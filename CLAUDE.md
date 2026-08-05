@@ -79,14 +79,25 @@ subscribes. That is what keeps the graph acyclic.
 
 ```bash
 npm run build                        # must succeed — it also lints the module graph
-node tools/smoke.js                  # 47 end-to-end checks, must exit 0
+node tools/smoke.js                  # 61 end-to-end checks, must exit 0
 node tools/smoke.js --shot out.png   # …and eyeball the result
 ```
 
 The smoke test boots the real application in Chromium and checks rendering,
-selection, undo/redo, zoom, all fifteen dock panes, all five themes, every
-exporter (including PDF header validation) and reload persistence. **Any
-console error fails the run.**
+selection, typing into panel fields without losing focus, snapping, undo/redo,
+zoom, all fifteen dock panes, all five themes, every exporter (including PDF
+header validation) and reload persistence. **Any console error fails the run.**
+
+Two traps worth knowing, both of which have caused real bugs:
+
+- **Panels must not rebuild while a text field in them has focus.** They write
+  to the store on every keystroke, and the resulting `doc:changed` would
+  replace the input under the caret. `inspector.js` and `panels.js` each guard
+  this and defer the rebuild until focus leaves.
+- **A canvas mousedown calls `preventDefault()`**, which suppresses the focus
+  change a click normally makes. The canvas carries `tabindex="-1"` and is
+  focused explicitly on mousedown, otherwise keyboard focus stays in whatever
+  toolbar dropdown was last used and every shortcut silently stops working.
 
 ## Git
 

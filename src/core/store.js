@@ -582,10 +582,22 @@ export function createsCycle(from, to) {
 
 /* ── Settings ──────────────────────────────────────────────────────────── */
 
+/**
+ * Settings that describe how input behaves rather than how the plan reads.
+ * These are preferences, so they persist but stay out of the undo stack —
+ * pressing Ctrl+Z should never silently change your snapping back.
+ */
+const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart']);
+
 /** Settings changes are undoable — they alter how the plan reads. */
 export function setSetting(key, value, label = 'Change setting') {
+  if (doc.settings[key] === value) return false;
+  if (INPUT_PREFERENCES.has(key)) {
+    return editQuiet((d) => {
+      d.settings[key] = value;
+    }, 'preference');
+  }
   return edit(label, (d) => {
-    if (d.settings[key] === value) return false;
     d.settings[key] = value;
   });
 }

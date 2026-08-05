@@ -235,6 +235,8 @@
   position: relative;
   overflow: hidden;
   cursor: default;
+  /* Focused programmatically to reclaim keyboard control, never by tabbing. */
+  outline: none;
 }
 .tl-canvas.panning {
   cursor: grabbing;
@@ -403,6 +405,46 @@
   overflow: hidden;
   text-overflow: ellipsis;
   line-height: 1.25;
+}
+/* Title over subtitle inside a bar tall enough for two lines. */
+.tl-obj .ob-textwrap {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  overflow: hidden;
+  line-height: 1.18;
+}
+.tl-obj .ob-textwrap.inline {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 6px;
+}
+.tl-obj .ob-textwrap.inline .ob-sub::before {
+  content: '·';
+  margin-right: 5px;
+  opacity: 0.6;
+}
+.tl-obj .ob-sub {
+  font-size: 0.84em;
+  font-weight: 400;
+  opacity: 0.78;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* Point markers stack their subtitle beneath the title. */
+.tl-obj .ob-point-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+.tl-obj .ob-point-label .ob-sub {
+  font-size: 0.86em;
+  font-weight: 500;
+  color: var(--text-muted);
 }
 .tl-obj .ob-icon {
   flex: 0 0 auto;

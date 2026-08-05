@@ -119,6 +119,112 @@ async function main() {
   await page.keyboard.press('Control+z');
   await page.waitForTimeout(250);
 
+  console.log('\nTyping in panels');
+  // Regression: every keystroke writes to the store, which used to rebuild the
+  // panel and throw focus out of the input after a single character.
+  // Re-select the bar: the undo above pruned the selection, so the inspector
+  // would otherwise be showing the project rather than an object.
+  await page.locator('.tl-obj.shape-bar').filter({ hasText: 'Wayside Equipment Installation' }).first().click();
+  await page.waitForTimeout(250);
+
+  const titleBox = page.locator('#inspector .cx-section input[type="text"]').first();
+  await titleBox.click();
+  await titleBox.fill('');
+  await page.keyboard.type('Wayside Retrofit Alpha', { delay: 18 });
+  await page.waitForTimeout(400);
+  check('inspector keeps focus while typing', await titleBox.evaluate((n) => n === document.activeElement));
+  check('whole string reached the field', (await titleBox.inputValue()) === 'Wayside Retrofit Alpha', await titleBox.inputValue());
+  check('edit reached the timeline', (await page.locator('.tl-obj').filter({ hasText: 'Wayside Retrofit Alpha' }).count()) === 1);
+
+  // The subtitle field is the second text box, and drives the two-line label.
+  const subtitleInput = page.locator('#inspector input[placeholder="Optional second line"]').first();
+  await subtitleInput.click();
+  await subtitleInput.fill('');
+  await page.keyboard.type('Fleet A · depot works', { delay: 18 });
+  await page.waitForTimeout(400);
+  check('subtitle field keeps focus too', await subtitleInput.evaluate((n) => n === document.activeElement));
+  check('subtitle text intact', (await subtitleInput.inputValue()) === 'Fleet A · depot works', await subtitleInput.inputValue());
+
+  // Blur, then confirm the deferred rebuild ran and the canvas shows it.
+  await page.locator('#canvas-frame').click({ position: { x: 40, y: 300 } });
+  await page.waitForTimeout(400);
+  check('subtitle rendered on the timeline cell', (await page.locator('.tl-obj .ob-sub').count()) > 0);
+  check(
+    'subtitle text visible in the cell',
+    (await page.locator('.tl-obj .ob-sub').first().innerText()).includes('Fleet A')
+  );
+
+  // Dock panes hold the same guarantee (filter text box).
+  await page.locator('#sidenav .nav-link[data-pane="filters"]').click();
+  await page.waitForTimeout(250);
+  const filterInput = page.locator('#dock input[type="text"]').first();
+  await filterInput.click();
+  await page.keyboard.type('regression', { delay: 18 });
+  await page.waitForTimeout(400);
+  check('filter box keeps focus while typing', await filterInput.evaluate((n) => n === document.activeElement));
+  check('filter text intact', (await filterInput.inputValue()) === 'regression', await filterInput.inputValue());
+  await filterInput.fill('');
+  await page.waitForTimeout(300);
+
+  console.log('\nSnapping');
+  const readObject = (title) => page.evaluate((t) => new Promise((res) => {
+    const r = indexedDB.open('cx-timeline');
+    r.onsuccess = () => {
+      const g = r.result.transaction('projects').objectStore('projects').getAll();
+      g.onsuccess = () => {
+        const rec = g.result.sort((a, b) => b.savedAt - a.savedAt)[0];
+        const o = rec.doc.objects.find((x) => x.title.includes(t));
+        res(o ? { start: o.start, end: o.end, snap: rec.doc.settings.snap } : null);
+      };
+    };
+  }), title);
+
+  await page.locator('.tl-obj').filter({ hasText: 'Wayside Retrofit Alpha' }).first().click();
+  await page.waitForTimeout(250);
+
+  // Week snapping: an arrow key must step a whole week and land on a Monday.
+  // Re-click the bar after using the dropdown — shortcuts deliberately stand
+  // down while a form control holds focus.
+  await page.selectOption('#toolbar select', 'week');
+  await page.waitForTimeout(250);
+  await page.locator('.tl-obj').filter({ hasText: 'Wayside Retrofit Alpha' }).first().click();
+  await page.waitForTimeout(200);
+  await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(900);
+  let snapped = await readObject('Wayside Retrofit Alpha');
+  check('snap setting persisted', snapped && snapped.snap === 'week', snapped?.snap);
+  check(
+    'week snap lands the nudge on a Monday',
+    snapped && new Date(snapped.start).getUTCDay() === 1,
+    snapped ? new Date(snapped.start).toISOString().slice(0, 10) : 'no object'
+  );
+
+  // Month snapping: the nudge must land on the first of a month.
+  await page.selectOption('#toolbar select', 'month');
+  await page.waitForTimeout(250);
+  await page.locator('.tl-obj').filter({ hasText: 'Wayside Retrofit Alpha' }).first().click();
+  await page.waitForTimeout(200);
+  await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(900);
+  snapped = await readObject('Wayside Retrofit Alpha');
+  check(
+    'month snap lands the nudge on the 1st',
+    snapped && new Date(snapped.start).getUTCDate() === 1,
+    snapped ? new Date(snapped.start).toISOString().slice(0, 10) : 'no object'
+  );
+
+  // Changing the snap unit must not be undoable — Ctrl+Z should move the bar
+  // back, not silently reset the dropdown.
+  const beforeUndo = (await readObject('Wayside Retrofit Alpha')).start;
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(600);
+  const undoneObject = await readObject('Wayside Retrofit Alpha');
+  check('snap unit survives undo', (await page.inputValue('#toolbar select')) === 'month');
+  check('undo moved the bar, not the setting', undoneObject.start !== beforeUndo);
+
+  await page.selectOption('#toolbar select', 'day');
+  await page.waitForTimeout(250);
+
   console.log('\nViewport');
   const zoomBefore = await page.evaluate(() => document.querySelectorAll('.tl-tick').length);
   await page.mouse.move(900, 500);
@@ -225,7 +331,8 @@ async function main() {
 
   console.log('\nPersistence');
   await page.evaluate(() => document.querySelectorAll('.cx-modal-overlay').forEach((n) => n.remove()));
-  await page.locator('.tl-obj.shape-bar').filter({ hasText: 'Wayside Equipment Installation' }).first().click();
+  // The typing checks renamed this bar earlier in the run.
+  await page.locator('.tl-obj.shape-bar').filter({ hasText: 'Wayside Retrofit Alpha' }).first().click();
   await page.waitForTimeout(200);
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');

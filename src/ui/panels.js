@@ -67,6 +67,25 @@ let dockEl = null;
 let bodyEl = null;
 let headEl = null;
 let active = 'lanes';
+/** Set when a rebuild was suppressed because the user was mid-edit. */
+let pendingRender = false;
+
+/**
+ * True when focus is in a text-entry control inside the dock.
+ *
+ * Panes write straight to the store as you type, and the store publishes
+ * `doc:changed`, which would rebuild the pane and destroy the input under the
+ * caret. While the user is typing the pane holds still and the rebuild is
+ * deferred until focus leaves. Discrete controls (selects, checkboxes) are
+ * excluded so choosing one refreshes the pane immediately.
+ */
+function isTypingInDock() {
+  const active_ = document.activeElement;
+  if (!dockEl || !active_ || !dockEl.contains(active_)) return false;
+  const tag = active_.tagName.toLowerCase();
+  if (tag === 'textarea' || active_.isContentEditable) return true;
+  return tag === 'input' && !['checkbox', 'radio', 'color', 'range', 'file'].includes(active_.type);
+}
 
 export function buildPanels() {
   dockEl = document.getElementById('dock');
@@ -80,7 +99,19 @@ export function buildPanels() {
   dockEl.appendChild(resizer);
   installResizer(resizer, dockEl, 190, 480);
 
-  const rerender = debounce(() => renderPane(), 70);
+  dockEl.addEventListener('focusout', () => {
+    setTimeout(() => {
+      if (pendingRender && !isTypingInDock()) renderPane();
+    }, 0);
+  });
+
+  const rerender = debounce(() => {
+    if (isTypingInDock()) {
+      pendingRender = true;
+      return;
+    }
+    renderPane();
+  }, 70);
   on(EV.DOC_CHANGED, (p) => {
     if (p?.transient) return;
     rerender();
@@ -155,6 +186,10 @@ const TITLES = {
 
 function renderPane() {
   if (!bodyEl) return;
+  pendingRender = false;
+  // Keep the reader's place across rebuilds.
+  const scroll = bodyEl.querySelector('.pane-scroll')?.scrollTop || 0;
+
   clear(headEl);
   clear(bodyEl);
 
@@ -169,9 +204,10 @@ function renderPane() {
     })
   );
 
-  const scroll = el('div', { class: 'pane-scroll' });
-  bodyEl.appendChild(scroll);
-  (RENDERERS[active] || paneLanes)(scroll);
+  const pane = el('div', { class: 'pane-scroll' });
+  bodyEl.appendChild(pane);
+  (RENDERERS[active] || paneLanes)(pane);
+  pane.scrollTop = scroll;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

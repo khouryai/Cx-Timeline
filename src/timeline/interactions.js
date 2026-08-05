@@ -14,7 +14,7 @@
 
 import { clamp, closestData, hasMod, isTyping } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
-import { MS_DAY, snap as snapMs, fmtDate, toISO } from '../core/dates.js';
+import { MS_DAY, snap as snapMs, fmtDate, toISO, addMonths, addWeeks, addWorkingDays } from '../core/dates.js';
 import { TYPES } from '../core/model.js';
 import * as store from '../core/store.js';
 import * as viewport from './viewport.js';
@@ -83,6 +83,41 @@ function snapDate(ms) {
   return snapMs(ms, settings.snap, { weekStart: settings.weekStart, holidays: settings.holidays });
 }
 
+/** Human name of the active snap unit, shown on the drag guide. */
+function snapLabel() {
+  const mode = store.getSettings().snap;
+  return { day: 'day', workday: 'working day', week: 'week', month: 'month', quarter: 'quarter' }[mode] || '';
+}
+
+/**
+ * Advance an instant by one snap unit.
+ *
+ * Keyboard nudging steps by whatever the snap dropdown says, so the two
+ * controls agree: with week snapping, an arrow key moves a week. Stepping by a
+ * single day under month snapping would round straight back to where it
+ * started and look like the key had done nothing.
+ */
+export function stepBySnap(ms, direction, large = false) {
+  const settings = store.getSettings();
+  const n = direction * (large ? snapLargeMultiplier(settings.snap) : 1);
+  switch (settings.snap) {
+    case 'week':
+      return addWeeks(ms, n);
+    case 'month':
+      return addMonths(ms, n);
+    case 'quarter':
+      return addMonths(ms, n * 3);
+    case 'workday':
+      return addWorkingDays(ms, n, settings.holidays);
+    default:
+      return ms + n * MS_DAY;
+  }
+}
+
+function snapLargeMultiplier(mode) {
+  return mode === 'week' ? 4 : mode === 'month' || mode === 'quarter' ? 3 : 7;
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    Wheel — zoom and scroll
    ═══════════════════════════════════════════════════════════════════════ */
@@ -128,6 +163,14 @@ function onCanvasMouseDown(e) {
   if (e.button === 2) return; // right-click handled by contextmenu
   const point = toCanvas(e);
   const tool = store.getTool();
+
+  // Object and handle presses call preventDefault to stop text selection,
+  // which also suppresses the focus change a click would normally make. Left
+  // alone, focus would stay in whatever toolbar dropdown or panel field was
+  // last touched, and every keyboard shortcut would quietly stop working.
+  if (!dom.canvas.contains(document.activeElement)) {
+    dom.canvas.focus({ preventScroll: true });
+  }
 
   // Middle button, space-drag or the pan tool always pans.
   if (e.button === 1 || spaceHeld || tool === 'pan') {
@@ -441,7 +484,8 @@ function moveDrag(point, e) {
 
   const first = store.getObject(gesture.ids[0]);
   if (first) {
-    renderer.showGuide(viewport.msToPx(first.start), fmtDate(first.start, 'day'));
+    const unit = snapLabel();
+    renderer.showGuide(viewport.msToPx(first.start), fmtDate(first.start, 'day') + (unit ? ` · snap ${unit}` : ''));
   }
   autoPanEdge(point.x);
   renderer.requestRender();
@@ -460,10 +504,12 @@ function resizeDrag(point, e) {
     if (!obj) return false;
     if (gesture.edge === 'start') {
       const next = snapDate(start + deltaMs);
-      obj.start = Math.min(next, obj.end - MS_DAY);
+      // Clamping to the minimum duration can knock the edge off the grid, so
+      // snap once more after the clamp rather than leaving a stray date.
+      obj.start = next <= obj.end - MS_DAY ? next : snapDate(obj.end - MS_DAY);
     } else {
       const next = snapDate(end + deltaMs);
-      obj.end = Math.max(next, obj.start + MS_DAY);
+      obj.end = next >= obj.start + MS_DAY ? next : snapDate(obj.start + MS_DAY);
     }
   });
 
@@ -471,7 +517,8 @@ function resizeDrag(point, e) {
   if (obj) {
     const edgeMs = gesture.edge === 'start' ? obj.start : obj.end;
     const days = Math.round((obj.end - obj.start) / MS_DAY);
-    renderer.showGuide(viewport.msToPx(edgeMs), `${fmtDate(edgeMs, 'day')} · ${days}d`);
+    const unit = snapLabel();
+    renderer.showGuide(viewport.msToPx(edgeMs), `${fmtDate(edgeMs, 'day')} · ${days}d${unit ? ` · snap ${unit}` : ''}`);
   }
   autoPanEdge(point.x);
   renderer.requestRender();
@@ -636,10 +683,11 @@ function laneResizeMove(e) {
 /** Roll back the live preview, then re-apply the height as one undoable edit. */
 function laneResizeEnd(finished) {
   const lane = store.getLane(finished.id);
-  if (!lane) return;
-  const height = lane.height;
-  if (height === finished.startHeight) return;
+  const height = lane ? lane.height : null;
+  // Always unwind the preview: leaving one open would make the next edit diff
+  // against a stale snapshot.
   store.cancelPreview();
+  if (!lane || height === finished.startHeight) return;
   store.updateLane(finished.id, { height }, 'Resize lane');
 }
 
@@ -693,34 +741,47 @@ function onGutterContextMenu(e) {
    Programmatic helpers used by shortcuts and the inspector
    ═══════════════════════════════════════════════════════════════════════ */
 
-/** Nudge the selection by whole days. */
-export function nudgeSelection(days) {
+/**
+ * Move the selection by one snap unit (or several, with `large`).
+ * The result is snapped to the grid, so the first press also aligns an object
+ * that was sitting off it.
+ */
+export function nudgeSelection(direction, large = false) {
   const ids = store.getSelection().filter((id) => !store.getObject(id)?.locked);
   if (!ids.length) return;
+
   store.updateObjects(
     ids,
     (obj) => {
-      const shift = days * MS_DAY;
-      return TYPES[obj.type]?.duration
-        ? { start: obj.start + shift, end: obj.end + shift }
-        : { start: obj.start + shift };
+      const stepped = stepBySnap(obj.start, direction, large);
+      let next = snapDate(stepped);
+      // Snapping must never cancel the movement out entirely.
+      if (next === obj.start) next = stepped;
+      const shift = next - obj.start;
+      return TYPES[obj.type]?.duration ? { start: next, end: obj.end + shift } : { start: next };
     },
-    days > 0 ? 'Move later' : 'Move earlier',
+    direction > 0 ? 'Move later' : 'Move earlier',
     { mergeKey: 'nudge' }
   );
   renderer.requestRender();
 }
 
-/** Grow or shrink the selection's duration by whole days. */
-export function stretchSelection(days) {
+/** Grow or shrink the selection's duration by one snap unit. */
+export function stretchSelection(direction) {
   const ids = store.getSelection().filter((id) => {
     const obj = store.getObject(id);
     return obj && !obj.locked && TYPES[obj.type]?.duration;
   });
   if (!ids.length) return;
+
   store.updateObjects(
     ids,
-    (obj) => ({ end: Math.max(obj.start + MS_DAY, obj.end + days * MS_DAY) }),
+    (obj) => {
+      const stepped = stepBySnap(obj.end, direction, false);
+      let next = snapDate(stepped);
+      if (next === obj.end) next = stepped;
+      return { end: Math.max(obj.start + MS_DAY, next) };
+    },
     'Change duration',
     { mergeKey: 'stretch' }
   );

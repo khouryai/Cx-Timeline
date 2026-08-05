@@ -60,6 +60,28 @@ let headEl = null;
 let bodyEl = null;
 /** Section collapse state survives re-renders so the panel does not jump. */
 const collapsed = new Set(['appearance', 'text', 'arrange']);
+/** Set when a rebuild was suppressed because the user was mid-edit. */
+let pendingRender = false;
+
+/**
+ * True when focus is in a text-entry control inside this panel.
+ *
+ * Every keystroke writes to the store, which publishes `doc:changed`, which
+ * would otherwise rebuild the panel and destroy the very input being typed
+ * into — dropping focus and the caret after each character. While the user is
+ * typing, the panel holds still; the deferred rebuild runs once focus leaves.
+ *
+ * Selects, checkboxes, ranges and colour wells are deliberately excluded:
+ * those are discrete choices that may change which fields apply, so the panel
+ * should refresh immediately.
+ */
+function isTypingInPanel() {
+  const active = document.activeElement;
+  if (!host || !active || !host.contains(active)) return false;
+  const tag = active.tagName.toLowerCase();
+  if (tag === 'textarea' || active.isContentEditable) return true;
+  return tag === 'input' && !['checkbox', 'radio', 'color', 'range', 'file'].includes(active.type);
+}
 
 export function buildInspector() {
   host = document.getElementById('inspector');
@@ -68,6 +90,13 @@ export function buildInspector() {
   headEl = el('div', { class: 'insp-head' });
   bodyEl = el('div', { class: 'insp-body' });
   host.append(headEl, bodyEl);
+
+  // Once focus leaves the panel, run any rebuild that was held back.
+  host.addEventListener('focusout', () => {
+    setTimeout(() => {
+      if (pendingRender && !isTypingInPanel()) render();
+    }, 0);
+  });
 
   on(EV.SELECTION_CHANGED, render);
   on(EV.DOC_CHANGED, (p) => {
@@ -84,7 +113,13 @@ export function buildInspector() {
   render();
 }
 
-const scheduleRender = debounce(() => render(), 60);
+const scheduleRender = debounce(() => {
+  if (isTypingInPanel()) {
+    pendingRender = true;
+    return;
+  }
+  render();
+}, 60);
 
 /* ══════════════════════════════════════════════════════════════════════════
    Router
@@ -92,8 +127,13 @@ const scheduleRender = debounce(() => render(), 60);
 
 export function render() {
   if (!host) return;
+  pendingRender = false;
+
   const selection = store.selectedObjects();
   const links = renderer.getSelectedLinks();
+  // Rebuilding replaces the scrolled content, so put the reader back where
+  // they were rather than snapping to the top of the panel.
+  const scroll = bodyEl.scrollTop;
 
   clear(headEl);
   clear(bodyEl);
@@ -102,6 +142,8 @@ export function render() {
   else if (selection.length > 1) renderMulti(selection);
   else if (links.length === 1) renderLink(links[0]);
   else renderProject();
+
+  bodyEl.scrollTop = scroll;
 }
 
 function headerFor(kind, name, actions = []) {

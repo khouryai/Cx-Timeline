@@ -90,7 +90,9 @@ export function mount(host) {
 
   dom.stage = el('div', { class: 'tl-stage' }, [dom.grid, dom.laneRows, dom.connectors, dom.objects, dom.today, dom.overlay]);
   dom.scroll = el('div', { class: 'tl-scroll' }, [dom.stage]);
-  dom.canvas = el('div', { class: 'tl-canvas' }, [dom.scroll]);
+  // tabindex makes the canvas programmatically focusable: clicking it takes
+  // keyboard focus back from the toolbar and panels so shortcuts keep working.
+  dom.canvas = el('div', { class: 'tl-canvas', tabindex: '-1' }, [dom.scroll]);
 
   dom.root.append(dom.corner, dom.ruler, dom.gutter, dom.canvas);
   host.appendChild(dom.root);
@@ -381,6 +383,8 @@ function paintObject(node, rect, settings, selected) {
     settings.showProgress,
     JSON.stringify(style),
     obj.subtitle,
+    Math.round(rect.h),
+    Math.round(rect.w / 8),
     obj.notes ? 1 : 0,
     (obj.attachments || []).length,
   ].join('|');
@@ -457,6 +461,53 @@ function buildObjectMarkup(node, rect, def, color, settings) {
   }
 }
 
+/**
+ * Title, plus the subtitle when the object has one and the bar has room.
+ *
+ * A tall bar stacks the two lines; a short but wide one runs them together
+ * with the subtitle dimmed, which keeps the extra context visible without
+ * pushing the title out of the bar.
+ */
+function titleBlock(obj, rect, style) {
+  const subtitle = (obj.subtitle || '').trim();
+  const fontSize = style.fontSize || 12;
+
+  if (!subtitle) return el('span', { class: 'ob-text', text: obj.title });
+
+  const stacked = rect.h >= fontSize * 2 + 8 && rect.w > 64;
+  if (stacked) {
+    return el('span', { class: 'ob-textwrap' }, [
+      el('span', { class: 'ob-text', text: obj.title }),
+      el('span', { class: 'ob-sub', text: subtitle }),
+    ]);
+  }
+
+  if (rect.w > 130) {
+    return el('span', { class: 'ob-textwrap inline' }, [
+      el('span', { class: 'ob-text', text: obj.title }),
+      el('span', { class: 'ob-sub', text: subtitle }),
+    ]);
+  }
+
+  return el('span', { class: 'ob-text', text: obj.title, title: `${obj.title} — ${subtitle}` });
+}
+
+/** Label drawn beside a bar too narrow to hold text. */
+function outsideText(obj) {
+  const subtitle = (obj.subtitle || '').trim();
+  return subtitle ? `${obj.title} · ${subtitle}` : obj.title;
+}
+
+/** Two-line label under a milestone, release flag or risk pin. */
+function pointLabel(obj, { above = false, max = 34 } = {}) {
+  const subtitle = (obj.subtitle || '').trim();
+  const node = el('div', { class: 'ob-point-label' + (above ? ' above' : '') }, [
+    el('span', { text: truncate(obj.title, max) }),
+  ]);
+  if (subtitle) node.appendChild(el('span', { class: 'ob-sub', text: truncate(subtitle, max) }));
+  return node;
+}
+
 /* ── Shape builders ────────────────────────────────────────────────────── */
 
 function buildBar(node, rect, color, ink, settings) {
@@ -484,13 +535,13 @@ function buildBar(node, rect, color, ink, settings) {
   if (obj.icon && rect.w > 34) {
     label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: Math.min(14, rect.h - 6) }) }));
   }
-  label.appendChild(el('span', { class: 'ob-text', text: obj.title }));
+  label.appendChild(titleBlock(obj, rect, style));
   if (settings.showProgress && TYPES[obj.type]?.progress && rect.w > 86 && obj.progress > 0) {
     label.appendChild(el('span', { class: 'ob-pct', text: `${Math.round(obj.progress)}%` }));
   }
 
   if (rect.labelOutside) {
-    node.appendChild(el('div', { class: 'ob-outside', text: obj.title }));
+    node.appendChild(el('div', { class: 'ob-outside', text: outsideText(obj) }));
   } else {
     node.appendChild(label);
   }
@@ -516,7 +567,7 @@ function buildBand(node, rect, color, shape) {
   const label = el('div', { class: 'ob-label' });
   applyTextStyle(label, style, style.textColor || resolved);
   if (obj.icon) label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: 13 }) }));
-  label.appendChild(el('span', { class: 'ob-text', text: obj.title }));
+  label.appendChild(titleBlock(obj, rect, style));
   node.appendChild(label);
 }
 
@@ -538,7 +589,7 @@ function buildDiamond(node, rect, color, ink) {
       }),
     ])
   );
-  node.appendChild(el('div', { class: 'ob-point-label', text: obj.title }));
+  node.appendChild(pointLabel(obj, { max: 30 }));
   appendMarks(node, obj, rect);
 }
 
@@ -566,8 +617,7 @@ function buildRelease(node, rect, color) {
   );
   // The title normally sits above the chip, but on the topmost row that would
   // slide under the ruler — drop it below instead.
-  const above = rect.y > 22;
-  node.appendChild(el('div', { class: 'ob-point-label' + (above ? ' above' : ''), text: obj.title }));
+  node.appendChild(pointLabel(obj, { above: rect.y > 22, max: 26 }));
   appendMarks(node, obj, rect);
 }
 
@@ -587,7 +637,7 @@ function buildMarker(node, rect, color) {
       ]),
     ])
   );
-  node.appendChild(el('div', { class: 'ob-point-label', text: truncate(obj.title, 34) }));
+  node.appendChild(pointLabel(obj, { max: 34 }));
   appendMarks(node, obj, rect);
 }
 
@@ -604,7 +654,10 @@ function buildSticky(node, rect, color) {
 
   const note = el('div', { class: 'ob-note' });
   applyTextStyle(note, style, style.textColor || readableInk(resolved));
-  note.textContent = obj.title;
+  note.appendChild(el('span', { text: obj.title }));
+  if ((obj.subtitle || '').trim()) {
+    note.appendChild(el('span', { class: 'ob-sub', style: { display: 'block', marginTop: '2px' }, text: obj.subtitle }));
+  }
   node.appendChild(note);
 }
 
@@ -619,7 +672,7 @@ function buildCallout(node, rect, color, ink) {
   const label = el('div', { class: 'ob-label' });
   applyTextStyle(label, style, style.textColor || 'var(--text)');
   if (obj.icon) label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: 13 }) }));
-  label.appendChild(el('span', { class: 'ob-text', text: obj.title }));
+  label.appendChild(titleBlock(obj, rect, style));
   node.appendChild(label);
   node.appendChild(
     el('div', {
@@ -634,7 +687,7 @@ function buildText(node, rect) {
   const style = obj.style || {};
   const label = el('div', { class: 'ob-label' });
   applyTextStyle(label, style, style.textColor || 'var(--text)');
-  label.appendChild(el('span', { class: 'ob-text', text: obj.title }));
+  label.appendChild(titleBlock(obj, rect, style));
   node.appendChild(label);
 }
 

@@ -135,11 +135,11 @@ function onKeyDown(e) {
 
     case 'ArrowLeft':
       e.preventDefault();
-      nudgeSelection(e.shiftKey ? -7 : -1);
+      nudgeSelection(-1, e.shiftKey);
       return;
     case 'ArrowRight':
       e.preventDefault();
-      nudgeSelection(e.shiftKey ? 7 : 1);
+      nudgeSelection(1, e.shiftKey);
       return;
 
     case 'F11':

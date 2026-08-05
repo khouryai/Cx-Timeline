@@ -380,23 +380,47 @@ function drawObject(items, obj, lane, { top, msToX, palette, pxPerDay, settings 
     }
 
     const ink = style.textColor || (isBand ? color : readableInk(color));
-    const label = truncate(obj.title, Math.max(4, Math.floor(w / 5.4)));
+    const subtitle = (obj.subtitle || '').trim();
+    const charBudget = Math.max(4, Math.floor(w / 5.4));
     if (w > 26) {
-      items.push({
-        type: 'text',
-        x: x + 5,
-        y: top + h / 2 + 3.2,
-        text: label,
-        size: Math.min(9, style.fontSize || 9),
-        weight: style.bold ? 700 : 500,
-        fill: ink,
-      });
+      // With a subtitle the label splits into two lines, matching what the
+      // canvas draws; without one it stays vertically centred.
+      if (subtitle && h >= 18) {
+        items.push({
+          type: 'text',
+          x: x + 5,
+          y: top + h / 2 - 0.6,
+          text: truncate(obj.title, charBudget),
+          size: Math.min(8.5, style.fontSize || 8.5),
+          weight: style.bold ? 700 : 600,
+          fill: ink,
+        });
+        items.push({
+          type: 'text',
+          x: x + 5,
+          y: top + h / 2 + 7.4,
+          text: truncate(subtitle, charBudget),
+          size: 7,
+          fill: ink,
+          opacity: 0.78,
+        });
+      } else {
+        items.push({
+          type: 'text',
+          x: x + 5,
+          y: top + h / 2 + 3.2,
+          text: truncate(obj.title, charBudget),
+          size: Math.min(9, style.fontSize || 9),
+          weight: style.bold ? 700 : 500,
+          fill: ink,
+        });
+      }
     } else {
       items.push({
         type: 'text',
         x: x + w + 4,
         y: top + h / 2 + 3.2,
-        text: truncate(obj.title, 40),
+        text: truncate(subtitle ? `${obj.title} · ${subtitle}` : obj.title, 46),
         size: 8,
         fill: palette.textMuted,
       });
@@ -427,11 +451,17 @@ function drawObject(items, obj, lane, { top, msToX, palette, pxPerDay, settings 
       strokeWidth: 0.8,
     });
     items.push({ type: 'text', x: cx, y: cy + r + 9, text: truncate(obj.title, 30), size: 7.5, weight: 600, fill: palette.text, anchor: 'middle' });
+    if (obj.subtitle) {
+      items.push({ type: 'text', x: cx, y: cy + r + 18, text: truncate(obj.subtitle, 30), size: 6.5, fill: palette.textMuted, anchor: 'middle' });
+    }
   } else {
     const severity = obj.data?.severity;
     const pinColor = severity === 'critical' || severity === 'high' ? palette.bad : color;
     items.push({ type: 'circle', cx, cy, r: r - 1, fill: pinColor, stroke: withAlpha(pinColor, 0.9), strokeWidth: 0.8 });
     items.push({ type: 'text', x: cx, y: cy + r + 9, text: truncate(obj.title, 30), size: 7.5, fill: palette.text, anchor: 'middle' });
+    if (obj.subtitle) {
+      items.push({ type: 'text', x: cx, y: cy + r + 18, text: truncate(obj.subtitle, 30), size: 6.5, fill: palette.textMuted, anchor: 'middle' });
+    }
   }
 
   return { x: cx - r, right: cx + r, cy, bottom: top + M.rowH, top };

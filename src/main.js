@@ -260,6 +260,9 @@ function buildHoverCard(obj) {
 
   return el('div', {}, [
     el('div', { class: 'tip-title', text: obj.title }),
+    obj.subtitle
+      ? el('div', { style: { fontSize: 'var(--fs-tiny)', color: 'var(--text-muted)', marginBottom: '2px' }, text: obj.subtitle })
+      : null,
     el('div', { class: 'tip-meta', text: meta.join('  ·  ') }),
     el('div', { style: { marginTop: '5px', display: 'flex', gap: '5px', flexWrap: 'wrap' } }, [
       el('span', { class: `cx-badge ${status.tone === 'neutral' ? 'neutral' : status.tone}`, text: status.label }),

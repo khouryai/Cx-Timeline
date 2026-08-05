@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 35   Built: 2026-08-05T21:21:36.635Z
+ * Modules: 35   Built: 2026-08-05T22:05:17.677Z
  */
 (function () {
   'use strict';
@@ -2726,10 +2726,22 @@ __mods["core/store.js"] = function (__x, __req) {
 
   /* ── Settings ──────────────────────────────────────────────────────────── */
 
+  /**
+   * Settings that describe how input behaves rather than how the plan reads.
+   * These are preferences, so they persist but stay out of the undo stack —
+   * pressing Ctrl+Z should never silently change your snapping back.
+   */
+  const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart']);
+
   /** Settings changes are undoable — they alter how the plan reads. */
   function setSetting(key, value, label = 'Change setting') {
+    if (doc.settings[key] === value) return false;
+    if (INPUT_PREFERENCES.has(key)) {
+      return editQuiet((d) => {
+        d.settings[key] = value;
+      }, 'preference');
+    }
     return edit(label, (d) => {
-      if (d.settings[key] === value) return false;
       d.settings[key] = value;
     });
   }
@@ -5138,7 +5150,9 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
     dom.stage = el('div', { class: 'tl-stage' }, [dom.grid, dom.laneRows, dom.connectors, dom.objects, dom.today, dom.overlay]);
     dom.scroll = el('div', { class: 'tl-scroll' }, [dom.stage]);
-    dom.canvas = el('div', { class: 'tl-canvas' }, [dom.scroll]);
+    // tabindex makes the canvas programmatically focusable: clicking it takes
+    // keyboard focus back from the toolbar and panels so shortcuts keep working.
+    dom.canvas = el('div', { class: 'tl-canvas', tabindex: '-1' }, [dom.scroll]);
 
     dom.root.append(dom.corner, dom.ruler, dom.gutter, dom.canvas);
     host.appendChild(dom.root);
@@ -5429,6 +5443,8 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
       settings.showProgress,
       JSON.stringify(style),
       obj.subtitle,
+      Math.round(rect.h),
+      Math.round(rect.w / 8),
       obj.notes ? 1 : 0,
       (obj.attachments || []).length,
     ].join('|');
@@ -5505,6 +5521,53 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     }
   }
 
+  /**
+   * Title, plus the subtitle when the object has one and the bar has room.
+   *
+   * A tall bar stacks the two lines; a short but wide one runs them together
+   * with the subtitle dimmed, which keeps the extra context visible without
+   * pushing the title out of the bar.
+   */
+  function titleBlock(obj, rect, style) {
+    const subtitle = (obj.subtitle || '').trim();
+    const fontSize = style.fontSize || 12;
+
+    if (!subtitle) return el('span', { class: 'ob-text', text: obj.title });
+
+    const stacked = rect.h >= fontSize * 2 + 8 && rect.w > 64;
+    if (stacked) {
+      return el('span', { class: 'ob-textwrap' }, [
+        el('span', { class: 'ob-text', text: obj.title }),
+        el('span', { class: 'ob-sub', text: subtitle }),
+      ]);
+    }
+
+    if (rect.w > 130) {
+      return el('span', { class: 'ob-textwrap inline' }, [
+        el('span', { class: 'ob-text', text: obj.title }),
+        el('span', { class: 'ob-sub', text: subtitle }),
+      ]);
+    }
+
+    return el('span', { class: 'ob-text', text: obj.title, title: `${obj.title} — ${subtitle}` });
+  }
+
+  /** Label drawn beside a bar too narrow to hold text. */
+  function outsideText(obj) {
+    const subtitle = (obj.subtitle || '').trim();
+    return subtitle ? `${obj.title} · ${subtitle}` : obj.title;
+  }
+
+  /** Two-line label under a milestone, release flag or risk pin. */
+  function pointLabel(obj, { above = false, max = 34 } = {}) {
+    const subtitle = (obj.subtitle || '').trim();
+    const node = el('div', { class: 'ob-point-label' + (above ? ' above' : '') }, [
+      el('span', { text: truncate(obj.title, max) }),
+    ]);
+    if (subtitle) node.appendChild(el('span', { class: 'ob-sub', text: truncate(subtitle, max) }));
+    return node;
+  }
+
   /* ── Shape builders ────────────────────────────────────────────────────── */
 
   function buildBar(node, rect, color, ink, settings) {
@@ -5532,13 +5595,13 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     if (obj.icon && rect.w > 34) {
       label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: Math.min(14, rect.h - 6) }) }));
     }
-    label.appendChild(el('span', { class: 'ob-text', text: obj.title }));
+    label.appendChild(titleBlock(obj, rect, style));
     if (settings.showProgress && TYPES[obj.type]?.progress && rect.w > 86 && obj.progress > 0) {
       label.appendChild(el('span', { class: 'ob-pct', text: `${Math.round(obj.progress)}%` }));
     }
 
     if (rect.labelOutside) {
-      node.appendChild(el('div', { class: 'ob-outside', text: obj.title }));
+      node.appendChild(el('div', { class: 'ob-outside', text: outsideText(obj) }));
     } else {
       node.appendChild(label);
     }
@@ -5564,7 +5627,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const label = el('div', { class: 'ob-label' });
     applyTextStyle(label, style, style.textColor || resolved);
     if (obj.icon) label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: 13 }) }));
-    label.appendChild(el('span', { class: 'ob-text', text: obj.title }));
+    label.appendChild(titleBlock(obj, rect, style));
     node.appendChild(label);
   }
 
@@ -5586,7 +5649,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
         }),
       ])
     );
-    node.appendChild(el('div', { class: 'ob-point-label', text: obj.title }));
+    node.appendChild(pointLabel(obj, { max: 30 }));
     appendMarks(node, obj, rect);
   }
 
@@ -5614,8 +5677,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     );
     // The title normally sits above the chip, but on the topmost row that would
     // slide under the ruler — drop it below instead.
-    const above = rect.y > 22;
-    node.appendChild(el('div', { class: 'ob-point-label' + (above ? ' above' : ''), text: obj.title }));
+    node.appendChild(pointLabel(obj, { above: rect.y > 22, max: 26 }));
     appendMarks(node, obj, rect);
   }
 
@@ -5635,7 +5697,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
         ]),
       ])
     );
-    node.appendChild(el('div', { class: 'ob-point-label', text: truncate(obj.title, 34) }));
+    node.appendChild(pointLabel(obj, { max: 34 }));
     appendMarks(node, obj, rect);
   }
 
@@ -5652,7 +5714,10 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
     const note = el('div', { class: 'ob-note' });
     applyTextStyle(note, style, style.textColor || readableInk(resolved));
-    note.textContent = obj.title;
+    note.appendChild(el('span', { text: obj.title }));
+    if ((obj.subtitle || '').trim()) {
+      note.appendChild(el('span', { class: 'ob-sub', style: { display: 'block', marginTop: '2px' }, text: obj.subtitle }));
+    }
     node.appendChild(note);
   }
 
@@ -5667,7 +5732,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const label = el('div', { class: 'ob-label' });
     applyTextStyle(label, style, style.textColor || 'var(--text)');
     if (obj.icon) label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: 13 }) }));
-    label.appendChild(el('span', { class: 'ob-text', text: obj.title }));
+    label.appendChild(titleBlock(obj, rect, style));
     node.appendChild(label);
     node.appendChild(
       el('div', {
@@ -5682,7 +5747,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const style = obj.style || {};
     const label = el('div', { class: 'ob-label' });
     applyTextStyle(label, style, style.textColor || 'var(--text)');
-    label.appendChild(el('span', { class: 'ob-text', text: obj.title }));
+    label.appendChild(titleBlock(obj, rect, style));
     node.appendChild(label);
   }
 
@@ -6007,7 +6072,7 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
 
   const { clamp, closestData, hasMod, isTyping } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
-  const { MS_DAY, snap: snapMs, fmtDate, toISO } = __req("core/dates.js");
+  const { MS_DAY, snap: snapMs, fmtDate, toISO, addMonths, addWeeks, addWorkingDays } = __req("core/dates.js");
   const { TYPES } = __req("core/model.js");
   const store = __req("core/store.js");
   const viewport = __req("timeline/viewport.js");
@@ -6076,6 +6141,41 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
     return snapMs(ms, settings.snap, { weekStart: settings.weekStart, holidays: settings.holidays });
   }
 
+  /** Human name of the active snap unit, shown on the drag guide. */
+  function snapLabel() {
+    const mode = store.getSettings().snap;
+    return { day: 'day', workday: 'working day', week: 'week', month: 'month', quarter: 'quarter' }[mode] || '';
+  }
+
+  /**
+   * Advance an instant by one snap unit.
+   *
+   * Keyboard nudging steps by whatever the snap dropdown says, so the two
+   * controls agree: with week snapping, an arrow key moves a week. Stepping by a
+   * single day under month snapping would round straight back to where it
+   * started and look like the key had done nothing.
+   */
+  function stepBySnap(ms, direction, large = false) {
+    const settings = store.getSettings();
+    const n = direction * (large ? snapLargeMultiplier(settings.snap) : 1);
+    switch (settings.snap) {
+      case 'week':
+        return addWeeks(ms, n);
+      case 'month':
+        return addMonths(ms, n);
+      case 'quarter':
+        return addMonths(ms, n * 3);
+      case 'workday':
+        return addWorkingDays(ms, n, settings.holidays);
+      default:
+        return ms + n * MS_DAY;
+    }
+  }
+
+  function snapLargeMultiplier(mode) {
+    return mode === 'week' ? 4 : mode === 'month' || mode === 'quarter' ? 3 : 7;
+  }
+
   /* ══════════════════════════════════════════════════════════════════════════
      Wheel — zoom and scroll
      ═══════════════════════════════════════════════════════════════════════ */
@@ -6121,6 +6221,14 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
     if (e.button === 2) return; // right-click handled by contextmenu
     const point = toCanvas(e);
     const tool = store.getTool();
+
+    // Object and handle presses call preventDefault to stop text selection,
+    // which also suppresses the focus change a click would normally make. Left
+    // alone, focus would stay in whatever toolbar dropdown or panel field was
+    // last touched, and every keyboard shortcut would quietly stop working.
+    if (!dom.canvas.contains(document.activeElement)) {
+      dom.canvas.focus({ preventScroll: true });
+    }
 
     // Middle button, space-drag or the pan tool always pans.
     if (e.button === 1 || spaceHeld || tool === 'pan') {
@@ -6434,7 +6542,8 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
 
     const first = store.getObject(gesture.ids[0]);
     if (first) {
-      renderer.showGuide(viewport.msToPx(first.start), fmtDate(first.start, 'day'));
+      const unit = snapLabel();
+      renderer.showGuide(viewport.msToPx(first.start), fmtDate(first.start, 'day') + (unit ? ` · snap ${unit}` : ''));
     }
     autoPanEdge(point.x);
     renderer.requestRender();
@@ -6453,10 +6562,12 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
       if (!obj) return false;
       if (gesture.edge === 'start') {
         const next = snapDate(start + deltaMs);
-        obj.start = Math.min(next, obj.end - MS_DAY);
+        // Clamping to the minimum duration can knock the edge off the grid, so
+        // snap once more after the clamp rather than leaving a stray date.
+        obj.start = next <= obj.end - MS_DAY ? next : snapDate(obj.end - MS_DAY);
       } else {
         const next = snapDate(end + deltaMs);
-        obj.end = Math.max(next, obj.start + MS_DAY);
+        obj.end = next >= obj.start + MS_DAY ? next : snapDate(obj.start + MS_DAY);
       }
     });
 
@@ -6464,7 +6575,8 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
     if (obj) {
       const edgeMs = gesture.edge === 'start' ? obj.start : obj.end;
       const days = Math.round((obj.end - obj.start) / MS_DAY);
-      renderer.showGuide(viewport.msToPx(edgeMs), `${fmtDate(edgeMs, 'day')} · ${days}d`);
+      const unit = snapLabel();
+      renderer.showGuide(viewport.msToPx(edgeMs), `${fmtDate(edgeMs, 'day')} · ${days}d${unit ? ` · snap ${unit}` : ''}`);
     }
     autoPanEdge(point.x);
     renderer.requestRender();
@@ -6629,10 +6741,11 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
   /** Roll back the live preview, then re-apply the height as one undoable edit. */
   function laneResizeEnd(finished) {
     const lane = store.getLane(finished.id);
-    if (!lane) return;
-    const height = lane.height;
-    if (height === finished.startHeight) return;
+    const height = lane ? lane.height : null;
+    // Always unwind the preview: leaving one open would make the next edit diff
+    // against a stale snapshot.
     store.cancelPreview();
+    if (!lane || height === finished.startHeight) return;
     store.updateLane(finished.id, { height }, 'Resize lane');
   }
 
@@ -6686,34 +6799,47 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
      Programmatic helpers used by shortcuts and the inspector
      ═══════════════════════════════════════════════════════════════════════ */
 
-  /** Nudge the selection by whole days. */
-  function nudgeSelection(days) {
+  /**
+   * Move the selection by one snap unit (or several, with `large`).
+   * The result is snapped to the grid, so the first press also aligns an object
+   * that was sitting off it.
+   */
+  function nudgeSelection(direction, large = false) {
     const ids = store.getSelection().filter((id) => !store.getObject(id)?.locked);
     if (!ids.length) return;
+
     store.updateObjects(
       ids,
       (obj) => {
-        const shift = days * MS_DAY;
-        return TYPES[obj.type]?.duration
-          ? { start: obj.start + shift, end: obj.end + shift }
-          : { start: obj.start + shift };
+        const stepped = stepBySnap(obj.start, direction, large);
+        let next = snapDate(stepped);
+        // Snapping must never cancel the movement out entirely.
+        if (next === obj.start) next = stepped;
+        const shift = next - obj.start;
+        return TYPES[obj.type]?.duration ? { start: next, end: obj.end + shift } : { start: next };
       },
-      days > 0 ? 'Move later' : 'Move earlier',
+      direction > 0 ? 'Move later' : 'Move earlier',
       { mergeKey: 'nudge' }
     );
     renderer.requestRender();
   }
 
-  /** Grow or shrink the selection's duration by whole days. */
-  function stretchSelection(days) {
+  /** Grow or shrink the selection's duration by one snap unit. */
+  function stretchSelection(direction) {
     const ids = store.getSelection().filter((id) => {
       const obj = store.getObject(id);
       return obj && !obj.locked && TYPES[obj.type]?.duration;
     });
     if (!ids.length) return;
+
     store.updateObjects(
       ids,
-      (obj) => ({ end: Math.max(obj.start + MS_DAY, obj.end + days * MS_DAY) }),
+      (obj) => {
+        const stepped = stepBySnap(obj.end, direction, false);
+        let next = snapDate(stepped);
+        if (next === obj.end) next = stepped;
+        return { end: Math.max(obj.start + MS_DAY, next) };
+      },
       'Change duration',
       { mergeKey: 'stretch' }
     );
@@ -6730,6 +6856,7 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "attach", { get: () => attach, enumerable: true });
+  Object.defineProperty(__x, "stepBySnap", { get: () => stepBySnap, enumerable: true });
   Object.defineProperty(__x, "nudgeSelection", { get: () => nudgeSelection, enumerable: true });
   Object.defineProperty(__x, "stretchSelection", { get: () => stretchSelection, enumerable: true });
   Object.defineProperty(__x, "isDragging", { get: () => isDragging, enumerable: true });
@@ -9424,23 +9551,47 @@ __mods["io/scene.js"] = function (__x, __req) {
       }
 
       const ink = style.textColor || (isBand ? color : readableInk(color));
-      const label = truncate(obj.title, Math.max(4, Math.floor(w / 5.4)));
+      const subtitle = (obj.subtitle || '').trim();
+      const charBudget = Math.max(4, Math.floor(w / 5.4));
       if (w > 26) {
-        items.push({
-          type: 'text',
-          x: x + 5,
-          y: top + h / 2 + 3.2,
-          text: label,
-          size: Math.min(9, style.fontSize || 9),
-          weight: style.bold ? 700 : 500,
-          fill: ink,
-        });
+        // With a subtitle the label splits into two lines, matching what the
+        // canvas draws; without one it stays vertically centred.
+        if (subtitle && h >= 18) {
+          items.push({
+            type: 'text',
+            x: x + 5,
+            y: top + h / 2 - 0.6,
+            text: truncate(obj.title, charBudget),
+            size: Math.min(8.5, style.fontSize || 8.5),
+            weight: style.bold ? 700 : 600,
+            fill: ink,
+          });
+          items.push({
+            type: 'text',
+            x: x + 5,
+            y: top + h / 2 + 7.4,
+            text: truncate(subtitle, charBudget),
+            size: 7,
+            fill: ink,
+            opacity: 0.78,
+          });
+        } else {
+          items.push({
+            type: 'text',
+            x: x + 5,
+            y: top + h / 2 + 3.2,
+            text: truncate(obj.title, charBudget),
+            size: Math.min(9, style.fontSize || 9),
+            weight: style.bold ? 700 : 500,
+            fill: ink,
+          });
+        }
       } else {
         items.push({
           type: 'text',
           x: x + w + 4,
           y: top + h / 2 + 3.2,
-          text: truncate(obj.title, 40),
+          text: truncate(subtitle ? `${obj.title} · ${subtitle}` : obj.title, 46),
           size: 8,
           fill: palette.textMuted,
         });
@@ -9471,11 +9622,17 @@ __mods["io/scene.js"] = function (__x, __req) {
         strokeWidth: 0.8,
       });
       items.push({ type: 'text', x: cx, y: cy + r + 9, text: truncate(obj.title, 30), size: 7.5, weight: 600, fill: palette.text, anchor: 'middle' });
+      if (obj.subtitle) {
+        items.push({ type: 'text', x: cx, y: cy + r + 18, text: truncate(obj.subtitle, 30), size: 6.5, fill: palette.textMuted, anchor: 'middle' });
+      }
     } else {
       const severity = obj.data?.severity;
       const pinColor = severity === 'critical' || severity === 'high' ? palette.bad : color;
       items.push({ type: 'circle', cx, cy, r: r - 1, fill: pinColor, stroke: withAlpha(pinColor, 0.9), strokeWidth: 0.8 });
       items.push({ type: 'text', x: cx, y: cy + r + 9, text: truncate(obj.title, 30), size: 7.5, fill: palette.text, anchor: 'middle' });
+      if (obj.subtitle) {
+        items.push({ type: 'text', x: cx, y: cy + r + 18, text: truncate(obj.subtitle, 30), size: 6.5, fill: palette.textMuted, anchor: 'middle' });
+      }
     }
 
     return { x: cx - r, right: cx + r, cy, bottom: top + M.rowH, top };
@@ -11664,6 +11821,25 @@ __mods["ui/panels.js"] = function (__x, __req) {
   let bodyEl = null;
   let headEl = null;
   let active = 'lanes';
+  /** Set when a rebuild was suppressed because the user was mid-edit. */
+  let pendingRender = false;
+
+  /**
+   * True when focus is in a text-entry control inside the dock.
+   *
+   * Panes write straight to the store as you type, and the store publishes
+   * `doc:changed`, which would rebuild the pane and destroy the input under the
+   * caret. While the user is typing the pane holds still and the rebuild is
+   * deferred until focus leaves. Discrete controls (selects, checkboxes) are
+   * excluded so choosing one refreshes the pane immediately.
+   */
+  function isTypingInDock() {
+    const active_ = document.activeElement;
+    if (!dockEl || !active_ || !dockEl.contains(active_)) return false;
+    const tag = active_.tagName.toLowerCase();
+    if (tag === 'textarea' || active_.isContentEditable) return true;
+    return tag === 'input' && !['checkbox', 'radio', 'color', 'range', 'file'].includes(active_.type);
+  }
 
   function buildPanels() {
     dockEl = document.getElementById('dock');
@@ -11677,7 +11853,19 @@ __mods["ui/panels.js"] = function (__x, __req) {
     dockEl.appendChild(resizer);
     installResizer(resizer, dockEl, 190, 480);
 
-    const rerender = debounce(() => renderPane(), 70);
+    dockEl.addEventListener('focusout', () => {
+      setTimeout(() => {
+        if (pendingRender && !isTypingInDock()) renderPane();
+      }, 0);
+    });
+
+    const rerender = debounce(() => {
+      if (isTypingInDock()) {
+        pendingRender = true;
+        return;
+      }
+      renderPane();
+    }, 70);
     on(EV.DOC_CHANGED, (p) => {
       if (p?.transient) return;
       rerender();
@@ -11752,6 +11940,10 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
   function renderPane() {
     if (!bodyEl) return;
+    pendingRender = false;
+    // Keep the reader's place across rebuilds.
+    const scroll = bodyEl.querySelector('.pane-scroll')?.scrollTop || 0;
+
     clear(headEl);
     clear(bodyEl);
 
@@ -11766,9 +11958,10 @@ __mods["ui/panels.js"] = function (__x, __req) {
       })
     );
 
-    const scroll = el('div', { class: 'pane-scroll' });
-    bodyEl.appendChild(scroll);
-    (RENDERERS[active] || paneLanes)(scroll);
+    const pane = el('div', { class: 'pane-scroll' });
+    bodyEl.appendChild(pane);
+    (RENDERERS[active] || paneLanes)(pane);
+    pane.scrollTop = scroll;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -13590,6 +13783,28 @@ __mods["ui/inspector.js"] = function (__x, __req) {
   let bodyEl = null;
   /** Section collapse state survives re-renders so the panel does not jump. */
   const collapsed = new Set(['appearance', 'text', 'arrange']);
+  /** Set when a rebuild was suppressed because the user was mid-edit. */
+  let pendingRender = false;
+
+  /**
+   * True when focus is in a text-entry control inside this panel.
+   *
+   * Every keystroke writes to the store, which publishes `doc:changed`, which
+   * would otherwise rebuild the panel and destroy the very input being typed
+   * into — dropping focus and the caret after each character. While the user is
+   * typing, the panel holds still; the deferred rebuild runs once focus leaves.
+   *
+   * Selects, checkboxes, ranges and colour wells are deliberately excluded:
+   * those are discrete choices that may change which fields apply, so the panel
+   * should refresh immediately.
+   */
+  function isTypingInPanel() {
+    const active = document.activeElement;
+    if (!host || !active || !host.contains(active)) return false;
+    const tag = active.tagName.toLowerCase();
+    if (tag === 'textarea' || active.isContentEditable) return true;
+    return tag === 'input' && !['checkbox', 'radio', 'color', 'range', 'file'].includes(active.type);
+  }
 
   function buildInspector() {
     host = document.getElementById('inspector');
@@ -13598,6 +13813,13 @@ __mods["ui/inspector.js"] = function (__x, __req) {
     headEl = el('div', { class: 'insp-head' });
     bodyEl = el('div', { class: 'insp-body' });
     host.append(headEl, bodyEl);
+
+    // Once focus leaves the panel, run any rebuild that was held back.
+    host.addEventListener('focusout', () => {
+      setTimeout(() => {
+        if (pendingRender && !isTypingInPanel()) render();
+      }, 0);
+    });
 
     on(EV.SELECTION_CHANGED, render);
     on(EV.DOC_CHANGED, (p) => {
@@ -13614,7 +13836,13 @@ __mods["ui/inspector.js"] = function (__x, __req) {
     render();
   }
 
-  const scheduleRender = debounce(() => render(), 60);
+  const scheduleRender = debounce(() => {
+    if (isTypingInPanel()) {
+      pendingRender = true;
+      return;
+    }
+    render();
+  }, 60);
 
   /* ══════════════════════════════════════════════════════════════════════════
      Router
@@ -13622,8 +13850,13 @@ __mods["ui/inspector.js"] = function (__x, __req) {
 
   function render() {
     if (!host) return;
+    pendingRender = false;
+
     const selection = store.selectedObjects();
     const links = renderer.getSelectedLinks();
+    // Rebuilding replaces the scrolled content, so put the reader back where
+    // they were rather than snapping to the top of the panel.
+    const scroll = bodyEl.scrollTop;
 
     clear(headEl);
     clear(bodyEl);
@@ -13632,6 +13865,8 @@ __mods["ui/inspector.js"] = function (__x, __req) {
     else if (selection.length > 1) renderMulti(selection);
     else if (links.length === 1) renderLink(links[0]);
     else renderProject();
+
+    bodyEl.scrollTop = scroll;
   }
 
   function headerFor(kind, name, actions = []) {
@@ -15271,11 +15506,11 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
 
       case 'ArrowLeft':
         e.preventDefault();
-        nudgeSelection(e.shiftKey ? -7 : -1);
+        nudgeSelection(-1, e.shiftKey);
         return;
       case 'ArrowRight':
         e.preventDefault();
-        nudgeSelection(e.shiftKey ? 7 : 1);
+        nudgeSelection(1, e.shiftKey);
         return;
 
       case 'F11':
@@ -15603,6 +15838,9 @@ __mods["main.js"] = function (__x, __req) {
 
     return el('div', {}, [
       el('div', { class: 'tip-title', text: obj.title }),
+      obj.subtitle
+        ? el('div', { style: { fontSize: 'var(--fs-tiny)', color: 'var(--text-muted)', marginBottom: '2px' }, text: obj.subtitle })
+        : null,
       el('div', { class: 'tip-meta', text: meta.join('  ·  ') }),
       el('div', { style: { marginTop: '5px', display: 'flex', gap: '5px', flexWrap: 'wrap' } }, [
         el('span', { class: `cx-badge ${status.tone === 'neutral' ? 'neutral' : status.tone}`, text: status.label }),
