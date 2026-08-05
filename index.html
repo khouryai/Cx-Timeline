@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="description" content="CX Timeline — a local-first interactive timeline and commissioning planner for software releases, testing campaigns and rail signalling commissioning." />
+    <title>CX Timeline — Commissioning Planner</title>
+
+    <link rel="stylesheet" href="css/tokens.css" />
+    <link rel="stylesheet" href="css/base.css" />
+    <link rel="stylesheet" href="css/components.css" />
+    <link rel="stylesheet" href="css/layout.css" />
+    <link rel="stylesheet" href="css/timeline.css" />
+    <link rel="stylesheet" href="css/notes.css" />
+
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111827'/%3E%3Crect x='6' y='7' width='4' height='18' rx='2' fill='%23e60012'/%3E%3Crect x='13' y='10' width='13' height='4' rx='2' fill='%235b93f5'/%3E%3Crect x='13' y='18' width='8' height='4' rx='2' fill='%2316a571'/%3E%3C/svg%3E"
+    />
+  </head>
+
+  <body>
+    <!-- Shown until main.js takes over; removed on boot. -->
+    <div id="boot" role="status" aria-live="polite">
+      <div class="boot-mark">
+        <div class="boot-bar"></div>
+        <div>
+          <div class="boot-name">CX Timeline</div>
+          <div class="boot-sub">Commissioning Planner</div>
+        </div>
+      </div>
+      <div class="boot-track"><div class="boot-fill"></div></div>
+    </div>
+
+    <div id="app">
+      <nav id="sidenav" aria-label="Primary"></nav>
+
+      <div id="main">
+        <div id="toolbar" role="toolbar" aria-label="Timeline tools"></div>
+
+        <div id="workspace">
+          <aside id="dock" aria-label="Panels"></aside>
+          <div id="canvas-frame" role="application" aria-label="Timeline canvas"></div>
+          <aside id="inspector" aria-label="Properties"></aside>
+        </div>
+      </div>
+
+      <div id="statusbar" role="status"></div>
+    </div>
+
+    <noscript>
+      <div style="padding: 40px; font-family: system-ui, sans-serif; color: #e9edf5">
+        <h1>JavaScript is required</h1>
+        <p>CX Timeline runs entirely in your browser and needs JavaScript enabled.</p>
+      </div>
+    </noscript>
+
+    <!--
+      The application is authored as ES modules in src/ and linked into this
+      single bundle by tools/build.js. Browsers refuse `type="module"` over
+      file://, so the bundle is what makes "double-click index.html" work with
+      no server and no setup. Run `npm run build` after editing anything in src/.
+    -->
+    <script src="app.bundle.js"></script>
+  </body>
+</html>

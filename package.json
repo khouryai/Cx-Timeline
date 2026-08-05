@@ -1,0 +1,19 @@
+{
+  "name": "cx-timeline",
+  "version": "1.0.0",
+  "description": "CX Timeline — local-first interactive timeline & commissioning planner",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build.js",
+    "watch": "node tools/build.js --watch",
+    "test": "node tools/run_tests.js",
+    "serve": "node tools/serve.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}

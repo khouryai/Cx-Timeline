@@ -1,0 +1,450 @@
+/**
+ * Commands — the single implementation of every user-invokable action.
+ *
+ * The context menu, the keyboard shortcuts, the toolbar and the inspector all
+ * call the same functions here, so a behaviour never drifts between the three
+ * ways of reaching it and there is exactly one place to fix a bug.
+ *
+ * Imports: util, events, dates, model, store, storage, viewport, renderer,
+ *          interactions, icons, components.
+ */
+
+import { el, download, clamp } from '../core/util.js';
+import { emit, EV } from '../core/events.js';
+import { MS_DAY, toISO, fmtDate, addDays } from '../core/dates.js';
+import { TYPES, makeBaseline, makeObject, projectExtent, effectiveToday, makeProject } from '../core/model.js';
+import * as store from '../core/store.js';
+import { saveNow, makeBackup } from '../core/storage.js';
+import * as viewport from '../timeline/viewport.js';
+import * as renderer from '../timeline/renderer.js';
+import { icon } from './icons.js';
+import { toast, confirmDialog, promptDialog, openModal } from './components.js';
+
+/* ── Clipboard ─────────────────────────────────────────────────────────── */
+
+/**
+ * Copy the selection to the in-app clipboard.
+ * Dependencies wholly inside the selection travel with it; dangling ones do
+ * not, because pasting half a relationship is never what anyone wants.
+ */
+export function copySelection() {
+  const objects = store.selectedObjects();
+  if (!objects.length) return false;
+
+  const ids = new Set(objects.map((o) => o.id));
+  const links = store.getDoc().links.filter((l) => ids.has(l.from) && ids.has(l.to));
+  const anchor = Math.min(...objects.map((o) => o.start));
+
+  store.setClipboard({
+    anchor,
+    objects: objects.map((o) => JSON.parse(JSON.stringify(o))),
+    links: links.map((l) => JSON.parse(JSON.stringify(l))),
+  });
+
+  // Mirror to the system clipboard so a selection can be pasted into another
+  // window of the app, or into an email as readable text.
+  writeSystemClipboard(objects);
+  toast({ tone: 'info', title: `${objects.length} object${objects.length === 1 ? '' : 's'} copied`, timeout: 1800 });
+  return true;
+}
+
+export function cutSelection() {
+  if (!copySelection()) return false;
+  const ids = store.getSelection();
+  store.removeObjects(ids, 'Cut');
+  renderer.requestRender();
+  return true;
+}
+
+/**
+ * Paste the clipboard. Without an explicit target the paste lands at the
+ * viewport centre, which is where the user is looking.
+ */
+export function paste({ atMs = null, laneId = null } = {}) {
+  const clip = store.getClipboard();
+  if (!clip || !clip.objects.length) {
+    toast({ tone: 'warn', title: 'Nothing to paste' });
+    return false;
+  }
+
+  const target = atMs != null ? atMs : viewport.pxToMs(viewport.getWidth() / 2);
+  const shift = target - clip.anchor;
+  const idMap = new Map();
+
+  const objects = clip.objects.map((source) => {
+    const copy = makeObject({
+      ...source,
+      id: undefined,
+      start: source.start + shift,
+      end: source.end + shift,
+      lane: laneId || source.lane,
+    });
+    idMap.set(source.id, copy.id);
+    return copy;
+  });
+
+  const newIds = store.addObjects(objects, `Paste ${objects.length} object${objects.length === 1 ? '' : 's'}`);
+
+  for (const link of clip.links) {
+    const from = idMap.get(link.from);
+    const to = idMap.get(link.to);
+    if (from && to) store.addLink({ from, to, type: link.type, lag: link.lag, style: link.style, label: link.label });
+  }
+
+  store.setSelection(newIds);
+  renderer.requestRender();
+  return true;
+}
+
+/** Duplicate in place, offset by the object's own duration so it stays clear. */
+export function duplicateSelection() {
+  const objects = store.selectedObjects();
+  if (!objects.length) return false;
+
+  const ids = new Set(objects.map((o) => o.id));
+  const idMap = new Map();
+  const copies = objects.map((source) => {
+    const duration = TYPES[source.type]?.duration ? source.end - source.start : MS_DAY * 3;
+    const copy = makeObject({
+      ...source,
+      id: undefined,
+      title: source.title,
+      start: source.start + duration,
+      end: source.end + duration,
+    });
+    idMap.set(source.id, copy.id);
+    return copy;
+  });
+
+  const newIds = store.addObjects(copies, `Duplicate ${copies.length} object${copies.length === 1 ? '' : 's'}`);
+  for (const link of store.getDoc().links) {
+    if (ids.has(link.from) && ids.has(link.to)) {
+      store.addLink({ from: idMap.get(link.from), to: idMap.get(link.to), type: link.type, lag: link.lag });
+    }
+  }
+
+  store.setSelection(newIds);
+  renderer.requestRender();
+  return true;
+}
+
+export async function deleteSelection({ confirm = true } = {}) {
+  const ids = store.getSelection();
+  if (!ids.length) return false;
+
+  const locked = ids.filter((id) => store.getObject(id)?.locked);
+  if (locked.length === ids.length) {
+    toast({ tone: 'warn', title: 'Locked', message: 'Unlock these objects before deleting them.' });
+    return false;
+  }
+
+  const deletable = ids.filter((id) => !store.getObject(id)?.locked);
+  if (confirm && deletable.length > 4) {
+    const ok = await confirmDialog({
+      title: `Delete ${deletable.length} objects`,
+      message: 'Their dependencies are removed too. This can be undone.',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return false;
+  }
+
+  store.removeObjects(deletable, deletable.length > 1 ? `Delete ${deletable.length} objects` : 'Delete object');
+  renderer.requestRender();
+  return true;
+}
+
+/** Best-effort mirror of a copy into the OS clipboard, as readable text. */
+function writeSystemClipboard(objects) {
+  if (!navigator.clipboard?.writeText) return;
+  const lines = objects.map((o) => {
+    const range = TYPES[o.type]?.duration ? `${toISO(o.start)} → ${toISO(o.end)}` : toISO(o.start);
+    return [o.title, TYPES[o.type]?.label || o.type, range, o.owner, o.status].filter(Boolean).join('\t');
+  });
+  navigator.clipboard.writeText(lines.join('\n')).catch(() => {
+    /* clipboard permission denied — the in-app clipboard still works */
+  });
+}
+
+/* ── Selection ─────────────────────────────────────────────────────────── */
+
+export function selectAll() {
+  store.selectAll();
+  renderer.requestRender();
+}
+
+export function selectNone() {
+  store.clearSelection();
+  renderer.setSelectedLinks([]);
+  renderer.requestRender();
+}
+
+/** Extend the selection to everything in the same lane. */
+export function selectLane() {
+  const objects = store.selectedObjects();
+  if (!objects.length) return;
+  const lanes = new Set(objects.map((o) => o.lane));
+  store.setSelection(store.getDoc().objects.filter((o) => lanes.has(o.lane)).map((o) => o.id));
+  renderer.requestRender();
+}
+
+/** Select everything the current selection depends on, transitively. */
+export function selectDependencyChain() {
+  const seeds = store.getSelection();
+  if (!seeds.length) return;
+  const doc = store.getDoc();
+  const out = new Set(seeds);
+  const stack = [...seeds];
+  while (stack.length) {
+    const id = stack.pop();
+    for (const link of doc.links) {
+      if (link.from === id && !out.has(link.to)) {
+        out.add(link.to);
+        stack.push(link.to);
+      }
+      if (link.to === id && !out.has(link.from)) {
+        out.add(link.from);
+        stack.push(link.from);
+      }
+    }
+  }
+  store.setSelection(Array.from(out));
+  renderer.requestRender();
+}
+
+/* ── Object state ──────────────────────────────────────────────────────── */
+
+export function toggleLock() {
+  const objects = store.selectedObjects();
+  if (!objects.length) return;
+  const lock = !objects.every((o) => o.locked);
+  store.updateObjects(objects.map((o) => o.id), { locked: lock }, lock ? 'Lock' : 'Unlock');
+  renderer.requestRender();
+}
+
+export function toggleHidden() {
+  const objects = store.selectedObjects();
+  if (!objects.length) return;
+  const hide = !objects.every((o) => o.hidden);
+  store.updateObjects(objects.map((o) => o.id), { hidden: hide }, hide ? 'Hide' : 'Show');
+  renderer.requestRender();
+}
+
+export function groupSelection() {
+  const ids = store.getSelection();
+  if (ids.length < 2) {
+    toast({ tone: 'warn', title: 'Select two or more objects to group' });
+    return;
+  }
+  store.groupObjects(ids);
+  renderer.requestRender();
+}
+
+export function ungroupSelection() {
+  store.ungroupObjects(store.getSelection());
+  renderer.requestRender();
+}
+
+export function setStatus(status) {
+  const ids = store.getSelection();
+  if (!ids.length) return;
+  store.updateObjects(ids, { status }, 'Change status');
+  renderer.requestRender();
+}
+
+export function setProgress(percent) {
+  const ids = store.getSelection();
+  if (!ids.length) return;
+  store.updateObjects(ids, { progress: clamp(percent, 0, 100) }, 'Change progress');
+  renderer.requestRender();
+}
+
+/* ── Creation ──────────────────────────────────────────────────────────── */
+
+/** Create an object of `type` at a date and lane, then select it. */
+export function createObject(type, { ms = null, laneId = null, select = true } = {}) {
+  const def = TYPES[type];
+  if (!def) return null;
+  const start = ms != null ? ms : viewport.pxToMs(viewport.getWidth() / 2);
+  const id = store.addObject(
+    {
+      type,
+      lane: laneId || store.getDoc().laneOrder[0] || null,
+      start,
+      end: def.duration ? start + (def.defaultDays || 1) * MS_DAY : start,
+    },
+    `Add ${def.label.toLowerCase()}`
+  );
+  if (select) store.setSelection([id]);
+  renderer.requestRender();
+  emit('object:created', { id, type });
+  return id;
+}
+
+export async function addLane(afterIndex = -1) {
+  const name = await promptDialog({ title: 'New lane', label: 'Lane name', value: '', placeholder: 'e.g. Wayside' });
+  if (!name) return null;
+  const id = store.addLane({ name: name.trim() }, afterIndex);
+  renderer.requestRender();
+  return id;
+}
+
+/* ── Baselines ─────────────────────────────────────────────────────────── */
+
+export async function takeBaseline() {
+  const doc = store.getDoc();
+  const name = await promptDialog({
+    title: 'Take baseline',
+    label: 'Baseline name',
+    value: `Baseline ${fmtDate(effectiveToday(doc), 'medium')}`,
+  });
+  if (!name) return null;
+  const baseline = makeBaseline(doc, name.trim());
+  store.addBaseline(baseline);
+  renderer.requestRender();
+  toast({ tone: 'good', title: 'Baseline captured', message: `${baseline.snapshot.length} objects recorded.` });
+  return baseline.id;
+}
+
+/* ── View ──────────────────────────────────────────────────────────────── */
+
+export function zoomIn() {
+  viewport.zoomBy(1.42);
+  renderer.requestRender();
+}
+
+export function zoomOut() {
+  viewport.zoomBy(0.7);
+  renderer.requestRender();
+}
+
+export function fitAll() {
+  const extent = projectExtent(store.getDoc());
+  viewport.fitRange(extent.start, extent.end, 30);
+  renderer.requestRender();
+}
+
+/** Frame the current selection. */
+export function zoomToSelection() {
+  const objects = store.selectedObjects();
+  if (!objects.length) return fitAll();
+  const start = Math.min(...objects.map((o) => o.start));
+  const end = Math.max(...objects.map((o) => (TYPES[o.type]?.duration ? o.end : o.start + MS_DAY)));
+  viewport.fitRange(start, end, 80);
+  renderer.requestRender();
+  return true;
+}
+
+export function goToToday() {
+  viewport.centerOn(effectiveToday(store.getDoc()), 0.42);
+  renderer.requestRender();
+}
+
+export function togglePresentation() {
+  emit(EV.PRESENT_MODE, { on: !document.body.classList.contains('presenting') });
+}
+
+/* ── Project lifecycle ─────────────────────────────────────────────────── */
+
+export async function newProject() {
+  const ok = await confirmDialog({
+    title: 'Start a new project',
+    message: 'The current project stays saved and can be reopened from Backups. Continue?',
+    confirmLabel: 'New project',
+  });
+  if (!ok) return;
+  await makeBackup('before-new');
+  store.replaceDoc(makeProject('Untitled Programme'), 'new');
+  fitAll();
+  toast({ tone: 'good', title: 'New project created' });
+}
+
+export async function saveSnapshot() {
+  await saveNow();
+  await makeBackup('manual');
+  toast({ tone: 'good', title: 'Snapshot saved', message: 'A restore point was added to Backups.' });
+}
+
+/* ── Navigation ────────────────────────────────────────────────────────── */
+
+/** Jump to and flash an object — used by search results and outline rows. */
+export function revealObject(id) {
+  store.setSelection([id]);
+  renderer.revealObject(id);
+}
+
+/* ── Keyboard help ─────────────────────────────────────────────────────── */
+
+export const SHORTCUTS = [
+  { group: 'Editing', items: [
+    ['mod+z', 'Undo'],
+    ['mod+y  /  mod+shift+z', 'Redo'],
+    ['mod+c', 'Copy selection'],
+    ['mod+x', 'Cut selection'],
+    ['mod+v', 'Paste'],
+    ['mod+d', 'Duplicate'],
+    ['Delete  /  Backspace', 'Delete selection'],
+    ['mod+g', 'Group'],
+    ['mod+shift+g', 'Ungroup'],
+    ['mod+l', 'Lock / unlock'],
+  ]},
+  { group: 'Selection', items: [
+    ['mod+a', 'Select all'],
+    ['Esc', 'Clear selection'],
+    ['Shift+click', 'Add to selection'],
+    ['Drag on canvas', 'Marquee select'],
+    ['mod+shift+a', 'Select whole lane'],
+    ['mod+shift+d', 'Select dependency chain'],
+  ]},
+  { group: 'Moving', items: [
+    ['← / →', 'Nudge one day'],
+    ['Shift + ← / →', 'Nudge one week'],
+    ['mod + ← / →', 'Change duration by a day'],
+    ['Alt while dragging', 'Keep in the same lane'],
+  ]},
+  { group: 'View', items: [
+    ['Mouse wheel', 'Zoom in / out'],
+    ['mod + wheel', 'Zoom (always)'],
+    ['Shift + wheel', 'Pan horizontally'],
+    ['Space + drag', 'Pan'],
+    ['mod+0', 'Fit whole plan'],
+    ['mod+shift+0', 'Zoom to selection'],
+    ['T', 'Go to today'],
+    ['V / H', 'Select tool / Pan tool'],
+    ['F11  /  P', 'Presentation mode'],
+  ]},
+  { group: 'Application', items: [
+    ['mod+f', 'Global search'],
+    ['mod+s', 'Save a restore point'],
+    ['mod+p', 'Print / export to PDF'],
+    ['?', 'This help'],
+  ]},
+];
+
+export function showShortcuts() {
+  const body = el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(248px, 1fr))', gap: '18px' } });
+
+  for (const group of SHORTCUTS) {
+    body.appendChild(
+      el('div', {}, [
+        el('div', { class: 'eyebrow', style: { marginBottom: '7px' }, text: group.group }),
+        el('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+          group.items.map(([keys, label]) =>
+            el('div', { style: { display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: 'var(--fs-tiny)' } }, [
+              el('span', { style: { color: 'var(--text-muted)' }, text: label }),
+              el('span', { class: 'mono', style: { color: 'var(--text-subtle)', whiteSpace: 'nowrap' }, text: keys.replace(/mod/g, navigator.platform.includes('Mac') ? '⌘' : 'Ctrl') }),
+            ])
+          )
+        ),
+      ])
+    );
+  }
+
+  openModal({
+    title: 'Keyboard shortcuts',
+    subtitle: 'Everything the timeline responds to.',
+    size: 'wide',
+    body,
+    actions: [{ label: 'Close', kind: 'primary' }],
+  });
+}

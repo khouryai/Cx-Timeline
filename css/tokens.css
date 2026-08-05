@@ -1,0 +1,461 @@
+/* ============================================================================
+   CX Timeline — Design tokens
+   ----------------------------------------------------------------------------
+   The single source of truth for every visual value in the application.
+   Nothing else in the codebase may use a raw hex colour: if a value you need
+   does not exist here, add a token in the right category and use var(--name).
+
+   Structure
+   ---------
+   1. INVARIANTS  — brand, shape, motion, spacing, typography. Identical in
+                    every theme; these are what make the app feel like part of
+                    the CX Portal suite regardless of palette.
+   2. PALETTES    — the raw colour scales (warm neutral ink + cool slate),
+                    lifted verbatim from cx-portal/styles.css so the two apps
+                    share literally the same colours.
+   3. THEMES      — semantic surface/text/status assignments per theme.
+                    Selected with <html data-theme="dark|light|engineering|
+                    blueprint|presentation">. Dark is the default.
+   ========================================================================= */
+
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=Roboto+Mono:wght@400;500;600&display=swap');
+
+:root {
+  /* ── 1. INVARIANTS ─────────────────────────────────────────────────────── */
+
+  /* Brand — Hitachi red (shared with cx-portal) */
+  --hitachi-red: #e60012;
+  --hitachi-red-hover: #b80010;
+  --primary: #e60012;
+  --primary-hover: #b80010;
+
+  /* Warm neutral ink scale */
+  --black: #0a0a0c;
+  --near-black: #131316;
+  --charcoal: #1d1e22;
+  --gray-900: #2a2c31;
+  --gray-800: #3a3c43;
+  --gray-700: #54575f;
+  --gray-600: #74777f;
+  --gray-500: #9a9da4;
+  --gray-400: #c2c5cb;
+  --gray-300: #dfe1e5;
+  --gray-200: #ececef;
+  --gray-100: #f4f4f6;
+  --gray-50: #fafaf8;
+  --white: #ffffff;
+
+  /* Slate (cool gray) scale — dark chrome */
+  --slate-950: #0b0f1a;
+  --slate-900: #111827;
+  --slate-850: #151d2e;
+  --slate-800: #1f2937;
+  --slate-750: #26313f;
+  --slate-700: #374151;
+  --slate-600: #4b5563;
+  --slate-500: #6b7280;
+  --slate-400: #9ca3af;
+  --slate-300: #d1d5db;
+  --slate-200: #e5e7eb;
+  --slate-100: #f3f4f6;
+  --slate-50: #f9fafb;
+
+  /* Typography */
+  --f-display: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --f-ui: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --f-mono: 'Roboto Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --f-body: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --fs-micro: 10px;
+  --fs-tiny: 11px;
+  --fs-small: 12px;
+  --fs-base: 13px;
+  --fs-body: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-display: 26px;
+
+  /* Elevation / shape / motion */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --easing: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 140ms;
+  --dur: 220ms;
+  --dur-slow: 380ms;
+
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Chrome geometry */
+  --sidenav-w: 208px;
+  --toolbar-h: 52px;
+  --statusbar-h: 26px;
+  --ruler-h: 58px;
+  --lane-gutter-w: 190px;
+
+  /* Focus ring — the ONE focus style in the app */
+  --focus-ring: 2px solid rgba(230, 0, 18, 0.5);
+  --focus-ring-offset: 2px;
+  --ring: 0 0 0 3px rgba(230, 0, 18, 0.14);
+
+  /* Object type accents — stable across themes so the legend reads the same */
+  --type-activity: #3a76e8;
+  --type-milestone: #9333d9;
+  --type-release: #2563eb;
+  --type-campaign: #0d9488;
+  --type-risk: #e0900b;
+  --type-issue: #e51b22;
+  --type-note: #eab308;
+  --type-decision: #6366f1;
+  --type-document: #64748b;
+  --type-freeze: #0ea5e9;
+  --type-outage: #f97316;
+  --type-container: #6b7280;
+
+  /* Subsystem accents — rail signalling disciplines */
+  --sys-ats: #3a76e8;
+  --sys-ixl: #9333d9;
+  --sys-scada: #0d9488;
+  --sys-comms: #0ea5e9;
+  --sys-wayside: #e0900b;
+  --sys-vehicle: #e51b22;
+  --sys-civil: #78716c;
+  --sys-power: #f97316;
+}
+
+/* ── 3. THEMES ─────────────────────────────────────────────────────────────
+   Every theme must define the same semantic contract. Anything consuming
+   colour uses these names only.
+   ------------------------------------------------------------------------ */
+
+/* ── DARK (default) — derives from cx-portal's slate sidenav chrome ─────── */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --app-bg: #0b0f1a;
+  --canvas-bg: #0d1220;
+  --surface: #111827;
+  --surface-2: #172033;
+  --surface-3: #1f2937;
+  --surface-raised: #1c2740;
+  --card-bg: #131c2e;
+  --chrome-bg: #0e1523;
+
+  --text: #e9edf5;
+  --text-main: #f4f6fa;
+  --text-muted: #9aa5b8;
+  --text-subtle: #6d798e;
+  --text-inverse: #0b0f1a;
+
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --line-soft: rgba(255, 255, 255, 0.06);
+  --line-strong: rgba(255, 255, 255, 0.2);
+
+  /* Status — the ink is cx-portal's "mid-dot" scale, which is tuned to read
+     on dark backgrounds; the -light pair becomes a translucent tint. */
+  --good: #16a571;
+  --good-light: rgba(22, 165, 113, 0.16);
+  --good-border: rgba(22, 165, 113, 0.4);
+  --warn: #e0900b;
+  --warn-light: rgba(224, 144, 11, 0.16);
+  --warn-border: rgba(224, 144, 11, 0.4);
+  --bad: #f2555b;
+  --bad-light: rgba(229, 27, 34, 0.18);
+  --bad-border: rgba(229, 27, 34, 0.45);
+  --info: #5b93f5;
+  --info-light: rgba(58, 118, 232, 0.18);
+  --info-border: rgba(58, 118, 232, 0.42);
+  --pending: #a855f7;
+  --pending-light: rgba(147, 51, 217, 0.18);
+  --pending-border: rgba(147, 51, 217, 0.42);
+  --neutral: #94a3b8;
+  --neutral-light: rgba(148, 163, 184, 0.14);
+  --neutral-border: rgba(148, 163, 184, 0.34);
+
+  --accent-blue: #5b93f5;
+  --accent-indigo: #818cf8;
+  --accent-amber: #fbbf24;
+  --accent-teal: #2dd4bf;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.3), 0 8px 20px -8px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 4px 10px rgba(0, 0, 0, 0.35), 0 32px 64px -24px rgba(0, 0, 0, 0.7);
+
+  --grid-line: rgba(255, 255, 255, 0.045);
+  --grid-line-major: rgba(255, 255, 255, 0.1);
+  --grid-weekend: rgba(255, 255, 255, 0.03);
+  --today-line: #ff2233;
+  --selection: rgba(91, 147, 245, 0.9);
+  --selection-fill: rgba(91, 147, 245, 0.12);
+  --connector: #7d8aa3;
+  --scroll-track: rgba(255, 255, 255, 0.04);
+  --scroll-thumb: rgba(255, 255, 255, 0.16);
+}
+
+/* ── LIGHT — cx-portal's production palette, value for value ─────────────── */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --app-bg: #f6f7f9;
+  --canvas-bg: #fbfbfc;
+  --surface: #ffffff;
+  --surface-2: #f9fafb;
+  --surface-3: #f3f4f6;
+  --surface-raised: #ffffff;
+  --card-bg: #ffffff;
+  --chrome-bg: #ffffff;
+
+  --text: #1a1a1a;
+  --text-main: #131316;
+  --text-muted: #6e7179;
+  --text-subtle: #697280;
+  --text-inverse: #ffffff;
+
+  --border: #ebebeb;
+  --border-strong: #d8d8d8;
+  --line-soft: #e4e7ec;
+  --line-strong: #cfd5df;
+
+  --good: #0d7a4f;
+  --good-light: #e8f4ee;
+  --good-border: rgba(13, 122, 79, 0.28);
+  --warn: #a8550a;
+  --warn-light: #fbf0e1;
+  --warn-border: rgba(168, 85, 10, 0.3);
+  --bad: #c01017;
+  --bad-light: #fdeaeb;
+  --bad-border: rgba(192, 16, 23, 0.26);
+  --info: #1d4eaf;
+  --info-light: #e8efff;
+  --info-border: rgba(29, 78, 175, 0.26);
+  --pending: #6b21a8;
+  --pending-light: #f1eaf9;
+  --pending-border: rgba(107, 33, 168, 0.26);
+  --neutral: #6b7280;
+  --neutral-light: #f3f4f6;
+  --neutral-border: rgba(107, 114, 128, 0.28);
+
+  --accent-blue: #2563eb;
+  --accent-indigo: #6366f1;
+  --accent-amber: #f59e0b;
+  --accent-teal: #0d9488;
+
+  --shadow-sm: 0 1px 2px rgba(15, 17, 21, 0.05), 0 1px 1px rgba(15, 17, 21, 0.03);
+  --shadow-md: 0 1px 2px rgba(15, 17, 21, 0.04), 0 6px 16px -8px rgba(15, 17, 21, 0.14);
+  --shadow-lg: 0 2px 6px rgba(15, 17, 21, 0.06), 0 28px 56px -20px rgba(15, 17, 21, 0.3);
+
+  --grid-line: rgba(15, 17, 21, 0.05);
+  --grid-line-major: rgba(15, 17, 21, 0.12);
+  --grid-weekend: rgba(15, 17, 21, 0.035);
+  --today-line: #e60012;
+  --selection: #2563eb;
+  --selection-fill: rgba(37, 99, 235, 0.1);
+  --connector: #8b93a3;
+  --scroll-track: #f3f4f6;
+  --scroll-thumb: #cfd5df;
+}
+
+/* ── ENGINEERING — high-contrast instrument panel, mono-forward ──────────── */
+:root[data-theme='engineering'] {
+  color-scheme: dark;
+
+  --app-bg: #07090d;
+  --canvas-bg: #090c12;
+  --surface: #0e1219;
+  --surface-2: #131922;
+  --surface-3: #1a222e;
+  --surface-raised: #18202b;
+  --card-bg: #10151d;
+  --chrome-bg: #0a0e14;
+
+  --text: #d8e2ec;
+  --text-main: #eaf2f9;
+  --text-muted: #8d9bab;
+  --text-subtle: #64717f;
+  --text-inverse: #07090d;
+
+  --border: rgba(122, 209, 255, 0.13);
+  --border-strong: rgba(122, 209, 255, 0.28);
+  --line-soft: rgba(122, 209, 255, 0.08);
+  --line-strong: rgba(122, 209, 255, 0.32);
+
+  --good: #22c55e;
+  --good-light: rgba(34, 197, 94, 0.15);
+  --good-border: rgba(34, 197, 94, 0.42);
+  --warn: #fbbf24;
+  --warn-light: rgba(251, 191, 36, 0.15);
+  --warn-border: rgba(251, 191, 36, 0.42);
+  --bad: #ff4d55;
+  --bad-light: rgba(255, 77, 85, 0.16);
+  --bad-border: rgba(255, 77, 85, 0.45);
+  --info: #38bdf8;
+  --info-light: rgba(56, 189, 248, 0.15);
+  --info-border: rgba(56, 189, 248, 0.42);
+  --pending: #c084fc;
+  --pending-light: rgba(192, 132, 252, 0.15);
+  --pending-border: rgba(192, 132, 252, 0.42);
+  --neutral: #94a3b8;
+  --neutral-light: rgba(148, 163, 184, 0.13);
+  --neutral-border: rgba(148, 163, 184, 0.34);
+
+  --accent-blue: #38bdf8;
+  --accent-indigo: #a5b4fc;
+  --accent-amber: #fbbf24;
+  --accent-teal: #2dd4bf;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.6);
+  --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.5), 0 10px 24px -10px rgba(0, 0, 0, 0.7);
+  --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.55), 0 34px 70px -26px rgba(0, 0, 0, 0.85);
+
+  --grid-line: rgba(122, 209, 255, 0.07);
+  --grid-line-major: rgba(122, 209, 255, 0.16);
+  --grid-weekend: rgba(122, 209, 255, 0.04);
+  --today-line: #ff2233;
+  --selection: #38bdf8;
+  --selection-fill: rgba(56, 189, 248, 0.14);
+  --connector: #6f8ba3;
+  --scroll-track: rgba(122, 209, 255, 0.05);
+  --scroll-thumb: rgba(122, 209, 255, 0.2);
+
+  --f-ui: 'Roboto Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* ── BLUEPRINT — drafting-table blue with cyan rules ─────────────────────── */
+:root[data-theme='blueprint'] {
+  color-scheme: dark;
+
+  --app-bg: #082044;
+  --canvas-bg: #0a2751;
+  --surface: #0c2d5c;
+  --surface-2: #0f3568;
+  --surface-3: #144077;
+  --surface-raised: #123a6e;
+  --card-bg: #0d3164;
+  --chrome-bg: #071c3c;
+
+  --text: #dceaff;
+  --text-main: #f0f7ff;
+  --text-muted: #9dbde6;
+  --text-subtle: #6f96c9;
+  --text-inverse: #082044;
+
+  --border: rgba(160, 210, 255, 0.2);
+  --border-strong: rgba(160, 210, 255, 0.38);
+  --line-soft: rgba(160, 210, 255, 0.12);
+  --line-strong: rgba(160, 210, 255, 0.45);
+
+  --good: #4ade80;
+  --good-light: rgba(74, 222, 128, 0.16);
+  --good-border: rgba(74, 222, 128, 0.42);
+  --warn: #fcd34d;
+  --warn-light: rgba(252, 211, 77, 0.16);
+  --warn-border: rgba(252, 211, 77, 0.42);
+  --bad: #fb7185;
+  --bad-light: rgba(251, 113, 133, 0.18);
+  --bad-border: rgba(251, 113, 133, 0.45);
+  --info: #7dd3fc;
+  --info-light: rgba(125, 211, 252, 0.18);
+  --info-border: rgba(125, 211, 252, 0.45);
+  --pending: #d8b4fe;
+  --pending-light: rgba(216, 180, 254, 0.16);
+  --pending-border: rgba(216, 180, 254, 0.42);
+  --neutral: #a5c4e8;
+  --neutral-light: rgba(165, 196, 232, 0.14);
+  --neutral-border: rgba(165, 196, 232, 0.34);
+
+  --accent-blue: #7dd3fc;
+  --accent-indigo: #c7d2fe;
+  --accent-amber: #fcd34d;
+  --accent-teal: #5eead4;
+
+  --shadow-sm: 0 1px 2px rgba(2, 12, 30, 0.5);
+  --shadow-md: 0 2px 6px rgba(2, 12, 30, 0.45), 0 10px 24px -10px rgba(2, 12, 30, 0.7);
+  --shadow-lg: 0 4px 12px rgba(2, 12, 30, 0.5), 0 34px 70px -26px rgba(2, 12, 30, 0.8);
+
+  --grid-line: rgba(160, 210, 255, 0.13);
+  --grid-line-major: rgba(160, 210, 255, 0.26);
+  --grid-weekend: rgba(160, 210, 255, 0.07);
+  --today-line: #ff5566;
+  --selection: #7dd3fc;
+  --selection-fill: rgba(125, 211, 252, 0.16);
+  --connector: #8fb8e8;
+  --scroll-track: rgba(160, 210, 255, 0.08);
+  --scroll-thumb: rgba(160, 210, 255, 0.28);
+}
+
+/* ── PRESENTATION — bright, low-chrome, projector-safe ───────────────────── */
+:root[data-theme='presentation'] {
+  color-scheme: light;
+
+  --app-bg: #ffffff;
+  --canvas-bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #fafbfc;
+  --surface-3: #f1f3f6;
+  --surface-raised: #ffffff;
+  --card-bg: #ffffff;
+  --chrome-bg: #ffffff;
+
+  --text: #101318;
+  --text-main: #000000;
+  --text-muted: #52586a;
+  --text-subtle: #737b8c;
+  --text-inverse: #ffffff;
+
+  --border: #e2e5ea;
+  --border-strong: #c8cdd6;
+  --line-soft: #eceef2;
+  --line-strong: #b6bcc8;
+
+  --good: #0a7f4f;
+  --good-light: #e4f5ec;
+  --good-border: rgba(10, 127, 79, 0.32);
+  --warn: #b45309;
+  --warn-light: #fdf1e2;
+  --warn-border: rgba(180, 83, 9, 0.32);
+  --bad: #be123c;
+  --bad-light: #fdeaef;
+  --bad-border: rgba(190, 18, 60, 0.3);
+  --info: #1d4ed8;
+  --info-light: #e7eeff;
+  --info-border: rgba(29, 78, 216, 0.3);
+  --pending: #7e22ce;
+  --pending-light: #f4eafc;
+  --pending-border: rgba(126, 34, 206, 0.3);
+  --neutral: #5b6472;
+  --neutral-light: #f1f3f6;
+  --neutral-border: rgba(91, 100, 114, 0.3);
+
+  --accent-blue: #1d4ed8;
+  --accent-indigo: #4f46e5;
+  --accent-amber: #d97706;
+  --accent-teal: #0f766e;
+
+  --shadow-sm: 0 1px 2px rgba(16, 19, 24, 0.06);
+  --shadow-md: 0 2px 4px rgba(16, 19, 24, 0.06), 0 8px 18px -10px rgba(16, 19, 24, 0.18);
+  --shadow-lg: 0 4px 10px rgba(16, 19, 24, 0.08), 0 30px 60px -22px rgba(16, 19, 24, 0.32);
+
+  --grid-line: rgba(16, 19, 24, 0.07);
+  --grid-line-major: rgba(16, 19, 24, 0.16);
+  --grid-weekend: rgba(16, 19, 24, 0.04);
+  --today-line: #e60012;
+  --selection: #1d4ed8;
+  --selection-fill: rgba(29, 78, 216, 0.1);
+  --connector: #6b7280;
+  --scroll-track: #f1f3f6;
+  --scroll-thumb: #c8cdd6;
+
+  --fs-base: 14px;
+  --fs-body: 15px;
+  --fs-small: 13px;
+  --fs-tiny: 12px;
+}

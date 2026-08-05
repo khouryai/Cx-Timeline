@@ -1,0 +1,268 @@
+/* ============================================================================
+   CX Timeline — Rich notes editor & rendered notes
+   ========================================================================= */
+
+.note-editor {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+.note-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+  padding: 5px 6px;
+  background: var(--surface-3);
+  border-bottom: 1px solid var(--border);
+}
+.note-tb-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border-strong);
+  margin: 0 4px;
+}
+
+.note-surface {
+  padding: 12px 14px;
+  font-family: var(--f-body), var(--f-ui);
+  font-size: var(--fs-body);
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--surface);
+  overflow-y: auto;
+  max-height: 52vh;
+  outline: none;
+}
+.note-surface:focus {
+  box-shadow: inset 0 0 0 2px rgba(230, 0, 18, 0.18);
+}
+
+/* ── Shared note typography (editor + rendered) ─────────────────────────── */
+.note-surface h1,
+.note-render h1 {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 14px 0 6px;
+}
+.note-surface h2,
+.note-render h2 {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 12px 0 5px;
+}
+.note-surface h3,
+.note-render h3 {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 11px 0 4px;
+}
+.note-surface p,
+.note-render p {
+  margin: 0 0 8px;
+}
+.note-surface ul,
+.note-render ul {
+  list-style: disc;
+  padding-left: 22px;
+  margin: 0 0 8px;
+}
+.note-surface ol,
+.note-render ol {
+  list-style: decimal;
+  padding-left: 22px;
+  margin: 0 0 8px;
+}
+.note-surface li,
+.note-render li {
+  margin: 2px 0;
+}
+.note-surface blockquote,
+.note-render blockquote {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-muted);
+  font-style: italic;
+}
+.note-surface a,
+.note-render a {
+  color: var(--accent-blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.note-surface a:hover,
+.note-render a:hover {
+  color: var(--hitachi-red);
+}
+.note-surface hr,
+.note-render hr {
+  border: none;
+  border-top: 1px solid var(--border-strong);
+  margin: 12px 0;
+}
+.note-surface img,
+.note-render img {
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+  margin: 6px 0;
+  display: block;
+}
+.note-surface code,
+.note-render code {
+  font-family: var(--f-mono);
+  font-size: 0.92em;
+  background: var(--surface-3);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.note-surface pre,
+.note-render pre {
+  font-family: var(--f-mono);
+  font-size: var(--fs-small);
+  background: var(--surface-3);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  margin: 0 0 8px;
+}
+
+.note-surface table,
+.note-render table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: var(--fs-small);
+}
+.note-surface th,
+.note-render th {
+  background: var(--surface-3);
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: left;
+}
+.note-surface th,
+.note-surface td,
+.note-render th,
+.note-render td {
+  border: 1px solid var(--border-strong);
+  padding: 5px 8px;
+}
+
+.note-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 3px 0;
+}
+.note-check input[type='checkbox'] {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  cursor: pointer;
+  position: relative;
+  flex: 0 0 auto;
+}
+.note-check input[type='checkbox']:checked {
+  background: var(--good);
+  border-color: var(--good);
+}
+.note-check input[type='checkbox']:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.note-check input[type='checkbox']:checked + span {
+  text-decoration: line-through;
+  color: var(--text-subtle);
+}
+
+/* ── Rendered (read-only) ───────────────────────────────────────────────── */
+.note-render {
+  font-family: var(--f-body), var(--f-ui);
+  font-size: var(--fs-small);
+  line-height: 1.55;
+  color: var(--text-muted);
+  overflow-y: auto;
+}
+.note-render > *:last-child {
+  margin-bottom: 0;
+}
+
+/* ── Attachment list ────────────────────────────────────────────────────── */
+.att-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.att-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: var(--fs-tiny);
+  transition: border-color var(--dur-fast) var(--easing), background var(--dur-fast) var(--easing);
+}
+.att-row:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-3);
+}
+.att-row .att-icon {
+  color: var(--text-subtle);
+  display: flex;
+  flex: 0 0 auto;
+}
+.att-row .att-main {
+  flex: 1;
+  min-width: 0;
+}
+.att-row .att-name {
+  color: var(--text);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.att-row .att-meta {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  color: var(--text-subtle);
+  letter-spacing: 0.05em;
+}
+.att-drop {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  text-align: center;
+  font-size: var(--fs-tiny);
+  color: var(--text-subtle);
+  transition: border-color var(--dur-fast) var(--easing), background var(--dur-fast) var(--easing);
+  cursor: pointer;
+}
+.att-drop:hover,
+.att-drop.over {
+  border-color: var(--hitachi-red);
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
