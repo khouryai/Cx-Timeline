@@ -39,6 +39,7 @@ const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..'
 const SRC = path.join(ROOT, 'src');
 const ENTRY = path.join(SRC, 'main.js');
 const OUT = path.join(ROOT, 'app.bundle.js');
+const CONFIG_OUT = path.join(ROOT, 'config.js');
 
 const IMPORT_NAMED = /^\s*import\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]\s*;?\s*$/;
 const IMPORT_NS = /^\s*import\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s+from\s*['"]([^'"]+)['"]\s*;?\s*$/;
@@ -268,8 +269,37 @@ function indent(code) {
     .join('\n');
 }
 
+/**
+ * Rewrite `config.js` from the environment.
+ *
+ * Cloudflare Pages (and any other CI) sets SUPABASE_URL / SUPABASE_ANON_KEY as
+ * build variables, which keeps them out of the repository. When they are not
+ * set the committed file is left exactly as it is, so a local `npm run build`
+ * never clobbers hand-entered values — and a checkout with no backend at all
+ * still builds and runs local-only.
+ */
+function writeConfig() {
+  const url = process.env.SUPABASE_URL || '';
+  const key = process.env.SUPABASE_ANON_KEY || '';
+  if (!url && !key) return false;
+
+  const requireAuth = /^(1|true|yes)$/i.test(process.env.CX_REQUIRE_AUTH || '');
+  const source = fs.readFileSync(CONFIG_OUT, 'utf8');
+  // Keep the file's documentation; replace only the literal it exports.
+  const header = source.slice(0, source.indexOf('window.CX_CONFIG'));
+  const body = `window.CX_CONFIG = ${JSON.stringify(
+    { supabaseUrl: url, supabaseAnonKey: key, requireAuth },
+    null,
+    2
+  )};\n`;
+  fs.writeFileSync(CONFIG_OUT, header + body, 'utf8');
+  console.log(`✓ config.js     — backend ${url ? new URL(url).host : '(none)'}`);
+  return true;
+}
+
 function build() {
   const started = Date.now();
+  writeConfig();
   const modules = collect(ENTRY);
   const order = sort(modules);
   const bundle = emit(modules, order, toId(ENTRY));

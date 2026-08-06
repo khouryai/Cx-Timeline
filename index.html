@@ -57,6 +57,21 @@
     </noscript>
 
     <!--
+      Where the backend lives, if there is one. Blank means local-only: no
+      account, browser storage, works by double-clicking this file. See
+      config.js.
+    -->
+    <script src="config.js"></script>
+
+    <!--
+      The Supabase client, vendored rather than fetched from a CDN so the
+      application still has no runtime network dependency and keeps working if
+      a CDN is blocked or goes away. Loaded ahead of the bundle, which reads it
+      as a global; the module linker never sees it.
+    -->
+    <script src="vendor/supabase.js"></script>
+
+    <!--
       The application is authored as ES modules in src/ and linked into this
       single bundle by tools/build.js. Browsers refuse `type="module"` over
       file://, so the bundle is what makes "double-click index.html" work with
