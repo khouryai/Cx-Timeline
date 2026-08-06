@@ -1,0 +1,37 @@
+{
+  // Cloudflare Workers static-assets deployment.
+  //
+  // Without this file wrangler generates one on the fly and points `assets` at
+  // the repository root, which uploads `node_modules` — including the 60 MB
+  // `workerd` binary — and fails on Cloudflare's 25 MiB per-asset limit. The
+  // deployable site is `dist/`, which `npm run build:dist` assembles from
+  // index.html, the bundle, css/ and vendor/ and nothing else.
+  //
+  // There is no Worker script: this is a static site, so `main` is absent and
+  // Cloudflare serves the assets directly from its edge.
+  //
+  // Dashboard settings that must match (Workers → cx-timeline → Settings):
+  //   Build command        npm run build:dist
+  //   Deploy command       npx wrangler deploy
+  //   Build variables      SUPABASE_URL, SUPABASE_ANON_KEY
+  //
+  // The build deliberately fails when those two variables are missing, rather
+  // than publishing a site nobody can sign in to.
+
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cx-timeline",
+  "compatibility_date": "2026-08-01",
+
+  "assets": {
+    "directory": "./dist",
+
+    // The application is one page that owns its own routing, so an unknown
+    // path should hand back index.html rather than a 404 — a shared link with
+    // a trailing path still opens the app.
+    "not_found_handling": "single-page-application"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

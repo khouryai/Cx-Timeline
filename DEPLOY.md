@@ -1,7 +1,7 @@
 # Deploying CX Timeline
 
-Cloudflare Pages for the site, Supabase for accounts and data. Both free at
-this size. About twenty minutes end to end.
+Cloudflare for the site, Supabase for accounts and data. Both free at this
+size. About twenty minutes end to end.
 
 You need: a Supabase project and a Cloudflare account. Nothing else — no
 server to run, no container, no database to administer.
@@ -37,8 +37,9 @@ policies "not existing, skipping" are expected on a first run.
 
 **Authentication → URL Configuration**:
 
-- **Site URL** — your Pages URL, e.g. `https://cx-timeline.pages.dev`.
-  Password-reset and confirmation links point here, so it has to be right.
+- **Site URL** — your deployed URL, e.g.
+  `https://cx-timeline.<subdomain>.workers.dev`. Password-reset and
+  confirmation links point here, so it has to be right.
 - **Redirect URLs** — add the same URL.
 
 > Come back and fix these after step 5, once you know the real URL.
@@ -63,20 +64,25 @@ grant access. Every row is behind row-level security tied to the signed-in
 user, so on its own it can read nothing. Do **not** use the `service_role`
 key — that one bypasses every policy, and it must never reach a browser.
 
-## 5. Cloudflare Pages — deploy
+## 5. Cloudflare — deploy
 
-**Workers & Pages** → **Create** → **Pages** → **Connect to Git** → pick this
-repository.
+Cloudflare offers two products here and they are easy to mix up. **Workers**
+(with static assets) is the current one and is what the dashboard steers you
+to; **Pages** is the older one. Either serves this app fine. The repository
+carries a [`wrangler.jsonc`](wrangler.jsonc) configured for **Workers**.
+
+### Workers (what the dashboard gives you today)
+
+**Workers & Pages** → **Create** → **Import a repository** → pick this repo.
 
 | Setting | Value |
 |---|---|
-| Framework preset | None |
 | Build command | `npm run build:dist` |
-| Build output directory | `dist` |
-| Node version | 18 or later |
+| Deploy command | `npx wrangler deploy` |
+| Root directory | `/` |
 
-**Environment variables** (Settings → Environment variables → Production
-*and* Preview):
+**Build variables** (Settings → Build → Variables and Secrets — these are
+*build* variables, not runtime ones):
 
 | Name | Value |
 |---|---|
@@ -87,14 +93,30 @@ The build writes these into `config.js`, so the keys live in Cloudflare rather
 than in the repository. The build **fails** if they are missing, rather than
 publishing a site nobody can sign in to.
 
-**Deploy**. You get `https://<project>.pages.dev` free. Go back to step 3 and
-put that URL into Supabase.
+> **If the build says `[ERROR] Asset too large`**, wrangler is uploading the
+> repository root instead of `dist/` — it generates its own config when it
+> cannot find one, and that config points at `.`, which sweeps in
+> `node_modules/workerd/bin/workerd` at roughly 60 MB against a 25 MiB limit.
+> Make sure `wrangler.jsonc` is committed and that the build command is
+> `npm run build:dist`, so `dist/` exists by the time wrangler runs. A correct
+> build reads about a dozen files, not a few thousand.
+
+### Pages (the older product)
+
+Build command `npm run build:dist`, output directory `dist`, same two
+environment variables. Pages ignores `wrangler.jsonc`.
+
+### The URL
+
+You get `https://<worker>.<subdomain>.workers.dev` (or `<project>.pages.dev`)
+free. Go back to step 3 and put it into Supabase, or password resets and
+confirmation links will bounce.
 
 ### A custom domain
 
-Pages → **Custom domains** → **Set up a domain**. Free to attach. If you need
-to *buy* one, Cloudflare Registrar sells at cost. Add the new domain to
-Supabase's redirect URLs too.
+Settings → **Domains & Routes** → **Add** (Workers), or **Custom domains**
+(Pages). Free to attach. If you need to *buy* one, Cloudflare Registrar sells
+at cost. Add the new domain to Supabase's redirect URLs too.
 
 ---
 
@@ -158,7 +180,8 @@ data. Use a second Supabase project for previews if that matters to you.
 
 Free at this scale, and the ceilings are generous:
 
-- **Cloudflare Pages** — unlimited bandwidth, 500 builds/month.
+- **Cloudflare** — unlimited bandwidth; 100,000 Worker requests/day on the
+  free plan, which static assets served from cache barely touch.
 - **Supabase free tier** — 500 MB database, 1 GB file storage, 50,000 monthly
   active users. A programme plan is a few hundred kilobytes; attachments are
   what will eventually push you over, and they are stored outside the
