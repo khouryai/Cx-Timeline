@@ -343,5 +343,139 @@ select refuses(:'carol',
   'a viewer deleting an attachment'
 );
 
+
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice E'\nInvitation-only sign-up'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+-- Sign-up goes through GoTrue, not through PostgREST, so the interface has no
+-- say in it: anyone holding the public key can POST to /auth/v1/signup. These
+-- checks insert into auth.users directly, which is the closest thing to that
+-- request, and confirm the trigger is what stops it.
+
+reset role;
+
+select assert(
+  (select is_admin from public.profiles where email = 'alice@example.com'),
+  'the first account created is an administrator'
+);
+select assert(
+  not (select is_admin from public.profiles where email = 'bob@example.com'),
+  'later accounts are not'
+);
+
+-- The uninvited are refused, whatever they know.
+select refuses(:'alice',
+  format('insert into auth.users (email) values (%L)', 'stranger@example.com'),
+  'signing up without an invitation'
+);
+select assert(
+  not exists (select 1 from auth.users where email = 'stranger@example.com'),
+  'and no account is left behind'
+);
+
+set role authenticated;
+
+-- ── Only administrators invite ────────────────────────────────────────────
+select act_as(:'bob');
+select refuses(:'bob',
+  format('select public.invite_user(%L, %L)', 'friend@example.com', 'editor'),
+  'a non-administrator inviting someone'
+);
+select refuses(:'bob',
+  format('select public.list_invitations()'),
+  'a non-administrator reading the invitation list'
+);
+select assert(
+  (select count(*) from public.list_accounts()) = 0,
+  'a non-administrator cannot enumerate accounts'
+);
+select refuses(:'bob',
+  format('update public.profiles set is_admin = true where id = %L', :'bob'),
+  'a user making themselves an administrator'
+);
+
+select act_as(:'alice');
+select public.invite_user('newstarter@example.com', 'editor', 'Signalling engineer');
+select assert(
+  (select count(*) from public.list_invitations()) = 1,
+  'an administrator can invite'
+);
+select refuses(:'alice',
+  format('select public.invite_user(%L)', 'not-an-email'),
+  'inviting something that is not an email address'
+);
+select refuses(:'alice',
+  format('select public.invite_user(%L)', 'bob@example.com'),
+  'inviting somebody who already has an account'
+);
+
+-- ── The invited can join, once ────────────────────────────────────────────
+reset role;
+insert into auth.users (email) values ('newstarter@example.com');
+select assert(
+  exists (select 1 from public.profiles where email = 'newstarter@example.com'),
+  'an invited address can create its account'
+);
+select assert(
+  (select accepted_at is not null from public.invitations where email = 'newstarter@example.com'),
+  'the invitation is marked used'
+);
+select assert(
+  not (select is_admin from public.profiles where email = 'newstarter@example.com'),
+  'and they are not an administrator'
+);
+
+-- A used invitation is not a reusable key.
+delete from auth.users where email = 'newstarter@example.com';
+select refuses(:'alice',
+  format('insert into auth.users (email) values (%L)', 'newstarter@example.com'),
+  'reusing an invitation that has already been accepted'
+);
+
+-- Nor is an expired one.
+set role authenticated;
+select act_as(:'alice');
+select public.invite_user('late@example.com');
+reset role;
+update public.invitations set expires_at = now() - interval '1 day' where email = 'late@example.com';
+select refuses(:'alice',
+  format('insert into auth.users (email) values (%L)', 'late@example.com'),
+  'accepting an invitation that has expired'
+);
+
+-- ── Revoking ──────────────────────────────────────────────────────────────
+set role authenticated;
+select act_as(:'alice');
+select public.invite_user('changed-my-mind@example.com');
+select public.revoke_invitation('changed-my-mind@example.com');
+reset role;
+select refuses(:'alice',
+  format('insert into auth.users (email) values (%L)', 'changed-my-mind@example.com'),
+  'signing up after the invitation was revoked'
+);
+
+-- ── Administrators ────────────────────────────────────────────────────────
+set role authenticated;
+select act_as(:'alice');
+select public.set_admin(:'bob', true);
+select act_as(:'bob');
+select assert(public.is_admin(), 'a promoted user becomes an administrator');
+select assert(
+  (select count(*) from public.list_accounts()) >= 4,
+  'and can now see every account'
+);
+
+select act_as(:'alice');
+select public.set_admin(:'bob', false);
+select act_as(:'bob');
+select assert(not public.is_admin(), 'and can be demoted again');
+
+-- The last administrator cannot lock everyone out.
+select act_as(:'alice');
+select refuses(:'alice',
+  format('select public.set_admin(%L, false)', :'alice'),
+  'the only administrator demoting themselves'
+);
+
 reset role;
 do $$ begin raise notice E'\nAll permission checks passed.'; end $$;

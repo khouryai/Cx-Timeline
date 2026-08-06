@@ -20,9 +20,17 @@ A new account starts with an empty project that you own. Your work is saved
 automatically after every edit: there is no Save button, and no way to lose
 changes by forgetting to press one.
 
+### Accounts are by invitation
+
+There is no sign-up form. An administrator invites an email address from
+**Team & Access** and passes on the link that appears; nobody else can create
+an account, and that is enforced by the database rather than by hiding a
+button. Invitations expire after 30 days, work once, and can be revoked.
+
 ### Sharing
 
-**Projects → Share** grants access by email address, at one of three levels:
+An account on its own sees nothing. **Projects → Share** grants access to a
+plan by email address, at one of three levels:
 
 | | Viewer | Editor | Owner |
 |---|:--:|:--:|:--:|
@@ -188,8 +196,10 @@ Global search covers titles, notes, owners, subsystems, areas, tags, versions,
 build numbers and references, ranked by where the match landed.
 
 Filters combine text, date range, type, status, lane, owner, subsystem, area
-and tag. Filtered-out objects dim rather than disappear, so the shape of the
-plan stays readable — and exports honour the filters.
+and tag. Non-matching objects **dim** by default, so the shape of the plan
+stays readable, or **hide** entirely — the choice sits at the top of the
+Filters pane and is saved with the project. Hiding reflows the lanes around
+what is left rather than leaving gaps. Exports always hide.
 
 The legend is generated from what is actually in the document and doubles as a
 filter control.

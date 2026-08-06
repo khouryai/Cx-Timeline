@@ -44,13 +44,17 @@ policies "not existing, skipping" are expected on a first run.
 
 > Come back and fix these after step 5, once you know the real URL.
 
-**Optional but recommended.** Anyone with the public key can create an
-account, and there is no invitation flow. To keep it to your own people,
-either turn off **Allow new users to sign up** in
-**Authentication → Sign In / Providers → Email** and create accounts yourself
-under **Authentication → Users**, or restrict sign-ups by domain. Access to
-any *project* is separate: a new account can see nothing until an owner shares
-something with it.
+> ### Leave "Allow new users to sign up" **ON**
+>
+> This looks like the setting that makes the application private. It is not,
+> and turning it off breaks the invitation flow — invited people would be
+> refused along with everyone else, because Supabase would reject the sign-up
+> before the database ever sees it.
+>
+> Sign-up is closed by a trigger on `auth.users` instead: an account can only
+> be created for an address an administrator has invited, and the refusal
+> happens in Postgres, so it applies to anyone calling the API directly as
+> much as to the sign-in screen. `npm run test:sql` proves it.
 
 ## 4. Supabase — collect the two values
 
@@ -120,16 +124,48 @@ at cost. Add the new domain to Supabase's redirect URLs too.
 
 ---
 
-## 6. Check it
+## 6. The first account
 
-1. Open the site. You should get the sign-in screen — there is no way past it.
-2. Create an account. You land in a new, empty project that you own.
-3. **Projects → Share**, add a colleague's email as **Viewer**.
-4. Have them sign in: they see the plan, a "Read-only" bar, no editing tools,
+Sign-up is invitation-only, which leaves a chicken-and-egg problem: nobody can
+be invited until somebody is an administrator. So **the first account ever
+created is let in and made an administrator.** After that the door shuts.
+
+1. Open the site and go to `<your-url>/#invite=you@yourcompany.com`.
+2. Fill in your name and a password, and create the account.
+3. You are now the administrator. Confirm it: **Team & Access** appears in the
+   sidebar, under Data.
+
+If you had already created an account before running the invitation part of
+the schema, it is not automatically an administrator. Promote it once, in the
+SQL editor:
+
+```sql
+update public.profiles set is_admin = true where email = 'you@yourcompany.com';
+```
+
+## 7. Inviting everyone else
+
+**Team & Access → Invite someone.** You get a link to send them however you
+like — Teams, email, a text message. No mail server is involved, which is
+deliberate: Supabase's built-in SMTP is rate-limited to a handful of messages
+an hour and is not meant for production.
+
+- The link expires in 30 days and works once.
+- **Revoke** stops it being used, even if they already have the link.
+- Finding the link is not enough on its own: the database checks the address
+  against the invitation list, so a shared or guessed URL gets nowhere.
+
+An account on its own sees **nothing**. Access to a plan is separate:
+
+## 8. Check the permissions
+
+1. **Projects → Share**, add a colleague's email as **Viewer**.
+2. Have them sign in: they see the plan, a "Read-only" bar, no editing tools,
    and any attempt to change something is refused.
 
-If sharing says *no account for …*, that person has not signed up yet.
-Sharing grants access to an existing account; it does not send an invitation.
+If sharing says *no account for …*, they have been invited but have not yet
+set up their account. Sharing grants access to an account that already
+exists.
 
 ---
 
@@ -147,6 +183,11 @@ Sharing grants access to an existing account; it does not send an invitation.
 Roles are per project, so the same person can own one plan and merely watch
 another.
 
+**Administrator** is separate and deployment-wide: it is the right to invite
+people and to appoint other administrators, and nothing else. An
+administrator gets no automatic sight of anyone's plans — they have to be
+shared like everybody else.
+
 **The rules live in the database, not the interface.** A viewer who opens the
 browser console and calls the API directly is refused by Postgres. The
 read-only mode in the UI exists to explain the state, not to enforce it —
@@ -159,8 +200,10 @@ npm run test:sql
 ```
 
 That stands up a throwaway PostgreSQL, applies the real `schema.sql`, and runs
-57 checks that become each user in turn and confirm the database refuses what
-it should. It never touches your Supabase project.
+78 checks that become each user in turn and confirm the database refuses what
+it should — including that an uninvited address cannot create an account, that
+a used or expired invitation cannot be reused, and that a user cannot make
+themselves an administrator. It never touches your Supabase project.
 
 ---
 

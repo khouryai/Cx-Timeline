@@ -62,6 +62,7 @@ const NAV = [
       { pane: 'io', label: 'Import / Export', icon: 'download' },
       { pane: 'backups', label: 'Backups', icon: 'save' },
       { pane: 'lists', label: 'Dropdown Lists', icon: 'list' },
+      { pane: 'team', label: 'Team & Access', icon: 'users', hosted: true, admin: true },
       { pane: 'settings', label: 'Settings', icon: 'gear' },
     ],
   },
@@ -104,8 +105,11 @@ function buildSidenav() {
   for (const group of NAV) {
     dom.navLinks.appendChild(el('div', { class: 'sidenav-section-label', text: group.section }));
     for (const item of group.items) {
-      // Some panes only mean anything with a backend behind them.
+      // Some panes only mean anything with a backend behind them, and one is
+      // for administrators. Both are re-evaluated on auth:changed, which
+      // rebuilds the sidebar.
       if (item.hosted && !cloud.isConfigured()) continue;
+      if (item.admin && !cloud.isAdmin()) continue;
       const link = el('a', {
         class: 'nav-link',
         href: '#',
@@ -502,6 +506,15 @@ function wireEvents() {
   });
   on(EV.DOC_REPLACED, refresh);
   on(EV.HISTORY_CHANGED, refresh);
+
+  // Which panes exist depends on the account — the Team pane is for
+  // administrators — so the sidebar is rebuilt, not just refreshed, when the
+  // signed-in user changes.
+  on(EV.AUTH_CHANGED, () => {
+    buildSidenav();
+    refreshStatus();
+  });
+  on(EV.ACCESS_CHANGED, refresh);
   on(EV.SELECTION_CHANGED, () => refreshStatus());
   on(EV.TOOL_CHANGED, () => refreshToolbar());
   on(EV.VIEW_CHANGED, debounce(() => {

@@ -616,6 +616,7 @@ export function defaultSettings() {
     showMinimap: true,
     showLegend: true,
     showProgress: true,
+    filterMode: 'dim',           // dim | hide — what happens to filtered-out objects
     showBaseline: false,
     activeBaseline: null,
     criticalPath: false,

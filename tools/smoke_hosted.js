@@ -49,6 +49,8 @@ function fakeSdk() {
   window.__cx.calls = [];
   window.__cx.role = window.__cx.role || 'owner';
   window.__cx.signedIn = window.__cx.signedIn || false;
+  window.__cx.admin = window.__cx.admin === undefined ? true : window.__cx.admin;
+  window.__cx.invitations = window.__cx.invitations || [];
 
   const USER = { id: 'user-1', email: 'alice@example.com', user_metadata: { full_name: 'Alice Engineer' } };
   const DOC = {
@@ -157,6 +159,37 @@ function fakeSdk() {
             return { data: [{ member_id: 'user-3', member_email: args.p_email, member_role: args.p_role }], error: null };
           }
           if (name === 'prune_backups') return { data: 0, error: null };
+          if (name === 'is_admin') return { data: window.__cx.admin, error: null };
+          if (name === 'invite_user') {
+            if (!window.__cx.admin) return denied('only an administrator can invite people');
+            const email = String(args.p_email).trim().toLowerCase();
+            if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+              return { data: null, error: { code: '22023', message: `${args.p_email} does not look like an email address` } };
+            }
+            window.__cx.invitations.push({
+              email, role_hint: args.p_role, note: args.p_note,
+              created_at: new Date().toISOString(),
+              expires_at: new Date(Date.now() + 30 * 864e5).toISOString(),
+              expired: false, invited_by: 'alice@example.com',
+            });
+            return { data: [{ invited_email: email, invitation_expires: new Date(Date.now() + 30 * 864e5).toISOString() }], error: null };
+          }
+          if (name === 'revoke_invitation') {
+            const email = String(args.p_email).toLowerCase();
+            window.__cx.invitations = window.__cx.invitations.filter((i) => i.email !== email);
+            return { data: null, error: null };
+          }
+          if (name === 'list_invitations') {
+            return { data: window.__cx.admin ? window.__cx.invitations : [], error: null };
+          }
+          if (name === 'list_accounts') {
+            if (!window.__cx.admin) return { data: [], error: null };
+            return { data: [
+              { id: 'user-1', email: 'alice@example.com', full_name: 'Alice Engineer', is_admin: true, created_at: new Date().toISOString(), projects: 2 },
+              { id: 'user-2', email: 'carol@example.com', full_name: null, is_admin: false, created_at: new Date().toISOString(), projects: 1 },
+            ], error: null };
+          }
+          if (name === 'set_admin') return { data: null, error: null };
           return { data: null, error: null };
         },
       };
@@ -206,9 +239,13 @@ async function main() {
     /do not match/i.test(await page.locator('.cx-gate-msg').innerText()));
   check('the gate stays up after a failure', await page.locator('.cx-gate-card').isVisible());
 
-  await page.locator('.cx-gate-link', { hasText: 'Create an account' }).click();
+  // Sign-up is not self-service; the invitation flow is covered further down.
+  check('sign-up is not offered from the gate',
+    (await page.locator('.cx-gate-link', { hasText: /create an account/i }).count()) === 0);
+  await page.locator('.cx-gate-link', { hasText: /forgot password/i }).click();
   await page.waitForTimeout(250);
-  check('sign-up is reachable', (await page.locator('.cx-gate-title').innerText()).includes('Create an account'));
+  check('password reset is reachable',
+    /reset your password/i.test(await page.locator('.cx-gate-title').innerText()));
   await page.locator('.cx-gate-link', { hasText: 'Back to sign in' }).click();
   await page.waitForTimeout(250);
 
@@ -293,6 +330,76 @@ async function main() {
   await page.keyboard.press('Delete');
   await page.waitForTimeout(600);
   check('a viewer cannot delete', (await page.locator('.tl-obj').count()) === countBefore);
+
+  /* ── Invitation-only sign-up ──────────────────────────────────────────── */
+  console.log('\nInvitation-only sign-up');
+  await page.addInitScript(() => { window.__cx = { role: 'owner', signedIn: false, admin: true, calls: [], invitations: [] }; });
+  await page.goto(url_, { waitUntil: 'load' });
+  await page.waitForSelector('.cx-gate', { timeout: 15000 });
+  await page.waitForTimeout(500);
+
+  check('the gate offers no way to create an account',
+    (await page.locator('.cx-gate-link', { hasText: /create an account/i }).count()) === 0);
+  check('it says so plainly',
+    /invitation/i.test(await page.locator('.cx-gate-links').innerText()));
+  check('signing in and resetting a password are still offered',
+    (await page.locator('.cx-gate button[type="submit"]').count()) === 1 &&
+    (await page.locator('.cx-gate-link', { hasText: /forgot password/i }).count()) === 1);
+
+  // An invitation link reveals the form and fills the address in. Changing
+  // only the fragment is a same-document navigation, so the reload is what
+  // actually re-runs boot — exactly as it would for someone opening the link
+  // fresh.
+  await page.goto(url_ + '#invite=newstarter%40example.com', { waitUntil: 'load' });
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('.cx-gate', { timeout: 15000 });
+  await page.waitForTimeout(600);
+  check('an invitation link opens the sign-up form',
+    /set up your account/i.test(await page.locator('.cx-gate-title').innerText()));
+  check('with the invited address filled in',
+    (await page.locator('.cx-gate input[name="email"]').inputValue()) === 'newstarter@example.com');
+
+  /* ── The Team pane ────────────────────────────────────────────────────── */
+  console.log('\nTeam administration');
+  await page.addInitScript(() => { window.__cx = { role: 'owner', signedIn: true, admin: true, calls: [], invitations: [] }; });
+  await page.goto(url_, { waitUntil: 'load' });
+  await page.waitForSelector('.tl-root', { timeout: 15000 });
+  await page.waitForTimeout(1400);
+
+  check('an administrator gets the Team pane',
+    (await page.locator('#sidenav .nav-link[data-pane="team"]').count()) === 1);
+  await page.locator('#sidenav .nav-link[data-pane="team"]').click();
+  await page.waitForTimeout(700);
+  check('it lists the accounts', (await page.locator('#dock .cx-listrow[data-account]').count()) === 2);
+  check('and marks the administrators', (await page.locator('#dock .cx-listrow[data-account] .cx-badge').count()) === 1);
+
+  await page.locator('#dock input[type="email"]').fill('newstarter@example.com');
+  await page.locator('#dock .cx-btn.primary', { hasText: 'Create invitation' }).click();
+  await page.waitForTimeout(700);
+  check('inviting produces a link to pass on', (await page.locator('.cx-modal').count()) === 1);
+  const inviteLink = await page.locator('.cx-modal input[readonly]').inputValue();
+  check('the link carries the invited address', /#invite=newstarter%40example\.com$/.test(inviteLink), inviteLink);
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(500);
+  check('the invitation is listed as pending',
+    (await page.locator('#dock .cx-listrow[data-invite="newstarter@example.com"]').count()) === 1);
+
+  await page.locator('#dock input[type="email"]').fill('not-an-email');
+  await page.locator('#dock .cx-btn.primary', { hasText: 'Create invitation' }).click();
+  await page.waitForTimeout(600);
+  check('a bad address is rejected with a reason', (await page.locator('.cx-toast').count()) >= 1);
+  await page.evaluate(() => document.querySelectorAll('.cx-toast, .cx-modal-overlay').forEach((n) => n.remove()));
+
+  /* ── Non-administrators ───────────────────────────────────────────────── */
+  console.log('\nNon-administrators');
+  await page.addInitScript(() => { window.__cx = { role: 'editor', signedIn: true, admin: false, calls: [], invitations: [] }; });
+  await page.goto(url_, { waitUntil: 'load' });
+  await page.waitForSelector('.tl-root', { timeout: 15000 });
+  await page.waitForTimeout(1400);
+  check('the Team pane is not offered',
+    (await page.locator('#sidenav .nav-link[data-pane="team"]').count()) === 0);
+  check('nor is the invitation list reachable',
+    (await page.evaluate(() => window.__cx.invitations.length)) === 0);
 
   /* ── No way round the gate ────────────────────────────────────────────── */
   console.log('\nThe gate cannot be skipped');

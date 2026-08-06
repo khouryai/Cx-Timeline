@@ -144,7 +144,7 @@ export function renderNow() {
   const settings = doc.settings;
 
   const predicate = hasActiveFilters() ? filterPredicate(doc, getFilters()) : null;
-  const layout = computeLayout({ filterFn: predicate });
+  const layout = computeLayout({ filterFn: predicate, hideFiltered: settings.filterMode === 'hide' });
   lastLayout = layout;
 
   dom.stage.style.height = `${stageHeight(layout.geometry)}px`;

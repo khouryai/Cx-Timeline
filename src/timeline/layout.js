@@ -260,10 +260,18 @@ export function packRows(entries, { minGapPx = 6 } = {}) {
  * The render model for the current frame.
  *
  * `filterFn` receives an object and returns true when it passes the active
- * filters; failing objects are still laid out (so the plan does not reflow as
- * filters change) but are marked `dimmed`.
+ * filters. What happens to the failures is the user's choice:
+ *
+ *   dim (default)  they are laid out and marked `dimmed`, so the shape of the
+ *                  plan stays readable and nothing moves as filters change.
+ *   hide           they are dropped before packing, so rows reflow and lanes
+ *                  shrink to what is left — the plan closes up around them.
+ *
+ * Dropping them before packing rather than skipping them at paint time is what
+ * makes the second mode worth having: skipping later would leave the gaps the
+ * hidden objects were occupying.
  */
-export function computeLayout({ filterFn = null, includeOffscreen = false, gutterWidth = 190 } = {}) {
+export function computeLayout({ filterFn = null, hideFiltered = false, includeOffscreen = false, gutterWidth = 190 } = {}) {
   const doc = getDoc();
   const lanes = orderedLanes(false);
   const rects = [];
@@ -273,7 +281,9 @@ export function computeLayout({ filterFn = null, includeOffscreen = false, gutte
   let y = 0;
 
   for (const lane of lanes) {
-    const laneObjects = doc.objects.filter((o) => o.lane === lane.id && !o.hidden);
+    const laneObjects = doc.objects.filter(
+      (o) => o.lane === lane.id && !o.hidden && !(hideFiltered && filterFn && !filterFn(o))
+    );
 
     // Measure every object in the lane, not just the visible ones: row heights
     // must not change as the plan is scrolled sideways.

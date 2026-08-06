@@ -55,7 +55,7 @@ import {
 } from './components.js';
 import * as cmd from './commands.js';
 import { listEditor } from './lists.js';
-import { openShareDialog } from './auth.js';
+import { openShareDialog, paneTeam } from './auth.js';
 import { openObjectDialog, openLaneDialog } from './dialogs.js';
 import { THEMES, applyTheme, getTheme } from './theme.js';
 import * as exporters from '../io/exporters.js';
@@ -63,7 +63,7 @@ import { importFile, buildDocFromRows } from '../io/importers.js';
 import { pickFiles } from '../core/util.js';
 
 export const PANES = [
-  'projects', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
+  'projects', 'team', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
   'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
   'settings',
 ];
@@ -166,6 +166,7 @@ export function toggleDock() {
 
 const RENDERERS = {
   projects: paneProjects,
+  team: paneTeam,
   lanes: paneLanes,
   palette: panePalette,
   outline: paneOutline,
@@ -185,7 +186,7 @@ const RENDERERS = {
 };
 
 const TITLES = {
-  projects: 'Projects',
+  projects: 'Projects', team: 'Team & access',
   lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
   campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
   baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',
@@ -803,6 +804,29 @@ function paneFilters(root) {
         onClick: selectFiltered,
       }),
     ])
+  );
+
+  // What a filter does to everything else. Dimming keeps the shape of the plan
+  // legible and nothing moves; hiding closes the rows up around what is left,
+  // which reads better when you are down to a handful of objects.
+  root.appendChild(
+    field(
+      'Non-matching objects',
+      segmented({
+        value: doc.settings.filterMode || 'dim',
+        stretch: true,
+        options: [
+          { value: 'dim', label: 'Dim' },
+          { value: 'hide', label: 'Hide' },
+        ],
+        onChange: (v) => {
+          store.setSetting('filterMode', v, 'Change filter display');
+          renderer.invalidateAll();
+          renderer.requestRender();
+        },
+      }),
+      'Hiding reflows the lanes around what is left. Exports always hide.'
+    )
   );
 
   root.appendChild(field('Text contains', textInput({

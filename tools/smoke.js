@@ -588,6 +588,47 @@ async function main() {
   await page.waitForTimeout(500);
   check('restore defaults re-adds the shipped options', (await page.locator('#dock .list-opt[data-option="dynamic"]').count()) === 1);
 
+  console.log('\nFilter display mode');
+  await page.locator('#sidenav .nav-link[data-pane="filters"]').click();
+  await page.waitForTimeout(350);
+  const filterText = page.locator('#dock input[type="text"]').first();
+  await filterText.fill('regression');
+  await page.waitForTimeout(700);
+
+  const shown = () => page.evaluate(() => ({
+    total: document.querySelectorAll('.tl-obj').length,
+    dimmed: document.querySelectorAll('.tl-obj.filtered-out').length,
+    height: document.querySelector('.tl-stage')?.getBoundingClientRect().height || 0,
+  }));
+
+  const dimmedState = await shown();
+  check('dim keeps non-matching objects on the canvas', dimmedState.dimmed > 0, `${dimmedState.dimmed} dimmed`);
+
+  await page.locator('#dock .cx-seg button', { hasText: 'Hide' }).click();
+  await page.waitForTimeout(800);
+  const hiddenState = await shown();
+  check('hide removes them entirely', hiddenState.dimmed === 0, `${hiddenState.dimmed} dimmed`);
+  check('and the matches are still drawn', hiddenState.total > 0 && hiddenState.total < dimmedState.total,
+    `${dimmedState.total} → ${hiddenState.total}`);
+  check('the plan closes up rather than leaving gaps', hiddenState.height < dimmedState.height,
+    `${Math.round(dimmedState.height)}px → ${Math.round(hiddenState.height)}px`);
+
+  // The choice is part of the document, so it survives a reload.
+  const stored = await page.evaluate(() => new Promise((res) => {
+    const r = indexedDB.open('cx-timeline');
+    r.onsuccess = () => {
+      const g = r.result.transaction('projects').objectStore('projects').getAll();
+      g.onsuccess = () => res(g.result.sort((a, b) => b.savedAt - a.savedAt)[0]?.doc?.settings?.filterMode);
+    };
+  }));
+  check('the choice is saved with the project', stored === 'hide', String(stored));
+
+  await page.locator('#dock .cx-seg button', { hasText: 'Dim' }).click();
+  await page.waitForTimeout(500);
+  check('switching back restores them', (await shown()).dimmed > 0);
+  await filterText.fill('');
+  await page.waitForTimeout(600);
+
   console.log('\nDock panes');
   const panes = ['lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links', 'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists', 'settings'];
   for (const pane of panes) {

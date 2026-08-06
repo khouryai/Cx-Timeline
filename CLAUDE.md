@@ -25,7 +25,13 @@ defines three roles — owner, editor, viewer — as row-level security policies
 they do not create it. Changing what a role may do means changing the SQL and
 `supabase/test/permissions.sql`, not the interface.
 
-Two things about row-level security that have already caused bugs here:
+**Sign-up is closed.** An account exists only because an administrator invited
+that address; a trigger on `auth.users` refuses anything else, so hiding the
+form is presentation, not the control. Supabase's own "Allow new users to sign
+up" must stay **on** — turning it off rejects invited people too, before the
+trigger runs. The first account ever created bootstraps as administrator.
+
+Three things about Postgres here that have already caused bugs:
 
 - **A refused UPDATE or DELETE is not an error.** The row is excluded, the
   statement matches nothing, and the driver reports success. Every save goes
@@ -33,8 +39,18 @@ Two things about row-level security that have already caused bugs here:
   table write has to check the returned row count, or it will report a save
   that never happened.
 - **A policy that queries the table it protects recurses.** The `can_read` /
-  `can_write` / `owns` helpers are `SECURITY DEFINER` to step outside RLS and
-  break the cycle.
+  `can_write` / `owns` / `is_admin` helpers are `SECURITY DEFINER` to step
+  outside RLS and break the cycle.
+- **A `RETURNS TABLE` column name shadows a real column inside plpgsql.**
+  `returns table (email text)` makes a bare `email` in the body resolve to the
+  OUT parameter, so `on conflict (email)` and unqualified INSERT column lists
+  fail at runtime — not at creation. This bit `share_project` and
+  `invite_user`; both now prefix their outputs (`member_email`,
+  `invited_email`).
+- **A BEFORE INSERT trigger cannot reference the row it is inserting.**
+  `accept_invitation` sets `accepted_user_id` to the new `auth.users` id, so
+  it has to run AFTER — in BEFORE the foreign key has nothing to point at and
+  every sign-up fails.
 
 ## Architecture
 
@@ -91,6 +107,10 @@ subscribes. That is what keeps the graph acyclic.
   graph and reassigns the binding. `edit()` uses the outgoing document as the
   "before" side of its diff, and derived analysis is memoised in a WeakMap
   keyed on document identity. Mutating in place breaks both, silently.
+- **Filtered-out objects dim by default and can be hidden instead**
+  (`settings.filterMode`). Hiding drops them before packing in
+  `computeLayout()`, so the rows reflow and the lanes close up; skipping them
+  at paint time would leave the gaps they used to occupy. Exports always hide.
 - **Derived state is never stored.** Violations, critical path and float are
   computed from the document, so they appear and clear on their own. Do not
   add a `violated` field to a link — there is nothing to keep in step.

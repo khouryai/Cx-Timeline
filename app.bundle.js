@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 39   Built: 2026-08-06T22:00:02.714Z
+ * Modules: 39   Built: 2026-08-06T23:27:58.342Z
  */
 (function () {
   'use strict';
@@ -1726,6 +1726,7 @@ __mods["core/model.js"] = function (__x, __req) {
       showMinimap: true,
       showLegend: true,
       showProgress: true,
+      filterMode: 'dim',           // dim | hide — what happens to filtered-out objects
       showBaseline: false,
       activeBaseline: null,
       criticalPath: false,
@@ -2215,6 +2216,7 @@ __mods["core/cloud.js"] = function (__x, __req) {
     try {
       const { data } = await client.auth.getSession();
       user = data?.session?.user || null;
+      if (user) await refreshAdmin();
     } catch (err) {
       console.warn('[cx-timeline] could not restore the session:', err.message);
       user = null;
@@ -2263,6 +2265,7 @@ __mods["core/cloud.js"] = function (__x, __req) {
     });
     if (error) throw friendlier(error);
     user = data.user;
+    await refreshAdmin();
     emit(EV.AUTH_CHANGED, { user, event: 'SIGNED_IN' });
     return user;
   }
@@ -2285,6 +2288,7 @@ __mods["core/cloud.js"] = function (__x, __req) {
 
     if (data.session) {
       user = data.user;
+      await refreshAdmin();
       emit(EV.AUTH_CHANGED, { user, event: 'SIGNED_IN' });
       return { user, confirmationRequired: false };
     }
@@ -2295,6 +2299,7 @@ __mods["core/cloud.js"] = function (__x, __req) {
     if (!client) return;
     await client.auth.signOut();
     user = null;
+    admin = false;
     forgetProject();
     emit(EV.AUTH_CHANGED, { user: null, event: 'SIGNED_OUT' });
   }
@@ -2463,6 +2468,91 @@ __mods["core/cloud.js"] = function (__x, __req) {
     if (error) throw friendlier(error);
     if (!data || !data.length) throw new Error('Only the owner can delete a project.');
     if (id === projectId) forgetProject();
+  }
+
+  /* ── Accounts and invitations (administrators) ─────────────────────────── */
+
+  let admin = false;
+
+  /** True when the signed-in user administers this deployment. */
+  function isAdmin() {
+    return admin;
+  }
+
+  /**
+   * Ask the server whether this account is an administrator.
+   * Cached, because it gates UI that renders on every document change; it is
+   * refreshed on sign-in and after any change to administrators.
+   */
+  async function refreshAdmin() {
+    if (!client || !user) {
+      admin = false;
+      return false;
+    }
+    try {
+      admin = Boolean(await rpc('is_admin'));
+    } catch {
+      admin = false;
+    }
+    return admin;
+  }
+
+  /**
+   * Invite an email address to create an account.
+   *
+   * Sign-up is closed: the database refuses any account whose address has no
+   * pending invitation, so this is the only way in. No email is sent — the
+   * caller gets a link to pass on however they like, which avoids depending on
+   * a mail server that a free project does not reliably have.
+   */
+  async function inviteUser(email, role = 'editor', note = '') {
+    const rows = await rpc('invite_user', { p_email: email, p_role: role, p_note: note || null });
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    return {
+      email: row?.invited_email || String(email).trim().toLowerCase(),
+      expires: row?.invitation_expires ? new Date(row.invitation_expires).getTime() : null,
+    };
+  }
+
+  async function revokeInvitation(email) {
+    await rpc('revoke_invitation', { p_email: email });
+  }
+
+  async function listInvitations() {
+    const rows = await rpc('list_invitations');
+    return (rows || []).map((r) => ({
+      email: r.email,
+      role: r.role_hint,
+      note: r.note,
+      created: new Date(r.created_at).getTime(),
+      expires: new Date(r.expires_at).getTime(),
+      expired: r.expired,
+      invitedBy: r.invited_by,
+    }));
+  }
+
+  async function listAccounts() {
+    const rows = await rpc('list_accounts');
+    return (rows || []).map((r) => ({
+      id: r.id,
+      email: r.email,
+      name: r.full_name,
+      admin: r.is_admin,
+      created: new Date(r.created_at).getTime(),
+      projects: r.projects,
+      isYou: r.id === user?.id,
+    }));
+  }
+
+  async function setAdmin(userId, value) {
+    await rpc('set_admin', { p_user: userId, p_admin: value });
+    if (userId === user?.id) await refreshAdmin();
+  }
+
+  /** The link an invited person opens to set up their account. */
+  function inviteLink(email) {
+    const base = window.location.origin + window.location.pathname;
+    return `${base}#invite=${encodeURIComponent(email)}`;
   }
 
   /* ── Sharing ───────────────────────────────────────────────────────────── */
@@ -2657,6 +2747,10 @@ __mods["core/cloud.js"] = function (__x, __req) {
       [/no account for/i, message.replace(/^.*?no account for/i, 'No account for')],
       [/must keep at least one owner/i, 'A project has to keep at least one owner.'],
       [/read only/i, 'This project is read-only for you.'],
+      [/invitation only/i, message],
+      [/only an administrator/i, 'Only an administrator can do that.'],
+      [/already has an account/i, message],
+      [/at least one administrator/i, 'There has to be at least one administrator.'],
     ];
     for (const [pattern, replacement] of map) {
       if (pattern.test(message)) {
@@ -2694,6 +2788,14 @@ __mods["core/cloud.js"] = function (__x, __req) {
   Object.defineProperty(__x, "saveProject", { get: () => saveProject, enumerable: true });
   Object.defineProperty(__x, "renameProject", { get: () => renameProject, enumerable: true });
   Object.defineProperty(__x, "deleteProject", { get: () => deleteProject, enumerable: true });
+  Object.defineProperty(__x, "isAdmin", { get: () => isAdmin, enumerable: true });
+  Object.defineProperty(__x, "refreshAdmin", { get: () => refreshAdmin, enumerable: true });
+  Object.defineProperty(__x, "inviteUser", { get: () => inviteUser, enumerable: true });
+  Object.defineProperty(__x, "revokeInvitation", { get: () => revokeInvitation, enumerable: true });
+  Object.defineProperty(__x, "listInvitations", { get: () => listInvitations, enumerable: true });
+  Object.defineProperty(__x, "listAccounts", { get: () => listAccounts, enumerable: true });
+  Object.defineProperty(__x, "setAdmin", { get: () => setAdmin, enumerable: true });
+  Object.defineProperty(__x, "inviteLink", { get: () => inviteLink, enumerable: true });
   Object.defineProperty(__x, "listMembers", { get: () => listMembers, enumerable: true });
   Object.defineProperty(__x, "shareProject", { get: () => shareProject, enumerable: true });
   Object.defineProperty(__x, "unshareProject", { get: () => unshareProject, enumerable: true });
@@ -6166,10 +6268,18 @@ __mods["timeline/layout.js"] = function (__x, __req) {
    * The render model for the current frame.
    *
    * `filterFn` receives an object and returns true when it passes the active
-   * filters; failing objects are still laid out (so the plan does not reflow as
-   * filters change) but are marked `dimmed`.
+   * filters. What happens to the failures is the user's choice:
+   *
+   *   dim (default)  they are laid out and marked `dimmed`, so the shape of the
+   *                  plan stays readable and nothing moves as filters change.
+   *   hide           they are dropped before packing, so rows reflow and lanes
+   *                  shrink to what is left — the plan closes up around them.
+   *
+   * Dropping them before packing rather than skipping them at paint time is what
+   * makes the second mode worth having: skipping later would leave the gaps the
+   * hidden objects were occupying.
    */
-  function computeLayout({ filterFn = null, includeOffscreen = false, gutterWidth = 190 } = {}) {
+  function computeLayout({ filterFn = null, hideFiltered = false, includeOffscreen = false, gutterWidth = 190 } = {}) {
     const doc = getDoc();
     const lanes = orderedLanes(false);
     const rects = [];
@@ -6179,7 +6289,9 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     let y = 0;
 
     for (const lane of lanes) {
-      const laneObjects = doc.objects.filter((o) => o.lane === lane.id && !o.hidden);
+      const laneObjects = doc.objects.filter(
+        (o) => o.lane === lane.id && !o.hidden && !(hideFiltered && filterFn && !filterFn(o))
+      );
 
       // Measure every object in the lane, not just the visible ones: row heights
       // must not change as the plan is scrolled sideways.
@@ -7098,7 +7210,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const settings = doc.settings;
 
     const predicate = hasActiveFilters() ? filterPredicate(doc, getFilters()) : null;
-    const layout = computeLayout({ filterFn: predicate });
+    const layout = computeLayout({ filterFn: predicate, hideFiltered: settings.filterMode === 'hide' });
     lastLayout = layout;
 
     dom.stage.style.height = `${stageHeight(layout.geometry)}px`;
@@ -10836,14 +10948,26 @@ __mods["ui/auth.js"] = function (__x, __req) {
    * wrong. It renders before the workspace is built, so nothing behind it can
    * flash into view.
    *
-   * Imports: util, events, cloud, icons, components.
+   * Imports: util, events, dates, cloud, icons, components.
    */
 
   const { el, clear } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const cloud = __req("core/cloud.js");
   const { icon } = __req("ui/icons.js");
-  const { openModal, field, textInput, selectInput, toast, badge, confirmDialog, emptyState } = __req("ui/components.js");
+  const { fmtDate } = __req("core/dates.js");
+  const { openModal, field, textInput, selectInput, section, skeleton, toast, badge, confirmDialog, emptyState } = __req("ui/components.js");
+
+
+
+
+
+
+
+
+
+
+
 
   /* ══════════════════════════════════════════════════════════════════════════
      The gate
@@ -10858,13 +10982,19 @@ __mods["ui/auth.js"] = function (__x, __req) {
   function requireSignIn() {
     return new Promise((resolve) => {
       const allowLocal = !cloud.authRequired();
-      let mode = 'signin'; // signin | signup | reset
+
+      // Sign-up is not offered. An invited person arrives on a link carrying
+      // their address, which is the only thing that reveals the form — and even
+      // then the database refuses any address without a pending invitation, so
+      // finding this URL achieves nothing on its own.
+      const invited = invitedEmail();
+      let mode = invited ? 'signup' : 'signin'; // signin | signup | reset
 
       const overlay = el('div', { class: 'cx-gate', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Sign in' });
       const card = el('div', { class: 'cx-gate-card' });
       overlay.appendChild(card);
 
-      const emailInput = textInput({ type: 'email', value: '', placeholder: 'you@company.com' });
+      const emailInput = textInput({ type: 'email', value: invited || '', placeholder: 'you@company.com' });
       emailInput.setAttribute('autocomplete', 'username');
       emailInput.setAttribute('name', 'email');
 
@@ -10943,7 +11073,10 @@ __mods["ui/auth.js"] = function (__x, __req) {
 
         const titles = {
           signin: ['Sign in', 'Your projects, wherever you open them.'],
-          signup: ['Create an account', 'You will be the owner of everything you create.'],
+          signup: [
+            'Set up your account',
+            invited ? `You have been invited as ${invited}. Choose a password.` : 'Accounts are created by invitation.',
+          ],
           reset: ['Reset your password', 'We will email you a link.'],
         };
         const [title, subtitle] = titles[mode];
@@ -10976,8 +11109,9 @@ __mods["ui/auth.js"] = function (__x, __req) {
 
         const links = el('div', { class: 'cx-gate-links' });
         if (mode === 'signin') {
+          // No "create an account": there is no self-service sign-up.
           links.append(
-            gateLink('Create an account', () => setMode('signup')),
+            el('span', { class: 'cx-hint', text: 'Access is by invitation.' }),
             gateLink('Forgot password?', () => setMode('reset'))
           );
         } else {
@@ -11005,8 +11139,28 @@ __mods["ui/auth.js"] = function (__x, __req) {
 
       render();
       document.body.appendChild(overlay);
-      setTimeout(() => emailInput.focus(), 80);
+      // An invited person already has their address filled in; put them in the
+      // field they actually have to complete.
+      setTimeout(() => (invited ? nameInput : emailInput).focus(), 80);
     });
+  }
+
+  /**
+   * The address on an invitation link, if this is one.
+   *
+   * The link is a convenience, not a credential — it reveals the form and
+   * prefills the address, nothing more. Whether an account may be created is
+   * decided by the database, which refuses any address without a pending
+   * invitation however the request arrives.
+   */
+  function invitedEmail() {
+    const match = /[#&?]invite=([^&]+)/.exec(window.location.hash || '');
+    if (!match) return '';
+    try {
+      return decodeURIComponent(match[1]).trim().toLowerCase();
+    } catch {
+      return '';
+    }
   }
 
   function gateLink(text, onClick) {
@@ -11130,6 +11284,218 @@ __mods["ui/auth.js"] = function (__x, __req) {
 
   function roleLabel(role) {
     return { owner: 'Owner', editor: 'Editor', viewer: 'View only' }[role] || 'No project open';
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Team administration
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Who may have an account, and who administers the deployment.
+   *
+   * Sign-up is closed, so this pane is the only door in. Inviting writes a row
+   * the database checks when the account is created — which is why an
+   * invitation cannot be forged by anyone who finds the link, and why revoking
+   * one actually stops the sign-up rather than merely hiding a button.
+   */
+  function paneTeam(root) {
+    if (!cloud.isConfigured() || !cloud.isSignedIn()) {
+      root.appendChild(
+        emptyState({ iconName: 'users', title: 'Not available', message: 'Sign in to manage who has access.' })
+      );
+      return;
+    }
+    if (!cloud.isAdmin()) {
+      root.appendChild(
+        emptyState({
+          iconName: 'shield',
+          title: 'Administrators only',
+          message: 'Accounts are created by invitation. Ask an administrator to invite someone.',
+        })
+      );
+      return;
+    }
+
+    root.appendChild(el('div', { class: 'cx-hint', style: { marginBottom: '12px' },
+      text: 'Nobody can create an account unless their address is invited here — the database refuses the sign-up, not just the form.' }));
+
+    /* ── Invite ────────────────────────────────────────────────────────────── */
+    const emailInput = textInput({ type: 'email', value: '', placeholder: 'colleague@company.com' });
+    const noteInput = textInput({ value: '', placeholder: 'Role or team (optional)' });
+
+    const invite = async () => {
+      const email = emailInput.value.trim();
+      if (!email) return;
+      try {
+        const result = await cloud.inviteUser(email, 'editor', noteInput.value.trim());
+        emailInput.value = '';
+        noteInput.value = '';
+        showInviteLink(result.email);
+        refresh();
+      } catch (err) {
+        toast({ tone: 'bad', title: 'Could not invite', message: err.message });
+      }
+    };
+    emailInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        invite();
+      }
+    });
+
+    root.appendChild(
+      section('Invite someone', [
+        field('Email', emailInput),
+        field('Note', noteInput, 'Only you see this — a reminder of who they are.'),
+        el('button', {
+          class: 'cx-btn mini primary',
+          html: icon('plus', { size: 12 }) + '<span>Create invitation</span>',
+          onClick: invite,
+        }),
+        el('div', { class: 'cx-hint', style: { marginTop: '8px' },
+          text: 'No email is sent. You get a link to pass on however you like.' }),
+      ])
+    );
+
+    const pending = el('div', { class: 'cx-list' });
+    const accounts = el('div', { class: 'cx-list' });
+    root.append(
+      section('Pending invitations', [pending]),
+      section('Accounts', [accounts])
+    );
+
+    async function refresh() {
+      clear(pending);
+      clear(accounts);
+      pending.appendChild(skeleton(2));
+
+      try {
+        const [invites, people] = await Promise.all([cloud.listInvitations(), cloud.listAccounts()]);
+        clear(pending);
+
+        if (!invites.length) {
+          pending.appendChild(el('div', { class: 'cx-hint', text: 'None outstanding.' }));
+        } else {
+          for (const invitation of invites) pending.appendChild(invitationRow(invitation));
+        }
+        for (const person of people) accounts.appendChild(accountRow(person));
+      } catch (err) {
+        clear(pending);
+        pending.appendChild(el('div', { class: 'cx-gate-msg bad', text: err.message }));
+      }
+    }
+
+    function invitationRow(invitation) {
+      return el('div', { class: 'cx-listrow', dataset: { invite: invitation.email }, style: { cursor: 'default' } }, [
+        el('span', { class: 'cx-dot', style: { background: invitation.expired ? 'var(--bad)' : 'var(--pending)' } }),
+        el('div', { class: 'lr-main' }, [
+          el('div', { class: 'lr-title', text: invitation.email }),
+          el('div', { class: 'lr-meta', text: [
+            invitation.note,
+            invitation.expired ? 'expired' : `expires ${fmtDate(invitation.expires, 'medium')}`,
+          ].filter(Boolean).join(' · ') }),
+        ]),
+        el('div', { class: 'lr-actions', style: { opacity: '1' } }, [
+          el('button', {
+            class: 'cx-btn icon mini ghost',
+            title: 'Copy the invitation link',
+            'aria-label': `Copy the invitation link for ${invitation.email}`,
+            html: icon('copy', { size: 11 }),
+            onClick: () => showInviteLink(invitation.email),
+          }),
+          el('button', {
+            class: 'cx-btn icon mini ghost',
+            title: 'Revoke',
+            'aria-label': `Revoke the invitation for ${invitation.email}`,
+            html: icon('trash', { size: 11 }),
+            onClick: async () => {
+              const ok = await confirmDialog({
+                title: `Revoke ${invitation.email}?`,
+                message: 'They will not be able to create an account with that address.',
+                confirmLabel: 'Revoke',
+                danger: true,
+              });
+              if (!ok) return;
+              try {
+                await cloud.revokeInvitation(invitation.email);
+                refresh();
+              } catch (err) {
+                toast({ tone: 'bad', title: 'Could not revoke', message: err.message });
+              }
+            },
+          }),
+        ]),
+      ]);
+    }
+
+    function accountRow(person) {
+      return el('div', { class: 'cx-listrow', dataset: { account: person.id }, style: { cursor: 'default' } }, [
+        el('div', { class: 'acc-avatar small', text: initials(person.name || person.email) }),
+        el('div', { class: 'lr-main' }, [
+          el('div', { class: 'lr-title', text: (person.name || person.email) + (person.isYou ? '  (you)' : '') }),
+          el('div', { class: 'lr-meta', text: [
+            person.email,
+            `${person.projects} project${person.projects === 1 ? '' : 's'}`,
+          ].join(' · ') }),
+        ]),
+        person.admin ? badge('Admin', 'good') : null,
+        el('div', { class: 'lr-actions', style: { opacity: '1' } }, [
+          el('button', {
+            class: 'cx-btn mini ghost',
+            text: person.admin ? 'Remove admin' : 'Make admin',
+            onClick: async () => {
+              try {
+                await cloud.setAdmin(person.id, !person.admin);
+                refresh();
+              } catch (err) {
+                toast({ tone: 'bad', title: 'Could not change', message: err.message });
+              }
+            },
+          }),
+        ]),
+      ].filter(Boolean));
+    }
+
+    refresh();
+  }
+
+  /**
+   * Show the link an invited person opens.
+   *
+   * A dialog rather than a silent clipboard write, because the link is the
+   * whole deliverable of inviting someone — losing it silently would mean
+   * revoking and re-inviting to get it back.
+   */
+  function showInviteLink(email) {
+    const link = cloud.inviteLink(email);
+    const box = textInput({ value: link });
+    box.readOnly = true;
+    box.style.fontFamily = 'var(--f-mono)';
+    box.style.fontSize = 'var(--fs-tiny)';
+
+    openModal({
+      title: 'Invitation created',
+      subtitle: `${email} can now set up an account — and nobody else can.`,
+      body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+        field('Send them this link', box, 'It expires in 30 days. Revoke it any time from the Team pane.'),
+        el('button', {
+          class: 'cx-btn mini',
+          html: icon('copy', { size: 12 }) + '<span>Copy link</span>',
+          onClick: async (e) => {
+            try {
+              await navigator.clipboard.writeText(link);
+            } catch {
+              // Clipboard access can be refused; selecting the text still works.
+              box.select();
+            }
+            e.currentTarget.innerHTML = icon('check', { size: 12 }) + '<span>Copied</span>';
+          },
+        }),
+      ]),
+      actions: [{ label: 'Done', kind: 'primary' }],
+    });
+
+    setTimeout(() => box.select(), 60);
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -11288,6 +11654,7 @@ __mods["ui/auth.js"] = function (__x, __req) {
   Object.defineProperty(__x, "requireSignIn", { get: () => requireSignIn, enumerable: true });
   Object.defineProperty(__x, "installAccessMode", { get: () => installAccessMode, enumerable: true });
   Object.defineProperty(__x, "accountBlock", { get: () => accountBlock, enumerable: true });
+  Object.defineProperty(__x, "paneTeam", { get: () => paneTeam, enumerable: true });
   Object.defineProperty(__x, "openShareDialog", { get: () => openShareDialog, enumerable: true });
 };
 
@@ -15011,7 +15378,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
   const cmd = __req("ui/commands.js");
   const { listEditor } = __req("ui/lists.js");
-  const { openShareDialog } = __req("ui/auth.js");
+  const { openShareDialog, paneTeam } = __req("ui/auth.js");
   const { openObjectDialog, openLaneDialog } = __req("ui/dialogs.js");
   const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
   const exporters = __req("io/exporters.js");
@@ -15019,7 +15386,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const { pickFiles } = __req("core/util.js");
 
   const PANES = [
-    'projects', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
+    'projects', 'team', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
     'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
     'settings',
   ];
@@ -15122,6 +15489,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
   const RENDERERS = {
     projects: paneProjects,
+    team: paneTeam,
     lanes: paneLanes,
     palette: panePalette,
     outline: paneOutline,
@@ -15141,7 +15509,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   };
 
   const TITLES = {
-    projects: 'Projects',
+    projects: 'Projects', team: 'Team & access',
     lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
     campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
     baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',
@@ -15759,6 +16127,29 @@ __mods["ui/panels.js"] = function (__x, __req) {
           onClick: selectFiltered,
         }),
       ])
+    );
+
+    // What a filter does to everything else. Dimming keeps the shape of the plan
+    // legible and nothing moves; hiding closes the rows up around what is left,
+    // which reads better when you are down to a handful of objects.
+    root.appendChild(
+      field(
+        'Non-matching objects',
+        segmented({
+          value: doc.settings.filterMode || 'dim',
+          stretch: true,
+          options: [
+            { value: 'dim', label: 'Dim' },
+            { value: 'hide', label: 'Hide' },
+          ],
+          onChange: (v) => {
+            store.setSetting('filterMode', v, 'Change filter display');
+            renderer.invalidateAll();
+            renderer.requestRender();
+          },
+        }),
+        'Hiding reflows the lanes around what is left. Exports always hide.'
+      )
     );
 
     root.appendChild(field('Text contains', textInput({
@@ -16749,6 +17140,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
         { pane: 'io', label: 'Import / Export', icon: 'download' },
         { pane: 'backups', label: 'Backups', icon: 'save' },
         { pane: 'lists', label: 'Dropdown Lists', icon: 'list' },
+        { pane: 'team', label: 'Team & Access', icon: 'users', hosted: true, admin: true },
         { pane: 'settings', label: 'Settings', icon: 'gear' },
       ],
     },
@@ -16791,8 +17183,11 @@ __mods["ui/shell.js"] = function (__x, __req) {
     for (const group of NAV) {
       dom.navLinks.appendChild(el('div', { class: 'sidenav-section-label', text: group.section }));
       for (const item of group.items) {
-        // Some panes only mean anything with a backend behind them.
+        // Some panes only mean anything with a backend behind them, and one is
+        // for administrators. Both are re-evaluated on auth:changed, which
+        // rebuilds the sidebar.
         if (item.hosted && !cloud.isConfigured()) continue;
+        if (item.admin && !cloud.isAdmin()) continue;
         const link = el('a', {
           class: 'nav-link',
           href: '#',
@@ -17189,6 +17584,15 @@ __mods["ui/shell.js"] = function (__x, __req) {
     });
     on(EV.DOC_REPLACED, refresh);
     on(EV.HISTORY_CHANGED, refresh);
+
+    // Which panes exist depends on the account — the Team pane is for
+    // administrators — so the sidebar is rebuilt, not just refreshed, when the
+    // signed-in user changes.
+    on(EV.AUTH_CHANGED, () => {
+      buildSidenav();
+      refreshStatus();
+    });
+    on(EV.ACCESS_CHANGED, refresh);
     on(EV.SELECTION_CHANGED, () => refreshStatus());
     on(EV.TOOL_CHANGED, () => refreshToolbar());
     on(EV.VIEW_CHANGED, debounce(() => {

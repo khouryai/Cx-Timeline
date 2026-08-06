@@ -83,6 +83,7 @@ export async function init() {
   try {
     const { data } = await client.auth.getSession();
     user = data?.session?.user || null;
+    if (user) await refreshAdmin();
   } catch (err) {
     console.warn('[cx-timeline] could not restore the session:', err.message);
     user = null;
@@ -131,6 +132,7 @@ export async function signIn(email, password) {
   });
   if (error) throw friendlier(error);
   user = data.user;
+  await refreshAdmin();
   emit(EV.AUTH_CHANGED, { user, event: 'SIGNED_IN' });
   return user;
 }
@@ -153,6 +155,7 @@ export async function signUp(email, password, fullName = '') {
 
   if (data.session) {
     user = data.user;
+    await refreshAdmin();
     emit(EV.AUTH_CHANGED, { user, event: 'SIGNED_IN' });
     return { user, confirmationRequired: false };
   }
@@ -163,6 +166,7 @@ export async function signOut() {
   if (!client) return;
   await client.auth.signOut();
   user = null;
+  admin = false;
   forgetProject();
   emit(EV.AUTH_CHANGED, { user: null, event: 'SIGNED_OUT' });
 }
@@ -331,6 +335,91 @@ export async function deleteProject(id) {
   if (error) throw friendlier(error);
   if (!data || !data.length) throw new Error('Only the owner can delete a project.');
   if (id === projectId) forgetProject();
+}
+
+/* ── Accounts and invitations (administrators) ─────────────────────────── */
+
+let admin = false;
+
+/** True when the signed-in user administers this deployment. */
+export function isAdmin() {
+  return admin;
+}
+
+/**
+ * Ask the server whether this account is an administrator.
+ * Cached, because it gates UI that renders on every document change; it is
+ * refreshed on sign-in and after any change to administrators.
+ */
+export async function refreshAdmin() {
+  if (!client || !user) {
+    admin = false;
+    return false;
+  }
+  try {
+    admin = Boolean(await rpc('is_admin'));
+  } catch {
+    admin = false;
+  }
+  return admin;
+}
+
+/**
+ * Invite an email address to create an account.
+ *
+ * Sign-up is closed: the database refuses any account whose address has no
+ * pending invitation, so this is the only way in. No email is sent — the
+ * caller gets a link to pass on however they like, which avoids depending on
+ * a mail server that a free project does not reliably have.
+ */
+export async function inviteUser(email, role = 'editor', note = '') {
+  const rows = await rpc('invite_user', { p_email: email, p_role: role, p_note: note || null });
+  const row = Array.isArray(rows) ? rows[0] : rows;
+  return {
+    email: row?.invited_email || String(email).trim().toLowerCase(),
+    expires: row?.invitation_expires ? new Date(row.invitation_expires).getTime() : null,
+  };
+}
+
+export async function revokeInvitation(email) {
+  await rpc('revoke_invitation', { p_email: email });
+}
+
+export async function listInvitations() {
+  const rows = await rpc('list_invitations');
+  return (rows || []).map((r) => ({
+    email: r.email,
+    role: r.role_hint,
+    note: r.note,
+    created: new Date(r.created_at).getTime(),
+    expires: new Date(r.expires_at).getTime(),
+    expired: r.expired,
+    invitedBy: r.invited_by,
+  }));
+}
+
+export async function listAccounts() {
+  const rows = await rpc('list_accounts');
+  return (rows || []).map((r) => ({
+    id: r.id,
+    email: r.email,
+    name: r.full_name,
+    admin: r.is_admin,
+    created: new Date(r.created_at).getTime(),
+    projects: r.projects,
+    isYou: r.id === user?.id,
+  }));
+}
+
+export async function setAdmin(userId, value) {
+  await rpc('set_admin', { p_user: userId, p_admin: value });
+  if (userId === user?.id) await refreshAdmin();
+}
+
+/** The link an invited person opens to set up their account. */
+export function inviteLink(email) {
+  const base = window.location.origin + window.location.pathname;
+  return `${base}#invite=${encodeURIComponent(email)}`;
 }
 
 /* ── Sharing ───────────────────────────────────────────────────────────── */
@@ -525,6 +614,10 @@ function friendlier(error) {
     [/no account for/i, message.replace(/^.*?no account for/i, 'No account for')],
     [/must keep at least one owner/i, 'A project has to keep at least one owner.'],
     [/read only/i, 'This project is read-only for you.'],
+    [/invitation only/i, message],
+    [/only an administrator/i, 'Only an administrator can do that.'],
+    [/already has an account/i, message],
+    [/at least one administrator/i, 'There has to be at least one administrator.'],
   ];
   for (const [pattern, replacement] of map) {
     if (pattern.test(message)) {

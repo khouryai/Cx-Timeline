@@ -573,3 +573,317 @@ create policy attachments_delete on storage.objects
     bucket_id = 'attachments'
     and public.can_write_project(((storage.foldername(name))[1])::uuid)
   );
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- Invitation-only sign-up
+--
+-- The application is closed: an account exists only because an administrator
+-- invited that address. Hiding the sign-up form would not achieve this — the
+-- auth endpoint is public and anyone with the anon key can POST to it — so the
+-- rule is a trigger on `auth.users` that refuses the insert. The interface
+-- reflects the rule; the database is the rule.
+--
+-- Bootstrapping: the very first account created becomes an administrator, so
+-- there is a way in before any invitation can exist. After that the door is
+-- shut, and only administrators can open it.
+-- ══════════════════════════════════════════════════════════════════════════
+
+alter table public.profiles
+  add column if not exists is_admin boolean not null default false;
+
+create table if not exists public.invitations (
+  email            text primary key,
+  role_hint        text not null default 'editor'
+                     check (role_hint in ('viewer', 'editor', 'owner')),
+  note             text,
+  invited_by       uuid references auth.users(id) on delete set null,
+  created_at       timestamptz not null default now(),
+  expires_at       timestamptz not null default now() + interval '30 days',
+  accepted_at      timestamptz,
+  accepted_user_id uuid references auth.users(id) on delete set null
+);
+
+create index if not exists invitations_pending_idx
+  on public.invitations (created_at desc) where accepted_at is null;
+
+-- ── Am I an administrator? ────────────────────────────────────────────────
+-- SECURITY DEFINER for the same reason as the project helpers: a policy on
+-- `profiles` that queried `profiles` would recurse.
+create or replace function public.is_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select coalesce(
+    (select is_admin from public.profiles where id = auth.uid()),
+    false
+  )
+$$;
+
+-- ── The gate ──────────────────────────────────────────────────────────────
+create or replace function public.enforce_invitation()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  pending public.invitations%rowtype;
+  first_account boolean;
+begin
+  select not exists (select 1 from public.profiles) into first_account;
+
+  -- Somebody has to be able to get in before there is anyone to invite them.
+  if first_account then
+    return new;
+  end if;
+
+  select * into pending
+  from public.invitations
+  where lower(email) = lower(new.email)
+    and accepted_at is null
+    and expires_at > now();
+
+  if pending.email is null then
+    raise exception
+      'CX Timeline is invitation only. Ask an administrator to invite %.', new.email
+      using errcode = '42501';
+  end if;
+
+  return new;
+end;
+$$;
+
+-- Marking the invitation used has to wait for AFTER: `accepted_user_id`
+-- references auth.users, and in a BEFORE trigger the row being inserted does
+-- not exist yet, so the foreign key would reject every real sign-up. Leaving
+-- it until after also means an insert that fails later does not burn the
+-- invitation.
+create or replace function public.accept_invitation()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  update public.invitations
+  set accepted_at = now(), accepted_user_id = new.id
+  where lower(email) = lower(new.email)
+    and accepted_at is null;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_invited on auth.users;
+create trigger on_auth_user_invited
+  before insert on auth.users
+  for each row execute function public.enforce_invitation();
+
+drop trigger if exists on_auth_user_accepted on auth.users;
+create trigger on_auth_user_accepted
+  after insert on auth.users
+  for each row execute function public.accept_invitation();
+
+-- The first account is also the first administrator. This runs after the
+-- profile row exists, so it counts admins rather than profiles.
+create or replace function public.claim_first_admin()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if not exists (select 1 from public.profiles where is_admin) then
+    update public.profiles set is_admin = true where id = new.id;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_profile_created on public.profiles;
+create trigger on_profile_created
+  after insert on public.profiles
+  for each row execute function public.claim_first_admin();
+
+-- ── Policies ──────────────────────────────────────────────────────────────
+alter table public.invitations enable row level security;
+
+-- Only administrators ever see the invitation list. It is a list of people's
+-- email addresses; ordinary users have no business reading it.
+drop policy if exists invitations_admin on public.invitations;
+create policy invitations_admin on public.invitations
+  for all to authenticated
+  using (public.is_admin())
+  with check (public.is_admin());
+
+-- A user may edit their own profile but must not be able to make themselves
+-- an administrator, which the previous `profiles_update` policy allowed.
+drop policy if exists profiles_update on public.profiles;
+create policy profiles_update on public.profiles
+  for update to authenticated
+  using (id = auth.uid() or public.is_admin())
+  with check (
+    public.is_admin()
+    or (
+      id = auth.uid()
+      -- unchanged, whatever it currently is
+      and is_admin = (select p.is_admin from public.profiles p where p.id = auth.uid())
+    )
+  );
+
+-- Administrators can see every account, so they can manage them.
+drop policy if exists profiles_select on public.profiles;
+create policy profiles_select on public.profiles
+  for select to authenticated
+  using (
+    id = auth.uid()
+    or public.is_admin()
+    or exists (
+      select 1
+      from public.project_members mine
+      join public.project_members theirs on theirs.project_id = mine.project_id
+      where mine.user_id = auth.uid()
+        and theirs.user_id = public.profiles.id
+    )
+  );
+
+-- ── API ───────────────────────────────────────────────────────────────────
+
+create or replace function public.invite_user(
+  p_email text,
+  p_role  text default 'editor',
+  p_note  text default null
+)
+-- Prefixed output columns: plpgsql resolves a bare `email` to the OUT
+-- parameter, which makes `on conflict (email)` below ambiguous at runtime.
+returns table (invited_email text, invitation_expires timestamptz)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  clean text := lower(trim(p_email));
+begin
+  if not public.is_admin() then
+    raise exception 'only an administrator can invite people' using errcode = '42501';
+  end if;
+  if clean !~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$' then
+    raise exception '% does not look like an email address', p_email using errcode = '22023';
+  end if;
+  if exists (select 1 from auth.users u where lower(u.email) = clean) then
+    raise exception '% already has an account', clean using errcode = '22023';
+  end if;
+
+  insert into public.invitations (email, role_hint, note, invited_by)
+  values (clean, coalesce(p_role, 'editor'), p_note, auth.uid())
+  on conflict (email) do update
+    set role_hint  = excluded.role_hint,
+        note       = excluded.note,
+        invited_by = excluded.invited_by,
+        created_at = now(),
+        expires_at = now() + interval '30 days',
+        -- re-inviting someone whose invitation lapsed reopens it
+        accepted_at = null,
+        accepted_user_id = null;
+
+  return query
+    select i.email, i.expires_at from public.invitations i where i.email = clean;
+end;
+$$;
+
+create or replace function public.revoke_invitation(p_email text)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if not public.is_admin() then
+    raise exception 'only an administrator can revoke an invitation' using errcode = '42501';
+  end if;
+  delete from public.invitations where lower(email) = lower(trim(p_email));
+end;
+$$;
+
+create or replace function public.list_invitations()
+returns table (
+  email      text,
+  role_hint  text,
+  note       text,
+  created_at timestamptz,
+  expires_at timestamptz,
+  expired    boolean,
+  invited_by text
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select i.email, i.role_hint, i.note, i.created_at, i.expires_at,
+         i.expires_at <= now(),
+         p.email
+  from public.invitations i
+  left join public.profiles p on p.id = i.invited_by
+  where public.is_admin()
+    and i.accepted_at is null
+  order by i.created_at desc
+$$;
+
+create or replace function public.list_accounts()
+returns table (
+  id         uuid,
+  email      text,
+  full_name  text,
+  is_admin   boolean,
+  created_at timestamptz,
+  projects   integer
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select p.id, p.email, p.full_name, p.is_admin, p.created_at,
+         (select count(*)::integer from public.project_members m where m.user_id = p.id)
+  from public.profiles p
+  where public.is_admin()
+  order by p.is_admin desc, p.email
+$$;
+
+create or replace function public.set_admin(p_user uuid, p_admin boolean)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if not public.is_admin() then
+    raise exception 'only an administrator can change administrators' using errcode = '42501';
+  end if;
+  -- Never let the last administrator step down; nobody could invite again.
+  if not p_admin
+     and (select count(*) from public.profiles where is_admin) <= 1
+     and (select is_admin from public.profiles where id = p_user) then
+    raise exception 'there has to be at least one administrator' using errcode = '22023';
+  end if;
+
+  update public.profiles set is_admin = p_admin where id = p_user;
+end;
+$$;
+
+revoke all on function public.is_admin()                          from public, anon;
+revoke all on function public.invite_user(text, text, text)       from public, anon;
+revoke all on function public.revoke_invitation(text)             from public, anon;
+revoke all on function public.list_invitations()                  from public, anon;
+revoke all on function public.list_accounts()                     from public, anon;
+revoke all on function public.set_admin(uuid, boolean)            from public, anon;
+
+grant execute on function public.is_admin()                       to authenticated;
+grant execute on function public.invite_user(text, text, text)    to authenticated;
+grant execute on function public.revoke_invitation(text)          to authenticated;
+grant execute on function public.list_invitations()               to authenticated;
+grant execute on function public.list_accounts()                  to authenticated;
+grant execute on function public.set_admin(uuid, boolean)         to authenticated;
