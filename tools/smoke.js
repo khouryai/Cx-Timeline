@@ -89,6 +89,11 @@ async function main() {
   check('minimap rendered', (await page.locator('.tl-minimap .tl-mini-obj').count()) > 5);
   check('legend rendered', (await page.locator('.tl-legend-item').count()) > 3);
   check('status bar populated', (await page.locator('#statusbar .sb-item').first().innerText()).length > 0);
+  check(
+    'sample plan opens with every dependency satisfied',
+    (await page.locator('.tl-connectors g[data-violated]').count()) === 0 &&
+      (await page.locator('.tl-obj.violated').count()) === 0
+  );
 
   console.log('\nSelection & inspector');
   // Pick a plain activity bar by name: point markers and full-lane bands
@@ -303,6 +308,73 @@ async function main() {
     rendered.text.slice(0, 70)
   );
   await truncationAudit('long-title');
+
+  console.log('\nDependency violations');
+  // The starter plan links "Regression Cycle 5" → "Dynamic Testing Campaign 1"
+  // (finish-to-start). Drag the predecessor far enough right and the
+  // constraint becomes impossible; the arrow and both ends must flag.
+  await page.locator('#toolbar .cx-seg button', { hasText: /^M$/ }).first().click();
+  await page.waitForTimeout(300);
+  await page.keyboard.press('Control+0');
+  await page.waitForTimeout(400);
+
+  const violationState = () => page.evaluate(() => ({
+    links: document.querySelectorAll('.tl-connectors g[data-violated]').length,
+    objects: document.querySelectorAll('.tl-obj.violated').length,
+    flags: document.querySelectorAll('.tl-obj .ob-breach').length,
+    status: document.querySelector('#statusbar .sb-warn')?.textContent || '',
+  }));
+
+  // Earlier sections move objects around, so compare against the state as it
+  // stands rather than assuming a pristine plan.
+  const baseline = await violationState();
+
+  // Push the predecessor of a finish-to-start link well past its successor.
+  const predecessor = page.locator('.tl-obj[data-label^="Regression Cycle 5"]').first();
+  await predecessor.click();
+  await page.waitForTimeout(250);
+  for (let i = 0; i < 14; i++) await page.keyboard.press('Shift+ArrowRight');
+  await page.waitForTimeout(700);
+
+  const broken = await violationState();
+  check('dependency arrow turns red', broken.links > baseline.links, `${baseline.links} → ${broken.links} violated link(s)`);
+  check('both ends of the link are flagged', broken.objects > baseline.objects, `${baseline.objects} → ${broken.objects} flagged`);
+  check('objects carry a day-count flag', broken.flags >= 2, `${broken.flags} flag badge(s)`);
+  check('status bar reports the breach', /broken dependenc/i.test(broken.status), broken.status);
+
+  const detail = await page.evaluate(() => {
+    const flag = document.querySelector('.tl-obj .ob-breach');
+    return { text: flag?.textContent || '', title: flag?.getAttribute('title') || '' };
+  });
+  check('flag states how many days it is out by', /\d+d/.test(detail.text), `${detail.text} · ${detail.title}`);
+
+  // Reverting the move must clear the flags with no residual state.
+  for (let i = 0; i < 14; i++) await page.keyboard.press('Shift+ArrowLeft');
+  await page.waitForTimeout(800);
+  const reverted = await violationState();
+  check(
+    'flags clear when the dates are put back',
+    reverted.links === baseline.links && reverted.objects === baseline.objects,
+    `expected ${baseline.links}/${baseline.objects}, got ${reverted.links}/${reverted.objects}`
+  );
+
+  // Adjusting the *dependency* rather than the dates must also clear it.
+  for (let i = 0; i < 14; i++) await page.keyboard.press('Shift+ArrowRight');
+  await page.waitForTimeout(700);
+  check('broken again after re-moving', (await violationState()).links > baseline.links);
+
+  await page.locator('#sidenav .nav-link[data-pane="links"]').click();
+  await page.waitForTimeout(350);
+  check('dependencies pane counts the breach', (await page.locator('#dock .cx-listrow.danger').count()) >= 1);
+
+  await page.locator('#dock .insp-alert button.primary').click();
+  await page.waitForTimeout(900);
+  const resolved = await violationState();
+  check('"Reschedule all" clears every violation', resolved.links === 0 && resolved.objects === 0, JSON.stringify(resolved));
+  check('status bar indicator disappears', resolved.status === '', resolved.status);
+
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(400);
 
   console.log('\nDock panes');
   const panes = ['lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links', 'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'settings'];

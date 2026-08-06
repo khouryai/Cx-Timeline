@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 36   Built: 2026-08-06T01:42:33.564Z
+ * Modules: 36   Built: 2026-08-06T17:14:03.721Z
  */
 (function () {
   'use strict';
@@ -1576,11 +1576,14 @@ __mods["core/model.js"] = function (__x, __req) {
       makeObject({ type: 'activity', lane: lane(5), start: D(0), end: D(40), title: 'Radio Coverage Survey', subsystem: 'comms', status: 'inprogress', progress: 80, owner: 'S. Njoroge' }),
       makeObject({ type: 'activity', lane: lane(6), start: D(24), end: D(88), title: 'Wayside Equipment Installation', subsystem: 'wayside', status: 'inprogress', progress: 45, owner: 'P. Lindqvist' }),
       makeObject({ type: 'activity', lane: lane(7), start: D(44), end: D(92), title: 'Onboard Retrofit — Fleet A', subsystem: 'vehicle', status: 'planned', progress: 0, owner: 'K. Ibrahim' }),
-      makeObject({ type: 'campaign', lane: lane(8), start: D(64), end: D(104), title: 'Dynamic Testing Campaign 1', status: 'planned', progress: 0, owner: 'J. Moreau', subsystem: 'ats', area: 'Depot → Station 6', data: { testPackage: 'TP-DYN-01' } }),
-      makeObject({ type: 'campaign', lane: lane(8), start: D(110), end: D(150), title: 'Site Acceptance Testing', status: 'planned', progress: 0, owner: 'J. Moreau', area: 'Full alignment', data: { testPackage: 'TP-SAT-01' } }),
-      makeObject({ type: 'milestone', lane: lane(8), start: D(152), title: 'Provisional Acceptance', status: 'planned', owner: 'Programme' }),
+      // Dates satisfy every dependency below: the campaign starts after its
+      // latest predecessor (Wayside installation, D88) finishes. A shipped
+      // sample plan should not open with broken constraints.
+      makeObject({ type: 'campaign', lane: lane(8), start: D(90), end: D(130), title: 'Dynamic Testing Campaign 1', status: 'planned', progress: 0, owner: 'J. Moreau', subsystem: 'ats', area: 'Depot → Station 6', data: { testPackage: 'TP-DYN-01' } }),
+      makeObject({ type: 'campaign', lane: lane(8), start: D(136), end: D(176), title: 'Site Acceptance Testing', status: 'planned', progress: 0, owner: 'J. Moreau', area: 'Full alignment', data: { testPackage: 'TP-SAT-01' } }),
+      makeObject({ type: 'milestone', lane: lane(8), start: D(180), title: 'Provisional Acceptance', status: 'planned', owner: 'Programme' }),
       makeObject({ type: 'freeze', lane: lane(0), start: D(88), end: D(102), title: 'Code Freeze', status: 'planned' }),
-      makeObject({ type: 'customer', lane: lane(9), start: D(100), end: D(112), title: 'Customer Witness Testing', status: 'planned', owner: 'Metro Authority' }),
+      makeObject({ type: 'customer', lane: lane(9), start: D(140), end: D(152), title: 'Customer Witness Testing', status: 'planned', owner: 'Metro Authority' }),
       makeObject({ type: 'outage', lane: lane(9), start: D(72), end: D(75), title: 'Traction Power Outage', status: 'planned', area: 'Sector 3' }),
       makeObject({ type: 'risk', lane: lane(10), start: D(58), title: 'Vehicle availability for dynamic testing', status: 'open', owner: 'J. Moreau', data: { severity: 'high', likelihood: 'medium', mitigation: 'Secure two additional test slots with Operations.' } }),
       makeObject({ type: 'issue', lane: lane(10), start: D(36), title: 'IXL-1184 · Route locking timeout', status: 'open', owner: 'D. Vasquez', data: { severity: 'critical', reference: 'IXL-1184' } }),
@@ -1597,7 +1600,7 @@ __mods["core/model.js"] = function (__x, __req) {
     ];
 
     doc.meta.viewStart = D(-14);
-    doc.meta.viewEnd = D(180);
+    doc.meta.viewEnd = D(200);
     return doc;
   }
 
@@ -2165,6 +2168,21 @@ __mods["core/store.js"] = function (__x, __req) {
 
   /* ── Private state ─────────────────────────────────────────────────────── */
 
+  /**
+   * The current document.
+   *
+   * INVARIANT: `doc` is never mutated in place. Every write path builds a new
+   * object graph and reassigns this binding. Two things depend on that:
+   *
+   *   1. `edit()` can use the outgoing `doc` directly as the "before" side of
+   *      its diff, instead of paying for a second deep clone.
+   *   2. Derived analysis (critical path, dependency violations) is memoised in
+   *      a WeakMap keyed on this object, so document identity *is* the cache
+   *      key — no revision counter to keep in step, and stale entries are
+   *      collected automatically.
+   *
+   * Break the invariant and both go quietly wrong.
+   */
   let doc = normalise(makeProject());
   let history = new History();
   let objectIndex = new Map();
@@ -2261,7 +2279,9 @@ __mods["core/store.js"] = function (__x, __req) {
    * @returns {boolean} true when the document actually changed.
    */
   function edit(label, mutator, opts = {}) {
-    const before = previewBase || deepClone(doc);
+    // No clone needed for the "before" side: `doc` is immutable by invariant,
+    // and `draft` is a separate graph. This halves the cloning cost of an edit.
+    const before = previewBase || doc;
     const draft = deepClone(doc);
 
     const result = mutator(draft);
@@ -2297,13 +2317,56 @@ __mods["core/store.js"] = function (__x, __req) {
    * Update the document without recording history — for live drag feedback.
    * The first call in a gesture snapshots the pre-gesture document so the
    * eventual `edit()` produces one patch covering the whole gesture.
+   *
+   * Prefer `previewObjects()` for anything driven by pointer movement: this
+   * variant deep-clones the whole document, which a drag would pay for on every
+   * frame.
    */
   function preview(mutator) {
-    if (!previewBase) previewBase = deepClone(doc);
+    if (!previewBase) previewBase = doc;
     const draft = deepClone(doc);
     if (mutator(draft) === false) return false;
     doc = draft;
     reindex();
+    emit(EV.DOC_CHANGED, { reason: 'preview', transient: true });
+    return true;
+  }
+
+  /**
+   * Copy-on-write preview of specific objects — the fast path for dragging.
+   *
+   * A drag touches a handful of objects but used to deep-clone the entire
+   * document on every mouse-move, so the cost of moving one bar grew with the
+   * size of the whole plan. This clones only the objects named in `ids` and
+   * shares every other object by reference, which keeps a gesture's per-frame
+   * cost proportional to the selection instead of the project.
+   *
+   * The result is still a brand-new document object, so the immutability
+   * invariant — and the memoisation that rides on it — holds.
+   *
+   * @param {string[]} ids       Objects the mutator is allowed to change.
+   * @param {Function} mutate    Called once per object with a private copy.
+   */
+  function previewObjects(ids, mutate) {
+    if (!previewBase) previewBase = doc;
+
+    const targets = new Set(ids);
+    if (!targets.size) return false;
+
+    const next = doc.objects.map((o) => {
+      if (!targets.has(o.id)) return o;
+      // Clone only what a drag can touch; `style`/`data` stay shared until the
+      // inspector actually edits them.
+      const copy = { ...o };
+      if (mutate(copy) === false) return o;
+      return copy;
+    });
+
+    doc = { ...doc, objects: next };
+
+    // Patch the index rather than rebuilding it over every object.
+    for (const o of next) if (targets.has(o.id)) objectIndex.set(o.id, o);
+
     emit(EV.DOC_CHANGED, { reason: 'preview', transient: true });
     return true;
   }
@@ -2315,6 +2378,11 @@ __mods["core/store.js"] = function (__x, __req) {
     previewBase = null;
     reindex();
     emit(EV.DOC_CHANGED, { reason: 'preview-cancel', transient: true });
+  }
+
+  /** True while a gesture is staging changes outside history. */
+  function hasPreview() {
+    return previewBase !== null;
   }
 
   /**
@@ -2866,7 +2934,9 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "markClean", { get: () => markClean, enumerable: true });
   Object.defineProperty(__x, "edit", { get: () => edit, enumerable: true });
   Object.defineProperty(__x, "preview", { get: () => preview, enumerable: true });
+  Object.defineProperty(__x, "previewObjects", { get: () => previewObjects, enumerable: true });
   Object.defineProperty(__x, "cancelPreview", { get: () => cancelPreview, enumerable: true });
+  Object.defineProperty(__x, "hasPreview", { get: () => hasPreview, enumerable: true });
   Object.defineProperty(__x, "editQuiet", { get: () => editQuiet, enumerable: true });
   Object.defineProperty(__x, "replaceDoc", { get: () => replaceDoc, enumerable: true });
   Object.defineProperty(__x, "historyState", { get: () => historyState, enumerable: true });
@@ -3462,6 +3532,150 @@ __mods["core/analysis.js"] = function (__x, __req) {
   const { TYPES, LINK_TYPES, effectiveToday } = __req("core/model.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
+     Memoisation
+
+     The store never mutates a document in place — every write produces a new
+     object graph — so document identity is a perfect cache key. A WeakMap keyed
+     on the document gives free invalidation (a new document misses) and free
+     eviction (old documents are collected), with no revision counter to keep in
+     step. This matters because violations are re-read on every rendered frame
+     of a drag, by the renderer, the inspector, the panels and the status bar.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const criticalCache = new WeakMap();
+  const violationCache = new WeakMap();
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Dependency constraints
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Evaluate one dependency.
+   *
+   * Each relationship pins one date of the successor against one date of the
+   * predecessor, offset by the link's lag (negative lag is a lead, and relaxes
+   * the constraint):
+   *
+   *   FS  successor starts  ≥ predecessor finishes + lag
+   *   SS  successor starts  ≥ predecessor starts   + lag
+   *   FF  successor finishes ≥ predecessor finishes + lag
+   *   SF  successor finishes ≥ predecessor starts   + lag
+   *
+   * `slackDays` is how much room is left: zero is exactly tight, negative means
+   * the plan is now impossible by that many days.
+   */
+  function evaluateLink(link, predecessor, successor) {
+    if (!predecessor || !successor) return null;
+
+    const lag = (link.lag || 0) * MS_DAY;
+    const predStart = predecessor.start;
+    const predEnd = TYPES[predecessor.type]?.duration ? predecessor.end : predecessor.start;
+    const succStart = successor.start;
+    const succEnd = TYPES[successor.type]?.duration ? successor.end : successor.start;
+
+    let required;
+    let actual;
+    let edge;
+
+    switch ((LINK_TYPES[link.type] || LINK_TYPES.FS).short) {
+      case 'SS':
+        required = predStart + lag;
+        actual = succStart;
+        edge = 'start';
+        break;
+      case 'FF':
+        required = predEnd + lag;
+        actual = succEnd;
+        edge = 'end';
+        break;
+      case 'SF':
+        required = predStart + lag;
+        actual = succEnd;
+        edge = 'end';
+        break;
+      case 'FS':
+      default:
+        required = predEnd + lag;
+        actual = succStart;
+        edge = 'start';
+        break;
+    }
+
+    const slackDays = Math.round((actual - required) / MS_DAY);
+    return {
+      id: link.id,
+      type: link.type,
+      lag: link.lag || 0,
+      required,
+      actual,
+      edge,
+      slackDays,
+      violated: slackDays < 0,
+      /** Days the successor would have to move to satisfy the link. */
+      shortfallDays: slackDays < 0 ? -slackDays : 0,
+    };
+  }
+
+  /**
+   * Every dependency whose precedence constraint is currently broken.
+   *
+   * Memoised per document, so the renderer can ask on every frame of a drag
+   * without recomputing.
+   *
+   * @returns {{byLink: Map, objects: Map, links: Set, count: number, worst: number}}
+   */
+  function linkViolations(doc) {
+    const cached = violationCache.get(doc);
+    if (cached) return cached;
+
+    const byId = new Map(doc.objects.map((o) => [o.id, o]));
+    const byLink = new Map();
+    const objects = new Map(); // object id -> the violations it is party to
+    const links = new Set();
+    let worst = 0;
+
+    for (const link of doc.links) {
+      const predecessor = byId.get(link.from);
+      const successor = byId.get(link.to);
+      const result = evaluateLink(link, predecessor, successor);
+      if (!result) continue;
+
+      byLink.set(link.id, result);
+      if (!result.violated) continue;
+
+      links.add(link.id);
+      worst = Math.max(worst, result.shortfallDays);
+
+      for (const [id, role] of [[link.from, 'predecessor'], [link.to, 'successor']]) {
+        if (!objects.has(id)) objects.set(id, []);
+        objects.get(id).push({ ...result, role, otherId: role === 'predecessor' ? link.to : link.from });
+      }
+    }
+
+    const result = { byLink, objects, links, count: links.size, worst };
+    violationCache.set(doc, result);
+    return result;
+  }
+
+  /**
+   * The dates that would satisfy a link, for a one-click fix.
+   * Moving the successor preserves its duration.
+   */
+  function resolutionFor(link, predecessor, successor) {
+    const evaluated = evaluateLink(link, predecessor, successor);
+    if (!evaluated || !evaluated.violated) return null;
+
+    const shift = evaluated.required - evaluated.actual;
+    const hasDuration = !!TYPES[successor.type]?.duration;
+    return {
+      id: successor.id,
+      start: successor.start + shift,
+      end: hasDuration ? successor.end + shift : successor.start + shift,
+      shiftDays: Math.round(shift / MS_DAY),
+    };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
      Critical path
      ═══════════════════════════════════════════════════════════════════════ */
 
@@ -3474,6 +3688,9 @@ __mods["core/analysis.js"] = function (__x, __req) {
    * simply unconnected, and marking it so would drown the real chain.
    */
   function criticalPath(doc) {
+    const cached = criticalCache.get(doc);
+    if (cached) return cached;
+
     const objects = doc.objects.filter((o) => !o.hidden);
     const byId = new Map(objects.map((o) => [o.id, o]));
     const links = doc.links.filter((l) => byId.has(l.from) && byId.has(l.to));
@@ -3577,7 +3794,9 @@ __mods["core/analysis.js"] = function (__x, __req) {
       if (connected && floatDays <= 0) critical.add(id);
     }
 
-    return { critical, floats, early, late, projectFinish, order };
+    const result = { critical, floats, early, late, projectFinish, order };
+    criticalCache.set(doc, result);
+    return result;
   }
 
   function durationMs(obj) {
@@ -3763,6 +3982,9 @@ __mods["core/analysis.js"] = function (__x, __req) {
     return workingDaysBetween(from, obj.end, holidays);
   }
 
+  Object.defineProperty(__x, "evaluateLink", { get: () => evaluateLink, enumerable: true });
+  Object.defineProperty(__x, "linkViolations", { get: () => linkViolations, enumerable: true });
+  Object.defineProperty(__x, "resolutionFor", { get: () => resolutionFor, enumerable: true });
   Object.defineProperty(__x, "criticalPath", { get: () => criticalPath, enumerable: true });
   Object.defineProperty(__x, "compareBaseline", { get: () => compareBaseline, enumerable: true });
   Object.defineProperty(__x, "objectHealth", { get: () => objectHealth, enumerable: true });
@@ -5201,7 +5423,7 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
    * Route every link that has both endpoints laid out.
    * Returns render descriptors ready for the SVG layer and the exporters.
    */
-  function routeAll(links, layoutById, style = 'orthogonal', { criticalIds = null } = {}) {
+  function routeAll(links, layoutById, style = 'orthogonal', { criticalIds = null, violations = null } = {}) {
     const out = [];
     for (const link of links) {
       const fromRect = layoutById.get(link.from);
@@ -5209,12 +5431,22 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
       if (!fromRect || !toRect) continue;
       const route = routeLink(link, fromRect, toRect, style);
       if (!route) continue;
+
+      const breach = violations ? violations.byLink.get(link.id) : null;
+      const violated = !!breach?.violated;
+
       out.push({
         link,
         ...route,
         dimmed: fromRect.dimmed || toRect.dimmed,
         critical: criticalIds ? criticalIds.has(link.from) && criticalIds.has(link.to) : false,
-        label: link.label || (link.lag ? `${LINK_TYPES[link.type]?.short || link.type}${link.lag > 0 ? '+' : ''}${link.lag}d` : ''),
+        violated,
+        breach,
+        // A broken link states the damage instead of its relationship type: the
+        // number of days it is out by is the actionable fact.
+        label: violated
+          ? `${breach.shortfallDays}d late`
+          : link.label || (link.lag ? `${LINK_TYPES[link.type]?.short || link.type}${link.lag > 0 ? '+' : ''}${link.lag}d` : ''),
       });
     }
     return out;
@@ -5239,18 +5471,31 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
       const path = document.createElementNS(SVG_NS, 'path');
       path.setAttribute('d', item.d);
       let cls = 'tl-link';
-      if (item.critical) cls += ' critical';
+      // A violated link outranks the critical-path highlight: an impossible
+      // constraint is more urgent than a tight one.
+      if (item.violated) cls += ' violated';
+      else if (item.critical) cls += ' critical';
       if (item.dimmed) cls += ' dim';
       if (selectedLinkIds.has(item.link.id)) cls += ' selected';
       path.setAttribute('class', cls);
-      if (item.link.color) path.setAttribute('stroke', item.link.color);
+      if (item.link.color && !item.violated) path.setAttribute('stroke', item.link.color);
       group.appendChild(path);
+
+      if (item.violated) {
+        group.dataset.violated = 'true';
+        const detail = document.createElementNS(SVG_NS, 'title');
+        detail.textContent = `Dependency broken by ${item.breach.shortfallDays} day${item.breach.shortfallDays === 1 ? '' : 's'}`;
+        group.appendChild(detail);
+      }
 
       const arrow = document.createElementNS(SVG_NS, 'path');
       arrow.setAttribute('d', item.arrow);
       arrow.setAttribute('class', cls);
-      arrow.setAttribute('fill', item.link.color || 'currentColor');
-      arrow.style.fill = item.critical ? 'var(--bad)' : item.link.color || 'var(--connector)';
+      arrow.style.fill = item.violated
+        ? 'var(--bad)'
+        : item.critical
+        ? 'var(--bad)'
+        : item.link.color || 'var(--connector)';
       arrow.style.stroke = 'none';
       group.appendChild(arrow);
 
@@ -5259,7 +5504,7 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
         text.setAttribute('x', item.mid.x);
         text.setAttribute('y', item.mid.y - 4);
         text.setAttribute('text-anchor', 'middle');
-        text.setAttribute('class', 'tl-link-label');
+        text.setAttribute('class', 'tl-link-label' + (item.violated ? ' violated' : ''));
         text.textContent = item.label;
         group.appendChild(text);
       }
@@ -5547,6 +5792,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
   const { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } = __req("core/model.js");
   const { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
   const { filterPredicate } = __req("core/query.js");
+  const { linkViolations, criticalPath } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const { computeLayout, stageHeight, ROW_HEIGHT } = __req("timeline/layout.js");
   const { fontString, textWidth, wrapText, resetTextCache } = __req("timeline/text.js");
@@ -5876,6 +6122,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
   function renderObjects(layout, settings) {
     const seen = new Set();
     const selection = new Set(getSelection());
+    const violations = linkViolations(getDoc());
 
     for (const rect of layout.rects) {
       seen.add(rect.id);
@@ -5885,7 +6132,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
         objectNodes.set(rect.id, node);
         dom.objects.appendChild(node);
       }
-      paintObject(node, rect, settings, selection.has(rect.id));
+      paintObject(node, rect, settings, selection.has(rect.id), violations.objects.get(rect.id) || null);
     }
 
     // Retire nodes for objects that scrolled out of view or were deleted.
@@ -5902,7 +6149,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
    * signature changes; position and size are always applied directly, which is
    * the path a drag takes.
    */
-  function paintObject(node, rect, settings, selected) {
+  function paintObject(node, rect, settings, selected, breaches) {
     const obj = rect.obj;
     const def = TYPES[obj.type] || TYPES.activity;
     const style = obj.style || {};
@@ -5943,32 +6190,36 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
       rect.label.placement,
       rect.label.lines.join('\u0001'),
       rect.label.subLines.join('\u0001'),
+      breaches ? breaches.map((b) => `${b.role}:${b.shortfallDays}`).join(',') : '',
       obj.notes ? 1 : 0,
       (obj.attachments || []).length,
     ].join('|');
 
     if (node.dataset.sig !== signature) {
       node.dataset.sig = signature;
-      buildObjectMarkup(node, rect, def, color, settings);
+      buildObjectMarkup(node, rect, def, color, settings, breaches);
     }
 
-    node.className = objectClass(rect, def, selected);
+    node.className = objectClass(rect, def, selected, breaches);
+    if (breaches) node.dataset.violated = String(breaches.length);
+    else delete node.dataset.violated;
     node.style.setProperty('--obj-radius', `${style.radius ?? 6}px`);
     node.style.opacity = String(style.opacity ?? 1);
     if (style.rotation) node.style.transform = `rotate(${style.rotation}deg)`;
     else node.style.transform = '';
   }
 
-  function objectClass(rect, def, selected) {
+  function objectClass(rect, def, selected, breaches) {
     let cls = `tl-obj shape-${def.shape}`;
     if (selected) cls += ' selected';
     if (rect.obj.locked) cls += ' locked';
     if (rect.dimmed) cls += ' filtered-out';
     if (rect.obj.groupId) cls += ' grouped';
+    if (breaches) cls += ' violated';
     return cls;
   }
 
-  function buildObjectMarkup(node, rect, def, color, settings) {
+  function buildObjectMarkup(node, rect, def, color, settings, breaches) {
     clear(node);
     const obj = rect.obj;
     const style = obj.style || {};
@@ -6007,6 +6258,8 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
         buildBar(node, rect, color, ink, settings);
         break;
     }
+
+    if (breaches) node.appendChild(violationFlag(breaches));
 
     // Interaction affordances — only for things the user can actually grab.
     if (!obj.locked && rect.hasDuration && shape !== 'band') {
@@ -6255,6 +6508,32 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     }
   }
 
+  /**
+   * The flag shown on both ends of a broken dependency.
+   *
+   * Sits outside the bar's top-left corner so it is visible even on a bar only
+   * a few pixels wide, and states the worst shortfall in days rather than just
+   * asserting that something is wrong.
+   */
+  function violationFlag(breaches) {
+    const worst = breaches.reduce((max, b) => Math.max(max, b.shortfallDays), 0);
+    const asSuccessor = breaches.some((b) => b.role === 'successor');
+    const detail = asSuccessor
+      ? `Starts ${worst} day${worst === 1 ? '' : 's'} before its predecessor allows`
+      : `Finishes ${worst} day${worst === 1 ? '' : 's'} after its successor starts`;
+
+    // Deliberately not `.ob-flag` — that class is the release shape's coloured
+    // pole, and reusing it here restyled every release marker.
+    return el('div', {
+      class: 'ob-breach',
+      title: `Dependency broken — ${detail}`,
+      'aria-label': `Dependency broken. ${detail}`,
+    }, [
+      el('span', { html: icon('warning', { size: 9 }), style: { display: 'flex' } }),
+      el('span', { text: `${worst}d` }),
+    ]);
+  }
+
   /** Small indicators: notes, attachments, lock, group membership. */
   function appendMarks(node, obj, rect) {
     const marks = [];
@@ -6385,8 +6664,11 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
       while (dom.connectors.firstChild) dom.connectors.removeChild(dom.connectors.firstChild);
       return;
     }
+    // Memoised on document identity, so asking every frame of a drag is free
+    // once the document has settled.
     const routed = routeAll(doc.links, layout.byId, settings.connectorStyle, {
       criticalIds: settings.criticalPath ? criticalIds : null,
+      violations: linkViolations(doc),
     });
     renderConnectors(dom.connectors, routed, {
       selectedLinkIds: selectedLinks,
@@ -7012,25 +7294,21 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
     // Alt suppresses lane changes, so a purely horizontal nudge stays in place.
     const laneChange = !e.altKey && targetLane ? targetLane.id : null;
 
-    store.preview((draft) => {
-      for (const id of gesture.ids) {
-        const obj = draft.objects.find((o) => o.id === id);
-        const original = gesture.originals.get(id);
-        if (!obj || !original) continue;
+    const targetLaneRecord = laneChange ? store.getLane(laneChange) : null;
+    const canChangeLane = targetLaneRecord && !targetLaneRecord.locked && gesture.ids.length === 1;
 
-        const rawStart = original.start + deltaMs;
-        const snapped = snapDate(rawStart);
-        const shift = snapped - original.start;
-        obj.start = original.start + shift;
-        if (TYPES[obj.type]?.duration) obj.end = original.end + shift;
+    store.previewObjects(gesture.ids, (obj) => {
+      const original = gesture.originals.get(obj.id);
+      if (!original) return false;
 
-        if (laneChange && gesture.ids.length === 1) {
-          const lane = draft.lanes.find((l) => l.id === laneChange);
-          if (lane && !lane.locked) {
-            obj.lane = laneChange;
-            obj.row = 0; // let the packer re-place it in the new lane
-          }
-        }
+      const snapped = snapDate(original.start + deltaMs);
+      const shift = snapped - original.start;
+      obj.start = original.start + shift;
+      if (TYPES[obj.type]?.duration) obj.end = original.end + shift;
+
+      if (canChangeLane) {
+        obj.lane = laneChange;
+        obj.row = 0; // let the packer re-place it in the new lane
       }
     });
 
@@ -7051,9 +7329,7 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
     const deltaMs = viewport.pxToDuration(dx);
     const { start, end } = gesture.original;
 
-    store.preview((draft) => {
-      const obj = draft.objects.find((o) => o.id === gesture.id);
-      if (!obj) return false;
+    store.previewObjects([gesture.id], (obj) => {
       if (gesture.edge === 'start') {
         const next = snapDate(start + deltaMs);
         // Clamping to the minimum duration can knock the edge off the grid, so
@@ -8215,6 +8491,7 @@ __mods["ui/commands.js"] = function (__x, __req) {
   const { TYPES, makeBaseline, makeObject, projectExtent, effectiveToday, makeProject } = __req("core/model.js");
   const store = __req("core/store.js");
   const { saveNow, makeBackup } = __req("core/storage.js");
+  const { linkViolations, resolutionFor } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
@@ -8489,6 +8766,93 @@ __mods["ui/commands.js"] = function (__x, __req) {
     return id;
   }
 
+  /* ── Dependency violations ─────────────────────────────────────────────── */
+
+  /**
+   * Move a link's successor to the earliest date the dependency allows,
+   * preserving its duration. The link's own red state clears by itself once the
+   * dates satisfy it — nothing stores a "violated" flag.
+   */
+  function resolveViolation(linkId) {
+    const doc = store.getDoc();
+    const link = doc.links.find((l) => l.id === linkId);
+    if (!link) return false;
+
+    const fix = resolutionFor(link, store.getObject(link.from), store.getObject(link.to));
+    if (!fix) return false;
+
+    const successor = store.getObject(fix.id);
+    if (successor?.locked) {
+      toast({ tone: 'warn', title: 'Locked', message: 'Unlock the successor before rescheduling it.' });
+      return false;
+    }
+
+    store.updateObject(fix.id, { start: fix.start, end: fix.end }, 'Resolve dependency');
+    store.setSelection([fix.id]);
+    renderer.revealObject(fix.id);
+    toast({
+      tone: 'good',
+      title: 'Dependency resolved',
+      message: `"${successor?.title}" moved ${fix.shiftDays} day${Math.abs(fix.shiftDays) === 1 ? '' : 's'} later.`,
+    });
+    return true;
+  }
+
+  /**
+   * Resolve every broken dependency, repeatedly, so fixing one that cascades
+   * into another settles the whole chain rather than leaving the next one red.
+   */
+  function resolveAllViolations() {
+    const before = linkViolations(store.getDoc()).count;
+    if (!before) {
+      toast({ tone: 'info', title: 'No broken dependencies' });
+      return 0;
+    }
+
+    // Each pass can expose newly broken downstream links; the graph is acyclic,
+    // so a bounded sweep always terminates.
+    let fixed = 0;
+    for (let pass = 0; pass < 24; pass++) {
+      const violations = linkViolations(store.getDoc());
+      if (!violations.count) break;
+
+      let movedThisPass = 0;
+      for (const linkId of violations.links) {
+        const doc = store.getDoc();
+        const link = doc.links.find((l) => l.id === linkId);
+        if (!link) continue;
+        const fix = resolutionFor(link, store.getObject(link.from), store.getObject(link.to));
+        if (!fix || store.getObject(fix.id)?.locked) continue;
+        store.updateObject(fix.id, { start: fix.start, end: fix.end }, 'Resolve dependencies');
+        movedThisPass++;
+        fixed++;
+      }
+      if (!movedThisPass) break;
+    }
+
+    renderer.requestRender();
+    const remaining = linkViolations(store.getDoc()).count;
+    toast({
+      tone: remaining ? 'warn' : 'good',
+      title: `${fixed} reschedule${fixed === 1 ? '' : 's'} applied`,
+      message: remaining
+        ? `${remaining} still broken — their successors are locked.`
+        : 'All dependencies satisfied.',
+    });
+    return fixed;
+  }
+
+  /** Select and frame every object involved in a broken dependency. */
+  function selectViolations() {
+    const violations = linkViolations(store.getDoc());
+    if (!violations.count) {
+      toast({ tone: 'info', title: 'No broken dependencies' });
+      return;
+    }
+    store.setSelection(Array.from(violations.objects.keys()));
+    zoomToSelection();
+  }
+
   /* ── Baselines ─────────────────────────────────────────────────────────── */
 
   async function takeBaseline() {
@@ -8666,6 +9030,9 @@ __mods["ui/commands.js"] = function (__x, __req) {
   Object.defineProperty(__x, "setProgress", { get: () => setProgress, enumerable: true });
   Object.defineProperty(__x, "createObject", { get: () => createObject, enumerable: true });
   Object.defineProperty(__x, "addLane", { get: () => addLane, enumerable: true });
+  Object.defineProperty(__x, "resolveViolation", { get: () => resolveViolation, enumerable: true });
+  Object.defineProperty(__x, "resolveAllViolations", { get: () => resolveAllViolations, enumerable: true });
+  Object.defineProperty(__x, "selectViolations", { get: () => selectViolations, enumerable: true });
   Object.defineProperty(__x, "takeBaseline", { get: () => takeBaseline, enumerable: true });
   Object.defineProperty(__x, "zoomIn", { get: () => zoomIn, enumerable: true });
   Object.defineProperty(__x, "zoomOut", { get: () => zoomOut, enumerable: true });
@@ -12369,7 +12736,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const store = __req("core/store.js");
   const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage } = __req("core/storage.js");
   const { search, summarise, facet, filterPredicate } = __req("core/query.js");
-  const { criticalPath, compareBaseline, programmeHealth, objectHealth, slipByLane } = __req("core/analysis.js");
+  const { criticalPath, compareBaseline, programmeHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
@@ -12823,13 +13190,31 @@ __mods["ui/panels.js"] = function (__x, __req) {
   function paneLinks(root) {
     const doc = store.getDoc();
     const analysis = criticalPath(doc);
+    const violations = linkViolations(doc);
 
     root.appendChild(
       el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '10px' } }, [
         chipStat('Links', doc.links.length, 'info'),
-        chipStat('Critical', analysis.critical.size, analysis.critical.size ? 'bad' : 'muted'),
+        chipStat('Broken', violations.count, violations.count ? 'bad' : 'good'),
+        chipStat('Critical', analysis.critical.size, analysis.critical.size ? 'warn' : 'muted'),
       ])
     );
+
+    if (violations.count) {
+      root.appendChild(
+        el('div', { class: 'insp-alert', style: { marginBottom: '11px' } }, [
+          el('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [
+            el('span', { html: icon('warning', { size: 13 }), style: { display: 'flex' } }),
+            el('span', { style: { fontWeight: 700 }, text: `${violations.count} broken ${violations.count === 1 ? 'dependency' : 'dependencies'}` }),
+          ]),
+          el('div', { style: { fontSize: 'var(--fs-tiny)', marginTop: '4px', color: 'var(--text-muted)' }, text: `Worst is ${violations.worst} day${violations.worst === 1 ? '' : 's'} out.` }),
+          el('div', { style: { display: 'flex', gap: '6px', marginTop: '8px' } }, [
+            el('button', { class: 'cx-btn mini', text: 'Show on timeline', onClick: () => cmd.selectViolations() }),
+            el('button', { class: 'cx-btn mini primary', text: 'Reschedule all', onClick: () => { cmd.resolveAllViolations(); renderPane(); } }),
+          ]),
+        ])
+      );
+    }
 
     root.appendChild(
       el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px', marginBottom: '12px' } }, [
@@ -12870,21 +13255,43 @@ __mods["ui/panels.js"] = function (__x, __req) {
     const titles = new Map(doc.objects.map((o) => [o.id, o.title]));
     const list = el('div', { class: 'cx-list' });
 
-    for (const link of doc.links) {
+    // Broken links first: they are the ones needing a decision.
+    const ordered = doc.links
+      .slice()
+      .sort((a, b) => (violations.links.has(b.id) ? 1 : 0) - (violations.links.has(a.id) ? 1 : 0));
+
+    for (const link of ordered) {
       const critical = analysis.critical.has(link.from) && analysis.critical.has(link.to);
+      const evaluated = violations.byLink.get(link.id);
+      const broken = !!evaluated?.violated;
+
       list.appendChild(
-        el('div', { class: 'cx-listrow', onClick: () => cmd.revealObject(link.to) }, [
-          el('span', { style: { display: 'flex', color: critical ? 'var(--bad)' : 'var(--text-subtle)' }, html: icon(critical ? 'route' : 'link', { size: 12 }) }),
+        el('div', { class: 'cx-listrow' + (broken ? ' danger' : ''), onClick: () => cmd.revealObject(link.to) }, [
+          el('span', {
+            style: { display: 'flex', color: broken ? 'var(--bad)' : critical ? 'var(--warn)' : 'var(--text-subtle)' },
+            html: icon(broken ? 'warning' : critical ? 'route' : 'link', { size: 12 }),
+          }),
           el('div', { class: 'lr-main' }, [
             el('div', { class: 'lr-title', text: `${titles.get(link.from) || '?'} → ${titles.get(link.to) || '?'}` }),
-            el('div', { class: 'lr-meta', text: `${link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''}${critical ? ' · critical' : ''}` }),
+            el('div', {
+              class: 'lr-meta',
+              text: `${link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''}${
+                broken ? ` · broken by ${evaluated.shortfallDays}d` : evaluated ? ` · ${evaluated.slackDays}d slack` : ''
+              }${critical ? ' · critical' : ''}`,
+            }),
           ]),
           el('div', { class: 'lr-actions' }, [
+            broken
+              ? iconBtn('refresh', 'Move the successor to the earliest allowed date', () => {
+                  cmd.resolveViolation(link.id);
+                  renderPane();
+                })
+              : null,
             iconBtn('unlink', 'Delete dependency', () => {
               store.removeLinks([link.id]);
               renderer.requestRender();
             }),
-          ]),
+          ].filter(Boolean)),
         ])
       );
     }
@@ -13822,6 +14229,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const { TYPES, typeGroups, effectiveToday, projectExtent } = __req("core/model.js");
   const store = __req("core/store.js");
   const { isFallback } = __req("core/storage.js");
+  const { linkViolations } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
@@ -14215,6 +14623,13 @@ __mods["ui/shell.js"] = function (__x, __req) {
     dom.selText = el('span', { class: 'sb-item' });
     dom.statusbar.appendChild(dom.selText);
 
+    dom.violationText = el('span', {
+      class: 'sb-item clickable sb-warn',
+      title: 'Show broken dependencies',
+      onClick: () => showPane('links'),
+    });
+    dom.statusbar.appendChild(dom.violationText);
+
     dom.statusbar.appendChild(el('span', { class: 'sb-spacer' }));
 
     dom.cursorText = el('span', { class: 'sb-item', title: 'Date under the cursor' });
@@ -14244,6 +14659,12 @@ __mods["ui/shell.js"] = function (__x, __req) {
 
     dom.countText.textContent = `${doc.objects.length} objects · ${doc.lanes.length} lanes · ${doc.links.length} links`;
     dom.selText.textContent = selection.length ? `${selection.length} selected` : '';
+
+    const violations = linkViolations(doc);
+    dom.violationText.textContent = violations.count
+      ? `⚠ ${violations.count} broken ${violations.count === 1 ? 'dependency' : 'dependencies'}`
+      : '';
+    dom.violationText.style.display = violations.count ? '' : 'none';
     dom.zoomText.textContent = `${zoom.scale} · ${zoom.span}`;
     dom.storageText.textContent = isFallback() ? 'localStorage' : 'IndexedDB';
   }
@@ -14345,7 +14766,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
 
 
   const store = __req("core/store.js");
-  const { objectHealth } = __req("core/analysis.js");
+  const { objectHealth, linkViolations, evaluateLink } = __req("core/analysis.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
   const { field, textInput, numberInput, selectInput, checkbox, toggle, rangeInput, segmented, section, colorControl, iconPicker, popover, closePopover, emptyState, badge, chipStat, confirmDialog, contextMenu } = __req("ui/components.js");
@@ -14369,6 +14790,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
 
 
   const { openNoteEditor, renderNote, notePreview } = __req("ui/notes.js");
+  const { resolveViolation } = __req("ui/commands.js");
   const { attachmentList } = __req("ui/attachments.js");
 
   let host = null;
@@ -14500,7 +14922,10 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       }),
     ]);
 
+    const breaches = linkViolations(store.getDoc()).objects.get(obj.id) || null;
+
     bodyEl.append(
+      breaches ? violationBanner(obj, breaches) : null,
       healthStrip(obj),
       sectionOf('identity', 'Identity', identityFields(obj, def, lane)),
       sectionOf('schedule', 'Schedule', scheduleFields(obj, def)),
@@ -14566,6 +14991,45 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       case 'late': return `Planned date passed ${fmtDuration(health.days || 0)} ago.`;
       default: return 'Not started yet.';
     }
+  }
+
+  /**
+   * Banner shown when this object is party to a broken dependency.
+   * It disappears on its own the moment the dates satisfy the link again —
+   * nothing here is stored, it is read from the document every render.
+   */
+  function violationBanner(obj, breaches) {
+    const rows = breaches.map((breach) => {
+      const other = store.getObject(breach.otherId);
+      const asSuccessor = breach.role === 'successor';
+      const message = asSuccessor
+        ? `Starts ${breach.shortfallDays}d before "${other?.title || '?'}" allows`
+        : `Finishes ${breach.shortfallDays}d after "${other?.title || '?'}" starts`;
+
+      return el('div', { style: { display: 'flex', alignItems: 'center', gap: '7px', marginTop: '5px' } }, [
+        el('div', { style: { flex: '1', minWidth: '0', fontSize: 'var(--fs-tiny)', color: 'var(--text)' }, text: message }),
+        el('button', {
+          class: 'cx-btn mini',
+          title: 'Move the successor to the earliest date the dependency allows',
+          text: 'Fix',
+          onClick: () => {
+            resolveViolation(breach.id);
+            render();
+          },
+        }),
+      ]);
+    });
+
+    return el('div', {
+      class: 'insp-alert',
+      role: 'alert',
+    }, [
+      el('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [
+        el('span', { html: icon('warning', { size: 13 }), style: { display: 'flex' } }),
+        el('span', { style: { fontWeight: 700 }, text: `Dependency broken (${breaches.length})` }),
+      ]),
+      ...rows,
+    ]);
   }
 
   /* ── Identity ──────────────────────────────────────────────────────────── */
@@ -14878,12 +15342,22 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       const other = store.getObject(outgoing ? link.to : link.from);
       if (!other) continue;
 
+      const evaluated = evaluateLink(link, store.getObject(link.from), store.getObject(link.to));
+      const slack = evaluated
+        ? evaluated.violated
+          ? `broken by ${evaluated.shortfallDays}d`
+          : `${evaluated.slackDays}d slack`
+        : '';
+
       out.push(
-        el('div', { class: 'cx-listrow' }, [
-          el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon(outgoing ? 'arrow' : 'arrow-left', { size: 12 }) }),
+        el('div', { class: 'cx-listrow' + (evaluated?.violated ? ' danger' : '') }, [
+          el('span', {
+            style: { display: 'flex', color: evaluated?.violated ? 'var(--bad)' : 'var(--text-subtle)' },
+            html: icon(evaluated?.violated ? 'warning' : outgoing ? 'arrow' : 'arrow-left', { size: 12 }),
+          }),
           el('div', { class: 'lr-main' }, [
             el('div', { class: 'lr-title', text: other.title }),
-            el('div', { class: 'lr-meta', text: `${LINK_TYPES[link.type]?.short || link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''} · ${outgoing ? 'successor' : 'predecessor'}` }),
+            el('div', { class: 'lr-meta', text: `${LINK_TYPES[link.type]?.short || link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''} · ${outgoing ? 'successor' : 'predecessor'} · ${slack}` }),
           ]),
           el('div', { class: 'lr-actions' }, [
             el('button', {
@@ -15691,6 +16165,7 @@ __mods["ui/menus.js"] = function (__x, __req) {
   const cmd = __req("ui/commands.js");
   const { openNoteEditor } = __req("ui/notes.js");
   const { showPane } = __req("ui/panels.js");
+  const { linkViolations } = __req("core/analysis.js");
   const { openObjectDialog } = __req("ui/dialogs.js");
 
   function installMenus() {
@@ -15736,12 +16211,33 @@ __mods["ui/menus.js"] = function (__x, __req) {
       { label: many ? 'Group' : 'Group with…', icon: 'layers', key: 'mod+g', disabled: !many, onClick: () => cmd.groupSelection() },
       { label: 'Ungroup', icon: 'unlink', key: 'mod+shift+g', disabled: !obj.groupId, onClick: () => cmd.ungroupSelection() },
       'sep',
+      ...violationItems(obj),
       { label: obj.locked ? 'Unlock' : 'Lock', icon: obj.locked ? 'unlock' : 'lock', key: 'mod+l', onClick: () => cmd.toggleLock() },
       { label: 'Select dependency chain', icon: 'route', key: 'mod+shift+d', onClick: () => cmd.selectDependencyChain() },
       { label: 'Zoom to selection', icon: 'expand', key: 'mod+shift+0', onClick: () => cmd.zoomToSelection() },
       'sep',
       { label: many ? `Delete ${selection.length} objects` : 'Delete', icon: 'trash', key: 'del', danger: true, onClick: () => cmd.deleteSelection() },
     ]);
+  }
+
+  /** Repair actions, offered only when this object is in a broken dependency. */
+  function violationItems(obj) {
+    const breaches = linkViolations(store.getDoc()).objects.get(obj.id);
+    if (!breaches?.length) return [];
+
+    const worst = breaches.reduce((max, b) => Math.max(max, b.shortfallDays), 0);
+    return [
+      { heading: `Dependency broken by ${worst}d` },
+      ...breaches.map((breach) => {
+        const other = store.getObject(breach.otherId);
+        return {
+          label: `Reschedule to clear "${other?.title || 'link'}"`,
+          icon: 'refresh',
+          onClick: () => cmd.resolveViolation(breach.id),
+        };
+      }),
+      'sep',
+    ];
   }
 
   function statusItems(obj) {

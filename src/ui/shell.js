@@ -16,6 +16,7 @@ import { fmtDate, fmtTimestamp, toISO } from '../core/dates.js';
 import { TYPES, typeGroups, effectiveToday, projectExtent } from '../core/model.js';
 import * as store from '../core/store.js';
 import { isFallback } from '../core/storage.js';
+import { linkViolations } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
@@ -409,6 +410,13 @@ function buildStatusbar() {
   dom.selText = el('span', { class: 'sb-item' });
   dom.statusbar.appendChild(dom.selText);
 
+  dom.violationText = el('span', {
+    class: 'sb-item clickable sb-warn',
+    title: 'Show broken dependencies',
+    onClick: () => showPane('links'),
+  });
+  dom.statusbar.appendChild(dom.violationText);
+
   dom.statusbar.appendChild(el('span', { class: 'sb-spacer' }));
 
   dom.cursorText = el('span', { class: 'sb-item', title: 'Date under the cursor' });
@@ -438,6 +446,12 @@ function refreshStatus() {
 
   dom.countText.textContent = `${doc.objects.length} objects · ${doc.lanes.length} lanes · ${doc.links.length} links`;
   dom.selText.textContent = selection.length ? `${selection.length} selected` : '';
+
+  const violations = linkViolations(doc);
+  dom.violationText.textContent = violations.count
+    ? `⚠ ${violations.count} broken ${violations.count === 1 ? 'dependency' : 'dependencies'}`
+    : '';
+  dom.violationText.style.display = violations.count ? '' : 'none';
   dom.zoomText.textContent = `${zoom.scale} · ${zoom.span}`;
   dom.storageText.textContent = isFallback() ? 'localStorage' : 'IndexedDB';
 }

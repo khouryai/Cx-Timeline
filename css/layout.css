@@ -487,6 +487,14 @@
 .sb-spacer {
   flex: 1 1 auto;
 }
+.sb-item.sb-warn {
+  color: var(--bad);
+  font-weight: 700;
+}
+.sb-item.sb-warn:hover {
+  background: var(--bad-light);
+  color: var(--bad);
+}
 .sb-dot {
   width: 6px;
   height: 6px;

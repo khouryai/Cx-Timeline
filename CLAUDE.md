@@ -52,8 +52,17 @@ subscribes. That is what keeps the graph acyclic.
   with search keywords and a category; render with `icon('name')`. Icons use
   `currentColor`. Icon-only buttons need an `aria-label`.
 - **Every document mutation goes through the store** (`core/store.js`) so it is
-  undoable and autosaved. Live drag feedback uses `preview()`, and the gesture
-  commits once with `edit()` on release — never one `edit()` per mouse-move.
+  undoable and autosaved. Live drag feedback uses `previewObjects(ids, fn)` —
+  copy-on-write, so a gesture costs the selection, not the project — and the
+  gesture commits once with `edit()` on release. Never one `edit()` per
+  mouse-move, and never the whole-document `preview()` on a pointer path.
+- **`getDoc()` is never mutated in place.** Every write builds a new object
+  graph and reassigns the binding. `edit()` uses the outgoing document as the
+  "before" side of its diff, and derived analysis is memoised in a WeakMap
+  keyed on document identity. Mutating in place breaks both, silently.
+- **Derived state is never stored.** Violations, critical path and float are
+  computed from the document, so they appear and clear on their own. Do not
+  add a `violated` field to a link — there is nothing to keep in step.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
 - **Dates are UTC-midnight milliseconds internally**, `YYYY-MM-DD` on disk.
@@ -86,7 +95,7 @@ subscribes. That is what keeps the graph acyclic.
 
 ```bash
 npm run build                        # must succeed — it also lints the module graph
-node tools/smoke.js                  # 68 end-to-end checks, must exit 0
+node tools/smoke.js                  # 79 end-to-end checks, must exit 0
 node tools/smoke.js --shot out.png   # …and eyeball the result
 ```
 
@@ -109,6 +118,9 @@ Two traps worth knowing, both of which have caused real bugs:
   `textContent` has no spaces in it. The whole string lives on the object node
   as `aria-label` and `data-label`; use those to find or announce an object,
   never the concatenated text.
+- **`.ob-flag` is the release shape's coloured pole**, not a status badge.
+  The broken-dependency badge is `.ob-breach`. Reusing the former restyled
+  every release marker on the canvas.
 
 ## Git
 

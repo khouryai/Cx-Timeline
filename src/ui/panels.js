@@ -28,7 +28,7 @@ import {
 import * as store from '../core/store.js';
 import { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage } from '../core/storage.js';
 import { search, summarise, facet, filterPredicate } from '../core/query.js';
-import { criticalPath, compareBaseline, programmeHealth, objectHealth, slipByLane } from '../core/analysis.js';
+import { criticalPath, compareBaseline, programmeHealth, objectHealth, slipByLane, linkViolations, evaluateLink } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
@@ -482,13 +482,31 @@ function toneOf(status) {
 function paneLinks(root) {
   const doc = store.getDoc();
   const analysis = criticalPath(doc);
+  const violations = linkViolations(doc);
 
   root.appendChild(
     el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '10px' } }, [
       chipStat('Links', doc.links.length, 'info'),
-      chipStat('Critical', analysis.critical.size, analysis.critical.size ? 'bad' : 'muted'),
+      chipStat('Broken', violations.count, violations.count ? 'bad' : 'good'),
+      chipStat('Critical', analysis.critical.size, analysis.critical.size ? 'warn' : 'muted'),
     ])
   );
+
+  if (violations.count) {
+    root.appendChild(
+      el('div', { class: 'insp-alert', style: { marginBottom: '11px' } }, [
+        el('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [
+          el('span', { html: icon('warning', { size: 13 }), style: { display: 'flex' } }),
+          el('span', { style: { fontWeight: 700 }, text: `${violations.count} broken ${violations.count === 1 ? 'dependency' : 'dependencies'}` }),
+        ]),
+        el('div', { style: { fontSize: 'var(--fs-tiny)', marginTop: '4px', color: 'var(--text-muted)' }, text: `Worst is ${violations.worst} day${violations.worst === 1 ? '' : 's'} out.` }),
+        el('div', { style: { display: 'flex', gap: '6px', marginTop: '8px' } }, [
+          el('button', { class: 'cx-btn mini', text: 'Show on timeline', onClick: () => cmd.selectViolations() }),
+          el('button', { class: 'cx-btn mini primary', text: 'Reschedule all', onClick: () => { cmd.resolveAllViolations(); renderPane(); } }),
+        ]),
+      ])
+    );
+  }
 
   root.appendChild(
     el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px', marginBottom: '12px' } }, [
@@ -529,21 +547,43 @@ function paneLinks(root) {
   const titles = new Map(doc.objects.map((o) => [o.id, o.title]));
   const list = el('div', { class: 'cx-list' });
 
-  for (const link of doc.links) {
+  // Broken links first: they are the ones needing a decision.
+  const ordered = doc.links
+    .slice()
+    .sort((a, b) => (violations.links.has(b.id) ? 1 : 0) - (violations.links.has(a.id) ? 1 : 0));
+
+  for (const link of ordered) {
     const critical = analysis.critical.has(link.from) && analysis.critical.has(link.to);
+    const evaluated = violations.byLink.get(link.id);
+    const broken = !!evaluated?.violated;
+
     list.appendChild(
-      el('div', { class: 'cx-listrow', onClick: () => cmd.revealObject(link.to) }, [
-        el('span', { style: { display: 'flex', color: critical ? 'var(--bad)' : 'var(--text-subtle)' }, html: icon(critical ? 'route' : 'link', { size: 12 }) }),
+      el('div', { class: 'cx-listrow' + (broken ? ' danger' : ''), onClick: () => cmd.revealObject(link.to) }, [
+        el('span', {
+          style: { display: 'flex', color: broken ? 'var(--bad)' : critical ? 'var(--warn)' : 'var(--text-subtle)' },
+          html: icon(broken ? 'warning' : critical ? 'route' : 'link', { size: 12 }),
+        }),
         el('div', { class: 'lr-main' }, [
           el('div', { class: 'lr-title', text: `${titles.get(link.from) || '?'} → ${titles.get(link.to) || '?'}` }),
-          el('div', { class: 'lr-meta', text: `${link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''}${critical ? ' · critical' : ''}` }),
+          el('div', {
+            class: 'lr-meta',
+            text: `${link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''}${
+              broken ? ` · broken by ${evaluated.shortfallDays}d` : evaluated ? ` · ${evaluated.slackDays}d slack` : ''
+            }${critical ? ' · critical' : ''}`,
+          }),
         ]),
         el('div', { class: 'lr-actions' }, [
+          broken
+            ? iconBtn('refresh', 'Move the successor to the earliest allowed date', () => {
+                cmd.resolveViolation(link.id);
+                renderPane();
+              })
+            : null,
           iconBtn('unlink', 'Delete dependency', () => {
             store.removeLinks([link.id]);
             renderer.requestRender();
           }),
-        ]),
+        ].filter(Boolean)),
       ])
     );
   }

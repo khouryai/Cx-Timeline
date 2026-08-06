@@ -21,6 +21,7 @@ import { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } from '../core/date
 import { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } from '../core/model.js';
 import { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
 import { filterPredicate } from '../core/query.js';
+import { linkViolations, criticalPath } from '../core/analysis.js';
 import * as viewport from './viewport.js';
 import { computeLayout, stageHeight, ROW_HEIGHT } from './layout.js';
 import { fontString, textWidth, wrapText, resetTextCache } from './text.js';
@@ -350,6 +351,7 @@ function renderLaneRows(layout) {
 function renderObjects(layout, settings) {
   const seen = new Set();
   const selection = new Set(getSelection());
+  const violations = linkViolations(getDoc());
 
   for (const rect of layout.rects) {
     seen.add(rect.id);
@@ -359,7 +361,7 @@ function renderObjects(layout, settings) {
       objectNodes.set(rect.id, node);
       dom.objects.appendChild(node);
     }
-    paintObject(node, rect, settings, selection.has(rect.id));
+    paintObject(node, rect, settings, selection.has(rect.id), violations.objects.get(rect.id) || null);
   }
 
   // Retire nodes for objects that scrolled out of view or were deleted.
@@ -376,7 +378,7 @@ function renderObjects(layout, settings) {
  * signature changes; position and size are always applied directly, which is
  * the path a drag takes.
  */
-function paintObject(node, rect, settings, selected) {
+function paintObject(node, rect, settings, selected, breaches) {
   const obj = rect.obj;
   const def = TYPES[obj.type] || TYPES.activity;
   const style = obj.style || {};
@@ -417,32 +419,36 @@ function paintObject(node, rect, settings, selected) {
     rect.label.placement,
     rect.label.lines.join('\u0001'),
     rect.label.subLines.join('\u0001'),
+    breaches ? breaches.map((b) => `${b.role}:${b.shortfallDays}`).join(',') : '',
     obj.notes ? 1 : 0,
     (obj.attachments || []).length,
   ].join('|');
 
   if (node.dataset.sig !== signature) {
     node.dataset.sig = signature;
-    buildObjectMarkup(node, rect, def, color, settings);
+    buildObjectMarkup(node, rect, def, color, settings, breaches);
   }
 
-  node.className = objectClass(rect, def, selected);
+  node.className = objectClass(rect, def, selected, breaches);
+  if (breaches) node.dataset.violated = String(breaches.length);
+  else delete node.dataset.violated;
   node.style.setProperty('--obj-radius', `${style.radius ?? 6}px`);
   node.style.opacity = String(style.opacity ?? 1);
   if (style.rotation) node.style.transform = `rotate(${style.rotation}deg)`;
   else node.style.transform = '';
 }
 
-function objectClass(rect, def, selected) {
+function objectClass(rect, def, selected, breaches) {
   let cls = `tl-obj shape-${def.shape}`;
   if (selected) cls += ' selected';
   if (rect.obj.locked) cls += ' locked';
   if (rect.dimmed) cls += ' filtered-out';
   if (rect.obj.groupId) cls += ' grouped';
+  if (breaches) cls += ' violated';
   return cls;
 }
 
-function buildObjectMarkup(node, rect, def, color, settings) {
+function buildObjectMarkup(node, rect, def, color, settings, breaches) {
   clear(node);
   const obj = rect.obj;
   const style = obj.style || {};
@@ -481,6 +487,8 @@ function buildObjectMarkup(node, rect, def, color, settings) {
       buildBar(node, rect, color, ink, settings);
       break;
   }
+
+  if (breaches) node.appendChild(violationFlag(breaches));
 
   // Interaction affordances — only for things the user can actually grab.
   if (!obj.locked && rect.hasDuration && shape !== 'band') {
@@ -729,6 +737,32 @@ function buildImage(node, rect) {
   }
 }
 
+/**
+ * The flag shown on both ends of a broken dependency.
+ *
+ * Sits outside the bar's top-left corner so it is visible even on a bar only
+ * a few pixels wide, and states the worst shortfall in days rather than just
+ * asserting that something is wrong.
+ */
+function violationFlag(breaches) {
+  const worst = breaches.reduce((max, b) => Math.max(max, b.shortfallDays), 0);
+  const asSuccessor = breaches.some((b) => b.role === 'successor');
+  const detail = asSuccessor
+    ? `Starts ${worst} day${worst === 1 ? '' : 's'} before its predecessor allows`
+    : `Finishes ${worst} day${worst === 1 ? '' : 's'} after its successor starts`;
+
+  // Deliberately not `.ob-flag` — that class is the release shape's coloured
+  // pole, and reusing it here restyled every release marker.
+  return el('div', {
+    class: 'ob-breach',
+    title: `Dependency broken — ${detail}`,
+    'aria-label': `Dependency broken. ${detail}`,
+  }, [
+    el('span', { html: icon('warning', { size: 9 }), style: { display: 'flex' } }),
+    el('span', { text: `${worst}d` }),
+  ]);
+}
+
 /** Small indicators: notes, attachments, lock, group membership. */
 function appendMarks(node, obj, rect) {
   const marks = [];
@@ -859,8 +893,11 @@ function renderLinks(doc, layout, settings) {
     while (dom.connectors.firstChild) dom.connectors.removeChild(dom.connectors.firstChild);
     return;
   }
+  // Memoised on document identity, so asking every frame of a drag is free
+  // once the document has settled.
   const routed = routeAll(doc.links, layout.byId, settings.connectorStyle, {
     criticalIds: settings.criticalPath ? criticalIds : null,
+    violations: linkViolations(doc),
   });
   renderConnectors(dom.connectors, routed, {
     selectedLinkIds: selectedLinks,

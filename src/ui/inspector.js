@@ -29,7 +29,7 @@ import {
   effectiveToday,
 } from '../core/model.js';
 import * as store from '../core/store.js';
-import { objectHealth } from '../core/analysis.js';
+import { objectHealth, linkViolations, evaluateLink } from '../core/analysis.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
 import {
@@ -53,6 +53,7 @@ import {
   contextMenu,
 } from './components.js';
 import { openNoteEditor, renderNote, notePreview } from './notes.js';
+import { resolveViolation } from './commands.js';
 import { attachmentList } from './attachments.js';
 
 let host = null;
@@ -184,7 +185,10 @@ function renderSingle(obj) {
     }),
   ]);
 
+  const breaches = linkViolations(store.getDoc()).objects.get(obj.id) || null;
+
   bodyEl.append(
+    breaches ? violationBanner(obj, breaches) : null,
     healthStrip(obj),
     sectionOf('identity', 'Identity', identityFields(obj, def, lane)),
     sectionOf('schedule', 'Schedule', scheduleFields(obj, def)),
@@ -250,6 +254,45 @@ function healthMessage(health) {
     case 'late': return `Planned date passed ${fmtDuration(health.days || 0)} ago.`;
     default: return 'Not started yet.';
   }
+}
+
+/**
+ * Banner shown when this object is party to a broken dependency.
+ * It disappears on its own the moment the dates satisfy the link again —
+ * nothing here is stored, it is read from the document every render.
+ */
+function violationBanner(obj, breaches) {
+  const rows = breaches.map((breach) => {
+    const other = store.getObject(breach.otherId);
+    const asSuccessor = breach.role === 'successor';
+    const message = asSuccessor
+      ? `Starts ${breach.shortfallDays}d before "${other?.title || '?'}" allows`
+      : `Finishes ${breach.shortfallDays}d after "${other?.title || '?'}" starts`;
+
+    return el('div', { style: { display: 'flex', alignItems: 'center', gap: '7px', marginTop: '5px' } }, [
+      el('div', { style: { flex: '1', minWidth: '0', fontSize: 'var(--fs-tiny)', color: 'var(--text)' }, text: message }),
+      el('button', {
+        class: 'cx-btn mini',
+        title: 'Move the successor to the earliest date the dependency allows',
+        text: 'Fix',
+        onClick: () => {
+          resolveViolation(breach.id);
+          render();
+        },
+      }),
+    ]);
+  });
+
+  return el('div', {
+    class: 'insp-alert',
+    role: 'alert',
+  }, [
+    el('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [
+      el('span', { html: icon('warning', { size: 13 }), style: { display: 'flex' } }),
+      el('span', { style: { fontWeight: 700 }, text: `Dependency broken (${breaches.length})` }),
+    ]),
+    ...rows,
+  ]);
 }
 
 /* ── Identity ──────────────────────────────────────────────────────────── */
@@ -562,12 +605,22 @@ function linkFields(obj) {
     const other = store.getObject(outgoing ? link.to : link.from);
     if (!other) continue;
 
+    const evaluated = evaluateLink(link, store.getObject(link.from), store.getObject(link.to));
+    const slack = evaluated
+      ? evaluated.violated
+        ? `broken by ${evaluated.shortfallDays}d`
+        : `${evaluated.slackDays}d slack`
+      : '';
+
     out.push(
-      el('div', { class: 'cx-listrow' }, [
-        el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon(outgoing ? 'arrow' : 'arrow-left', { size: 12 }) }),
+      el('div', { class: 'cx-listrow' + (evaluated?.violated ? ' danger' : '') }, [
+        el('span', {
+          style: { display: 'flex', color: evaluated?.violated ? 'var(--bad)' : 'var(--text-subtle)' },
+          html: icon(evaluated?.violated ? 'warning' : outgoing ? 'arrow' : 'arrow-left', { size: 12 }),
+        }),
         el('div', { class: 'lr-main' }, [
           el('div', { class: 'lr-title', text: other.title }),
-          el('div', { class: 'lr-meta', text: `${LINK_TYPES[link.type]?.short || link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''} · ${outgoing ? 'successor' : 'predecessor'}` }),
+          el('div', { class: 'lr-meta', text: `${LINK_TYPES[link.type]?.short || link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''} · ${outgoing ? 'successor' : 'predecessor'} · ${slack}` }),
         ]),
         el('div', { class: 'lr-actions' }, [
           el('button', {

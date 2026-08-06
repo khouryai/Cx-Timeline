@@ -140,7 +140,7 @@ function arrowHead(point, inDir) {
  * Route every link that has both endpoints laid out.
  * Returns render descriptors ready for the SVG layer and the exporters.
  */
-export function routeAll(links, layoutById, style = 'orthogonal', { criticalIds = null } = {}) {
+export function routeAll(links, layoutById, style = 'orthogonal', { criticalIds = null, violations = null } = {}) {
   const out = [];
   for (const link of links) {
     const fromRect = layoutById.get(link.from);
@@ -148,12 +148,22 @@ export function routeAll(links, layoutById, style = 'orthogonal', { criticalIds 
     if (!fromRect || !toRect) continue;
     const route = routeLink(link, fromRect, toRect, style);
     if (!route) continue;
+
+    const breach = violations ? violations.byLink.get(link.id) : null;
+    const violated = !!breach?.violated;
+
     out.push({
       link,
       ...route,
       dimmed: fromRect.dimmed || toRect.dimmed,
       critical: criticalIds ? criticalIds.has(link.from) && criticalIds.has(link.to) : false,
-      label: link.label || (link.lag ? `${LINK_TYPES[link.type]?.short || link.type}${link.lag > 0 ? '+' : ''}${link.lag}d` : ''),
+      violated,
+      breach,
+      // A broken link states the damage instead of its relationship type: the
+      // number of days it is out by is the actionable fact.
+      label: violated
+        ? `${breach.shortfallDays}d late`
+        : link.label || (link.lag ? `${LINK_TYPES[link.type]?.short || link.type}${link.lag > 0 ? '+' : ''}${link.lag}d` : ''),
     });
   }
   return out;
@@ -178,18 +188,31 @@ export function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onS
     const path = document.createElementNS(SVG_NS, 'path');
     path.setAttribute('d', item.d);
     let cls = 'tl-link';
-    if (item.critical) cls += ' critical';
+    // A violated link outranks the critical-path highlight: an impossible
+    // constraint is more urgent than a tight one.
+    if (item.violated) cls += ' violated';
+    else if (item.critical) cls += ' critical';
     if (item.dimmed) cls += ' dim';
     if (selectedLinkIds.has(item.link.id)) cls += ' selected';
     path.setAttribute('class', cls);
-    if (item.link.color) path.setAttribute('stroke', item.link.color);
+    if (item.link.color && !item.violated) path.setAttribute('stroke', item.link.color);
     group.appendChild(path);
+
+    if (item.violated) {
+      group.dataset.violated = 'true';
+      const detail = document.createElementNS(SVG_NS, 'title');
+      detail.textContent = `Dependency broken by ${item.breach.shortfallDays} day${item.breach.shortfallDays === 1 ? '' : 's'}`;
+      group.appendChild(detail);
+    }
 
     const arrow = document.createElementNS(SVG_NS, 'path');
     arrow.setAttribute('d', item.arrow);
     arrow.setAttribute('class', cls);
-    arrow.setAttribute('fill', item.link.color || 'currentColor');
-    arrow.style.fill = item.critical ? 'var(--bad)' : item.link.color || 'var(--connector)';
+    arrow.style.fill = item.violated
+      ? 'var(--bad)'
+      : item.critical
+      ? 'var(--bad)'
+      : item.link.color || 'var(--connector)';
     arrow.style.stroke = 'none';
     group.appendChild(arrow);
 
@@ -198,7 +221,7 @@ export function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onS
       text.setAttribute('x', item.mid.x);
       text.setAttribute('y', item.mid.y - 4);
       text.setAttribute('text-anchor', 'middle');
-      text.setAttribute('class', 'tl-link-label');
+      text.setAttribute('class', 'tl-link-label' + (item.violated ? ' violated' : ''));
       text.textContent = item.label;
       group.appendChild(text);
     }

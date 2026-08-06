@@ -1048,3 +1048,28 @@
 .cx-dot.round {
   border-radius: 50%;
 }
+
+/* ── Inline alert (broken dependency, and anything else needing a decision) ─ */
+.insp-alert {
+  margin: 11px 12px 0;
+  padding: 9px 11px;
+  border: 1px solid var(--bad-border);
+  border-left: 3px solid var(--bad);
+  border-radius: var(--radius-md);
+  background: var(--bad-light);
+  color: var(--bad);
+  font-size: var(--fs-small);
+}
+
+/* A list row whose subject needs attention. */
+.cx-listrow.danger {
+  border-color: var(--bad-border);
+  background: var(--bad-light);
+}
+.cx-listrow.danger:hover {
+  border-color: var(--bad);
+}
+.cx-listrow.danger .lr-title {
+  color: var(--bad);
+  font-weight: 600;
+}

@@ -21,6 +21,21 @@ import { History, diff, apply } from './history.js';
 
 /* ── Private state ─────────────────────────────────────────────────────── */
 
+/**
+ * The current document.
+ *
+ * INVARIANT: `doc` is never mutated in place. Every write path builds a new
+ * object graph and reassigns this binding. Two things depend on that:
+ *
+ *   1. `edit()` can use the outgoing `doc` directly as the "before" side of
+ *      its diff, instead of paying for a second deep clone.
+ *   2. Derived analysis (critical path, dependency violations) is memoised in
+ *      a WeakMap keyed on this object, so document identity *is* the cache
+ *      key — no revision counter to keep in step, and stale entries are
+ *      collected automatically.
+ *
+ * Break the invariant and both go quietly wrong.
+ */
 let doc = normalise(makeProject());
 let history = new History();
 let objectIndex = new Map();
@@ -117,7 +132,9 @@ export function markClean() {
  * @returns {boolean} true when the document actually changed.
  */
 export function edit(label, mutator, opts = {}) {
-  const before = previewBase || deepClone(doc);
+  // No clone needed for the "before" side: `doc` is immutable by invariant,
+  // and `draft` is a separate graph. This halves the cloning cost of an edit.
+  const before = previewBase || doc;
   const draft = deepClone(doc);
 
   const result = mutator(draft);
@@ -153,13 +170,56 @@ export function edit(label, mutator, opts = {}) {
  * Update the document without recording history — for live drag feedback.
  * The first call in a gesture snapshots the pre-gesture document so the
  * eventual `edit()` produces one patch covering the whole gesture.
+ *
+ * Prefer `previewObjects()` for anything driven by pointer movement: this
+ * variant deep-clones the whole document, which a drag would pay for on every
+ * frame.
  */
 export function preview(mutator) {
-  if (!previewBase) previewBase = deepClone(doc);
+  if (!previewBase) previewBase = doc;
   const draft = deepClone(doc);
   if (mutator(draft) === false) return false;
   doc = draft;
   reindex();
+  emit(EV.DOC_CHANGED, { reason: 'preview', transient: true });
+  return true;
+}
+
+/**
+ * Copy-on-write preview of specific objects — the fast path for dragging.
+ *
+ * A drag touches a handful of objects but used to deep-clone the entire
+ * document on every mouse-move, so the cost of moving one bar grew with the
+ * size of the whole plan. This clones only the objects named in `ids` and
+ * shares every other object by reference, which keeps a gesture's per-frame
+ * cost proportional to the selection instead of the project.
+ *
+ * The result is still a brand-new document object, so the immutability
+ * invariant — and the memoisation that rides on it — holds.
+ *
+ * @param {string[]} ids       Objects the mutator is allowed to change.
+ * @param {Function} mutate    Called once per object with a private copy.
+ */
+export function previewObjects(ids, mutate) {
+  if (!previewBase) previewBase = doc;
+
+  const targets = new Set(ids);
+  if (!targets.size) return false;
+
+  const next = doc.objects.map((o) => {
+    if (!targets.has(o.id)) return o;
+    // Clone only what a drag can touch; `style`/`data` stay shared until the
+    // inspector actually edits them.
+    const copy = { ...o };
+    if (mutate(copy) === false) return o;
+    return copy;
+  });
+
+  doc = { ...doc, objects: next };
+
+  // Patch the index rather than rebuilding it over every object.
+  for (const o of next) if (targets.has(o.id)) objectIndex.set(o.id, o);
+
   emit(EV.DOC_CHANGED, { reason: 'preview', transient: true });
   return true;
 }
@@ -171,6 +231,11 @@ export function cancelPreview() {
   previewBase = null;
   reindex();
   emit(EV.DOC_CHANGED, { reason: 'preview-cancel', transient: true });
+}
+
+/** True while a gesture is staging changes outside history. */
+export function hasPreview() {
+  return previewBase !== null;
 }
 
 /**

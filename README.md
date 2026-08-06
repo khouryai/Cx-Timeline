@@ -110,6 +110,15 @@ anything moves. Circular dependencies are rejected at creation.
 **Critical path** highlighting runs a full forward/backward pass and reports
 total float per activity.
 
+**Broken dependencies flag themselves.** Move a predecessor past the point its
+successor can still start and the arrow turns red and dashed, labelled with
+how many days the plan is out by; both objects gain a red badge and outline,
+the inspector explains the breach, and the status bar counts them. Fix the
+dates — or adjust the link's type or lag — and everything reverts on its own.
+Nothing is stored: the state is derived from the document on every render, so
+it can never go stale. A **Fix** button moves the successor to the earliest
+date the dependency allows, and **Reschedule all** settles a whole cascade.
+
 ### Progress, baselines and slip
 
 Activities carry percent complete, drawn as a progress fill, with remaining

@@ -15,6 +15,7 @@ import { MS_DAY, toISO, fmtDate, addDays } from '../core/dates.js';
 import { TYPES, makeBaseline, makeObject, projectExtent, effectiveToday, makeProject } from '../core/model.js';
 import * as store from '../core/store.js';
 import { saveNow, makeBackup } from '../core/storage.js';
+import { linkViolations, resolutionFor } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
@@ -287,6 +288,93 @@ export async function addLane(afterIndex = -1) {
   const id = store.addLane({ name: name.trim() }, afterIndex);
   renderer.requestRender();
   return id;
+}
+
+/* ── Dependency violations ─────────────────────────────────────────────── */
+
+/**
+ * Move a link's successor to the earliest date the dependency allows,
+ * preserving its duration. The link's own red state clears by itself once the
+ * dates satisfy it — nothing stores a "violated" flag.
+ */
+export function resolveViolation(linkId) {
+  const doc = store.getDoc();
+  const link = doc.links.find((l) => l.id === linkId);
+  if (!link) return false;
+
+  const fix = resolutionFor(link, store.getObject(link.from), store.getObject(link.to));
+  if (!fix) return false;
+
+  const successor = store.getObject(fix.id);
+  if (successor?.locked) {
+    toast({ tone: 'warn', title: 'Locked', message: 'Unlock the successor before rescheduling it.' });
+    return false;
+  }
+
+  store.updateObject(fix.id, { start: fix.start, end: fix.end }, 'Resolve dependency');
+  store.setSelection([fix.id]);
+  renderer.revealObject(fix.id);
+  toast({
+    tone: 'good',
+    title: 'Dependency resolved',
+    message: `"${successor?.title}" moved ${fix.shiftDays} day${Math.abs(fix.shiftDays) === 1 ? '' : 's'} later.`,
+  });
+  return true;
+}
+
+/**
+ * Resolve every broken dependency, repeatedly, so fixing one that cascades
+ * into another settles the whole chain rather than leaving the next one red.
+ */
+export function resolveAllViolations() {
+  const before = linkViolations(store.getDoc()).count;
+  if (!before) {
+    toast({ tone: 'info', title: 'No broken dependencies' });
+    return 0;
+  }
+
+  // Each pass can expose newly broken downstream links; the graph is acyclic,
+  // so a bounded sweep always terminates.
+  let fixed = 0;
+  for (let pass = 0; pass < 24; pass++) {
+    const violations = linkViolations(store.getDoc());
+    if (!violations.count) break;
+
+    let movedThisPass = 0;
+    for (const linkId of violations.links) {
+      const doc = store.getDoc();
+      const link = doc.links.find((l) => l.id === linkId);
+      if (!link) continue;
+      const fix = resolutionFor(link, store.getObject(link.from), store.getObject(link.to));
+      if (!fix || store.getObject(fix.id)?.locked) continue;
+      store.updateObject(fix.id, { start: fix.start, end: fix.end }, 'Resolve dependencies');
+      movedThisPass++;
+      fixed++;
+    }
+    if (!movedThisPass) break;
+  }
+
+  renderer.requestRender();
+  const remaining = linkViolations(store.getDoc()).count;
+  toast({
+    tone: remaining ? 'warn' : 'good',
+    title: `${fixed} reschedule${fixed === 1 ? '' : 's'} applied`,
+    message: remaining
+      ? `${remaining} still broken — their successors are locked.`
+      : 'All dependencies satisfied.',
+  });
+  return fixed;
+}
+
+/** Select and frame every object involved in a broken dependency. */
+export function selectViolations() {
+  const violations = linkViolations(store.getDoc());
+  if (!violations.count) {
+    toast({ tone: 'info', title: 'No broken dependencies' });
+    return;
+  }
+  store.setSelection(Array.from(violations.objects.keys()));
+  zoomToSelection();
 }
 
 /* ── Baselines ─────────────────────────────────────────────────────────── */

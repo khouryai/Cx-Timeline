@@ -460,25 +460,21 @@ function moveDrag(point, e) {
   // Alt suppresses lane changes, so a purely horizontal nudge stays in place.
   const laneChange = !e.altKey && targetLane ? targetLane.id : null;
 
-  store.preview((draft) => {
-    for (const id of gesture.ids) {
-      const obj = draft.objects.find((o) => o.id === id);
-      const original = gesture.originals.get(id);
-      if (!obj || !original) continue;
+  const targetLaneRecord = laneChange ? store.getLane(laneChange) : null;
+  const canChangeLane = targetLaneRecord && !targetLaneRecord.locked && gesture.ids.length === 1;
 
-      const rawStart = original.start + deltaMs;
-      const snapped = snapDate(rawStart);
-      const shift = snapped - original.start;
-      obj.start = original.start + shift;
-      if (TYPES[obj.type]?.duration) obj.end = original.end + shift;
+  store.previewObjects(gesture.ids, (obj) => {
+    const original = gesture.originals.get(obj.id);
+    if (!original) return false;
 
-      if (laneChange && gesture.ids.length === 1) {
-        const lane = draft.lanes.find((l) => l.id === laneChange);
-        if (lane && !lane.locked) {
-          obj.lane = laneChange;
-          obj.row = 0; // let the packer re-place it in the new lane
-        }
-      }
+    const snapped = snapDate(original.start + deltaMs);
+    const shift = snapped - original.start;
+    obj.start = original.start + shift;
+    if (TYPES[obj.type]?.duration) obj.end = original.end + shift;
+
+    if (canChangeLane) {
+      obj.lane = laneChange;
+      obj.row = 0; // let the packer re-place it in the new lane
     }
   });
 
@@ -499,9 +495,7 @@ function resizeDrag(point, e) {
   const deltaMs = viewport.pxToDuration(dx);
   const { start, end } = gesture.original;
 
-  store.preview((draft) => {
-    const obj = draft.objects.find((o) => o.id === gesture.id);
-    if (!obj) return false;
+  store.previewObjects([gesture.id], (obj) => {
     if (gesture.edge === 'start') {
       const next = snapDate(start + deltaMs);
       // Clamping to the minimum duration can knock the edge off the grid, so

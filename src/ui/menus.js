@@ -19,6 +19,7 @@ import { contextMenu, confirmDialog, promptDialog, toast, colorControl, popover,
 import * as cmd from './commands.js';
 import { openNoteEditor } from './notes.js';
 import { showPane } from './panels.js';
+import { linkViolations } from '../core/analysis.js';
 import { openObjectDialog } from './dialogs.js';
 
 export function installMenus() {
@@ -64,12 +65,33 @@ function objectMenu({ id, clientX, clientY }) {
     { label: many ? 'Group' : 'Group with…', icon: 'layers', key: 'mod+g', disabled: !many, onClick: () => cmd.groupSelection() },
     { label: 'Ungroup', icon: 'unlink', key: 'mod+shift+g', disabled: !obj.groupId, onClick: () => cmd.ungroupSelection() },
     'sep',
+    ...violationItems(obj),
     { label: obj.locked ? 'Unlock' : 'Lock', icon: obj.locked ? 'unlock' : 'lock', key: 'mod+l', onClick: () => cmd.toggleLock() },
     { label: 'Select dependency chain', icon: 'route', key: 'mod+shift+d', onClick: () => cmd.selectDependencyChain() },
     { label: 'Zoom to selection', icon: 'expand', key: 'mod+shift+0', onClick: () => cmd.zoomToSelection() },
     'sep',
     { label: many ? `Delete ${selection.length} objects` : 'Delete', icon: 'trash', key: 'del', danger: true, onClick: () => cmd.deleteSelection() },
   ]);
+}
+
+/** Repair actions, offered only when this object is in a broken dependency. */
+function violationItems(obj) {
+  const breaches = linkViolations(store.getDoc()).objects.get(obj.id);
+  if (!breaches?.length) return [];
+
+  const worst = breaches.reduce((max, b) => Math.max(max, b.shortfallDays), 0);
+  return [
+    { heading: `Dependency broken by ${worst}d` },
+    ...breaches.map((breach) => {
+      const other = store.getObject(breach.otherId);
+      return {
+        label: `Reschedule to clear "${other?.title || 'link'}"`,
+        icon: 'refresh',
+        onClick: () => cmd.resolveViolation(breach.id),
+      };
+    }),
+    'sep',
+  ];
 }
 
 function statusItems(obj) {

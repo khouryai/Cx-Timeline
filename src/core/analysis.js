@@ -13,6 +13,150 @@ import { MS_DAY, daysBetween, workingDaysBetween } from './dates.js';
 import { TYPES, LINK_TYPES, effectiveToday } from './model.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
+   Memoisation
+
+   The store never mutates a document in place — every write produces a new
+   object graph — so document identity is a perfect cache key. A WeakMap keyed
+   on the document gives free invalidation (a new document misses) and free
+   eviction (old documents are collected), with no revision counter to keep in
+   step. This matters because violations are re-read on every rendered frame
+   of a drag, by the renderer, the inspector, the panels and the status bar.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const criticalCache = new WeakMap();
+const violationCache = new WeakMap();
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Dependency constraints
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Evaluate one dependency.
+ *
+ * Each relationship pins one date of the successor against one date of the
+ * predecessor, offset by the link's lag (negative lag is a lead, and relaxes
+ * the constraint):
+ *
+ *   FS  successor starts  ≥ predecessor finishes + lag
+ *   SS  successor starts  ≥ predecessor starts   + lag
+ *   FF  successor finishes ≥ predecessor finishes + lag
+ *   SF  successor finishes ≥ predecessor starts   + lag
+ *
+ * `slackDays` is how much room is left: zero is exactly tight, negative means
+ * the plan is now impossible by that many days.
+ */
+export function evaluateLink(link, predecessor, successor) {
+  if (!predecessor || !successor) return null;
+
+  const lag = (link.lag || 0) * MS_DAY;
+  const predStart = predecessor.start;
+  const predEnd = TYPES[predecessor.type]?.duration ? predecessor.end : predecessor.start;
+  const succStart = successor.start;
+  const succEnd = TYPES[successor.type]?.duration ? successor.end : successor.start;
+
+  let required;
+  let actual;
+  let edge;
+
+  switch ((LINK_TYPES[link.type] || LINK_TYPES.FS).short) {
+    case 'SS':
+      required = predStart + lag;
+      actual = succStart;
+      edge = 'start';
+      break;
+    case 'FF':
+      required = predEnd + lag;
+      actual = succEnd;
+      edge = 'end';
+      break;
+    case 'SF':
+      required = predStart + lag;
+      actual = succEnd;
+      edge = 'end';
+      break;
+    case 'FS':
+    default:
+      required = predEnd + lag;
+      actual = succStart;
+      edge = 'start';
+      break;
+  }
+
+  const slackDays = Math.round((actual - required) / MS_DAY);
+  return {
+    id: link.id,
+    type: link.type,
+    lag: link.lag || 0,
+    required,
+    actual,
+    edge,
+    slackDays,
+    violated: slackDays < 0,
+    /** Days the successor would have to move to satisfy the link. */
+    shortfallDays: slackDays < 0 ? -slackDays : 0,
+  };
+}
+
+/**
+ * Every dependency whose precedence constraint is currently broken.
+ *
+ * Memoised per document, so the renderer can ask on every frame of a drag
+ * without recomputing.
+ *
+ * @returns {{byLink: Map, objects: Map, links: Set, count: number, worst: number}}
+ */
+export function linkViolations(doc) {
+  const cached = violationCache.get(doc);
+  if (cached) return cached;
+
+  const byId = new Map(doc.objects.map((o) => [o.id, o]));
+  const byLink = new Map();
+  const objects = new Map(); // object id -> the violations it is party to
+  const links = new Set();
+  let worst = 0;
+
+  for (const link of doc.links) {
+    const predecessor = byId.get(link.from);
+    const successor = byId.get(link.to);
+    const result = evaluateLink(link, predecessor, successor);
+    if (!result) continue;
+
+    byLink.set(link.id, result);
+    if (!result.violated) continue;
+
+    links.add(link.id);
+    worst = Math.max(worst, result.shortfallDays);
+
+    for (const [id, role] of [[link.from, 'predecessor'], [link.to, 'successor']]) {
+      if (!objects.has(id)) objects.set(id, []);
+      objects.get(id).push({ ...result, role, otherId: role === 'predecessor' ? link.to : link.from });
+    }
+  }
+
+  const result = { byLink, objects, links, count: links.size, worst };
+  violationCache.set(doc, result);
+  return result;
+}
+
+/**
+ * The dates that would satisfy a link, for a one-click fix.
+ * Moving the successor preserves its duration.
+ */
+export function resolutionFor(link, predecessor, successor) {
+  const evaluated = evaluateLink(link, predecessor, successor);
+  if (!evaluated || !evaluated.violated) return null;
+
+  const shift = evaluated.required - evaluated.actual;
+  const hasDuration = !!TYPES[successor.type]?.duration;
+  return {
+    id: successor.id,
+    start: successor.start + shift,
+    end: hasDuration ? successor.end + shift : successor.start + shift,
+    shiftDays: Math.round(shift / MS_DAY),
+  };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    Critical path
    ═══════════════════════════════════════════════════════════════════════ */
 
@@ -25,6 +169,9 @@ import { TYPES, LINK_TYPES, effectiveToday } from './model.js';
  * simply unconnected, and marking it so would drown the real chain.
  */
 export function criticalPath(doc) {
+  const cached = criticalCache.get(doc);
+  if (cached) return cached;
+
   const objects = doc.objects.filter((o) => !o.hidden);
   const byId = new Map(objects.map((o) => [o.id, o]));
   const links = doc.links.filter((l) => byId.has(l.from) && byId.has(l.to));
@@ -128,7 +275,9 @@ export function criticalPath(doc) {
     if (connected && floatDays <= 0) critical.add(id);
   }
 
-  return { critical, floats, early, late, projectFinish, order };
+  const result = { critical, floats, early, late, projectFinish, order };
+  criticalCache.set(doc, result);
+  return result;
 }
 
 function durationMs(obj) {
