@@ -11,12 +11,13 @@
 
 import { on, emit, EV } from '../core/events.js';
 import { fmtDate, MS_DAY } from '../core/dates.js';
-import { TYPES, STATUSES, RELEASE_STATUSES, typeGroups, statusOf } from '../core/model.js';
+import { TYPES, listOptions, typeGroups, statusOf } from '../core/model.js';
 import * as store from '../core/store.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
 import { contextMenu, confirmDialog, promptDialog, toast, colorControl, popover, closePopover } from './components.js';
 import * as cmd from './commands.js';
+import { openListManager } from './lists.js';
 import { openNoteEditor } from './notes.js';
 import { showPane } from './panels.js';
 import { linkViolations } from '../core/analysis.js';
@@ -95,11 +96,14 @@ function violationItems(obj) {
 }
 
 function statusItems(obj) {
-  const ids = obj.type === 'release' ? RELEASE_STATUSES : ['planned', 'inprogress', 'complete', 'blocked', 'onhold', 'cancelled'];
-  return ids.map((id) => ({
-    label: STATUSES[id].label + (obj.status === id ? '  ✓' : ''),
-    onClick: () => cmd.setStatus(id),
+  // The whole list, in the user's own order: which statuses suit which type
+  // is a judgement only the project can make now that the list is editable.
+  const items = listOptions('status').map((option) => ({
+    label: option.label + (obj.status === option.id ? '  ✓' : ''),
+    onClick: () => cmd.setStatus(option.id),
   }));
+  items.push('sep', { label: 'Edit statuses…', onClick: () => openListManager('status') });
+  return items;
 }
 
 async function promptProgress() {

@@ -5,26 +5,21 @@
  * opened by double-click or Enter — with the object's schedule, details,
  * notes and attachments on one surface.
  *
- * Imports: util, dates, model, store, renderer, icons, components, notes,
- *          attachments.
+ * Imports: util, dates, model, store, renderer, icons, components, lists,
+ *          notes, attachments.
  */
 
 import { el, clear } from '../core/util.js';
 import { toISO, toMs, fmtDate, fmtDuration, MS_DAY } from '../core/dates.js';
 import {
   TYPES,
-  STATUSES,
-  STATUS_IDS,
-  SEVERITIES,
-  APPROVALS,
-  SUBSYSTEMS,
-  TEST_KINDS,
   durationDays,
 } from '../core/model.js';
 import * as store from '../core/store.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
 import { openModal, field, textInput, numberInput, selectInput, rangeInput, toast, badge } from './components.js';
+import { managedSelect, suggestInput } from './lists.js';
 import { noteEditor } from './notes.js';
 import { attachmentList } from './attachments.js';
 
@@ -116,12 +111,13 @@ function buildDetails(pane, obj, def) {
         options: store.orderedLanes().map((l) => ({ value: l.id, label: l.name })),
         onChange: (v) => set({ lane: v, row: 0 }, 'Move to lane'),
       })),
-      field('Status', selectInput({
+      field('Status', managedSelect({
+        listId: 'status',
         value: obj.status,
-        options: STATUS_IDS.map((s) => ({ value: s, label: STATUSES[s].label })),
         onChange: (v) => set({ status: v }, 'Change status'),
       })),
-      field('Owner', textInput({
+      field('Owner', suggestInput({
+        listId: 'owner',
         value: obj.owner,
         placeholder: 'Responsible engineer',
         onInput: (v) => set({ owner: v }, 'Change owner', { mergeKey: `dlg-owner:${obj.id}` }),
@@ -209,9 +205,9 @@ function buildDetails(pane, obj, def) {
         field('Release number', textInput({ value: data.releaseNumber || '', placeholder: 'REL-025', onInput: (v) => setData('releaseNumber', v, 'Change release number') })),
         field('Build number', textInput({ value: data.buildNumber || '', placeholder: '2.5.0-rc3', onInput: (v) => setData('buildNumber', v, 'Change build number') })),
       ]),
-      field('Approval', selectInput({
+      field('Approval', managedSelect({
+        listId: 'approval',
         value: data.approval || 'none',
-        options: Object.entries(APPROVALS).map(([id, a]) => ({ value: id, label: a.label })),
         onChange: (v) => setData('approval', v, 'Change approval'),
       }))
     );
@@ -221,24 +217,22 @@ function buildDetails(pane, obj, def) {
     extra.push(
       el('div', { class: 'cx-row three' }, [
         has('subsystem')
-          ? field('Subsystem', selectInput({
+          ? field('Subsystem', managedSelect({
+              listId: 'subsystem',
               value: obj.subsystem,
-              placeholder: '—',
-              options: SUBSYSTEMS.map((s) => ({ value: s.id, label: s.label })),
               onChange: (v) => set({ subsystem: v }, 'Change subsystem'),
             }))
           : null,
         has('area')
-          ? field('Area', textInput({ value: obj.area, placeholder: 'Section / zone', onInput: (v) => set({ area: v }, 'Change area', { mergeKey: `dlg-area:${obj.id}` }) }))
+          ? field('Area', suggestInput({ listId: 'area', value: obj.area, placeholder: 'Section / zone', onInput: (v) => set({ area: v }, 'Change area', { mergeKey: `dlg-area:${obj.id}` }) }))
           : null,
         has('testPackage')
           ? field('Test package', textInput({ value: data.testPackage || '', placeholder: 'TP-DYN-01', onInput: (v) => setData('testPackage', v, 'Change test package') }))
           : null,
         has('testKind')
-          ? field('Test type', selectInput({
+          ? field('Test type', managedSelect({
+              listId: 'testKind',
               value: data.testKind || '',
-              placeholder: '—',
-              options: TEST_KINDS.map((t) => ({ value: t.id, label: t.label })),
               onChange: (v) => setData('testKind', v, 'Change test type'),
             }))
           : null,
@@ -258,15 +252,15 @@ function buildDetails(pane, obj, def) {
   if (has('severity')) {
     extra.push(
       el('div', { class: 'cx-row' }, [
-        field('Severity', selectInput({
+        field('Severity', managedSelect({
+          listId: 'severity',
           value: data.severity || 'medium',
-          options: Object.entries(SEVERITIES).map(([id, s]) => ({ value: id, label: s.label })),
           onChange: (v) => setData('severity', v, 'Change severity'),
         })),
         has('likelihood')
-          ? field('Likelihood', selectInput({
+          ? field('Likelihood', managedSelect({
+              listId: 'severity',
               value: data.likelihood || 'medium',
-              options: Object.entries(SEVERITIES).map(([id, s]) => ({ value: id, label: s.label })),
               onChange: (v) => setData('likelihood', v, 'Change likelihood'),
             }))
           : field('Reference', textInput({ value: data.reference || '', onInput: (v) => setData('reference', v, 'Change reference') })),

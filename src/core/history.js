@@ -17,7 +17,7 @@ import { deepClone, deepEqual, uid } from './util.js';
 const COLLECTIONS = ['lanes', 'objects', 'links', 'baselines', 'groups', 'attachments'];
 
 /** Top-level fields diffed by value. */
-const FIELDS = ['name', 'description', 'client', 'programme', 'settings', 'laneOrder', 'meta'];
+const FIELDS = ['name', 'description', 'client', 'programme', 'settings', 'lists', 'laneOrder', 'meta'];
 
 /* ── Diff ──────────────────────────────────────────────────────────────── */
 

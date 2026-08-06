@@ -16,7 +16,7 @@
 
 import { deepClone, clamp } from './util.js';
 import { emit, EV } from './events.js';
-import { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES } from './model.js';
+import { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage } from './model.js';
 import { History, diff, apply } from './history.js';
 
 /* ── Private state ─────────────────────────────────────────────────────── */
@@ -68,6 +68,9 @@ const ui = {
 function reindex() {
   objectIndex = new Map(doc.objects.map((o) => [o.id, o]));
   laneIndex = new Map(doc.lanes.map((l) => [l.id, l]));
+  // The document owns its vocabularies; push them down to the model so the
+  // renderer, legend and badge helpers resolve against this project's lists.
+  syncLists(doc.lists);
 }
 reindex();
 
@@ -726,6 +729,112 @@ export function removeAttachmentRecord(id) {
 
 export function getAttachment(id) {
   return doc.attachments.find((a) => a.id === id) || null;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Editable lists (status, subsystem, test type, severity, approval, fonts)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+export function getList(listId) {
+  return doc.lists?.[listId] || [];
+}
+
+/** How many objects currently use an option. */
+export function listOptionUsage(listId, optionId) {
+  return listUsage(doc, listId, optionId);
+}
+
+/**
+ * Add an option. Returns its id, or null when the id is already taken —
+ * duplicate ids would make the value ambiguous.
+ */
+export function addListOption(listId, { id, label, color, tone }) {
+  const optionId = String(id ?? label ?? '').trim();
+  if (!optionId && listId !== 'font') return null;
+  if (getList(listId).some((o) => o.id === optionId)) return null;
+
+  const option = { id: optionId, label: String(label || optionId).trim() || optionId };
+  if (color) option.color = color;
+  if (tone) option.tone = tone;
+
+  edit(`Add ${LIST_DEFS[listId]?.label || listId} option`, (d) => {
+    if (!d.lists[listId]) d.lists[listId] = [];
+    d.lists[listId].push(option);
+  });
+  return optionId;
+}
+
+export function updateListOption(listId, optionId, patch, opts = {}) {
+  return edit(
+    `Edit ${LIST_DEFS[listId]?.label || listId} option`,
+    (d) => {
+      const option = (d.lists[listId] || []).find((o) => o.id === optionId);
+      if (!option) return false;
+      // The id is the stored value on every object, so it is not editable —
+      // only the presentation is.
+      if (patch.label != null) option.label = String(patch.label);
+      if (patch.color !== undefined) {
+        if (patch.color) option.color = patch.color;
+        else delete option.color;
+      }
+      if (patch.tone !== undefined) {
+        if (patch.tone) option.tone = patch.tone;
+        else delete option.tone;
+      }
+    },
+    opts
+  );
+}
+
+/**
+ * Delete an option, rewriting the objects that use it.
+ *
+ * `reassignTo` moves them onto another option; omitting it clears the field.
+ * Both happen in the same edit as the removal, so one undo puts everything
+ * back and the document is never left referencing a deleted option.
+ */
+export function removeListOption(listId, optionId, { reassignTo = '' } = {}) {
+  const def = LIST_DEFS[listId];
+  if (!def) return false;
+
+  return edit(`Remove ${def.label} option`, (d) => {
+    d.lists[listId] = (d.lists[listId] || []).filter((o) => o.id !== optionId);
+
+    for (const obj of d.objects) {
+      if (def.field && obj[def.field] === optionId) obj[def.field] = reassignTo;
+      if (def.styleKey && obj.style?.[def.styleKey] === optionId) obj.style[def.styleKey] = reassignTo;
+      if (def.dataKeys) {
+        for (const key of def.dataKeys) {
+          if (obj.data?.[key] === optionId) obj.data[key] = reassignTo;
+        }
+      }
+    }
+  });
+}
+
+/** Move an option up or down the list. */
+export function moveListOption(listId, optionId, delta) {
+  return edit(`Reorder ${LIST_DEFS[listId]?.label || listId}`, (d) => {
+    const list = d.lists[listId] || [];
+    const from = list.findIndex((o) => o.id === optionId);
+    const to = clamp(from + delta, 0, list.length - 1);
+    if (from < 0 || from === to) return false;
+    const [moved] = list.splice(from, 1);
+    list.splice(to, 0, moved);
+  });
+}
+
+/** Restore one list to the shipped defaults, keeping any option still in use. */
+export function resetList(listId) {
+  return edit(`Reset ${LIST_DEFS[listId]?.label || listId}`, (d) => {
+    const seeds = defaultLists()[listId] || [];
+    const keep = [];
+    for (const option of d.lists[listId] || []) {
+      const stillUsed = listUsage(d, listId, option.id) > 0;
+      if (stillUsed && !seeds.some((s) => s.id === option.id)) keep.push(option);
+    }
+    d.lists[listId] = [...seeds, ...keep];
+  });
 }
 
 /* ── Groups ────────────────────────────────────────────────────────────── */

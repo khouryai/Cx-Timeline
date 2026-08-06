@@ -7,7 +7,7 @@
  * is undoable and autosaved without the panel having to manage a draft.
  *
  * Imports: util, events, dates, model, store, analysis, viewport, renderer,
- *          icons, components, notes, attachments.
+ *          icons, components, lists, notes, attachments.
  */
 
 import { el, clear, debounce, clamp } from '../core/util.js';
@@ -15,12 +15,7 @@ import { on, emit, EV } from '../core/events.js';
 import { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } from '../core/dates.js';
 import {
   TYPES,
-  STATUSES,
-  STATUS_IDS,
-  SEVERITIES,
-  APPROVALS,
-  SUBSYSTEMS,
-  TEST_KINDS,
+  listOptions,
   LINK_TYPES,
   CONNECTOR_STYLES,
   durationDays,
@@ -52,6 +47,7 @@ import {
   confirmDialog,
   contextMenu,
 } from './components.js';
+import { managedSelect, suggestInput } from './lists.js';
 import { openNoteEditor, renderNote, notePreview } from './notes.js';
 import { resolveViolation } from './commands.js';
 import { attachmentList } from './attachments.js';
@@ -187,7 +183,9 @@ function renderSingle(obj) {
 
   const breaches = linkViolations(store.getDoc()).objects.get(obj.id) || null;
 
-  bodyEl.append(
+  // `append` stringifies null into a literal "null" text node, and several of
+  // these are conditional — filter before handing them over.
+  bodyEl.append(...[
     breaches ? violationBanner(obj, breaches) : null,
     healthStrip(obj),
     sectionOf('identity', 'Identity', identityFields(obj, def, lane)),
@@ -198,8 +196,8 @@ function renderSingle(obj) {
     sectionOf('links', 'Dependencies', linkFields(obj)),
     sectionOf('appearance', 'Appearance', appearanceFields(obj)),
     sectionOf('text', 'Text', textFields(obj)),
-    sectionOf('arrange', 'Arrange', arrangeFields(obj))
-  );
+    sectionOf('arrange', 'Arrange', arrangeFields(obj)),
+  ].filter(Boolean));
 }
 
 function sectionOf(id, title, children) {
@@ -397,9 +395,9 @@ function scheduleFields(obj, def) {
   }
 
   fields.push(
-    field('Status', selectInput({
+    field('Status', managedSelect({
+      listId: 'status',
       value: obj.status,
-      options: STATUS_IDS.map((id) => ({ value: id, label: STATUSES[id].label })),
       onChange: (v) => set(obj.id, { status: v }, 'Change status'),
     }))
   );
@@ -436,7 +434,8 @@ function detailFields(obj, def) {
   const has = (name) => def.fields.includes(name);
 
   if (has('owner')) {
-    out.push(field('Owner', textInput({
+    out.push(field('Owner', suggestInput({
+      listId: 'owner',
       value: obj.owner,
       placeholder: 'Responsible engineer',
       onInput: (v) => set(obj.id, { owner: v }, 'Change owner', { mergeKey: `owner:${obj.id}` }),
@@ -447,15 +446,15 @@ function detailFields(obj, def) {
     out.push(
       el('div', { class: 'cx-row' }, [
         has('subsystem')
-          ? field('Subsystem', selectInput({
+          ? field('Subsystem', managedSelect({
+              listId: 'subsystem',
               value: obj.subsystem,
-              placeholder: '—',
-              options: SUBSYSTEMS.map((s) => ({ value: s.id, label: s.label })),
               onChange: (v) => set(obj.id, { subsystem: v }, 'Change subsystem'),
             }))
           : null,
         has('area')
-          ? field('Area', textInput({
+          ? field('Area', suggestInput({
+              listId: 'area',
               value: obj.area,
               placeholder: 'Section / zone',
               onInput: (v) => set(obj.id, { area: v }, 'Change area', { mergeKey: `area:${obj.id}` }),
@@ -477,9 +476,9 @@ function detailFields(obj, def) {
     out.push(field('Build', textInput({ value: data.buildNumber || '', placeholder: '2.5.0-rc3', onInput: (v) => setData('buildNumber', v, 'Change build number') })));
   }
   if (has('approval')) {
-    out.push(field('Approval', selectInput({
+    out.push(field('Approval', managedSelect({
+      listId: 'approval',
       value: data.approval || 'none',
-      options: Object.entries(APPROVALS).map(([id, a]) => ({ value: id, label: a.label })),
       onChange: (v) => setData('approval', v, 'Change approval'),
     })));
   }
@@ -488,10 +487,9 @@ function detailFields(obj, def) {
     out.push(field('Test package', textInput({ value: data.testPackage || '', placeholder: 'TP-DYN-01', onInput: (v) => setData('testPackage', v, 'Change test package') })));
   }
   if (has('testKind')) {
-    out.push(field('Test type', selectInput({
+    out.push(field('Test type', managedSelect({
+      listId: 'testKind',
       value: data.testKind || '',
-      placeholder: '—',
-      options: TEST_KINDS.map((t) => ({ value: t.id, label: t.label })),
       onChange: (v) => setData('testKind', v, 'Change test type'),
     })));
   }
@@ -516,15 +514,15 @@ function detailFields(obj, def) {
   if (has('severity')) {
     out.push(
       el('div', { class: 'cx-row' }, [
-        field('Severity', selectInput({
+        field('Severity', managedSelect({
+          listId: 'severity',
           value: data.severity || 'medium',
-          options: Object.entries(SEVERITIES).map(([id, s]) => ({ value: id, label: s.label })),
           onChange: (v) => setData('severity', v, 'Change severity'),
         })),
         has('likelihood')
-          ? field('Likelihood', selectInput({
+          ? field('Likelihood', managedSelect({
+              listId: 'severity',
               value: data.likelihood || 'medium',
-              options: Object.entries(SEVERITIES).map(([id, s]) => ({ value: id, label: s.label })),
               onChange: (v) => setData('likelihood', v, 'Change likelihood'),
             }))
           : null,
@@ -700,24 +698,15 @@ function appearanceFields(obj) {
 
 /* ── Text ──────────────────────────────────────────────────────────────── */
 
-const FONT_OPTIONS = [
-  { value: '', label: 'Interface (default)' },
-  { value: "'Archivo', system-ui, sans-serif", label: 'Archivo' },
-  { value: "'Roboto Mono', monospace", label: 'Roboto Mono' },
-  { value: 'Georgia, serif', label: 'Georgia' },
-  { value: "'Times New Roman', serif", label: 'Times New Roman' },
-  { value: 'Arial, Helvetica, sans-serif', label: 'Arial' },
-  { value: "'Courier New', monospace", label: 'Courier New' },
-];
-
 function textFields(obj) {
   const style = obj.style || {};
   const setStyle = (patch, label) => set(obj.id, { style: patch }, label || 'Change text style');
 
   return [
-    field('Font', selectInput({
+    field('Font', managedSelect({
+      listId: 'font',
       value: style.font || '',
-      options: FONT_OPTIONS,
+      placeholder: 'Interface (default)',
       onChange: (v) => setStyle({ font: v }, 'Change font'),
     })),
     el('div', { class: 'cx-row' }, [
@@ -814,10 +803,11 @@ function renderMulti(objects) {
           }
         },
       })),
-      field('Status', selectInput({
+      field('Status', managedSelect({
+        listId: 'status',
         value: '',
+        allowEmpty: true,
         placeholder: 'Set status…',
-        options: STATUS_IDS.map((id) => ({ value: id, label: STATUSES[id].label })),
         onChange: (v) => {
           if (v) {
             store.updateObjects(ids, { status: v }, 'Set status');
@@ -833,10 +823,11 @@ function renderMulti(objects) {
           renderer.requestRender();
         },
       })),
-      field('Subsystem', selectInput({
+      field('Subsystem', managedSelect({
+        listId: 'subsystem',
         value: '',
+        allowEmpty: true,
         placeholder: 'Set subsystem…',
-        options: SUBSYSTEMS.map((s) => ({ value: s.id, label: s.label })),
         onChange: (v) => {
           if (v) {
             store.updateObjects(ids, { subsystem: v }, 'Set subsystem');

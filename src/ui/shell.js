@@ -58,6 +58,7 @@ const NAV = [
     items: [
       { pane: 'io', label: 'Import / Export', icon: 'download' },
       { pane: 'backups', label: 'Backups', icon: 'save' },
+      { pane: 'lists', label: 'Dropdown Lists', icon: 'list' },
       { pane: 'settings', label: 'Settings', icon: 'gear' },
     ],
   },

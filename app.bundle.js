@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 36   Built: 2026-08-06T17:55:44.351Z
+ * Modules: 37   Built: 2026-08-06T18:33:31.191Z
  */
 (function () {
   'use strict';
@@ -526,6 +526,7 @@ __mods["core/events.js"] = function (__x, __req) {
     DOC_CHANGED: 'doc:changed', // { reason, ids? } — any mutation to the project
     DOC_META_CHANGED: 'doc:meta', // name/description/settings only
     DOC_REPLACED: 'doc:replaced', // wholesale swap (import, restore, new)
+    LISTS_CHANGED: 'lists:changed', // { listId } — a dropdown vocabulary was edited
 
     /* Persistence */
     SAVE_START: 'save:start',
@@ -1117,7 +1118,7 @@ __mods["core/model.js"] = function (__x, __req) {
   const { toMs, toISO, todayMs, addDays, MS_DAY, startOfMonth, addMonths } = __req("core/dates.js");
 
   /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
-  const SCHEMA_VERSION = 1;
+  const SCHEMA_VERSION = 2;
 
   /* ══════════════════════════════════════════════════════════════════════════
      Object type registry
@@ -1358,63 +1359,227 @@ __mods["core/model.js"] = function (__x, __req) {
      ═══════════════════════════════════════════════════════════════════════ */
 
   /**
-   * Statuses are shared across object types so the legend, filters and colour
-   * coding all speak one language. `tone` maps onto the semantic colour tokens.
+   * Editable vocabularies.
+   *
+   * Status, subsystem, test type and the rest are *project data*, not constants:
+   * every organisation runs a different set, so the lists below are only the
+   * seed. They are copied into `doc.lists` when a project is created, and from
+   * then on the user can add, rename, recolour, reorder and delete options —
+   * changes that are undoable, autosaved and exported with the plan like
+   * anything else.
+   *
+   * Read them through `listOptions()` / `statusOf()` and friends rather than
+   * touching these tables directly, so a project's own edits are honoured.
    */
-  const STATUSES = {
-    planned: { label: 'Planned', tone: 'info', color: 'var(--info)' },
-    testing: { label: 'Testing', tone: 'warn', color: 'var(--warn)' },
-    inprogress: { label: 'In Progress', tone: 'warn', color: 'var(--warn)' },
-    released: { label: 'Released', tone: 'good', color: 'var(--good)' },
-    complete: { label: 'Complete', tone: 'good', color: 'var(--good)' },
-    delayed: { label: 'Delayed', tone: 'bad', color: 'var(--bad)' },
-    blocked: { label: 'Blocked', tone: 'bad', color: 'var(--bad)' },
-    cancelled: { label: 'Cancelled', tone: 'neutral', color: 'var(--neutral)' },
-    onhold: { label: 'On Hold', tone: 'neutral', color: 'var(--neutral)' },
-    open: { label: 'Open', tone: 'pending', color: 'var(--pending)' },
-    closed: { label: 'Closed', tone: 'good', color: 'var(--good)' },
+
+  const DEFAULT_LISTS = {
+    status: [
+      { id: 'planned', label: 'Planned', color: 'var(--info)', tone: 'info' },
+      { id: 'testing', label: 'Testing', color: 'var(--warn)', tone: 'warn' },
+      { id: 'inprogress', label: 'In Progress', color: 'var(--warn)', tone: 'warn' },
+      { id: 'released', label: 'Released', color: 'var(--good)', tone: 'good' },
+      { id: 'complete', label: 'Complete', color: 'var(--good)', tone: 'good' },
+      { id: 'delayed', label: 'Delayed', color: 'var(--bad)', tone: 'bad' },
+      { id: 'blocked', label: 'Blocked', color: 'var(--bad)', tone: 'bad' },
+      { id: 'cancelled', label: 'Cancelled', color: 'var(--neutral)', tone: 'neutral' },
+      { id: 'onhold', label: 'On Hold', color: 'var(--neutral)', tone: 'neutral' },
+      { id: 'open', label: 'Open', color: 'var(--pending)', tone: 'pending' },
+      { id: 'closed', label: 'Closed', color: 'var(--good)', tone: 'good' },
+    ],
+    subsystem: [
+      { id: 'ats', label: 'ATS', color: 'var(--sys-ats)' },
+      { id: 'ixl', label: 'IXL', color: 'var(--sys-ixl)' },
+      { id: 'scada', label: 'SCADA', color: 'var(--sys-scada)' },
+      { id: 'comms', label: 'Communications', color: 'var(--sys-comms)' },
+      { id: 'wayside', label: 'Wayside', color: 'var(--sys-wayside)' },
+      { id: 'vehicle', label: 'Vehicle', color: 'var(--sys-vehicle)' },
+      { id: 'civil', label: 'Civil', color: 'var(--sys-civil)' },
+      { id: 'power', label: 'Power', color: 'var(--sys-power)' },
+    ],
+    testKind: [
+      { id: 'static', label: 'Static Testing' },
+      { id: 'dynamic', label: 'Dynamic Testing' },
+      { id: 'integration', label: 'Integration Testing' },
+      { id: 'regression', label: 'Regression Testing' },
+      { id: 'sat', label: 'Site Acceptance Testing' },
+      { id: 'fat', label: 'Factory Acceptance Testing' },
+      { id: 'unit', label: 'Unit / Module Testing' },
+    ],
+    severity: [
+      { id: 'low', label: 'Low', tone: 'good' },
+      { id: 'medium', label: 'Medium', tone: 'warn' },
+      { id: 'high', label: 'High', tone: 'bad' },
+      { id: 'critical', label: 'Critical', tone: 'bad' },
+    ],
+    approval: [
+      { id: 'none', label: 'Not submitted' },
+      { id: 'pending', label: 'Pending' },
+      { id: 'approved', label: 'Approved' },
+      { id: 'rejected', label: 'Rejected' },
+    ],
+    owner: [],
+    area: [],
+    font: [
+      { id: '', label: 'Interface (default)' },
+      { id: "'Archivo', system-ui, sans-serif", label: 'Archivo' },
+      { id: "'Roboto Mono', monospace", label: 'Roboto Mono' },
+      { id: 'Georgia, serif', label: 'Georgia' },
+      { id: "'Times New Roman', serif", label: 'Times New Roman' },
+      { id: 'Arial, Helvetica, sans-serif', label: 'Arial' },
+      { id: "'Courier New', monospace", label: 'Courier New' },
+    ],
   };
 
-  const STATUS_IDS = Object.keys(STATUSES);
-
-  /** The five release statuses the brief calls out, in presentation order. */
-  const RELEASE_STATUSES = ['planned', 'testing', 'released', 'delayed', 'cancelled'];
-
-  const SEVERITIES = {
-    low: { label: 'Low', tone: 'good' },
-    medium: { label: 'Medium', tone: 'warn' },
-    high: { label: 'High', tone: 'bad' },
-    critical: { label: 'Critical', tone: 'bad' },
+  /**
+   * What each editable list is, and where its values live on an object.
+   *
+   * `field` is a top-level property, `dataKeys` are inside `obj.data`, and
+   * `styleKey` is inside `obj.style`. That is what lets the manager count
+   * usages and reassign them when an option is deleted.
+   */
+  const LIST_DEFS = {
+    status: {
+      label: 'Status',
+      field: 'status',
+      color: true,
+      tone: true,
+      required: true,
+      hint: 'Drives object colour, the legend and status filters.',
+    },
+    subsystem: {
+      label: 'Subsystem',
+      field: 'subsystem',
+      color: true,
+      hint: 'Rail signalling disciplines — ATS, IXL, SCADA and so on.',
+    },
+    testKind: {
+      label: 'Test type',
+      dataKeys: ['testKind'],
+      hint: 'Offered on test windows.',
+    },
+    severity: {
+      label: 'Severity & likelihood',
+      dataKeys: ['severity', 'likelihood'],
+      tone: true,
+      hint: 'Shared by both risk fields; a high severity turns its pin red.',
+    },
+    approval: {
+      label: 'Release approval',
+      dataKeys: ['approval'],
+      hint: 'Approval state on software releases.',
+    },
+    owner: {
+      label: 'Owner',
+      field: 'owner',
+      freeform: true,
+      hint: 'Suggestions offered when typing an owner. Any name is still allowed.',
+    },
+    area: {
+      label: 'Area',
+      field: 'area',
+      freeform: true,
+      hint: 'Suggestions offered when typing an area. Any value is still allowed.',
+    },
+    font: {
+      label: 'Fonts',
+      styleKey: 'font',
+      hint: 'Font stacks offered in the Text section. Add a corporate font here.',
+    },
   };
 
-  const APPROVALS = {
-    none: { label: 'Not submitted' },
-    pending: { label: 'Pending' },
-    approved: { label: 'Approved' },
-    rejected: { label: 'Rejected' },
-  };
+  const LIST_IDS = Object.keys(LIST_DEFS);
 
-  /** Rail signalling subsystems — the tag vocabulary for commissioning work. */
-  const SUBSYSTEMS = [
-    { id: 'ats', label: 'ATS', color: 'var(--sys-ats)' },
-    { id: 'ixl', label: 'IXL', color: 'var(--sys-ixl)' },
-    { id: 'scada', label: 'SCADA', color: 'var(--sys-scada)' },
-    { id: 'comms', label: 'Communications', color: 'var(--sys-comms)' },
-    { id: 'wayside', label: 'Wayside', color: 'var(--sys-wayside)' },
-    { id: 'vehicle', label: 'Vehicle', color: 'var(--sys-vehicle)' },
-    { id: 'civil', label: 'Civil', color: 'var(--sys-civil)' },
-    { id: 'power', label: 'Power', color: 'var(--sys-power)' },
-  ];
+  /** Semantic tones an option may carry, for badges and chips. */
+  const TONES = ['good', 'warn', 'bad', 'info', 'pending', 'neutral'];
 
-  const TEST_KINDS = [
-    { id: 'static', label: 'Static Testing' },
-    { id: 'dynamic', label: 'Dynamic Testing' },
-    { id: 'integration', label: 'Integration Testing' },
-    { id: 'regression', label: 'Regression Testing' },
-    { id: 'sat', label: 'Site Acceptance Testing' },
-    { id: 'fat', label: 'Factory Acceptance Testing' },
-    { id: 'unit', label: 'Unit / Module Testing' },
-  ];
+  /** A fresh copy of the seed lists. */
+  function defaultLists() {
+    return deepClone(DEFAULT_LISTS);
+  }
+
+  /* ── Active lists ──────────────────────────────────────────────────────────
+     The document owns the lists, but they are read from dozens of places that
+     have no document to hand (the renderer's colour lookup, the legend, badge
+     helpers). Rather than thread the document through all of them, the store
+     pushes the current lists here whenever the document changes — the same
+     pattern `core/dates.js` uses for date order, and for the same reason: this
+     module is low in the graph and must not import upwards.
+     ----------------------------------------------------------------------- */
+
+  let activeLists = defaultLists();
+
+  /** Called by the store after every document change. */
+  function syncLists(lists) {
+    activeLists = lists && typeof lists === 'object' ? lists : defaultLists();
+  }
+
+  /** Options for a list, in display order. */
+  function listOptions(listId) {
+    const list = activeLists[listId];
+    return Array.isArray(list) ? list : [];
+  }
+
+  /** Just the ids, for filters and menus. */
+  function listIds(listId) {
+    return listOptions(listId).map((o) => o.id);
+  }
+
+  /** One option, or null when the value is not in the list. */
+  function listOption(listId, id) {
+    if (id == null) return null;
+    return listOptions(listId).find((o) => o.id === id) || null;
+  }
+
+  /**
+   * A value's descriptor, with a readable fallback for anything the list does
+   * not know about — an imported file may carry statuses this project has never
+   * seen, and showing the raw value beats showing nothing.
+   */
+  function listLabel(listId, id, fallback = '') {
+    if (!id) return fallback;
+    return listOption(listId, id)?.label || String(id);
+  }
+
+  /** Status descriptor with a safe fallback for unknown values. */
+  function statusOf(id) {
+    const option = listOption('status', id);
+    if (option) return { ...option, tone: option.tone || 'neutral', color: option.color || 'var(--neutral)' };
+    return { id, label: id ? String(id) : 'Unset', tone: 'neutral', color: 'var(--neutral)' };
+  }
+
+  function subsystemOf(id) {
+    return listOption('subsystem', id);
+  }
+
+  function severityOf(id) {
+    return listOption('severity', id);
+  }
+
+  /** Where a list's values live on an object — used for counting and reassigning. */
+  function listUsage(doc, listId, optionId) {
+    const def = LIST_DEFS[listId];
+    if (!def) return 0;
+    let count = 0;
+    for (const obj of doc.objects) {
+      if (def.field && obj[def.field] === optionId) count++;
+      else if (def.styleKey && (obj.style?.[def.styleKey] ?? '') === optionId) count++;
+      else if (def.dataKeys && def.dataKeys.some((k) => (obj.data?.[k] ?? '') === optionId)) count++;
+    }
+    return count;
+  }
+
+  /** Every distinct value of a list actually present in the document. */
+  function listValuesInUse(doc, listId) {
+    const def = LIST_DEFS[listId];
+    const seen = new Set();
+    if (!def) return seen;
+    for (const obj of doc.objects) {
+      if (def.field && obj[def.field]) seen.add(obj[def.field]);
+      if (def.styleKey && obj.style?.[def.styleKey]) seen.add(obj.style[def.styleKey]);
+      if (def.dataKeys) for (const k of def.dataKeys) if (obj.data?.[k]) seen.add(obj.data[k]);
+    }
+    return seen;
+  }
 
   /** Dependency link types (the four classic precedence relationships). */
   const LINK_TYPES = {
@@ -1582,6 +1747,7 @@ __mods["core/model.js"] = function (__x, __req) {
       created: Date.now(),
       modified: Date.now(),
       settings: defaultSettings(),
+      lists: defaultLists(),
       laneOrder: [],
       lanes: [],
       objects: [],
@@ -1690,6 +1856,15 @@ __mods["core/model.js"] = function (__x, __req) {
       doc.schema = 1;
       return doc;
     },
+
+    // v1 → v2: status, subsystem, test type, severity, approval and the font
+    // menu became editable project data. `normalise()` seeds the lists and
+    // adopts any value the document already uses, so nothing is lost.
+    (doc) => {
+      if (!doc.lists) doc.lists = defaultLists();
+      doc.schema = 2;
+      return doc;
+    },
   ];
 
   /**
@@ -1716,6 +1891,7 @@ __mods["core/model.js"] = function (__x, __req) {
     doc.created = doc.created || Date.now();
     doc.modified = doc.modified || Date.now();
     doc.settings = { ...defaultSettings(), ...(doc.settings || {}) };
+    doc.lists = normaliseLists(doc);
     doc.baselines = Array.isArray(doc.baselines) ? doc.baselines : [];
     doc.groups = Array.isArray(doc.groups) ? doc.groups : [];
     doc.attachments = Array.isArray(doc.attachments) ? doc.attachments : [];
@@ -1743,6 +1919,51 @@ __mods["core/model.js"] = function (__x, __req) {
       .filter((l) => objIds.has(l.from) && objIds.has(l.to) && l.from !== l.to);
 
     return doc;
+  }
+
+  /**
+   * Repair the document's vocabularies.
+   *
+   * Missing lists are seeded from the defaults, malformed options are dropped,
+   * and — importantly — any value the objects actually use but the list does
+   * not contain is adopted into it. An imported plan carrying an unfamiliar
+   * status therefore keeps working and becomes editable, rather than silently
+   * reading as an unknown value forever.
+   */
+  function normaliseLists(doc) {
+    const seeds = defaultLists();
+    const out = {};
+
+    for (const listId of LIST_IDS) {
+      const incoming = Array.isArray(doc.lists?.[listId]) ? doc.lists[listId] : seeds[listId];
+      const seen = new Set();
+      const options = [];
+
+      for (const raw of incoming || []) {
+        if (!raw || typeof raw !== 'object') continue;
+        const id = raw.id === '' ? '' : String(raw.id ?? '').trim();
+        if (raw.id == null || seen.has(id)) continue;
+        seen.add(id);
+        options.push({
+          id,
+          label: String(raw.label ?? id) || '(unnamed)',
+          ...(raw.color ? { color: raw.color } : {}),
+          ...(raw.tone ? { tone: raw.tone } : {}),
+        });
+      }
+
+      // Adopt in-use values that are not in the list.
+      for (const value of listValuesInUse(doc, listId)) {
+        if (!seen.has(value)) {
+          seen.add(value);
+          options.push({ id: value, label: String(value) });
+        }
+      }
+
+      out[listId] = options;
+    }
+
+    return out;
   }
 
   /**
@@ -1806,18 +2027,10 @@ __mods["core/model.js"] = function (__x, __req) {
   /** Resolve the accent colour for an object: explicit fill → status → type. */
   function objectColor(obj, lane) {
     if (obj.style?.fill) return obj.style.fill;
-    if (obj.type === 'release' && STATUSES[obj.status]) return STATUSES[obj.status].color;
+    const status = listOption('status', obj.status);
+    if (obj.type === 'release' && status?.color) return status.color;
     if (lane?.color && (obj.type === 'activity' || obj.type === 'testwindow')) return lane.color;
     return TYPES[obj.type]?.accent || 'var(--type-activity)';
-  }
-
-  /** Status descriptor with a safe fallback for unknown values. */
-  function statusOf(id) {
-    return STATUSES[id] || { label: id || 'Unset', tone: 'neutral', color: 'var(--neutral)' };
-  }
-
-  function subsystemOf(id) {
-    return SUBSYSTEMS.find((s) => s.id === id) || null;
   }
 
   /** Object bounds in ms, always with end > start so hit-testing works. */
@@ -1869,13 +2082,20 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "TYPES", { get: () => TYPES, enumerable: true });
   Object.defineProperty(__x, "TYPE_IDS", { get: () => TYPE_IDS, enumerable: true });
   Object.defineProperty(__x, "typeGroups", { get: () => typeGroups, enumerable: true });
-  Object.defineProperty(__x, "STATUSES", { get: () => STATUSES, enumerable: true });
-  Object.defineProperty(__x, "STATUS_IDS", { get: () => STATUS_IDS, enumerable: true });
-  Object.defineProperty(__x, "RELEASE_STATUSES", { get: () => RELEASE_STATUSES, enumerable: true });
-  Object.defineProperty(__x, "SEVERITIES", { get: () => SEVERITIES, enumerable: true });
-  Object.defineProperty(__x, "APPROVALS", { get: () => APPROVALS, enumerable: true });
-  Object.defineProperty(__x, "SUBSYSTEMS", { get: () => SUBSYSTEMS, enumerable: true });
-  Object.defineProperty(__x, "TEST_KINDS", { get: () => TEST_KINDS, enumerable: true });
+  Object.defineProperty(__x, "LIST_DEFS", { get: () => LIST_DEFS, enumerable: true });
+  Object.defineProperty(__x, "LIST_IDS", { get: () => LIST_IDS, enumerable: true });
+  Object.defineProperty(__x, "TONES", { get: () => TONES, enumerable: true });
+  Object.defineProperty(__x, "defaultLists", { get: () => defaultLists, enumerable: true });
+  Object.defineProperty(__x, "syncLists", { get: () => syncLists, enumerable: true });
+  Object.defineProperty(__x, "listOptions", { get: () => listOptions, enumerable: true });
+  Object.defineProperty(__x, "listIds", { get: () => listIds, enumerable: true });
+  Object.defineProperty(__x, "listOption", { get: () => listOption, enumerable: true });
+  Object.defineProperty(__x, "listLabel", { get: () => listLabel, enumerable: true });
+  Object.defineProperty(__x, "statusOf", { get: () => statusOf, enumerable: true });
+  Object.defineProperty(__x, "subsystemOf", { get: () => subsystemOf, enumerable: true });
+  Object.defineProperty(__x, "severityOf", { get: () => severityOf, enumerable: true });
+  Object.defineProperty(__x, "listUsage", { get: () => listUsage, enumerable: true });
+  Object.defineProperty(__x, "listValuesInUse", { get: () => listValuesInUse, enumerable: true });
   Object.defineProperty(__x, "LINK_TYPES", { get: () => LINK_TYPES, enumerable: true });
   Object.defineProperty(__x, "CONNECTOR_STYLES", { get: () => CONNECTOR_STYLES, enumerable: true });
   Object.defineProperty(__x, "defaultStyle", { get: () => defaultStyle, enumerable: true });
@@ -1892,8 +2112,6 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "durationDays", { get: () => durationDays, enumerable: true });
   Object.defineProperty(__x, "remainingDays", { get: () => remainingDays, enumerable: true });
   Object.defineProperty(__x, "objectColor", { get: () => objectColor, enumerable: true });
-  Object.defineProperty(__x, "statusOf", { get: () => statusOf, enumerable: true });
-  Object.defineProperty(__x, "subsystemOf", { get: () => subsystemOf, enumerable: true });
   Object.defineProperty(__x, "objectRange", { get: () => objectRange, enumerable: true });
   Object.defineProperty(__x, "projectExtent", { get: () => projectExtent, enumerable: true });
   Object.defineProperty(__x, "ownersOf", { get: () => ownersOf, enumerable: true });
@@ -1925,7 +2143,7 @@ __mods["core/history.js"] = function (__x, __req) {
   const COLLECTIONS = ['lanes', 'objects', 'links', 'baselines', 'groups', 'attachments'];
 
   /** Top-level fields diffed by value. */
-  const FIELDS = ['name', 'description', 'client', 'programme', 'settings', 'laneOrder', 'meta'];
+  const FIELDS = ['name', 'description', 'client', 'programme', 'settings', 'lists', 'laneOrder', 'meta'];
 
   /* ── Diff ──────────────────────────────────────────────────────────────── */
 
@@ -2228,7 +2446,7 @@ __mods["core/store.js"] = function (__x, __req) {
 
   const { deepClone, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
-  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES } = __req("core/model.js");
+  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage } = __req("core/model.js");
   const { History, diff, apply } = __req("core/history.js");
 
   /* ── Private state ─────────────────────────────────────────────────────── */
@@ -2280,6 +2498,9 @@ __mods["core/store.js"] = function (__x, __req) {
   function reindex() {
     objectIndex = new Map(doc.objects.map((o) => [o.id, o]));
     laneIndex = new Map(doc.lanes.map((l) => [l.id, l]));
+    // The document owns its vocabularies; push them down to the model so the
+    // renderer, legend and badge helpers resolve against this project's lists.
+    syncLists(doc.lists);
   }
   reindex();
 
@@ -2940,6 +3161,112 @@ __mods["core/store.js"] = function (__x, __req) {
     return doc.attachments.find((a) => a.id === id) || null;
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     Editable lists (status, subsystem, test type, severity, approval, fonts)
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  function getList(listId) {
+    return doc.lists?.[listId] || [];
+  }
+
+  /** How many objects currently use an option. */
+  function listOptionUsage(listId, optionId) {
+    return listUsage(doc, listId, optionId);
+  }
+
+  /**
+   * Add an option. Returns its id, or null when the id is already taken —
+   * duplicate ids would make the value ambiguous.
+   */
+  function addListOption(listId, { id, label, color, tone }) {
+    const optionId = String(id ?? label ?? '').trim();
+    if (!optionId && listId !== 'font') return null;
+    if (getList(listId).some((o) => o.id === optionId)) return null;
+
+    const option = { id: optionId, label: String(label || optionId).trim() || optionId };
+    if (color) option.color = color;
+    if (tone) option.tone = tone;
+
+    edit(`Add ${LIST_DEFS[listId]?.label || listId} option`, (d) => {
+      if (!d.lists[listId]) d.lists[listId] = [];
+      d.lists[listId].push(option);
+    });
+    return optionId;
+  }
+
+  function updateListOption(listId, optionId, patch, opts = {}) {
+    return edit(
+      `Edit ${LIST_DEFS[listId]?.label || listId} option`,
+      (d) => {
+        const option = (d.lists[listId] || []).find((o) => o.id === optionId);
+        if (!option) return false;
+        // The id is the stored value on every object, so it is not editable —
+        // only the presentation is.
+        if (patch.label != null) option.label = String(patch.label);
+        if (patch.color !== undefined) {
+          if (patch.color) option.color = patch.color;
+          else delete option.color;
+        }
+        if (patch.tone !== undefined) {
+          if (patch.tone) option.tone = patch.tone;
+          else delete option.tone;
+        }
+      },
+      opts
+    );
+  }
+
+  /**
+   * Delete an option, rewriting the objects that use it.
+   *
+   * `reassignTo` moves them onto another option; omitting it clears the field.
+   * Both happen in the same edit as the removal, so one undo puts everything
+   * back and the document is never left referencing a deleted option.
+   */
+  function removeListOption(listId, optionId, { reassignTo = '' } = {}) {
+    const def = LIST_DEFS[listId];
+    if (!def) return false;
+
+    return edit(`Remove ${def.label} option`, (d) => {
+      d.lists[listId] = (d.lists[listId] || []).filter((o) => o.id !== optionId);
+
+      for (const obj of d.objects) {
+        if (def.field && obj[def.field] === optionId) obj[def.field] = reassignTo;
+        if (def.styleKey && obj.style?.[def.styleKey] === optionId) obj.style[def.styleKey] = reassignTo;
+        if (def.dataKeys) {
+          for (const key of def.dataKeys) {
+            if (obj.data?.[key] === optionId) obj.data[key] = reassignTo;
+          }
+        }
+      }
+    });
+  }
+
+  /** Move an option up or down the list. */
+  function moveListOption(listId, optionId, delta) {
+    return edit(`Reorder ${LIST_DEFS[listId]?.label || listId}`, (d) => {
+      const list = d.lists[listId] || [];
+      const from = list.findIndex((o) => o.id === optionId);
+      const to = clamp(from + delta, 0, list.length - 1);
+      if (from < 0 || from === to) return false;
+      const [moved] = list.splice(from, 1);
+      list.splice(to, 0, moved);
+    });
+  }
+
+  /** Restore one list to the shipped defaults, keeping any option still in use. */
+  function resetList(listId) {
+    return edit(`Reset ${LIST_DEFS[listId]?.label || listId}`, (d) => {
+      const seeds = defaultLists()[listId] || [];
+      const keep = [];
+      for (const option of d.lists[listId] || []) {
+        const stillUsed = listUsage(d, listId, option.id) > 0;
+        if (stillUsed && !seeds.some((s) => s.id === option.id)) keep.push(option);
+      }
+      d.lists[listId] = [...seeds, ...keep];
+    });
+  }
+
   /* ── Groups ────────────────────────────────────────────────────────────── */
 
   function groupObjects(ids, name = 'Group') {
@@ -3054,6 +3381,13 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "addAttachmentRecord", { get: () => addAttachmentRecord, enumerable: true });
   Object.defineProperty(__x, "removeAttachmentRecord", { get: () => removeAttachmentRecord, enumerable: true });
   Object.defineProperty(__x, "getAttachment", { get: () => getAttachment, enumerable: true });
+  Object.defineProperty(__x, "getList", { get: () => getList, enumerable: true });
+  Object.defineProperty(__x, "listOptionUsage", { get: () => listOptionUsage, enumerable: true });
+  Object.defineProperty(__x, "addListOption", { get: () => addListOption, enumerable: true });
+  Object.defineProperty(__x, "updateListOption", { get: () => updateListOption, enumerable: true });
+  Object.defineProperty(__x, "removeListOption", { get: () => removeListOption, enumerable: true });
+  Object.defineProperty(__x, "moveListOption", { get: () => moveListOption, enumerable: true });
+  Object.defineProperty(__x, "resetList", { get: () => resetList, enumerable: true });
   Object.defineProperty(__x, "groupObjects", { get: () => groupObjects, enumerable: true });
   Object.defineProperty(__x, "ungroupObjects", { get: () => ungroupObjects, enumerable: true });
   Object.defineProperty(__x, "expandGroupSelection", { get: () => expandGroupSelection, enumerable: true });
@@ -4355,7 +4689,7 @@ __mods["core/query.js"] = function (__x, __req) {
 
   const { fold, stripHtml, truncate } = __req("core/util.js");
   const { toMs, MS_DAY } = __req("core/dates.js");
-  const { TYPES, STATUSES, statusOf, subsystemOf } = __req("core/model.js");
+  const { TYPES, listIds, statusOf, subsystemOf } = __req("core/model.js");
 
   /**
    * Build a predicate from the active filter set.
@@ -4554,7 +4888,7 @@ __mods["core/query.js"] = function (__x, __req) {
   /** Status ids actually present in the document, in canonical order. */
   function usedStatuses(doc) {
     const present = new Set(doc.objects.map((o) => o.status));
-    return Object.keys(STATUSES).filter((id) => present.has(id));
+    return listIds('status').filter((id) => present.has(id));
   }
 
   /** Type ids actually present in the document, in registry order. */
@@ -9142,6 +9476,567 @@ __mods["ui/commands.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/lists.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/lists.js"] = function (__x, __req) {
+  /**
+   * Editable dropdown vocabularies.
+   *
+   * Two things live here: `managedSelect()`, a dropdown that can edit its own
+   * options, and the manager dialog behind it. Every list the user can change —
+   * status, subsystem, test type, severity, approval, fonts, and the owner and
+   * area suggestion lists — is reached through these, so adding a status from
+   * the inspector and adding one from the Lists pane run the same code.
+   *
+   * Imports: util, events, model, query, store, renderer, icons, components.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const { emit, EV } = __req("core/events.js");
+  const { LIST_DEFS, LIST_IDS, TONES, listOptions, listOption } = __req("core/model.js");
+  const store = __req("core/store.js");
+  const renderer = __req("timeline/renderer.js");
+  const { icon } = __req("ui/icons.js");
+  const { facet } = __req("core/query.js");
+  const { openModal, domId, field, textInput, selectInput, colorControl, confirmDialog, toast, emptyState } = __req("ui/components.js");
+
+
+
+
+
+
+
+
+
+
+
+  /**
+   * Sentinel values for the two action rows at the foot of every managed
+   * dropdown. A leading NUL cannot occur in a real option id, so a
+   * user-defined option can never collide with them.
+   */
+  const ADD = '\u0000add';
+  const MANAGE = '\u0000manage';
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The dropdown
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * A `<select>` bound to an editable list, with "Add option…" and "Manage
+   * list…" at the bottom.
+   *
+   * A value that is not in the list (imported data, or an option someone else
+   * deleted) is still shown and still selected, marked so it is obvious why it
+   * looks different — silently dropping it would silently change the object.
+   *
+   * @param {object}   opts
+   * @param {string}   opts.listId
+   * @param {string}   opts.value
+   * @param {Function} opts.onChange
+   * @param {string}   [opts.placeholder]  Shown as the empty choice.
+   * @param {boolean}  [opts.mini]
+   * @param {boolean}  [opts.allowEmpty]   Offer a blank choice (default: true
+   *                                       unless the list def says required).
+   */
+  function managedSelect({ listId, value, onChange, placeholder, mini = false, allowEmpty = null }) {
+    const def = LIST_DEFS[listId] || { label: listId };
+    const select = el('select', { class: 'cx-select' + (mini ? ' mini' : ''), dataset: { list: listId } });
+
+    const rebuild = (current) => {
+      clear(select);
+      const empty = allowEmpty == null ? !def.required : allowEmpty;
+      if (empty) select.appendChild(el('option', { value: '', text: placeholder || '—' }));
+
+      const options = listOptions(listId);
+      for (const option of options) {
+        if (option.id === '' && empty) continue; // already covered by the blank row
+        select.appendChild(el('option', { value: option.id, text: option.label }));
+      }
+
+      // Keep an unknown value visible rather than snapping the field to blank.
+      if (current && !options.some((o) => o.id === current)) {
+        select.appendChild(el('option', { value: current, text: `${current} — not in list` }));
+      }
+
+      select.appendChild(el('option', { value: '\u0000sep', text: '──────────', disabled: true }));
+      select.appendChild(el('option', { value: ADD, text: `＋  Add ${def.label.toLowerCase()}…` }));
+      select.appendChild(el('option', { value: MANAGE, text: `⚙  Manage ${def.label.toLowerCase()}…` }));
+
+      select.value = current ?? '';
+    };
+
+    let last = value ?? '';
+    rebuild(last);
+
+    select.addEventListener('change', () => {
+      const picked = select.value;
+
+      if (picked === ADD || picked === MANAGE) {
+        // Never let a command leak out as a value.
+        select.value = last;
+        const done = (chosenId) => {
+          rebuild(chosenId ?? last);
+          if (chosenId != null && chosenId !== last) {
+            last = chosenId;
+            select.value = chosenId;
+            onChange(chosenId);
+          }
+        };
+        if (picked === ADD) promptNewOption(listId, done);
+        else openListManager(listId, () => done(null));
+        return;
+      }
+
+      if (picked === '\u0000sep') {
+        select.value = last;
+        return;
+      }
+
+      last = picked;
+      onChange(picked);
+    });
+
+    return select;
+  }
+
+  /**
+   * A text input backed by a suggestion list (owner, area).
+   *
+   * These stay free text — a plan should never block you from typing a name
+   * that is not yet on a list — but the list is offered through a `datalist`,
+   * and the manager is one click away.
+   */
+  function suggestInput({ listId, value, onInput, onChange, placeholder, mini = false }) {
+    // The inspector and the object dialog can both be showing an Owner field at
+    // once, so the datalist needs an id of its own — a duplicate would silently
+    // hand one of them the wrong suggestions.
+    const listElementId = domId(`sg-${listId}`);
+    const input = textInput({ value, placeholder, mini, onInput, onChange });
+    input.setAttribute('list', listElementId);
+
+    const datalist = el('datalist', { id: listElementId });
+    for (const suggestion of suggestions(listId)) {
+      datalist.appendChild(el('option', { value: suggestion }));
+    }
+
+    const manage = el('button', {
+      class: 'cx-btn icon mini ghost',
+      title: `Manage ${LIST_DEFS[listId]?.label.toLowerCase() || listId} suggestions`,
+      'aria-label': `Manage ${LIST_DEFS[listId]?.label || listId} suggestions`,
+      html: icon('list', { size: 12 }),
+      onClick: () => openListManager(listId),
+    });
+
+    return el('div', { class: 'cx-inline' }, [
+      el('div', { style: { flex: '1', minWidth: '0' } }, [input, datalist]),
+      manage,
+    ]);
+  }
+
+  /**
+   * Suggestions for a free-text field: the curated list plus whatever the plan
+   * already uses. Typing a new owner should make that owner offerable on the
+   * next object without anyone having to curate a list first.
+   */
+  function suggestions(listId) {
+    const out = [];
+    const seen = new Set();
+    for (const option of listOptions(listId)) {
+      if (option.id && !seen.has(option.id)) { seen.add(option.id); out.push(option.id); }
+    }
+    const def = LIST_DEFS[listId];
+    if (def?.field) {
+      for (const entry of facet(store.getDoc(), def.field)) {
+        if (entry.value && !seen.has(entry.value)) { seen.add(entry.value); out.push(entry.value); }
+      }
+    }
+    return out;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Add an option
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Ask for a new option and add it.
+   * `onDone(id|null)` reports the id that was created, so the dropdown that
+   * launched this can select it straight away.
+   */
+  function promptNewOption(listId, onDone = () => {}) {
+    const def = LIST_DEFS[listId] || { label: listId };
+    const labelInput = textInput({ value: '', placeholder: `New ${def.label.toLowerCase()}` });
+
+    let color = '#5b93f5';
+    let tone = 'neutral';
+
+    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+      field('Name', labelInput),
+      def.color ? field('Colour', colorControl({ value: color, onChange: (v) => { color = v; } })) : null,
+      def.tone
+        ? field('Tone', selectInput({
+            value: tone,
+            options: TONES.map((t) => ({ value: t, label: t[0].toUpperCase() + t.slice(1) })),
+            onChange: (v) => { tone = v; },
+          }), 'Controls the badge colour where this value is shown as a chip.')
+        : null,
+      el('div', { class: 'cx-hint', text: def.hint || '' }),
+    ].filter(Boolean));
+
+    let settled = false;
+    const modal = openModal({
+      title: `Add ${def.label.toLowerCase()}`,
+      body,
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Add',
+          kind: 'primary',
+          onClick: () => {
+            settled = true;
+            onDone(commit());
+          },
+        },
+      ],
+      onClose: () => {
+        if (!settled) onDone(null);
+      },
+    });
+
+    function commit() {
+      const label = labelInput.value.trim();
+      if (!label) return null;
+      // The id is what every object stores, so derive a stable one from the
+      // name rather than letting it drift with later renames.
+      const id = listId === 'font' ? label : slugify(label, listId);
+      const created = store.addListOption(listId, {
+        id,
+        label,
+        color: def.color ? color : undefined,
+        tone: def.tone ? tone : undefined,
+      });
+      if (!created) {
+        toast({ tone: 'warn', title: 'Already on the list', message: `"${label}" is already a ${def.label.toLowerCase()} option.` });
+        return null;
+      }
+      renderer.requestRender();
+      return created;
+    }
+
+    labelInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        settled = true;
+        const id = commit();
+        modal.close();
+        onDone(id);
+      }
+    });
+
+    setTimeout(() => labelInput.focus(), 40);
+  }
+
+  /** A url-safe id, unique within the list. */
+  function slugify(label, listId) {
+    const base =
+      String(label)
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'option';
+
+    const taken = new Set(listOptions(listId).map((o) => o.id));
+    if (!taken.has(base)) return base;
+    let n = 2;
+    while (taken.has(`${base}-${n}`)) n++;
+    return `${base}-${n}`;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The editor
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Which list the editor last showed.
+   *
+   * Every mutation writes to the store, and the dock rebuilds its pane on
+   * `doc:changed` — so without this, deleting an option would drop the reader
+   * back on the first tab mid-task.
+   */
+  let lastList = LIST_IDS[0];
+
+  /**
+   * The list editor, as a detached node.
+   *
+   * The modal and the Lists dock pane are the same widget — building it once
+   * means "add a status" behaves identically wherever it is reached, and there
+   * is only one place to change when a list grows a new property.
+   *
+   * @param {object}   [opts]
+   * @param {string}   [opts.listId]  Start on this list (default: the first).
+   * @param {boolean}  [opts.tabs]    Offer the list picker (default: true).
+   * @returns {{node: HTMLElement, refresh: Function, active: Function}}
+   */
+  function listEditor({ listId = null, tabs: showTabs = true } = {}) {
+    let active = listId && LIST_DEFS[listId] ? listId : lastList;
+
+    const tabs = el('div', { class: 'cx-seg', style: { flexWrap: 'wrap', marginBottom: '13px' } });
+    const body = el('div');
+    const node = el('div', {}, showTabs ? [tabs, body] : [body]);
+
+    if (showTabs) {
+      for (const id of LIST_IDS) {
+        tabs.appendChild(
+          el('button', { dataset: { list: id }, text: LIST_DEFS[id].label, onClick: () => selectTab(id) })
+        );
+      }
+    }
+
+    function selectTab(id) {
+      active = id;
+      lastList = id;
+      for (const button of tabs.children) button.classList.toggle('active', button.dataset.list === id);
+      renderList();
+    }
+
+    function renderList() {
+      clear(body);
+      const def = LIST_DEFS[active];
+      const options = listOptions(active);
+
+      body.appendChild(el('div', { class: 'cx-hint', style: { marginBottom: '10px' }, text: def.hint || '' }));
+
+      if (!options.length) {
+        body.appendChild(
+          emptyState({
+            iconName: 'list',
+            title: 'No options yet',
+            message: `Add the ${def.label.toLowerCase()} values this programme uses.`,
+          })
+        );
+      } else {
+        const rows = el('div', { class: 'cx-list' });
+        options.forEach((option, index) => rows.appendChild(optionRow(active, def, option, index, options.length)));
+        body.appendChild(rows);
+      }
+
+      body.appendChild(
+        el('div', { style: { display: 'flex', gap: '6px', marginTop: '12px', flexWrap: 'wrap' } }, [
+          el('button', {
+            class: 'cx-btn mini primary',
+            html: icon('plus', { size: 12 }) + '<span>Add option</span>',
+            onClick: () => promptNewOption(active, () => renderList()),
+          }),
+          el('button', {
+            class: 'cx-btn mini',
+            html: icon('refresh', { size: 12 }) + '<span>Restore defaults</span>',
+            title: 'Re-add the shipped options, keeping any custom one still in use',
+            onClick: async () => {
+              const ok = await confirmDialog({
+                title: `Restore ${def.label.toLowerCase()} defaults`,
+                message: 'The shipped options come back. Custom options still used by an object are kept; unused ones are removed.',
+                confirmLabel: 'Restore',
+              });
+              if (ok) {
+                store.resetList(active);
+                changed();
+                renderList();
+              }
+            },
+          }),
+        ])
+      );
+    }
+
+    function optionRow(listId_, def, option, index, total) {
+      const usage = store.listOptionUsage(listId_, option.id);
+
+      const label = textInput({
+        value: option.label,
+        mini: true,
+        onChange: (v) => {
+          store.updateListOption(listId_, option.id, { label: v.trim() || option.id });
+          changed();
+        },
+      });
+      label.setAttribute('aria-label', `Name for ${option.label}`);
+
+      return el('div', { class: 'list-opt', dataset: { option: option.id } }, [
+        def.color
+          ? el('input', {
+              class: 'cx-color lo-swatch',
+              type: 'color',
+              value: toHex(option.color),
+              title: 'Option colour',
+              'aria-label': `Colour for ${option.label}`,
+              // `change`, not `input`: the dock pane rebuilds on doc:changed and
+              // a colour input is not covered by the typing guard, so a live
+              // stream of edits would pull the picker out from under the drag.
+              onChange: (e) => {
+                store.updateListOption(listId_, option.id, { color: e.target.value });
+                changed();
+              },
+            })
+          : el('span', { class: 'cx-dot lo-swatch', style: { background: 'var(--text-subtle)' } }),
+
+        el('div', { class: 'lo-name' }, [label]),
+
+        el('div', { class: 'lo-actions' }, [
+          iconButton('chevron-up', 'Move up', index === 0, () => {
+            store.moveListOption(listId_, option.id, -1);
+            changed();
+            renderList();
+          }),
+          iconButton('chevron-down', 'Move down', index === total - 1, () => {
+            store.moveListOption(listId_, option.id, 1);
+            changed();
+            renderList();
+          }),
+          iconButton('trash', 'Remove option', false, () => confirmRemoval(listId_, def, option, usage)),
+        ]),
+
+        el('div', { class: 'lo-foot' }, [
+          el('div', { class: 'lo-meta', text: `${option.id || '(blank)'} · ${usage ? `used by ${usage}` : 'unused'}` }),
+          def.tone
+            ? el('div', { class: 'lo-tone' }, [
+                selectInput({
+                  value: option.tone || 'neutral',
+                  mini: true,
+                  options: TONES.map((t) => ({ value: t, label: t })),
+                  onChange: (v) => {
+                    store.updateListOption(listId_, option.id, { tone: v });
+                    changed();
+                  },
+                }),
+              ])
+            : null,
+        ].filter(Boolean)),
+      ].filter(Boolean));
+    }
+
+    function confirmRemoval(listId_, def, option, usage) {
+      if (!usage) {
+        store.removeListOption(listId_, option.id);
+        changed();
+        renderList();
+        return;
+      }
+
+      // Something still points at it, so ask what those objects should become
+      // rather than leaving them referencing an option that no longer exists.
+      const replacements = listOptions(listId_).filter((o) => o.id !== option.id);
+      let reassignTo = '';
+
+      let settled = false;
+      openModal({
+        title: `Remove "${option.label}"`,
+        body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+          el('div', { style: { fontSize: 'var(--fs-small)', color: 'var(--text-muted)' }, text: `${usage} object${usage === 1 ? '' : 's'} currently use this ${def.label.toLowerCase()}.` }),
+          field('Move them to', selectInput({
+            value: '',
+            placeholder: '— leave blank —',
+            options: replacements.map((o) => ({ value: o.id, label: o.label })),
+            onChange: (v) => { reassignTo = v; },
+          }), 'Leaving it blank clears the field on those objects.'),
+        ]),
+        actions: [
+          { label: 'Cancel' },
+          {
+            label: 'Remove',
+            kind: 'danger',
+            onClick: () => {
+              settled = true;
+              const target = reassignTo ? listOption(listId_, reassignTo)?.label : '';
+              store.removeListOption(listId_, option.id, { reassignTo });
+              changed();
+              renderList();
+              toast({
+                tone: 'good',
+                title: `"${option.label}" removed`,
+                message: target
+                  ? `${usage} object${usage === 1 ? '' : 's'} moved to "${target}".`
+                  : `${usage} object${usage === 1 ? '' : 's'} had the field cleared.`,
+              });
+            },
+          },
+        ],
+        onClose: () => {
+          if (!settled) renderList();
+        },
+      });
+    }
+
+    /** One announcement for every mutation: repaint, then tell the UI. */
+    function changed() {
+      renderer.requestRender();
+      emit(EV.LISTS_CHANGED, { listId: active });
+    }
+
+    selectTab(active);
+    return { node, refresh: renderList, active: () => active };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The manager dialog
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Open the manager for one list, or the whole set when `listId` is omitted. */
+  function openListManager(listId = null, onClose = () => {}) {
+    const editor = listEditor({ listId });
+
+    return openModal({
+      title: 'Manage lists',
+      subtitle: 'Options are saved with the project, and every change is undoable.',
+      size: 'wide',
+      body: editor.node,
+      actions: [{ label: 'Done', kind: 'primary' }],
+      onClose: () => {
+        emit(EV.LISTS_CHANGED, { listId: editor.active() });
+        onClose();
+      },
+    });
+  }
+
+  function iconButton(name, title, disabled, onClick) {
+    return el('button', {
+      class: 'cx-btn icon mini ghost',
+      title,
+      'aria-label': title,
+      disabled,
+      html: icon(name, { size: 11 }),
+      onClick,
+    });
+  }
+
+  /** Colour inputs need a concrete hex; theme tokens resolve to one. */
+  function toHex(color) {
+    if (!color) return '#5b93f5';
+    const value = String(color).trim();
+    if (value.startsWith('#')) return value.length === 4
+      ? '#' + value.slice(1).split('').map((c) => c + c).join('')
+      : value.slice(0, 7);
+
+    if (value.startsWith('var(')) {
+      try {
+        const resolved = getComputedStyle(document.documentElement).getPropertyValue(value.slice(4, -1).trim()).trim();
+        if (resolved.startsWith('#')) return resolved.length === 4
+          ? '#' + resolved.slice(1).split('').map((c) => c + c).join('')
+          : resolved.slice(0, 7);
+      } catch {
+        /* fall through to the default */
+      }
+    }
+    return '#5b93f5';
+  }
+
+  Object.defineProperty(__x, "managedSelect", { get: () => managedSelect, enumerable: true });
+  Object.defineProperty(__x, "suggestInput", { get: () => suggestInput, enumerable: true });
+  Object.defineProperty(__x, "promptNewOption", { get: () => promptNewOption, enumerable: true });
+  Object.defineProperty(__x, "listEditor", { get: () => listEditor, enumerable: true });
+  Object.defineProperty(__x, "openListManager", { get: () => openListManager, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/notes.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/notes.js"] = function (__x, __req) {
@@ -9722,19 +10617,13 @@ __mods["ui/dialogs.js"] = function (__x, __req) {
    * opened by double-click or Enter — with the object's schedule, details,
    * notes and attachments on one surface.
    *
-   * Imports: util, dates, model, store, renderer, icons, components, notes,
-   *          attachments.
+   * Imports: util, dates, model, store, renderer, icons, components, lists,
+   *          notes, attachments.
    */
 
   const { el, clear } = __req("core/util.js");
   const { toISO, toMs, fmtDate, fmtDuration, MS_DAY } = __req("core/dates.js");
-  const { TYPES, STATUSES, STATUS_IDS, SEVERITIES, APPROVALS, SUBSYSTEMS, TEST_KINDS, durationDays } = __req("core/model.js");
-
-
-
-
-
-
+  const { TYPES, durationDays } = __req("core/model.js");
 
 
 
@@ -9742,6 +10631,7 @@ __mods["ui/dialogs.js"] = function (__x, __req) {
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
   const { openModal, field, textInput, numberInput, selectInput, rangeInput, toast, badge } = __req("ui/components.js");
+  const { managedSelect, suggestInput } = __req("ui/lists.js");
   const { noteEditor } = __req("ui/notes.js");
   const { attachmentList } = __req("ui/attachments.js");
 
@@ -9833,12 +10723,13 @@ __mods["ui/dialogs.js"] = function (__x, __req) {
           options: store.orderedLanes().map((l) => ({ value: l.id, label: l.name })),
           onChange: (v) => set({ lane: v, row: 0 }, 'Move to lane'),
         })),
-        field('Status', selectInput({
+        field('Status', managedSelect({
+          listId: 'status',
           value: obj.status,
-          options: STATUS_IDS.map((s) => ({ value: s, label: STATUSES[s].label })),
           onChange: (v) => set({ status: v }, 'Change status'),
         })),
-        field('Owner', textInput({
+        field('Owner', suggestInput({
+          listId: 'owner',
           value: obj.owner,
           placeholder: 'Responsible engineer',
           onInput: (v) => set({ owner: v }, 'Change owner', { mergeKey: `dlg-owner:${obj.id}` }),
@@ -9926,9 +10817,9 @@ __mods["ui/dialogs.js"] = function (__x, __req) {
           field('Release number', textInput({ value: data.releaseNumber || '', placeholder: 'REL-025', onInput: (v) => setData('releaseNumber', v, 'Change release number') })),
           field('Build number', textInput({ value: data.buildNumber || '', placeholder: '2.5.0-rc3', onInput: (v) => setData('buildNumber', v, 'Change build number') })),
         ]),
-        field('Approval', selectInput({
+        field('Approval', managedSelect({
+          listId: 'approval',
           value: data.approval || 'none',
-          options: Object.entries(APPROVALS).map(([id, a]) => ({ value: id, label: a.label })),
           onChange: (v) => setData('approval', v, 'Change approval'),
         }))
       );
@@ -9938,24 +10829,22 @@ __mods["ui/dialogs.js"] = function (__x, __req) {
       extra.push(
         el('div', { class: 'cx-row three' }, [
           has('subsystem')
-            ? field('Subsystem', selectInput({
+            ? field('Subsystem', managedSelect({
+                listId: 'subsystem',
                 value: obj.subsystem,
-                placeholder: '—',
-                options: SUBSYSTEMS.map((s) => ({ value: s.id, label: s.label })),
                 onChange: (v) => set({ subsystem: v }, 'Change subsystem'),
               }))
             : null,
           has('area')
-            ? field('Area', textInput({ value: obj.area, placeholder: 'Section / zone', onInput: (v) => set({ area: v }, 'Change area', { mergeKey: `dlg-area:${obj.id}` }) }))
+            ? field('Area', suggestInput({ listId: 'area', value: obj.area, placeholder: 'Section / zone', onInput: (v) => set({ area: v }, 'Change area', { mergeKey: `dlg-area:${obj.id}` }) }))
             : null,
           has('testPackage')
             ? field('Test package', textInput({ value: data.testPackage || '', placeholder: 'TP-DYN-01', onInput: (v) => setData('testPackage', v, 'Change test package') }))
             : null,
           has('testKind')
-            ? field('Test type', selectInput({
+            ? field('Test type', managedSelect({
+                listId: 'testKind',
                 value: data.testKind || '',
-                placeholder: '—',
-                options: TEST_KINDS.map((t) => ({ value: t.id, label: t.label })),
                 onChange: (v) => setData('testKind', v, 'Change test type'),
               }))
             : null,
@@ -9975,15 +10864,15 @@ __mods["ui/dialogs.js"] = function (__x, __req) {
     if (has('severity')) {
       extra.push(
         el('div', { class: 'cx-row' }, [
-          field('Severity', selectInput({
+          field('Severity', managedSelect({
+            listId: 'severity',
             value: data.severity || 'medium',
-            options: Object.entries(SEVERITIES).map(([id, s]) => ({ value: id, label: s.label })),
             onChange: (v) => setData('severity', v, 'Change severity'),
           })),
           has('likelihood')
-            ? field('Likelihood', selectInput({
+            ? field('Likelihood', managedSelect({
+                listId: 'severity',
                 value: data.likelihood || 'medium',
-                options: Object.entries(SEVERITIES).map(([id, s]) => ({ value: id, label: s.label })),
                 onChange: (v) => setData('likelihood', v, 'Change likelihood'),
               }))
             : field('Reference', textInput({ value: data.reference || '', onInput: (v) => setData('reference', v, 'Change reference') })),
@@ -11482,7 +12371,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
 
   const { download, slug, stripHtml } = __req("core/util.js");
   const { toISO, fmtDate } = __req("core/dates.js");
-  const { TYPES, STATUSES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES } = __req("core/model.js");
+  const { TYPES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES } = __req("core/model.js");
   const { getDoc, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
   const { filterPredicate } = __req("core/query.js");
   const { compareBaseline, criticalPath } = __req("core/analysis.js");
@@ -12122,10 +13011,7 @@ __mods["io/importers.js"] = function (__x, __req) {
 
   const { readFileAsText, readFileAsArrayBuffer, fold } = __req("core/util.js");
   const { toMs, toISO, MS_DAY, addDays, todayMs, getDateOrder } = __req("core/dates.js");
-  const { makeProject, makeObject, makeLane, makeLink, normalise, validate, TYPES, STATUSES, STATUS_IDS, SUBSYSTEMS, TEST_KINDS } = __req("core/model.js");
-
-
-
+  const { makeProject, makeObject, makeLane, makeLink, normalise, validate, TYPES, listOptions } = __req("core/model.js");
 
 
 
@@ -12562,8 +13448,8 @@ __mods["io/importers.js"] = function (__x, __req) {
   function resolveStatus(value, progressText) {
     const text = fold(value);
     if (text) {
-      for (const id of STATUS_IDS) {
-        if (fold(STATUSES[id].label) === text || id === text) return id;
+      for (const option of listOptions('status')) {
+        if (fold(option.label) === text || option.id === text) return option.id;
       }
       if (/complete|done|finish|closed/.test(text)) return 'complete';
       if (/progress|active|started|ongoing|wip/.test(text)) return 'inprogress';
@@ -12583,7 +13469,7 @@ __mods["io/importers.js"] = function (__x, __req) {
   function resolveSubsystem(value) {
     const text = fold(value);
     if (!text) return '';
-    const found = SUBSYSTEMS.find((s) => s.id === text || fold(s.label) === text);
+    const found = listOptions('subsystem').find((s) => s.id === text || fold(s.label) === text);
     if (found) return found.id;
     if (/interlock/.test(text)) return 'ixl';
     if (/comm|radio|network/.test(text)) return 'comms';
@@ -12596,7 +13482,7 @@ __mods["io/importers.js"] = function (__x, __req) {
   function resolveTestKind(value) {
     const text = fold(value);
     if (!text) return '';
-    const found = TEST_KINDS.find((t) => t.id === text || fold(t.label) === text);
+    const found = listOptions('testKind').find((t) => t.id === text || fold(t.label) === text);
     return found ? found.id : '';
   }
 
@@ -12816,21 +13702,20 @@ __mods["ui/panels.js"] = function (__x, __req) {
   /**
    * Dock panes.
    *
-   * The left dock hosts fifteen panes reached from the sidebar. Each is a small
+   * The left dock hosts sixteen panes reached from the sidebar. Each is a small
    * pure-render function over the store; the router below tracks which is
    * showing and re-renders it when the document changes, so no pane has to
    * manage its own subscriptions.
    *
    * Imports: util, events, dates, model, store, storage, query, analysis,
-   *          viewport, renderer, io, icons, components, notes, dialogs, theme.
+   *          viewport, renderer, io, icons, components, lists, notes, dialogs,
+   *          theme.
    */
 
   const { el, clear, debounce, bytes, download } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } = __req("core/dates.js");
-  const { TYPES, STATUSES, STATUS_IDS, SUBSYSTEMS, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline } = __req("core/model.js");
-
-
+  const { TYPES, listOptions, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline } = __req("core/model.js");
 
 
 
@@ -12867,6 +13752,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
 
   const cmd = __req("ui/commands.js");
+  const { listEditor } = __req("ui/lists.js");
   const { openObjectDialog, openLaneDialog } = __req("ui/dialogs.js");
   const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
   const exporters = __req("io/exporters.js");
@@ -12875,7 +13761,8 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
   const PANES = [
     'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
-    'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'settings',
+    'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
+    'settings',
   ];
 
   let dockEl = null;
@@ -12989,6 +13876,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
     history: paneHistory,
     io: paneIo,
     backups: paneBackups,
+    lists: paneLists,
     settings: paneSettings,
   };
 
@@ -12996,7 +13884,8 @@ __mods["ui/panels.js"] = function (__x, __req) {
     lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
     campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
     baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',
-    history: 'Version history', io: 'Import / export', backups: 'Backups', settings: 'Settings',
+    history: 'Version history', io: 'Import / export', backups: 'Backups',
+    lists: 'Dropdown lists', settings: 'Settings',
   };
 
   function renderPane() {
@@ -13642,9 +14531,9 @@ __mods["ui/panels.js"] = function (__x, __req) {
     );
 
     root.appendChild(checkGroup('Type', 'types', Object.entries(TYPES).map(([id, t]) => ({ value: id, label: t.label })), filters.types));
-    root.appendChild(checkGroup('Status', 'statuses', STATUS_IDS.map((id) => ({ value: id, label: STATUSES[id].label })), filters.statuses));
+    root.appendChild(checkGroup('Status', 'statuses', listOptions('status').map((o) => ({ value: o.id, label: o.label })), filters.statuses));
     root.appendChild(checkGroup('Lane', 'lanes', store.orderedLanes().map((l) => ({ value: l.id, label: l.name })), filters.lanes));
-    root.appendChild(checkGroup('Subsystem', 'subsystems', SUBSYSTEMS.map((s) => ({ value: s.id, label: s.label })), filters.subsystems));
+    root.appendChild(checkGroup('Subsystem', 'subsystems', listOptions('subsystem').map((s) => ({ value: s.id, label: s.label })), filters.subsystems));
 
     const owners = facet(doc, 'owner');
     if (owners.length) {
@@ -14113,6 +15002,24 @@ __mods["ui/panels.js"] = function (__x, __req) {
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
+     Dropdown lists
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Every editable vocabulary in one place. The same editor is behind the
+   * "Manage…" row at the foot of each dropdown, so there is one behaviour to
+   * learn and one implementation to maintain.
+   */
+  function paneLists(root) {
+    root.appendChild(
+      el('div', { class: 'cx-hint', style: { marginBottom: '12px' } }, [
+        el('span', { text: 'Statuses, subsystems and the rest are project data — add, rename, recolour, reorder or remove them. Changes are undoable and travel with the file.' }),
+      ])
+    );
+    root.appendChild(listEditor().node);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
      Settings
      ═══════════════════════════════════════════════════════════════════════ */
 
@@ -14383,6 +15290,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
       items: [
         { pane: 'io', label: 'Import / Export', icon: 'download' },
         { pane: 'backups', label: 'Backups', icon: 'save' },
+        { pane: 'lists', label: 'Dropdown Lists', icon: 'list' },
         { pane: 'settings', label: 'Settings', icon: 'gear' },
       ],
     },
@@ -14856,18 +15764,13 @@ __mods["ui/inspector.js"] = function (__x, __req) {
    * is undoable and autosaved without the panel having to manage a draft.
    *
    * Imports: util, events, dates, model, store, analysis, viewport, renderer,
-   *          icons, components, notes, attachments.
+   *          icons, components, lists, notes, attachments.
    */
 
   const { el, clear, debounce, clamp } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } = __req("core/dates.js");
-  const { TYPES, STATUSES, STATUS_IDS, SEVERITIES, APPROVALS, SUBSYSTEMS, TEST_KINDS, LINK_TYPES, CONNECTOR_STYLES, durationDays, remainingDays, statusOf, effectiveToday } = __req("core/model.js");
-
-
-
-
-
+  const { TYPES, listOptions, LINK_TYPES, CONNECTOR_STYLES, durationDays, remainingDays, statusOf, effectiveToday } = __req("core/model.js");
 
 
 
@@ -14901,6 +15804,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
 
 
 
+  const { managedSelect, suggestInput } = __req("ui/lists.js");
   const { openNoteEditor, renderNote, notePreview } = __req("ui/notes.js");
   const { resolveViolation } = __req("ui/commands.js");
   const { attachmentList } = __req("ui/attachments.js");
@@ -15036,7 +15940,9 @@ __mods["ui/inspector.js"] = function (__x, __req) {
 
     const breaches = linkViolations(store.getDoc()).objects.get(obj.id) || null;
 
-    bodyEl.append(
+    // `append` stringifies null into a literal "null" text node, and several of
+    // these are conditional — filter before handing them over.
+    bodyEl.append(...[
       breaches ? violationBanner(obj, breaches) : null,
       healthStrip(obj),
       sectionOf('identity', 'Identity', identityFields(obj, def, lane)),
@@ -15047,8 +15953,8 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       sectionOf('links', 'Dependencies', linkFields(obj)),
       sectionOf('appearance', 'Appearance', appearanceFields(obj)),
       sectionOf('text', 'Text', textFields(obj)),
-      sectionOf('arrange', 'Arrange', arrangeFields(obj))
-    );
+      sectionOf('arrange', 'Arrange', arrangeFields(obj)),
+    ].filter(Boolean));
   }
 
   function sectionOf(id, title, children) {
@@ -15246,9 +16152,9 @@ __mods["ui/inspector.js"] = function (__x, __req) {
     }
 
     fields.push(
-      field('Status', selectInput({
+      field('Status', managedSelect({
+        listId: 'status',
         value: obj.status,
-        options: STATUS_IDS.map((id) => ({ value: id, label: STATUSES[id].label })),
         onChange: (v) => set(obj.id, { status: v }, 'Change status'),
       }))
     );
@@ -15285,7 +16191,8 @@ __mods["ui/inspector.js"] = function (__x, __req) {
     const has = (name) => def.fields.includes(name);
 
     if (has('owner')) {
-      out.push(field('Owner', textInput({
+      out.push(field('Owner', suggestInput({
+        listId: 'owner',
         value: obj.owner,
         placeholder: 'Responsible engineer',
         onInput: (v) => set(obj.id, { owner: v }, 'Change owner', { mergeKey: `owner:${obj.id}` }),
@@ -15296,15 +16203,15 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       out.push(
         el('div', { class: 'cx-row' }, [
           has('subsystem')
-            ? field('Subsystem', selectInput({
+            ? field('Subsystem', managedSelect({
+                listId: 'subsystem',
                 value: obj.subsystem,
-                placeholder: '—',
-                options: SUBSYSTEMS.map((s) => ({ value: s.id, label: s.label })),
                 onChange: (v) => set(obj.id, { subsystem: v }, 'Change subsystem'),
               }))
             : null,
           has('area')
-            ? field('Area', textInput({
+            ? field('Area', suggestInput({
+                listId: 'area',
                 value: obj.area,
                 placeholder: 'Section / zone',
                 onInput: (v) => set(obj.id, { area: v }, 'Change area', { mergeKey: `area:${obj.id}` }),
@@ -15326,9 +16233,9 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       out.push(field('Build', textInput({ value: data.buildNumber || '', placeholder: '2.5.0-rc3', onInput: (v) => setData('buildNumber', v, 'Change build number') })));
     }
     if (has('approval')) {
-      out.push(field('Approval', selectInput({
+      out.push(field('Approval', managedSelect({
+        listId: 'approval',
         value: data.approval || 'none',
-        options: Object.entries(APPROVALS).map(([id, a]) => ({ value: id, label: a.label })),
         onChange: (v) => setData('approval', v, 'Change approval'),
       })));
     }
@@ -15337,10 +16244,9 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       out.push(field('Test package', textInput({ value: data.testPackage || '', placeholder: 'TP-DYN-01', onInput: (v) => setData('testPackage', v, 'Change test package') })));
     }
     if (has('testKind')) {
-      out.push(field('Test type', selectInput({
+      out.push(field('Test type', managedSelect({
+        listId: 'testKind',
         value: data.testKind || '',
-        placeholder: '—',
-        options: TEST_KINDS.map((t) => ({ value: t.id, label: t.label })),
         onChange: (v) => setData('testKind', v, 'Change test type'),
       })));
     }
@@ -15365,15 +16271,15 @@ __mods["ui/inspector.js"] = function (__x, __req) {
     if (has('severity')) {
       out.push(
         el('div', { class: 'cx-row' }, [
-          field('Severity', selectInput({
+          field('Severity', managedSelect({
+            listId: 'severity',
             value: data.severity || 'medium',
-            options: Object.entries(SEVERITIES).map(([id, s]) => ({ value: id, label: s.label })),
             onChange: (v) => setData('severity', v, 'Change severity'),
           })),
           has('likelihood')
-            ? field('Likelihood', selectInput({
+            ? field('Likelihood', managedSelect({
+                listId: 'severity',
                 value: data.likelihood || 'medium',
-                options: Object.entries(SEVERITIES).map(([id, s]) => ({ value: id, label: s.label })),
                 onChange: (v) => setData('likelihood', v, 'Change likelihood'),
               }))
             : null,
@@ -15549,24 +16455,15 @@ __mods["ui/inspector.js"] = function (__x, __req) {
 
   /* ── Text ──────────────────────────────────────────────────────────────── */
 
-  const FONT_OPTIONS = [
-    { value: '', label: 'Interface (default)' },
-    { value: "'Archivo', system-ui, sans-serif", label: 'Archivo' },
-    { value: "'Roboto Mono', monospace", label: 'Roboto Mono' },
-    { value: 'Georgia, serif', label: 'Georgia' },
-    { value: "'Times New Roman', serif", label: 'Times New Roman' },
-    { value: 'Arial, Helvetica, sans-serif', label: 'Arial' },
-    { value: "'Courier New', monospace", label: 'Courier New' },
-  ];
-
   function textFields(obj) {
     const style = obj.style || {};
     const setStyle = (patch, label) => set(obj.id, { style: patch }, label || 'Change text style');
 
     return [
-      field('Font', selectInput({
+      field('Font', managedSelect({
+        listId: 'font',
         value: style.font || '',
-        options: FONT_OPTIONS,
+        placeholder: 'Interface (default)',
         onChange: (v) => setStyle({ font: v }, 'Change font'),
       })),
       el('div', { class: 'cx-row' }, [
@@ -15663,10 +16560,11 @@ __mods["ui/inspector.js"] = function (__x, __req) {
             }
           },
         })),
-        field('Status', selectInput({
+        field('Status', managedSelect({
+          listId: 'status',
           value: '',
+          allowEmpty: true,
           placeholder: 'Set status…',
-          options: STATUS_IDS.map((id) => ({ value: id, label: STATUSES[id].label })),
           onChange: (v) => {
             if (v) {
               store.updateObjects(ids, { status: v }, 'Set status');
@@ -15682,10 +16580,11 @@ __mods["ui/inspector.js"] = function (__x, __req) {
             renderer.requestRender();
           },
         })),
-        field('Subsystem', selectInput({
+        field('Subsystem', managedSelect({
+          listId: 'subsystem',
           value: '',
+          allowEmpty: true,
           placeholder: 'Set subsystem…',
-          options: SUBSYSTEMS.map((s) => ({ value: s.id, label: s.label })),
           onChange: (v) => {
             if (v) {
               store.updateObjects(ids, { subsystem: v }, 'Set subsystem');
@@ -16113,7 +17012,7 @@ __mods["ui/legend.js"] = function (__x, __req) {
 
   const { el, clear, rafBatch } = __req("core/util.js");
   const { on, EV } = __req("core/events.js");
-  const { TYPES, STATUSES, SUBSYSTEMS, statusOf } = __req("core/model.js");
+  const { TYPES, listIds, listOptions, statusOf } = __req("core/model.js");
   const { getDoc, getSettings, getFilters, setFilters } = __req("core/store.js");
   const { summarise } = __req("core/query.js");
   const renderer = __req("timeline/renderer.js");
@@ -16182,7 +17081,7 @@ __mods["ui/legend.js"] = function (__x, __req) {
     }
 
     // Statuses present, in canonical order.
-    const statusIds = Object.keys(STATUSES).filter((id) => stats.byStatus.has(id));
+    const statusIds = listIds('status').filter((id) => stats.byStatus.has(id));
     if (statusIds.length) {
       root.appendChild(
         group('Status', statusIds.map((id) => ({
@@ -16196,7 +17095,7 @@ __mods["ui/legend.js"] = function (__x, __req) {
     }
 
     // Subsystems present.
-    const subsystemIds = SUBSYSTEMS.filter((s) => stats.bySubsystem.has(s.id));
+    const subsystemIds = listOptions('subsystem').filter((s) => stats.bySubsystem.has(s.id));
     if (subsystemIds.length) {
       root.appendChild(
         group('Subsystems', subsystemIds.map((s) => ({
@@ -16269,12 +17168,13 @@ __mods["ui/menus.js"] = function (__x, __req) {
 
   const { on, emit, EV } = __req("core/events.js");
   const { fmtDate, MS_DAY } = __req("core/dates.js");
-  const { TYPES, STATUSES, RELEASE_STATUSES, typeGroups, statusOf } = __req("core/model.js");
+  const { TYPES, listOptions, typeGroups, statusOf } = __req("core/model.js");
   const store = __req("core/store.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
   const { contextMenu, confirmDialog, promptDialog, toast, colorControl, popover, closePopover } = __req("ui/components.js");
   const cmd = __req("ui/commands.js");
+  const { openListManager } = __req("ui/lists.js");
   const { openNoteEditor } = __req("ui/notes.js");
   const { showPane } = __req("ui/panels.js");
   const { linkViolations } = __req("core/analysis.js");
@@ -16353,11 +17253,14 @@ __mods["ui/menus.js"] = function (__x, __req) {
   }
 
   function statusItems(obj) {
-    const ids = obj.type === 'release' ? RELEASE_STATUSES : ['planned', 'inprogress', 'complete', 'blocked', 'onhold', 'cancelled'];
-    return ids.map((id) => ({
-      label: STATUSES[id].label + (obj.status === id ? '  ✓' : ''),
-      onClick: () => cmd.setStatus(id),
+    // The whole list, in the user's own order: which statuses suit which type
+    // is a judgement only the project can make now that the list is editable.
+    const items = listOptions('status').map((option) => ({
+      label: option.label + (obj.status === option.id ? '  ✓' : ''),
+      onClick: () => cmd.setStatus(option.id),
     }));
+    items.push('sep', { label: 'Edit statuses…', onClick: () => openListManager('status') });
+    return items;
   }
 
   async function promptProgress() {

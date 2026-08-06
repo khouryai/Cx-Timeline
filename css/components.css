@@ -1038,6 +1038,59 @@
   opacity: 1;
 }
 
+/* ── Editable list options (Dropdown Lists pane + Manage lists dialog) ──── */
+/* The dock is ~250px wide, so a one-line row would squeeze the name field to
+   nothing. A two-row grid keeps it usable there and in the wide dialog. */
+.list-opt {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "swatch name    actions"
+    "foot   foot    foot";
+  align-items: center;
+  gap: 7px 8px;
+  padding: 9px 9px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  transition: border-color var(--dur-fast) var(--easing);
+}
+.list-opt:hover {
+  border-color: var(--border-strong);
+}
+.list-opt .lo-swatch {
+  grid-area: swatch;
+}
+.list-opt .lo-name {
+  grid-area: name;
+  min-width: 0;
+}
+.list-opt .lo-actions {
+  grid-area: actions;
+  display: flex;
+  gap: 2px;
+}
+.list-opt .lo-foot {
+  grid-area: foot;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.list-opt .lo-meta {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-subtle);
+  letter-spacing: 0.04em;
+  /* ids can be long (a font stack is one) — wrap rather than hide them */
+  overflow-wrap: anywhere;
+}
+.list-opt .lo-tone {
+  flex: 0 0 auto;
+}
+
 /* ── Dot / swatch marker used in lists and the legend ───────────────────── */
 .cx-dot {
   width: 9px;

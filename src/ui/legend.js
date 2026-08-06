@@ -12,7 +12,7 @@
 
 import { el, clear, rafBatch } from '../core/util.js';
 import { on, EV } from '../core/events.js';
-import { TYPES, STATUSES, SUBSYSTEMS, statusOf } from '../core/model.js';
+import { TYPES, listIds, listOptions, statusOf } from '../core/model.js';
 import { getDoc, getSettings, getFilters, setFilters } from '../core/store.js';
 import { summarise } from '../core/query.js';
 import * as renderer from '../timeline/renderer.js';
@@ -81,7 +81,7 @@ function draw() {
   }
 
   // Statuses present, in canonical order.
-  const statusIds = Object.keys(STATUSES).filter((id) => stats.byStatus.has(id));
+  const statusIds = listIds('status').filter((id) => stats.byStatus.has(id));
   if (statusIds.length) {
     root.appendChild(
       group('Status', statusIds.map((id) => ({
@@ -95,7 +95,7 @@ function draw() {
   }
 
   // Subsystems present.
-  const subsystemIds = SUBSYSTEMS.filter((s) => stats.bySubsystem.has(s.id));
+  const subsystemIds = listOptions('subsystem').filter((s) => stats.bySubsystem.has(s.id));
   if (subsystemIds.length) {
     root.appendChild(
       group('Subsystems', subsystemIds.map((s) => ({

@@ -1,13 +1,14 @@
 /**
  * Dock panes.
  *
- * The left dock hosts fifteen panes reached from the sidebar. Each is a small
+ * The left dock hosts sixteen panes reached from the sidebar. Each is a small
  * pure-render function over the store; the router below tracks which is
  * showing and re-renders it when the document changes, so no pane has to
  * manage its own subscriptions.
  *
  * Imports: util, events, dates, model, store, storage, query, analysis,
- *          viewport, renderer, io, icons, components, notes, dialogs, theme.
+ *          viewport, renderer, io, icons, components, lists, notes, dialogs,
+ *          theme.
  */
 
 import { el, clear, debounce, bytes, download } from '../core/util.js';
@@ -15,9 +16,7 @@ import { on, emit, EV } from '../core/events.js';
 import { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } from '../core/dates.js';
 import {
   TYPES,
-  STATUSES,
-  STATUS_IDS,
-  SUBSYSTEMS,
+  listOptions,
   typeGroups,
   statusOf,
   subsystemOf,
@@ -52,6 +51,7 @@ import {
   contextMenu,
 } from './components.js';
 import * as cmd from './commands.js';
+import { listEditor } from './lists.js';
 import { openObjectDialog, openLaneDialog } from './dialogs.js';
 import { THEMES, applyTheme, getTheme } from './theme.js';
 import * as exporters from '../io/exporters.js';
@@ -60,7 +60,8 @@ import { pickFiles } from '../core/util.js';
 
 export const PANES = [
   'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
-  'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'settings',
+  'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
+  'settings',
 ];
 
 let dockEl = null;
@@ -174,6 +175,7 @@ const RENDERERS = {
   history: paneHistory,
   io: paneIo,
   backups: paneBackups,
+  lists: paneLists,
   settings: paneSettings,
 };
 
@@ -181,7 +183,8 @@ const TITLES = {
   lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
   campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
   baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',
-  history: 'Version history', io: 'Import / export', backups: 'Backups', settings: 'Settings',
+  history: 'Version history', io: 'Import / export', backups: 'Backups',
+  lists: 'Dropdown lists', settings: 'Settings',
 };
 
 function renderPane() {
@@ -827,9 +830,9 @@ function paneFilters(root) {
   );
 
   root.appendChild(checkGroup('Type', 'types', Object.entries(TYPES).map(([id, t]) => ({ value: id, label: t.label })), filters.types));
-  root.appendChild(checkGroup('Status', 'statuses', STATUS_IDS.map((id) => ({ value: id, label: STATUSES[id].label })), filters.statuses));
+  root.appendChild(checkGroup('Status', 'statuses', listOptions('status').map((o) => ({ value: o.id, label: o.label })), filters.statuses));
   root.appendChild(checkGroup('Lane', 'lanes', store.orderedLanes().map((l) => ({ value: l.id, label: l.name })), filters.lanes));
-  root.appendChild(checkGroup('Subsystem', 'subsystems', SUBSYSTEMS.map((s) => ({ value: s.id, label: s.label })), filters.subsystems));
+  root.appendChild(checkGroup('Subsystem', 'subsystems', listOptions('subsystem').map((s) => ({ value: s.id, label: s.label })), filters.subsystems));
 
   const owners = facet(doc, 'owner');
   if (owners.length) {
@@ -1295,6 +1298,24 @@ async function restoreBackup(backup) {
   store.replaceDoc(doc, 'restore');
   cmd.fitAll();
   toast({ tone: 'good', title: 'Backup restored' });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Dropdown lists
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Every editable vocabulary in one place. The same editor is behind the
+ * "Manage…" row at the foot of each dropdown, so there is one behaviour to
+ * learn and one implementation to maintain.
+ */
+function paneLists(root) {
+  root.appendChild(
+    el('div', { class: 'cx-hint', style: { marginBottom: '12px' } }, [
+      el('span', { text: 'Statuses, subsystems and the rest are project data — add, rename, recolour, reorder or remove them. Changes are undoable and travel with the file.' }),
+    ])
+  );
+  root.appendChild(listEditor().node);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

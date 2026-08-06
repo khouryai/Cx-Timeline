@@ -144,6 +144,27 @@ Files of any type (PDF, Excel, Word, images, ZIP, logs) can be attached to any
 object. File bytes live in IndexedDB, separate from the document, so a project
 carrying 40 MB of test logs still autosaves in milliseconds.
 
+### Editable dropdowns
+
+Every dropdown vocabulary is yours to change — **Status**, **Subsystem**,
+**Test type**, **Severity & likelihood**, **Release approval**, **Owner**,
+**Area** and the **font** menu. Add options, rename them, recolour them,
+reorder them, or delete them, from the **Dropdown Lists** pane or from the
+"＋ Add…" and "⚙ Manage…" rows at the foot of any dropdown — both are the same
+editor.
+
+Deleting an option that objects still use asks where those objects should go
+and moves them in the same step, so one undo puts everything back. Renaming
+never breaks anything: the stored value keeps its original id and only the
+label changes. **Restore defaults** brings the shipped options back while
+keeping any custom one still in use.
+
+The lists are saved with the project, so they travel with the file, export
+with it and are covered by undo like any other edit. Imported files that carry
+values your lists have never seen keep them — the value is adopted rather than
+silently dropped. Owner and Area stay free text, offering what the plan
+already uses as suggestions rather than blocking a new name.
+
 ### Search, filters and legend
 
 Global search covers titles, notes, owners, subsystems, areas, tags, versions,
@@ -234,7 +255,7 @@ src/
   core/        util · events · dates · model · query · history · store
                storage · analysis
   timeline/    viewport · layout · connectors · renderer · interactions
-  ui/          icons · components · theme · shell · panels · inspector
+  ui/          icons · components · lists · theme · shell · panels · inspector
                dialogs · menus · commands · shortcuts · notes · attachments
                minimap · legend
   io/          scene · svg · pdf · inflate · exporters · importers

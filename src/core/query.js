@@ -10,7 +10,7 @@
 
 import { fold, stripHtml, truncate } from './util.js';
 import { toMs, MS_DAY } from './dates.js';
-import { TYPES, STATUSES, statusOf, subsystemOf } from './model.js';
+import { TYPES, listIds, statusOf, subsystemOf } from './model.js';
 
 /**
  * Build a predicate from the active filter set.
@@ -209,7 +209,7 @@ export function facet(doc, field) {
 /** Status ids actually present in the document, in canonical order. */
 export function usedStatuses(doc) {
   const present = new Set(doc.objects.map((o) => o.status));
-  return Object.keys(STATUSES).filter((id) => present.has(id));
+  return listIds('status').filter((id) => present.has(id));
 }
 
 /** Type ids actually present in the document, in registry order. */

@@ -14,7 +14,7 @@ import { uid, deepClone, clamp } from './util.js';
 import { toMs, toISO, todayMs, addDays, MS_DAY, startOfMonth, addMonths } from './dates.js';
 
 /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /* ══════════════════════════════════════════════════════════════════════════
    Object type registry
@@ -255,63 +255,227 @@ export function typeGroups() {
    ═══════════════════════════════════════════════════════════════════════ */
 
 /**
- * Statuses are shared across object types so the legend, filters and colour
- * coding all speak one language. `tone` maps onto the semantic colour tokens.
+ * Editable vocabularies.
+ *
+ * Status, subsystem, test type and the rest are *project data*, not constants:
+ * every organisation runs a different set, so the lists below are only the
+ * seed. They are copied into `doc.lists` when a project is created, and from
+ * then on the user can add, rename, recolour, reorder and delete options —
+ * changes that are undoable, autosaved and exported with the plan like
+ * anything else.
+ *
+ * Read them through `listOptions()` / `statusOf()` and friends rather than
+ * touching these tables directly, so a project's own edits are honoured.
  */
-export const STATUSES = {
-  planned: { label: 'Planned', tone: 'info', color: 'var(--info)' },
-  testing: { label: 'Testing', tone: 'warn', color: 'var(--warn)' },
-  inprogress: { label: 'In Progress', tone: 'warn', color: 'var(--warn)' },
-  released: { label: 'Released', tone: 'good', color: 'var(--good)' },
-  complete: { label: 'Complete', tone: 'good', color: 'var(--good)' },
-  delayed: { label: 'Delayed', tone: 'bad', color: 'var(--bad)' },
-  blocked: { label: 'Blocked', tone: 'bad', color: 'var(--bad)' },
-  cancelled: { label: 'Cancelled', tone: 'neutral', color: 'var(--neutral)' },
-  onhold: { label: 'On Hold', tone: 'neutral', color: 'var(--neutral)' },
-  open: { label: 'Open', tone: 'pending', color: 'var(--pending)' },
-  closed: { label: 'Closed', tone: 'good', color: 'var(--good)' },
+
+const DEFAULT_LISTS = {
+  status: [
+    { id: 'planned', label: 'Planned', color: 'var(--info)', tone: 'info' },
+    { id: 'testing', label: 'Testing', color: 'var(--warn)', tone: 'warn' },
+    { id: 'inprogress', label: 'In Progress', color: 'var(--warn)', tone: 'warn' },
+    { id: 'released', label: 'Released', color: 'var(--good)', tone: 'good' },
+    { id: 'complete', label: 'Complete', color: 'var(--good)', tone: 'good' },
+    { id: 'delayed', label: 'Delayed', color: 'var(--bad)', tone: 'bad' },
+    { id: 'blocked', label: 'Blocked', color: 'var(--bad)', tone: 'bad' },
+    { id: 'cancelled', label: 'Cancelled', color: 'var(--neutral)', tone: 'neutral' },
+    { id: 'onhold', label: 'On Hold', color: 'var(--neutral)', tone: 'neutral' },
+    { id: 'open', label: 'Open', color: 'var(--pending)', tone: 'pending' },
+    { id: 'closed', label: 'Closed', color: 'var(--good)', tone: 'good' },
+  ],
+  subsystem: [
+    { id: 'ats', label: 'ATS', color: 'var(--sys-ats)' },
+    { id: 'ixl', label: 'IXL', color: 'var(--sys-ixl)' },
+    { id: 'scada', label: 'SCADA', color: 'var(--sys-scada)' },
+    { id: 'comms', label: 'Communications', color: 'var(--sys-comms)' },
+    { id: 'wayside', label: 'Wayside', color: 'var(--sys-wayside)' },
+    { id: 'vehicle', label: 'Vehicle', color: 'var(--sys-vehicle)' },
+    { id: 'civil', label: 'Civil', color: 'var(--sys-civil)' },
+    { id: 'power', label: 'Power', color: 'var(--sys-power)' },
+  ],
+  testKind: [
+    { id: 'static', label: 'Static Testing' },
+    { id: 'dynamic', label: 'Dynamic Testing' },
+    { id: 'integration', label: 'Integration Testing' },
+    { id: 'regression', label: 'Regression Testing' },
+    { id: 'sat', label: 'Site Acceptance Testing' },
+    { id: 'fat', label: 'Factory Acceptance Testing' },
+    { id: 'unit', label: 'Unit / Module Testing' },
+  ],
+  severity: [
+    { id: 'low', label: 'Low', tone: 'good' },
+    { id: 'medium', label: 'Medium', tone: 'warn' },
+    { id: 'high', label: 'High', tone: 'bad' },
+    { id: 'critical', label: 'Critical', tone: 'bad' },
+  ],
+  approval: [
+    { id: 'none', label: 'Not submitted' },
+    { id: 'pending', label: 'Pending' },
+    { id: 'approved', label: 'Approved' },
+    { id: 'rejected', label: 'Rejected' },
+  ],
+  owner: [],
+  area: [],
+  font: [
+    { id: '', label: 'Interface (default)' },
+    { id: "'Archivo', system-ui, sans-serif", label: 'Archivo' },
+    { id: "'Roboto Mono', monospace", label: 'Roboto Mono' },
+    { id: 'Georgia, serif', label: 'Georgia' },
+    { id: "'Times New Roman', serif", label: 'Times New Roman' },
+    { id: 'Arial, Helvetica, sans-serif', label: 'Arial' },
+    { id: "'Courier New', monospace", label: 'Courier New' },
+  ],
 };
 
-export const STATUS_IDS = Object.keys(STATUSES);
-
-/** The five release statuses the brief calls out, in presentation order. */
-export const RELEASE_STATUSES = ['planned', 'testing', 'released', 'delayed', 'cancelled'];
-
-export const SEVERITIES = {
-  low: { label: 'Low', tone: 'good' },
-  medium: { label: 'Medium', tone: 'warn' },
-  high: { label: 'High', tone: 'bad' },
-  critical: { label: 'Critical', tone: 'bad' },
+/**
+ * What each editable list is, and where its values live on an object.
+ *
+ * `field` is a top-level property, `dataKeys` are inside `obj.data`, and
+ * `styleKey` is inside `obj.style`. That is what lets the manager count
+ * usages and reassign them when an option is deleted.
+ */
+export const LIST_DEFS = {
+  status: {
+    label: 'Status',
+    field: 'status',
+    color: true,
+    tone: true,
+    required: true,
+    hint: 'Drives object colour, the legend and status filters.',
+  },
+  subsystem: {
+    label: 'Subsystem',
+    field: 'subsystem',
+    color: true,
+    hint: 'Rail signalling disciplines — ATS, IXL, SCADA and so on.',
+  },
+  testKind: {
+    label: 'Test type',
+    dataKeys: ['testKind'],
+    hint: 'Offered on test windows.',
+  },
+  severity: {
+    label: 'Severity & likelihood',
+    dataKeys: ['severity', 'likelihood'],
+    tone: true,
+    hint: 'Shared by both risk fields; a high severity turns its pin red.',
+  },
+  approval: {
+    label: 'Release approval',
+    dataKeys: ['approval'],
+    hint: 'Approval state on software releases.',
+  },
+  owner: {
+    label: 'Owner',
+    field: 'owner',
+    freeform: true,
+    hint: 'Suggestions offered when typing an owner. Any name is still allowed.',
+  },
+  area: {
+    label: 'Area',
+    field: 'area',
+    freeform: true,
+    hint: 'Suggestions offered when typing an area. Any value is still allowed.',
+  },
+  font: {
+    label: 'Fonts',
+    styleKey: 'font',
+    hint: 'Font stacks offered in the Text section. Add a corporate font here.',
+  },
 };
 
-export const APPROVALS = {
-  none: { label: 'Not submitted' },
-  pending: { label: 'Pending' },
-  approved: { label: 'Approved' },
-  rejected: { label: 'Rejected' },
-};
+export const LIST_IDS = Object.keys(LIST_DEFS);
 
-/** Rail signalling subsystems — the tag vocabulary for commissioning work. */
-export const SUBSYSTEMS = [
-  { id: 'ats', label: 'ATS', color: 'var(--sys-ats)' },
-  { id: 'ixl', label: 'IXL', color: 'var(--sys-ixl)' },
-  { id: 'scada', label: 'SCADA', color: 'var(--sys-scada)' },
-  { id: 'comms', label: 'Communications', color: 'var(--sys-comms)' },
-  { id: 'wayside', label: 'Wayside', color: 'var(--sys-wayside)' },
-  { id: 'vehicle', label: 'Vehicle', color: 'var(--sys-vehicle)' },
-  { id: 'civil', label: 'Civil', color: 'var(--sys-civil)' },
-  { id: 'power', label: 'Power', color: 'var(--sys-power)' },
-];
+/** Semantic tones an option may carry, for badges and chips. */
+export const TONES = ['good', 'warn', 'bad', 'info', 'pending', 'neutral'];
 
-export const TEST_KINDS = [
-  { id: 'static', label: 'Static Testing' },
-  { id: 'dynamic', label: 'Dynamic Testing' },
-  { id: 'integration', label: 'Integration Testing' },
-  { id: 'regression', label: 'Regression Testing' },
-  { id: 'sat', label: 'Site Acceptance Testing' },
-  { id: 'fat', label: 'Factory Acceptance Testing' },
-  { id: 'unit', label: 'Unit / Module Testing' },
-];
+/** A fresh copy of the seed lists. */
+export function defaultLists() {
+  return deepClone(DEFAULT_LISTS);
+}
+
+/* ── Active lists ──────────────────────────────────────────────────────────
+   The document owns the lists, but they are read from dozens of places that
+   have no document to hand (the renderer's colour lookup, the legend, badge
+   helpers). Rather than thread the document through all of them, the store
+   pushes the current lists here whenever the document changes — the same
+   pattern `core/dates.js` uses for date order, and for the same reason: this
+   module is low in the graph and must not import upwards.
+   ----------------------------------------------------------------------- */
+
+let activeLists = defaultLists();
+
+/** Called by the store after every document change. */
+export function syncLists(lists) {
+  activeLists = lists && typeof lists === 'object' ? lists : defaultLists();
+}
+
+/** Options for a list, in display order. */
+export function listOptions(listId) {
+  const list = activeLists[listId];
+  return Array.isArray(list) ? list : [];
+}
+
+/** Just the ids, for filters and menus. */
+export function listIds(listId) {
+  return listOptions(listId).map((o) => o.id);
+}
+
+/** One option, or null when the value is not in the list. */
+export function listOption(listId, id) {
+  if (id == null) return null;
+  return listOptions(listId).find((o) => o.id === id) || null;
+}
+
+/**
+ * A value's descriptor, with a readable fallback for anything the list does
+ * not know about — an imported file may carry statuses this project has never
+ * seen, and showing the raw value beats showing nothing.
+ */
+export function listLabel(listId, id, fallback = '') {
+  if (!id) return fallback;
+  return listOption(listId, id)?.label || String(id);
+}
+
+/** Status descriptor with a safe fallback for unknown values. */
+export function statusOf(id) {
+  const option = listOption('status', id);
+  if (option) return { ...option, tone: option.tone || 'neutral', color: option.color || 'var(--neutral)' };
+  return { id, label: id ? String(id) : 'Unset', tone: 'neutral', color: 'var(--neutral)' };
+}
+
+export function subsystemOf(id) {
+  return listOption('subsystem', id);
+}
+
+export function severityOf(id) {
+  return listOption('severity', id);
+}
+
+/** Where a list's values live on an object — used for counting and reassigning. */
+export function listUsage(doc, listId, optionId) {
+  const def = LIST_DEFS[listId];
+  if (!def) return 0;
+  let count = 0;
+  for (const obj of doc.objects) {
+    if (def.field && obj[def.field] === optionId) count++;
+    else if (def.styleKey && (obj.style?.[def.styleKey] ?? '') === optionId) count++;
+    else if (def.dataKeys && def.dataKeys.some((k) => (obj.data?.[k] ?? '') === optionId)) count++;
+  }
+  return count;
+}
+
+/** Every distinct value of a list actually present in the document. */
+export function listValuesInUse(doc, listId) {
+  const def = LIST_DEFS[listId];
+  const seen = new Set();
+  if (!def) return seen;
+  for (const obj of doc.objects) {
+    if (def.field && obj[def.field]) seen.add(obj[def.field]);
+    if (def.styleKey && obj.style?.[def.styleKey]) seen.add(obj.style[def.styleKey]);
+    if (def.dataKeys) for (const k of def.dataKeys) if (obj.data?.[k]) seen.add(obj.data[k]);
+  }
+  return seen;
+}
 
 /** Dependency link types (the four classic precedence relationships). */
 export const LINK_TYPES = {
@@ -479,6 +643,7 @@ export function makeProject(name = 'Untitled Programme') {
     created: Date.now(),
     modified: Date.now(),
     settings: defaultSettings(),
+    lists: defaultLists(),
     laneOrder: [],
     lanes: [],
     objects: [],
@@ -587,6 +752,15 @@ const MIGRATIONS = [
     doc.schema = 1;
     return doc;
   },
+
+  // v1 → v2: status, subsystem, test type, severity, approval and the font
+  // menu became editable project data. `normalise()` seeds the lists and
+  // adopts any value the document already uses, so nothing is lost.
+  (doc) => {
+    if (!doc.lists) doc.lists = defaultLists();
+    doc.schema = 2;
+    return doc;
+  },
 ];
 
 /**
@@ -613,6 +787,7 @@ export function normalise(input) {
   doc.created = doc.created || Date.now();
   doc.modified = doc.modified || Date.now();
   doc.settings = { ...defaultSettings(), ...(doc.settings || {}) };
+  doc.lists = normaliseLists(doc);
   doc.baselines = Array.isArray(doc.baselines) ? doc.baselines : [];
   doc.groups = Array.isArray(doc.groups) ? doc.groups : [];
   doc.attachments = Array.isArray(doc.attachments) ? doc.attachments : [];
@@ -640,6 +815,51 @@ export function normalise(input) {
     .filter((l) => objIds.has(l.from) && objIds.has(l.to) && l.from !== l.to);
 
   return doc;
+}
+
+/**
+ * Repair the document's vocabularies.
+ *
+ * Missing lists are seeded from the defaults, malformed options are dropped,
+ * and — importantly — any value the objects actually use but the list does
+ * not contain is adopted into it. An imported plan carrying an unfamiliar
+ * status therefore keeps working and becomes editable, rather than silently
+ * reading as an unknown value forever.
+ */
+function normaliseLists(doc) {
+  const seeds = defaultLists();
+  const out = {};
+
+  for (const listId of LIST_IDS) {
+    const incoming = Array.isArray(doc.lists?.[listId]) ? doc.lists[listId] : seeds[listId];
+    const seen = new Set();
+    const options = [];
+
+    for (const raw of incoming || []) {
+      if (!raw || typeof raw !== 'object') continue;
+      const id = raw.id === '' ? '' : String(raw.id ?? '').trim();
+      if (raw.id == null || seen.has(id)) continue;
+      seen.add(id);
+      options.push({
+        id,
+        label: String(raw.label ?? id) || '(unnamed)',
+        ...(raw.color ? { color: raw.color } : {}),
+        ...(raw.tone ? { tone: raw.tone } : {}),
+      });
+    }
+
+    // Adopt in-use values that are not in the list.
+    for (const value of listValuesInUse(doc, listId)) {
+      if (!seen.has(value)) {
+        seen.add(value);
+        options.push({ id: value, label: String(value) });
+      }
+    }
+
+    out[listId] = options;
+  }
+
+  return out;
 }
 
 /**
@@ -703,18 +923,10 @@ export function remainingDays(obj) {
 /** Resolve the accent colour for an object: explicit fill → status → type. */
 export function objectColor(obj, lane) {
   if (obj.style?.fill) return obj.style.fill;
-  if (obj.type === 'release' && STATUSES[obj.status]) return STATUSES[obj.status].color;
+  const status = listOption('status', obj.status);
+  if (obj.type === 'release' && status?.color) return status.color;
   if (lane?.color && (obj.type === 'activity' || obj.type === 'testwindow')) return lane.color;
   return TYPES[obj.type]?.accent || 'var(--type-activity)';
-}
-
-/** Status descriptor with a safe fallback for unknown values. */
-export function statusOf(id) {
-  return STATUSES[id] || { label: id || 'Unset', tone: 'neutral', color: 'var(--neutral)' };
-}
-
-export function subsystemOf(id) {
-  return SUBSYSTEMS.find((s) => s.id === id) || null;
 }
 
 /** Object bounds in ms, always with end > start so hit-testing works. */

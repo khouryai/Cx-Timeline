@@ -26,8 +26,8 @@ core/model → core/query · core/history · core/analysis
 core/store → core/storage
 timeline/viewport → timeline/layout → timeline/connectors
                   → timeline/renderer → timeline/interactions
-ui/icons · ui/components → ui/theme → ui/commands → ui/dialogs
-                                    → ui/panels → ui/shell
+ui/icons · ui/components → ui/lists → ui/theme → ui/commands → ui/dialogs
+                                             → ui/panels → ui/shell
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
 main.js                                    the only module that may import freely
 ```
@@ -65,6 +65,17 @@ subscribes. That is what keeps the graph acyclic.
   add a `violated` field to a link — there is nothing to keep in step.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
+- **Dropdown vocabularies are document data, not constants.** Status,
+  subsystem, test type, severity, approval and the font menu live in
+  `doc.lists`, seeded from `DEFAULT_LISTS` and described by `LIST_DEFS` in
+  `core/model.js`. Read them with `listOptions()` / `listOption()` /
+  `statusOf()` — never re-declare a hard-coded array — and render them with
+  `managedSelect()` from `ui/lists.js` so the "Add…" and "Manage…" rows come
+  along. Free-text fields with suggestions use `suggestInput()`. The store
+  owns the mutations (`addListOption`, `updateListOption`,
+  `removeListOption`, `moveListOption`, `resetList`), and `removeListOption`
+  rewrites the objects that used the option in the *same* edit so one undo
+  puts everything back.
 - **Dates are UTC-midnight milliseconds internally**, `YYYY-MM-DD` on disk.
   Never call a local-time getter — a calendar date must not shift by a
   timezone. Display order (M/D/Y by default) is a preference pushed into
@@ -86,12 +97,19 @@ subscribes. That is what keeps the graph acyclic.
   `build<Shape>` branch in `timeline/renderer.js` only if it needs a new shape.
 - **A new dock pane**: add it to `PANES`, `TITLES` and `RENDERERS` in
   `ui/panels.js`, and to `NAV` in `ui/shell.js`.
+- **A new editable list**: add the seed to `DEFAULT_LISTS` and an entry to
+  `LIST_DEFS` in `core/model.js` saying where its values live on an object —
+  `field` (a top-level property), `dataKeys` (inside `data`) or `styleKey`
+  (inside `style`). Usage counting, deletion-with-reassign, the manager tab
+  and the Dropdown Lists pane all follow from that one entry.
 - **A new export format**: consume the scene from `io/scene.js` rather than
   re-walking the document — that is what keeps every export agreeing with
   every other.
 - **Schema changes**: bump `SCHEMA_VERSION` in `core/model.js` and append a
   step to `MIGRATIONS`. Never delete a migration step; old files must always
-  be able to walk forward.
+  be able to walk forward. A new top-level key also needs adding to
+  `COLLECTIONS` or `FIELDS` in `core/history.js`, or edits to it will not be
+  undoable — they will not even register as a change.
 
 ## Verify after changes
 
@@ -103,8 +121,9 @@ node tools/smoke.js --shot out.png   # …and eyeball the result
 
 The smoke test boots the real application in Chromium and checks rendering,
 selection, typing into panel fields without losing focus, snapping, undo/redo,
-zoom, all fifteen dock panes, all five themes, every exporter (including PDF
-header validation) and reload persistence. **Any console error fails the run.**
+zoom, editing the dropdown vocabularies, all sixteen dock panes, all five
+themes, every exporter (including PDF header validation) and reload
+persistence. **Any console error fails the run.**
 
 Two traps worth knowing, both of which have caused real bugs:
 
@@ -123,6 +142,9 @@ Two traps worth knowing, both of which have caused real bugs:
 - **`.ob-flag` is the release shape's coloured pole**, not a status badge.
   The broken-dependency badge is `.ob-breach`. Reusing the former restyled
   every release marker on the canvas.
+- **`Element.append(null)` inserts the string "null"**, unlike `el()`, which
+  filters its children. Any conditional argument to a raw `append()` has to be
+  filtered first — this shipped a visible "null" in the inspector once.
 - **Ruler ticks do not clip, so a label must be measured before it is
   placed.** `placeTickLabel()` computes the reach to the *next labelled* tick
   and draws the label — and its optional sub-label — only if it fits. Nudging

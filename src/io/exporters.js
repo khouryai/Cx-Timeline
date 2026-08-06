@@ -10,7 +10,7 @@
 
 import { download, slug, stripHtml } from '../core/util.js';
 import { toISO, fmtDate } from '../core/dates.js';
-import { TYPES, STATUSES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES } from '../core/model.js';
+import { TYPES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES } from '../core/model.js';
 import { getDoc, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
 import { filterPredicate } from '../core/query.js';
 import { compareBaseline, criticalPath } from '../core/analysis.js';

@@ -23,10 +23,7 @@ import {
   normalise,
   validate,
   TYPES,
-  STATUSES,
-  STATUS_IDS,
-  SUBSYSTEMS,
-  TEST_KINDS,
+  listOptions,
 } from '../core/model.js';
 import { getDoc } from '../core/store.js';
 import { readZip, zipText } from './inflate.js';
@@ -455,8 +452,8 @@ function resolveType(value, { isMilestone, title }) {
 function resolveStatus(value, progressText) {
   const text = fold(value);
   if (text) {
-    for (const id of STATUS_IDS) {
-      if (fold(STATUSES[id].label) === text || id === text) return id;
+    for (const option of listOptions('status')) {
+      if (fold(option.label) === text || option.id === text) return option.id;
     }
     if (/complete|done|finish|closed/.test(text)) return 'complete';
     if (/progress|active|started|ongoing|wip/.test(text)) return 'inprogress';
@@ -476,7 +473,7 @@ function resolveStatus(value, progressText) {
 function resolveSubsystem(value) {
   const text = fold(value);
   if (!text) return '';
-  const found = SUBSYSTEMS.find((s) => s.id === text || fold(s.label) === text);
+  const found = listOptions('subsystem').find((s) => s.id === text || fold(s.label) === text);
   if (found) return found.id;
   if (/interlock/.test(text)) return 'ixl';
   if (/comm|radio|network/.test(text)) return 'comms';
@@ -489,7 +486,7 @@ function resolveSubsystem(value) {
 function resolveTestKind(value) {
   const text = fold(value);
   if (!text) return '';
-  const found = TEST_KINDS.find((t) => t.id === text || fold(t.label) === text);
+  const found = listOptions('testKind').find((t) => t.id === text || fold(t.label) === text);
   return found ? found.id : '';
 }
 

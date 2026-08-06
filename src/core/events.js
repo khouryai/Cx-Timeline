@@ -80,6 +80,7 @@ export const EV = {
   DOC_CHANGED: 'doc:changed', // { reason, ids? } — any mutation to the project
   DOC_META_CHANGED: 'doc:meta', // name/description/settings only
   DOC_REPLACED: 'doc:replaced', // wholesale swap (import, restore, new)
+  LISTS_CHANGED: 'lists:changed', // { listId } — a dropdown vocabulary was edited
 
   /* Persistence */
   SAVE_START: 'save:start',

@@ -106,6 +106,10 @@ async function main() {
   check('inspector shows object', (await page.locator('#inspector .ih-name').innerText()).length > 0);
   check('inspector sections built', (await page.locator('#inspector .cx-section').count()) >= 6);
 
+  // `append(null)` stringifies — a conditional row that is absent must leave
+  // nothing behind, not the word "null".
+  check('no stray null text in the inspector', !/\bnull\b/.test(await page.locator('#inspector').innerText()));
+
   console.log('\nEditing & history');
   const before = await page.evaluate(() => document.querySelectorAll('.tl-obj').length);
   await page.keyboard.press('Control+d');
@@ -439,8 +443,153 @@ async function main() {
   await page.keyboard.press('Control+z');
   await page.waitForTimeout(400);
 
+  console.log('\nEditable lists');
+  // Every dropdown vocabulary is project data. The pane and the "Manage…" row
+  // at the foot of each dropdown are the same editor, so exercising the pane
+  // exercises both.
+  const storedList = (listId) => page.evaluate((id) => new Promise((res) => {
+    const r = indexedDB.open('cx-timeline');
+    r.onsuccess = () => {
+      const g = r.result.transaction('projects').objectStore('projects').getAll();
+      g.onsuccess = () => {
+        const rec = g.result.sort((a, b) => b.savedAt - a.savedAt)[0];
+        res(rec?.doc?.lists?.[id] || null);
+      };
+    };
+  }), listId);
+
+  // Something selected, so the inspector is showing a status dropdown.
+  await page.locator('.tl-obj[data-label^="Regression Cycle 5"]').first().click();
+  await page.waitForTimeout(250);
+  check('inspector status field is a managed list', (await page.locator('#inspector select[data-list="status"]').count()) === 1);
+
+  await page.locator('#sidenav .nav-link[data-pane="lists"]').click();
+  await page.waitForTimeout(350);
+  check('lists pane shows the status vocabulary', (await page.locator('#dock .list-opt[data-option="planned"]').count()) === 1);
+  check('lists pane offers every list', (await page.locator('#dock .cx-seg button').count()) >= 8);
+
+  // ── Add ────────────────────────────────────────────────────────────────
+  await page.locator('#dock .cx-btn.primary', { hasText: 'Add option' }).click();
+  await page.waitForTimeout(300);
+  await page.locator('.cx-modal input[type="text"]').first().fill('Awaiting Sign-off');
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(500);
+  check('a new option joins the list', (await page.locator('#dock .list-opt[data-option="awaiting-sign-off"]').count()) === 1);
+
+  const offered = () => page.evaluate(() => {
+    const sel = document.querySelector('#inspector select[data-list="status"]');
+    return sel ? Array.from(sel.options).map((o) => o.value) : [];
+  });
+  check('the dropdown offers it immediately', (await offered()).includes('awaiting-sign-off'));
+  check('the option is saved with the project', ((await storedList('status')) || []).some((o) => o.id === 'awaiting-sign-off'));
+
+  // ── Use it, then remove it and reassign ────────────────────────────────
+  await page.selectOption('#inspector select[data-list="status"]', 'awaiting-sign-off');
+  await page.waitForTimeout(600);
+  const statusOfSelected = () => page.evaluate(() => {
+    const sel = document.querySelector('#inspector select[data-list="status"]');
+    return sel ? sel.value : null;
+  });
+  check('an object can take the new status', (await statusOfSelected()) === 'awaiting-sign-off');
+
+  await page.locator('#dock .list-opt[data-option="awaiting-sign-off"] button[aria-label="Remove option"]').click();
+  await page.waitForTimeout(350);
+  check('removing an option in use asks where its objects go', (await page.locator('.cx-modal select').count()) === 1);
+  await page.selectOption('.cx-modal select', 'blocked');
+  await page.locator('.cx-modal-foot .cx-btn.danger').click();
+  await page.waitForTimeout(600);
+  check('the option is gone', (await page.locator('#dock .list-opt[data-option="awaiting-sign-off"]').count()) === 0);
+  check('objects that used it were reassigned', (await statusOfSelected()) === 'blocked');
+
+  // ── Undo ───────────────────────────────────────────────────────────────
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(600);
+  check('undo brings the option back', (await page.locator('#dock .list-opt[data-option="awaiting-sign-off"]').count()) === 1);
+  check('undo restores the objects too', (await statusOfSelected()) === 'awaiting-sign-off');
+
+  // ── Rename and reorder ─────────────────────────────────────────────────
+  const renamed = page.locator('#dock .list-opt[data-option="awaiting-sign-off"] input[type="text"]');
+  await renamed.fill('Awaiting Approval');
+  await renamed.blur();
+  await page.waitForTimeout(600);
+  check('renaming keeps the stored id', ((await storedList('status')) || []).some((o) => o.id === 'awaiting-sign-off' && o.label === 'Awaiting Approval'));
+  check('the rename reaches the dropdown', await page.evaluate(() => {
+    const sel = document.querySelector('#inspector select[data-list="status"]');
+    return !!sel && Array.from(sel.options).some((o) => o.value === 'awaiting-sign-off' && o.textContent === 'Awaiting Approval');
+  }));
+
+  const indexOfOption = (id) => page.evaluate((wanted) =>
+    Array.from(document.querySelectorAll('#dock .list-opt')).findIndex((n) => n.dataset.option === wanted), id);
+  const wasAt = await indexOfOption('awaiting-sign-off');
+  await page.locator('#dock .list-opt[data-option="awaiting-sign-off"] button[aria-label="Move up"]').click();
+  await page.waitForTimeout(400);
+  const nowAt = await indexOfOption('awaiting-sign-off');
+  check('an option can be moved up the list', nowAt === wasAt - 1, `${wasAt} → ${nowAt}`);
+  const dropdownOrder = await page.evaluate(() => {
+    const sel = document.querySelector('#inspector select[data-list="status"]');
+    return sel ? Array.from(sel.options).map((o) => o.value) : [];
+  });
+  const paneOrder = await page.evaluate(() => Array.from(document.querySelectorAll('#dock .list-opt')).map((n) => n.dataset.option));
+  check(
+    'the dropdown follows the list order',
+    JSON.stringify(dropdownOrder.filter((v) => paneOrder.includes(v))) === JSON.stringify(paneOrder),
+    `${dropdownOrder.join(',')} vs ${paneOrder.join(',')}`
+  );
+
+  // ── A list with no colour column still works ───────────────────────────
+  await page.locator('#dock .cx-seg button', { hasText: 'Test type' }).click();
+  await page.waitForTimeout(300);
+  check('another list renders', (await page.locator('#dock .list-opt[data-option="dynamic"]').count()) === 1);
+  await page.locator('#dock .list-opt[data-option="dynamic"] button[aria-label="Remove option"]').click();
+  await page.waitForTimeout(400);
+  const askedAgain = await page.locator('.cx-modal').count();
+  if (askedAgain) {
+    await page.selectOption('.cx-modal select', 'static');
+    await page.locator('.cx-modal-foot .cx-btn.danger').click();
+    await page.waitForTimeout(500);
+  }
+  check('removing from a second list works', (await page.locator('#dock .list-opt[data-option="dynamic"]').count()) === 0);
+
+  // ── The dropdown edits itself ──────────────────────────────────────────
+  // "Manage…" and "Add…" sit at the foot of every managed select. Picking one
+  // must open the editor and must never leak the command out as a value.
+  await page.locator('.tl-obj[data-label^="Regression Cycle 5"]').first().click();
+  await page.waitForTimeout(250);
+  const statusBefore = await page.evaluate(() => document.querySelector('#inspector select[data-list="status"]').value);
+  await page.evaluate(() => {
+    const sel = document.querySelector('#inspector select[data-list="status"]');
+    sel.value = Array.from(sel.options).find((o) => o.textContent.includes('Manage')).value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.waitForTimeout(400);
+  check('"Manage…" opens the editor from the dropdown', (await page.locator('.cx-modal-title', { hasText: 'Manage lists' }).count()) === 1);
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(400);
+  check('the command never becomes the value', (await page.evaluate(() => document.querySelector('#inspector select[data-list="status"]').value)) === statusBefore);
+
+  // Owner is free text with suggestions rather than a closed list.
+  check('owner is a suggestion field', (await page.locator('#inspector input[list]').count()) >= 1);
+  check('owner suggestions include names already in the plan', await page.evaluate(() => {
+    const input = document.querySelector('#inspector input[list]');
+    const dl = input && document.getElementById(input.getAttribute('list'));
+    return !!dl && dl.options.length > 0;
+  }));
+
+  await page.locator('#sidenav .nav-link[data-pane="lists"]').click();
+  await page.waitForTimeout(350);
+  await page.locator('#dock .cx-seg button', { hasText: 'Test type' }).click();
+  await page.waitForTimeout(300);
+
+  // Put the vocabulary back so later sections see a normal project.
+  await page.locator('#dock .cx-btn.mini', { hasText: 'Restore defaults' }).click();
+  await page.waitForTimeout(300);
+  await page.locator('.cx-modal-foot .cx-btn').last().click();
+  await page.waitForTimeout(500);
+  check('restore defaults re-adds the shipped options', (await page.locator('#dock .list-opt[data-option="dynamic"]').count()) === 1);
+
   console.log('\nDock panes');
-  const panes = ['lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links', 'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'settings'];
+  const panes = ['lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links', 'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists', 'settings'];
   for (const pane of panes) {
     const errorsBefore = consoleErrors.length;
     await page.locator(`#sidenav .nav-link[data-pane="${pane}"]`).click();
