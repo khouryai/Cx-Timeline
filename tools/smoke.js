@@ -94,7 +94,7 @@ async function main() {
   // Pick a plain activity bar by name: point markers and full-lane bands
   // legitimately overlap each other, so "the first object" is not a stable
   // click target.
-  const target = page.locator('.tl-obj.shape-bar').filter({ hasText: 'Wayside Equipment Installation' }).first();
+  const target = page.locator('.tl-obj.shape-bar[data-label="Wayside Equipment Installation"]').first();
   await target.click();
   await page.waitForTimeout(250);
   check('object selected', (await page.locator('.tl-obj.selected').count()) === 1);
@@ -124,7 +124,7 @@ async function main() {
   // panel and throw focus out of the input after a single character.
   // Re-select the bar: the undo above pruned the selection, so the inspector
   // would otherwise be showing the project rather than an object.
-  await page.locator('.tl-obj.shape-bar').filter({ hasText: 'Wayside Equipment Installation' }).first().click();
+  await page.locator('.tl-obj.shape-bar[data-label="Wayside Equipment Installation"]').first().click();
   await page.waitForTimeout(250);
 
   const titleBox = page.locator('#inspector .cx-section input[type="text"]').first();
@@ -134,7 +134,7 @@ async function main() {
   await page.waitForTimeout(400);
   check('inspector keeps focus while typing', await titleBox.evaluate((n) => n === document.activeElement));
   check('whole string reached the field', (await titleBox.inputValue()) === 'Wayside Retrofit Alpha', await titleBox.inputValue());
-  check('edit reached the timeline', (await page.locator('.tl-obj').filter({ hasText: 'Wayside Retrofit Alpha' }).count()) === 1);
+  check('edit reached the timeline', (await page.locator('.tl-obj[data-label^="Wayside Retrofit Alpha"]').count()) === 1);
 
   // The subtitle field is the second text box, and drives the two-line label.
   const subtitleInput = page.locator('#inspector input[placeholder="Optional second line"]').first();
@@ -179,7 +179,7 @@ async function main() {
     };
   }), title);
 
-  await page.locator('.tl-obj').filter({ hasText: 'Wayside Retrofit Alpha' }).first().click();
+  await page.locator('.tl-obj[data-label^="Wayside Retrofit Alpha"]').first().click();
   await page.waitForTimeout(250);
 
   // Week snapping: an arrow key must step a whole week and land on a Monday.
@@ -187,7 +187,7 @@ async function main() {
   // down while a form control holds focus.
   await page.selectOption('#toolbar select', 'week');
   await page.waitForTimeout(250);
-  await page.locator('.tl-obj').filter({ hasText: 'Wayside Retrofit Alpha' }).first().click();
+  await page.locator('.tl-obj[data-label^="Wayside Retrofit Alpha"]').first().click();
   await page.waitForTimeout(200);
   await page.keyboard.press('ArrowRight');
   await page.waitForTimeout(900);
@@ -202,7 +202,7 @@ async function main() {
   // Month snapping: the nudge must land on the first of a month.
   await page.selectOption('#toolbar select', 'month');
   await page.waitForTimeout(250);
-  await page.locator('.tl-obj').filter({ hasText: 'Wayside Retrofit Alpha' }).first().click();
+  await page.locator('.tl-obj[data-label^="Wayside Retrofit Alpha"]').first().click();
   await page.waitForTimeout(200);
   await page.keyboard.press('ArrowRight');
   await page.waitForTimeout(900);
@@ -235,6 +235,74 @@ async function main() {
   await page.keyboard.press('Control+0');
   await page.waitForTimeout(320);
   check('fit-all keeps objects on screen', (await page.locator('.tl-obj').count()) > 8);
+
+  console.log('\nNo truncated text');
+  // The hard guarantee: at every scale, no label is clipped, ellipsised or
+  // hidden. Measured by comparing each label's laid-out width against its
+  // content width, which is what the browser does before it truncates.
+  const truncationAudit = async (label) => {
+    const bad = await page.evaluate(() => {
+      const offenders = [];
+      const nodes = document.querySelectorAll(
+        '.tl-obj .ob-line, .tl-obj .ob-pct, .tl-tick span, .tl-lane-label .ll-name, .tl-today-flag'
+      );
+      for (const n of nodes) {
+        const style = getComputedStyle(n);
+        if (style.textOverflow === 'ellipsis') {
+          offenders.push(`ellipsis: ${n.textContent.slice(0, 30)}`);
+          continue;
+        }
+        if (style.webkitLineClamp && style.webkitLineClamp !== 'none') {
+          offenders.push(`clamped: ${n.textContent.slice(0, 30)}`);
+          continue;
+        }
+        // 1px of tolerance for sub-pixel rounding in the layout engine.
+        if (n.scrollWidth > n.clientWidth + 1 && style.overflow === 'hidden') {
+          offenders.push(`clipped: ${n.textContent.slice(0, 30)}`);
+        }
+        if (n.scrollHeight > n.clientHeight + 1 && style.overflowY === 'hidden') {
+          offenders.push(`cut vertically: ${n.textContent.slice(0, 30)}`);
+        }
+      }
+      return offenders;
+    });
+    check(`no truncated text at ${label} scale`, bad.length === 0, bad.slice(0, 3).join(' | '));
+  };
+
+  for (const [scaleKey, scaleName] of [['D', 'day'], ['W', 'week'], ['M', 'month'], ['Q', 'quarter'], ['Y', 'year']]) {
+    await page.locator('#toolbar .cx-seg button', { hasText: new RegExp(`^${scaleKey}$`) }).first().click();
+    await page.waitForTimeout(400);
+    await truncationAudit(scaleName);
+  }
+
+  // Long text must survive too: a title nobody would fit in a bar.
+  await page.locator('.tl-obj.shape-bar').first().click();
+  await page.waitForTimeout(250);
+  const longTitle = 'Interlocking route locking regression verification for the northern approach';
+  const longBox = page.locator('#inspector .cx-section input[type="text"]').first();
+  await longBox.click();
+  await longBox.fill('');
+  await page.keyboard.type(longTitle, { delay: 4 });
+  await page.locator('#canvas-frame').click({ position: { x: 400, y: 40 } });
+  await page.waitForTimeout(500);
+
+  const rendered = await page.evaluate((expected) => {
+    // data-label carries "title — subtitle", so match on the title prefix.
+    const node = document.querySelector(`.tl-obj[data-label^="${expected.replace(/"/g, '\\"')}"]`);
+    if (!node) return { found: false, text: '(object not rendered)' };
+    // Every word of the title must appear among the wrapped lines — that is
+    // what "nothing is hidden" means in practice.
+    const lines = Array.from(node.querySelectorAll('.ob-line')).map((n) => n.textContent);
+    const joined = lines.join(' ').replace(/\s+/g, ' ').trim();
+    const missing = expected.split(/\s+/).filter((word) => !joined.includes(word));
+    return { found: missing.length === 0, text: missing.length ? `missing: ${missing.join(', ')}` : joined, lines: lines.length };
+  }, longTitle);
+  check(
+    `a very long title renders in full across ${rendered.lines || '?'} wrapped lines`,
+    rendered.found,
+    rendered.text.slice(0, 70)
+  );
+  await truncationAudit('long-title');
 
   console.log('\nDock panes');
   const panes = ['lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links', 'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'settings'];
@@ -331,8 +399,8 @@ async function main() {
 
   console.log('\nPersistence');
   await page.evaluate(() => document.querySelectorAll('.cx-modal-overlay').forEach((n) => n.remove()));
-  // The typing checks renamed this bar earlier in the run.
-  await page.locator('.tl-obj.shape-bar').filter({ hasText: 'Wayside Retrofit Alpha' }).first().click();
+  // Earlier checks renamed several bars, so just take the first one there is.
+  await page.locator('.tl-obj.shape-bar').first().click();
   await page.waitForTimeout(200);
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');

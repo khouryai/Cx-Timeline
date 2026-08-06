@@ -46,8 +46,15 @@ quarter, year** — that the ruler selects automatically as you zoom.
 | Fit everything | <kbd>Ctrl</kbd>+<kbd>0</kbd> |
 | Go to today | <kbd>T</kbd> |
 
-Gridlines, weekend shading and grid density are all configurable, and dragged
-dates snap to day, working day, week, month or quarter — or nothing at all.
+Gridlines, weekend shading and grid density are all configurable. Snapping
+(day, working day, week, month, quarter, or off) governs dragging, resizing
+and keyboard nudging alike — an arrow key steps one snap unit.
+
+**Labels are never truncated.** At every zoom, text either wraps inside its
+bar or moves to a full wrapped block beside it; rows and lanes grow to fit,
+and packing reserves the space a label needs so two can never overprint. Ruler
+labels are spaced out rather than shortened. The same rules apply to SVG and
+PDF output.
 
 ### Lanes
 

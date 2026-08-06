@@ -7,7 +7,13 @@
  * exporter, the PDF writer and the minimap — so what you export is exactly
  * what you saw.
  *
- * Imports: util, dates, model, store, viewport.
+ * Labels are never clipped, ellipsised or hidden at any zoom. That constraint
+ * drives the whole design here: every label is measured before it is placed,
+ * a label that will not fit inside its bar is moved beside it, packing
+ * reserves the space the label occupies as well as the bar, and rows and
+ * lanes grow to whatever height the wrapped text needs.
+ *
+ * Imports: util, dates, model, store, viewport, text.
  */
 
 import { clamp } from '../core/util.js';
@@ -15,123 +21,341 @@ import { MS_DAY } from '../core/dates.js';
 import { TYPES, objectRange } from '../core/model.js';
 import { getDoc, orderedLanes, getLane } from '../core/store.js';
 import { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } from './viewport.js';
+import { fontString, textWidth, wrapText, fitWidth } from './text.js';
+
+/* ── Metrics ───────────────────────────────────────────────────────────── */
 
 /** Vertical padding inside a lane band. */
 const LANE_PAD = 7;
-/** Height of a stacked row inside a lane. */
+/** Smallest a packed row may be. */
 export const ROW_HEIGHT = 24;
 /** Gap between stacked rows. */
-const ROW_GAP = 3;
+const ROW_GAP = 4;
 /** Minimum drawn width of a bar so a one-day task stays clickable. */
 const MIN_BAR_PX = 6;
-/** Point objects (milestones, markers) occupy a fixed square. */
+/** Point objects (milestones, markers) occupy a fixed square glyph. */
 const POINT_SIZE = 26;
+/** Horizontal padding inside a bar's label. */
+const LABEL_PAD_X = 8;
+/** Vertical padding around a wrapped label inside a bar. */
+const LABEL_PAD_Y = 4;
+/** Gap between a bar and a label placed beside it. */
+const OUTSIDE_GAP = 7;
+/** Widest a label placed beside a bar may be before it wraps. */
+const OUTSIDE_MAX_W = 250;
+/** A bar narrower than this never holds its label internally. */
+const MIN_INSIDE_W = 54;
+/** Above this many wrapped lines, a label moves outside rather than stack up. */
+const MAX_INSIDE_LINES = 3;
+/** Space an icon takes inside a bar label. */
+const ICON_W = 18;
+/** Space the percentage readout takes inside a bar label. */
+const PCT_W = 30;
 
-/**
- * Vertical geometry for every visible lane.
- * @returns {{lanes: Array, totalHeight: number, byId: Map}}
- */
-export function laneLayout() {
-  const lanes = orderedLanes(false);
-  const out = [];
-  const byId = new Map();
-  let y = 0;
+/* ── Fonts ─────────────────────────────────────────────────────────────── */
 
-  for (const lane of lanes) {
-    const height = lane.collapsed ? 26 : lane.height;
-    const entry = { lane, id: lane.id, y, height, contentY: y + LANE_PAD, contentH: Math.max(10, height - LANE_PAD * 2) };
-    out.push(entry);
-    byId.set(lane.id, entry);
-    y += height;
-  }
-
-  return { lanes: out, totalHeight: y, byId };
+function titleFont(obj) {
+  const style = obj.style || {};
+  return fontString({
+    size: style.fontSize || 12,
+    weight: style.bold ? 700 : 500,
+    italic: !!style.italic,
+    family: style.font || null,
+  });
 }
 
+function subtitleFont(obj) {
+  const style = obj.style || {};
+  return fontString({
+    size: Math.max(9, Math.round((style.fontSize || 12) * 0.84)),
+    weight: 400,
+    italic: !!style.italic,
+    family: style.font || null,
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Label measurement
+   ═══════════════════════════════════════════════════════════════════════ */
+
 /**
- * Assign a stacking row to every object in a lane so overlapping bars sit
- * above one another instead of on top of one another.
+ * Decide where an object's label goes and how much room it needs.
  *
- * Objects keep an explicit `row` when the user has dragged them vertically;
- * otherwise a first-fit packer places them on the lowest free row. Packing
- * runs in start order, which keeps the result stable as the plan is edited.
+ * `placement` is one of:
+ *   'inside'  — wrapped within the bar
+ *   'outside' — wrapped in a block to the right of a bar too narrow to hold it
+ *   'below' / 'above' — centred under (or over) a point glyph
+ *   'fill'    — free-form annotation; the whole object grows to fit the text
  */
-export function packRows(objects, { minGapMs = 0, pointPadMs = MS_DAY } = {}) {
-  const sorted = objects.slice().sort((a, b) => a.start - b.start || a.z - b.z);
-  const rowEnds = []; // last occupied end (ms) per row
+export function measureLabel(obj, barWidthPx) {
+  const def = TYPES[obj.type] || TYPES.activity;
+  const shape = def.shape;
+  const title = String(obj.title || '');
+  const subtitle = String(obj.subtitle || '').trim();
+  const tFont = titleFont(obj);
+  const sFont = subtitleFont(obj);
+
+  /* Point objects: the label always sits outside the glyph, centred. */
+  if (!def.duration) {
+    const fitted = fitWidth(title, tFont, { maxWidth: 200, maxLines: 3, minWidth: 40 });
+    const titleWrap = wrapText(title, fitted.width, tFont);
+    const subWrap = subtitle ? wrapText(subtitle, Math.max(fitted.width, 90), sFont) : null;
+    const width = Math.max(titleWrap.width, subWrap ? subWrap.width : 0);
+    const height = titleWrap.height + (subWrap ? subWrap.height : 0);
+
+    return {
+      placement: shape === 'release' ? 'above' : 'below',
+      lines: titleWrap.lines,
+      subLines: subWrap ? subWrap.lines : [],
+      lineHeight: titleWrap.lineHeight,
+      subLineHeight: subWrap ? subWrap.lineHeight : 0,
+      width: Math.ceil(width),
+      height: Math.ceil(height),
+      // Centred text spreads equally either side of the glyph.
+      extraLeft: Math.ceil(width / 2) + 4,
+      extraRight: Math.ceil(width / 2) + 4,
+      extraBelow: shape === 'release' ? 0 : Math.ceil(height) + 4,
+      extraAbove: shape === 'release' ? Math.ceil(height) + 4 : 0,
+    };
+  }
+
+  /* Free-form annotations: the box grows around the text. */
+  if (shape === 'sticky' || shape === 'text' || shape === 'callout' || shape === 'image') {
+    const inner = Math.max(40, barWidthPx - LABEL_PAD_X * 2);
+    const titleWrap = wrapText(title, inner, tFont);
+    const subWrap = subtitle ? wrapText(subtitle, inner, sFont) : null;
+    return {
+      placement: 'fill',
+      lines: titleWrap.lines,
+      subLines: subWrap ? subWrap.lines : [],
+      lineHeight: titleWrap.lineHeight,
+      subLineHeight: subWrap ? subWrap.lineHeight : 0,
+      width: Math.ceil(Math.max(titleWrap.width, subWrap ? subWrap.width : 0)),
+      height: Math.ceil(titleWrap.height + (subWrap ? subWrap.height : 0)),
+      extraLeft: 0,
+      extraRight: 0,
+      extraBelow: 0,
+      extraAbove: 0,
+    };
+  }
+
+  /* Bars and bands: inside when the text fits, beside the bar when it does not. */
+  const reserved = LABEL_PAD_X * 2 + (obj.icon ? ICON_W : 0) + (def.progress && obj.progress > 0 ? PCT_W : 0);
+  const inner = barWidthPx - reserved;
+
+  if (inner >= MIN_INSIDE_W) {
+    const titleWrap = wrapText(title, inner, tFont);
+    const subWrap = subtitle ? wrapText(subtitle, inner, sFont) : null;
+    const totalLines = titleWrap.lines.length + (subWrap ? subWrap.lines.length : 0);
+
+    if (totalLines <= MAX_INSIDE_LINES) {
+      return {
+        placement: 'inside',
+        lines: titleWrap.lines,
+        subLines: subWrap ? subWrap.lines : [],
+        lineHeight: titleWrap.lineHeight,
+        subLineHeight: subWrap ? subWrap.lineHeight : 0,
+        width: Math.ceil(Math.max(titleWrap.width, subWrap ? subWrap.width : 0)),
+        height: Math.ceil(titleWrap.height + (subWrap ? subWrap.height : 0)),
+        extraLeft: 0,
+        extraRight: 0,
+        extraBelow: 0,
+        extraAbove: 0,
+      };
+    }
+  }
+
+  const fitted = fitWidth(title, tFont, { maxWidth: OUTSIDE_MAX_W, maxLines: 3, minWidth: 70 });
+  const titleWrap = wrapText(title, fitted.width, tFont);
+  const subWrap = subtitle ? wrapText(subtitle, Math.max(fitted.width, 90), sFont) : null;
+  const width = Math.ceil(Math.max(titleWrap.width, subWrap ? subWrap.width : 0));
+  const height = Math.ceil(titleWrap.height + (subWrap ? subWrap.height : 0));
+
+  return {
+    placement: 'outside',
+    lines: titleWrap.lines,
+    subLines: subWrap ? subWrap.lines : [],
+    lineHeight: titleWrap.lineHeight,
+    subLineHeight: subWrap ? subWrap.lineHeight : 0,
+    width,
+    height,
+    extraLeft: 0,
+    extraRight: width + OUTSIDE_GAP + 4,
+    extraBelow: 0,
+    extraAbove: 0,
+  };
+}
+
+/** Height one object needs on its packed row, label included. */
+function rowHeightFor(obj, label) {
+  const def = TYPES[obj.type] || TYPES.activity;
+
+  if (!def.duration) {
+    return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove);
+  }
+  if (label.placement === 'fill') {
+    return Math.max(46, label.height + LABEL_PAD_Y * 2 + 8);
+  }
+  if (label.placement === 'outside') {
+    // The bar itself stays slim; the row must still clear the label beside it.
+    return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2);
+  }
+  return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Packing
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Assign a stacking row to every object in a lane so neither bars nor their
+ * labels overlap.
+ *
+ * The occupied span of an object is the bar plus whatever its label needs on
+ * either side, converted from pixels to time at the current zoom. That is
+ * what guarantees a label placed beside a narrow bar can never be overprinted
+ * by the next object along.
+ *
+ * Objects keep an explicit `row` when the user has set one; otherwise a
+ * first-fit packer places them on the lowest free row, in start order, which
+ * keeps the result stable as the plan is edited.
+ */
+export function packRows(entries, { minGapPx = 6 } = {}) {
+  const sorted = entries.slice().sort((a, b) => a.obj.start - b.obj.start || a.obj.z - b.obj.z);
+  const rowEnds = []; // last occupied end (px) per row
   const assigned = new Map();
 
-  for (const obj of sorted) {
-    const { start, end } = objectRange(obj);
-    // A milestone or risk pin draws as a small glyph but reads as a centred
-    // label several times wider, so it is packed against the width of that
-    // label — otherwise two markers a few days apart overprint each other.
-    const isPoint = !TYPES[obj.type]?.duration;
-    const labelPad = isPoint ? Math.max(pointPadMs, pointPadMs * Math.min(1.6, (obj.title || '').length / 18)) : 0;
-    const from = isPoint ? start - labelPad / 2 : start;
-    const to = isPoint ? end + labelPad / 2 : end;
+  for (const entry of sorted) {
+    const { obj, label, barWidth } = entry;
+    const startPx = msToPx(obj.start);
+    const hasDuration = !!TYPES[obj.type]?.duration;
+
+    const from = (hasDuration ? startPx : startPx - POINT_SIZE / 2) - label.extraLeft;
+    const to = (hasDuration ? startPx + barWidth : startPx + POINT_SIZE / 2) + label.extraRight;
 
     if (Number.isFinite(obj.row) && obj.row > 0) {
-      assigned.set(obj.id, obj.row);
-      rowEnds[obj.row] = Math.max(rowEnds[obj.row] || -Infinity, to + minGapMs);
+      const row = Math.min(obj.row, 24);
+      assigned.set(obj.id, row);
+      rowEnds[row] = Math.max(rowEnds[row] ?? -Infinity, to + minGapPx);
       continue;
     }
 
     let row = 0;
-    while (row < rowEnds.length && rowEnds[row] > from) row++;
-    rowEnds[row] = to + minGapMs;
+    while (row < rowEnds.length && (rowEnds[row] ?? -Infinity) > from) row++;
+    rowEnds[row] = to + minGapPx;
     assigned.set(obj.id, row);
   }
 
-  const rows = Math.max(1, rowEnds.length);
-  return { assigned, rows };
+  // Explicit rows can leave gaps; normalise the count to the highest used.
+  let rows = 0;
+  for (const row of assigned.values()) rows = Math.max(rows, row + 1);
+  return { assigned, rows: Math.max(1, rows) };
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   Full layout
+   ═══════════════════════════════════════════════════════════════════════ */
+
 /**
- * The full render model for the current frame.
+ * The render model for the current frame.
  *
  * `filterFn` receives an object and returns true when it passes the active
  * filters; failing objects are still laid out (so the plan does not reflow as
  * filters change) but are marked `dimmed`.
  */
-export function computeLayout({ filterFn = null, includeOffscreen = false } = {}) {
+export function computeLayout({ filterFn = null, includeOffscreen = false, gutterWidth = 190 } = {}) {
   const doc = getDoc();
-  const geometry = laneLayout();
-  const { from, to } = visibleRange();
+  const lanes = orderedLanes(false);
   const rects = [];
   const byId = new Map();
 
-  for (const laneEntry of geometry.lanes) {
-    const laneObjects = doc.objects.filter((o) => o.lane === laneEntry.id && !o.hidden);
-    if (!laneObjects.length) continue;
+  const laneEntries = [];
+  let y = 0;
 
-    // Convert a comfortable label width in pixels into a time span, so
-    // clearance stays visually constant as the user zooms.
-    const { assigned, rows } = packRows(laneObjects, { pointPadMs: Math.abs(pxToDuration(96)) });
-    const collapsed = laneEntry.lane.collapsed;
+  for (const lane of lanes) {
+    const laneObjects = doc.objects.filter((o) => o.lane === lane.id && !o.hidden);
 
-    // Distribute the lane's content height across the packed rows, but never
-    // squeeze a row below a legible height — the lane grows visually instead.
-    const usable = laneEntry.contentH;
-    const rowH = collapsed ? Math.max(8, usable) : clamp(Math.floor((usable - (rows - 1) * ROW_GAP) / rows), 12, 44);
+    // Measure every object in the lane, not just the visible ones: row heights
+    // must not change as the plan is scrolled sideways.
+    const measured = laneObjects.map((obj) => {
+      const hasDuration = !!TYPES[obj.type]?.duration;
+      const barWidth = hasDuration
+        ? Math.max(MIN_BAR_PX, durationToPx(Math.max(obj.end - obj.start, MS_DAY * 0.25)))
+        : POINT_SIZE;
+      const label = measureLabel(obj, barWidth);
+      return { obj, label, barWidth, height: rowHeightFor(obj, label) };
+    });
 
-    for (const obj of laneObjects) {
-      const visible = includeOffscreen || rangeVisible(obj.start, TYPES[obj.type]?.duration ? obj.end : obj.start, 400);
+    const collapsed = lane.collapsed;
+    const { assigned, rows } = collapsed ? { assigned: new Map(measured.map((m) => [m.obj.id, 0])), rows: 1 } : packRows(measured);
+
+    // Each row is as tall as the tallest thing standing on it.
+    const rowHeights = new Array(rows).fill(ROW_HEIGHT);
+    if (!collapsed) {
+      for (const entry of measured) {
+        const row = assigned.get(entry.obj.id) || 0;
+        rowHeights[row] = Math.max(rowHeights[row], entry.height);
+      }
+    }
+
+    const rowTops = [];
+    let cursor = 0;
+    for (let r = 0; r < rows; r++) {
+      rowTops.push(cursor);
+      cursor += rowHeights[r] + ROW_GAP;
+    }
+    const contentHeight = Math.max(ROW_HEIGHT, cursor - ROW_GAP);
+
+    // The lane's stored height is a minimum: it grows to fit its content and
+    // its own name in the gutter, and never shrinks below what the user set.
+    const gutterHeight = laneLabelHeight(lane, gutterWidth);
+    const height = collapsed
+      ? 26
+      : Math.max(lane.height, contentHeight + LANE_PAD * 2, gutterHeight);
+
+    const entry = {
+      lane,
+      id: lane.id,
+      y,
+      height,
+      contentY: y + LANE_PAD,
+      contentH: Math.max(10, height - LANE_PAD * 2),
+      rowTops,
+      rowHeights,
+      rows,
+    };
+    laneEntries.push(entry);
+    y += height;
+
+    for (const item of measured) {
+      const visible =
+        includeOffscreen ||
+        rangeVisible(
+          item.obj.start - pxToDuration(item.label.extraLeft),
+          (TYPES[item.obj.type]?.duration ? item.obj.end : item.obj.start) + pxToDuration(item.label.extraRight),
+          400
+        );
       if (!visible) continue;
 
-      const row = assigned.get(obj.id) || 0;
-      const rect = objectRect(obj, laneEntry, row, rowH, collapsed);
-      rect.dimmed = filterFn ? !filterFn(obj) : false;
+      const row = assigned.get(item.obj.id) || 0;
+      const rect = objectRect(item.obj, entry, row, item, collapsed);
+      rect.dimmed = filterFn ? !filterFn(item.obj) : false;
       rects.push(rect);
-      byId.set(obj.id, rect);
+      byId.set(item.obj.id, rect);
     }
   }
 
-  // Draw order: explicit z, then containers/bands behind everything else so
-  // they read as backdrops rather than covering the work they contain.
+  const geometry = {
+    lanes: laneEntries,
+    totalHeight: y,
+    byId: new Map(laneEntries.map((e) => [e.id, e])),
+  };
+
+  // Draw order: containers and bands behind everything else so they read as
+  // backdrops rather than covering the work they contain.
   rects.sort((a, b) => backdropRank(a) - backdropRank(b) || a.obj.z - b.obj.z);
 
-  return { geometry, rects, byId, range: { from, to } };
+  return { geometry, rects, byId, range: visibleRange() };
 }
 
 function backdropRank(rect) {
@@ -141,18 +365,29 @@ function backdropRank(rect) {
   return 2;
 }
 
+/** Height the lane's own name needs in the gutter, wrapped to its width. */
+function laneLabelHeight(lane, gutterWidth) {
+  const font = fontString({ size: 12, weight: 600 });
+  // Matches the gutter label's CSS box: 24px left inset, 30px right inset.
+  const available = Math.max(60, gutterWidth - 54);
+  const wrapped = wrapText(lane.name || '', available, font);
+  return wrapped.height + 22; // meta line plus padding
+}
+
 /**
  * Screen rectangle for one object.
  * Coordinates are canvas-relative: x from the viewport origin, y from the top
  * of the lane stack (the scroll container handles vertical offset).
  */
-export function objectRect(obj, laneEntry, row = 0, rowH = ROW_HEIGHT, collapsed = false) {
+export function objectRect(obj, laneEntry, row, measured, collapsed = false) {
   const def = TYPES[obj.type] || TYPES.activity;
   const shape = def.shape;
   const hasDuration = def.duration;
+  const label = measured.label;
 
   const x = msToPx(obj.start);
-  const rawWidth = hasDuration ? durationToPx(Math.max(obj.end - obj.start, MS_DAY * 0.25)) : 0;
+  const rowTop = laneEntry.contentY + (laneEntry.rowTops[row] ?? 0);
+  const rowH = laneEntry.rowHeights[row] ?? ROW_HEIGHT;
 
   let width;
   let left;
@@ -160,7 +395,7 @@ export function objectRect(obj, laneEntry, row = 0, rowH = ROW_HEIGHT, collapsed
   let top;
 
   if (hasDuration) {
-    width = Math.max(MIN_BAR_PX, rawWidth);
+    width = measured.barWidth;
     left = x;
   } else {
     width = POINT_SIZE;
@@ -168,27 +403,21 @@ export function objectRect(obj, laneEntry, row = 0, rowH = ROW_HEIGHT, collapsed
   }
 
   if (shape === 'band' || shape === 'container') {
-    // Bands span the whole lane rather than sitting on a packed row.
     top = laneEntry.y + 1;
     height = laneEntry.height - 2;
   } else if (collapsed) {
     top = laneEntry.y + 4;
     height = Math.max(8, laneEntry.height - 8);
-  } else {
-    top = laneEntry.contentY + row * (rowH + ROW_GAP);
+  } else if (!hasDuration) {
+    // Glyph sits above its label (or below it, for a release flag).
+    top = rowTop + label.extraAbove;
+    height = POINT_SIZE;
+  } else if (label.placement === 'fill') {
+    top = rowTop;
     height = rowH;
-    if (!hasDuration) {
-      // Point glyphs are centred on their row rather than filling it.
-      top = laneEntry.contentY + row * (rowH + ROW_GAP) + rowH / 2 - POINT_SIZE / 2;
-      height = POINT_SIZE;
-    }
-    if (shape === 'sticky' || shape === 'callout' || shape === 'text' || shape === 'image') {
-      // Free-form annotations get more vertical room than a schedule bar.
-      height = Math.max(height, obj.style?.height || 54);
-      top = laneEntry.contentY + row * (rowH + ROW_GAP);
-      const maxBottom = laneEntry.y + laneEntry.height - 4;
-      if (top + height > maxBottom) top = Math.max(laneEntry.contentY, maxBottom - height);
-    }
+  } else {
+    height = label.placement === 'outside' ? Math.min(rowH, Math.max(ROW_HEIGHT, label.lineHeight + LABEL_PAD_Y * 2)) : rowH;
+    top = rowTop + (rowH - height) / 2;
   }
 
   return {
@@ -198,6 +427,7 @@ export function objectRect(obj, laneEntry, row = 0, rowH = ROW_HEIGHT, collapsed
     laneEntry,
     shape,
     row,
+    label,
     x: left,
     y: top,
     w: width,
@@ -207,10 +437,15 @@ export function objectRect(obj, laneEntry, row = 0, rowH = ROW_HEIGHT, collapsed
     centerX: hasDuration ? left + width / 2 : x,
     centerY: top + height / 2,
     hasDuration,
-    truncatedLeft: rawWidth > 0 && left < -2000,
-    labelOutside: hasDuration && width < 52,
+    /** Full extent including the label — used for hit-testing and marquees. */
+    labelLeft: left - label.extraLeft,
+    labelRight: left + width + label.extraRight,
   };
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Queries
+   ═══════════════════════════════════════════════════════════════════════ */
 
 /** Which lane sits at a given canvas y coordinate. */
 export function laneAtY(geometry, y) {
@@ -221,18 +456,20 @@ export function laneAtY(geometry, y) {
 }
 
 /** Which packed row within a lane a canvas y coordinate falls on. */
-export function rowAtY(laneEntry, y, rows = 1) {
-  if (!laneEntry) return 0;
-  const usable = laneEntry.contentH;
-  const rowH = clamp(Math.floor((usable - (rows - 1) * ROW_GAP) / rows), 12, 44);
+export function rowAtY(laneEntry, y) {
+  if (!laneEntry || !laneEntry.rowTops.length) return 0;
   const offset = y - laneEntry.contentY;
-  return clamp(Math.floor(offset / (rowH + ROW_GAP)), 0, Math.max(0, rows - 1));
+  for (let r = laneEntry.rowTops.length - 1; r >= 0; r--) {
+    if (offset >= laneEntry.rowTops[r]) return r;
+  }
+  return 0;
 }
 
 /**
  * Hit-test: the topmost object rectangle containing a canvas point.
  * Iterates back to front so the object drawn last wins, matching what the
- * user sees.
+ * user sees. Only the bar or glyph is a target — a label beside a bar is
+ * informative, not a handle.
  */
 export function hitTest(layout, x, y, tolerance = 0) {
   for (let i = layout.rects.length - 1; i >= 0; i--) {
@@ -281,4 +518,20 @@ export function laneEntryFor(geometry, laneId) {
 /** Convenience: the lane record an object belongs to. */
 export function laneOf(obj) {
   return getLane(obj.lane);
+}
+
+/** Vertical geometry only — used where object placement is irrelevant. */
+export function laneLayout() {
+  const lanes = orderedLanes(false);
+  const out = [];
+  const byId = new Map();
+  let y = 0;
+  for (const lane of lanes) {
+    const height = lane.collapsed ? 26 : lane.height;
+    const entry = { lane, id: lane.id, y, height, contentY: y + LANE_PAD, contentH: Math.max(10, height - LANE_PAD * 2) };
+    out.push(entry);
+    byId.set(lane.id, entry);
+    y += height;
+  }
+  return { lanes: out, totalHeight: y, byId };
 }

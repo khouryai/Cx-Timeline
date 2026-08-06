@@ -14,10 +14,11 @@
  * Imports: util, dates, model, analysis.
  */
 
-import { clamp, withAlpha, readableInk, truncate } from '../core/util.js';
+import { clamp, withAlpha, readableInk } from '../core/util.js';
 import { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } from '../core/dates.js';
 import { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays } from '../core/model.js';
 import { criticalPath } from '../core/analysis.js';
+import { fontString, textWidth, wrapText, fitWidth } from '../timeline/text.js';
 
 /** Layout constants for exported drawings, in points/pixels. */
 const M = {
@@ -27,11 +28,78 @@ const M = {
   headerH: 62,
   lanePadY: 6,
   rowH: 20,
-  rowGap: 3,
+  rowGap: 4,
   barMinW: 3,
   pointR: 7,
   footerH: 26,
+  labelPadX: 5,
+  outsideGap: 5,
+  outsideMaxW: 210,
+  minInsideW: 44,
 };
+
+/* Fonts used by exported drawings, measured the same way the canvas is. */
+const EXPORT_FONTS = {
+  title: fontString({ size: 8.5, weight: 600 }),
+  titleBold: fontString({ size: 8.5, weight: 700 }),
+  sub: fontString({ size: 7, weight: 400 }),
+  lane: fontString({ size: 9.5, weight: 600 }),
+};
+const EXPORT_LINE_H = 10;
+const EXPORT_SUB_LINE_H = 8.5;
+
+/**
+ * Where an exported object's label goes, and the room it needs.
+ *
+ * Mirrors the on-screen rule exactly — inside when the text fits, beside the
+ * bar when it does not, centred under a point glyph — so a printed plan reads
+ * the same as the screen and, like the screen, never truncates a label.
+ */
+function exportLabel(obj, barWidth) {
+  const def = TYPES[obj.type] || TYPES.activity;
+  const title = String(obj.title || '');
+  const subtitle = String(obj.subtitle || '').trim();
+  const font = obj.style?.bold ? EXPORT_FONTS.titleBold : EXPORT_FONTS.title;
+
+  const build = (width, placement) => {
+    const t = wrapText(title, width, font, { lineHeight: EXPORT_LINE_H });
+    const sub = subtitle ? wrapText(subtitle, width, EXPORT_FONTS.sub, { lineHeight: EXPORT_SUB_LINE_H }) : null;
+    return {
+      placement,
+      lines: t.lines,
+      subLines: sub ? sub.lines : [],
+      width: Math.ceil(Math.max(t.width, sub ? sub.width : 0)),
+      height: t.lines.length * EXPORT_LINE_H + (sub ? sub.lines.length * EXPORT_SUB_LINE_H : 0),
+    };
+  };
+
+  if (!def.duration) {
+    const fitted = fitWidth(title, font, { maxWidth: 150, maxLines: 3, minWidth: 34 });
+    const label = build(fitted.width, def.shape === 'release' ? 'above' : 'below');
+    label.extraLeft = label.width / 2 + 3;
+    label.extraRight = label.width / 2 + 3;
+    label.extraVert = label.height + 4;
+    return label;
+  }
+
+  const inner = barWidth - M.labelPadX * 2;
+  if (inner >= M.minInsideW) {
+    const label = build(inner, 'inside');
+    if (label.lines.length + label.subLines.length <= 3) {
+      label.extraLeft = 0;
+      label.extraRight = 0;
+      label.extraVert = 0;
+      return label;
+    }
+  }
+
+  const fitted = fitWidth(title, font, { maxWidth: M.outsideMaxW, maxLines: 3, minWidth: 60 });
+  const label = build(fitted.width, 'outside');
+  label.extraLeft = 0;
+  label.extraRight = label.width + M.outsideGap + 3;
+  label.extraVert = 0;
+  return label;
+}
 
 /**
  * Resolve the palette for an export. Themes live in CSS, so we read the
@@ -127,10 +195,38 @@ export function buildScene(doc, opts = {}) {
       .filter((o) => o.lane === lane.id && !o.hidden && (!filter || filter(o)))
       .sort((a, b) => a.start - b.start);
 
-    const rows = packRowsForExport(objects);
-    const rowCount = Math.max(1, rows.rows);
-    const height = Math.max(34, rowCount * (M.rowH + M.rowGap) + M.lanePadY * 2);
-    laneGeom.push({ lane, y, height, objects, rows: rows.assigned });
+    const measured = objects.map((obj) => {
+      const hasDuration = !!TYPES[obj.type]?.duration;
+      const barWidth = hasDuration
+        ? Math.max(M.barMinW, ((obj.end - obj.start) / MS_DAY) * pxPerDay)
+        : M.pointR * 2;
+      const label = exportLabel(obj, barWidth);
+      const height = hasDuration
+        ? Math.max(M.rowH, label.height + 5)
+        : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
+      return { obj, label, barWidth, height };
+    });
+
+    const packed = packRowsForExport(measured, msToX);
+    const rowHeights = new Array(packed.rows).fill(M.rowH);
+    for (const item of measured) {
+      const row = packed.assigned.get(item.obj.id) || 0;
+      rowHeights[row] = Math.max(rowHeights[row], item.height);
+    }
+    const rowTops = [];
+    let cursor = 0;
+    for (let r = 0; r < packed.rows; r++) {
+      rowTops.push(cursor);
+      cursor += rowHeights[r] + M.rowGap;
+    }
+
+    const laneNameWrap = wrapText(lane.name || '', M.gutter - 24, EXPORT_FONTS.lane, { lineHeight: 11 });
+    const height = Math.max(
+      34,
+      Math.max(M.rowH, cursor - M.rowGap) + M.lanePadY * 2,
+      laneNameWrap.lines.length * 11 + 20
+    );
+    laneGeom.push({ lane, y, height, objects, measured, rows: packed.assigned, rowTops, laneNameWrap });
     y += height;
   }
 
@@ -202,7 +298,11 @@ export function buildScene(doc, opts = {}) {
 
   const lowerTicks = ticks(scaleId, extent.start, extent.end, { weekStart: doc.settings.weekStart });
   const tickWidth = lowerTicks.length > 1 ? msToX(lowerTicks[1].start) - msToX(lowerTicks[0].start) : 40;
-  const labelStride = Math.max(1, Math.ceil(24 / Math.max(tickWidth, 1)));
+  // Label every Nth tick, sized from the measured widest label, so exported
+  // ruler labels are spaced out rather than shortened.
+  const tickFont = fontString({ size: 7.5, weight: 500, mono: true });
+  const widestTick = lowerTicks.reduce((max, t) => Math.max(max, textWidth(t.label, tickFont)), 0);
+  const labelStride = Math.max(1, Math.ceil((widestTick + 10) / Math.max(tickWidth, 1)));
 
   lowerTicks.forEach((tick, i) => {
     const x = msToX(tick.start);
@@ -244,30 +344,24 @@ export function buildScene(doc, opts = {}) {
     }
     items.push({ type: 'line', x1: 0, y1: entry.y + entry.height, x2: width, y2: entry.y + entry.height, stroke: palette.grid, strokeWidth: 0.6 });
     items.push({ type: 'rect', x: 0, y: entry.y, w: 3, h: entry.height, fill: laneColor });
-    items.push({
-      type: 'text',
-      x: 12,
-      y: entry.y + 15,
-      text: truncate(entry.lane.name, 26),
-      size: 9.5,
-      weight: 600,
-      fill: palette.text,
+    entry.laneNameWrap.lines.forEach((line, i) => {
+      items.push({ type: 'text', x: 12, y: entry.y + 15 + i * 11, text: line, size: 9.5, weight: 600, fill: palette.text });
     });
     items.push({
       type: 'text',
       x: 12,
-      y: entry.y + 27,
+      y: entry.y + 16 + entry.laneNameWrap.lines.length * 11,
       text: `${entry.objects.length} item${entry.objects.length === 1 ? '' : 's'}`,
       size: 7,
       fill: palette.textSubtle,
       family: 'mono',
     });
 
-    for (const obj of entry.objects) {
-      const row = entry.rows.get(obj.id) || 0;
-      const top = entry.y + M.lanePadY + row * (M.rowH + M.rowGap);
-      const rect = drawObject(items, obj, entry.lane, { top, msToX, palette, pxPerDay, settings: doc.settings });
-      if (rect) rectsById.set(obj.id, rect);
+    for (const item of entry.measured) {
+      const row = entry.rows.get(item.obj.id) || 0;
+      const top = entry.y + M.lanePadY + (entry.rowTops[row] ?? 0);
+      const rect = drawObject(items, item, entry.lane, { top, msToX, palette, settings: doc.settings });
+      if (rect) rectsById.set(item.obj.id, rect);
     }
   });
 
@@ -347,18 +441,48 @@ export function buildScene(doc, opts = {}) {
 
 /* ── Object drawing ────────────────────────────────────────────────────── */
 
-function drawObject(items, obj, lane, { top, msToX, palette, pxPerDay, settings }) {
+/**
+ * Draw one object plus its label.
+ *
+ * The label was measured and placed by `exportLabel`; this only prints the
+ * lines it was given, so nothing is shortened on the way to paper.
+ */
+function drawObject(items, measured, lane, { top, msToX, palette, settings }) {
+  const { obj, label, barWidth } = measured;
   const def = TYPES[obj.type] || TYPES.activity;
   const color = solid(objectColor(obj, lane), palette);
   const style = obj.style || {};
   const opacity = style.opacity ?? 1;
 
+  /** Print a wrapped block from a given baseline. */
+  const printBlock = (x, baseline, ink, anchor) => {
+    let y = baseline;
+    for (const line of label.lines) {
+      items.push({
+        type: 'text',
+        x,
+        y,
+        text: line,
+        size: 8.5,
+        weight: style.bold ? 700 : 600,
+        fill: ink,
+        anchor,
+        opacity,
+      });
+      y += EXPORT_LINE_H;
+    }
+    for (const line of label.subLines) {
+      items.push({ type: 'text', x, y, text: line, size: 7, fill: ink, anchor, opacity: opacity * 0.8 });
+      y += EXPORT_SUB_LINE_H;
+    }
+  };
+
   if (def.duration) {
     const x = msToX(obj.start);
-    const w = Math.max(M.barMinW, msToX(obj.end) - x);
-    const h = def.shape === 'band' || def.shape === 'container' ? M.rowH : M.rowH;
-    const radius = Math.min(style.radius ?? 4, h / 2);
     const isBand = def.shape === 'band' || def.shape === 'container';
+    const h = label.placement === 'inside' ? Math.max(M.rowH, label.height + 5) : M.rowH;
+    const w = Math.max(M.barMinW, barWidth);
+    const radius = Math.min(style.radius ?? 4, h / 2);
 
     items.push({
       type: 'rect',
@@ -379,51 +503,15 @@ function drawObject(items, obj, lane, { top, msToX, palette, pxPerDay, settings 
       items.push({ type: 'rect', x, y: top, w: pw, h, fill: withAlpha('#ffffff', 0.3), radius, opacity });
     }
 
-    const ink = style.textColor || (isBand ? color : readableInk(color));
-    const subtitle = (obj.subtitle || '').trim();
-    const charBudget = Math.max(4, Math.floor(w / 5.4));
-    if (w > 26) {
-      // With a subtitle the label splits into two lines, matching what the
-      // canvas draws; without one it stays vertically centred.
-      if (subtitle && h >= 18) {
-        items.push({
-          type: 'text',
-          x: x + 5,
-          y: top + h / 2 - 0.6,
-          text: truncate(obj.title, charBudget),
-          size: Math.min(8.5, style.fontSize || 8.5),
-          weight: style.bold ? 700 : 600,
-          fill: ink,
-        });
-        items.push({
-          type: 'text',
-          x: x + 5,
-          y: top + h / 2 + 7.4,
-          text: truncate(subtitle, charBudget),
-          size: 7,
-          fill: ink,
-          opacity: 0.78,
-        });
-      } else {
-        items.push({
-          type: 'text',
-          x: x + 5,
-          y: top + h / 2 + 3.2,
-          text: truncate(obj.title, charBudget),
-          size: Math.min(9, style.fontSize || 9),
-          weight: style.bold ? 700 : 500,
-          fill: ink,
-        });
-      }
+    if (label.placement === 'inside') {
+      const ink = style.textColor || (isBand ? color : readableInk(color));
+      const blockH = label.lines.length * EXPORT_LINE_H + label.subLines.length * EXPORT_SUB_LINE_H;
+      printBlock(x + M.labelPadX, top + (h - blockH) / 2 + 7, ink, 'start');
     } else {
-      items.push({
-        type: 'text',
-        x: x + w + 4,
-        y: top + h / 2 + 3.2,
-        text: truncate(subtitle ? `${obj.title} · ${subtitle}` : obj.title, 46),
-        size: 8,
-        fill: palette.textMuted,
-      });
+      // Too narrow to hold the text: the full label sits beside the bar, in
+      // space the packer already reserved for it.
+      const blockH = label.lines.length * EXPORT_LINE_H + label.subLines.length * EXPORT_SUB_LINE_H;
+      printBlock(x + w + M.outsideGap, top + (h - blockH) / 2 + 7, palette.text, 'start');
     }
 
     return { x, right: x + w, cy: top + h / 2, bottom: top + h, top };
@@ -431,17 +519,20 @@ function drawObject(items, obj, lane, { top, msToX, palette, pxPerDay, settings 
 
   /* Point objects: milestone diamond, release flag, risk/issue pin. */
   const cx = msToX(obj.start);
-  const cy = top + M.rowH / 2;
+  const glyphTop = label.placement === 'above' ? top + label.extraVert : top;
+  const cy = glyphTop + M.pointR;
   const r = M.pointR;
 
   if (def.shape === 'release') {
     const statusColor = solid(style.fill || statusOf(obj.status).color, palette);
-    items.push({ type: 'rect', x: cx - 1, y: top, w: 2, h: M.rowH, fill: statusColor });
-    const label = obj.data?.version ? `v${obj.data.version}` : truncate(obj.title, 14);
-    const w = 10 + label.length * 5;
-    items.push({ type: 'rect', x: cx - w / 2, y: cy - 7, w, h: 14, fill: withAlpha(statusColor, 0.2), stroke: statusColor, strokeWidth: 0.8, radius: 3 });
-    items.push({ type: 'text', x: cx, y: cy + 3.2, text: label, size: 7.5, weight: 700, fill: statusColor, anchor: 'middle', family: 'mono' });
-    items.push({ type: 'text', x: cx, y: top - 3, text: truncate(obj.title, 26), size: 7.5, fill: palette.textMuted, anchor: 'middle' });
+    items.push({ type: 'rect', x: cx - 1, y: glyphTop, w: 2, h: r * 2, fill: statusColor });
+    const chip = obj.data?.version ? `v${obj.data.version}` : '';
+    if (chip) {
+      const chipW = textWidth(chip, EXPORT_FONTS.title) + 10;
+      items.push({ type: 'rect', x: cx - chipW / 2, y: cy - 7, w: chipW, h: 14, fill: withAlpha(statusColor, 0.2), stroke: statusColor, strokeWidth: 0.8, radius: 3 });
+      items.push({ type: 'text', x: cx, y: cy + 3.2, text: chip, size: 7.5, weight: 700, fill: statusColor, anchor: 'middle', family: 'mono' });
+    }
+    printBlock(cx, top + 8, palette.text, 'middle');
   } else if (def.shape === 'diamond') {
     items.push({
       type: 'polygon',
@@ -450,37 +541,39 @@ function drawObject(items, obj, lane, { top, msToX, palette, pxPerDay, settings 
       stroke: withAlpha(color, 0.9),
       strokeWidth: 0.8,
     });
-    items.push({ type: 'text', x: cx, y: cy + r + 9, text: truncate(obj.title, 30), size: 7.5, weight: 600, fill: palette.text, anchor: 'middle' });
-    if (obj.subtitle) {
-      items.push({ type: 'text', x: cx, y: cy + r + 18, text: truncate(obj.subtitle, 30), size: 6.5, fill: palette.textMuted, anchor: 'middle' });
-    }
+    printBlock(cx, cy + r + 8, palette.text, 'middle');
   } else {
     const severity = obj.data?.severity;
     const pinColor = severity === 'critical' || severity === 'high' ? palette.bad : color;
     items.push({ type: 'circle', cx, cy, r: r - 1, fill: pinColor, stroke: withAlpha(pinColor, 0.9), strokeWidth: 0.8 });
-    items.push({ type: 'text', x: cx, y: cy + r + 9, text: truncate(obj.title, 30), size: 7.5, fill: palette.text, anchor: 'middle' });
-    if (obj.subtitle) {
-      items.push({ type: 'text', x: cx, y: cy + r + 18, text: truncate(obj.subtitle, 30), size: 6.5, fill: palette.textMuted, anchor: 'middle' });
-    }
+    printBlock(cx, cy + r + 8, palette.text, 'middle');
   }
 
-  return { x: cx - r, right: cx + r, cy, bottom: top + M.rowH, top };
+  return { x: cx - r, right: cx + r, cy, bottom: glyphTop + r * 2, top: glyphTop };
 }
 
 /* ── Helpers ───────────────────────────────────────────────────────────── */
 
-function packRowsForExport(objects) {
+/**
+ * First-fit row packing over the *label* extent, not just the bar, so an
+ * exported label can never be overprinted by the next object along.
+ */
+function packRowsForExport(measured, msToX) {
   const rowEnds = [];
   const assigned = new Map();
-  for (const obj of objects) {
-    const hasDuration = !!TYPES[obj.type]?.duration;
-    const from = hasDuration ? obj.start : obj.start - MS_DAY * 2;
-    const to = hasDuration ? obj.end : obj.start + MS_DAY * 2;
+
+  for (const item of measured) {
+    const hasDuration = !!TYPES[item.obj.type]?.duration;
+    const startX = msToX(item.obj.start);
+    const from = (hasDuration ? startX : startX - M.pointR) - item.label.extraLeft;
+    const to = (hasDuration ? startX + item.barWidth : startX + M.pointR) + item.label.extraRight;
+
     let row = 0;
-    while (row < rowEnds.length && rowEnds[row] > from) row++;
-    rowEnds[row] = to;
-    assigned.set(obj.id, row);
+    while (row < rowEnds.length && (rowEnds[row] ?? -Infinity) > from) row++;
+    rowEnds[row] = to + 5;
+    assigned.set(item.obj.id, row);
   }
+
   return { assigned, rows: Math.max(1, rowEnds.length) };
 }
 

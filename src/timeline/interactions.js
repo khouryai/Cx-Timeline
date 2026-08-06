@@ -18,7 +18,7 @@ import { MS_DAY, snap as snapMs, fmtDate, toISO, addMonths, addWeeks, addWorking
 import { TYPES } from '../core/model.js';
 import * as store from '../core/store.js';
 import * as viewport from './viewport.js';
-import { hitTest, hitTestBox, laneAtY, packRows } from './layout.js';
+import { hitTest, hitTestBox, laneAtY } from './layout.js';
 import * as renderer from './renderer.js';
 import { previewPath } from './connectors.js';
 

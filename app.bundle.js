@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 35   Built: 2026-08-05T22:05:17.677Z
+ * Modules: 36   Built: 2026-08-06T01:42:33.564Z
  */
 (function () {
   'use strict';
@@ -4286,6 +4286,218 @@ __mods["core/query.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// timeline/text.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["timeline/text.js"] = function (__x, __req) {
+  /**
+   * Text measurement and wrapping.
+   *
+   * Nothing on the timeline is allowed to be clipped, ellipsised or hidden, at
+   * any zoom. Honouring that means the layout has to *know* how wide a label is
+   * before it decides where to put it and how tall to make the row — guesswork
+   * based on character counts is what produces the "…" this module exists to
+   * remove.
+   *
+   * Measurement goes through a detached canvas 2D context, which reports the
+   * same advance widths the DOM will use for the same font. Results are cached,
+   * because a zoom gesture re-measures every visible label on every frame.
+   *
+   * Leaf module: imports nothing.
+   */
+
+  let ctx = null;
+  let uiFamily = null;
+  let monoFamily = null;
+
+  const widthCache = new Map();
+  const wrapCache = new Map();
+  const MAX_CACHE = 12000;
+
+  function context() {
+    if (!ctx) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 8;
+      canvas.height = 8;
+      ctx = canvas.getContext('2d');
+    }
+    return ctx;
+  }
+
+  function readVar(name, fallback) {
+    try {
+      const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return value || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  /** The interface font stack, read once from the token sheet. */
+  function uiFontFamily() {
+    if (!uiFamily) uiFamily = readVar('--f-ui', "system-ui, sans-serif");
+    return uiFamily;
+  }
+
+  function monoFontFamily() {
+    if (!monoFamily) monoFamily = readVar('--f-mono', 'monospace');
+    return monoFamily;
+  }
+
+  /**
+   * Build a canvas `font` string.
+   * `family` may be a CSS stack; the canvas resolves it the same way the DOM does.
+   */
+  function fontString({ size = 12, weight = 500, family = null, italic = false, mono = false } = {}) {
+    const stack = family || (mono ? monoFontFamily() : uiFontFamily());
+    return `${italic ? 'italic ' : ''}${weight} ${size}px ${stack}`;
+  }
+
+  /**
+   * Discard cached metrics. Called when the theme changes, since a theme may
+   * swap the interface font (Engineering uses the monospace stack), and when a
+   * web font finishes loading and every width shifts.
+   */
+  function resetTextCache() {
+    uiFamily = null;
+    monoFamily = null;
+    widthCache.clear();
+    wrapCache.clear();
+  }
+
+  // A late-arriving web font silently invalidates every cached width, so drop
+  // the cache once loading settles.
+  if (typeof document !== 'undefined' && document.fonts?.ready) {
+    document.fonts.ready.then(() => resetTextCache()).catch(() => {});
+  }
+
+  /** Advance width of `text` in pixels. */
+  function textWidth(text, font) {
+    const key = `${font} ${text}`;
+    const hit = widthCache.get(key);
+    if (hit !== undefined) return hit;
+
+    const c = context();
+    c.font = font;
+    const width = c.measureText(text).width;
+
+    if (widthCache.size > MAX_CACHE) widthCache.clear();
+    widthCache.set(key, width);
+    return width;
+  }
+
+  /**
+   * Greedy word wrap.
+   *
+   * Breaks on whitespace, and hard-breaks any single word too long for the
+   * measure — a 40-character part number must still appear in full rather than
+   * overflow its box.
+   *
+   * @returns {{lines: string[], width: number, height: number, lineHeight: number}}
+   */
+  function wrapText(text, maxWidth, font, { lineHeight = null, maxLines = 0 } = {}) {
+    const source = String(text || '').trim();
+    const limit = Math.max(12, maxWidth);
+    const key = `${font} ${Math.round(limit)} ${maxLines} ${source}`;
+
+    const hit = wrapCache.get(key);
+    if (hit) return hit;
+
+    const size = fontSizeOf(font);
+    const lh = lineHeight || Math.round(size * 1.28);
+
+    let lines;
+    if (!source) {
+      lines = [];
+    } else if (textWidth(source, font) <= limit) {
+      lines = [source];
+    } else {
+      lines = [];
+      let current = '';
+
+      for (const word of source.split(/\s+/)) {
+        const candidate = current ? `${current} ${word}` : word;
+        if (textWidth(candidate, font) <= limit) {
+          current = candidate;
+          continue;
+        }
+        if (current) {
+          lines.push(current);
+          current = '';
+        }
+        // The word alone may still be too wide — split it across lines rather
+        // than letting it spill out of the box.
+        if (textWidth(word, font) > limit) {
+          let piece = '';
+          for (const ch of word) {
+            if (piece && textWidth(piece + ch, font) > limit) {
+              lines.push(piece);
+              piece = ch;
+            } else {
+              piece += ch;
+            }
+          }
+          current = piece;
+        } else {
+          current = word;
+        }
+      }
+      if (current) lines.push(current);
+    }
+
+    // `maxLines` is a hint used to decide placement, never to drop text: when
+    // the caller enforces it, it re-wraps at a wider measure instead.
+    const result = {
+      lines,
+      width: lines.reduce((max, line) => Math.max(max, textWidth(line, font)), 0),
+      height: Math.max(lh, lines.length * lh),
+      lineHeight: lh,
+      overflowed: maxLines > 0 && lines.length > maxLines,
+    };
+
+    if (wrapCache.size > MAX_CACHE) wrapCache.clear();
+    wrapCache.set(key, result);
+    return result;
+  }
+
+  function fontSizeOf(font) {
+    const match = /(\d+(?:\.\d+)?)px/.exec(font);
+    return match ? parseFloat(match[1]) : 12;
+  }
+
+  /**
+   * The narrowest measure, up to `maxWidth`, that fits `text` in `maxLines`.
+   *
+   * Used to size labels that sit beside an object: a two-word title should get
+   * a box just wide enough for it, not a fixed 240px block that pushes its
+   * neighbours away for no reason.
+   */
+  function fitWidth(text, font, { maxWidth = 260, maxLines = 3, minWidth = 60 } = {}) {
+    const full = textWidth(String(text || ''), font);
+    if (full <= maxWidth) return { width: Math.max(minWidth, Math.ceil(full)), lines: 1 };
+
+    // Aim for the number of lines that keeps the block roughly rectangular.
+    const target = Math.min(maxLines, Math.max(1, Math.ceil(full / maxWidth)));
+    const ideal = Math.min(maxWidth, Math.max(minWidth, Math.ceil(full / target) + 12));
+    const wrapped = wrapText(text, ideal, font);
+    return { width: Math.max(minWidth, Math.ceil(wrapped.width)), lines: wrapped.lines.length };
+  }
+
+  /** Total height a wrapped block occupies. */
+  function blockHeight(lineCount, lineHeight) {
+    return Math.max(1, lineCount) * lineHeight;
+  }
+
+  Object.defineProperty(__x, "uiFontFamily", { get: () => uiFontFamily, enumerable: true });
+  Object.defineProperty(__x, "monoFontFamily", { get: () => monoFontFamily, enumerable: true });
+  Object.defineProperty(__x, "fontString", { get: () => fontString, enumerable: true });
+  Object.defineProperty(__x, "resetTextCache", { get: () => resetTextCache, enumerable: true });
+  Object.defineProperty(__x, "textWidth", { get: () => textWidth, enumerable: true });
+  Object.defineProperty(__x, "wrapText", { get: () => wrapText, enumerable: true });
+  Object.defineProperty(__x, "fitWidth", { get: () => fitWidth, enumerable: true });
+  Object.defineProperty(__x, "blockHeight", { get: () => blockHeight, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // timeline/layout.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["timeline/layout.js"] = function (__x, __req) {
@@ -4298,7 +4510,13 @@ __mods["timeline/layout.js"] = function (__x, __req) {
    * exporter, the PDF writer and the minimap — so what you export is exactly
    * what you saw.
    *
-   * Imports: util, dates, model, store, viewport.
+   * Labels are never clipped, ellipsised or hidden at any zoom. That constraint
+   * drives the whole design here: every label is measured before it is placed,
+   * a label that will not fit inside its bar is moved beside it, packing
+   * reserves the space the label occupies as well as the bar, and rows and
+   * lanes grow to whatever height the wrapped text needs.
+   *
+   * Imports: util, dates, model, store, viewport, text.
    */
 
   const { clamp } = __req("core/util.js");
@@ -4306,123 +4524,341 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   const { TYPES, objectRange } = __req("core/model.js");
   const { getDoc, orderedLanes, getLane } = __req("core/store.js");
   const { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } = __req("timeline/viewport.js");
+  const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
+
+  /* ── Metrics ───────────────────────────────────────────────────────────── */
 
   /** Vertical padding inside a lane band. */
   const LANE_PAD = 7;
-  /** Height of a stacked row inside a lane. */
+  /** Smallest a packed row may be. */
   const ROW_HEIGHT = 24;
   /** Gap between stacked rows. */
-  const ROW_GAP = 3;
+  const ROW_GAP = 4;
   /** Minimum drawn width of a bar so a one-day task stays clickable. */
   const MIN_BAR_PX = 6;
-  /** Point objects (milestones, markers) occupy a fixed square. */
+  /** Point objects (milestones, markers) occupy a fixed square glyph. */
   const POINT_SIZE = 26;
+  /** Horizontal padding inside a bar's label. */
+  const LABEL_PAD_X = 8;
+  /** Vertical padding around a wrapped label inside a bar. */
+  const LABEL_PAD_Y = 4;
+  /** Gap between a bar and a label placed beside it. */
+  const OUTSIDE_GAP = 7;
+  /** Widest a label placed beside a bar may be before it wraps. */
+  const OUTSIDE_MAX_W = 250;
+  /** A bar narrower than this never holds its label internally. */
+  const MIN_INSIDE_W = 54;
+  /** Above this many wrapped lines, a label moves outside rather than stack up. */
+  const MAX_INSIDE_LINES = 3;
+  /** Space an icon takes inside a bar label. */
+  const ICON_W = 18;
+  /** Space the percentage readout takes inside a bar label. */
+  const PCT_W = 30;
 
-  /**
-   * Vertical geometry for every visible lane.
-   * @returns {{lanes: Array, totalHeight: number, byId: Map}}
-   */
-  function laneLayout() {
-    const lanes = orderedLanes(false);
-    const out = [];
-    const byId = new Map();
-    let y = 0;
+  /* ── Fonts ─────────────────────────────────────────────────────────────── */
 
-    for (const lane of lanes) {
-      const height = lane.collapsed ? 26 : lane.height;
-      const entry = { lane, id: lane.id, y, height, contentY: y + LANE_PAD, contentH: Math.max(10, height - LANE_PAD * 2) };
-      out.push(entry);
-      byId.set(lane.id, entry);
-      y += height;
-    }
-
-    return { lanes: out, totalHeight: y, byId };
+  function titleFont(obj) {
+    const style = obj.style || {};
+    return fontString({
+      size: style.fontSize || 12,
+      weight: style.bold ? 700 : 500,
+      italic: !!style.italic,
+      family: style.font || null,
+    });
   }
 
+  function subtitleFont(obj) {
+    const style = obj.style || {};
+    return fontString({
+      size: Math.max(9, Math.round((style.fontSize || 12) * 0.84)),
+      weight: 400,
+      italic: !!style.italic,
+      family: style.font || null,
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Label measurement
+     ═══════════════════════════════════════════════════════════════════════ */
+
   /**
-   * Assign a stacking row to every object in a lane so overlapping bars sit
-   * above one another instead of on top of one another.
+   * Decide where an object's label goes and how much room it needs.
    *
-   * Objects keep an explicit `row` when the user has dragged them vertically;
-   * otherwise a first-fit packer places them on the lowest free row. Packing
-   * runs in start order, which keeps the result stable as the plan is edited.
+   * `placement` is one of:
+   *   'inside'  — wrapped within the bar
+   *   'outside' — wrapped in a block to the right of a bar too narrow to hold it
+   *   'below' / 'above' — centred under (or over) a point glyph
+   *   'fill'    — free-form annotation; the whole object grows to fit the text
    */
-  function packRows(objects, { minGapMs = 0, pointPadMs = MS_DAY } = {}) {
-    const sorted = objects.slice().sort((a, b) => a.start - b.start || a.z - b.z);
-    const rowEnds = []; // last occupied end (ms) per row
+  function measureLabel(obj, barWidthPx) {
+    const def = TYPES[obj.type] || TYPES.activity;
+    const shape = def.shape;
+    const title = String(obj.title || '');
+    const subtitle = String(obj.subtitle || '').trim();
+    const tFont = titleFont(obj);
+    const sFont = subtitleFont(obj);
+
+    /* Point objects: the label always sits outside the glyph, centred. */
+    if (!def.duration) {
+      const fitted = fitWidth(title, tFont, { maxWidth: 200, maxLines: 3, minWidth: 40 });
+      const titleWrap = wrapText(title, fitted.width, tFont);
+      const subWrap = subtitle ? wrapText(subtitle, Math.max(fitted.width, 90), sFont) : null;
+      const width = Math.max(titleWrap.width, subWrap ? subWrap.width : 0);
+      const height = titleWrap.height + (subWrap ? subWrap.height : 0);
+
+      return {
+        placement: shape === 'release' ? 'above' : 'below',
+        lines: titleWrap.lines,
+        subLines: subWrap ? subWrap.lines : [],
+        lineHeight: titleWrap.lineHeight,
+        subLineHeight: subWrap ? subWrap.lineHeight : 0,
+        width: Math.ceil(width),
+        height: Math.ceil(height),
+        // Centred text spreads equally either side of the glyph.
+        extraLeft: Math.ceil(width / 2) + 4,
+        extraRight: Math.ceil(width / 2) + 4,
+        extraBelow: shape === 'release' ? 0 : Math.ceil(height) + 4,
+        extraAbove: shape === 'release' ? Math.ceil(height) + 4 : 0,
+      };
+    }
+
+    /* Free-form annotations: the box grows around the text. */
+    if (shape === 'sticky' || shape === 'text' || shape === 'callout' || shape === 'image') {
+      const inner = Math.max(40, barWidthPx - LABEL_PAD_X * 2);
+      const titleWrap = wrapText(title, inner, tFont);
+      const subWrap = subtitle ? wrapText(subtitle, inner, sFont) : null;
+      return {
+        placement: 'fill',
+        lines: titleWrap.lines,
+        subLines: subWrap ? subWrap.lines : [],
+        lineHeight: titleWrap.lineHeight,
+        subLineHeight: subWrap ? subWrap.lineHeight : 0,
+        width: Math.ceil(Math.max(titleWrap.width, subWrap ? subWrap.width : 0)),
+        height: Math.ceil(titleWrap.height + (subWrap ? subWrap.height : 0)),
+        extraLeft: 0,
+        extraRight: 0,
+        extraBelow: 0,
+        extraAbove: 0,
+      };
+    }
+
+    /* Bars and bands: inside when the text fits, beside the bar when it does not. */
+    const reserved = LABEL_PAD_X * 2 + (obj.icon ? ICON_W : 0) + (def.progress && obj.progress > 0 ? PCT_W : 0);
+    const inner = barWidthPx - reserved;
+
+    if (inner >= MIN_INSIDE_W) {
+      const titleWrap = wrapText(title, inner, tFont);
+      const subWrap = subtitle ? wrapText(subtitle, inner, sFont) : null;
+      const totalLines = titleWrap.lines.length + (subWrap ? subWrap.lines.length : 0);
+
+      if (totalLines <= MAX_INSIDE_LINES) {
+        return {
+          placement: 'inside',
+          lines: titleWrap.lines,
+          subLines: subWrap ? subWrap.lines : [],
+          lineHeight: titleWrap.lineHeight,
+          subLineHeight: subWrap ? subWrap.lineHeight : 0,
+          width: Math.ceil(Math.max(titleWrap.width, subWrap ? subWrap.width : 0)),
+          height: Math.ceil(titleWrap.height + (subWrap ? subWrap.height : 0)),
+          extraLeft: 0,
+          extraRight: 0,
+          extraBelow: 0,
+          extraAbove: 0,
+        };
+      }
+    }
+
+    const fitted = fitWidth(title, tFont, { maxWidth: OUTSIDE_MAX_W, maxLines: 3, minWidth: 70 });
+    const titleWrap = wrapText(title, fitted.width, tFont);
+    const subWrap = subtitle ? wrapText(subtitle, Math.max(fitted.width, 90), sFont) : null;
+    const width = Math.ceil(Math.max(titleWrap.width, subWrap ? subWrap.width : 0));
+    const height = Math.ceil(titleWrap.height + (subWrap ? subWrap.height : 0));
+
+    return {
+      placement: 'outside',
+      lines: titleWrap.lines,
+      subLines: subWrap ? subWrap.lines : [],
+      lineHeight: titleWrap.lineHeight,
+      subLineHeight: subWrap ? subWrap.lineHeight : 0,
+      width,
+      height,
+      extraLeft: 0,
+      extraRight: width + OUTSIDE_GAP + 4,
+      extraBelow: 0,
+      extraAbove: 0,
+    };
+  }
+
+  /** Height one object needs on its packed row, label included. */
+  function rowHeightFor(obj, label) {
+    const def = TYPES[obj.type] || TYPES.activity;
+
+    if (!def.duration) {
+      return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove);
+    }
+    if (label.placement === 'fill') {
+      return Math.max(46, label.height + LABEL_PAD_Y * 2 + 8);
+    }
+    if (label.placement === 'outside') {
+      // The bar itself stays slim; the row must still clear the label beside it.
+      return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2);
+    }
+    return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Packing
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Assign a stacking row to every object in a lane so neither bars nor their
+   * labels overlap.
+   *
+   * The occupied span of an object is the bar plus whatever its label needs on
+   * either side, converted from pixels to time at the current zoom. That is
+   * what guarantees a label placed beside a narrow bar can never be overprinted
+   * by the next object along.
+   *
+   * Objects keep an explicit `row` when the user has set one; otherwise a
+   * first-fit packer places them on the lowest free row, in start order, which
+   * keeps the result stable as the plan is edited.
+   */
+  function packRows(entries, { minGapPx = 6 } = {}) {
+    const sorted = entries.slice().sort((a, b) => a.obj.start - b.obj.start || a.obj.z - b.obj.z);
+    const rowEnds = []; // last occupied end (px) per row
     const assigned = new Map();
 
-    for (const obj of sorted) {
-      const { start, end } = objectRange(obj);
-      // A milestone or risk pin draws as a small glyph but reads as a centred
-      // label several times wider, so it is packed against the width of that
-      // label — otherwise two markers a few days apart overprint each other.
-      const isPoint = !TYPES[obj.type]?.duration;
-      const labelPad = isPoint ? Math.max(pointPadMs, pointPadMs * Math.min(1.6, (obj.title || '').length / 18)) : 0;
-      const from = isPoint ? start - labelPad / 2 : start;
-      const to = isPoint ? end + labelPad / 2 : end;
+    for (const entry of sorted) {
+      const { obj, label, barWidth } = entry;
+      const startPx = msToPx(obj.start);
+      const hasDuration = !!TYPES[obj.type]?.duration;
+
+      const from = (hasDuration ? startPx : startPx - POINT_SIZE / 2) - label.extraLeft;
+      const to = (hasDuration ? startPx + barWidth : startPx + POINT_SIZE / 2) + label.extraRight;
 
       if (Number.isFinite(obj.row) && obj.row > 0) {
-        assigned.set(obj.id, obj.row);
-        rowEnds[obj.row] = Math.max(rowEnds[obj.row] || -Infinity, to + minGapMs);
+        const row = Math.min(obj.row, 24);
+        assigned.set(obj.id, row);
+        rowEnds[row] = Math.max(rowEnds[row] ?? -Infinity, to + minGapPx);
         continue;
       }
 
       let row = 0;
-      while (row < rowEnds.length && rowEnds[row] > from) row++;
-      rowEnds[row] = to + minGapMs;
+      while (row < rowEnds.length && (rowEnds[row] ?? -Infinity) > from) row++;
+      rowEnds[row] = to + minGapPx;
       assigned.set(obj.id, row);
     }
 
-    const rows = Math.max(1, rowEnds.length);
-    return { assigned, rows };
+    // Explicit rows can leave gaps; normalise the count to the highest used.
+    let rows = 0;
+    for (const row of assigned.values()) rows = Math.max(rows, row + 1);
+    return { assigned, rows: Math.max(1, rows) };
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     Full layout
+     ═══════════════════════════════════════════════════════════════════════ */
+
   /**
-   * The full render model for the current frame.
+   * The render model for the current frame.
    *
    * `filterFn` receives an object and returns true when it passes the active
    * filters; failing objects are still laid out (so the plan does not reflow as
    * filters change) but are marked `dimmed`.
    */
-  function computeLayout({ filterFn = null, includeOffscreen = false } = {}) {
+  function computeLayout({ filterFn = null, includeOffscreen = false, gutterWidth = 190 } = {}) {
     const doc = getDoc();
-    const geometry = laneLayout();
-    const { from, to } = visibleRange();
+    const lanes = orderedLanes(false);
     const rects = [];
     const byId = new Map();
 
-    for (const laneEntry of geometry.lanes) {
-      const laneObjects = doc.objects.filter((o) => o.lane === laneEntry.id && !o.hidden);
-      if (!laneObjects.length) continue;
+    const laneEntries = [];
+    let y = 0;
 
-      // Convert a comfortable label width in pixels into a time span, so
-      // clearance stays visually constant as the user zooms.
-      const { assigned, rows } = packRows(laneObjects, { pointPadMs: Math.abs(pxToDuration(96)) });
-      const collapsed = laneEntry.lane.collapsed;
+    for (const lane of lanes) {
+      const laneObjects = doc.objects.filter((o) => o.lane === lane.id && !o.hidden);
 
-      // Distribute the lane's content height across the packed rows, but never
-      // squeeze a row below a legible height — the lane grows visually instead.
-      const usable = laneEntry.contentH;
-      const rowH = collapsed ? Math.max(8, usable) : clamp(Math.floor((usable - (rows - 1) * ROW_GAP) / rows), 12, 44);
+      // Measure every object in the lane, not just the visible ones: row heights
+      // must not change as the plan is scrolled sideways.
+      const measured = laneObjects.map((obj) => {
+        const hasDuration = !!TYPES[obj.type]?.duration;
+        const barWidth = hasDuration
+          ? Math.max(MIN_BAR_PX, durationToPx(Math.max(obj.end - obj.start, MS_DAY * 0.25)))
+          : POINT_SIZE;
+        const label = measureLabel(obj, barWidth);
+        return { obj, label, barWidth, height: rowHeightFor(obj, label) };
+      });
 
-      for (const obj of laneObjects) {
-        const visible = includeOffscreen || rangeVisible(obj.start, TYPES[obj.type]?.duration ? obj.end : obj.start, 400);
+      const collapsed = lane.collapsed;
+      const { assigned, rows } = collapsed ? { assigned: new Map(measured.map((m) => [m.obj.id, 0])), rows: 1 } : packRows(measured);
+
+      // Each row is as tall as the tallest thing standing on it.
+      const rowHeights = new Array(rows).fill(ROW_HEIGHT);
+      if (!collapsed) {
+        for (const entry of measured) {
+          const row = assigned.get(entry.obj.id) || 0;
+          rowHeights[row] = Math.max(rowHeights[row], entry.height);
+        }
+      }
+
+      const rowTops = [];
+      let cursor = 0;
+      for (let r = 0; r < rows; r++) {
+        rowTops.push(cursor);
+        cursor += rowHeights[r] + ROW_GAP;
+      }
+      const contentHeight = Math.max(ROW_HEIGHT, cursor - ROW_GAP);
+
+      // The lane's stored height is a minimum: it grows to fit its content and
+      // its own name in the gutter, and never shrinks below what the user set.
+      const gutterHeight = laneLabelHeight(lane, gutterWidth);
+      const height = collapsed
+        ? 26
+        : Math.max(lane.height, contentHeight + LANE_PAD * 2, gutterHeight);
+
+      const entry = {
+        lane,
+        id: lane.id,
+        y,
+        height,
+        contentY: y + LANE_PAD,
+        contentH: Math.max(10, height - LANE_PAD * 2),
+        rowTops,
+        rowHeights,
+        rows,
+      };
+      laneEntries.push(entry);
+      y += height;
+
+      for (const item of measured) {
+        const visible =
+          includeOffscreen ||
+          rangeVisible(
+            item.obj.start - pxToDuration(item.label.extraLeft),
+            (TYPES[item.obj.type]?.duration ? item.obj.end : item.obj.start) + pxToDuration(item.label.extraRight),
+            400
+          );
         if (!visible) continue;
 
-        const row = assigned.get(obj.id) || 0;
-        const rect = objectRect(obj, laneEntry, row, rowH, collapsed);
-        rect.dimmed = filterFn ? !filterFn(obj) : false;
+        const row = assigned.get(item.obj.id) || 0;
+        const rect = objectRect(item.obj, entry, row, item, collapsed);
+        rect.dimmed = filterFn ? !filterFn(item.obj) : false;
         rects.push(rect);
-        byId.set(obj.id, rect);
+        byId.set(item.obj.id, rect);
       }
     }
 
-    // Draw order: explicit z, then containers/bands behind everything else so
-    // they read as backdrops rather than covering the work they contain.
+    const geometry = {
+      lanes: laneEntries,
+      totalHeight: y,
+      byId: new Map(laneEntries.map((e) => [e.id, e])),
+    };
+
+    // Draw order: containers and bands behind everything else so they read as
+    // backdrops rather than covering the work they contain.
     rects.sort((a, b) => backdropRank(a) - backdropRank(b) || a.obj.z - b.obj.z);
 
-    return { geometry, rects, byId, range: { from, to } };
+    return { geometry, rects, byId, range: visibleRange() };
   }
 
   function backdropRank(rect) {
@@ -4432,18 +4868,29 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     return 2;
   }
 
+  /** Height the lane's own name needs in the gutter, wrapped to its width. */
+  function laneLabelHeight(lane, gutterWidth) {
+    const font = fontString({ size: 12, weight: 600 });
+    // Matches the gutter label's CSS box: 24px left inset, 30px right inset.
+    const available = Math.max(60, gutterWidth - 54);
+    const wrapped = wrapText(lane.name || '', available, font);
+    return wrapped.height + 22; // meta line plus padding
+  }
+
   /**
    * Screen rectangle for one object.
    * Coordinates are canvas-relative: x from the viewport origin, y from the top
    * of the lane stack (the scroll container handles vertical offset).
    */
-  function objectRect(obj, laneEntry, row = 0, rowH = ROW_HEIGHT, collapsed = false) {
+  function objectRect(obj, laneEntry, row, measured, collapsed = false) {
     const def = TYPES[obj.type] || TYPES.activity;
     const shape = def.shape;
     const hasDuration = def.duration;
+    const label = measured.label;
 
     const x = msToPx(obj.start);
-    const rawWidth = hasDuration ? durationToPx(Math.max(obj.end - obj.start, MS_DAY * 0.25)) : 0;
+    const rowTop = laneEntry.contentY + (laneEntry.rowTops[row] ?? 0);
+    const rowH = laneEntry.rowHeights[row] ?? ROW_HEIGHT;
 
     let width;
     let left;
@@ -4451,7 +4898,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     let top;
 
     if (hasDuration) {
-      width = Math.max(MIN_BAR_PX, rawWidth);
+      width = measured.barWidth;
       left = x;
     } else {
       width = POINT_SIZE;
@@ -4459,27 +4906,21 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     }
 
     if (shape === 'band' || shape === 'container') {
-      // Bands span the whole lane rather than sitting on a packed row.
       top = laneEntry.y + 1;
       height = laneEntry.height - 2;
     } else if (collapsed) {
       top = laneEntry.y + 4;
       height = Math.max(8, laneEntry.height - 8);
-    } else {
-      top = laneEntry.contentY + row * (rowH + ROW_GAP);
+    } else if (!hasDuration) {
+      // Glyph sits above its label (or below it, for a release flag).
+      top = rowTop + label.extraAbove;
+      height = POINT_SIZE;
+    } else if (label.placement === 'fill') {
+      top = rowTop;
       height = rowH;
-      if (!hasDuration) {
-        // Point glyphs are centred on their row rather than filling it.
-        top = laneEntry.contentY + row * (rowH + ROW_GAP) + rowH / 2 - POINT_SIZE / 2;
-        height = POINT_SIZE;
-      }
-      if (shape === 'sticky' || shape === 'callout' || shape === 'text' || shape === 'image') {
-        // Free-form annotations get more vertical room than a schedule bar.
-        height = Math.max(height, obj.style?.height || 54);
-        top = laneEntry.contentY + row * (rowH + ROW_GAP);
-        const maxBottom = laneEntry.y + laneEntry.height - 4;
-        if (top + height > maxBottom) top = Math.max(laneEntry.contentY, maxBottom - height);
-      }
+    } else {
+      height = label.placement === 'outside' ? Math.min(rowH, Math.max(ROW_HEIGHT, label.lineHeight + LABEL_PAD_Y * 2)) : rowH;
+      top = rowTop + (rowH - height) / 2;
     }
 
     return {
@@ -4489,6 +4930,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
       laneEntry,
       shape,
       row,
+      label,
       x: left,
       y: top,
       w: width,
@@ -4498,10 +4940,15 @@ __mods["timeline/layout.js"] = function (__x, __req) {
       centerX: hasDuration ? left + width / 2 : x,
       centerY: top + height / 2,
       hasDuration,
-      truncatedLeft: rawWidth > 0 && left < -2000,
-      labelOutside: hasDuration && width < 52,
+      /** Full extent including the label — used for hit-testing and marquees. */
+      labelLeft: left - label.extraLeft,
+      labelRight: left + width + label.extraRight,
     };
   }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Queries
+     ═══════════════════════════════════════════════════════════════════════ */
 
   /** Which lane sits at a given canvas y coordinate. */
   function laneAtY(geometry, y) {
@@ -4512,18 +4959,20 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   }
 
   /** Which packed row within a lane a canvas y coordinate falls on. */
-  function rowAtY(laneEntry, y, rows = 1) {
-    if (!laneEntry) return 0;
-    const usable = laneEntry.contentH;
-    const rowH = clamp(Math.floor((usable - (rows - 1) * ROW_GAP) / rows), 12, 44);
+  function rowAtY(laneEntry, y) {
+    if (!laneEntry || !laneEntry.rowTops.length) return 0;
     const offset = y - laneEntry.contentY;
-    return clamp(Math.floor(offset / (rowH + ROW_GAP)), 0, Math.max(0, rows - 1));
+    for (let r = laneEntry.rowTops.length - 1; r >= 0; r--) {
+      if (offset >= laneEntry.rowTops[r]) return r;
+    }
+    return 0;
   }
 
   /**
    * Hit-test: the topmost object rectangle containing a canvas point.
    * Iterates back to front so the object drawn last wins, matching what the
-   * user sees.
+   * user sees. Only the bar or glyph is a target — a label beside a bar is
+   * informative, not a handle.
    */
   function hitTest(layout, x, y, tolerance = 0) {
     for (let i = layout.rects.length - 1; i >= 0; i--) {
@@ -4574,8 +5023,24 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     return getLane(obj.lane);
   }
 
+  /** Vertical geometry only — used where object placement is irrelevant. */
+  function laneLayout() {
+    const lanes = orderedLanes(false);
+    const out = [];
+    const byId = new Map();
+    let y = 0;
+    for (const lane of lanes) {
+      const height = lane.collapsed ? 26 : lane.height;
+      const entry = { lane, id: lane.id, y, height, contentY: y + LANE_PAD, contentH: Math.max(10, height - LANE_PAD * 2) };
+      out.push(entry);
+      byId.set(lane.id, entry);
+      y += height;
+    }
+    return { lanes: out, totalHeight: y, byId };
+  }
+
   Object.defineProperty(__x, "ROW_HEIGHT", { get: () => ROW_HEIGHT, enumerable: true });
-  Object.defineProperty(__x, "laneLayout", { get: () => laneLayout, enumerable: true });
+  Object.defineProperty(__x, "measureLabel", { get: () => measureLabel, enumerable: true });
   Object.defineProperty(__x, "packRows", { get: () => packRows, enumerable: true });
   Object.defineProperty(__x, "computeLayout", { get: () => computeLayout, enumerable: true });
   Object.defineProperty(__x, "objectRect", { get: () => objectRect, enumerable: true });
@@ -4587,6 +5052,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   Object.defineProperty(__x, "stageHeight", { get: () => stageHeight, enumerable: true });
   Object.defineProperty(__x, "laneEntryFor", { get: () => laneEntryFor, enumerable: true });
   Object.defineProperty(__x, "laneOf", { get: () => laneOf, enumerable: true });
+  Object.defineProperty(__x, "laneLayout", { get: () => laneLayout, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -5075,7 +5541,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
    * Imports: util, dates, model, store, query, viewport, layout, connectors, icons.
    */
 
-  const { el, clear, rafBatch, escapeHtml, withAlpha, readableInk, clamp, truncate } = __req("core/util.js");
+  const { el, clear, rafBatch, withAlpha, readableInk, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } = __req("core/dates.js");
   const { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } = __req("core/model.js");
@@ -5083,6 +5549,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
   const { filterPredicate } = __req("core/query.js");
   const viewport = __req("timeline/viewport.js");
   const { computeLayout, stageHeight, ROW_HEIGHT } = __req("timeline/layout.js");
+  const { fontString, textWidth, wrapText, resetTextCache } = __req("timeline/text.js");
   const { routeAll, renderConnectors } = __req("timeline/connectors.js");
   const { icon } = __req("ui/icons.js");
 
@@ -5232,26 +5699,31 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
     // Upper band — the coarser unit (month over week, quarter over month, …).
     if (header.id !== scale.id) {
-      for (const tick of ticks(header.id, from, to, { weekStart: settings.weekStart })) {
+      const upper = ticks(header.id, from, to, { weekStart: settings.weekStart });
+      const upperFont = fontString({ size: 11, weight: 700, mono: true });
+      const upperStride = strideFor(upper, (t) => labelFor(header.id, t), upperFont, 16);
+
+      upper.forEach((tick, i) => {
         const x = viewport.msToPx(tick.start);
         const width = viewport.msToPx(tick.end) - x;
-        if (width < 3) continue;
-        const node = el('div', {
-          class: 'tl-tick major',
-          style: { left: `${x}px`, width: `${width}px` },
-        });
-        // A tick that begins off the left edge would otherwise have its label
-        // scrolled out of the box; nudge the text back into view so the current
-        // month/quarter is always readable.
-        if (x < 0) node.style.paddingLeft = `${Math.min(-x + 7, width - 46)}px`;
-        node.appendChild(el('span', { text: labelFor(header.id, tick) }));
+        if (width < 2) return;
+
+        const node = el('div', { class: 'tl-tick major', style: { left: `${x}px`, width: `${width}px` } });
+        if (i % upperStride === 0) {
+          // A tick that begins off the left edge would drag its label out of
+          // sight; nudge the text back so the current period stays readable.
+          if (x < 0) node.style.paddingLeft = `${Math.max(7, -x + 7)}px`;
+          node.appendChild(el('span', { text: labelFor(header.id, tick) }));
+        }
         dom.bandUpper.appendChild(node);
-      }
+      });
     }
 
     // Lower band — the working unit.
     const list = ticks(scale.id, from, to, { weekStart: settings.weekStart });
-    const stride = strideFor(list, scale.id);
+    const lowerFont = fontString({ size: 10, weight: 500, mono: true });
+    const stride = strideFor(list, (t) => t.label, lowerFont, 12);
+
     list.forEach((tick, i) => {
       const x = viewport.msToPx(tick.start);
       const width = viewport.msToPx(tick.end) - x;
@@ -5261,23 +5733,41 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
       if (tick.major) cls += ' major';
       if (tick.weekend && settings.showWeekends) cls += ' weekend';
       if (scale.id === 'day' && toISO(tick.start) === todayIso) cls += ' today';
-      if (width < 26) cls += ' narrow';
-      if (stride > 1 && i % stride !== 0) cls += ' hide-label';
 
       const node = el('div', { class: cls, style: { left: `${x}px`, width: `${width}px` } });
-      if (x < 0 && width > 40) node.style.paddingLeft = `${Math.min(-x + 7, width - 34)}px`;
-      node.appendChild(el('span', { text: tick.label }));
-      if (tick.sub && width > 62) node.appendChild(el('span', { class: 'tk-sub', text: tick.sub }));
+
+      // Only label every `stride`-th tick. Every label that *is* drawn is drawn
+      // in full — labels are never clipped or ellipsised, just spaced out far
+      // enough that they cannot collide.
+      if (i % stride === 0) {
+        if (x < 0 && width > 30) node.style.paddingLeft = `${Math.max(7, -x + 7)}px`;
+        node.appendChild(el('span', { text: tick.label }));
+        const subWidth = textWidth(`${tick.label} ${tick.sub || ''}`, lowerFont) + 16;
+        if (tick.sub && width * stride > subWidth) node.appendChild(el('span', { class: 'tk-sub', text: tick.sub }));
+      }
       dom.bandLower.appendChild(node);
     });
   }
 
-  /** Thin out labels when ticks get too dense to read. */
-  function strideFor(list, scaleId) {
+  /**
+   * How many ticks to skip between labels so that no two labels can touch.
+   *
+   * Derived from the measured width of the widest label in view rather than a
+   * guessed character count, which is what lets the ruler drop the *number* of
+   * labels without ever shortening one.
+   */
+  function strideFor(list, labelOf, font, gap) {
     if (!list.length) return 1;
     const px = viewport.msToPx(list[0].end) - viewport.msToPx(list[0].start);
-    const need = scaleId === 'day' ? 22 : 34;
-    return px >= need ? 1 : Math.ceil(need / Math.max(px, 1));
+    if (px <= 0) return 1;
+
+    let widest = 0;
+    // Sampling a slice is enough: labels within one scale are near-uniform.
+    const step = Math.max(1, Math.floor(list.length / 24));
+    for (let i = 0; i < list.length; i += step) {
+      widest = Math.max(widest, textWidth(labelOf(list[i]), font));
+    }
+    return Math.max(1, Math.ceil((widest + gap) / px));
   }
 
   function labelFor(scaleId, tick) {
@@ -5305,7 +5795,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
         el('div', { class: 'll-bar' }),
         el('div', { class: 'll-grip', html: icon('move', { size: 12 }), dataset: { laneDrag: lane.id }, title: 'Drag to reorder' }),
         el('div', { class: 'll-main' }, [
-          el('div', { class: 'll-name', style: { color: 'var(--text)' }, text: lane.name, title: lane.name }),
+          el('div', { class: 'll-name', style: { color: 'var(--text)' }, text: lane.name }),
           el('div', { class: 'll-meta', text: `${count} item${count === 1 ? '' : 's'}${lane.locked ? ' · locked' : ''}` }),
         ]),
         el('div', { class: 'll-actions' }, [
@@ -5418,6 +5908,12 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const style = obj.style || {};
     const color = objectColor(obj, rect.lane);
 
+    // The full, unwrapped label is the object's accessible name and the handle
+    // tests and tooling use to find it.
+    const fullLabel = [obj.title, obj.subtitle].filter(Boolean).join(' — ');
+    node.setAttribute('aria-label', `${def.label}: ${fullLabel}`);
+    node.dataset.label = fullLabel;
+
     node.style.left = `${rect.x}px`;
     node.style.top = `${rect.y}px`;
     node.style.width = `${rect.w}px`;
@@ -5444,7 +5940,9 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
       JSON.stringify(style),
       obj.subtitle,
       Math.round(rect.h),
-      Math.round(rect.w / 8),
+      rect.label.placement,
+      rect.label.lines.join('\u0001'),
+      rect.label.subLines.join('\u0001'),
       obj.notes ? 1 : 0,
       (obj.attachments || []).length,
     ].join('|');
@@ -5522,49 +6020,38 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
   }
 
   /**
-   * Title, plus the subtitle when the object has one and the bar has room.
+   * Render a measured label block: one <span> per wrapped line.
    *
-   * A tall bar stacks the two lines; a short but wide one runs them together
-   * with the subtitle dimmed, which keeps the extra context visible without
-   * pushing the title out of the bar.
+   * The layout pass has already decided the wrap points and reserved the space,
+   * so nothing here needs to shorten, clip or ellipsise anything — it just
+   * prints the lines it was given.
    */
-  function titleBlock(obj, rect, style) {
-    const subtitle = (obj.subtitle || '').trim();
-    const fontSize = style.fontSize || 12;
-
-    if (!subtitle) return el('span', { class: 'ob-text', text: obj.title });
-
-    const stacked = rect.h >= fontSize * 2 + 8 && rect.w > 64;
-    if (stacked) {
-      return el('span', { class: 'ob-textwrap' }, [
-        el('span', { class: 'ob-text', text: obj.title }),
-        el('span', { class: 'ob-sub', text: subtitle }),
-      ]);
+  function labelBlock(label, { className = 'ob-textwrap' } = {}) {
+    // The line spans are visual fragments of one sentence, so they are hidden
+    // from assistive technology; the object node carries the whole string as
+    // its accessible name instead.
+    const wrap = el('span', { class: className, 'aria-hidden': 'true' });
+    for (const line of label.lines) {
+      wrap.appendChild(el('span', { class: 'ob-line', text: line }));
     }
-
-    if (rect.w > 130) {
-      return el('span', { class: 'ob-textwrap inline' }, [
-        el('span', { class: 'ob-text', text: obj.title }),
-        el('span', { class: 'ob-sub', text: subtitle }),
-      ]);
+    for (const line of label.subLines) {
+      wrap.appendChild(el('span', { class: 'ob-line ob-sub', text: line }));
     }
-
-    return el('span', { class: 'ob-text', text: obj.title, title: `${obj.title} — ${subtitle}` });
+    return wrap;
   }
 
-  /** Label drawn beside a bar too narrow to hold text. */
-  function outsideText(obj) {
-    const subtitle = (obj.subtitle || '').trim();
-    return subtitle ? `${obj.title} · ${subtitle}` : obj.title;
+  /** Full label placed beside a bar too narrow to hold it. */
+  function outsideLabel(rect) {
+    const node = labelBlock(rect.label, { className: 'ob-outside' });
+    node.style.width = `${rect.label.width}px`;
+    return node;
   }
 
-  /** Two-line label under a milestone, release flag or risk pin. */
-  function pointLabel(obj, { above = false, max = 34 } = {}) {
-    const subtitle = (obj.subtitle || '').trim();
-    const node = el('div', { class: 'ob-point-label' + (above ? ' above' : '') }, [
-      el('span', { text: truncate(obj.title, max) }),
-    ]);
-    if (subtitle) node.appendChild(el('span', { class: 'ob-sub', text: truncate(subtitle, max) }));
+  /** Centred label above or below a point glyph. */
+  function pointLabel(rect) {
+    const label = rect.label;
+    const node = labelBlock(label, { className: 'ob-point-label' + (label.placement === 'above' ? ' above' : '') });
+    node.style.width = `${label.width}px`;
     return node;
   }
 
@@ -5592,17 +6079,23 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const label = el('div', { class: 'ob-label' });
     applyTextStyle(label, style, ink);
 
-    if (obj.icon && rect.w > 34) {
-      label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: Math.min(14, rect.h - 6) }) }));
-    }
-    label.appendChild(titleBlock(obj, rect, style));
-    if (settings.showProgress && TYPES[obj.type]?.progress && rect.w > 86 && obj.progress > 0) {
-      label.appendChild(el('span', { class: 'ob-pct', text: `${Math.round(obj.progress)}%` }));
-    }
-
-    if (rect.labelOutside) {
-      node.appendChild(el('div', { class: 'ob-outside', text: outsideText(obj) }));
+    if (rect.label.placement === 'outside') {
+      // The bar is too narrow to hold its text, so the full label — wrapped,
+      // never shortened — sits immediately to its right. The packer reserved
+      // that space, so it cannot be overprinted by the next object.
+      node.appendChild(outsideLabel(rect));
+      if (settings.showProgress && TYPES[obj.type]?.progress && obj.progress > 0 && rect.w > 34) {
+        label.appendChild(el('span', { class: 'ob-pct', text: `${Math.round(obj.progress)}%` }));
+        node.appendChild(label);
+      }
     } else {
+      if (obj.icon && rect.w > 34) {
+        label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: Math.min(14, rect.h - 6) }) }));
+      }
+      label.appendChild(labelBlock(rect.label));
+      if (settings.showProgress && TYPES[obj.type]?.progress && obj.progress > 0) {
+        label.appendChild(el('span', { class: 'ob-pct', text: `${Math.round(obj.progress)}%` }));
+      }
       node.appendChild(label);
     }
 
@@ -5627,7 +6120,8 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const label = el('div', { class: 'ob-label' });
     applyTextStyle(label, style, style.textColor || resolved);
     if (obj.icon) label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: 13 }) }));
-    label.appendChild(titleBlock(obj, rect, style));
+    if (rect.label.placement === 'outside') node.appendChild(outsideLabel(rect));
+    else label.appendChild(labelBlock(rect.label));
     node.appendChild(label);
   }
 
@@ -5649,7 +6143,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
         }),
       ])
     );
-    node.appendChild(pointLabel(obj, { max: 30 }));
+    node.appendChild(pointLabel(rect));
     appendMarks(node, obj, rect);
   }
 
@@ -5675,9 +6169,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
         el('span', { text: obj.data?.version ? `v${obj.data.version}` : obj.title }),
       ])
     );
-    // The title normally sits above the chip, but on the topmost row that would
-    // slide under the ruler — drop it below instead.
-    node.appendChild(pointLabel(obj, { above: rect.y > 22, max: 26 }));
+    node.appendChild(pointLabel(rect));
     appendMarks(node, obj, rect);
   }
 
@@ -5697,7 +6189,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
         ]),
       ])
     );
-    node.appendChild(pointLabel(obj, { max: 34 }));
+    node.appendChild(pointLabel(rect));
     appendMarks(node, obj, rect);
   }
 
@@ -5714,10 +6206,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
     const note = el('div', { class: 'ob-note' });
     applyTextStyle(note, style, style.textColor || readableInk(resolved));
-    note.appendChild(el('span', { text: obj.title }));
-    if ((obj.subtitle || '').trim()) {
-      note.appendChild(el('span', { class: 'ob-sub', style: { display: 'block', marginTop: '2px' }, text: obj.subtitle }));
-    }
+    note.appendChild(labelBlock(rect.label));
     node.appendChild(note);
   }
 
@@ -5732,7 +6221,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const label = el('div', { class: 'ob-label' });
     applyTextStyle(label, style, style.textColor || 'var(--text)');
     if (obj.icon) label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: 13 }) }));
-    label.appendChild(titleBlock(obj, rect, style));
+    label.appendChild(labelBlock(rect.label));
     node.appendChild(label);
     node.appendChild(
       el('div', {
@@ -5747,7 +6236,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const style = obj.style || {};
     const label = el('div', { class: 'ob-label' });
     applyTextStyle(label, style, style.textColor || 'var(--text)');
-    label.appendChild(titleBlock(obj, rect, style));
+    label.appendChild(labelBlock(rect.label));
     node.appendChild(label);
   }
 
@@ -6025,8 +6514,13 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     return objectNodes.get(id) || null;
   }
 
-  /** Force a rebuild of every object node — used after a theme change. */
+  /**
+   * Force a rebuild of every object node — used after a theme change.
+   * A theme may swap the interface font (Engineering uses the monospace stack),
+   * so cached text measurements are discarded at the same time.
+   */
   function invalidateAll() {
+    resetTextCache();
     for (const node of objectNodes.values()) node.dataset.sig = '';
     requestRender();
   }
@@ -6076,7 +6570,7 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
   const { TYPES } = __req("core/model.js");
   const store = __req("core/store.js");
   const viewport = __req("timeline/viewport.js");
-  const { hitTest, hitTestBox, laneAtY, packRows } = __req("timeline/layout.js");
+  const { hitTest, hitTestBox, laneAtY } = __req("timeline/layout.js");
   const renderer = __req("timeline/renderer.js");
   const { previewPath } = __req("timeline/connectors.js");
 
@@ -9185,10 +9679,11 @@ __mods["io/scene.js"] = function (__x, __req) {
    * Imports: util, dates, model, analysis.
    */
 
-  const { clamp, withAlpha, readableInk, truncate } = __req("core/util.js");
+  const { clamp, withAlpha, readableInk } = __req("core/util.js");
   const { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } = __req("core/dates.js");
   const { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays } = __req("core/model.js");
   const { criticalPath } = __req("core/analysis.js");
+  const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
 
   /** Layout constants for exported drawings, in points/pixels. */
   const M = {
@@ -9198,11 +9693,78 @@ __mods["io/scene.js"] = function (__x, __req) {
     headerH: 62,
     lanePadY: 6,
     rowH: 20,
-    rowGap: 3,
+    rowGap: 4,
     barMinW: 3,
     pointR: 7,
     footerH: 26,
+    labelPadX: 5,
+    outsideGap: 5,
+    outsideMaxW: 210,
+    minInsideW: 44,
   };
+
+  /* Fonts used by exported drawings, measured the same way the canvas is. */
+  const EXPORT_FONTS = {
+    title: fontString({ size: 8.5, weight: 600 }),
+    titleBold: fontString({ size: 8.5, weight: 700 }),
+    sub: fontString({ size: 7, weight: 400 }),
+    lane: fontString({ size: 9.5, weight: 600 }),
+  };
+  const EXPORT_LINE_H = 10;
+  const EXPORT_SUB_LINE_H = 8.5;
+
+  /**
+   * Where an exported object's label goes, and the room it needs.
+   *
+   * Mirrors the on-screen rule exactly — inside when the text fits, beside the
+   * bar when it does not, centred under a point glyph — so a printed plan reads
+   * the same as the screen and, like the screen, never truncates a label.
+   */
+  function exportLabel(obj, barWidth) {
+    const def = TYPES[obj.type] || TYPES.activity;
+    const title = String(obj.title || '');
+    const subtitle = String(obj.subtitle || '').trim();
+    const font = obj.style?.bold ? EXPORT_FONTS.titleBold : EXPORT_FONTS.title;
+
+    const build = (width, placement) => {
+      const t = wrapText(title, width, font, { lineHeight: EXPORT_LINE_H });
+      const sub = subtitle ? wrapText(subtitle, width, EXPORT_FONTS.sub, { lineHeight: EXPORT_SUB_LINE_H }) : null;
+      return {
+        placement,
+        lines: t.lines,
+        subLines: sub ? sub.lines : [],
+        width: Math.ceil(Math.max(t.width, sub ? sub.width : 0)),
+        height: t.lines.length * EXPORT_LINE_H + (sub ? sub.lines.length * EXPORT_SUB_LINE_H : 0),
+      };
+    };
+
+    if (!def.duration) {
+      const fitted = fitWidth(title, font, { maxWidth: 150, maxLines: 3, minWidth: 34 });
+      const label = build(fitted.width, def.shape === 'release' ? 'above' : 'below');
+      label.extraLeft = label.width / 2 + 3;
+      label.extraRight = label.width / 2 + 3;
+      label.extraVert = label.height + 4;
+      return label;
+    }
+
+    const inner = barWidth - M.labelPadX * 2;
+    if (inner >= M.minInsideW) {
+      const label = build(inner, 'inside');
+      if (label.lines.length + label.subLines.length <= 3) {
+        label.extraLeft = 0;
+        label.extraRight = 0;
+        label.extraVert = 0;
+        return label;
+      }
+    }
+
+    const fitted = fitWidth(title, font, { maxWidth: M.outsideMaxW, maxLines: 3, minWidth: 60 });
+    const label = build(fitted.width, 'outside');
+    label.extraLeft = 0;
+    label.extraRight = label.width + M.outsideGap + 3;
+    label.extraVert = 0;
+    return label;
+  }
 
   /**
    * Resolve the palette for an export. Themes live in CSS, so we read the
@@ -9298,10 +9860,38 @@ __mods["io/scene.js"] = function (__x, __req) {
         .filter((o) => o.lane === lane.id && !o.hidden && (!filter || filter(o)))
         .sort((a, b) => a.start - b.start);
 
-      const rows = packRowsForExport(objects);
-      const rowCount = Math.max(1, rows.rows);
-      const height = Math.max(34, rowCount * (M.rowH + M.rowGap) + M.lanePadY * 2);
-      laneGeom.push({ lane, y, height, objects, rows: rows.assigned });
+      const measured = objects.map((obj) => {
+        const hasDuration = !!TYPES[obj.type]?.duration;
+        const barWidth = hasDuration
+          ? Math.max(M.barMinW, ((obj.end - obj.start) / MS_DAY) * pxPerDay)
+          : M.pointR * 2;
+        const label = exportLabel(obj, barWidth);
+        const height = hasDuration
+          ? Math.max(M.rowH, label.height + 5)
+          : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
+        return { obj, label, barWidth, height };
+      });
+
+      const packed = packRowsForExport(measured, msToX);
+      const rowHeights = new Array(packed.rows).fill(M.rowH);
+      for (const item of measured) {
+        const row = packed.assigned.get(item.obj.id) || 0;
+        rowHeights[row] = Math.max(rowHeights[row], item.height);
+      }
+      const rowTops = [];
+      let cursor = 0;
+      for (let r = 0; r < packed.rows; r++) {
+        rowTops.push(cursor);
+        cursor += rowHeights[r] + M.rowGap;
+      }
+
+      const laneNameWrap = wrapText(lane.name || '', M.gutter - 24, EXPORT_FONTS.lane, { lineHeight: 11 });
+      const height = Math.max(
+        34,
+        Math.max(M.rowH, cursor - M.rowGap) + M.lanePadY * 2,
+        laneNameWrap.lines.length * 11 + 20
+      );
+      laneGeom.push({ lane, y, height, objects, measured, rows: packed.assigned, rowTops, laneNameWrap });
       y += height;
     }
 
@@ -9373,7 +9963,11 @@ __mods["io/scene.js"] = function (__x, __req) {
 
     const lowerTicks = ticks(scaleId, extent.start, extent.end, { weekStart: doc.settings.weekStart });
     const tickWidth = lowerTicks.length > 1 ? msToX(lowerTicks[1].start) - msToX(lowerTicks[0].start) : 40;
-    const labelStride = Math.max(1, Math.ceil(24 / Math.max(tickWidth, 1)));
+    // Label every Nth tick, sized from the measured widest label, so exported
+    // ruler labels are spaced out rather than shortened.
+    const tickFont = fontString({ size: 7.5, weight: 500, mono: true });
+    const widestTick = lowerTicks.reduce((max, t) => Math.max(max, textWidth(t.label, tickFont)), 0);
+    const labelStride = Math.max(1, Math.ceil((widestTick + 10) / Math.max(tickWidth, 1)));
 
     lowerTicks.forEach((tick, i) => {
       const x = msToX(tick.start);
@@ -9415,30 +10009,24 @@ __mods["io/scene.js"] = function (__x, __req) {
       }
       items.push({ type: 'line', x1: 0, y1: entry.y + entry.height, x2: width, y2: entry.y + entry.height, stroke: palette.grid, strokeWidth: 0.6 });
       items.push({ type: 'rect', x: 0, y: entry.y, w: 3, h: entry.height, fill: laneColor });
-      items.push({
-        type: 'text',
-        x: 12,
-        y: entry.y + 15,
-        text: truncate(entry.lane.name, 26),
-        size: 9.5,
-        weight: 600,
-        fill: palette.text,
+      entry.laneNameWrap.lines.forEach((line, i) => {
+        items.push({ type: 'text', x: 12, y: entry.y + 15 + i * 11, text: line, size: 9.5, weight: 600, fill: palette.text });
       });
       items.push({
         type: 'text',
         x: 12,
-        y: entry.y + 27,
+        y: entry.y + 16 + entry.laneNameWrap.lines.length * 11,
         text: `${entry.objects.length} item${entry.objects.length === 1 ? '' : 's'}`,
         size: 7,
         fill: palette.textSubtle,
         family: 'mono',
       });
 
-      for (const obj of entry.objects) {
-        const row = entry.rows.get(obj.id) || 0;
-        const top = entry.y + M.lanePadY + row * (M.rowH + M.rowGap);
-        const rect = drawObject(items, obj, entry.lane, { top, msToX, palette, pxPerDay, settings: doc.settings });
-        if (rect) rectsById.set(obj.id, rect);
+      for (const item of entry.measured) {
+        const row = entry.rows.get(item.obj.id) || 0;
+        const top = entry.y + M.lanePadY + (entry.rowTops[row] ?? 0);
+        const rect = drawObject(items, item, entry.lane, { top, msToX, palette, settings: doc.settings });
+        if (rect) rectsById.set(item.obj.id, rect);
       }
     });
 
@@ -9518,18 +10106,48 @@ __mods["io/scene.js"] = function (__x, __req) {
 
   /* ── Object drawing ────────────────────────────────────────────────────── */
 
-  function drawObject(items, obj, lane, { top, msToX, palette, pxPerDay, settings }) {
+  /**
+   * Draw one object plus its label.
+   *
+   * The label was measured and placed by `exportLabel`; this only prints the
+   * lines it was given, so nothing is shortened on the way to paper.
+   */
+  function drawObject(items, measured, lane, { top, msToX, palette, settings }) {
+    const { obj, label, barWidth } = measured;
     const def = TYPES[obj.type] || TYPES.activity;
     const color = solid(objectColor(obj, lane), palette);
     const style = obj.style || {};
     const opacity = style.opacity ?? 1;
 
+    /** Print a wrapped block from a given baseline. */
+    const printBlock = (x, baseline, ink, anchor) => {
+      let y = baseline;
+      for (const line of label.lines) {
+        items.push({
+          type: 'text',
+          x,
+          y,
+          text: line,
+          size: 8.5,
+          weight: style.bold ? 700 : 600,
+          fill: ink,
+          anchor,
+          opacity,
+        });
+        y += EXPORT_LINE_H;
+      }
+      for (const line of label.subLines) {
+        items.push({ type: 'text', x, y, text: line, size: 7, fill: ink, anchor, opacity: opacity * 0.8 });
+        y += EXPORT_SUB_LINE_H;
+      }
+    };
+
     if (def.duration) {
       const x = msToX(obj.start);
-      const w = Math.max(M.barMinW, msToX(obj.end) - x);
-      const h = def.shape === 'band' || def.shape === 'container' ? M.rowH : M.rowH;
-      const radius = Math.min(style.radius ?? 4, h / 2);
       const isBand = def.shape === 'band' || def.shape === 'container';
+      const h = label.placement === 'inside' ? Math.max(M.rowH, label.height + 5) : M.rowH;
+      const w = Math.max(M.barMinW, barWidth);
+      const radius = Math.min(style.radius ?? 4, h / 2);
 
       items.push({
         type: 'rect',
@@ -9550,51 +10168,15 @@ __mods["io/scene.js"] = function (__x, __req) {
         items.push({ type: 'rect', x, y: top, w: pw, h, fill: withAlpha('#ffffff', 0.3), radius, opacity });
       }
 
-      const ink = style.textColor || (isBand ? color : readableInk(color));
-      const subtitle = (obj.subtitle || '').trim();
-      const charBudget = Math.max(4, Math.floor(w / 5.4));
-      if (w > 26) {
-        // With a subtitle the label splits into two lines, matching what the
-        // canvas draws; without one it stays vertically centred.
-        if (subtitle && h >= 18) {
-          items.push({
-            type: 'text',
-            x: x + 5,
-            y: top + h / 2 - 0.6,
-            text: truncate(obj.title, charBudget),
-            size: Math.min(8.5, style.fontSize || 8.5),
-            weight: style.bold ? 700 : 600,
-            fill: ink,
-          });
-          items.push({
-            type: 'text',
-            x: x + 5,
-            y: top + h / 2 + 7.4,
-            text: truncate(subtitle, charBudget),
-            size: 7,
-            fill: ink,
-            opacity: 0.78,
-          });
-        } else {
-          items.push({
-            type: 'text',
-            x: x + 5,
-            y: top + h / 2 + 3.2,
-            text: truncate(obj.title, charBudget),
-            size: Math.min(9, style.fontSize || 9),
-            weight: style.bold ? 700 : 500,
-            fill: ink,
-          });
-        }
+      if (label.placement === 'inside') {
+        const ink = style.textColor || (isBand ? color : readableInk(color));
+        const blockH = label.lines.length * EXPORT_LINE_H + label.subLines.length * EXPORT_SUB_LINE_H;
+        printBlock(x + M.labelPadX, top + (h - blockH) / 2 + 7, ink, 'start');
       } else {
-        items.push({
-          type: 'text',
-          x: x + w + 4,
-          y: top + h / 2 + 3.2,
-          text: truncate(subtitle ? `${obj.title} · ${subtitle}` : obj.title, 46),
-          size: 8,
-          fill: palette.textMuted,
-        });
+        // Too narrow to hold the text: the full label sits beside the bar, in
+        // space the packer already reserved for it.
+        const blockH = label.lines.length * EXPORT_LINE_H + label.subLines.length * EXPORT_SUB_LINE_H;
+        printBlock(x + w + M.outsideGap, top + (h - blockH) / 2 + 7, palette.text, 'start');
       }
 
       return { x, right: x + w, cy: top + h / 2, bottom: top + h, top };
@@ -9602,17 +10184,20 @@ __mods["io/scene.js"] = function (__x, __req) {
 
     /* Point objects: milestone diamond, release flag, risk/issue pin. */
     const cx = msToX(obj.start);
-    const cy = top + M.rowH / 2;
+    const glyphTop = label.placement === 'above' ? top + label.extraVert : top;
+    const cy = glyphTop + M.pointR;
     const r = M.pointR;
 
     if (def.shape === 'release') {
       const statusColor = solid(style.fill || statusOf(obj.status).color, palette);
-      items.push({ type: 'rect', x: cx - 1, y: top, w: 2, h: M.rowH, fill: statusColor });
-      const label = obj.data?.version ? `v${obj.data.version}` : truncate(obj.title, 14);
-      const w = 10 + label.length * 5;
-      items.push({ type: 'rect', x: cx - w / 2, y: cy - 7, w, h: 14, fill: withAlpha(statusColor, 0.2), stroke: statusColor, strokeWidth: 0.8, radius: 3 });
-      items.push({ type: 'text', x: cx, y: cy + 3.2, text: label, size: 7.5, weight: 700, fill: statusColor, anchor: 'middle', family: 'mono' });
-      items.push({ type: 'text', x: cx, y: top - 3, text: truncate(obj.title, 26), size: 7.5, fill: palette.textMuted, anchor: 'middle' });
+      items.push({ type: 'rect', x: cx - 1, y: glyphTop, w: 2, h: r * 2, fill: statusColor });
+      const chip = obj.data?.version ? `v${obj.data.version}` : '';
+      if (chip) {
+        const chipW = textWidth(chip, EXPORT_FONTS.title) + 10;
+        items.push({ type: 'rect', x: cx - chipW / 2, y: cy - 7, w: chipW, h: 14, fill: withAlpha(statusColor, 0.2), stroke: statusColor, strokeWidth: 0.8, radius: 3 });
+        items.push({ type: 'text', x: cx, y: cy + 3.2, text: chip, size: 7.5, weight: 700, fill: statusColor, anchor: 'middle', family: 'mono' });
+      }
+      printBlock(cx, top + 8, palette.text, 'middle');
     } else if (def.shape === 'diamond') {
       items.push({
         type: 'polygon',
@@ -9621,37 +10206,39 @@ __mods["io/scene.js"] = function (__x, __req) {
         stroke: withAlpha(color, 0.9),
         strokeWidth: 0.8,
       });
-      items.push({ type: 'text', x: cx, y: cy + r + 9, text: truncate(obj.title, 30), size: 7.5, weight: 600, fill: palette.text, anchor: 'middle' });
-      if (obj.subtitle) {
-        items.push({ type: 'text', x: cx, y: cy + r + 18, text: truncate(obj.subtitle, 30), size: 6.5, fill: palette.textMuted, anchor: 'middle' });
-      }
+      printBlock(cx, cy + r + 8, palette.text, 'middle');
     } else {
       const severity = obj.data?.severity;
       const pinColor = severity === 'critical' || severity === 'high' ? palette.bad : color;
       items.push({ type: 'circle', cx, cy, r: r - 1, fill: pinColor, stroke: withAlpha(pinColor, 0.9), strokeWidth: 0.8 });
-      items.push({ type: 'text', x: cx, y: cy + r + 9, text: truncate(obj.title, 30), size: 7.5, fill: palette.text, anchor: 'middle' });
-      if (obj.subtitle) {
-        items.push({ type: 'text', x: cx, y: cy + r + 18, text: truncate(obj.subtitle, 30), size: 6.5, fill: palette.textMuted, anchor: 'middle' });
-      }
+      printBlock(cx, cy + r + 8, palette.text, 'middle');
     }
 
-    return { x: cx - r, right: cx + r, cy, bottom: top + M.rowH, top };
+    return { x: cx - r, right: cx + r, cy, bottom: glyphTop + r * 2, top: glyphTop };
   }
 
   /* ── Helpers ───────────────────────────────────────────────────────────── */
 
-  function packRowsForExport(objects) {
+  /**
+   * First-fit row packing over the *label* extent, not just the bar, so an
+   * exported label can never be overprinted by the next object along.
+   */
+  function packRowsForExport(measured, msToX) {
     const rowEnds = [];
     const assigned = new Map();
-    for (const obj of objects) {
-      const hasDuration = !!TYPES[obj.type]?.duration;
-      const from = hasDuration ? obj.start : obj.start - MS_DAY * 2;
-      const to = hasDuration ? obj.end : obj.start + MS_DAY * 2;
+
+    for (const item of measured) {
+      const hasDuration = !!TYPES[item.obj.type]?.duration;
+      const startX = msToX(item.obj.start);
+      const from = (hasDuration ? startX : startX - M.pointR) - item.label.extraLeft;
+      const to = (hasDuration ? startX + item.barWidth : startX + M.pointR) + item.label.extraRight;
+
       let row = 0;
-      while (row < rowEnds.length && rowEnds[row] > from) row++;
-      rowEnds[row] = to;
-      assigned.set(obj.id, row);
+      while (row < rowEnds.length && (rowEnds[row] ?? -Infinity) > from) row++;
+      rowEnds[row] = to + 5;
+      assigned.set(item.obj.id, row);
     }
+
     return { assigned, rows: Math.max(1, rowEnds.length) };
   }
 
@@ -11962,6 +12549,12 @@ __mods["ui/panels.js"] = function (__x, __req) {
     bodyEl.appendChild(pane);
     (RENDERERS[active] || paneLanes)(pane);
     pane.scrollTop = scroll;
+
+    // Dock lists stay single-line for density, so make sure a row that is too
+    // narrow for its text still surfaces the whole thing on hover.
+    for (const node of pane.querySelectorAll('.lr-title, .lr-meta')) {
+      if (!node.title) node.title = node.textContent;
+    }
   }
 
   /* ══════════════════════════════════════════════════════════════════════════

@@ -59,6 +59,13 @@ subscribes. That is what keeps the graph acyclic.
 - **Dates are UTC-midnight milliseconds internally**, `YYYY-MM-DD` on disk.
   Never call a local-time getter — a calendar date must not shift by a
   timezone.
+- **No timeline text is ever truncated, ellipsised or clamped**, at any zoom.
+  Labels are measured with `timeline/text.js` before placement: they wrap
+  inside a bar when they fit, move beside it when they do not, packing
+  reserves the space the label occupies, and rows and lanes grow to suit. Do
+  not reach for `text-overflow: ellipsis`, `-webkit-line-clamp` or
+  `truncate()` anywhere the canvas draws — the smoke test fails the build if
+  you do.
 
 ## Extending it
 
@@ -79,7 +86,7 @@ subscribes. That is what keeps the graph acyclic.
 
 ```bash
 npm run build                        # must succeed — it also lints the module graph
-node tools/smoke.js                  # 61 end-to-end checks, must exit 0
+node tools/smoke.js                  # 68 end-to-end checks, must exit 0
 node tools/smoke.js --shot out.png   # …and eyeball the result
 ```
 
@@ -98,6 +105,10 @@ Two traps worth knowing, both of which have caused real bugs:
   change a click normally makes. The canvas carries `tabindex="-1"` and is
   focused explicitly on mousedown, otherwise keyboard focus stays in whatever
   toolbar dropdown was last used and every shortcut silently stops working.
+- **A wrapped label is several `.ob-line` spans**, so an object's
+  `textContent` has no spaces in it. The whole string lives on the object node
+  as `aria-label` and `data-label`; use those to find or announce an object,
+  never the concatenated text.
 
 ## Git
 

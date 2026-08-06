@@ -208,6 +208,12 @@ function renderPane() {
   bodyEl.appendChild(pane);
   (RENDERERS[active] || paneLanes)(pane);
   pane.scrollTop = scroll;
+
+  // Dock lists stay single-line for density, so make sure a row that is too
+  // narrow for its text still surfaces the whole thing on hover.
+  for (const node of pane.querySelectorAll('.lr-title, .lr-meta')) {
+    if (!node.title) node.title = node.textContent;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

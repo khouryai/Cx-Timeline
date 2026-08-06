@@ -15,7 +15,7 @@
  * Imports: util, dates, model, store, query, viewport, layout, connectors, icons.
  */
 
-import { el, clear, rafBatch, escapeHtml, withAlpha, readableInk, clamp, truncate } from '../core/util.js';
+import { el, clear, rafBatch, withAlpha, readableInk, clamp } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
 import { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } from '../core/dates.js';
 import { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } from '../core/model.js';
@@ -23,6 +23,7 @@ import { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeB
 import { filterPredicate } from '../core/query.js';
 import * as viewport from './viewport.js';
 import { computeLayout, stageHeight, ROW_HEIGHT } from './layout.js';
+import { fontString, textWidth, wrapText, resetTextCache } from './text.js';
 import { routeAll, renderConnectors } from './connectors.js';
 import { icon } from '../ui/icons.js';
 
@@ -172,26 +173,31 @@ function renderRuler(doc, settings) {
 
   // Upper band — the coarser unit (month over week, quarter over month, …).
   if (header.id !== scale.id) {
-    for (const tick of ticks(header.id, from, to, { weekStart: settings.weekStart })) {
+    const upper = ticks(header.id, from, to, { weekStart: settings.weekStart });
+    const upperFont = fontString({ size: 11, weight: 700, mono: true });
+    const upperStride = strideFor(upper, (t) => labelFor(header.id, t), upperFont, 16);
+
+    upper.forEach((tick, i) => {
       const x = viewport.msToPx(tick.start);
       const width = viewport.msToPx(tick.end) - x;
-      if (width < 3) continue;
-      const node = el('div', {
-        class: 'tl-tick major',
-        style: { left: `${x}px`, width: `${width}px` },
-      });
-      // A tick that begins off the left edge would otherwise have its label
-      // scrolled out of the box; nudge the text back into view so the current
-      // month/quarter is always readable.
-      if (x < 0) node.style.paddingLeft = `${Math.min(-x + 7, width - 46)}px`;
-      node.appendChild(el('span', { text: labelFor(header.id, tick) }));
+      if (width < 2) return;
+
+      const node = el('div', { class: 'tl-tick major', style: { left: `${x}px`, width: `${width}px` } });
+      if (i % upperStride === 0) {
+        // A tick that begins off the left edge would drag its label out of
+        // sight; nudge the text back so the current period stays readable.
+        if (x < 0) node.style.paddingLeft = `${Math.max(7, -x + 7)}px`;
+        node.appendChild(el('span', { text: labelFor(header.id, tick) }));
+      }
       dom.bandUpper.appendChild(node);
-    }
+    });
   }
 
   // Lower band — the working unit.
   const list = ticks(scale.id, from, to, { weekStart: settings.weekStart });
-  const stride = strideFor(list, scale.id);
+  const lowerFont = fontString({ size: 10, weight: 500, mono: true });
+  const stride = strideFor(list, (t) => t.label, lowerFont, 12);
+
   list.forEach((tick, i) => {
     const x = viewport.msToPx(tick.start);
     const width = viewport.msToPx(tick.end) - x;
@@ -201,23 +207,41 @@ function renderRuler(doc, settings) {
     if (tick.major) cls += ' major';
     if (tick.weekend && settings.showWeekends) cls += ' weekend';
     if (scale.id === 'day' && toISO(tick.start) === todayIso) cls += ' today';
-    if (width < 26) cls += ' narrow';
-    if (stride > 1 && i % stride !== 0) cls += ' hide-label';
 
     const node = el('div', { class: cls, style: { left: `${x}px`, width: `${width}px` } });
-    if (x < 0 && width > 40) node.style.paddingLeft = `${Math.min(-x + 7, width - 34)}px`;
-    node.appendChild(el('span', { text: tick.label }));
-    if (tick.sub && width > 62) node.appendChild(el('span', { class: 'tk-sub', text: tick.sub }));
+
+    // Only label every `stride`-th tick. Every label that *is* drawn is drawn
+    // in full — labels are never clipped or ellipsised, just spaced out far
+    // enough that they cannot collide.
+    if (i % stride === 0) {
+      if (x < 0 && width > 30) node.style.paddingLeft = `${Math.max(7, -x + 7)}px`;
+      node.appendChild(el('span', { text: tick.label }));
+      const subWidth = textWidth(`${tick.label} ${tick.sub || ''}`, lowerFont) + 16;
+      if (tick.sub && width * stride > subWidth) node.appendChild(el('span', { class: 'tk-sub', text: tick.sub }));
+    }
     dom.bandLower.appendChild(node);
   });
 }
 
-/** Thin out labels when ticks get too dense to read. */
-function strideFor(list, scaleId) {
+/**
+ * How many ticks to skip between labels so that no two labels can touch.
+ *
+ * Derived from the measured width of the widest label in view rather than a
+ * guessed character count, which is what lets the ruler drop the *number* of
+ * labels without ever shortening one.
+ */
+function strideFor(list, labelOf, font, gap) {
   if (!list.length) return 1;
   const px = viewport.msToPx(list[0].end) - viewport.msToPx(list[0].start);
-  const need = scaleId === 'day' ? 22 : 34;
-  return px >= need ? 1 : Math.ceil(need / Math.max(px, 1));
+  if (px <= 0) return 1;
+
+  let widest = 0;
+  // Sampling a slice is enough: labels within one scale are near-uniform.
+  const step = Math.max(1, Math.floor(list.length / 24));
+  for (let i = 0; i < list.length; i += step) {
+    widest = Math.max(widest, textWidth(labelOf(list[i]), font));
+  }
+  return Math.max(1, Math.ceil((widest + gap) / px));
 }
 
 function labelFor(scaleId, tick) {
@@ -245,7 +269,7 @@ function renderGutter(layout) {
       el('div', { class: 'll-bar' }),
       el('div', { class: 'll-grip', html: icon('move', { size: 12 }), dataset: { laneDrag: lane.id }, title: 'Drag to reorder' }),
       el('div', { class: 'll-main' }, [
-        el('div', { class: 'll-name', style: { color: 'var(--text)' }, text: lane.name, title: lane.name }),
+        el('div', { class: 'll-name', style: { color: 'var(--text)' }, text: lane.name }),
         el('div', { class: 'll-meta', text: `${count} item${count === 1 ? '' : 's'}${lane.locked ? ' · locked' : ''}` }),
       ]),
       el('div', { class: 'll-actions' }, [
@@ -358,6 +382,12 @@ function paintObject(node, rect, settings, selected) {
   const style = obj.style || {};
   const color = objectColor(obj, rect.lane);
 
+  // The full, unwrapped label is the object's accessible name and the handle
+  // tests and tooling use to find it.
+  const fullLabel = [obj.title, obj.subtitle].filter(Boolean).join(' — ');
+  node.setAttribute('aria-label', `${def.label}: ${fullLabel}`);
+  node.dataset.label = fullLabel;
+
   node.style.left = `${rect.x}px`;
   node.style.top = `${rect.y}px`;
   node.style.width = `${rect.w}px`;
@@ -384,7 +414,9 @@ function paintObject(node, rect, settings, selected) {
     JSON.stringify(style),
     obj.subtitle,
     Math.round(rect.h),
-    Math.round(rect.w / 8),
+    rect.label.placement,
+    rect.label.lines.join('\u0001'),
+    rect.label.subLines.join('\u0001'),
     obj.notes ? 1 : 0,
     (obj.attachments || []).length,
   ].join('|');
@@ -462,49 +494,38 @@ function buildObjectMarkup(node, rect, def, color, settings) {
 }
 
 /**
- * Title, plus the subtitle when the object has one and the bar has room.
+ * Render a measured label block: one <span> per wrapped line.
  *
- * A tall bar stacks the two lines; a short but wide one runs them together
- * with the subtitle dimmed, which keeps the extra context visible without
- * pushing the title out of the bar.
+ * The layout pass has already decided the wrap points and reserved the space,
+ * so nothing here needs to shorten, clip or ellipsise anything — it just
+ * prints the lines it was given.
  */
-function titleBlock(obj, rect, style) {
-  const subtitle = (obj.subtitle || '').trim();
-  const fontSize = style.fontSize || 12;
-
-  if (!subtitle) return el('span', { class: 'ob-text', text: obj.title });
-
-  const stacked = rect.h >= fontSize * 2 + 8 && rect.w > 64;
-  if (stacked) {
-    return el('span', { class: 'ob-textwrap' }, [
-      el('span', { class: 'ob-text', text: obj.title }),
-      el('span', { class: 'ob-sub', text: subtitle }),
-    ]);
+function labelBlock(label, { className = 'ob-textwrap' } = {}) {
+  // The line spans are visual fragments of one sentence, so they are hidden
+  // from assistive technology; the object node carries the whole string as
+  // its accessible name instead.
+  const wrap = el('span', { class: className, 'aria-hidden': 'true' });
+  for (const line of label.lines) {
+    wrap.appendChild(el('span', { class: 'ob-line', text: line }));
   }
-
-  if (rect.w > 130) {
-    return el('span', { class: 'ob-textwrap inline' }, [
-      el('span', { class: 'ob-text', text: obj.title }),
-      el('span', { class: 'ob-sub', text: subtitle }),
-    ]);
+  for (const line of label.subLines) {
+    wrap.appendChild(el('span', { class: 'ob-line ob-sub', text: line }));
   }
-
-  return el('span', { class: 'ob-text', text: obj.title, title: `${obj.title} — ${subtitle}` });
+  return wrap;
 }
 
-/** Label drawn beside a bar too narrow to hold text. */
-function outsideText(obj) {
-  const subtitle = (obj.subtitle || '').trim();
-  return subtitle ? `${obj.title} · ${subtitle}` : obj.title;
+/** Full label placed beside a bar too narrow to hold it. */
+function outsideLabel(rect) {
+  const node = labelBlock(rect.label, { className: 'ob-outside' });
+  node.style.width = `${rect.label.width}px`;
+  return node;
 }
 
-/** Two-line label under a milestone, release flag or risk pin. */
-function pointLabel(obj, { above = false, max = 34 } = {}) {
-  const subtitle = (obj.subtitle || '').trim();
-  const node = el('div', { class: 'ob-point-label' + (above ? ' above' : '') }, [
-    el('span', { text: truncate(obj.title, max) }),
-  ]);
-  if (subtitle) node.appendChild(el('span', { class: 'ob-sub', text: truncate(subtitle, max) }));
+/** Centred label above or below a point glyph. */
+function pointLabel(rect) {
+  const label = rect.label;
+  const node = labelBlock(label, { className: 'ob-point-label' + (label.placement === 'above' ? ' above' : '') });
+  node.style.width = `${label.width}px`;
   return node;
 }
 
@@ -532,17 +553,23 @@ function buildBar(node, rect, color, ink, settings) {
   const label = el('div', { class: 'ob-label' });
   applyTextStyle(label, style, ink);
 
-  if (obj.icon && rect.w > 34) {
-    label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: Math.min(14, rect.h - 6) }) }));
-  }
-  label.appendChild(titleBlock(obj, rect, style));
-  if (settings.showProgress && TYPES[obj.type]?.progress && rect.w > 86 && obj.progress > 0) {
-    label.appendChild(el('span', { class: 'ob-pct', text: `${Math.round(obj.progress)}%` }));
-  }
-
-  if (rect.labelOutside) {
-    node.appendChild(el('div', { class: 'ob-outside', text: outsideText(obj) }));
+  if (rect.label.placement === 'outside') {
+    // The bar is too narrow to hold its text, so the full label — wrapped,
+    // never shortened — sits immediately to its right. The packer reserved
+    // that space, so it cannot be overprinted by the next object.
+    node.appendChild(outsideLabel(rect));
+    if (settings.showProgress && TYPES[obj.type]?.progress && obj.progress > 0 && rect.w > 34) {
+      label.appendChild(el('span', { class: 'ob-pct', text: `${Math.round(obj.progress)}%` }));
+      node.appendChild(label);
+    }
   } else {
+    if (obj.icon && rect.w > 34) {
+      label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: Math.min(14, rect.h - 6) }) }));
+    }
+    label.appendChild(labelBlock(rect.label));
+    if (settings.showProgress && TYPES[obj.type]?.progress && obj.progress > 0) {
+      label.appendChild(el('span', { class: 'ob-pct', text: `${Math.round(obj.progress)}%` }));
+    }
     node.appendChild(label);
   }
 
@@ -567,7 +594,8 @@ function buildBand(node, rect, color, shape) {
   const label = el('div', { class: 'ob-label' });
   applyTextStyle(label, style, style.textColor || resolved);
   if (obj.icon) label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: 13 }) }));
-  label.appendChild(titleBlock(obj, rect, style));
+  if (rect.label.placement === 'outside') node.appendChild(outsideLabel(rect));
+  else label.appendChild(labelBlock(rect.label));
   node.appendChild(label);
 }
 
@@ -589,7 +617,7 @@ function buildDiamond(node, rect, color, ink) {
       }),
     ])
   );
-  node.appendChild(pointLabel(obj, { max: 30 }));
+  node.appendChild(pointLabel(rect));
   appendMarks(node, obj, rect);
 }
 
@@ -615,9 +643,7 @@ function buildRelease(node, rect, color) {
       el('span', { text: obj.data?.version ? `v${obj.data.version}` : obj.title }),
     ])
   );
-  // The title normally sits above the chip, but on the topmost row that would
-  // slide under the ruler — drop it below instead.
-  node.appendChild(pointLabel(obj, { above: rect.y > 22, max: 26 }));
+  node.appendChild(pointLabel(rect));
   appendMarks(node, obj, rect);
 }
 
@@ -637,7 +663,7 @@ function buildMarker(node, rect, color) {
       ]),
     ])
   );
-  node.appendChild(pointLabel(obj, { max: 34 }));
+  node.appendChild(pointLabel(rect));
   appendMarks(node, obj, rect);
 }
 
@@ -654,10 +680,7 @@ function buildSticky(node, rect, color) {
 
   const note = el('div', { class: 'ob-note' });
   applyTextStyle(note, style, style.textColor || readableInk(resolved));
-  note.appendChild(el('span', { text: obj.title }));
-  if ((obj.subtitle || '').trim()) {
-    note.appendChild(el('span', { class: 'ob-sub', style: { display: 'block', marginTop: '2px' }, text: obj.subtitle }));
-  }
+  note.appendChild(labelBlock(rect.label));
   node.appendChild(note);
 }
 
@@ -672,7 +695,7 @@ function buildCallout(node, rect, color, ink) {
   const label = el('div', { class: 'ob-label' });
   applyTextStyle(label, style, style.textColor || 'var(--text)');
   if (obj.icon) label.appendChild(el('span', { class: 'ob-icon', html: icon(obj.icon, { size: 13 }) }));
-  label.appendChild(titleBlock(obj, rect, style));
+  label.appendChild(labelBlock(rect.label));
   node.appendChild(label);
   node.appendChild(
     el('div', {
@@ -687,7 +710,7 @@ function buildText(node, rect) {
   const style = obj.style || {};
   const label = el('div', { class: 'ob-label' });
   applyTextStyle(label, style, style.textColor || 'var(--text)');
-  label.appendChild(titleBlock(obj, rect, style));
+  label.appendChild(labelBlock(rect.label));
   node.appendChild(label);
 }
 
@@ -965,8 +988,13 @@ export function nodeFor(id) {
   return objectNodes.get(id) || null;
 }
 
-/** Force a rebuild of every object node — used after a theme change. */
+/**
+ * Force a rebuild of every object node — used after a theme change.
+ * A theme may swap the interface font (Engineering uses the monospace stack),
+ * so cached text measurements are discarded at the same time.
+ */
 export function invalidateAll() {
+  resetTextCache();
   for (const node of objectNodes.values()) node.dataset.sig = '';
   requestRender();
 }
