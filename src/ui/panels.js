@@ -12,7 +12,7 @@
 
 import { el, clear, debounce, bytes, download } from '../core/util.js';
 import { on, emit, EV } from '../core/events.js';
-import { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY } from '../core/dates.js';
+import { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } from '../core/dates.js';
 import {
   TYPES,
   STATUSES,
@@ -1347,6 +1347,11 @@ function paneSettings(root) {
         ],
         onChange: (v) => set('snap', v, 'Change snapping'),
       })),
+      field('Date format', selectInput({
+        value: settings.dateOrder || 'mdy',
+        options: DATE_ORDERS.map((o) => ({ value: o.id, label: o.label })),
+        onChange: (v) => set('dateOrder', v, 'Change date format'),
+      }), 'Display only — files always store dates as YYYY-MM-DD.'),
       field('Week starts on', segmented({
         value: String(settings.weekStart),
         stretch: true,

@@ -31,7 +31,7 @@ import { installShortcuts } from './ui/shortcuts.js';
 import { toast, showTooltip, hideTooltip, confirmDialog } from './ui/components.js';
 import { renderNote, notePreview } from './ui/notes.js';
 import { TYPES, statusOf, durationDays } from './core/model.js';
-import { fmtDate, fmtDuration } from './core/dates.js';
+import { fmtDate, fmtDuration, setDateOrder, getDateOrder } from './core/dates.js';
 import { el } from './core/util.js';
 
 const APP_VERSION = '1.0.0';
@@ -67,8 +67,9 @@ async function boot() {
     }
   }
 
-  /* ── 2. Theme, before first paint ────────────────────────────────────── */
+  /* ── 2. Theme and date format, before first paint ────────────────────── */
   initTheme();
+  installDateFormat();
 
   /* ── 3. Chrome ───────────────────────────────────────────────────────── */
   buildShell();
@@ -124,6 +125,36 @@ async function offerRecovery(recovery) {
     renderer.requestRender();
     toast({ tone: 'good', title: 'Recovered' });
   }
+}
+
+/* ── Date format ───────────────────────────────────────────────────────── */
+
+/**
+ * Push the project's date-display order into `core/dates.js`.
+ *
+ * That module is a leaf and cannot read the store, so the preference is
+ * pushed to it — on load, and again whenever the document changes, since an
+ * import or a settings change can bring a different one.
+ */
+function installDateFormat() {
+  const apply = () => {
+    const order = store.getSettings().dateOrder || 'mdy';
+    if (order === getDateOrder()) return false;
+    setDateOrder(order);
+    return true;
+  };
+
+  apply();
+
+  on(EV.DOC_CHANGED, (payload) => {
+    if (payload?.transient) return;
+    // A changed order invalidates every rendered date, including measured
+    // ruler labels, so force a full repaint rather than a positional update.
+    if (apply()) renderer.invalidateAll();
+  });
+  on(EV.DOC_REPLACED, () => {
+    if (apply()) renderer.invalidateAll();
+  });
 }
 
 /* ── Viewport persistence ──────────────────────────────────────────────── */

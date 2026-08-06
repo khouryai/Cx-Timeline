@@ -187,6 +187,32 @@ export function quarterOf(ms) {
 /* ── Formatting ────────────────────────────────────────────────────────── */
 
 /**
+ * Display order for dates.
+ *
+ * `toISO()` is unaffected — `YYYY-MM-DD` is the on-disk format and must never
+ * follow a display preference. This only governs what the user reads.
+ *
+ * Kept as module state with a setter rather than read from the store, because
+ * this module is a leaf and must not import upwards. The application applies
+ * the project's setting on load and whenever it changes.
+ */
+let dateOrder = 'mdy';
+
+export const DATE_ORDERS = [
+  { id: 'mdy', label: 'M/D/Y — 3/12/2026' },
+  { id: 'dmy', label: 'D/M/Y — 12/3/2026' },
+  { id: 'ymd', label: 'Y-M-D — 2026-03-12' },
+];
+
+export function setDateOrder(order) {
+  dateOrder = DATE_ORDERS.some((o) => o.id === order) ? order : 'mdy';
+}
+
+export function getDateOrder() {
+  return dateOrder;
+}
+
+/**
  * Format a date for display.
  * Presets: 'iso' | 'short' (12 Mar 26) | 'medium' (12 Mar 2026) |
  *          'long' (12 March 2026) | 'day' (Thu 12 Mar) | 'monthYear' |
@@ -198,30 +224,62 @@ export function fmtDate(ms, preset = 'medium') {
   const day = d.getUTCDate();
   const mon = d.getUTCMonth();
   const year = d.getUTCFullYear();
+  const weekday = DAYS_SHORT[d.getUTCDay()];
+  const us = dateOrder === 'mdy';
+  const iso = dateOrder === 'ymd';
+
+  /** "Mar 12, 2026" / "12 Mar 2026" / "2026 Mar 12" */
+  const worded = (month, y) =>
+    iso ? `${y} ${month} ${day}` : us ? `${month} ${day}, ${y}` : `${day} ${month} ${y}`;
+
   switch (preset) {
     case 'iso':
       return toISO(ms);
+
+    case 'numeric':
+      if (iso) return toISO(ms);
+      return us ? `${mon + 1}/${day}/${year}` : `${day}/${mon + 1}/${year}`;
+
+    case 'compact':
+      if (iso) return `${String(year).slice(2)}-${pad(mon + 1)}-${pad(day)}`;
+      return us
+        ? `${mon + 1}/${day}/${String(year).slice(2)}`
+        : `${day}/${mon + 1}/${String(year).slice(2)}`;
+
     case 'short':
-      return `${day} ${MONTHS_SHORT[mon]} ${String(year).slice(2)}`;
+      return worded(MONTHS_SHORT[mon], String(year).slice(2));
+
     case 'long':
-      return `${day} ${MONTHS[mon]} ${year}`;
+      return worded(MONTHS[mon], year);
+
     case 'day':
-      return `${DAYS_SHORT[d.getUTCDay()]} ${day} ${MONTHS_SHORT[mon]}`;
+      return iso
+        ? `${weekday} ${MONTHS_SHORT[mon]} ${day}`
+        : us
+        ? `${weekday}, ${MONTHS_SHORT[mon]} ${day}`
+        : `${weekday} ${day} ${MONTHS_SHORT[mon]}`;
+
     case 'dayFull':
-      return `${DAYS_SHORT[d.getUTCDay()]} ${day} ${MONTHS_SHORT[mon]} ${year}`;
+      return iso
+        ? `${weekday} ${year} ${MONTHS_SHORT[mon]} ${day}`
+        : us
+        ? `${weekday}, ${MONTHS_SHORT[mon]} ${day}, ${year}`
+        : `${weekday} ${day} ${MONTHS_SHORT[mon]} ${year}`;
+
     case 'monthYear':
       return `${MONTHS_SHORT[mon]} ${year}`;
+
     case 'quarter':
       return `Q${quarterOf(ms)} ${year}`;
+
     case 'week': {
       const w = isoWeek(ms);
       return `W${String(w.week).padStart(2, '0')} ${w.year}`;
     }
-    case 'compact':
-      return `${pad(day)}/${pad(mon + 1)}/${String(year).slice(2)}`;
+
     case 'medium':
     default:
-      return `${day} ${MONTHS_SHORT[mon]} ${year}`;
+      return worded(MONTHS_SHORT[mon], year);
   }
 }
 
@@ -250,10 +308,14 @@ export function fmtRelative(ms, ref = todayMs()) {
   return d > 0 ? `in ${abs}` : `${abs} ago`;
 }
 
-/** Timestamp for version history and backups. */
+/** Timestamp for version history and backups — local time, by design. */
 export function fmtTimestamp(ms) {
   const d = new Date(ms);
-  return `${pad(d.getDate())} ${MONTHS_SHORT[d.getMonth()]} ${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const month = MONTHS_SHORT[d.getMonth()];
+  if (dateOrder === 'ymd') return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`;
+  if (dateOrder === 'mdy') return `${month} ${d.getDate()}, ${d.getFullYear()} ${time}`;
+  return `${d.getDate()} ${month} ${d.getFullYear()} ${time}`;
 }
 
 /* ── Time-axis tick generation ─────────────────────────────────────────── */

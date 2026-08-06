@@ -14,7 +14,7 @@
  */
 
 import { readFileAsText, readFileAsArrayBuffer, fold } from '../core/util.js';
-import { toMs, toISO, MS_DAY, addDays, todayMs } from '../core/dates.js';
+import { toMs, toISO, MS_DAY, addDays, todayMs, getDateOrder } from '../core/dates.js';
 import {
   makeProject,
   makeObject,
@@ -369,18 +369,31 @@ export function parseDate(value) {
   const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(text);
   if (iso) return Date.UTC(+iso[1], +iso[2] - 1, +iso[3]);
 
-  // dd/mm/yyyy and mm/dd/yyyy are ambiguous. Day-first wins unless the first
-  // number cannot be a day — the format most of the world writes.
+  // 3/5/2026 is genuinely ambiguous. Where one field is over 12 the order is
+  // decided for us; otherwise fall back to the project's display order, so a
+  // plan shown as M/D/Y also imports spreadsheets written as M/D/Y.
   const slash = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})/.exec(text);
   if (slash) {
-    let [, a, b, y] = slash;
-    let day = +a;
-    let month = +b;
-    if (day > 12 && month <= 12) {
-      /* day-first, unambiguous */
-    } else if (month > 12 && day <= 12) {
-      [day, month] = [month, day];
+    const [, first, second, y] = slash;
+    const a = +first;
+    const b = +second;
+
+    let day;
+    let month;
+    if (a > 12 && b <= 12) {
+      day = a;
+      month = b;
+    } else if (b > 12 && a <= 12) {
+      month = a;
+      day = b;
+    } else if (getDateOrder() === 'dmy') {
+      day = a;
+      month = b;
+    } else {
+      month = a;
+      day = b;
     }
+
     let year = +y;
     if (year < 100) year += year < 70 ? 2000 : 1900;
     return Date.UTC(year, month - 1, day);

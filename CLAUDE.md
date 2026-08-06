@@ -67,7 +67,9 @@ subscribes. That is what keeps the graph acyclic.
   shortcut and the button. One implementation, three entry points.
 - **Dates are UTC-midnight milliseconds internally**, `YYYY-MM-DD` on disk.
   Never call a local-time getter — a calendar date must not shift by a
-  timezone.
+  timezone. Display order (M/D/Y by default) is a preference pushed into
+  `core/dates.js` via `setDateOrder()`, because that module is a leaf and
+  cannot read the store. `toISO()` ignores it: the on-disk format is fixed.
 - **No timeline text is ever truncated, ellipsised or clamped**, at any zoom.
   Labels are measured with `timeline/text.js` before placement: they wrap
   inside a bar when they fit, move beside it when they do not, packing
@@ -95,7 +97,7 @@ subscribes. That is what keeps the graph acyclic.
 
 ```bash
 npm run build                        # must succeed — it also lints the module graph
-node tools/smoke.js                  # 79 end-to-end checks, must exit 0
+node tools/smoke.js                  # 101 end-to-end checks, must exit 0
 node tools/smoke.js --shot out.png   # …and eyeball the result
 ```
 
@@ -121,6 +123,11 @@ Two traps worth knowing, both of which have caused real bugs:
 - **`.ob-flag` is the release shape's coloured pole**, not a status badge.
   The broken-dependency badge is `.ob-breach`. Reusing the former restyled
   every release marker on the canvas.
+- **Ruler ticks do not clip, so a label must be measured before it is
+  placed.** `placeTickLabel()` computes the reach to the *next labelled* tick
+  and draws the label — and its optional sub-label — only if it fits. Nudging
+  a partly off-screen label into view without that check prints it on top of
+  its neighbour.
 
 ## Git
 

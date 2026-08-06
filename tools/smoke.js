@@ -241,6 +241,65 @@ async function main() {
   await page.waitForTimeout(320);
   check('fit-all keeps objects on screen', (await page.locator('.tl-obj').count()) > 8);
 
+  console.log('\nRuler labels');
+  // Regression: a tick starting off the left edge had its label nudged back
+  // into view until it printed on top of the next tick's label.
+  const overlapAudit = async (label) => {
+    const overlaps = await page.evaluate(() => {
+      const found = [];
+      for (const band of document.querySelectorAll('.tl-band')) {
+        const boxes = [...band.querySelectorAll('.tl-tick span')]
+          .filter((n) => n.textContent.trim())
+          .map((n) => ({ text: n.textContent.trim(), r: n.getBoundingClientRect() }))
+          .filter((b) => b.r.width > 0)
+          .sort((a, b) => a.r.left - b.r.left);
+
+        for (let i = 1; i < boxes.length; i++) {
+          // 0.5px of tolerance for sub-pixel layout rounding.
+          if (boxes[i].r.left < boxes[i - 1].r.right - 0.5) {
+            found.push(`"${boxes[i - 1].text}" / "${boxes[i].text}"`);
+          }
+        }
+      }
+      return found;
+    });
+    check(`ruler labels never overlap (${label})`, overlaps.length === 0, overlaps.slice(0, 3).join(' · '));
+  };
+
+  for (const [key, name] of [['D', 'day'], ['W', 'week'], ['M', 'month'], ['Q', 'quarter'], ['Y', 'year']]) {
+    await page.locator('#toolbar .cx-seg button', { hasText: new RegExp(`^${key}$`) }).first().click();
+    await page.waitForTimeout(350);
+    await overlapAudit(name);
+    // Pan by fractions of a tick so a partly off-screen leading tick is the
+    // case under test, not an accident of alignment.
+    for (const dx of [37, 61, 89]) {
+      await page.mouse.move(900, 400);
+      await page.keyboard.down('Shift');
+      await page.mouse.wheel(dx, 0);
+      await page.keyboard.up('Shift');
+      await page.waitForTimeout(220);
+      await overlapAudit(`${name}, panned ${dx}`);
+    }
+  }
+
+  console.log('\nDate format');
+  const dateSamples = await page.evaluate(() => {
+    const texts = [...document.querySelectorAll('.tl-tick .tk-sub')].map((n) => n.textContent.trim());
+    return { subs: texts.filter(Boolean).slice(0, 4) };
+  });
+  check(
+    'ruler sub-labels use M/D/Y',
+    dateSamples.subs.every((t) => /^\d{1,2}\/\d{1,2}\/\d{2}$/.test(t)),
+    dateSamples.subs.join(', ') || '(none at this scale)'
+  );
+
+  const formatted = await page.evaluate(() => {
+    const status = document.querySelector('#statusbar .sb-item:last-child')?.textContent || '';
+    const saved = [...document.querySelectorAll('#statusbar .sb-item')].map((n) => n.textContent).join(' | ');
+    return { status, saved };
+  });
+  check('autosave stamp reads month-first', /[A-Z][a-z]{2} \d{1,2}, \d{4}/.test(formatted.saved), formatted.saved.slice(0, 60));
+
   console.log('\nNo truncated text');
   // The hard guarantee: at every scale, no label is clipped, ellipsised or
   // hidden. Measured by comparing each label's laid-out width against its
@@ -281,7 +340,11 @@ async function main() {
   }
 
   // Long text must survive too: a title nobody would fit in a bar.
-  await page.locator('.tl-obj.shape-bar').first().click();
+  // Target a named wide bar: "the first one" can be a 6px sliver sitting under
+  // a connector, which is selectable in its own right and swallows the click.
+  await page.keyboard.press('Control+0');
+  await page.waitForTimeout(400);
+  await page.locator('.tl-obj.shape-bar[data-label^="ATS Integration Testing"]').first().click();
   await page.waitForTimeout(250);
   const longTitle = 'Interlocking route locking regression verification for the northern approach';
   const longBox = page.locator('#inspector .cx-section input[type="text"]').first();

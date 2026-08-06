@@ -652,7 +652,7 @@ export function createsCycle(from, to) {
  * These are preferences, so they persist but stay out of the undo stack —
  * pressing Ctrl+Z should never silently change your snapping back.
  */
-const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart']);
+const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart', 'dateOrder']);
 
 /** Settings changes are undoable — they alter how the plan reads. */
 export function setSetting(key, value, label = 'Change setting') {

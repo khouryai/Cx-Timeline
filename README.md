@@ -50,6 +50,10 @@ Gridlines, weekend shading and grid density are all configurable. Snapping
 (day, working day, week, month, quarter, or off) governs dragging, resizing
 and keyboard nudging alike — an arrow key steps one snap unit.
 
+Dates display as **M/D/Y** by default; **Settings → Date format** switches to
+D/M/Y or Y-M-D. Files always store dates as `YYYY-MM-DD` regardless, and
+ambiguous dates in imported spreadsheets are read using the same order.
+
 **Labels are never truncated.** At every zoom, text either wraps inside its
 bar or moves to a full wrapped block beside it; rows and lanes grow to fit,
 and packing reserves the space a label needs so two can never overprint. Ruler

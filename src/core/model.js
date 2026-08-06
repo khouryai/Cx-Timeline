@@ -456,7 +456,7 @@ export function defaultSettings() {
     activeBaseline: null,
     criticalPath: false,
     laneLabels: true,
-    dateFormat: 'medium',
+    dateOrder: 'mdy',            // mdy | dmy | ymd — display order only
     autoBackupMinutes: 60,
     backupEveryEdits: 100,
     backupKeep: 20,

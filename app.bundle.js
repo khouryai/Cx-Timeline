@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 36   Built: 2026-08-06T17:14:03.721Z
+ * Modules: 36   Built: 2026-08-06T17:55:44.351Z
  */
 (function () {
   'use strict';
@@ -759,6 +759,32 @@ __mods["core/dates.js"] = function (__x, __req) {
   /* ── Formatting ────────────────────────────────────────────────────────── */
 
   /**
+   * Display order for dates.
+   *
+   * `toISO()` is unaffected — `YYYY-MM-DD` is the on-disk format and must never
+   * follow a display preference. This only governs what the user reads.
+   *
+   * Kept as module state with a setter rather than read from the store, because
+   * this module is a leaf and must not import upwards. The application applies
+   * the project's setting on load and whenever it changes.
+   */
+  let dateOrder = 'mdy';
+
+  const DATE_ORDERS = [
+    { id: 'mdy', label: 'M/D/Y — 3/12/2026' },
+    { id: 'dmy', label: 'D/M/Y — 12/3/2026' },
+    { id: 'ymd', label: 'Y-M-D — 2026-03-12' },
+  ];
+
+  function setDateOrder(order) {
+    dateOrder = DATE_ORDERS.some((o) => o.id === order) ? order : 'mdy';
+  }
+
+  function getDateOrder() {
+    return dateOrder;
+  }
+
+  /**
    * Format a date for display.
    * Presets: 'iso' | 'short' (12 Mar 26) | 'medium' (12 Mar 2026) |
    *          'long' (12 March 2026) | 'day' (Thu 12 Mar) | 'monthYear' |
@@ -770,30 +796,62 @@ __mods["core/dates.js"] = function (__x, __req) {
     const day = d.getUTCDate();
     const mon = d.getUTCMonth();
     const year = d.getUTCFullYear();
+    const weekday = DAYS_SHORT[d.getUTCDay()];
+    const us = dateOrder === 'mdy';
+    const iso = dateOrder === 'ymd';
+
+    /** "Mar 12, 2026" / "12 Mar 2026" / "2026 Mar 12" */
+    const worded = (month, y) =>
+      iso ? `${y} ${month} ${day}` : us ? `${month} ${day}, ${y}` : `${day} ${month} ${y}`;
+
     switch (preset) {
       case 'iso':
         return toISO(ms);
+
+      case 'numeric':
+        if (iso) return toISO(ms);
+        return us ? `${mon + 1}/${day}/${year}` : `${day}/${mon + 1}/${year}`;
+
+      case 'compact':
+        if (iso) return `${String(year).slice(2)}-${pad(mon + 1)}-${pad(day)}`;
+        return us
+          ? `${mon + 1}/${day}/${String(year).slice(2)}`
+          : `${day}/${mon + 1}/${String(year).slice(2)}`;
+
       case 'short':
-        return `${day} ${MONTHS_SHORT[mon]} ${String(year).slice(2)}`;
+        return worded(MONTHS_SHORT[mon], String(year).slice(2));
+
       case 'long':
-        return `${day} ${MONTHS[mon]} ${year}`;
+        return worded(MONTHS[mon], year);
+
       case 'day':
-        return `${DAYS_SHORT[d.getUTCDay()]} ${day} ${MONTHS_SHORT[mon]}`;
+        return iso
+          ? `${weekday} ${MONTHS_SHORT[mon]} ${day}`
+          : us
+          ? `${weekday}, ${MONTHS_SHORT[mon]} ${day}`
+          : `${weekday} ${day} ${MONTHS_SHORT[mon]}`;
+
       case 'dayFull':
-        return `${DAYS_SHORT[d.getUTCDay()]} ${day} ${MONTHS_SHORT[mon]} ${year}`;
+        return iso
+          ? `${weekday} ${year} ${MONTHS_SHORT[mon]} ${day}`
+          : us
+          ? `${weekday}, ${MONTHS_SHORT[mon]} ${day}, ${year}`
+          : `${weekday} ${day} ${MONTHS_SHORT[mon]} ${year}`;
+
       case 'monthYear':
         return `${MONTHS_SHORT[mon]} ${year}`;
+
       case 'quarter':
         return `Q${quarterOf(ms)} ${year}`;
+
       case 'week': {
         const w = isoWeek(ms);
         return `W${String(w.week).padStart(2, '0')} ${w.year}`;
       }
-      case 'compact':
-        return `${pad(day)}/${pad(mon + 1)}/${String(year).slice(2)}`;
+
       case 'medium':
       default:
-        return `${day} ${MONTHS_SHORT[mon]} ${year}`;
+        return worded(MONTHS_SHORT[mon], year);
     }
   }
 
@@ -822,10 +880,14 @@ __mods["core/dates.js"] = function (__x, __req) {
     return d > 0 ? `in ${abs}` : `${abs} ago`;
   }
 
-  /** Timestamp for version history and backups. */
+  /** Timestamp for version history and backups — local time, by design. */
   function fmtTimestamp(ms) {
     const d = new Date(ms);
-    return `${pad(d.getDate())} ${MONTHS_SHORT[d.getMonth()]} ${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const month = MONTHS_SHORT[d.getMonth()];
+    if (dateOrder === 'ymd') return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`;
+    if (dateOrder === 'mdy') return `${month} ${d.getDate()}, ${d.getFullYear()} ${time}`;
+    return `${d.getDate()} ${month} ${d.getFullYear()} ${time}`;
   }
 
   /* ── Time-axis tick generation ─────────────────────────────────────────── */
@@ -1021,6 +1083,9 @@ __mods["core/dates.js"] = function (__x, __req) {
   Object.defineProperty(__x, "addWorkingDays", { get: () => addWorkingDays, enumerable: true });
   Object.defineProperty(__x, "isoWeek", { get: () => isoWeek, enumerable: true });
   Object.defineProperty(__x, "quarterOf", { get: () => quarterOf, enumerable: true });
+  Object.defineProperty(__x, "DATE_ORDERS", { get: () => DATE_ORDERS, enumerable: true });
+  Object.defineProperty(__x, "setDateOrder", { get: () => setDateOrder, enumerable: true });
+  Object.defineProperty(__x, "getDateOrder", { get: () => getDateOrder, enumerable: true });
   Object.defineProperty(__x, "fmtDate", { get: () => fmtDate, enumerable: true });
   Object.defineProperty(__x, "fmtDuration", { get: () => fmtDuration, enumerable: true });
   Object.defineProperty(__x, "fmtRelative", { get: () => fmtRelative, enumerable: true });
@@ -1494,7 +1559,7 @@ __mods["core/model.js"] = function (__x, __req) {
       activeBaseline: null,
       criticalPath: false,
       laneLabels: true,
-      dateFormat: 'medium',
+      dateOrder: 'mdy',            // mdy | dmy | ymd — display order only
       autoBackupMinutes: 60,
       backupEveryEdits: 100,
       backupKeep: 20,
@@ -2799,7 +2864,7 @@ __mods["core/store.js"] = function (__x, __req) {
    * These are preferences, so they persist but stay out of the undo stack —
    * pressing Ctrl+Z should never silently change your snapping back.
    */
-  const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart']);
+  const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart', 'dateOrder']);
 
   /** Settings changes are undoable — they alter how the plan reads. */
   function setSetting(key, value, label = 'Change setting') {
@@ -5956,10 +6021,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
         const node = el('div', { class: 'tl-tick major', style: { left: `${x}px`, width: `${width}px` } });
         if (i % upperStride === 0) {
-          // A tick that begins off the left edge would drag its label out of
-          // sight; nudge the text back so the current period stays readable.
-          if (x < 0) node.style.paddingLeft = `${Math.max(7, -x + 7)}px`;
-          node.appendChild(el('span', { text: labelFor(header.id, tick) }));
+          placeTickLabel(node, x, width, labelFor(header.id, tick), upperFont, { stride: upperStride });
         }
         dom.bandUpper.appendChild(node);
       });
@@ -5986,13 +6048,45 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
       // in full — labels are never clipped or ellipsised, just spaced out far
       // enough that they cannot collide.
       if (i % stride === 0) {
-        if (x < 0 && width > 30) node.style.paddingLeft = `${Math.max(7, -x + 7)}px`;
-        node.appendChild(el('span', { text: tick.label }));
-        const subWidth = textWidth(`${tick.label} ${tick.sub || ''}`, lowerFont) + 16;
-        if (tick.sub && width * stride > subWidth) node.appendChild(el('span', { class: 'tk-sub', text: tick.sub }));
+        placeTickLabel(node, x, width, tick.label, lowerFont, { stride, sub: tick.sub || '' });
       }
       dom.bandLower.appendChild(node);
     });
+  }
+
+  /**
+   * Place a ruler tick's label, nudging it into view when the tick starts off
+   * the left edge — but only when the visible sliver is genuinely wide enough
+   * to hold it.
+   *
+   * Without that second condition the nudge pushes the label of a mostly
+   * off-screen tick rightwards until it prints on top of the next tick's label,
+   * which is exactly the overlap this guards against. When it will not fit, the
+   * label is dropped: the next tick along still names the period, so nothing is
+   * lost, and no text is ever drawn over other text.
+   *
+   * @returns {boolean} whether the label was drawn.
+   */
+  function placeTickLabel(node, x, width, text, font, { stride = 1, sub = '', gap = 12 } = {}) {
+    const inset = 7;
+    const subGap = 5; // matches .tk-sub's margin-left
+
+    // Room this label has before the *next labelled* tick begins. Unlabelled
+    // ticks in between are just rules, so the text may run over them.
+    const reach = width * stride;
+    const available = (x < 0 ? x + reach : reach) - inset - gap;
+
+    if (textWidth(text, font) > available) return false;
+
+    if (x < 0) node.style.paddingLeft = `${-x + inset}px`;
+    node.appendChild(el('span', { text }));
+
+    // The secondary label (a date under a week, a year under a month) is
+    // optional: it only appears when it too fits inside the same reach.
+    if (sub && textWidth(text, font) + subGap + textWidth(sub, font) <= available) {
+      node.appendChild(el('span', { class: 'tk-sub', text: sub }));
+    }
+    return true;
   }
 
   /**
@@ -12027,7 +12121,7 @@ __mods["io/importers.js"] = function (__x, __req) {
    */
 
   const { readFileAsText, readFileAsArrayBuffer, fold } = __req("core/util.js");
-  const { toMs, toISO, MS_DAY, addDays, todayMs } = __req("core/dates.js");
+  const { toMs, toISO, MS_DAY, addDays, todayMs, getDateOrder } = __req("core/dates.js");
   const { makeProject, makeObject, makeLane, makeLink, normalise, validate, TYPES, STATUSES, STATUS_IDS, SUBSYSTEMS, TEST_KINDS } = __req("core/model.js");
 
 
@@ -12382,18 +12476,31 @@ __mods["io/importers.js"] = function (__x, __req) {
     const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(text);
     if (iso) return Date.UTC(+iso[1], +iso[2] - 1, +iso[3]);
 
-    // dd/mm/yyyy and mm/dd/yyyy are ambiguous. Day-first wins unless the first
-    // number cannot be a day — the format most of the world writes.
+    // 3/5/2026 is genuinely ambiguous. Where one field is over 12 the order is
+    // decided for us; otherwise fall back to the project's display order, so a
+    // plan shown as M/D/Y also imports spreadsheets written as M/D/Y.
     const slash = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})/.exec(text);
     if (slash) {
-      let [, a, b, y] = slash;
-      let day = +a;
-      let month = +b;
-      if (day > 12 && month <= 12) {
-        /* day-first, unambiguous */
-      } else if (month > 12 && day <= 12) {
-        [day, month] = [month, day];
+      const [, first, second, y] = slash;
+      const a = +first;
+      const b = +second;
+
+      let day;
+      let month;
+      if (a > 12 && b <= 12) {
+        day = a;
+        month = b;
+      } else if (b > 12 && a <= 12) {
+        month = a;
+        day = b;
+      } else if (getDateOrder() === 'dmy') {
+        day = a;
+        month = b;
+      } else {
+        month = a;
+        day = b;
       }
+
       let year = +y;
       if (year < 100) year += year < 70 ? 2000 : 1900;
       return Date.UTC(year, month - 1, day);
@@ -12720,7 +12827,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
   const { el, clear, debounce, bytes, download } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY } = __req("core/dates.js");
+  const { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } = __req("core/dates.js");
   const { TYPES, STATUSES, STATUS_IDS, SUBSYSTEMS, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline } = __req("core/model.js");
 
 
@@ -14055,6 +14162,11 @@ __mods["ui/panels.js"] = function (__x, __req) {
           ],
           onChange: (v) => set('snap', v, 'Change snapping'),
         })),
+        field('Date format', selectInput({
+          value: settings.dateOrder || 'mdy',
+          options: DATE_ORDERS.map((o) => ({ value: o.id, label: o.label })),
+          onChange: (v) => set('dateOrder', v, 'Change date format'),
+        }), 'Display only — files always store dates as YYYY-MM-DD.'),
         field('Week starts on', segmented({
           value: String(settings.weekStart),
           stretch: true,
@@ -16698,7 +16810,7 @@ __mods["main.js"] = function (__x, __req) {
   const { toast, showTooltip, hideTooltip, confirmDialog } = __req("ui/components.js");
   const { renderNote, notePreview } = __req("ui/notes.js");
   const { TYPES, statusOf, durationDays } = __req("core/model.js");
-  const { fmtDate, fmtDuration } = __req("core/dates.js");
+  const { fmtDate, fmtDuration, setDateOrder, getDateOrder } = __req("core/dates.js");
   const { el } = __req("core/util.js");
 
   const APP_VERSION = '1.0.0';
@@ -16734,8 +16846,9 @@ __mods["main.js"] = function (__x, __req) {
       }
     }
 
-    /* ── 2. Theme, before first paint ────────────────────────────────────── */
+    /* ── 2. Theme and date format, before first paint ────────────────────── */
     initTheme();
+    installDateFormat();
 
     /* ── 3. Chrome ───────────────────────────────────────────────────────── */
     buildShell();
@@ -16791,6 +16904,36 @@ __mods["main.js"] = function (__x, __req) {
       renderer.requestRender();
       toast({ tone: 'good', title: 'Recovered' });
     }
+  }
+
+  /* ── Date format ───────────────────────────────────────────────────────── */
+
+  /**
+   * Push the project's date-display order into `core/dates.js`.
+   *
+   * That module is a leaf and cannot read the store, so the preference is
+   * pushed to it — on load, and again whenever the document changes, since an
+   * import or a settings change can bring a different one.
+   */
+  function installDateFormat() {
+    const apply = () => {
+      const order = store.getSettings().dateOrder || 'mdy';
+      if (order === getDateOrder()) return false;
+      setDateOrder(order);
+      return true;
+    };
+
+    apply();
+
+    on(EV.DOC_CHANGED, (payload) => {
+      if (payload?.transient) return;
+      // A changed order invalidates every rendered date, including measured
+      // ruler labels, so force a full repaint rather than a positional update.
+      if (apply()) renderer.invalidateAll();
+    });
+    on(EV.DOC_REPLACED, () => {
+      if (apply()) renderer.invalidateAll();
+    });
   }
 
   /* ── Viewport persistence ──────────────────────────────────────────────── */

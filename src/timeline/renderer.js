@@ -185,10 +185,7 @@ function renderRuler(doc, settings) {
 
       const node = el('div', { class: 'tl-tick major', style: { left: `${x}px`, width: `${width}px` } });
       if (i % upperStride === 0) {
-        // A tick that begins off the left edge would drag its label out of
-        // sight; nudge the text back so the current period stays readable.
-        if (x < 0) node.style.paddingLeft = `${Math.max(7, -x + 7)}px`;
-        node.appendChild(el('span', { text: labelFor(header.id, tick) }));
+        placeTickLabel(node, x, width, labelFor(header.id, tick), upperFont, { stride: upperStride });
       }
       dom.bandUpper.appendChild(node);
     });
@@ -215,13 +212,45 @@ function renderRuler(doc, settings) {
     // in full — labels are never clipped or ellipsised, just spaced out far
     // enough that they cannot collide.
     if (i % stride === 0) {
-      if (x < 0 && width > 30) node.style.paddingLeft = `${Math.max(7, -x + 7)}px`;
-      node.appendChild(el('span', { text: tick.label }));
-      const subWidth = textWidth(`${tick.label} ${tick.sub || ''}`, lowerFont) + 16;
-      if (tick.sub && width * stride > subWidth) node.appendChild(el('span', { class: 'tk-sub', text: tick.sub }));
+      placeTickLabel(node, x, width, tick.label, lowerFont, { stride, sub: tick.sub || '' });
     }
     dom.bandLower.appendChild(node);
   });
+}
+
+/**
+ * Place a ruler tick's label, nudging it into view when the tick starts off
+ * the left edge — but only when the visible sliver is genuinely wide enough
+ * to hold it.
+ *
+ * Without that second condition the nudge pushes the label of a mostly
+ * off-screen tick rightwards until it prints on top of the next tick's label,
+ * which is exactly the overlap this guards against. When it will not fit, the
+ * label is dropped: the next tick along still names the period, so nothing is
+ * lost, and no text is ever drawn over other text.
+ *
+ * @returns {boolean} whether the label was drawn.
+ */
+function placeTickLabel(node, x, width, text, font, { stride = 1, sub = '', gap = 12 } = {}) {
+  const inset = 7;
+  const subGap = 5; // matches .tk-sub's margin-left
+
+  // Room this label has before the *next labelled* tick begins. Unlabelled
+  // ticks in between are just rules, so the text may run over them.
+  const reach = width * stride;
+  const available = (x < 0 ? x + reach : reach) - inset - gap;
+
+  if (textWidth(text, font) > available) return false;
+
+  if (x < 0) node.style.paddingLeft = `${-x + inset}px`;
+  node.appendChild(el('span', { text }));
+
+  // The secondary label (a date under a week, a year under a month) is
+  // optional: it only appears when it too fits inside the same reach.
+  if (sub && textWidth(text, font) + subGap + textWidth(sub, font) <= available) {
+    node.appendChild(el('span', { class: 'tk-sub', text: sub }));
+  }
+  return true;
 }
 
 /**
