@@ -1,13 +1,19 @@
 /**
- * Local persistence.
+ * Persistence.
  *
- * The application is local-first: there is no server, and there is no Save
- * button. Every committed edit is written back within a few hundred
- * milliseconds, and the document survives a browser restart, a crash, or the
- * tab being closed mid-drag.
+ * There is no Save button. Every committed edit is written back within a few
+ * hundred milliseconds, and the document survives a browser restart, a crash,
+ * or the tab being closed mid-drag.
  *
- * Storage stack
- * -------------
+ * Where it is written depends on how the application is deployed, and every
+ * caller is deliberately unaware of which:
+ *
+ *   local mode   IndexedDB — the original behaviour, no account, no server.
+ *   hosted mode  Postgres via `core/cloud.js`, with IndexedDB demoted to an
+ *                offline cache so a dropped connection loses nothing.
+ *
+ * Storage stack (local, and the cache in hosted mode)
+ * --------------------------------------------------
  * IndexedDB is the primary store — it takes megabytes without complaint,
  * holds binary attachments natively, and writes off the main thread.
  * localStorage is kept as a mirror for the small stuff (preferences) and as a
@@ -15,11 +21,12 @@
  * browsing on some engines and when a page is opened from `file://` under a
  * hardened profile. The fallback is transparent to every caller.
  *
- * Imports: util, events, model, store.
+ * Imports: util, events, cloud, model, store.
  */
 
 import { debounce, bytes } from './util.js';
 import { emit, on, EV } from './events.js';
+import * as cloud from './cloud.js';
 import { normalise, makeStarterProject } from './model.js';
 import { getDoc, markClean, isDirty } from './store.js';
 
@@ -39,6 +46,13 @@ let usingFallback = false;
 let editsSinceBackup = 0;
 let backupTimer = null;
 let lastSaveError = null;
+
+/**
+ * True once a signed-in session has a project open on the server. Everything
+ * that has two implementations branches on this one flag, so there is a single
+ * answer to "where does this go" rather than a scattering of checks.
+ */
+let hosted = false;
 
 /* ── IndexedDB plumbing ────────────────────────────────────────────────── */
 
@@ -118,8 +132,11 @@ function lsSetJSON(key, value) {
 /* ── Lifecycle ─────────────────────────────────────────────────────────── */
 
 /**
- * Open the store and return the document to load: the most recently saved
- * project, or a seeded starter project on first run.
+ * Open the store and return the document to load.
+ *
+ * Hosted: the project last open on this device, or the most recent one the
+ * account can reach, or a fresh starter project created on the server.
+ * Local: the most recently saved project, or a seeded starter on first run.
  */
 export async function init() {
   try {
@@ -135,9 +152,72 @@ export async function init() {
 
   wireAutosave();
 
+  if (cloud.isSignedIn()) {
+    const opened = await openFromCloud();
+    if (opened) return opened;
+    // Signing in and then failing to reach the data is worth saying out loud
+    // rather than silently dropping the user into an unrelated local project.
+    console.warn('[cx-timeline] signed in but could not open a project; falling back to local storage');
+  }
+
   const saved = await loadLatest();
   if (saved) return { doc: normalise(saved), fresh: false };
   return { doc: normalise(makeStarterProject()), fresh: true };
+}
+
+/**
+ * Choose and open a project on the server.
+ * Returns the same shape as `init()`, or null when nothing could be opened.
+ */
+async function openFromCloud() {
+  try {
+    const projects = await cloud.listProjects();
+
+    // Prefer whatever this device had open, so a reload lands where you were.
+    const remembered = getPref('lastProject');
+    const wanted = projects.find((p) => p.id === remembered) || projects[0];
+
+    if (!wanted) {
+      const doc = normalise(makeStarterProject());
+      await cloud.createProject(doc);
+      hosted = true;
+      setPref('lastProject', cloud.getProjectId());
+      return { doc, fresh: true };
+    }
+
+    const doc = await cloud.openProject(wanted.id);
+    if (!doc) return null;
+    hosted = true;
+    setPref('lastProject', wanted.id);
+    return { doc: normalise(doc), fresh: false };
+  } catch (err) {
+    console.warn('[cx-timeline] could not load from the server:', err.message);
+    return null;
+  }
+}
+
+/** Open a different project. Used by the Projects pane. */
+export async function switchProject(id) {
+  const doc = await cloud.openProject(id);
+  if (!doc) throw new Error('That project is no longer available.');
+  hosted = true;
+  setPref('lastProject', id);
+  editsSinceBackup = 0;
+  return normalise(doc);
+}
+
+/** Create a project on the server from a document, and open it. */
+export async function createCloudProject(doc) {
+  const id = await cloud.createProject(normalise(doc));
+  hosted = true;
+  setPref('lastProject', id);
+  editsSinceBackup = 0;
+  return id;
+}
+
+/** True when the document is being kept on the server. */
+export function isHosted() {
+  return hosted;
 }
 
 /** True when running on the localStorage fallback path. */
@@ -203,11 +283,37 @@ export async function saveNow() {
   emit(EV.SAVE_START);
   try {
     const record = { id: doc.id, savedAt: Date.now(), doc };
-    if (usingFallback) {
+
+    if (hosted) {
+      const result = await cloud.saveProject(doc);
+
+      if (!result.ok) {
+        // A read-only refusal is not a failure to report as one: the user is
+        // simply browsing, and the write guard has already told them.
+        if (result.reason === 'read-only') {
+          markClean();
+          emit(EV.SAVE_DONE, { at: Date.now(), skipped: true });
+          return true;
+        }
+        if (result.conflict) {
+          // Never overwrite: keep the work in the local cache so it can be
+          // recovered, and let the UI decide what to offer.
+          await cacheLocally(record);
+          emit(EV.SAVE_ERROR, { error: new Error('conflict'), conflict: true });
+          return false;
+        }
+        throw new Error(result.reason || 'save failed');
+      }
+
+      // A local copy of every successful save is what makes a dropped
+      // connection survivable, and what the crash-recovery path reads.
+      await cacheLocally(record);
+    } else if (usingFallback) {
       lsSetJSON(LS_DOC, doc);
     } else {
       await wrap(tx(STORE_PROJECTS, 'readwrite').put(record));
     }
+
     markClean();
     lastSaveError = null;
     emit(EV.SAVE_DONE, { at: record.savedAt });
@@ -234,6 +340,23 @@ export async function saveNow() {
       });
     }
     return false;
+  }
+}
+
+/** Mirror a save into IndexedDB. Best-effort: the server is the record. */
+async function cacheLocally(record) {
+  if (usingFallback) {
+    try {
+      lsSetJSON(LS_DOC, record.doc);
+    } catch {
+      /* the cache is a convenience, not the record */
+    }
+    return;
+  }
+  try {
+    await wrap(tx(STORE_PROJECTS, 'readwrite').put(record));
+  } catch {
+    /* a full local cache must never block a successful server save */
   }
 }
 
@@ -315,7 +438,11 @@ export async function makeBackup(reason = 'manual') {
     doc,
   };
   try {
-    if (usingFallback) {
+    if (hosted) {
+      const written = await cloud.createBackup(doc, reason);
+      if (!written) return false; // read-only, or the server said no
+      await cloud.pruneBackups(doc.settings.backupKeep || 20);
+    } else if (usingFallback) {
       const list = lsGetJSON(LS_BACKUPS, []);
       list.push({ ...entry, key: entry.time });
       // localStorage is tight; keep far fewer snapshots on the fallback path.
@@ -334,6 +461,14 @@ export async function makeBackup(reason = 'manual') {
 }
 
 export async function listBackups() {
+  if (hosted) {
+    try {
+      return await cloud.listBackups();
+    } catch (err) {
+      console.warn('[cx-timeline] could not list backups:', err.message);
+      return [];
+    }
+  }
   if (usingFallback) {
     return lsGetJSON(LS_BACKUPS, [])
       .map((b) => ({ key: b.key, time: b.time, reason: b.reason, name: b.name, objects: b.objects, size: 0 }))
@@ -357,6 +492,7 @@ export async function listBackups() {
 }
 
 export async function loadBackup(key) {
+  if (hosted) return cloud.loadBackup(key);
   if (usingFallback) {
     const found = lsGetJSON(LS_BACKUPS, []).find((b) => b.key === key);
     return found ? found.doc : null;
@@ -366,6 +502,10 @@ export async function loadBackup(key) {
 }
 
 export async function deleteBackup(key) {
+  if (hosted) {
+    await cloud.deleteBackup(key);
+    return;
+  }
   if (usingFallback) {
     lsSetJSON(LS_BACKUPS, lsGetJSON(LS_BACKUPS, []).filter((b) => b.key !== key));
     return;
@@ -375,6 +515,10 @@ export async function deleteBackup(key) {
 
 /** Trim the backup history to the newest `keep` entries. */
 export async function pruneBackups(keep = 20) {
+  if (hosted) {
+    await cloud.pruneBackups(keep);
+    return;
+  }
   if (usingFallback || keep <= 0) return;
   const all = await wrap(tx(STORE_BACKUPS).getAll());
   if (all.length <= keep) return;
@@ -398,6 +542,7 @@ function estimateSize(doc) {
  * with 200 MB of logs still autosaves in milliseconds.
  */
 export async function putBlob(id, file) {
+  if (hosted) return cloud.putBlob(id, file);
   const record = { id, name: file.name, type: file.type, size: file.size, added: Date.now(), blob: file };
   if (usingFallback) {
     throw new Error('Attachments require IndexedDB, which is not available in this browser session.');
@@ -407,12 +552,20 @@ export async function putBlob(id, file) {
 }
 
 export async function getBlob(id) {
+  if (hosted) {
+    const blob = await cloud.getBlob(id);
+    return blob ? { id, blob, name: id, type: blob.type, size: blob.size } : null;
+  }
   if (usingFallback) return null;
   const record = await wrap(tx(STORE_BLOBS).get(id));
   return record || null;
 }
 
 export async function deleteBlob(id) {
+  if (hosted) {
+    await cloud.deleteBlob(id);
+    return;
+  }
   if (usingFallback) return;
   await wrap(tx(STORE_BLOBS, 'readwrite').delete(id));
 }
@@ -481,7 +634,11 @@ export async function usage() {
     /* not supported — the report simply omits the quota line */
   }
   return {
-    backend: usingFallback ? 'localStorage (fallback)' : 'IndexedDB',
+    backend: hosted
+      ? 'Supabase (this device keeps an offline copy)'
+      : usingFallback
+        ? 'localStorage (fallback)'
+        : 'IndexedDB',
     document: { bytes: docBytes, label: bytes(docBytes) },
     attachments: blobs,
     quota,

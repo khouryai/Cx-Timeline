@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 37   Built: 2026-08-06T21:00:39.348Z
+ * Modules: 39   Built: 2026-08-06T21:34:22.730Z
  */
 (function () {
   'use strict';
@@ -536,6 +536,12 @@ __mods["core/events.js"] = function (__x, __req) {
 
     /* History */
     HISTORY_CHANGED: 'history:changed', // { canUndo, canRedo, depth }
+
+    /* Account & sharing (hosted deployments only) */
+    AUTH_CHANGED: 'auth:changed', // { user } — signed in, signed out, session restored
+    ACCESS_CHANGED: 'access:changed', // { role, readOnly } — which project, and what you may do
+    EDIT_REFUSED: 'access:refused', // a write was attempted without permission
+    CLOUD_CONFLICT: 'cloud:conflict', // someone else saved the project first
 
     /* Selection & interaction */
     SELECTION_CHANGED: 'selection:changed', // { ids }
@@ -2121,6 +2127,588 @@ __mods["core/model.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// core/cloud.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/cloud.js"] = function (__x, __req) {
+  /**
+   * The hosted backend.
+   *
+   * This module is the *only* one that knows Supabase exists. Everything above
+   * it — storage, the panels, the sharing dialog — talks to the functions here
+   * and would keep working against a different backend if one ever replaced it.
+   *
+   * It is inert unless `config.js` names a project. With no configuration
+   * `isConfigured()` returns false, nothing here is ever called, and CX Timeline
+   * behaves exactly as it always has: local-first, no account, works by
+   * double-clicking index.html.
+   *
+   * On permissions
+   * --------------
+   * The role returned by `getRole()` drives the read-only UI, but it is not the
+   * control. Every rule is enforced by row-level security in Postgres, so a
+   * viewer who bypasses the interface entirely is still refused by the database.
+   * The role here exists to explain *why* something is disabled, not to decide
+   * it.
+   *
+   * On saving
+   * ---------
+   * Writes go through the `save_project` function rather than a plain UPDATE,
+   * for two reasons. A row hidden by row-level security is not an error — the
+   * statement simply matches nothing and reports success — so a plain UPDATE
+   * would let a viewer believe their work was saved. And the function carries an
+   * optimistic revision check, so two people editing one plan get told about the
+   * collision instead of quietly overwriting each other.
+   *
+   * Imports: util, events.
+   */
+
+  const { emit, EV } = __req("core/events.js");
+
+  /* ── Configuration ─────────────────────────────────────────────────────── */
+
+  function config() {
+    return (typeof window !== 'undefined' && window.CX_CONFIG) || {};
+  }
+
+  /** True when this build points at a backend. */
+  function isConfigured() {
+    const { supabaseUrl, supabaseAnonKey } = config();
+    return Boolean(supabaseUrl && supabaseAnonKey);
+  }
+
+  /** True when an account is required even if the backend cannot be reached. */
+  function authRequired() {
+    return Boolean(config().requireAuth);
+  }
+
+  /* ── Private state ─────────────────────────────────────────────────────── */
+
+  let client = null;
+  let user = null;
+  let projectId = null;
+  let projectRev = 0;
+  let role = null; // 'owner' | 'editor' | 'viewer' | null
+  let ready = false;
+
+  /* ── Lifecycle ─────────────────────────────────────────────────────────── */
+
+  /**
+   * Create the client and restore any existing session.
+   * Resolves to the signed-in user, or null. Never throws: a backend that is
+   * down must degrade to "not signed in", not to a blank page.
+   */
+  async function init() {
+    if (ready) return user;
+    if (!isConfigured()) return null;
+
+    const sdk = typeof window !== 'undefined' ? window.supabase : null;
+    if (!sdk || typeof sdk.createClient !== 'function') {
+      console.warn('[cx-timeline] the Supabase client did not load; running local-only');
+      return null;
+    }
+
+    const { supabaseUrl, supabaseAnonKey } = config();
+    client = sdk.createClient(supabaseUrl, supabaseAnonKey, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    });
+
+    try {
+      const { data } = await client.auth.getSession();
+      user = data?.session?.user || null;
+    } catch (err) {
+      console.warn('[cx-timeline] could not restore the session:', err.message);
+      user = null;
+    }
+
+    // A refresh token that expires while the tab is open, or a sign-out in
+    // another tab, must not leave a stale identity behind.
+    client.auth.onAuthStateChange((event, session) => {
+      const next = session?.user || null;
+      const changed = (next?.id || null) !== (user?.id || null);
+      user = next;
+      if (!next) forgetProject();
+      if (changed) emit(EV.AUTH_CHANGED, { user, event });
+    });
+
+    ready = true;
+    return user;
+  }
+
+  /** The client, for the rare caller that needs it. Null when not configured. */
+  function raw() {
+    return client;
+  }
+
+  /* ── Accounts ──────────────────────────────────────────────────────────── */
+
+  function currentUser() {
+    return user;
+  }
+
+  function isSignedIn() {
+    return Boolean(user);
+  }
+
+  /** A short label for the account menu. */
+  function accountLabel() {
+    if (!user) return '';
+    return user.user_metadata?.full_name || user.email || 'Signed in';
+  }
+
+  async function signIn(email, password) {
+    requireClient();
+    const { data, error } = await client.auth.signInWithPassword({
+      email: String(email || '').trim(),
+      password,
+    });
+    if (error) throw friendlier(error);
+    user = data.user;
+    emit(EV.AUTH_CHANGED, { user, event: 'SIGNED_IN' });
+    return user;
+  }
+
+  /**
+   * Create an account.
+   *
+   * Whether the user is signed in straight away depends on the project's email
+   * confirmation setting, so the caller is told which happened rather than
+   * having to guess from whether a session appeared.
+   */
+  async function signUp(email, password, fullName = '') {
+    requireClient();
+    const { data, error } = await client.auth.signUp({
+      email: String(email || '').trim(),
+      password,
+      options: { data: fullName ? { full_name: fullName } : {} },
+    });
+    if (error) throw friendlier(error);
+
+    if (data.session) {
+      user = data.user;
+      emit(EV.AUTH_CHANGED, { user, event: 'SIGNED_IN' });
+      return { user, confirmationRequired: false };
+    }
+    return { user: data.user, confirmationRequired: true };
+  }
+
+  async function signOut() {
+    if (!client) return;
+    await client.auth.signOut();
+    user = null;
+    forgetProject();
+    emit(EV.AUTH_CHANGED, { user: null, event: 'SIGNED_OUT' });
+  }
+
+  async function sendPasswordReset(email) {
+    requireClient();
+    const { error } = await client.auth.resetPasswordForEmail(String(email || '').trim(), {
+      redirectTo: window.location.origin + window.location.pathname,
+    });
+    if (error) throw friendlier(error);
+  }
+
+  async function updatePassword(password) {
+    requireClient();
+    const { error } = await client.auth.updateUser({ password });
+    if (error) throw friendlier(error);
+  }
+
+  /* ── The open project, and what you may do to it ───────────────────────── */
+
+  function getProjectId() {
+    return projectId;
+  }
+
+  function getRev() {
+    return projectRev;
+  }
+
+  /** 'owner' | 'editor' | 'viewer' | null (nothing open, or local-only). */
+  function getRole() {
+    return role;
+  }
+
+  function canWrite() {
+    return role === 'owner' || role === 'editor';
+  }
+
+  function isOwner() {
+    return role === 'owner';
+  }
+
+  /**
+   * True when the open project must not be modified.
+   *
+   * Deliberately false when no project is open or the app is running
+   * local-only — read-only is a property of *this* project, not a default.
+   */
+  function isReadOnly() {
+    return Boolean(projectId) && !canWrite();
+  }
+
+  function setAccess(id, nextRole, rev) {
+    const changed = id !== projectId || nextRole !== role;
+    projectId = id;
+    role = nextRole;
+    projectRev = rev ?? 0;
+    if (changed) emit(EV.ACCESS_CHANGED, { projectId, role, readOnly: isReadOnly() });
+  }
+
+  function forgetProject() {
+    if (projectId || role) setAccess(null, null, 0);
+  }
+
+  /* ── Projects ──────────────────────────────────────────────────────────── */
+
+  /** Every project the signed-in user can reach, newest first, with their role. */
+  async function listProjects() {
+    const rows = await rpc('list_my_projects');
+    return (rows || []).map((r) => ({
+      id: r.id,
+      name: r.name,
+      role: r.role,
+      objects: r.object_count,
+      rev: Number(r.rev),
+      savedAt: new Date(r.updated_at).getTime(),
+      createdAt: new Date(r.created_at).getTime(),
+      ownerEmail: r.owner_email,
+      members: r.member_count,
+    }));
+  }
+
+  /** Create a project from a document and open it. Returns its id. */
+  async function createProject(doc) {
+    requireUser();
+    const { data, error } = await client
+      .from('projects')
+      .insert({
+        owner_id: user.id,
+        name: doc?.name || 'Untitled Programme',
+        doc,
+        object_count: (doc?.objects || []).length,
+      })
+      .select('id, rev')
+      .single();
+    if (error) throw friendlier(error);
+
+    setAccess(data.id, 'owner', Number(data.rev));
+    return data.id;
+  }
+
+  /** Open a project. Returns the document, or null when it is not reachable. */
+  async function openProject(id) {
+    const { data, error } = await client
+      .from('projects')
+      .select('id, doc, rev, name')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw friendlier(error);
+    if (!data) {
+      forgetProject();
+      return null;
+    }
+
+    const theirRole = await rpc('project_role', { p_project: id });
+    setAccess(data.id, theirRole || 'viewer', Number(data.rev));
+    return data.doc;
+  }
+
+  /**
+   * Save the open project.
+   *
+   * Returns `{ ok, rev }` on success. A collision resolves to
+   * `{ ok: false, conflict: true }` rather than throwing, because the caller —
+   * autosave — has to keep running either way.
+   */
+  async function saveProject(doc, { force = false } = {}) {
+    if (!projectId) return { ok: false, reason: 'no-project' };
+    if (!canWrite()) return { ok: false, reason: 'read-only' };
+
+    const { data, error } = await client.rpc('save_project', {
+      p_project: projectId,
+      p_doc: doc,
+      p_rev: force ? 0 : projectRev,
+    });
+
+    if (error) {
+      if (isConflict(error)) {
+        emit(EV.CLOUD_CONFLICT, { projectId });
+        return { ok: false, conflict: true, reason: 'conflict' };
+      }
+      if (isDenied(error)) {
+        setAccess(projectId, 'viewer', projectRev);
+        return { ok: false, reason: 'read-only' };
+      }
+      throw friendlier(error);
+    }
+
+    projectRev = Number(data);
+    return { ok: true, rev: projectRev };
+  }
+
+  async function renameProject(id, name) {
+    const { data, error } = await client
+      .from('projects')
+      .update({ name })
+      .eq('id', id)
+      .select('id');
+    if (error) throw friendlier(error);
+    // A row excluded by row-level security is not an error — it just matches
+    // nothing — so an empty result is how a refused rename presents itself.
+    if (!data || !data.length) throw new Error('You do not have permission to rename this project.');
+  }
+
+  async function deleteProject(id) {
+    const { data, error } = await client.from('projects').delete().eq('id', id).select('id');
+    if (error) throw friendlier(error);
+    if (!data || !data.length) throw new Error('Only the owner can delete a project.');
+    if (id === projectId) forgetProject();
+  }
+
+  /* ── Sharing ───────────────────────────────────────────────────────────── */
+
+  async function listMembers(id = projectId) {
+    if (!id) return [];
+    const rows = await rpc('list_project_members', { p_project: id });
+    return (rows || []).map((r) => ({
+      userId: r.user_id,
+      email: r.email,
+      name: r.full_name,
+      role: r.role,
+      since: new Date(r.created_at).getTime(),
+      isYou: r.user_id === user?.id,
+    }));
+  }
+
+  /** Grant someone access by email address. Owners only. */
+  async function shareProject(id, email, memberRole) {
+    const rows = await rpc('share_project', {
+      p_project: id,
+      p_email: email,
+      p_role: memberRole,
+    });
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    return { userId: row?.member_id, email: row?.member_email, role: row?.member_role };
+  }
+
+  async function unshareProject(id, userId) {
+    await rpc('unshare_project', { p_project: id, p_user: userId });
+    if (userId === user?.id && id === projectId) forgetProject();
+  }
+
+  /** Change an existing member's role. Owners only. */
+  async function setMemberRole(id, email, memberRole) {
+    return shareProject(id, email, memberRole);
+  }
+
+  /* ── Backups ───────────────────────────────────────────────────────────── */
+
+  async function listBackups(id = projectId) {
+    if (!id) return [];
+    const { data, error } = await client
+      .from('project_backups')
+      .select('id, reason, name, object_count, size_bytes, created_at')
+      .eq('project_id', id)
+      .order('created_at', { ascending: false });
+    if (error) throw friendlier(error);
+    return (data || []).map((b) => ({
+      key: b.id,
+      time: new Date(b.created_at).getTime(),
+      reason: b.reason,
+      name: b.name,
+      objects: b.object_count,
+      size: b.size_bytes,
+    }));
+  }
+
+  async function createBackup(doc, reason = 'manual') {
+    if (!projectId || !canWrite()) return false;
+    let size = 0;
+    try {
+      size = JSON.stringify(doc).length;
+    } catch {
+      /* an unserialisable document would have failed to save already */
+    }
+    const { error } = await client.from('project_backups').insert({
+      project_id: projectId,
+      doc,
+      reason,
+      name: doc?.name || null,
+      object_count: (doc?.objects || []).length,
+      size_bytes: size,
+    });
+    if (error) {
+      if (isDenied(error)) return false;
+      throw friendlier(error);
+    }
+    return true;
+  }
+
+  async function loadBackup(key) {
+    const { data, error } = await client
+      .from('project_backups')
+      .select('doc')
+      .eq('id', key)
+      .maybeSingle();
+    if (error) throw friendlier(error);
+    return data?.doc || null;
+  }
+
+  async function deleteBackup(key) {
+    const { data, error } = await client.from('project_backups').delete().eq('id', key).select('id');
+    if (error) throw friendlier(error);
+    if (!data || !data.length) throw new Error('Only the owner can delete a backup.');
+  }
+
+  async function pruneBackups(keep = 20) {
+    if (!projectId || !canWrite()) return 0;
+    try {
+      return Number(await rpc('prune_backups', { p_project: projectId, p_keep: keep })) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /* ── Attachments ───────────────────────────────────────────────────────── */
+
+  const BUCKET = 'attachments';
+
+  /**
+   * Attachment bytes live in object storage, keyed `<project>/<id>`, exactly as
+   * they live outside the document locally — so a plan carrying 40 MB of test
+   * logs still saves in milliseconds. The first path segment is what the storage
+   * policies read to decide access.
+   */
+  function blobPath(id) {
+    return `${projectId}/${id}`;
+  }
+
+  async function putBlob(id, file) {
+    if (!projectId) throw new Error('No project is open.');
+    if (!canWrite()) throw new Error('This project is read-only.');
+    const { error } = await client.storage.from(BUCKET).upload(blobPath(id), file, {
+      upsert: true,
+      contentType: file.type || 'application/octet-stream',
+    });
+    if (error) throw friendlier(error);
+    return { id, name: file.name, type: file.type, size: file.size };
+  }
+
+  async function getBlob(id) {
+    if (!projectId) return null;
+    const { data, error } = await client.storage.from(BUCKET).download(blobPath(id));
+    if (error) return null;
+    return data;
+  }
+
+  async function deleteBlob(id) {
+    if (!projectId || !canWrite()) return;
+    await client.storage.from(BUCKET).remove([blobPath(id)]);
+  }
+
+  /* ── Plumbing ──────────────────────────────────────────────────────────── */
+
+  function requireClient() {
+    if (!client) throw new Error('This build is not connected to a backend.');
+  }
+
+  function requireUser() {
+    requireClient();
+    if (!user) throw new Error('You need to be signed in.');
+  }
+
+  async function rpc(name, args = {}) {
+    requireClient();
+    const { data, error } = await client.rpc(name, args);
+    if (error) throw friendlier(error);
+    return data;
+  }
+
+  /** Postgres raises 40001 for a revision collision; see save_project. */
+  function isConflict(error) {
+    return error?.code === '40001' || /conflict:/i.test(error?.message || '');
+  }
+
+  /** 42501 is insufficient_privilege — the read-only refusal. */
+  function isDenied(error) {
+    return (
+      error?.code === '42501' ||
+      error?.code === 'PGRST301' ||
+      /read only|permission|policy/i.test(error?.message || '')
+    );
+  }
+
+  /**
+   * Turn a backend error into something worth showing a person.
+   *
+   * Supabase messages are written for developers; these are the handful a user
+   * can actually act on, and the rest are passed through rather than swallowed.
+   */
+  function friendlier(error) {
+    const message = error?.message || String(error);
+    const map = [
+      [/invalid login credentials/i, 'That email and password do not match an account.'],
+      [/email not confirmed/i, 'Check your inbox and confirm your email address first.'],
+      [/user already registered/i, 'There is already an account with that email — sign in instead.'],
+      [/password should be at least (\d+)/i, 'Pick a longer password — at least $1 characters.'],
+      [/rate limit|too many requests/i, 'Too many attempts. Wait a minute and try again.'],
+      [/failed to fetch|networkerror/i, 'Cannot reach the server. Check your connection.'],
+      [/only the owner/i, 'Only the project owner can do that.'],
+      [/no account for/i, message.replace(/^.*?no account for/i, 'No account for')],
+      [/must keep at least one owner/i, 'A project has to keep at least one owner.'],
+      [/read only/i, 'This project is read-only for you.'],
+    ];
+    for (const [pattern, replacement] of map) {
+      if (pattern.test(message)) {
+        const out = new Error(message.replace(pattern, replacement));
+        out.code = error?.code;
+        return out;
+      }
+    }
+    const out = new Error(message);
+    out.code = error?.code;
+    return out;
+  }
+
+  Object.defineProperty(__x, "isConfigured", { get: () => isConfigured, enumerable: true });
+  Object.defineProperty(__x, "authRequired", { get: () => authRequired, enumerable: true });
+  Object.defineProperty(__x, "init", { get: () => init, enumerable: true });
+  Object.defineProperty(__x, "raw", { get: () => raw, enumerable: true });
+  Object.defineProperty(__x, "currentUser", { get: () => currentUser, enumerable: true });
+  Object.defineProperty(__x, "isSignedIn", { get: () => isSignedIn, enumerable: true });
+  Object.defineProperty(__x, "accountLabel", { get: () => accountLabel, enumerable: true });
+  Object.defineProperty(__x, "signIn", { get: () => signIn, enumerable: true });
+  Object.defineProperty(__x, "signUp", { get: () => signUp, enumerable: true });
+  Object.defineProperty(__x, "signOut", { get: () => signOut, enumerable: true });
+  Object.defineProperty(__x, "sendPasswordReset", { get: () => sendPasswordReset, enumerable: true });
+  Object.defineProperty(__x, "updatePassword", { get: () => updatePassword, enumerable: true });
+  Object.defineProperty(__x, "getProjectId", { get: () => getProjectId, enumerable: true });
+  Object.defineProperty(__x, "getRev", { get: () => getRev, enumerable: true });
+  Object.defineProperty(__x, "getRole", { get: () => getRole, enumerable: true });
+  Object.defineProperty(__x, "canWrite", { get: () => canWrite, enumerable: true });
+  Object.defineProperty(__x, "isOwner", { get: () => isOwner, enumerable: true });
+  Object.defineProperty(__x, "isReadOnly", { get: () => isReadOnly, enumerable: true });
+  Object.defineProperty(__x, "listProjects", { get: () => listProjects, enumerable: true });
+  Object.defineProperty(__x, "createProject", { get: () => createProject, enumerable: true });
+  Object.defineProperty(__x, "openProject", { get: () => openProject, enumerable: true });
+  Object.defineProperty(__x, "saveProject", { get: () => saveProject, enumerable: true });
+  Object.defineProperty(__x, "renameProject", { get: () => renameProject, enumerable: true });
+  Object.defineProperty(__x, "deleteProject", { get: () => deleteProject, enumerable: true });
+  Object.defineProperty(__x, "listMembers", { get: () => listMembers, enumerable: true });
+  Object.defineProperty(__x, "shareProject", { get: () => shareProject, enumerable: true });
+  Object.defineProperty(__x, "unshareProject", { get: () => unshareProject, enumerable: true });
+  Object.defineProperty(__x, "setMemberRole", { get: () => setMemberRole, enumerable: true });
+  Object.defineProperty(__x, "listBackups", { get: () => listBackups, enumerable: true });
+  Object.defineProperty(__x, "createBackup", { get: () => createBackup, enumerable: true });
+  Object.defineProperty(__x, "loadBackup", { get: () => loadBackup, enumerable: true });
+  Object.defineProperty(__x, "deleteBackup", { get: () => deleteBackup, enumerable: true });
+  Object.defineProperty(__x, "pruneBackups", { get: () => pruneBackups, enumerable: true });
+  Object.defineProperty(__x, "putBlob", { get: () => putBlob, enumerable: true });
+  Object.defineProperty(__x, "getBlob", { get: () => getBlob, enumerable: true });
+  Object.defineProperty(__x, "deleteBlob", { get: () => deleteBlob, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // core/history.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["core/history.js"] = function (__x, __req) {
@@ -2441,11 +3029,19 @@ __mods["core/store.js"] = function (__x, __req) {
    * which updates the document without touching history; the interaction
    * commits once with a single `edit()` when the pointer is released.
    *
-   * Imports: util, events, model, history.
+   * On a hosted deployment a project can be open read-only. Because every write
+   * funnels through the three entry points below, one guard covers the whole
+   * application — there is no path to a mutation that does not pass through
+   * here. The guard is a courtesy to the user, not the security boundary: that
+   * is row-level security in Postgres, which refuses the same writes even if
+   * this check were removed.
+   *
+   * Imports: util, events, cloud, model, history.
    */
 
   const { deepClone, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
+  const { isReadOnly } = __req("core/cloud.js");
   const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage } = __req("core/model.js");
   const { History, diff, apply } = __req("core/history.js");
 
@@ -2492,6 +3088,25 @@ __mods["core/store.js"] = function (__x, __req) {
     },
     clipboard: null,
   };
+
+  /* ── Write guard ───────────────────────────────────────────────────────── */
+
+  /**
+   * True when this write must not happen, having said so.
+   *
+   * `preview` is announced quietly: a viewer dragging a bar would otherwise
+   * raise a notification on every mouse-move.
+   */
+  function refuseWrite(label) {
+    if (!isReadOnly()) return false;
+    if (label !== 'preview') emit(EV.EDIT_REFUSED, { label });
+    return true;
+  }
+
+  /** True when the open project is read-only for the signed-in user. */
+  function isDocReadOnly() {
+    return isReadOnly();
+  }
 
   /* ── Indexing ──────────────────────────────────────────────────────────── */
 
@@ -2565,6 +3180,8 @@ __mods["core/store.js"] = function (__x, __req) {
    * @returns {boolean} true when the document actually changed.
    */
   function edit(label, mutator, opts = {}) {
+    if (refuseWrite(label)) return false;
+
     // No clone needed for the "before" side: `doc` is immutable by invariant,
     // and `draft` is a separate graph. This halves the cloning cost of an edit.
     const before = previewBase || doc;
@@ -2609,6 +3226,7 @@ __mods["core/store.js"] = function (__x, __req) {
    * frame.
    */
   function preview(mutator) {
+    if (refuseWrite('preview')) return false;
     if (!previewBase) previewBase = doc;
     const draft = deepClone(doc);
     if (mutator(draft) === false) return false;
@@ -2634,6 +3252,7 @@ __mods["core/store.js"] = function (__x, __req) {
    * @param {Function} mutate    Called once per object with a private copy.
    */
   function previewObjects(ids, mutate) {
+    if (refuseWrite('preview')) return false;
     if (!previewBase) previewBase = doc;
 
     const targets = new Set(ids);
@@ -2676,6 +3295,8 @@ __mods["core/store.js"] = function (__x, __req) {
    * undo stack (zoom level, panel widths, the active dock tab).
    */
   function editQuiet(mutator, reason = 'quiet') {
+    // Pan, zoom and the input preferences are how a *reader* uses the plan, so
+    // they are deliberately not gated — they never reach the server.
     const draft = deepClone(doc);
     if (mutator(draft) === false) return false;
     doc = draft;
@@ -3315,6 +3936,7 @@ __mods["core/store.js"] = function (__x, __req) {
     reindex();
   }
 
+  Object.defineProperty(__x, "isDocReadOnly", { get: () => isDocReadOnly, enumerable: true });
   Object.defineProperty(__x, "getDoc", { get: () => getDoc, enumerable: true });
   Object.defineProperty(__x, "getSettings", { get: () => getSettings, enumerable: true });
   Object.defineProperty(__x, "getObject", { get: () => getObject, enumerable: true });
@@ -3399,15 +4021,21 @@ __mods["core/store.js"] = function (__x, __req) {
 // ════════════════════════════════════════════════════════════════════════
 __mods["core/storage.js"] = function (__x, __req) {
   /**
-   * Local persistence.
+   * Persistence.
    *
-   * The application is local-first: there is no server, and there is no Save
-   * button. Every committed edit is written back within a few hundred
-   * milliseconds, and the document survives a browser restart, a crash, or the
-   * tab being closed mid-drag.
+   * There is no Save button. Every committed edit is written back within a few
+   * hundred milliseconds, and the document survives a browser restart, a crash,
+   * or the tab being closed mid-drag.
    *
-   * Storage stack
-   * -------------
+   * Where it is written depends on how the application is deployed, and every
+   * caller is deliberately unaware of which:
+   *
+   *   local mode   IndexedDB — the original behaviour, no account, no server.
+   *   hosted mode  Postgres via `core/cloud.js`, with IndexedDB demoted to an
+   *                offline cache so a dropped connection loses nothing.
+   *
+   * Storage stack (local, and the cache in hosted mode)
+   * --------------------------------------------------
    * IndexedDB is the primary store — it takes megabytes without complaint,
    * holds binary attachments natively, and writes off the main thread.
    * localStorage is kept as a mirror for the small stuff (preferences) and as a
@@ -3415,11 +4043,12 @@ __mods["core/storage.js"] = function (__x, __req) {
    * browsing on some engines and when a page is opened from `file://` under a
    * hardened profile. The fallback is transparent to every caller.
    *
-   * Imports: util, events, model, store.
+   * Imports: util, events, cloud, model, store.
    */
 
   const { debounce, bytes } = __req("core/util.js");
   const { emit, on, EV } = __req("core/events.js");
+  const cloud = __req("core/cloud.js");
   const { normalise, makeStarterProject } = __req("core/model.js");
   const { getDoc, markClean, isDirty } = __req("core/store.js");
 
@@ -3439,6 +4068,13 @@ __mods["core/storage.js"] = function (__x, __req) {
   let editsSinceBackup = 0;
   let backupTimer = null;
   let lastSaveError = null;
+
+  /**
+   * True once a signed-in session has a project open on the server. Everything
+   * that has two implementations branches on this one flag, so there is a single
+   * answer to "where does this go" rather than a scattering of checks.
+   */
+  let hosted = false;
 
   /* ── IndexedDB plumbing ────────────────────────────────────────────────── */
 
@@ -3518,8 +4154,11 @@ __mods["core/storage.js"] = function (__x, __req) {
   /* ── Lifecycle ─────────────────────────────────────────────────────────── */
 
   /**
-   * Open the store and return the document to load: the most recently saved
-   * project, or a seeded starter project on first run.
+   * Open the store and return the document to load.
+   *
+   * Hosted: the project last open on this device, or the most recent one the
+   * account can reach, or a fresh starter project created on the server.
+   * Local: the most recently saved project, or a seeded starter on first run.
    */
   async function init() {
     try {
@@ -3535,9 +4174,72 @@ __mods["core/storage.js"] = function (__x, __req) {
 
     wireAutosave();
 
+    if (cloud.isSignedIn()) {
+      const opened = await openFromCloud();
+      if (opened) return opened;
+      // Signing in and then failing to reach the data is worth saying out loud
+      // rather than silently dropping the user into an unrelated local project.
+      console.warn('[cx-timeline] signed in but could not open a project; falling back to local storage');
+    }
+
     const saved = await loadLatest();
     if (saved) return { doc: normalise(saved), fresh: false };
     return { doc: normalise(makeStarterProject()), fresh: true };
+  }
+
+  /**
+   * Choose and open a project on the server.
+   * Returns the same shape as `init()`, or null when nothing could be opened.
+   */
+  async function openFromCloud() {
+    try {
+      const projects = await cloud.listProjects();
+
+      // Prefer whatever this device had open, so a reload lands where you were.
+      const remembered = getPref('lastProject');
+      const wanted = projects.find((p) => p.id === remembered) || projects[0];
+
+      if (!wanted) {
+        const doc = normalise(makeStarterProject());
+        await cloud.createProject(doc);
+        hosted = true;
+        setPref('lastProject', cloud.getProjectId());
+        return { doc, fresh: true };
+      }
+
+      const doc = await cloud.openProject(wanted.id);
+      if (!doc) return null;
+      hosted = true;
+      setPref('lastProject', wanted.id);
+      return { doc: normalise(doc), fresh: false };
+    } catch (err) {
+      console.warn('[cx-timeline] could not load from the server:', err.message);
+      return null;
+    }
+  }
+
+  /** Open a different project. Used by the Projects pane. */
+  async function switchProject(id) {
+    const doc = await cloud.openProject(id);
+    if (!doc) throw new Error('That project is no longer available.');
+    hosted = true;
+    setPref('lastProject', id);
+    editsSinceBackup = 0;
+    return normalise(doc);
+  }
+
+  /** Create a project on the server from a document, and open it. */
+  async function createCloudProject(doc) {
+    const id = await cloud.createProject(normalise(doc));
+    hosted = true;
+    setPref('lastProject', id);
+    editsSinceBackup = 0;
+    return id;
+  }
+
+  /** True when the document is being kept on the server. */
+  function isHosted() {
+    return hosted;
   }
 
   /** True when running on the localStorage fallback path. */
@@ -3603,11 +4305,37 @@ __mods["core/storage.js"] = function (__x, __req) {
     emit(EV.SAVE_START);
     try {
       const record = { id: doc.id, savedAt: Date.now(), doc };
-      if (usingFallback) {
+
+      if (hosted) {
+        const result = await cloud.saveProject(doc);
+
+        if (!result.ok) {
+          // A read-only refusal is not a failure to report as one: the user is
+          // simply browsing, and the write guard has already told them.
+          if (result.reason === 'read-only') {
+            markClean();
+            emit(EV.SAVE_DONE, { at: Date.now(), skipped: true });
+            return true;
+          }
+          if (result.conflict) {
+            // Never overwrite: keep the work in the local cache so it can be
+            // recovered, and let the UI decide what to offer.
+            await cacheLocally(record);
+            emit(EV.SAVE_ERROR, { error: new Error('conflict'), conflict: true });
+            return false;
+          }
+          throw new Error(result.reason || 'save failed');
+        }
+
+        // A local copy of every successful save is what makes a dropped
+        // connection survivable, and what the crash-recovery path reads.
+        await cacheLocally(record);
+      } else if (usingFallback) {
         lsSetJSON(LS_DOC, doc);
       } else {
         await wrap(tx(STORE_PROJECTS, 'readwrite').put(record));
       }
+
       markClean();
       lastSaveError = null;
       emit(EV.SAVE_DONE, { at: record.savedAt });
@@ -3634,6 +4362,23 @@ __mods["core/storage.js"] = function (__x, __req) {
         });
       }
       return false;
+    }
+  }
+
+  /** Mirror a save into IndexedDB. Best-effort: the server is the record. */
+  async function cacheLocally(record) {
+    if (usingFallback) {
+      try {
+        lsSetJSON(LS_DOC, record.doc);
+      } catch {
+        /* the cache is a convenience, not the record */
+      }
+      return;
+    }
+    try {
+      await wrap(tx(STORE_PROJECTS, 'readwrite').put(record));
+    } catch {
+      /* a full local cache must never block a successful server save */
     }
   }
 
@@ -3715,7 +4460,11 @@ __mods["core/storage.js"] = function (__x, __req) {
       doc,
     };
     try {
-      if (usingFallback) {
+      if (hosted) {
+        const written = await cloud.createBackup(doc, reason);
+        if (!written) return false; // read-only, or the server said no
+        await cloud.pruneBackups(doc.settings.backupKeep || 20);
+      } else if (usingFallback) {
         const list = lsGetJSON(LS_BACKUPS, []);
         list.push({ ...entry, key: entry.time });
         // localStorage is tight; keep far fewer snapshots on the fallback path.
@@ -3734,6 +4483,14 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   async function listBackups() {
+    if (hosted) {
+      try {
+        return await cloud.listBackups();
+      } catch (err) {
+        console.warn('[cx-timeline] could not list backups:', err.message);
+        return [];
+      }
+    }
     if (usingFallback) {
       return lsGetJSON(LS_BACKUPS, [])
         .map((b) => ({ key: b.key, time: b.time, reason: b.reason, name: b.name, objects: b.objects, size: 0 }))
@@ -3757,6 +4514,7 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   async function loadBackup(key) {
+    if (hosted) return cloud.loadBackup(key);
     if (usingFallback) {
       const found = lsGetJSON(LS_BACKUPS, []).find((b) => b.key === key);
       return found ? found.doc : null;
@@ -3766,6 +4524,10 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   async function deleteBackup(key) {
+    if (hosted) {
+      await cloud.deleteBackup(key);
+      return;
+    }
     if (usingFallback) {
       lsSetJSON(LS_BACKUPS, lsGetJSON(LS_BACKUPS, []).filter((b) => b.key !== key));
       return;
@@ -3775,6 +4537,10 @@ __mods["core/storage.js"] = function (__x, __req) {
 
   /** Trim the backup history to the newest `keep` entries. */
   async function pruneBackups(keep = 20) {
+    if (hosted) {
+      await cloud.pruneBackups(keep);
+      return;
+    }
     if (usingFallback || keep <= 0) return;
     const all = await wrap(tx(STORE_BACKUPS).getAll());
     if (all.length <= keep) return;
@@ -3798,6 +4564,7 @@ __mods["core/storage.js"] = function (__x, __req) {
    * with 200 MB of logs still autosaves in milliseconds.
    */
   async function putBlob(id, file) {
+    if (hosted) return cloud.putBlob(id, file);
     const record = { id, name: file.name, type: file.type, size: file.size, added: Date.now(), blob: file };
     if (usingFallback) {
       throw new Error('Attachments require IndexedDB, which is not available in this browser session.');
@@ -3807,12 +4574,20 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   async function getBlob(id) {
+    if (hosted) {
+      const blob = await cloud.getBlob(id);
+      return blob ? { id, blob, name: id, type: blob.type, size: blob.size } : null;
+    }
     if (usingFallback) return null;
     const record = await wrap(tx(STORE_BLOBS).get(id));
     return record || null;
   }
 
   async function deleteBlob(id) {
+    if (hosted) {
+      await cloud.deleteBlob(id);
+      return;
+    }
     if (usingFallback) return;
     await wrap(tx(STORE_BLOBS, 'readwrite').delete(id));
   }
@@ -3881,7 +4656,11 @@ __mods["core/storage.js"] = function (__x, __req) {
       /* not supported — the report simply omits the quota line */
     }
     return {
-      backend: usingFallback ? 'localStorage (fallback)' : 'IndexedDB',
+      backend: hosted
+        ? 'Supabase (this device keeps an offline copy)'
+        : usingFallback
+          ? 'localStorage (fallback)'
+          : 'IndexedDB',
       document: { bytes: docBytes, label: bytes(docBytes) },
       attachments: blobs,
       quota,
@@ -3889,6 +4668,9 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "init", { get: () => init, enumerable: true });
+  Object.defineProperty(__x, "switchProject", { get: () => switchProject, enumerable: true });
+  Object.defineProperty(__x, "createCloudProject", { get: () => createCloudProject, enumerable: true });
+  Object.defineProperty(__x, "isHosted", { get: () => isHosted, enumerable: true });
   Object.defineProperty(__x, "isFallback", { get: () => isFallback, enumerable: true });
   Object.defineProperty(__x, "listProjects", { get: () => listProjects, enumerable: true });
   Object.defineProperty(__x, "loadProject", { get: () => loadProject, enumerable: true });
@@ -6019,6 +6801,8 @@ __mods["ui/icons.js"] = function (__x, __req) {
     /* ── People & organisation ─────────────────────────────────────────── */
     user: ['<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>', 'user person owner engineer assignee', 'People'],
     users: ['<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>', 'users team crew customer stakeholders', 'People'],
+    share: ['<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4"/><path d="M15.4 6.5l-6.8 4"/>', 'share access permission collaborate invite', 'People'],
+    logout: ['<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>', 'logout sign out leave exit account', 'People'],
     building: ['<rect width="16" height="20" x="4" y="2" rx="2"/><path d="M9 22v-4h6v4"/><path d="M8 6h.01"/><path d="M16 6h.01"/><path d="M8 10h.01"/><path d="M16 10h.01"/><path d="M8 14h.01"/><path d="M16 14h.01"/>', 'building client office organisation site', 'People'],
     globe: ['<circle cx="12" cy="12" r="10"/><path d="M12 2a15 15 0 0 1 0 20"/><path d="M12 2a15 15 0 0 0 0 20"/><path d="M2 12h20"/>', 'globe world region international site', 'People'],
     handshake: ['<path d="m11 17 2 2a1 1 0 1 0 3-3"/><path d="m14 14 2.5 2.5a1 1 0 1 0 3-3l-3.9-3.9a2 2 0 0 1 0-2.8l.4-.4a3 3 0 0 0-4.2 0l-1 1a2 2 0 0 1-2.8 0L7 7"/><path d="m21 3-6 6"/><path d="M3 21l6-6"/>', 'handshake agreement acceptance contract', 'People'],
@@ -10037,6 +10821,477 @@ __mods["ui/lists.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/auth.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/auth.js"] = function (__x, __req) {
+  /**
+   * Sign-in, the account menu, and sharing.
+   *
+   * Only reachable on a hosted deployment — with `config.js` blank none of this
+   * is ever shown and the application boots straight into the canvas, exactly as
+   * it does today.
+   *
+   * The gate is a full-screen overlay rather than a separate page, so a single
+   * static file still serves the whole application and there is no route to get
+   * wrong. It renders before the workspace is built, so nothing behind it can
+   * flash into view.
+   *
+   * Imports: util, events, cloud, icons, components.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const { on, emit, EV } = __req("core/events.js");
+  const cloud = __req("core/cloud.js");
+  const { icon } = __req("ui/icons.js");
+  const { openModal, field, textInput, selectInput, toast, badge, confirmDialog, emptyState } = __req("ui/components.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The gate
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Show the sign-in screen and resolve once there is a session.
+   *
+   * Resolves to the user, or to null when the visitor chooses to work locally —
+   * which stays available unless the deployment sets `requireAuth`.
+   */
+  function requireSignIn() {
+    return new Promise((resolve) => {
+      const allowLocal = !cloud.authRequired();
+      let mode = 'signin'; // signin | signup | reset
+
+      const overlay = el('div', { class: 'cx-gate', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Sign in' });
+      const card = el('div', { class: 'cx-gate-card' });
+      overlay.appendChild(card);
+
+      const emailInput = textInput({ type: 'email', value: '', placeholder: 'you@company.com' });
+      emailInput.setAttribute('autocomplete', 'username');
+      emailInput.setAttribute('name', 'email');
+
+      const passwordInput = textInput({ type: 'password', value: '', placeholder: '••••••••' });
+      passwordInput.setAttribute('autocomplete', 'current-password');
+      passwordInput.setAttribute('name', 'password');
+
+      const nameInput = textInput({ value: '', placeholder: 'Your name' });
+      nameInput.setAttribute('autocomplete', 'name');
+
+      const message = el('div', { class: 'cx-gate-msg', role: 'alert' });
+      const submit = el('button', { class: 'cx-btn primary', type: 'submit', text: 'Sign in' });
+
+      const say = (text, tone = 'bad') => {
+        message.className = `cx-gate-msg ${tone}`;
+        message.textContent = text || '';
+      };
+
+      let busy = false;
+      const setBusy = (state) => {
+        busy = state;
+        submit.disabled = state;
+        submit.classList.toggle('loading', state);
+      };
+
+      const form = el('form', { class: 'cx-gate-form', onSubmit: (e) => { e.preventDefault(); go(); } });
+
+      async function go() {
+        if (busy) return;
+        const email = emailInput.value.trim();
+        const password = passwordInput.value;
+
+        if (!email) return say('Enter your email address.');
+        if (mode !== 'reset' && !password) return say('Enter your password.');
+
+        setBusy(true);
+        say('');
+        try {
+          if (mode === 'signin') {
+            const user = await cloud.signIn(email, password);
+            finish(user);
+          } else if (mode === 'signup') {
+            const { user, confirmationRequired } = await cloud.signUp(email, password, nameInput.value.trim());
+            if (confirmationRequired) {
+              say(`Account created. Check ${email} for a confirmation link, then sign in.`, 'good');
+              setMode('signin');
+            } else {
+              finish(user);
+            }
+          } else {
+            await cloud.sendPasswordReset(email);
+            say(`If there is an account for ${email}, a reset link is on its way.`, 'good');
+            setMode('signin');
+          }
+        } catch (err) {
+          say(err.message);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      function finish(user) {
+        overlay.classList.add('done');
+        setTimeout(() => overlay.remove(), 260);
+        resolve(user);
+      }
+
+      function setMode(next) {
+        mode = next;
+        render();
+        setTimeout(() => (mode === 'signup' ? nameInput : emailInput).focus(), 30);
+      }
+
+      function render() {
+        clear(card);
+
+        const titles = {
+          signin: ['Sign in', 'Your projects, wherever you open them.'],
+          signup: ['Create an account', 'You will be the owner of everything you create.'],
+          reset: ['Reset your password', 'We will email you a link.'],
+        };
+        const [title, subtitle] = titles[mode];
+
+        card.append(
+          el('div', { class: 'cx-gate-brand' }, [
+            el('div', { class: 'brand-mark' }),
+            el('div', {}, [
+              el('div', { class: 'cx-gate-name', text: 'CX Timeline' }),
+              el('div', { class: 'cx-gate-sub', text: 'Commissioning Planner' }),
+            ]),
+          ]),
+          el('h1', { class: 'cx-gate-title', text: title }),
+          el('div', { class: 'cx-gate-lede', text: subtitle })
+        );
+
+        clear(form);
+        form.append(
+          ...[
+            mode === 'signup' ? field('Name', nameInput) : null,
+            field('Email', emailInput),
+            mode !== 'reset' ? field('Password', passwordInput) : null,
+            message,
+            submit,
+          ].filter(Boolean)
+        );
+        submit.textContent = { signin: 'Sign in', signup: 'Create account', reset: 'Send reset link' }[mode];
+        passwordInput.setAttribute('autocomplete', mode === 'signup' ? 'new-password' : 'current-password');
+        card.appendChild(form);
+
+        const links = el('div', { class: 'cx-gate-links' });
+        if (mode === 'signin') {
+          links.append(
+            gateLink('Create an account', () => setMode('signup')),
+            gateLink('Forgot password?', () => setMode('reset'))
+          );
+        } else {
+          links.appendChild(gateLink('Back to sign in', () => setMode('signin')));
+        }
+        card.appendChild(links);
+
+        if (allowLocal) {
+          card.appendChild(
+            el('div', { class: 'cx-gate-local' }, [
+              el('button', {
+                class: 'cx-btn ghost mini',
+                text: 'Continue without an account',
+                onClick: () => {
+                  overlay.classList.add('done');
+                  setTimeout(() => overlay.remove(), 260);
+                  resolve(null);
+                },
+              }),
+              el('div', { class: 'cx-hint', text: 'Work is saved in this browser only, and is not shared.' }),
+            ])
+          );
+        }
+      }
+
+      render();
+      document.body.appendChild(overlay);
+      setTimeout(() => emailInput.focus(), 80);
+    });
+  }
+
+  function gateLink(text, onClick) {
+    return el('button', { class: 'cx-gate-link', type: 'button', text, onClick });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Read-only presentation
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Reflect the current role in the interface.
+   *
+   * A viewer is not shown a broken application: the editing affordances go away,
+   * a banner explains why, and a refused write says so once rather than on every
+   * keystroke. The database is what actually stops the write — this is here so
+   * the user understands the state they are in.
+   */
+  function installAccessMode() {
+    const apply = () => {
+      const readOnly = cloud.isReadOnly();
+      document.body.classList.toggle('read-only', readOnly);
+      renderBanner(readOnly);
+    };
+
+    on(EV.ACCESS_CHANGED, apply);
+    on(EV.AUTH_CHANGED, apply);
+
+    // One notice per burst — a viewer holding an arrow key would otherwise
+    // stack up a notification per repeat.
+    let lastRefusal = 0;
+    on(EV.EDIT_REFUSED, () => {
+      const now = Date.now();
+      if (now - lastRefusal < 4000) return;
+      lastRefusal = now;
+      toast({
+        tone: 'warn',
+        title: 'Read-only',
+        message: 'You have view access to this project. Ask the owner for edit access to make changes.',
+      });
+    });
+
+    apply();
+  }
+
+  function renderBanner(readOnly) {
+    const existing = document.getElementById('cx-readonly-bar');
+    if (!readOnly) {
+      existing?.remove();
+      return;
+    }
+    if (existing) return;
+
+    const bar = el('div', { id: 'cx-readonly-bar', class: 'cx-readonly-bar', role: 'status' }, [
+      el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),
+      el('span', { text: 'Read-only — you have view access to this project.' }),
+    ]);
+    document.getElementById('main')?.prepend(bar);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The account menu
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** The signed-in-as block that sits at the foot of the sidebar. */
+  function accountBlock() {
+    const root = el('div', { class: 'cx-account' });
+
+    const render = () => {
+      clear(root);
+      if (!cloud.isSignedIn()) {
+        root.appendChild(
+          el('button', {
+            class: 'cx-btn mini',
+            html: icon('user', { size: 12 }) + '<span>Sign in</span>',
+            onClick: async () => {
+              await requireSignIn();
+              window.location.reload();
+            },
+          })
+        );
+        return;
+      }
+
+      const label = cloud.accountLabel();
+      root.append(
+        el('div', { class: 'acc-avatar', text: initials(label) }),
+        el('div', { class: 'acc-main' }, [
+          el('div', { class: 'acc-name', text: label, title: cloud.currentUser()?.email || '' }),
+          el('div', { class: 'acc-role', text: roleLabel(cloud.getRole()) }),
+        ]),
+        el('button', {
+          class: 'cx-btn icon mini ghost',
+          title: 'Sign out',
+          'aria-label': 'Sign out',
+          html: icon('logout', { size: 13 }),
+          onClick: async () => {
+            const ok = await confirmDialog({
+              title: 'Sign out?',
+              message: 'Anything saved stays on the server. Unsaved changes in this tab are written first.',
+              confirmLabel: 'Sign out',
+            });
+            if (!ok) return;
+            await cloud.signOut();
+            window.location.reload();
+          },
+        })
+      );
+    };
+
+    on(EV.AUTH_CHANGED, render);
+    on(EV.ACCESS_CHANGED, render);
+    render();
+    return root;
+  }
+
+  function initials(label) {
+    const parts = String(label).replace(/@.*$/, '').split(/[\s._-]+/).filter(Boolean);
+    return ((parts[0]?.[0] || '') + (parts[1]?.[0] || '')).toUpperCase() || '?';
+  }
+
+  function roleLabel(role) {
+    return { owner: 'Owner', editor: 'Editor', viewer: 'View only' }[role] || 'No project open';
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Sharing
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const ROLE_OPTIONS = [
+    { value: 'viewer', label: 'Viewer — can open and export, cannot change anything' },
+    { value: 'editor', label: 'Editor — can change the plan' },
+    { value: 'owner', label: 'Owner — full control, including sharing' },
+  ];
+
+  /**
+   * Who can see this project, and what they may do.
+   * Owners can change it; everyone else sees the list read-only, which is
+   * useful on its own — knowing who else is in a plan matters.
+   */
+  function openShareDialog(projectId = cloud.getProjectId(), projectName = '') {
+    if (!projectId) {
+      toast({ tone: 'warn', title: 'No project open', message: 'Open a project before sharing it.' });
+      return;
+    }
+
+    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } });
+    const list = el('div', { class: 'cx-list' });
+    const owner = cloud.isOwner();
+
+    const emailInput = textInput({ type: 'email', value: '', placeholder: 'colleague@company.com' });
+    let inviteRole = 'viewer';
+
+    async function refresh() {
+      clear(list);
+      let members = [];
+      try {
+        members = await cloud.listMembers(projectId);
+      } catch (err) {
+        list.appendChild(el('div', { class: 'cx-gate-msg bad', text: err.message }));
+        return;
+      }
+      if (!members.length) {
+        list.appendChild(emptyState({ iconName: 'user', title: 'Nobody else yet' }));
+        return;
+      }
+      for (const member of members) list.appendChild(memberRow(member));
+    }
+
+    function memberRow(member) {
+      const isLastOwner = member.role === 'owner';
+      return el('div', { class: 'cx-listrow', dataset: { member: member.userId }, style: { cursor: 'default' } }, [
+        el('div', { class: 'acc-avatar small', text: initials(member.name || member.email || '?') }),
+        el('div', { class: 'lr-main' }, [
+          el('div', { class: 'lr-title', text: (member.name || member.email) + (member.isYou ? '  (you)' : '') }),
+          el('div', { class: 'lr-meta', text: member.email || '' }),
+        ]),
+        owner && !member.isYou
+          ? selectInput({
+              value: member.role,
+              mini: true,
+              options: ROLE_OPTIONS.map((o) => ({ value: o.value, label: o.value })),
+              onChange: async (v) => {
+                try {
+                  await cloud.setMemberRole(projectId, member.email, v);
+                  toast({ tone: 'good', title: 'Access updated', message: `${member.email} is now ${v === 'viewer' ? 'a viewer' : `an ${v}`}.` });
+                  refresh();
+                } catch (err) {
+                  toast({ tone: 'bad', title: 'Could not change access', message: err.message });
+                  refresh();
+                }
+              },
+            })
+          : badge(roleLabel(member.role), member.role === 'viewer' ? 'muted' : 'info'),
+        owner && !(member.isYou && isLastOwner)
+          ? el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Remove access',
+              'aria-label': `Remove ${member.email}`,
+              html: icon('x', { size: 11 }),
+              onClick: async () => {
+                const ok = await confirmDialog({
+                  title: `Remove ${member.email}?`,
+                  message: 'They lose access to this project immediately.',
+                  confirmLabel: 'Remove',
+                  danger: true,
+                });
+                if (!ok) return;
+                try {
+                  await cloud.unshareProject(projectId, member.userId);
+                  refresh();
+                } catch (err) {
+                  toast({ tone: 'bad', title: 'Could not remove', message: err.message });
+                }
+              },
+            })
+          : null,
+      ].filter(Boolean));
+    }
+
+    async function invite() {
+      const email = emailInput.value.trim();
+      if (!email) return;
+      try {
+        await cloud.shareProject(projectId, email, inviteRole);
+        emailInput.value = '';
+        toast({
+          tone: 'good',
+          title: 'Shared',
+          message: `${email} now has ${inviteRole === 'viewer' ? 'view-only' : inviteRole} access.`,
+        });
+        refresh();
+      } catch (err) {
+        toast({ tone: 'bad', title: 'Could not share', message: err.message });
+      }
+    }
+
+    if (owner) {
+      const roleSelect = selectInput({
+        value: inviteRole,
+        options: ROLE_OPTIONS,
+        onChange: (v) => { inviteRole = v; },
+      });
+      emailInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          invite();
+        }
+      });
+
+      body.append(
+        el('div', {}, [
+          field('Invite by email', emailInput, 'They need a CX Timeline account already — sharing does not send an invitation email.'),
+          field('Access level', roleSelect),
+          el('button', {
+            class: 'cx-btn primary mini',
+            html: icon('plus', { size: 12 }) + '<span>Grant access</span>',
+            onClick: invite,
+          }),
+        ])
+      );
+    } else {
+      body.appendChild(
+        el('div', { class: 'cx-hint', text: 'Only the project owner can change who has access.' })
+      );
+    }
+
+    body.append(el('div', { class: 'cx-section-label', text: 'People with access' }), list);
+    refresh();
+
+    return openModal({
+      title: projectName ? `Share "${projectName}"` : 'Share project',
+      subtitle: 'Access is enforced by the database, not the interface.',
+      body,
+      actions: [{ label: 'Done', kind: 'primary' }],
+    });
+  }
+
+  Object.defineProperty(__x, "requireSignIn", { get: () => requireSignIn, enumerable: true });
+  Object.defineProperty(__x, "installAccessMode", { get: () => installAccessMode, enumerable: true });
+  Object.defineProperty(__x, "accountBlock", { get: () => accountBlock, enumerable: true });
+  Object.defineProperty(__x, "openShareDialog", { get: () => openShareDialog, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/notes.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/notes.js"] = function (__x, __req) {
@@ -13715,7 +14970,8 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const { el, clear, debounce, bytes, download } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } = __req("core/dates.js");
-  const { TYPES, listOptions, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline } = __req("core/model.js");
+  const { TYPES, listOptions, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline, makeProject } = __req("core/model.js");
+
 
 
 
@@ -13726,13 +14982,15 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
 
   const store = __req("core/store.js");
-  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage } = __req("core/storage.js");
+  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted } = __req("core/storage.js");
+  const cloud = __req("core/cloud.js");
   const { search, summarise, facet, filterPredicate } = __req("core/query.js");
   const { criticalPath, compareBaseline, programmeHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
-  const { field, textInput, numberInput, selectInput, checkbox, toggle, segmented, section, emptyState, badge, chipStat, confirmDialog, promptDialog, toast, openModal, progressBar, contextMenu } = __req("ui/components.js");
+  const { field, textInput, numberInput, selectInput, checkbox, toggle, segmented, section, emptyState, badge, chipStat, confirmDialog, promptDialog, skeleton, toast, openModal, progressBar, contextMenu } = __req("ui/components.js");
+
 
 
 
@@ -13753,6 +15011,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
   const cmd = __req("ui/commands.js");
   const { listEditor } = __req("ui/lists.js");
+  const { openShareDialog } = __req("ui/auth.js");
   const { openObjectDialog, openLaneDialog } = __req("ui/dialogs.js");
   const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
   const exporters = __req("io/exporters.js");
@@ -13760,7 +15019,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const { pickFiles } = __req("core/util.js");
 
   const PANES = [
-    'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
+    'projects', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
     'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
     'settings',
   ];
@@ -13862,6 +15121,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   /* ── Router ────────────────────────────────────────────────────────────── */
 
   const RENDERERS = {
+    projects: paneProjects,
     lanes: paneLanes,
     palette: panePalette,
     outline: paneOutline,
@@ -13881,6 +15141,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   };
 
   const TITLES = {
+    projects: 'Projects',
     lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
     campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
     baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',
@@ -15002,6 +16263,200 @@ __mods["ui/panels.js"] = function (__x, __req) {
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
+     Projects (hosted deployments only)
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const ROLE_TONE = { owner: 'good', editor: 'info', viewer: 'muted' };
+  const ROLE_WORD = { owner: 'Owner', editor: 'Editor', viewer: 'View only' };
+
+  /**
+   * Every plan this account can reach, with the role that governs it.
+   *
+   * The role badge is the whole point of the pane: knowing *before* you open
+   * something whether you will be able to change it is the difference between a
+   * read-only project and a broken one.
+   */
+  function paneProjects(root) {
+    if (!cloud.isConfigured()) {
+      root.appendChild(
+        emptyState({
+          iconName: 'folder',
+          title: 'Local project',
+          message: 'This build keeps everything in this browser. Projects and sharing appear when it is connected to a backend.',
+        })
+      );
+      return;
+    }
+
+    if (!cloud.isSignedIn()) {
+      root.appendChild(
+        emptyState({
+          iconName: 'user',
+          title: 'Not signed in',
+          message: 'Sign in to keep projects on the server and share them.',
+          action: { label: 'Sign in', onClick: () => window.location.reload() },
+        })
+      );
+      return;
+    }
+
+    const actions = el('div', { style: { display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap' } }, [
+      el('button', {
+        class: 'cx-btn mini primary',
+        html: icon('plus', { size: 12 }) + '<span>New project</span>',
+        onClick: () => newCloudProject(),
+      }),
+      el('button', {
+        class: 'cx-btn mini',
+        html: icon('share', { size: 12 }) + '<span>Share</span>',
+        title: 'Who can see the open project',
+        disabled: !cloud.getProjectId(),
+        onClick: () => openShareDialog(cloud.getProjectId(), store.getDoc().name),
+      }),
+    ]);
+    root.appendChild(actions);
+
+    const list = el('div', { class: 'cx-list' });
+    root.appendChild(list);
+    list.appendChild(skeleton(3));
+
+    cloud
+      .listProjects()
+      .then((projects) => {
+        clear(list);
+        if (!projects.length) {
+          list.appendChild(emptyState({ iconName: 'folder', title: 'No projects yet', message: 'Create one to get started.' }));
+          return;
+        }
+        for (const project of projects) list.appendChild(projectRow(project));
+      })
+      .catch((err) => {
+        clear(list);
+        list.appendChild(
+          emptyState({ iconName: 'warning', title: 'Could not load your projects', message: err.message })
+        );
+      });
+  }
+
+  function projectRow(project) {
+    const open = project.id === cloud.getProjectId();
+
+    return el('div', {
+      class: 'cx-listrow' + (open ? ' active' : ''),
+      dataset: { project: project.id },
+      onClick: () => (open ? null : openCloudProject(project)),
+    }, [
+      el('span', { class: 'cx-dot', style: { background: open ? 'var(--accent)' : 'var(--text-subtle)' } }),
+      el('div', { class: 'lr-main' }, [
+        el('div', { class: 'lr-title', text: project.name }),
+        el('div', {
+          class: 'lr-meta',
+          text: [
+            `${project.objects} object${project.objects === 1 ? '' : 's'}`,
+            fmtTimestamp(project.savedAt),
+            project.role === 'owner' ? null : `owner ${project.ownerEmail || '—'}`,
+            project.members > 1 ? `${project.members} people` : null,
+          ].filter(Boolean).join(' · '),
+        }),
+      ]),
+      badge(ROLE_WORD[project.role] || project.role, ROLE_TONE[project.role] || 'muted'),
+      el('div', { class: 'lr-actions' }, [
+        el('button', {
+          class: 'cx-btn icon mini ghost',
+          title: 'Share',
+          'aria-label': `Share ${project.name}`,
+          html: icon('share', { size: 11 }),
+          onClick: (e) => {
+            e.stopPropagation();
+            openShareDialog(project.id, project.name);
+          },
+        }),
+        project.role === 'owner'
+          ? el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Rename',
+              'aria-label': `Rename ${project.name}`,
+              html: icon('edit', { size: 11 }),
+              onClick: async (e) => {
+                e.stopPropagation();
+                const name = await promptDialog({ title: 'Rename project', label: 'Name', value: project.name });
+                if (!name || name === project.name) return;
+                try {
+                  await cloud.renameProject(project.id, name);
+                  if (project.id === cloud.getProjectId()) store.setMeta({ name }, 'Rename project');
+                  renderPane();
+                } catch (err) {
+                  toast({ tone: 'bad', title: 'Could not rename', message: err.message });
+                }
+              },
+            })
+          : null,
+        project.role === 'owner'
+          ? el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Delete',
+              'aria-label': `Delete ${project.name}`,
+              html: icon('trash', { size: 11 }),
+              onClick: (e) => {
+                e.stopPropagation();
+                removeCloudProject(project);
+              },
+            })
+          : null,
+      ].filter(Boolean)),
+    ]);
+  }
+
+  async function openCloudProject(project) {
+    try {
+      const doc = await switchProject(project.id);
+      store.replaceDoc(doc, 'load');
+      renderer.requestRender();
+      renderPane();
+      toast({
+        tone: 'good',
+        title: `Opened "${project.name}"`,
+        message: project.role === 'viewer' ? 'You have view-only access to this project.' : undefined,
+      });
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not open', message: err.message });
+    }
+  }
+
+  async function newCloudProject() {
+    const name = await promptDialog({ title: 'New project', label: 'Name', value: 'Untitled Programme' });
+    if (!name) return;
+    try {
+      const doc = makeProject(name);
+      await createCloudProject(doc);
+      store.replaceDoc(doc, 'load');
+      renderer.requestRender();
+      renderPane();
+      toast({ tone: 'good', title: 'Project created', message: `"${name}" is yours — share it from here.` });
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not create the project', message: err.message });
+    }
+  }
+
+  async function removeCloudProject(project) {
+    const ok = await confirmDialog({
+      title: `Delete "${project.name}"?`,
+      message: 'The project, its backups and everyone\'s access to it are removed. This cannot be undone.',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await cloud.deleteProject(project.id);
+      toast({ tone: 'good', title: 'Deleted' });
+      if (project.id === cloud.getProjectId()) window.location.reload();
+      else renderPane();
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not delete', message: err.message });
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
      Dropdown lists
      ═══════════════════════════════════════════════════════════════════════ */
 
@@ -15247,7 +16702,8 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const { fmtDate, fmtTimestamp, toISO } = __req("core/dates.js");
   const { TYPES, typeGroups, effectiveToday, projectExtent } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { isFallback } = __req("core/storage.js");
+  const { isFallback, isHosted } = __req("core/storage.js");
+  const cloud = __req("core/cloud.js");
   const { linkViolations } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
@@ -15255,12 +16711,14 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const { contextMenu, popover, closePopover, promptDialog, toast, segmented, keyHint, attachTooltip } = __req("ui/components.js");
   const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
   const { showPane, currentPane, PANES } = __req("ui/panels.js");
+  const { accountBlock, openShareDialog } = __req("ui/auth.js");
 
   /** Sidebar structure — sections of dock panes. */
   const NAV = [
     {
       section: 'Workspace',
       items: [
+        { pane: 'projects', label: 'Projects', icon: 'folder', hosted: true },
         { pane: 'lanes', label: 'Lanes', icon: 'layers' },
         { pane: 'palette', label: 'Add Objects', icon: 'plus' },
         { pane: 'outline', label: 'Outline', icon: 'list' },
@@ -15333,6 +16791,8 @@ __mods["ui/shell.js"] = function (__x, __req) {
     for (const group of NAV) {
       dom.navLinks.appendChild(el('div', { class: 'sidenav-section-label', text: group.section }));
       for (const item of group.items) {
+        // Some panes only mean anything with a backend behind them.
+        if (item.hosted && !cloud.isConfigured()) continue;
         const link = el('a', {
           class: 'nav-link',
           href: '#',
@@ -15353,16 +16813,23 @@ __mods["ui/shell.js"] = function (__x, __req) {
 
     dom.sidenav.appendChild(
       el('div', { class: 'sidenav-footer' }, [
-        el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.programme || doc.client || 'Local project' }),
+        cloud.isConfigured() ? accountBlock() : null,
+        el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.programme || doc.client || fallbackTag() }),
         el('button', {
           class: 'cx-btn mini',
           html: icon('maximize', { size: 12 }) + '<span>Present</span>',
           onClick: () => emit(EV.PRESENT_MODE, { on: !document.body.classList.contains('presenting') }),
         }),
-      ])
+      ].filter(Boolean))
     );
 
     updateNav();
+  }
+
+  /** What to call a project that has not been given a client or programme. */
+  function fallbackTag() {
+    if (!cloud.isConfigured()) return 'Local project';
+    return { owner: 'You own this', editor: 'Shared with you', viewer: 'View only' }[cloud.getRole()] || 'Untitled';
   }
 
   function updateNav() {
@@ -15386,7 +16853,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
     }
 
     const tag = dom.sidenav.querySelector('[data-project-tag]');
-    if (tag) tag.textContent = doc.programme || doc.client || 'Local project';
+    if (tag) tag.textContent = doc.programme || doc.client || fallbackTag();
   }
 
   /* ── Toolbar ───────────────────────────────────────────────────────────── */
@@ -15405,7 +16872,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
     /* Undo / redo */
     dom.undoBtn = toolButton('undo', 'Undo', () => store.undo(), 'mod+z');
     dom.redoBtn = toolButton('redo', 'Redo', () => store.redo(), 'mod+shift+z');
-    dom.toolbar.append(el('div', { class: 'tb-group' }, [dom.undoBtn, dom.redoBtn]), el('div', { class: 'tb-sep' }));
+    dom.toolbar.append(el('div', { class: 'tb-group editing' }, [dom.undoBtn, dom.redoBtn]), el('div', { class: 'tb-sep' }));
 
     /* Tools */
     dom.selectBtn = toolButton('cursor', 'Select', () => store.setTool('select'), 'v');
@@ -15415,7 +16882,13 @@ __mods["ui/shell.js"] = function (__x, __req) {
       html: icon('plus', { size: 14 }) + '<span>Add</span>' + icon('chevron-down', { size: 11 }),
       onClick: (e) => openAddMenu(e.currentTarget),
     });
-    dom.toolbar.append(el('div', { class: 'tb-group' }, [dom.selectBtn, dom.panBtn, dom.addBtn]), el('div', { class: 'tb-sep' }));
+    // The Add tool is an editing affordance; select and pan are how a reader
+    // moves around, so they stay.
+    dom.toolbar.append(
+      el('div', { class: 'tb-group' }, [dom.selectBtn, dom.panBtn]),
+      el('div', { class: 'tb-group editing' }, [dom.addBtn]),
+      el('div', { class: 'tb-sep' })
+    );
 
     /* Scale */
     dom.scaleSeg = segmented({
@@ -15526,7 +16999,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
           html: icon('maximize', { size: 14 }),
           onClick: () => emit(EV.PRESENT_MODE, { on: !document.body.classList.contains('presenting') }),
         }),
-      ])
+      ].filter(Boolean))
     );
 
     refreshToolbar();
@@ -15549,7 +17022,8 @@ __mods["ui/shell.js"] = function (__x, __req) {
     const history = store.historyState();
 
     dom.title.querySelector('.tt-name').textContent = doc.name;
-    dom.title.querySelector('.tt-meta').textContent = [doc.client, doc.programme].filter(Boolean).join(' · ') || 'Local project';
+    dom.title.querySelector('.tt-meta').textContent =
+      [doc.client, doc.programme].filter(Boolean).join(' · ') || fallbackTag();
 
     dom.undoBtn.disabled = !history.canUndo;
     dom.redoBtn.disabled = !history.canRedo;
@@ -15686,7 +17160,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
       : '';
     dom.violationText.style.display = violations.count ? '' : 'none';
     dom.zoomText.textContent = `${zoom.scale} · ${zoom.span}`;
-    dom.storageText.textContent = isFallback() ? 'localStorage' : 'IndexedDB';
+    dom.storageText.textContent = isHosted() ? 'Supabase' : isFallback() ? 'localStorage' : 'IndexedDB';
   }
 
   const refreshCursor = debounce((ms) => {
@@ -17684,11 +19158,16 @@ __mods["main.js"] = function (__x, __req) {
    * Application entry point.
    *
    * Boot order matters and is deliberate:
+   *   0. the backend, if this build has one, restores its session and — when
+   *      nobody is signed in — puts the gate up before anything else renders,
    *   1. storage opens and hands back the document to load,
    *   2. the store adopts it (nothing renders against an empty document),
    *   3. the theme is applied before the first paint, so there is no flash,
    *   4. the shell and canvas mount,
    *   5. interaction, shortcuts and menus attach last, once their targets exist.
+   *
+   * Step 0 does nothing at all when `config.js` is blank, which is what keeps
+   * the local-first, double-click-index.html build exactly as it was.
    *
    * Imports: everything — this is the only module allowed to.
    */
@@ -17697,7 +19176,8 @@ __mods["main.js"] = function (__x, __req) {
   const { on, emit, EV } = __req("core/events.js");
   const { projectExtent, effectiveToday } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { init: initStorage, takeRecovery, getPref, setPref, saveNow } = __req("core/storage.js");
+  const { init: initStorage, takeRecovery, getPref, setPref, saveNow, isHosted } = __req("core/storage.js");
+  const cloud = __req("core/cloud.js");
   const { criticalPath } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
@@ -17709,6 +19189,7 @@ __mods["main.js"] = function (__x, __req) {
   const { buildMinimap } = __req("ui/minimap.js");
   const { buildLegend } = __req("ui/legend.js");
   const { installMenus } = __req("ui/menus.js");
+  const { requireSignIn, installAccessMode } = __req("ui/auth.js");
   const { installShortcuts } = __req("ui/shortcuts.js");
   const { toast, showTooltip, hideTooltip, confirmDialog } = __req("ui/components.js");
   const { renderNote, notePreview } = __req("ui/notes.js");
@@ -17720,6 +19201,21 @@ __mods["main.js"] = function (__x, __req) {
 
   async function boot() {
     const started = performance.now();
+
+    /* ── 0. Account ──────────────────────────────────────────────────────── */
+    if (cloud.isConfigured()) {
+      try {
+        await cloud.init();
+        if (!cloud.isSignedIn()) {
+          // The splash covers the whole viewport and would sit on top of the
+          // sign-in card, swallowing its clicks. Loading is over: say so.
+          dismissSplash();
+          await requireSignIn();
+        }
+      } catch (err) {
+        console.error('[cx-timeline] sign-in failed:', err);
+      }
+    }
 
     /* ── 1. Storage & document ───────────────────────────────────────────── */
     let loaded;
@@ -17733,7 +19229,9 @@ __mods["main.js"] = function (__x, __req) {
     if (loaded) {
       store.replaceDoc(loaded.doc, 'load');
       // Offer to recover work the unload handler saved after an unclean exit.
-      const recovery = takeRecovery(loaded.doc);
+      // A read-only project has nothing to recover — the user cannot have
+      // changed it — so the prompt would be nonsense.
+      const recovery = cloud.isReadOnly() ? null : takeRecovery(loaded.doc);
       if (recovery) {
         setTimeout(() => offerRecovery(recovery), 900);
       }
@@ -17776,6 +19274,8 @@ __mods["main.js"] = function (__x, __req) {
     installMenus();
     installShortcuts();
     installHoverPreview();
+    installAccessMode();
+    installConflictHandling();
     installViewPersistence();
     installResizeHandling();
     installCriticalPathRecompute();
@@ -17784,13 +19284,45 @@ __mods["main.js"] = function (__x, __req) {
     renderer.renderNow();
 
     /* ── Done ────────────────────────────────────────────────────────────── */
-    const splash = document.getElementById('boot');
-    if (splash) {
-      splash.classList.add('done');
-      setTimeout(() => splash.remove(), 420);
-    }
+    dismissSplash();
 
     console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
+  }
+
+  /** Fade out the boot splash. Safe to call more than once. */
+  function dismissSplash() {
+    const splash = document.getElementById('boot');
+    if (!splash || splash.classList.contains('done')) return;
+    splash.classList.add('done');
+    setTimeout(() => splash.remove(), 420);
+  }
+
+  /* ── Save conflicts ────────────────────────────────────────────────────── */
+
+  /**
+   * Two people editing one plan.
+   *
+   * The server refuses the second save rather than letting it overwrite, so the
+   * only sensible thing left is to ask. Nothing is discarded silently: the local
+   * copy is already cached, and reloading is a deliberate choice.
+   */
+  function installConflictHandling() {
+    let asking = false;
+
+    on(EV.SAVE_ERROR, async (payload) => {
+      if (!payload?.conflict || asking) return;
+      asking = true;
+      const ok = await confirmDialog({
+        title: 'Someone else saved this project',
+        message:
+          'Your changes were not saved, because they would have overwritten work saved by another person since you opened it. ' +
+          'Reload to see their version — a copy of your version is kept in this browser and can be exported from Import / Export first.',
+        confirmLabel: 'Reload their version',
+        cancelLabel: 'Not yet',
+      });
+      asking = false;
+      if (ok) window.location.reload();
+    });
   }
 
   /* ── Recovery ──────────────────────────────────────────────────────────── */

@@ -15,7 +15,8 @@ import { on, emit, EV } from '../core/events.js';
 import { fmtDate, fmtTimestamp, toISO } from '../core/dates.js';
 import { TYPES, typeGroups, effectiveToday, projectExtent } from '../core/model.js';
 import * as store from '../core/store.js';
-import { isFallback } from '../core/storage.js';
+import { isFallback, isHosted } from '../core/storage.js';
+import * as cloud from '../core/cloud.js';
 import { linkViolations } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
@@ -23,12 +24,14 @@ import { icon } from './icons.js';
 import { contextMenu, popover, closePopover, promptDialog, toast, segmented, keyHint, attachTooltip } from './components.js';
 import { THEMES, applyTheme, getTheme } from './theme.js';
 import { showPane, currentPane, PANES } from './panels.js';
+import { accountBlock, openShareDialog } from './auth.js';
 
 /** Sidebar structure — sections of dock panes. */
 const NAV = [
   {
     section: 'Workspace',
     items: [
+      { pane: 'projects', label: 'Projects', icon: 'folder', hosted: true },
       { pane: 'lanes', label: 'Lanes', icon: 'layers' },
       { pane: 'palette', label: 'Add Objects', icon: 'plus' },
       { pane: 'outline', label: 'Outline', icon: 'list' },
@@ -101,6 +104,8 @@ function buildSidenav() {
   for (const group of NAV) {
     dom.navLinks.appendChild(el('div', { class: 'sidenav-section-label', text: group.section }));
     for (const item of group.items) {
+      // Some panes only mean anything with a backend behind them.
+      if (item.hosted && !cloud.isConfigured()) continue;
       const link = el('a', {
         class: 'nav-link',
         href: '#',
@@ -121,16 +126,23 @@ function buildSidenav() {
 
   dom.sidenav.appendChild(
     el('div', { class: 'sidenav-footer' }, [
-      el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.programme || doc.client || 'Local project' }),
+      cloud.isConfigured() ? accountBlock() : null,
+      el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.programme || doc.client || fallbackTag() }),
       el('button', {
         class: 'cx-btn mini',
         html: icon('maximize', { size: 12 }) + '<span>Present</span>',
         onClick: () => emit(EV.PRESENT_MODE, { on: !document.body.classList.contains('presenting') }),
       }),
-    ])
+    ].filter(Boolean))
   );
 
   updateNav();
+}
+
+/** What to call a project that has not been given a client or programme. */
+function fallbackTag() {
+  if (!cloud.isConfigured()) return 'Local project';
+  return { owner: 'You own this', editor: 'Shared with you', viewer: 'View only' }[cloud.getRole()] || 'Untitled';
 }
 
 function updateNav() {
@@ -154,7 +166,7 @@ function updateNav() {
   }
 
   const tag = dom.sidenav.querySelector('[data-project-tag]');
-  if (tag) tag.textContent = doc.programme || doc.client || 'Local project';
+  if (tag) tag.textContent = doc.programme || doc.client || fallbackTag();
 }
 
 /* ── Toolbar ───────────────────────────────────────────────────────────── */
@@ -173,7 +185,7 @@ function buildToolbar() {
   /* Undo / redo */
   dom.undoBtn = toolButton('undo', 'Undo', () => store.undo(), 'mod+z');
   dom.redoBtn = toolButton('redo', 'Redo', () => store.redo(), 'mod+shift+z');
-  dom.toolbar.append(el('div', { class: 'tb-group' }, [dom.undoBtn, dom.redoBtn]), el('div', { class: 'tb-sep' }));
+  dom.toolbar.append(el('div', { class: 'tb-group editing' }, [dom.undoBtn, dom.redoBtn]), el('div', { class: 'tb-sep' }));
 
   /* Tools */
   dom.selectBtn = toolButton('cursor', 'Select', () => store.setTool('select'), 'v');
@@ -183,7 +195,13 @@ function buildToolbar() {
     html: icon('plus', { size: 14 }) + '<span>Add</span>' + icon('chevron-down', { size: 11 }),
     onClick: (e) => openAddMenu(e.currentTarget),
   });
-  dom.toolbar.append(el('div', { class: 'tb-group' }, [dom.selectBtn, dom.panBtn, dom.addBtn]), el('div', { class: 'tb-sep' }));
+  // The Add tool is an editing affordance; select and pan are how a reader
+  // moves around, so they stay.
+  dom.toolbar.append(
+    el('div', { class: 'tb-group' }, [dom.selectBtn, dom.panBtn]),
+    el('div', { class: 'tb-group editing' }, [dom.addBtn]),
+    el('div', { class: 'tb-sep' })
+  );
 
   /* Scale */
   dom.scaleSeg = segmented({
@@ -294,7 +312,7 @@ function buildToolbar() {
         html: icon('maximize', { size: 14 }),
         onClick: () => emit(EV.PRESENT_MODE, { on: !document.body.classList.contains('presenting') }),
       }),
-    ])
+    ].filter(Boolean))
   );
 
   refreshToolbar();
@@ -317,7 +335,8 @@ function refreshToolbar() {
   const history = store.historyState();
 
   dom.title.querySelector('.tt-name').textContent = doc.name;
-  dom.title.querySelector('.tt-meta').textContent = [doc.client, doc.programme].filter(Boolean).join(' · ') || 'Local project';
+  dom.title.querySelector('.tt-meta').textContent =
+    [doc.client, doc.programme].filter(Boolean).join(' · ') || fallbackTag();
 
   dom.undoBtn.disabled = !history.canUndo;
   dom.redoBtn.disabled = !history.canRedo;
@@ -454,7 +473,7 @@ function refreshStatus() {
     : '';
   dom.violationText.style.display = violations.count ? '' : 'none';
   dom.zoomText.textContent = `${zoom.scale} · ${zoom.span}`;
-  dom.storageText.textContent = isFallback() ? 'localStorage' : 'IndexedDB';
+  dom.storageText.textContent = isHosted() ? 'Supabase' : isFallback() ? 'localStorage' : 'IndexedDB';
 }
 
 const refreshCursor = debounce((ms) => {

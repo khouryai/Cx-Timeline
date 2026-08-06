@@ -4,7 +4,37 @@
 
 `index.html` loads **`app.bundle.js`**, not `src/`. After changing anything
 under `src/`, run `npm run build`. The bundle is committed on purpose: it is
-what makes double-clicking `index.html` work with no server and no setup.
+what a deploy serves, with no build step at the edge.
+
+## Hosted, with a local mode for tests
+
+The application runs against Supabase (accounts, projects, backups, sharing).
+`config.js` is the only file that knows this — blank `supabaseUrl` puts it in
+**local mode**, against browser storage, with no account. That is the
+development and test path, not a deployment option: a build with a backend
+always requires an account (`requireAuth` defaults to true, and
+`tools/dist.js` refuses to publish a config with no backend).
+
+Local mode is also why the 126-check offline suite still passes untouched. If
+you add a hosted-only feature, hide it behind `cloud.isConfigured()` and cover
+it in `tools/smoke_hosted.js` instead.
+
+**Permissions are enforced in Postgres, never in the UI.** `supabase/schema.sql`
+defines three roles — owner, editor, viewer — as row-level security policies.
+`src/ui/auth.js` and the `body.read-only` styles explain the state to the user;
+they do not create it. Changing what a role may do means changing the SQL and
+`supabase/test/permissions.sql`, not the interface.
+
+Two things about row-level security that have already caused bugs here:
+
+- **A refused UPDATE or DELETE is not an error.** The row is excluded, the
+  statement matches nothing, and the driver reports success. Every save goes
+  through the `save_project()` function, which raises instead — and any direct
+  table write has to check the returned row count, or it will report a save
+  that never happened.
+- **A policy that queries the table it protects recurses.** The `can_read` /
+  `can_write` / `owns` helpers are `SECURITY DEFINER` to step outside RLS and
+  break the cycle.
 
 ## Architecture
 
@@ -22,12 +52,13 @@ else with a clear error:
 
 ```
 core/util · core/events · core/dates      leaves — import nothing
+core/cloud                                the only module that knows Supabase
 core/model → core/query · core/history · core/analysis
 core/store → core/storage
 timeline/viewport → timeline/layout → timeline/connectors
                   → timeline/renderer → timeline/interactions
-ui/icons · ui/components → ui/lists → ui/theme → ui/commands → ui/dialogs
-                                             → ui/panels → ui/shell
+ui/icons · ui/components → ui/lists · ui/auth → ui/theme → ui/commands
+                             → ui/dialogs → ui/panels → ui/shell
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
 main.js                                    the only module that may import freely
 ```

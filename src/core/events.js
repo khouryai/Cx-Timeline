@@ -91,6 +91,12 @@ export const EV = {
   /* History */
   HISTORY_CHANGED: 'history:changed', // { canUndo, canRedo, depth }
 
+  /* Account & sharing (hosted deployments only) */
+  AUTH_CHANGED: 'auth:changed', // { user } — signed in, signed out, session restored
+  ACCESS_CHANGED: 'access:changed', // { role, readOnly } — which project, and what you may do
+  EDIT_REFUSED: 'access:refused', // a write was attempted without permission
+  CLOUD_CONFLICT: 'cloud:conflict', // someone else saved the project first
+
   /* Selection & interaction */
   SELECTION_CHANGED: 'selection:changed', // { ids }
   OBJECT_ACTIVATED: 'object:activated', // { id } — double-click / Enter

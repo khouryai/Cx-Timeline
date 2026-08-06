@@ -1,0 +1,75 @@
+#!/usr/bin/env node
+/**
+ * Assemble the deployable site into `dist/`.
+ *
+ * Cloudflare Pages serves whatever directory it is pointed at, so building in
+ * place would publish `src/`, `tools/` and the test suites alongside the
+ * application. None of that is secret, but a deploy should contain the thing
+ * being deployed and nothing else.
+ *
+ * Run after `npm run build` — or use `npm run build:dist`, which does both.
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import url from 'node:url';
+
+const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
+const OUT = path.join(ROOT, 'dist');
+
+/** Everything the browser actually loads, and nothing else. */
+const FILES = ['index.html', 'app.bundle.js', 'config.js', '_headers'];
+const DIRS = ['css', 'vendor'];
+
+function copyDir(from, to) {
+  fs.mkdirSync(to, { recursive: true });
+  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    const src = path.join(from, entry.name);
+    const dst = path.join(to, entry.name);
+    if (entry.isDirectory()) copyDir(src, dst);
+    else fs.copyFileSync(src, dst);
+  }
+}
+
+function main() {
+  fs.rmSync(OUT, { recursive: true, force: true });
+  fs.mkdirSync(OUT, { recursive: true });
+
+  let bytes = 0;
+  for (const file of FILES) {
+    const src = path.join(ROOT, file);
+    if (!fs.existsSync(src)) continue;
+    fs.copyFileSync(src, path.join(OUT, file));
+    bytes += fs.statSync(src).size;
+  }
+  for (const dir of DIRS) {
+    const src = path.join(ROOT, dir);
+    if (!fs.existsSync(src)) continue;
+    copyDir(src, path.join(OUT, dir));
+  }
+
+  // Fail the build rather than publishing a site that cannot sign anyone in.
+  const config = fs.readFileSync(path.join(OUT, 'config.js'), 'utf8');
+  if (!/supabaseUrl:\s*['"]https?:\/\//.test(config) && !/"supabaseUrl":\s*"https?:\/\//.test(config)) {
+    console.error(
+      '✗ dist/config.js has no backend.\n' +
+        '  Set SUPABASE_URL and SUPABASE_ANON_KEY as build environment variables\n' +
+        '  (Cloudflare Pages → Settings → Environment variables) and build again.'
+    );
+    process.exit(1);
+  }
+
+  const total = walkSize(OUT);
+  console.log(`✓ dist/          — ${(total / 1024).toFixed(0)} kB ready to deploy`);
+}
+
+function walkSize(dir) {
+  let total = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    total += entry.isDirectory() ? walkSize(p) : fs.statSync(p).size;
+  }
+  return total;
+}
+
+main();

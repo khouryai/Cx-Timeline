@@ -23,9 +23,11 @@ import {
   durationDays,
   effectiveToday,
   makeBaseline,
+  makeProject,
 } from '../core/model.js';
 import * as store from '../core/store.js';
-import { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage } from '../core/storage.js';
+import { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted } from '../core/storage.js';
+import * as cloud from '../core/cloud.js';
 import { search, summarise, facet, filterPredicate } from '../core/query.js';
 import { criticalPath, compareBaseline, programmeHealth, objectHealth, slipByLane, linkViolations, evaluateLink } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
@@ -45,6 +47,7 @@ import {
   chipStat,
   confirmDialog,
   promptDialog,
+  skeleton,
   toast,
   openModal,
   progressBar,
@@ -52,6 +55,7 @@ import {
 } from './components.js';
 import * as cmd from './commands.js';
 import { listEditor } from './lists.js';
+import { openShareDialog } from './auth.js';
 import { openObjectDialog, openLaneDialog } from './dialogs.js';
 import { THEMES, applyTheme, getTheme } from './theme.js';
 import * as exporters from '../io/exporters.js';
@@ -59,7 +63,7 @@ import { importFile, buildDocFromRows } from '../io/importers.js';
 import { pickFiles } from '../core/util.js';
 
 export const PANES = [
-  'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
+  'projects', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
   'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
   'settings',
 ];
@@ -161,6 +165,7 @@ export function toggleDock() {
 /* ── Router ────────────────────────────────────────────────────────────── */
 
 const RENDERERS = {
+  projects: paneProjects,
   lanes: paneLanes,
   palette: panePalette,
   outline: paneOutline,
@@ -180,6 +185,7 @@ const RENDERERS = {
 };
 
 const TITLES = {
+  projects: 'Projects',
   lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
   campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
   baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',
@@ -1298,6 +1304,200 @@ async function restoreBackup(backup) {
   store.replaceDoc(doc, 'restore');
   cmd.fitAll();
   toast({ tone: 'good', title: 'Backup restored' });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Projects (hosted deployments only)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const ROLE_TONE = { owner: 'good', editor: 'info', viewer: 'muted' };
+const ROLE_WORD = { owner: 'Owner', editor: 'Editor', viewer: 'View only' };
+
+/**
+ * Every plan this account can reach, with the role that governs it.
+ *
+ * The role badge is the whole point of the pane: knowing *before* you open
+ * something whether you will be able to change it is the difference between a
+ * read-only project and a broken one.
+ */
+function paneProjects(root) {
+  if (!cloud.isConfigured()) {
+    root.appendChild(
+      emptyState({
+        iconName: 'folder',
+        title: 'Local project',
+        message: 'This build keeps everything in this browser. Projects and sharing appear when it is connected to a backend.',
+      })
+    );
+    return;
+  }
+
+  if (!cloud.isSignedIn()) {
+    root.appendChild(
+      emptyState({
+        iconName: 'user',
+        title: 'Not signed in',
+        message: 'Sign in to keep projects on the server and share them.',
+        action: { label: 'Sign in', onClick: () => window.location.reload() },
+      })
+    );
+    return;
+  }
+
+  const actions = el('div', { style: { display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap' } }, [
+    el('button', {
+      class: 'cx-btn mini primary',
+      html: icon('plus', { size: 12 }) + '<span>New project</span>',
+      onClick: () => newCloudProject(),
+    }),
+    el('button', {
+      class: 'cx-btn mini',
+      html: icon('share', { size: 12 }) + '<span>Share</span>',
+      title: 'Who can see the open project',
+      disabled: !cloud.getProjectId(),
+      onClick: () => openShareDialog(cloud.getProjectId(), store.getDoc().name),
+    }),
+  ]);
+  root.appendChild(actions);
+
+  const list = el('div', { class: 'cx-list' });
+  root.appendChild(list);
+  list.appendChild(skeleton(3));
+
+  cloud
+    .listProjects()
+    .then((projects) => {
+      clear(list);
+      if (!projects.length) {
+        list.appendChild(emptyState({ iconName: 'folder', title: 'No projects yet', message: 'Create one to get started.' }));
+        return;
+      }
+      for (const project of projects) list.appendChild(projectRow(project));
+    })
+    .catch((err) => {
+      clear(list);
+      list.appendChild(
+        emptyState({ iconName: 'warning', title: 'Could not load your projects', message: err.message })
+      );
+    });
+}
+
+function projectRow(project) {
+  const open = project.id === cloud.getProjectId();
+
+  return el('div', {
+    class: 'cx-listrow' + (open ? ' active' : ''),
+    dataset: { project: project.id },
+    onClick: () => (open ? null : openCloudProject(project)),
+  }, [
+    el('span', { class: 'cx-dot', style: { background: open ? 'var(--accent)' : 'var(--text-subtle)' } }),
+    el('div', { class: 'lr-main' }, [
+      el('div', { class: 'lr-title', text: project.name }),
+      el('div', {
+        class: 'lr-meta',
+        text: [
+          `${project.objects} object${project.objects === 1 ? '' : 's'}`,
+          fmtTimestamp(project.savedAt),
+          project.role === 'owner' ? null : `owner ${project.ownerEmail || '—'}`,
+          project.members > 1 ? `${project.members} people` : null,
+        ].filter(Boolean).join(' · '),
+      }),
+    ]),
+    badge(ROLE_WORD[project.role] || project.role, ROLE_TONE[project.role] || 'muted'),
+    el('div', { class: 'lr-actions' }, [
+      el('button', {
+        class: 'cx-btn icon mini ghost',
+        title: 'Share',
+        'aria-label': `Share ${project.name}`,
+        html: icon('share', { size: 11 }),
+        onClick: (e) => {
+          e.stopPropagation();
+          openShareDialog(project.id, project.name);
+        },
+      }),
+      project.role === 'owner'
+        ? el('button', {
+            class: 'cx-btn icon mini ghost',
+            title: 'Rename',
+            'aria-label': `Rename ${project.name}`,
+            html: icon('edit', { size: 11 }),
+            onClick: async (e) => {
+              e.stopPropagation();
+              const name = await promptDialog({ title: 'Rename project', label: 'Name', value: project.name });
+              if (!name || name === project.name) return;
+              try {
+                await cloud.renameProject(project.id, name);
+                if (project.id === cloud.getProjectId()) store.setMeta({ name }, 'Rename project');
+                renderPane();
+              } catch (err) {
+                toast({ tone: 'bad', title: 'Could not rename', message: err.message });
+              }
+            },
+          })
+        : null,
+      project.role === 'owner'
+        ? el('button', {
+            class: 'cx-btn icon mini ghost',
+            title: 'Delete',
+            'aria-label': `Delete ${project.name}`,
+            html: icon('trash', { size: 11 }),
+            onClick: (e) => {
+              e.stopPropagation();
+              removeCloudProject(project);
+            },
+          })
+        : null,
+    ].filter(Boolean)),
+  ]);
+}
+
+async function openCloudProject(project) {
+  try {
+    const doc = await switchProject(project.id);
+    store.replaceDoc(doc, 'load');
+    renderer.requestRender();
+    renderPane();
+    toast({
+      tone: 'good',
+      title: `Opened "${project.name}"`,
+      message: project.role === 'viewer' ? 'You have view-only access to this project.' : undefined,
+    });
+  } catch (err) {
+    toast({ tone: 'bad', title: 'Could not open', message: err.message });
+  }
+}
+
+async function newCloudProject() {
+  const name = await promptDialog({ title: 'New project', label: 'Name', value: 'Untitled Programme' });
+  if (!name) return;
+  try {
+    const doc = makeProject(name);
+    await createCloudProject(doc);
+    store.replaceDoc(doc, 'load');
+    renderer.requestRender();
+    renderPane();
+    toast({ tone: 'good', title: 'Project created', message: `"${name}" is yours — share it from here.` });
+  } catch (err) {
+    toast({ tone: 'bad', title: 'Could not create the project', message: err.message });
+  }
+}
+
+async function removeCloudProject(project) {
+  const ok = await confirmDialog({
+    title: `Delete "${project.name}"?`,
+    message: 'The project, its backups and everyone\'s access to it are removed. This cannot be undone.',
+    confirmLabel: 'Delete',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await cloud.deleteProject(project.id);
+    toast({ tone: 'good', title: 'Deleted' });
+    if (project.id === cloud.getProjectId()) window.location.reload();
+    else renderPane();
+  } catch (err) {
+    toast({ tone: 'bad', title: 'Could not delete', message: err.message });
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

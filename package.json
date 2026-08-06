@@ -1,16 +1,18 @@
 {
   "name": "cx-timeline",
   "version": "1.0.0",
-  "description": "CX Timeline \u2014 local-first interactive timeline & commissioning planner",
+  "description": "CX Timeline \u2014 hosted interactive timeline & commissioning planner",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node tools/build.js",
     "watch": "node tools/build.js --watch",
-    "test": "node tools/run_tests.js",
+    "test": "node tools/smoke.js && node tools/smoke_hosted.js && node tools/test_sql.js",
     "serve": "node tools/serve.js",
     "test:sql": "node tools/test_sql.js",
-    "test:smoke": "node tools/smoke.js"
+    "test:smoke": "node tools/smoke.js",
+    "test:hosted": "node tools/smoke_hosted.js",
+    "build:dist": "node tools/build.js && node tools/dist.js"
   },
   "engines": {
     "node": ">=18"

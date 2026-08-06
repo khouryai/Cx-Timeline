@@ -11,11 +11,19 @@
  * which updates the document without touching history; the interaction
  * commits once with a single `edit()` when the pointer is released.
  *
- * Imports: util, events, model, history.
+ * On a hosted deployment a project can be open read-only. Because every write
+ * funnels through the three entry points below, one guard covers the whole
+ * application — there is no path to a mutation that does not pass through
+ * here. The guard is a courtesy to the user, not the security boundary: that
+ * is row-level security in Postgres, which refuses the same writes even if
+ * this check were removed.
+ *
+ * Imports: util, events, cloud, model, history.
  */
 
 import { deepClone, clamp } from './util.js';
 import { emit, EV } from './events.js';
+import { isReadOnly } from './cloud.js';
 import { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage } from './model.js';
 import { History, diff, apply } from './history.js';
 
@@ -62,6 +70,25 @@ const ui = {
   },
   clipboard: null,
 };
+
+/* ── Write guard ───────────────────────────────────────────────────────── */
+
+/**
+ * True when this write must not happen, having said so.
+ *
+ * `preview` is announced quietly: a viewer dragging a bar would otherwise
+ * raise a notification on every mouse-move.
+ */
+function refuseWrite(label) {
+  if (!isReadOnly()) return false;
+  if (label !== 'preview') emit(EV.EDIT_REFUSED, { label });
+  return true;
+}
+
+/** True when the open project is read-only for the signed-in user. */
+export function isDocReadOnly() {
+  return isReadOnly();
+}
 
 /* ── Indexing ──────────────────────────────────────────────────────────── */
 
@@ -135,6 +162,8 @@ export function markClean() {
  * @returns {boolean} true when the document actually changed.
  */
 export function edit(label, mutator, opts = {}) {
+  if (refuseWrite(label)) return false;
+
   // No clone needed for the "before" side: `doc` is immutable by invariant,
   // and `draft` is a separate graph. This halves the cloning cost of an edit.
   const before = previewBase || doc;
@@ -179,6 +208,7 @@ export function edit(label, mutator, opts = {}) {
  * frame.
  */
 export function preview(mutator) {
+  if (refuseWrite('preview')) return false;
   if (!previewBase) previewBase = doc;
   const draft = deepClone(doc);
   if (mutator(draft) === false) return false;
@@ -204,6 +234,7 @@ export function preview(mutator) {
  * @param {Function} mutate    Called once per object with a private copy.
  */
 export function previewObjects(ids, mutate) {
+  if (refuseWrite('preview')) return false;
   if (!previewBase) previewBase = doc;
 
   const targets = new Set(ids);
@@ -246,6 +277,8 @@ export function hasPreview() {
  * undo stack (zoom level, panel widths, the active dock tab).
  */
 export function editQuiet(mutator, reason = 'quiet') {
+  // Pan, zoom and the input preferences are how a *reader* uses the plan, so
+  // they are deliberately not gated — they never reach the server.
   const draft = deepClone(doc);
   if (mutator(draft) === false) return false;
   doc = draft;

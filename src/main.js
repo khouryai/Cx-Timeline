@@ -2,11 +2,16 @@
  * Application entry point.
  *
  * Boot order matters and is deliberate:
+ *   0. the backend, if this build has one, restores its session and — when
+ *      nobody is signed in — puts the gate up before anything else renders,
  *   1. storage opens and hands back the document to load,
  *   2. the store adopts it (nothing renders against an empty document),
  *   3. the theme is applied before the first paint, so there is no flash,
  *   4. the shell and canvas mount,
  *   5. interaction, shortcuts and menus attach last, once their targets exist.
+ *
+ * Step 0 does nothing at all when `config.js` is blank, which is what keeps
+ * the local-first, double-click-index.html build exactly as it was.
  *
  * Imports: everything — this is the only module allowed to.
  */
@@ -15,7 +20,8 @@ import { debounce } from './core/util.js';
 import { on, emit, EV } from './core/events.js';
 import { projectExtent, effectiveToday } from './core/model.js';
 import * as store from './core/store.js';
-import { init as initStorage, takeRecovery, getPref, setPref, saveNow } from './core/storage.js';
+import { init as initStorage, takeRecovery, getPref, setPref, saveNow, isHosted } from './core/storage.js';
+import * as cloud from './core/cloud.js';
 import { criticalPath } from './core/analysis.js';
 import * as viewport from './timeline/viewport.js';
 import * as renderer from './timeline/renderer.js';
@@ -27,6 +33,7 @@ import { buildInspector } from './ui/inspector.js';
 import { buildMinimap } from './ui/minimap.js';
 import { buildLegend } from './ui/legend.js';
 import { installMenus } from './ui/menus.js';
+import { requireSignIn, installAccessMode } from './ui/auth.js';
 import { installShortcuts } from './ui/shortcuts.js';
 import { toast, showTooltip, hideTooltip, confirmDialog } from './ui/components.js';
 import { renderNote, notePreview } from './ui/notes.js';
@@ -38,6 +45,21 @@ const APP_VERSION = '1.0.0';
 
 async function boot() {
   const started = performance.now();
+
+  /* ── 0. Account ──────────────────────────────────────────────────────── */
+  if (cloud.isConfigured()) {
+    try {
+      await cloud.init();
+      if (!cloud.isSignedIn()) {
+        // The splash covers the whole viewport and would sit on top of the
+        // sign-in card, swallowing its clicks. Loading is over: say so.
+        dismissSplash();
+        await requireSignIn();
+      }
+    } catch (err) {
+      console.error('[cx-timeline] sign-in failed:', err);
+    }
+  }
 
   /* ── 1. Storage & document ───────────────────────────────────────────── */
   let loaded;
@@ -51,7 +73,9 @@ async function boot() {
   if (loaded) {
     store.replaceDoc(loaded.doc, 'load');
     // Offer to recover work the unload handler saved after an unclean exit.
-    const recovery = takeRecovery(loaded.doc);
+    // A read-only project has nothing to recover — the user cannot have
+    // changed it — so the prompt would be nonsense.
+    const recovery = cloud.isReadOnly() ? null : takeRecovery(loaded.doc);
     if (recovery) {
       setTimeout(() => offerRecovery(recovery), 900);
     }
@@ -94,6 +118,8 @@ async function boot() {
   installMenus();
   installShortcuts();
   installHoverPreview();
+  installAccessMode();
+  installConflictHandling();
   installViewPersistence();
   installResizeHandling();
   installCriticalPathRecompute();
@@ -102,13 +128,45 @@ async function boot() {
   renderer.renderNow();
 
   /* ── Done ────────────────────────────────────────────────────────────── */
-  const splash = document.getElementById('boot');
-  if (splash) {
-    splash.classList.add('done');
-    setTimeout(() => splash.remove(), 420);
-  }
+  dismissSplash();
 
   console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
+}
+
+/** Fade out the boot splash. Safe to call more than once. */
+function dismissSplash() {
+  const splash = document.getElementById('boot');
+  if (!splash || splash.classList.contains('done')) return;
+  splash.classList.add('done');
+  setTimeout(() => splash.remove(), 420);
+}
+
+/* ── Save conflicts ────────────────────────────────────────────────────── */
+
+/**
+ * Two people editing one plan.
+ *
+ * The server refuses the second save rather than letting it overwrite, so the
+ * only sensible thing left is to ask. Nothing is discarded silently: the local
+ * copy is already cached, and reloading is a deliberate choice.
+ */
+function installConflictHandling() {
+  let asking = false;
+
+  on(EV.SAVE_ERROR, async (payload) => {
+    if (!payload?.conflict || asking) return;
+    asking = true;
+    const ok = await confirmDialog({
+      title: 'Someone else saved this project',
+      message:
+        'Your changes were not saved, because they would have overwritten work saved by another person since you opened it. ' +
+        'Reload to see their version — a copy of your version is kept in this browser and can be exported from Import / Export first.',
+      confirmLabel: 'Reload their version',
+      cancelLabel: 'Not yet',
+    });
+    asking = false;
+    if (ok) window.location.reload();
+  });
 }
 
 /* ── Recovery ──────────────────────────────────────────────────────────── */

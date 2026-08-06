@@ -1,0 +1,179 @@
+# Deploying CX Timeline
+
+Cloudflare Pages for the site, Supabase for accounts and data. Both free at
+this size. About twenty minutes end to end.
+
+You need: a Supabase project and a Cloudflare account. Nothing else — no
+server to run, no container, no database to administer.
+
+---
+
+## 1. Supabase — create the project
+
+1. [supabase.com/dashboard](https://supabase.com/dashboard) → **New project**.
+2. Name it, pick a region near your users, and set a database password
+   (you will not need it again — save it anyway).
+3. Wait for it to finish provisioning.
+
+## 2. Supabase — create the schema
+
+**SQL Editor** → **New query** → paste the whole of
+[`supabase/schema.sql`](supabase/schema.sql) → **Run**.
+
+That creates the tables, the three roles, the row-level security policies and
+the API. It is idempotent, so you can re-run it after pulling a change.
+
+You should see `Success. No rows returned`. Warnings about triggers or
+policies "not existing, skipping" are expected on a first run.
+
+## 3. Supabase — configure auth
+
+**Authentication → Sign In / Providers**:
+
+- **Email** — enabled (it is by default).
+- **Confirm email** — your call. On is safer; off is friendlier for a small
+  team where you know everyone. With it on, a new user must click a link
+  before they can sign in.
+
+**Authentication → URL Configuration**:
+
+- **Site URL** — your Pages URL, e.g. `https://cx-timeline.pages.dev`.
+  Password-reset and confirmation links point here, so it has to be right.
+- **Redirect URLs** — add the same URL.
+
+> Come back and fix these after step 5, once you know the real URL.
+
+**Optional but recommended.** Anyone with the public key can create an
+account, and there is no invitation flow. To keep it to your own people,
+either turn off **Allow new users to sign up** in
+**Authentication → Sign In / Providers → Email** and create accounts yourself
+under **Authentication → Users**, or restrict sign-ups by domain. Access to
+any *project* is separate: a new account can see nothing until an owner shares
+something with it.
+
+## 4. Supabase — collect the two values
+
+**Project Settings → API**:
+
+- **Project URL** → `https://<ref>.supabase.co`
+- **anon / public key** → a long `eyJ…` string
+
+The anon key is meant to be public. It identifies the project; it does not
+grant access. Every row is behind row-level security tied to the signed-in
+user, so on its own it can read nothing. Do **not** use the `service_role`
+key — that one bypasses every policy, and it must never reach a browser.
+
+## 5. Cloudflare Pages — deploy
+
+**Workers & Pages** → **Create** → **Pages** → **Connect to Git** → pick this
+repository.
+
+| Setting | Value |
+|---|---|
+| Framework preset | None |
+| Build command | `npm run build:dist` |
+| Build output directory | `dist` |
+| Node version | 18 or later |
+
+**Environment variables** (Settings → Environment variables → Production
+*and* Preview):
+
+| Name | Value |
+|---|---|
+| `SUPABASE_URL` | your Project URL |
+| `SUPABASE_ANON_KEY` | your anon key |
+
+The build writes these into `config.js`, so the keys live in Cloudflare rather
+than in the repository. The build **fails** if they are missing, rather than
+publishing a site nobody can sign in to.
+
+**Deploy**. You get `https://<project>.pages.dev` free. Go back to step 3 and
+put that URL into Supabase.
+
+### A custom domain
+
+Pages → **Custom domains** → **Set up a domain**. Free to attach. If you need
+to *buy* one, Cloudflare Registrar sells at cost. Add the new domain to
+Supabase's redirect URLs too.
+
+---
+
+## 6. Check it
+
+1. Open the site. You should get the sign-in screen — there is no way past it.
+2. Create an account. You land in a new, empty project that you own.
+3. **Projects → Share**, add a colleague's email as **Viewer**.
+4. Have them sign in: they see the plan, a "Read-only" bar, no editing tools,
+   and any attempt to change something is refused.
+
+If sharing says *no account for …*, that person has not signed up yet.
+Sharing grants access to an existing account; it does not send an invitation.
+
+---
+
+## The permission model
+
+| | Viewer | Editor | Owner |
+|---|:--:|:--:|:--:|
+| Open, browse, export | ● | ● | ● |
+| Change the plan | | ● | ● |
+| Take backups | | ● | ● |
+| Restore a backup | | ● | ● |
+| Share, and change roles | | | ● |
+| Rename, delete the project | | | ● |
+
+Roles are per project, so the same person can own one plan and merely watch
+another.
+
+**The rules live in the database, not the interface.** A viewer who opens the
+browser console and calls the API directly is refused by Postgres. The
+read-only mode in the UI exists to explain the state, not to enforce it —
+which is why it is safe for the interface to be the friendly part.
+
+To prove that rather than take it on trust:
+
+```bash
+npm run test:sql
+```
+
+That stands up a throwaway PostgreSQL, applies the real `schema.sql`, and runs
+57 checks that become each user in turn and confirm the database refuses what
+it should. It never touches your Supabase project.
+
+---
+
+## Running it afterwards
+
+```bash
+npm run build:dist   # what Cloudflare runs
+npm test             # local UI, hosted UI, and the permission model
+npm run serve        # http://localhost:8123, using config.js as committed
+```
+
+Every push to the default branch redeploys. Other branches get a preview URL,
+which shares the same Supabase project — so a preview build writes to real
+data. Use a second Supabase project for previews if that matters to you.
+
+## Costs
+
+Free at this scale, and the ceilings are generous:
+
+- **Cloudflare Pages** — unlimited bandwidth, 500 builds/month.
+- **Supabase free tier** — 500 MB database, 1 GB file storage, 50,000 monthly
+  active users. A programme plan is a few hundred kilobytes; attachments are
+  what will eventually push you over, and they are stored outside the
+  document precisely so that stays predictable.
+
+A free Supabase project **pauses after a week with no traffic**. It comes back
+on the next request, but the first person in that morning waits a few seconds.
+Paid plans do not pause.
+
+## Backups
+
+Every backup is a row in `project_backups`, so they survive a lost laptop.
+Retention is per project (**Settings → Backups**), and the server prunes to it.
+
+That is *your* backup of a plan's history — not a backup of the database. For
+that, Supabase takes daily snapshots on paid plans; on the free tier, export
+what you care about (**Import / Export → JSON**) or run `pg_dump` on a
+schedule.

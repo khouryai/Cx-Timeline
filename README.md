@@ -1,32 +1,49 @@
 # CX Timeline
 
-**A local-first interactive timeline and commissioning planner.**
+**A hosted interactive timeline and commissioning planner.**
 
 Built for managing software releases, testing schedules, commissioning
 campaigns and programme milestones on rail signalling projects — and designed
 to sit alongside the CX Portal as part of the same software suite.
 
-Everything runs on your computer. There is no server, no account, no cloud,
-and nothing leaves the machine.
+Sign in, and your projects are wherever you open them. Share a plan with the
+people who need it, read-only or otherwise.
 
 ---
 
 ## Getting started
 
-**Double-click `index.html`.** That is the whole installation.
+Open the site and sign in. That is the whole installation — there is nothing
+to download and nothing to keep in step.
 
-The application opens in your browser with a sample commissioning plan loaded.
-Edit it, or start a clean project from **Import / Export → New project**.
+A new account starts with an empty project that you own. Your work is saved
+automatically after every edit: there is no Save button, and no way to lose
+changes by forgetting to press one.
 
-Your work is saved automatically after every edit. There is no Save button and
-no way to lose changes by forgetting to press one.
+### Sharing
 
-### Optional: running from a local server
+**Projects → Share** grants access by email address, at one of three levels:
 
-Not required, but useful during development:
+| | Viewer | Editor | Owner |
+|---|:--:|:--:|:--:|
+| Open, browse, export | ● | ● | ● |
+| Change the plan | | ● | ● |
+| Take and restore backups | | ● | ● |
+| Share, and change roles | | | ● |
+| Rename, delete the project | | | ● |
+
+Roles are per project, so the same person can own one plan and merely watch
+another. A viewer sees the whole plan, exports it freely, and is stopped from
+changing it — by the database, not just by the interface.
+
+### Deploying your own
+
+See **[DEPLOY.md](DEPLOY.md)**. Cloudflare Pages and Supabase, both free at
+this size, about twenty minutes.
 
 ```bash
-npm run serve      # http://localhost:8123
+npm run serve      # http://localhost:8123 — local development
+npm test           # local UI, hosted UI, and the permission model
 ```
 
 ---
@@ -177,16 +194,20 @@ plan stays readable — and exports honour the filters.
 The legend is generated from what is actually in the document and doubles as a
 filter control.
 
-### Saving, backups and history
+### Accounts, saving and backups
 
-- **Autosave** after every edit, debounced to 500 ms.
+- **Autosave** after every edit, debounced to 500 ms, straight to Postgres.
 - **Version history** — every edit recorded as a reversible patch, with
   unlimited undo/redo and one-click rollback to any earlier point.
 - **Backups** — automatic hourly and every 100 edits (both configurable),
-  plus before every import or restore. Configurable retention, restorable and
-  downloadable.
-- **Crash recovery** — work in flight is mirrored on unload and offered back
-  on the next launch.
+  kept server-side so they survive a lost laptop. Configurable retention,
+  restorable and downloadable.
+- **Offline cache** — every successful save is mirrored into IndexedDB, so a
+  dropped connection costs nothing and a crash is recoverable.
+- **Conflicts are refused, not merged** — if someone else saved while you had
+  the plan open, your write is rejected rather than silently overwriting
+  their work, and you are offered their version. Your copy stays in the
+  browser and can be exported first.
 
 ### Export and import
 
@@ -244,20 +265,19 @@ strict dependency layers. A zero-dependency linker (`tools/build.js`) resolves
 the module graph ahead of time and emits a single self-executing
 `app.bundle.js`.
 
-That indirection exists for one reason: browsers refuse to load
-`<script type="module">` over `file://`, so a real module graph cannot run by
-double-clicking an HTML file. Pre-linking keeps the source properly modular
-*and* keeps the application zero-setup. The bundle is committed, so a fresh
-clone runs immediately.
+That indirection exists so the deployed site is a handful of static files with
+no build step at the edge, and so the source stays properly modular without a
+toolchain to keep in step. The bundle is committed, so a fresh clone runs
+immediately.
 
 ```
 src/
   core/        util · events · dates · model · query · history · store
-               storage · analysis
+               storage · cloud · analysis
   timeline/    viewport · layout · connectors · renderer · interactions
   ui/          icons · components · lists · theme · shell · panels · inspector
                dialogs · menus · commands · shortcuts · notes · attachments
-               minimap · legend
+               minimap · legend · auth
   io/          scene · svg · pdf · inflate · exporters · importers
   main.js
 css/           tokens · base · components · layout · timeline · notes
@@ -282,27 +302,47 @@ A few decisions worth knowing about:
   list, so the two outputs are the same drawing rather than two
   re-implementations.
 - **No runtime dependencies.** Everything — the PDF writer, the DEFLATE
-  decompressor for `.xlsx`, the icon set — is in the repository. Nothing is
-  fetched at runtime, so the application works offline, forever.
+  decompressor for `.xlsx`, the icon set, even the Supabase client — is in the
+  repository. Nothing is fetched from a CDN, so there is no third party who
+  can break or watch the application.
+- **Permissions live in the database.** Roles are enforced by row-level
+  security in Postgres, so bypassing the interface achieves nothing. The
+  read-only UI explains the state; it does not create it. `npm run test:sql`
+  proves it against a real PostgreSQL.
 
 ### Working on it
 
 ```bash
-npm run build      # link src/ → app.bundle.js
-npm run watch      # rebuild on change
-npm run serve      # local dev server
-node tools/smoke.js --shot out.png   # headless end-to-end check (needs Playwright)
+npm run build       # link src/ → app.bundle.js
+npm run watch       # rebuild on change
+npm run serve       # local dev server
+npm run build:dist  # what Cloudflare Pages runs
+
+npm test            # all three suites
+npm run test:smoke  # 126 checks — the application, local mode
+npm run test:hosted # 34 checks — sign-in, sharing and read-only mode
+npm run test:sql    # 57 checks — the permission model, on real PostgreSQL
 ```
 
 After editing anything under `src/`, run `npm run build` — `index.html` loads
 the bundle, not the source.
 
+Leaving `config.js` blank runs the application in local mode against browser
+storage. That is the development and test path — it is how the offline suite
+runs — not a deployment option: a build with a backend always requires an
+account.
+
 ### Data and privacy
 
-All data is stored in this browser, on this computer:
+- **Postgres (Supabase)** — projects, membership and backups, every row behind
+  row-level security tied to your account
+- **Supabase Storage** — attachment bytes, in a private bucket keyed by
+  project, with the same access rules
+- **IndexedDB** — an offline mirror of the open project, so a dropped
+  connection loses nothing
+- **localStorage** — device preferences (theme, panel sizes) and the session
 
-- **IndexedDB** — the project, backups and attachment bytes
-- **localStorage** — device preferences (theme, panel sizes) and a crash-recovery mirror
-
-Nothing is transmitted anywhere. To move a project between machines, export
-JSON and import it on the other side.
+Your data goes to your own Supabase project and nowhere else — there is no
+analytics, no telemetry and no third-party script on the page. Sharing a
+project is the only way anyone else can see it, and an email address is never
+exposed to someone you do not share a project with.

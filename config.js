@@ -19,15 +19,15 @@
  * signed-in user, so a stolen anon key on its own can read nothing.
  */
 window.CX_CONFIG = {
-  /** e.g. 'https://abcdefghijklm.supabase.co' — blank runs local-only. */
+  /** e.g. 'https://abcdefghijklm.supabase.co'. Blank = local dev mode. */
   supabaseUrl: '',
 
   /** The project's anon / publishable key. */
   supabaseAnonKey: '',
 
   /**
-   * Require an account even when the backend is unreachable. Leave false so a
-   * network outage degrades to local editing rather than a locked-out app.
+   * Require an account. On by default: a hosted deployment has no business
+   * offering an anonymous, unshareable copy of someone's programme plan.
    */
-  requireAuth: false,
+  requireAuth: true,
 };

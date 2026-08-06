@@ -283,7 +283,9 @@ function writeConfig() {
   const key = process.env.SUPABASE_ANON_KEY || '';
   if (!url && !key) return false;
 
-  const requireAuth = /^(1|true|yes)$/i.test(process.env.CX_REQUIRE_AUTH || '');
+  // Hosted deployments require an account. Opting out is possible but has to
+  // be deliberate — the default must never be the weaker one.
+  const requireAuth = !/^(0|false|no)$/i.test(process.env.CX_REQUIRE_AUTH || 'true');
   const source = fs.readFileSync(CONFIG_OUT, 'utf8');
   // Keep the file's documentation; replace only the literal it exports.
   const header = source.slice(0, source.indexOf('window.CX_CONFIG'));

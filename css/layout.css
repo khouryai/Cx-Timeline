@@ -569,3 +569,231 @@ body.presenting #app {
     padding: 15px 0;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Account, access and sharing (hosted deployments)
+
+   None of this renders when config.js is blank — the application boots
+   straight into the canvas, exactly as the local-first build always has.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── The sign-in gate ──────────────────────────────────────────────────── */
+
+.cx-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg);
+  /* The workspace is already mounted behind this; it must never flash. */
+  animation: cx-gate-in var(--dur-slow) var(--easing);
+}
+.cx-gate.done {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms var(--easing);
+}
+@keyframes cx-gate-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.cx-gate-card {
+  width: min(400px, 100%);
+  padding: 30px 30px 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.cx-gate-brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-bottom: 26px;
+}
+.cx-gate-name {
+  font-family: var(--f-mono);
+  font-size: var(--fs-small);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-main);
+}
+.cx-gate-sub {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+.cx-gate-title {
+  margin: 0 0 5px;
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text-main);
+}
+.cx-gate-lede {
+  margin-bottom: 20px;
+  font-size: var(--fs-small);
+  color: var(--text-muted);
+}
+
+.cx-gate-form {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+.cx-gate-form .cx-btn {
+  justify-content: center;
+  width: 100%;
+  padding: 9px;
+}
+.cx-gate-form .cx-btn.loading {
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+.cx-gate-msg:empty {
+  display: none;
+}
+.cx-gate-msg {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-small);
+  border: 1px solid var(--bad);
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  color: var(--text-main);
+}
+.cx-gate-msg.good {
+  border-color: var(--good);
+  background: color-mix(in srgb, var(--good) 12%, transparent);
+}
+
+.cx-gate-links {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 16px;
+}
+.cx-gate-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--fs-small);
+  color: var(--accent);
+  cursor: pointer;
+}
+.cx-gate-link:hover {
+  text-decoration: underline;
+}
+
+.cx-gate-local {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+.cx-gate-local .cx-btn {
+  margin-bottom: 5px;
+}
+
+/* ── Read-only ─────────────────────────────────────────────────────────── */
+
+.cx-readonly-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  font-size: var(--fs-small);
+  color: var(--text-main);
+}
+.cx-readonly-bar .ro-icon {
+  display: inline-flex;
+  color: var(--warn);
+}
+
+/* Editing affordances stand down rather than lying about what they will do. */
+body.read-only #toolbar .tb-group.editing,
+body.read-only #toolbar .tb-group.editing + .tb-sep,
+body.read-only .nav-link[data-pane='palette'],
+body.read-only .ob-handle,
+body.read-only .ob-anchor {
+  display: none;
+}
+body.read-only .tl-obj {
+  cursor: default;
+}
+
+/* The inspector is entirely editing controls. A viewer can read every value —
+   which is the point of view access — but typing into a field the store will
+   refuse would show text that silently vanishes on the next rebuild. */
+body.read-only #inspector input,
+body.read-only #inspector textarea,
+body.read-only #inspector select,
+body.read-only #inspector .cx-btn:not(.ghost),
+body.read-only #inspector .cx-toggle,
+body.read-only #inspector .cx-swatch {
+  pointer-events: none;
+  opacity: 0.72;
+}
+
+/* ── Account block ─────────────────────────────────────────────────────── */
+
+.cx-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.cx-account .acc-main {
+  flex: 1;
+  min-width: 0;
+}
+.cx-account .acc-name {
+  overflow: hidden;
+  font-size: var(--fs-small);
+  font-weight: 500;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cx-account .acc-role {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+.acc-avatar {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.acc-avatar.small {
+  width: 22px;
+  height: 22px;
+  font-size: 9px;
+}
