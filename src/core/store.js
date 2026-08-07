@@ -28,7 +28,7 @@ import {
   normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES,
   syncLists, defaultLists, LIST_DEFS, listUsage,
   emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds,
-  makeP6Baseline, baselineSnapshot, isDerivedBaseline,
+  p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, isDerivedBaseline,
 } from './model.js';
 import { History, diff, apply } from './history.js';
 
@@ -985,7 +985,7 @@ export function placeP6Activity(activityId, { lane = null, type = null } = {}) {
     subtitle: activityId,
     start: dates.start,
     end: dates.end,
-    data: { p6Id: activityId },
+    data: { p6Ids: [activityId] },
   });
 
   edit(`Add ${activityId} from P6`, (d) => {
@@ -994,14 +994,46 @@ export function placeP6Activity(activityId, { lane = null, type = null } = {}) {
   return object.id;
 }
 
-/** Point an existing object at an activity, or at nothing. */
+/**
+ * Add an activity to what an object tracks.
+ *
+ * Additive, because one bar routinely stands for a whole test package. Use
+ * `unlinkP6` to take one away and `setP6Links` to replace the set outright.
+ */
 export function linkP6(objectId, activityId) {
-  return edit(activityId ? `Link to ${activityId}` : 'Unlink from P6', (d) => {
+  if (!activityId) return false;
+  return edit(`Link to ${activityId}`, (d) => {
     const object = d.objects.find((o) => o.id === objectId);
     if (!object) return false;
     object.data = object.data || {};
-    if (activityId) object.data.p6Id = activityId;
-    else delete object.data.p6Id;
+    const ids = p6LinkedIds(object);
+    if (ids.includes(activityId)) return false;
+    object.data.p6Ids = [...ids, activityId];
+    delete object.data.p6Id;
+  });
+}
+
+/** Stop tracking one activity, or all of them when no id is given. */
+export function unlinkP6(objectId, activityId = null) {
+  return edit(activityId ? `Unlink ${activityId}` : 'Unlink from P6', (d) => {
+    const object = d.objects.find((o) => o.id === objectId);
+    if (!object?.data) return false;
+    const ids = p6LinkedIds(object);
+    const next = activityId ? ids.filter((id) => id !== activityId) : [];
+    if (next.length === ids.length && activityId) return false;
+    object.data.p6Ids = next;
+    delete object.data.p6Id;
+  });
+}
+
+/** Replace everything an object tracks. */
+export function setP6Links(objectId, activityIds) {
+  return edit('Change P6 links', (d) => {
+    const object = d.objects.find((o) => o.id === objectId);
+    if (!object) return false;
+    object.data = object.data || {};
+    object.data.p6Ids = [...new Set([].concat(activityIds || []).filter(Boolean))];
+    delete object.data.p6Id;
   });
 }
 
@@ -1018,9 +1050,11 @@ export function adoptP6Dates(activityIds) {
   return edit('Adopt P6 dates', (d) => {
     let touched = 0;
     for (const object of d.objects) {
-      const id = object.data?.p6Id;
-      if (!id || !wanted.has(id)) continue;
-      const dates = p6Dates(d.p6?.activities?.[id]);
+      const ids = p6LinkedIds(object);
+      // An object tracking several activities follows when any one of them
+      // was chosen: its dates are the roll-up, so the whole set matters.
+      if (!ids.some((id) => wanted.has(id))) continue;
+      const dates = p6RollUp(d, object);
       if (!dates) continue;
       object.start = dates.start;
       object.end = TYPES[object.type]?.duration ? dates.end : dates.start;

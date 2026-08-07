@@ -14,7 +14,7 @@ import { uid, deepClone, clamp } from './util.js';
 import { toMs, toISO, todayMs, addDays, MS_DAY, startOfMonth, addMonths } from './dates.js';
 
 /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /* ══════════════════════════════════════════════════════════════════════════
    Object type registry
@@ -576,14 +576,75 @@ export function p6Slip(activity) {
   return { startShift, finishShift, slipped: finishShift > 0, changed: startShift !== 0 || finishShift !== 0 };
 }
 
-/** How far the plan differs from P6, in days, for an object that is linked. */
-export function p6Variance(obj, activity) {
-  const dates = p6Dates(activity);
+/**
+ * The activities an object is tracked against.
+ *
+ * One bar on a commissioning plan is routinely a dozen P6 activities — a
+ * campaign, a test package, a zone handover — so the link is a set. The
+ * singular `p6Id` written by the first version is still read, so nothing
+ * placed before this needs touching.
+ */
+export function p6LinkedIds(obj) {
+  const data = obj?.data;
+  if (!data) return [];
+  if (Array.isArray(data.p6Ids)) return data.p6Ids.filter(Boolean);
+  return data.p6Id ? [data.p6Id] : [];
+}
+
+/**
+ * The dates an object's linked activities span.
+ *
+ * Earliest start to latest finish, because a bar standing for twelve
+ * activities has to cover all of them — reporting only the first would show a
+ * campaign finishing while most of its work was outstanding.
+ *
+ * @param {string} [side]  'baseline' | 'progress'; omitted takes whichever
+ *                         each activity currently holds.
+ */
+export function p6RollUp(doc, obj, side = null) {
+  const register = p6Register(doc);
+  let start = null;
+  let end = null;
+  let count = 0;
+  let missing = 0;
+
+  for (const id of p6LinkedIds(obj)) {
+    const activity = register.activities[id];
+    if (!activity) {
+      missing++;
+      continue;
+    }
+    const dates = side ? activity[side] : p6Dates(activity);
+    if (!dates) continue;
+    start = start == null ? dates.start : Math.min(start, dates.start);
+    end = end == null ? dates.end : Math.max(end, dates.end);
+    count++;
+  }
+
+  if (!count) return null;
+  return { start, end, count, missing };
+}
+
+/**
+ * How far the plan differs from P6, in days.
+ *
+ * Measured against everything the object is linked to, rolled up — the
+ * question is "is this bar where P6 says the work is", not "does it match one
+ * particular activity".
+ */
+export function p6Variance(doc, obj) {
+  const dates = p6RollUp(doc, obj);
   if (!obj || !dates) return null;
   const hasDuration = !!TYPES[obj.type]?.duration;
   const startShift = Math.round((obj.start - dates.start) / MS_DAY);
   const finishShift = hasDuration ? Math.round((obj.end - dates.end) / MS_DAY) : startShift;
-  return { startShift, finishShift, behind: finishShift > 0, differs: startShift !== 0 || finishShift !== 0 };
+  return {
+    startShift,
+    finishShift,
+    behind: finishShift > 0,
+    differs: startShift !== 0 || finishShift !== 0,
+    count: dates.count,
+  };
 }
 
 /**
@@ -611,7 +672,7 @@ export function p6IsMilestone(activity) {
 /** Objects on the timeline that point at a given activity. */
 export function p6Placed(doc, activityId) {
   if (!activityId) return [];
-  return doc.objects.filter((o) => o.data?.p6Id === activityId);
+  return doc.objects.filter((o) => p6LinkedIds(o).includes(activityId));
 }
 
 /**
@@ -631,14 +692,12 @@ export function baselineSnapshot(doc, baseline) {
   if (!baseline) return [];
   if (baseline.source !== 'p6') return baseline.snapshot || [];
 
-  const register = p6Register(doc);
   const side = baseline.p6Kind === 'progress' ? 'progress' : 'baseline';
   const rows = [];
 
   for (const obj of doc.objects) {
-    const activityId = obj.data?.p6Id;
-    if (!activityId) continue;
-    const dates = register.activities[activityId]?.[side];
+    if (!p6LinkedIds(obj).length) continue;
+    const dates = p6RollUp(doc, obj, side);
     if (!dates) continue;
 
     rows.push({
@@ -678,7 +737,7 @@ export function makeP6Baseline(kind) {
 /** Every activity id the plan currently references. */
 export function p6PlacedIds(doc) {
   const ids = new Set();
-  for (const obj of doc.objects) if (obj.data?.p6Id) ids.add(obj.data.p6Id);
+  for (const obj of doc.objects) for (const id of p6LinkedIds(obj)) ids.add(id);
   return ids;
 }
 
@@ -979,6 +1038,19 @@ const MIGRATIONS = [
   (doc) => {
     if (!doc.p6) doc.p6 = emptyRegister();
     doc.schema = 3;
+    return doc;
+  },
+
+  // v3 → v4: an object may track several P6 activities, not one. A bar that
+  // stands for a campaign is routinely a dozen of them.
+  (doc) => {
+    for (const obj of doc.objects || []) {
+      if (!obj.data) continue;
+      if (Array.isArray(obj.data.p6Ids)) continue;
+      obj.data.p6Ids = obj.data.p6Id ? [obj.data.p6Id] : [];
+      delete obj.data.p6Id;
+    }
+    doc.schema = 4;
     return doc;
   },
 ];

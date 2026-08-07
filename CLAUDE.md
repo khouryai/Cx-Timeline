@@ -126,7 +126,13 @@ subscribes. That is what keeps the graph acyclic.
   next import brings it back.
 - **P6 data is a register, not objects.** `doc.p6` holds every imported
   activity keyed by activity ID — the only identifier P6 gives that survives a
-  rename — and an object points at one with `data.p6Id`. Each activity carries
+  rename — and an object points at a **set** of them with `data.p6Ids`, because
+  one commissioning bar is routinely a whole test package in P6. Read it with
+  `p6LinkedIds(obj)`, never the raw field: the singular `data.p6Id` written by
+  the first version is still migrated and still read. Where a link needs one
+  pair of dates — variance, the derived baselines, "move onto the P6 dates" —
+  it is the roll-up from `p6RollUp()`: earliest start to latest finish across
+  the set. Each activity carries
   a `baseline` and a `progress` date set, because that is how the reviews
   work; slip, variance and schedule position are all derived from those and
   never stored. An import writes the register and *proposes* changes to

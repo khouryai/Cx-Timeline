@@ -45,6 +45,9 @@ export function attach() {
   dom.canvas.addEventListener('dblclick', onCanvasDoubleClick);
   dom.canvas.addEventListener('contextmenu', onCanvasContextMenu);
   dom.canvas.addEventListener('wheel', onWheel, { passive: false });
+  dom.canvas.addEventListener('dragover', onCanvasDragOver);
+  dom.canvas.addEventListener('dragleave', onCanvasDragLeave);
+  dom.canvas.addEventListener('drop', onCanvasDrop);
 
   dom.ruler.addEventListener('mousedown', onRulerMouseDown);
   dom.ruler.addEventListener('wheel', onWheel, { passive: false });
@@ -62,6 +65,76 @@ export function attach() {
   window.addEventListener('blur', () => {
     spaceHeld = false;
     dom.canvas.classList.remove('pan-ready');
+  });
+}
+
+/* ── Dropping onto the canvas ──────────────────────────────────────────── */
+
+/**
+ * Something is being dragged over the plan.
+ *
+ * This layer reports *where* a thing landed — on which bar, in which lane —
+ * and deliberately not what it means. The P6 register decides that; the
+ * canvas would otherwise have to know about Primavera to accept a drop.
+ *
+ * File drags are left alone: `main.js` handles those, and claiming them here
+ * would break opening a project by dropping it on the window.
+ */
+function isDataDrag(e) {
+  const types = e.dataTransfer?.types;
+  if (!types) return false;
+  return Array.from(types).some((t) => t.startsWith('application/x-cx-'));
+}
+
+let dropTargetId = null;
+
+function markDropTarget(id) {
+  if (id === dropTargetId) return;
+  if (dropTargetId) renderer.elementFor(dropTargetId)?.classList.remove('drop-target');
+  dropTargetId = id;
+  if (id) renderer.elementFor(id)?.classList.add('drop-target');
+}
+
+function onCanvasDragOver(e) {
+  if (!isDataDrag(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+
+  const layout = renderer.getLayout();
+  if (!layout) return;
+  const point = toCanvas(e);
+  const hit = hitTest(layout, point.x, point.y);
+  markDropTarget(hit ? hit.id : null);
+}
+
+function onCanvasDragLeave(e) {
+  // `dragleave` fires when crossing into a child element too, so only clear
+  // the highlight when the pointer has genuinely left the canvas.
+  if (e.relatedTarget && dom.canvas.contains(e.relatedTarget)) return;
+  markDropTarget(null);
+}
+
+function onCanvasDrop(e) {
+  if (!isDataDrag(e)) return;
+  e.preventDefault();
+  markDropTarget(null);
+
+  const data = {};
+  for (const type of Array.from(e.dataTransfer.types)) {
+    if (type.startsWith('application/x-cx-')) data[type] = e.dataTransfer.getData(type);
+  }
+
+  const layout = renderer.getLayout();
+  if (!layout) return;
+  const point = toCanvas(e);
+  const hit = hitTest(layout, point.x, point.y);
+  const laneEntry = laneAtY(layout.geometry, point.y);
+
+  emit('canvas:drop', {
+    data,
+    objectId: hit ? hit.id : null,
+    laneId: laneEntry ? laneEntry.id : null,
+    ms: viewport.pxToMs(point.x),
   });
 }
 

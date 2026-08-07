@@ -1342,3 +1342,20 @@ body.presenting .tl-root {
 body.presenting .tl-baseline-bar {
   display: flex;
 }
+
+/* ── Drop target ───────────────────────────────────────────────────────── */
+
+/* While a P6 activity is being dragged, the bar under the pointer says it
+   will accept the link. The whole canvas dims its labels slightly so the
+   outlined target is the thing the eye lands on. */
+.tl-obj.drop-target {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+body.p6-dragging .tl-obj {
+  transition: opacity var(--dur-fast) var(--easing);
+}
+body.p6-dragging .tl-canvas {
+  cursor: copy;
+}

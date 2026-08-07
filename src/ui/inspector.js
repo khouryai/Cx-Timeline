@@ -10,17 +10,17 @@
  *          icons, components, lists, notes, attachments.
  */
 
-import { el, clear, debounce, clamp } from '../core/util.js';
+import { el, clear, debounce, clamp, escapeHtml } from '../core/util.js';
 import { on, emit, EV } from '../core/events.js';
 import { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } from '../core/dates.js';
 import {
   TYPES,
   listOptions,
-  p6Activity,
   p6Dates,
-  p6Slip,
   p6Variance,
   p6Register,
+  p6LinkedIds,
+  p6RollUp,
   LINK_TYPES,
   CONNECTOR_STYLES,
   durationDays,
@@ -51,6 +51,7 @@ import {
   chipStat,
   confirmDialog,
   contextMenu,
+  openPicker,
 } from './components.js';
 import { managedSelect, suggestInput } from './lists.js';
 import { openNoteEditor, renderNote, notePreview } from './notes.js';
@@ -705,91 +706,133 @@ function appearanceFields(obj) {
 /* ── P6 ────────────────────────────────────────────────────────────────── */
 
 /**
- * The P6 activity this object is tracked against, if any.
+ * The P6 activities this object is tracked against.
  *
- * Deliberately shows two numbers rather than one: how far P6 has moved the
- * activity since its baseline, and how far this plan differs from where P6
- * has it now. They answer different questions and conflating them is how a
- * review goes wrong.
+ * A bar routinely stands for a whole test package, so this is a set rather
+ * than a field, and the dates it is measured against are the roll-up:
+ * earliest start to latest finish across everything linked.
+ *
+ * Two numbers, deliberately separate: how far P6 has moved its own work since
+ * the baseline, and how far this plan differs from where P6 has it now.
  */
 function p6Fields(obj) {
   const doc = store.getDoc();
   const register = p6Register(doc);
-  const count = Object.keys(register.activities).length;
-  if (!count) return null;
+  if (!Object.keys(register.activities).length) return null;
 
-  const activityId = obj.data?.p6Id || '';
-  const activity = p6Activity(doc, activityId);
+  const linked = p6LinkedIds(obj);
+  const rollUp = p6RollUp(doc, obj);
+  const variance = p6Variance(doc, obj);
 
-  if (!activity) {
-    return [
-      el('div', { class: 'cx-hint', text: activityId
-        ? `Linked to ${activityId}, which is not in the imported schedule.`
-        : 'Not linked to a P6 activity.' }),
-      field('Activity ID', managedP6Select(obj, activityId)),
-    ];
-  }
+  const out = [];
 
-  const dates = p6Dates(activity);
-  const slip = p6Slip(activity);
-  const variance = p6Variance(obj, activity);
+  if (!linked.length) {
+    out.push(el('div', { class: 'cx-hint', text: 'Not tracked against any P6 activity. Drag one from the P6 Schedule pane onto this bar, or add it below.' }));
+  } else {
+    out.push(
+      el('div', { class: 'p6-links' }, linked.map((id) => {
+        const activity = register.activities[id];
+        const dates = activity ? p6Dates(activity) : null;
+        return el('div', { class: 'p6-chip' + (activity ? '' : ' unknown'), dataset: { p6: id } }, [
+          el('span', { class: 'p6-id', text: id }),
+          el('span', { class: 'p6-chip-name', text: activity ? activity.name : 'not in the register', title: activity?.name || '' }),
+          dates ? el('span', { class: 'p6-dates', text: `${fmtDate(dates.start, 'numeric')} → ${fmtDate(dates.end, 'numeric')}` }) : null,
+          el('button', {
+            class: 'cx-btn icon mini ghost',
+            title: 'Stop tracking this activity',
+            'aria-label': `Unlink ${id}`,
+            html: icon('x', { size: 10 }),
+            onClick: () => {
+              store.unlinkP6(obj.id, id);
+              renderer.requestRender();
+              render();
+            },
+          }),
+        ].filter(Boolean));
+      }))
+    );
 
-  return [
-    el('div', { class: 'p6-link' }, [
-      el('span', { class: 'p6-id', text: activity.id }),
-      el('span', { class: 'p6-dates', text: dates
-        ? `${fmtDate(dates.start, 'medium')} → ${fmtDate(dates.end, 'medium')}`
-        : 'no dates' }),
-      activity.missing ? badge('Not in P6', 'bad') : null,
-    ].filter(Boolean)),
+    if (rollUp) {
+      out.push(
+        el('div', { class: 'cx-hint', text: linked.length === 1
+          ? 'Measured against this activity.'
+          : `Measured against all ${rollUp.count} — earliest start to latest finish.` }),
+        el('div', { class: 'cx-chipstats', style: { marginTop: '4px' } }, [
+          chipStat('P6 span', `${fmtDate(rollUp.start, 'numeric')} → ${fmtDate(rollUp.end, 'numeric')}`, 'muted'),
+          chipStat('P6 slip', rollUpSlip(doc, obj), 'muted'),
+          variance ? chipStat('You', shift(variance.finishShift), !variance.differs ? 'muted' : variance.behind ? 'warn' : 'info') : null,
+        ].filter(Boolean))
+      );
+    }
 
-    el('div', { class: 'cx-hint', text: activity.name }),
-
-    el('div', { class: 'cx-chipstats', style: { marginTop: '4px' } }, [
-      slip?.changed
-        ? chipStat('P6 slip', shift(slip.finishShift), slip.finishShift > 0 ? 'bad' : 'good')
-        : chipStat('P6 slip', activity.baseline ? 'none' : '—', 'muted'),
-      variance
-        ? chipStat('You', shift(variance.finishShift), !variance.differs ? 'muted' : variance.behind ? 'warn' : 'info')
-        : null,
-    ].filter(Boolean)),
-
-    dates && variance?.differs
-      ? el('button', {
+    if (variance?.differs) {
+      out.push(
+        el('button', {
           class: 'cx-btn mini',
           html: icon('target', { size: 12 }) + '<span>Move onto the P6 dates</span>',
           onClick: () => {
-            store.adoptP6Dates([activity.id]);
+            store.adoptP6Dates(linked);
             renderer.requestRender();
+            render();
           },
         })
-      : null,
-
-    field('Activity ID', managedP6Select(obj, activityId)),
-  ].filter(Boolean);
-}
-
-/** Pick, change or clear the linked activity. */
-function managedP6Select(obj, current) {
-  const doc = store.getDoc();
-  const register = p6Register(doc);
-  const options = Object.values(register.activities)
-    .sort((a, b) => a.order - b.order)
-    .slice(0, 400)
-    .map((a) => ({ value: a.id, label: `${a.id} — ${a.name}` }));
-
-  // Keep an unknown value selectable rather than snapping the field to blank.
-  if (current && !options.some((o) => o.value === current)) {
-    options.unshift({ value: current, label: `${current} — not in the register` });
+      );
+    }
   }
 
-  return selectInput({
-    value: current,
-    placeholder: '— not linked —',
-    options,
-    onChange: (v) => {
-      store.linkP6(obj.id, v || null);
+  out.push(
+    el('button', {
+      class: 'cx-btn mini',
+      style: { justifyContent: 'flex-start', width: '100%' },
+      html: icon('search', { size: 12 }) + '<span>Add a P6 activity…</span>',
+      onClick: () => openActivityPicker(obj, register, linked),
+    })
+  );
+
+  return out;
+}
+
+/** How far P6 has moved the linked work since its own baseline. */
+function rollUpSlip(doc, obj) {
+  const before = p6RollUp(doc, obj, 'baseline');
+  const now = p6RollUp(doc, obj, 'progress');
+  if (!before || !now) return '—';
+  return shift(Math.round((now.end - before.end) / MS_DAY));
+}
+
+/**
+ * Search the register.
+ *
+ * A dropdown stops being navigable long before fifteen hundred entries, and
+ * nobody remembers an activity ID well enough to scroll to it.
+ */
+function openActivityPicker(obj, register, alreadyLinked) {
+  const taken = new Set(alreadyLinked);
+  const items = Object.values(register.activities)
+    .filter((a) => !taken.has(a.id))
+    .sort((a, b) => a.order - b.order)
+    .map((a) => ({
+      value: a.id,
+      label: a.name,
+      meta: [a.id, a.wbs, p6Dates(a) ? `${fmtDate(p6Dates(a).start, 'numeric')} → ${fmtDate(p6Dates(a).end, 'numeric')}` : null]
+        .filter(Boolean).join(' · '),
+    }));
+
+  if (!items.length) {
+    return;
+  }
+
+  openPicker({
+    title: 'Add a P6 activity',
+    subtitle: `${items.length} not yet linked to this object.`,
+    placeholder: 'Activity ID, name or WBS…',
+    items,
+    empty: 'No activity matches.',
+    onPick: (activityId) => {
+      if (!activityId) return;
+      store.linkP6(obj.id, activityId);
       renderer.requestRender();
+      render();
     },
   });
 }

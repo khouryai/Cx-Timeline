@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 41   Built: 2026-08-07T18:12:00.495Z
+ * Modules: 41   Built: 2026-08-07T18:35:50.805Z
  */
 (function () {
   'use strict';
@@ -1129,7 +1129,7 @@ __mods["core/model.js"] = function (__x, __req) {
   const { toMs, toISO, todayMs, addDays, MS_DAY, startOfMonth, addMonths } = __req("core/dates.js");
 
   /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
-  const SCHEMA_VERSION = 3;
+  const SCHEMA_VERSION = 4;
 
   /* ══════════════════════════════════════════════════════════════════════════
      Object type registry
@@ -1691,14 +1691,75 @@ __mods["core/model.js"] = function (__x, __req) {
     return { startShift, finishShift, slipped: finishShift > 0, changed: startShift !== 0 || finishShift !== 0 };
   }
 
-  /** How far the plan differs from P6, in days, for an object that is linked. */
-  function p6Variance(obj, activity) {
-    const dates = p6Dates(activity);
+  /**
+   * The activities an object is tracked against.
+   *
+   * One bar on a commissioning plan is routinely a dozen P6 activities — a
+   * campaign, a test package, a zone handover — so the link is a set. The
+   * singular `p6Id` written by the first version is still read, so nothing
+   * placed before this needs touching.
+   */
+  function p6LinkedIds(obj) {
+    const data = obj?.data;
+    if (!data) return [];
+    if (Array.isArray(data.p6Ids)) return data.p6Ids.filter(Boolean);
+    return data.p6Id ? [data.p6Id] : [];
+  }
+
+  /**
+   * The dates an object's linked activities span.
+   *
+   * Earliest start to latest finish, because a bar standing for twelve
+   * activities has to cover all of them — reporting only the first would show a
+   * campaign finishing while most of its work was outstanding.
+   *
+   * @param {string} [side]  'baseline' | 'progress'; omitted takes whichever
+   *                         each activity currently holds.
+   */
+  function p6RollUp(doc, obj, side = null) {
+    const register = p6Register(doc);
+    let start = null;
+    let end = null;
+    let count = 0;
+    let missing = 0;
+
+    for (const id of p6LinkedIds(obj)) {
+      const activity = register.activities[id];
+      if (!activity) {
+        missing++;
+        continue;
+      }
+      const dates = side ? activity[side] : p6Dates(activity);
+      if (!dates) continue;
+      start = start == null ? dates.start : Math.min(start, dates.start);
+      end = end == null ? dates.end : Math.max(end, dates.end);
+      count++;
+    }
+
+    if (!count) return null;
+    return { start, end, count, missing };
+  }
+
+  /**
+   * How far the plan differs from P6, in days.
+   *
+   * Measured against everything the object is linked to, rolled up — the
+   * question is "is this bar where P6 says the work is", not "does it match one
+   * particular activity".
+   */
+  function p6Variance(doc, obj) {
+    const dates = p6RollUp(doc, obj);
     if (!obj || !dates) return null;
     const hasDuration = !!TYPES[obj.type]?.duration;
     const startShift = Math.round((obj.start - dates.start) / MS_DAY);
     const finishShift = hasDuration ? Math.round((obj.end - dates.end) / MS_DAY) : startShift;
-    return { startShift, finishShift, behind: finishShift > 0, differs: startShift !== 0 || finishShift !== 0 };
+    return {
+      startShift,
+      finishShift,
+      behind: finishShift > 0,
+      differs: startShift !== 0 || finishShift !== 0,
+      count: dates.count,
+    };
   }
 
   /**
@@ -1726,7 +1787,7 @@ __mods["core/model.js"] = function (__x, __req) {
   /** Objects on the timeline that point at a given activity. */
   function p6Placed(doc, activityId) {
     if (!activityId) return [];
-    return doc.objects.filter((o) => o.data?.p6Id === activityId);
+    return doc.objects.filter((o) => p6LinkedIds(o).includes(activityId));
   }
 
   /**
@@ -1746,14 +1807,12 @@ __mods["core/model.js"] = function (__x, __req) {
     if (!baseline) return [];
     if (baseline.source !== 'p6') return baseline.snapshot || [];
 
-    const register = p6Register(doc);
     const side = baseline.p6Kind === 'progress' ? 'progress' : 'baseline';
     const rows = [];
 
     for (const obj of doc.objects) {
-      const activityId = obj.data?.p6Id;
-      if (!activityId) continue;
-      const dates = register.activities[activityId]?.[side];
+      if (!p6LinkedIds(obj).length) continue;
+      const dates = p6RollUp(doc, obj, side);
       if (!dates) continue;
 
       rows.push({
@@ -1793,7 +1852,7 @@ __mods["core/model.js"] = function (__x, __req) {
   /** Every activity id the plan currently references. */
   function p6PlacedIds(doc) {
     const ids = new Set();
-    for (const obj of doc.objects) if (obj.data?.p6Id) ids.add(obj.data.p6Id);
+    for (const obj of doc.objects) for (const id of p6LinkedIds(obj)) ids.add(id);
     return ids;
   }
 
@@ -2096,6 +2155,19 @@ __mods["core/model.js"] = function (__x, __req) {
       doc.schema = 3;
       return doc;
     },
+
+    // v3 → v4: an object may track several P6 activities, not one. A bar that
+    // stands for a campaign is routinely a dozen of them.
+    (doc) => {
+      for (const obj of doc.objects || []) {
+        if (!obj.data) continue;
+        if (Array.isArray(obj.data.p6Ids)) continue;
+        obj.data.p6Ids = obj.data.p6Id ? [obj.data.p6Id] : [];
+        delete obj.data.p6Id;
+      }
+      doc.schema = 4;
+      return doc;
+    },
   ];
 
   /**
@@ -2364,6 +2436,8 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "p6Count", { get: () => p6Count, enumerable: true });
   Object.defineProperty(__x, "p6Dates", { get: () => p6Dates, enumerable: true });
   Object.defineProperty(__x, "p6Slip", { get: () => p6Slip, enumerable: true });
+  Object.defineProperty(__x, "p6LinkedIds", { get: () => p6LinkedIds, enumerable: true });
+  Object.defineProperty(__x, "p6RollUp", { get: () => p6RollUp, enumerable: true });
   Object.defineProperty(__x, "p6Variance", { get: () => p6Variance, enumerable: true });
   Object.defineProperty(__x, "p6Position", { get: () => p6Position, enumerable: true });
   Object.defineProperty(__x, "p6IsMilestone", { get: () => p6IsMilestone, enumerable: true });
@@ -3411,7 +3485,7 @@ __mods["core/store.js"] = function (__x, __req) {
   const { deepClone, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { isReadOnly } = __req("core/cloud.js");
-  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds, makeP6Baseline, baselineSnapshot, isDerivedBaseline } = __req("core/model.js");
+  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, isDerivedBaseline } = __req("core/model.js");
 
 
 
@@ -4372,7 +4446,7 @@ __mods["core/store.js"] = function (__x, __req) {
       subtitle: activityId,
       start: dates.start,
       end: dates.end,
-      data: { p6Id: activityId },
+      data: { p6Ids: [activityId] },
     });
 
     edit(`Add ${activityId} from P6`, (d) => {
@@ -4381,14 +4455,46 @@ __mods["core/store.js"] = function (__x, __req) {
     return object.id;
   }
 
-  /** Point an existing object at an activity, or at nothing. */
+  /**
+   * Add an activity to what an object tracks.
+   *
+   * Additive, because one bar routinely stands for a whole test package. Use
+   * `unlinkP6` to take one away and `setP6Links` to replace the set outright.
+   */
   function linkP6(objectId, activityId) {
-    return edit(activityId ? `Link to ${activityId}` : 'Unlink from P6', (d) => {
+    if (!activityId) return false;
+    return edit(`Link to ${activityId}`, (d) => {
       const object = d.objects.find((o) => o.id === objectId);
       if (!object) return false;
       object.data = object.data || {};
-      if (activityId) object.data.p6Id = activityId;
-      else delete object.data.p6Id;
+      const ids = p6LinkedIds(object);
+      if (ids.includes(activityId)) return false;
+      object.data.p6Ids = [...ids, activityId];
+      delete object.data.p6Id;
+    });
+  }
+
+  /** Stop tracking one activity, or all of them when no id is given. */
+  function unlinkP6(objectId, activityId = null) {
+    return edit(activityId ? `Unlink ${activityId}` : 'Unlink from P6', (d) => {
+      const object = d.objects.find((o) => o.id === objectId);
+      if (!object?.data) return false;
+      const ids = p6LinkedIds(object);
+      const next = activityId ? ids.filter((id) => id !== activityId) : [];
+      if (next.length === ids.length && activityId) return false;
+      object.data.p6Ids = next;
+      delete object.data.p6Id;
+    });
+  }
+
+  /** Replace everything an object tracks. */
+  function setP6Links(objectId, activityIds) {
+    return edit('Change P6 links', (d) => {
+      const object = d.objects.find((o) => o.id === objectId);
+      if (!object) return false;
+      object.data = object.data || {};
+      object.data.p6Ids = [...new Set([].concat(activityIds || []).filter(Boolean))];
+      delete object.data.p6Id;
     });
   }
 
@@ -4405,9 +4511,11 @@ __mods["core/store.js"] = function (__x, __req) {
     return edit('Adopt P6 dates', (d) => {
       let touched = 0;
       for (const object of d.objects) {
-        const id = object.data?.p6Id;
-        if (!id || !wanted.has(id)) continue;
-        const dates = p6Dates(d.p6?.activities?.[id]);
+        const ids = p6LinkedIds(object);
+        // An object tracking several activities follows when any one of them
+        // was chosen: its dates are the roll-up, so the whole set matters.
+        if (!ids.some((id) => wanted.has(id))) continue;
+        const dates = p6RollUp(d, object);
         if (!dates) continue;
         object.start = dates.start;
         object.end = TYPES[object.type]?.duration ? dates.end : dates.start;
@@ -4590,6 +4698,8 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "clearP6", { get: () => clearP6, enumerable: true });
   Object.defineProperty(__x, "placeP6Activity", { get: () => placeP6Activity, enumerable: true });
   Object.defineProperty(__x, "linkP6", { get: () => linkP6, enumerable: true });
+  Object.defineProperty(__x, "unlinkP6", { get: () => unlinkP6, enumerable: true });
+  Object.defineProperty(__x, "setP6Links", { get: () => setP6Links, enumerable: true });
   Object.defineProperty(__x, "adoptP6Dates", { get: () => adoptP6Dates, enumerable: true });
   Object.defineProperty(__x, "showP6Comparison", { get: () => showP6Comparison, enumerable: true });
   Object.defineProperty(__x, "snapshotOf", { get: () => snapshotOf, enumerable: true });
@@ -7671,6 +7781,11 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     return lastLayout;
   }
 
+  /** The DOM node drawn for an object, if it is currently on screen. */
+  function elementFor(id) {
+    return objectNodes.get(id) || null;
+  }
+
   /** Tell the viewport how much room it has. */
   function measure() {
     if (!mounted) return;
@@ -8742,6 +8857,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
   Object.defineProperty(__x, "elements", { get: () => elements, enumerable: true });
   Object.defineProperty(__x, "getScrollTop", { get: () => getScrollTop, enumerable: true });
   Object.defineProperty(__x, "getLayout", { get: () => getLayout, enumerable: true });
+  Object.defineProperty(__x, "elementFor", { get: () => elementFor, enumerable: true });
   Object.defineProperty(__x, "measure", { get: () => measure, enumerable: true });
   Object.defineProperty(__x, "requestRender", { get: () => requestRender, enumerable: true });
   Object.defineProperty(__x, "renderNow", { get: () => renderNow, enumerable: true });
@@ -8810,6 +8926,9 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
     dom.canvas.addEventListener('dblclick', onCanvasDoubleClick);
     dom.canvas.addEventListener('contextmenu', onCanvasContextMenu);
     dom.canvas.addEventListener('wheel', onWheel, { passive: false });
+    dom.canvas.addEventListener('dragover', onCanvasDragOver);
+    dom.canvas.addEventListener('dragleave', onCanvasDragLeave);
+    dom.canvas.addEventListener('drop', onCanvasDrop);
 
     dom.ruler.addEventListener('mousedown', onRulerMouseDown);
     dom.ruler.addEventListener('wheel', onWheel, { passive: false });
@@ -8827,6 +8946,76 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
     window.addEventListener('blur', () => {
       spaceHeld = false;
       dom.canvas.classList.remove('pan-ready');
+    });
+  }
+
+  /* ── Dropping onto the canvas ──────────────────────────────────────────── */
+
+  /**
+   * Something is being dragged over the plan.
+   *
+   * This layer reports *where* a thing landed — on which bar, in which lane —
+   * and deliberately not what it means. The P6 register decides that; the
+   * canvas would otherwise have to know about Primavera to accept a drop.
+   *
+   * File drags are left alone: `main.js` handles those, and claiming them here
+   * would break opening a project by dropping it on the window.
+   */
+  function isDataDrag(e) {
+    const types = e.dataTransfer?.types;
+    if (!types) return false;
+    return Array.from(types).some((t) => t.startsWith('application/x-cx-'));
+  }
+
+  let dropTargetId = null;
+
+  function markDropTarget(id) {
+    if (id === dropTargetId) return;
+    if (dropTargetId) renderer.elementFor(dropTargetId)?.classList.remove('drop-target');
+    dropTargetId = id;
+    if (id) renderer.elementFor(id)?.classList.add('drop-target');
+  }
+
+  function onCanvasDragOver(e) {
+    if (!isDataDrag(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+
+    const layout = renderer.getLayout();
+    if (!layout) return;
+    const point = toCanvas(e);
+    const hit = hitTest(layout, point.x, point.y);
+    markDropTarget(hit ? hit.id : null);
+  }
+
+  function onCanvasDragLeave(e) {
+    // `dragleave` fires when crossing into a child element too, so only clear
+    // the highlight when the pointer has genuinely left the canvas.
+    if (e.relatedTarget && dom.canvas.contains(e.relatedTarget)) return;
+    markDropTarget(null);
+  }
+
+  function onCanvasDrop(e) {
+    if (!isDataDrag(e)) return;
+    e.preventDefault();
+    markDropTarget(null);
+
+    const data = {};
+    for (const type of Array.from(e.dataTransfer.types)) {
+      if (type.startsWith('application/x-cx-')) data[type] = e.dataTransfer.getData(type);
+    }
+
+    const layout = renderer.getLayout();
+    if (!layout) return;
+    const point = toCanvas(e);
+    const hit = hitTest(layout, point.x, point.y);
+    const laneEntry = laneAtY(layout.geometry, point.y);
+
+    emit('canvas:drop', {
+      data,
+      objectId: hit ? hit.id : null,
+      laneId: laneEntry ? laneEntry.id : null,
+      ms: viewport.pxToMs(point.x),
     });
   }
 
@@ -9656,7 +9845,7 @@ __mods["ui/components.js"] = function (__x, __req) {
    * Imports: util, events, icons.
    */
 
-  const { el, clear, escapeHtml, uid, IS_MAC, clamp } = __req("core/util.js");
+  const { el, clear, escapeHtml, uid, IS_MAC, clamp, fold } = __req("core/util.js");
   const { on, EV } = __req("core/events.js");
   const { icon, searchIcons, hasIcon } = __req("ui/icons.js");
 
@@ -10236,6 +10425,111 @@ __mods["ui/components.js"] = function (__x, __req) {
     ]);
   }
 
+  /**
+   * Choose one thing from many, by typing.
+   *
+   * A `<select>` stops being usable somewhere around fifty options, and the P6
+   * register has fifteen hundred. This is a search box over a list: type to
+   * narrow, arrow keys to move, Enter to take it.
+   *
+   * @param {object}   opts
+   * @param {string}   opts.title
+   * @param {string}   [opts.subtitle]
+   * @param {Array}    opts.items      [{ value, label, meta?, badge? }]
+   * @param {string}   [opts.placeholder]
+   * @param {string}   [opts.empty]    Shown when nothing matches.
+   * @param {Function} opts.onPick     Called with the chosen value.
+   * @param {string}   [opts.clearLabel] Offers a "none" choice when given.
+   */
+  function openPicker(opts) {
+    const items = opts.items || [];
+    let filtered = items;
+    let cursor = 0;
+
+    const list = el('div', { class: 'cx-picker-list', role: 'listbox' });
+    const search = textInput({
+      value: '',
+      placeholder: opts.placeholder || 'Type to search…',
+      onInput: (v) => {
+        const needle = fold(v);
+        filtered = needle
+          ? items.filter((i) => fold(`${i.label} ${i.meta || ''}`).includes(needle))
+          : items;
+        cursor = 0;
+        draw();
+      },
+    });
+    search.setAttribute('aria-label', opts.title || 'Search');
+
+    let handle = null;
+
+    const take = (item) => {
+      if (!item) return;
+      handle?.close();
+      opts.onPick(item.value);
+    };
+
+    function draw() {
+      clear(list);
+      if (!filtered.length) {
+        list.appendChild(el('div', { class: 'cx-hint', style: { padding: '14px 10px' }, text: opts.empty || 'Nothing matches.' }));
+        return;
+      }
+      // A long list is slower to build than to read; typing narrows it.
+      filtered.slice(0, 200).forEach((item, index) => {
+        list.appendChild(
+          el('div', {
+            class: 'cx-picker-item' + (index === cursor ? ' on' : ''),
+            role: 'option',
+            'aria-selected': index === cursor ? 'true' : 'false',
+            dataset: { value: item.value },
+            onClick: () => take(item),
+          }, [
+            el('div', { class: 'pi-label', text: item.label }),
+            item.meta ? el('div', { class: 'pi-meta', text: item.meta }) : null,
+          ].filter(Boolean))
+        );
+      });
+      if (filtered.length > 200) {
+        list.appendChild(el('div', { class: 'cx-hint', style: { padding: '8px 10px' }, text: `${filtered.length - 200} more — keep typing.` }));
+      }
+      list.querySelector('.cx-picker-item.on')?.scrollIntoView({ block: 'nearest' });
+    }
+
+    search.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const limit = Math.min(filtered.length, 200);
+        if (!limit) return;
+        cursor = (cursor + (e.key === 'ArrowDown' ? 1 : -1) + limit) % limit;
+        draw();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        take(filtered[cursor]);
+      }
+    });
+
+    draw();
+
+    const actions = [{ label: 'Cancel' }];
+    if (opts.clearLabel) {
+      actions.push({
+        label: opts.clearLabel,
+        onClick: () => opts.onPick(null),
+      });
+    }
+
+    handle = openModal({
+      title: opts.title,
+      subtitle: opts.subtitle,
+      body: el('div', {}, [search, list]),
+      actions,
+    });
+
+    setTimeout(() => search.focus(), 40);
+    return handle;
+  }
+
   /** Status/tone badge. */
   function badge(label, tone = 'neutral', { dot = true } = {}) {
     return el('span', { class: `cx-badge ${tone}` + (dot ? '' : ' nodot'), text: label });
@@ -10389,6 +10683,7 @@ __mods["ui/components.js"] = function (__x, __req) {
   Object.defineProperty(__x, "segmented", { get: () => segmented, enumerable: true });
   Object.defineProperty(__x, "section", { get: () => section, enumerable: true });
   Object.defineProperty(__x, "emptyState", { get: () => emptyState, enumerable: true });
+  Object.defineProperty(__x, "openPicker", { get: () => openPicker, enumerable: true });
   Object.defineProperty(__x, "badge", { get: () => badge, enumerable: true });
   Object.defineProperty(__x, "chipStat", { get: () => chipStat, enumerable: true });
   Object.defineProperty(__x, "iconPicker", { get: () => iconPicker, enumerable: true });
@@ -13614,7 +13909,8 @@ __mods["ui/p6.js"] = function (__x, __req) {
   const { el, clear, debounce, fold } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { fmtDate, fmtTimestamp, MS_DAY } = __req("core/dates.js");
-  const { TYPES, p6Register, p6Dates, p6Slip, p6Variance, p6Position, p6IsMilestone, p6Placed, p6PlacedIds, statusOf } = __req("core/model.js");
+  const { TYPES, p6Register, p6Dates, p6Slip, p6Variance, p6Position, p6IsMilestone, p6Placed, p6PlacedIds, p6LinkedIds, statusOf } = __req("core/model.js");
+
 
 
 
@@ -13631,7 +13927,8 @@ __mods["ui/p6.js"] = function (__x, __req) {
   const { readP6File, reconcile } = __req("io/p6.js");
   const cmd = __req("ui/commands.js");
   const { icon } = __req("ui/icons.js");
-  const { openModal, field, textInput, selectInput, segmented, checkbox, section, emptyState, badge, chipStat, toast, confirmDialog, skeleton } = __req("ui/components.js");
+  const { openModal, openPicker, field, textInput, selectInput, segmented, checkbox, section, emptyState, badge, chipStat, toast, confirmDialog, skeleton } = __req("ui/components.js");
+
 
 
 
@@ -14063,7 +14360,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
     const dates = p6Dates(activity);
     const slip = p6Slip(activity);
     const position = p6Position(activity);
-    const variance = placed ? p6Variance(objects[0], activity) : null;
+    const variance = placed ? p6Variance(doc, objects[0]) : null;
 
     const meta = [
       activity.id,
@@ -14072,9 +14369,11 @@ __mods["ui/p6.js"] = function (__x, __req) {
       activity.wbs || null,
     ].filter(Boolean).join(' · ');
 
-    return el('div', {
+    const row = el('div', {
       class: 'p6-row' + (placed ? ' placed' : ''),
       dataset: { p6: activity.id },
+      draggable: 'true',
+      title: 'Drag onto the timeline to place it, or onto an existing bar to link them',
       onClick: () => (placed ? reveal(objects[0].id) : place(activity.id)),
     }, [
       el('span', {
@@ -14120,10 +14419,27 @@ __mods["ui/p6.js"] = function (__x, __req) {
         activity.missing ? badge('Not in P6', 'bad') : null,
         slip?.changed ? badge(`P6 ${shiftLabel(slip.finishShift)}`, slip.finishShift > 0 ? 'bad' : 'good') : null,
         variance?.differs ? badge(`you ${shiftLabel(variance.finishShift)}`, variance.behind ? 'warn' : 'info') : null,
+      objects.length > 1 ? badge(`${objects.length} bars`, 'info') : null,
         !placed ? badge(POSITION_WORD[position], POSITION_TONE[position]) : null,
         placed && objects[0].status ? badge(statusOf(objects[0].status).label, statusOf(objects[0].status).tone) : null,
       ].filter(Boolean)),
     ]);
+
+    // Dragging is the obvious gesture for "put this there", and it is the only
+    // way to link without first knowing which of a hundred bars you want.
+    row.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData(P6_MIME, activity.id);
+      e.dataTransfer.setData('text/plain', `${activity.id} — ${activity.name}`);
+      e.dataTransfer.effectAllowed = 'copyLink';
+      row.classList.add('dragging');
+      document.body.classList.add('p6-dragging');
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      document.body.classList.remove('p6-dragging');
+    });
+
+    return row;
   }
 
   /* ── Actions ───────────────────────────────────────────────────────────── */
@@ -14170,11 +14486,11 @@ __mods["ui/p6.js"] = function (__x, __req) {
   async function unlink(objects, activity) {
     const ok = await confirmDialog({
       title: `Unlink ${activity.id}?`,
-      message: `${objects.length} object(s) will keep their dates and their place on the timeline — only the link to P6 is removed.`,
+      message: `${objects.length} object(s) keep their dates and their place on the timeline, and any other P6 activity they track. Only this link goes.`,
       confirmLabel: 'Unlink',
     });
     if (!ok) return;
-    for (const object of objects) store.linkP6(object.id, null);
+    for (const object of objects) store.unlinkP6(object.id, activity.id);
     renderer.requestRender();
     refresh();
   }
@@ -14182,44 +14498,39 @@ __mods["ui/p6.js"] = function (__x, __req) {
   /** Attach an activity to something already on the timeline. */
   function openLinkPicker(activity) {
     const doc = store.getDoc();
+    const lanes = new Map(doc.lanes.map((l) => [l.id, l.name]));
+    // A bar tracks a set of activities, so being linked already does not
+    // disqualify it — only already tracking *this* activity does.
     const candidates = doc.objects
-      .filter((o) => !o.data?.p6Id && TYPES[o.type])
+      .filter((o) => TYPES[o.type] && !p6LinkedIds(o).includes(activity.id))
       .sort((a, b) => a.start - b.start);
 
     if (!candidates.length) {
-      toast({ tone: 'warn', title: 'Nothing to link to', message: 'Every object is already linked to a P6 activity.' });
+      toast({ tone: 'warn', title: 'Nothing to link to', message: `Every object already tracks ${activity.id}.` });
       return;
     }
 
-    let objectId = '';
-    const lanes = new Map(doc.lanes.map((l) => [l.id, l.name]));
-
-    openModal({
+    openPicker({
       title: `Link ${activity.id}`,
-      subtitle: activity.name,
-      body: field('To which object', selectInput({
-        value: '',
-        placeholder: 'Choose…',
-        options: candidates.map((o) => ({
+      subtitle: `${activity.name} — the object keeps its own dates; linking records where they came from.`,
+      placeholder: 'Search by title or lane…',
+      items: candidates.map((o) => {
+        const tracked = p6LinkedIds(o).length;
+        return {
           value: o.id,
-          label: `${o.title} — ${lanes.get(o.lane) || 'no lane'} — ${fmtDate(o.start, 'numeric')}`,
-        })),
-        onChange: (v) => { objectId = v; },
-      }), 'The object keeps its own dates. Linking records where they came from, and lets the variance be shown.'),
-      actions: [
-        { label: 'Cancel' },
-        {
-          label: 'Link',
-          kind: 'primary',
-          onClick: () => {
-            if (!objectId) return;
-            store.linkP6(objectId, activity.id);
-            renderer.requestRender();
-            refresh();
-            toast({ tone: 'good', title: 'Linked', message: `${activity.id} is now tracked against that object.` });
-          },
-        },
-      ],
+          label: o.title,
+          meta: `${lanes.get(o.lane) || 'no lane'} · ${fmtDate(o.start, 'numeric')}`
+            + (tracked ? ` · tracks ${tracked}` : ''),
+        };
+      }),
+      empty: 'No object matches.',
+      onPick: (objectId) => {
+        if (!objectId) return;
+        store.linkP6(objectId, activity.id);
+        renderer.requestRender();
+        refresh();
+        toast({ tone: 'good', title: 'Linked', message: `${activity.id} is now tracked against that object.` });
+      },
     });
   }
 
@@ -14246,6 +14557,63 @@ __mods["ui/p6.js"] = function (__x, __req) {
     });
   }
 
+  /* ── Dropping onto the canvas ──────────────────────────────────────────── */
+
+  /** The type carried on a dragged activity. Also read by the canvas. */
+  const P6_MIME = 'application/x-cx-p6';
+
+  /**
+   * Wire up what a dropped activity means.
+   *
+   * The canvas reports *where* something landed — on a bar, or in a lane — and
+   * knows nothing about Primavera. What that means is decided here.
+   */
+  function installP6Drops() {
+    on('canvas:drop', ({ data, objectId, laneId }) => {
+      const activityId = data?.[P6_MIME];
+      if (!activityId) return;
+
+      const activity = store.getP6Activity(activityId);
+      if (!activity) {
+        toast({ tone: 'bad', title: 'Unknown activity', message: `${activityId} is not in the register.` });
+        return;
+      }
+
+      // Onto a bar: link the two. Onto empty lane: place a new object there.
+      if (objectId) {
+        const target = store.getObject(objectId);
+        const already = p6LinkedIds(target);
+        if (already.includes(activityId)) {
+          toast({ tone: 'info', title: 'Already linked', message: `That bar is already tracking ${activityId}.` });
+          return;
+        }
+        // Additive: a bar standing for a test package collects activities as
+        // you drop them, rather than each one displacing the last.
+        store.linkP6(objectId, activityId);
+        renderer.requestRender();
+        refresh();
+        const total = already.length + 1;
+        toast({
+          tone: 'good',
+          title: 'Linked',
+          message: total > 1
+            ? `${target.title} now tracks ${total} P6 activities.`
+            : `${target.title} now tracks ${activityId}.`,
+        });
+        return;
+      }
+
+      const id = store.placeP6Activity(activityId, { lane: laneId });
+      if (!id) {
+        toast({ tone: 'bad', title: 'Could not place it', message: 'That activity has no usable dates.' });
+        return;
+      }
+      cmd.revealObject(id);
+      refresh();
+      toast({ tone: 'good', title: `${activityId} added`, message: 'Its P6 dates are the starting point, and are yours from here.' });
+    });
+  }
+
   /* ── Helpers ───────────────────────────────────────────────────────────── */
 
   function shiftLabel(days) {
@@ -14267,6 +14635,8 @@ __mods["ui/p6.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "paneP6", { get: () => paneP6, enumerable: true });
   Object.defineProperty(__x, "openImport", { get: () => openImport, enumerable: true });
+  Object.defineProperty(__x, "P6_MIME", { get: () => P6_MIME, enumerable: true });
+  Object.defineProperty(__x, "installP6Drops", { get: () => installP6Drops, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -19629,10 +19999,10 @@ __mods["ui/inspector.js"] = function (__x, __req) {
    *          icons, components, lists, notes, attachments.
    */
 
-  const { el, clear, debounce, clamp } = __req("core/util.js");
+  const { el, clear, debounce, clamp, escapeHtml } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } = __req("core/dates.js");
-  const { TYPES, listOptions, p6Activity, p6Dates, p6Slip, p6Variance, p6Register, LINK_TYPES, CONNECTOR_STYLES, durationDays, remainingDays, statusOf, effectiveToday } = __req("core/model.js");
+  const { TYPES, listOptions, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, LINK_TYPES, CONNECTOR_STYLES, durationDays, remainingDays, statusOf, effectiveToday } = __req("core/model.js");
 
 
 
@@ -19651,7 +20021,8 @@ __mods["ui/inspector.js"] = function (__x, __req) {
   const { objectHealth, linkViolations, evaluateLink } = __req("core/analysis.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
-  const { field, textInput, numberInput, selectInput, checkbox, toggle, rangeInput, segmented, section, colorControl, iconPicker, popover, closePopover, emptyState, badge, chipStat, confirmDialog, contextMenu } = __req("ui/components.js");
+  const { field, textInput, numberInput, selectInput, checkbox, toggle, rangeInput, segmented, section, colorControl, iconPicker, popover, closePopover, emptyState, badge, chipStat, confirmDialog, contextMenu, openPicker } = __req("ui/components.js");
+
 
 
 
@@ -20324,91 +20695,133 @@ __mods["ui/inspector.js"] = function (__x, __req) {
   /* ── P6 ────────────────────────────────────────────────────────────────── */
 
   /**
-   * The P6 activity this object is tracked against, if any.
+   * The P6 activities this object is tracked against.
    *
-   * Deliberately shows two numbers rather than one: how far P6 has moved the
-   * activity since its baseline, and how far this plan differs from where P6
-   * has it now. They answer different questions and conflating them is how a
-   * review goes wrong.
+   * A bar routinely stands for a whole test package, so this is a set rather
+   * than a field, and the dates it is measured against are the roll-up:
+   * earliest start to latest finish across everything linked.
+   *
+   * Two numbers, deliberately separate: how far P6 has moved its own work since
+   * the baseline, and how far this plan differs from where P6 has it now.
    */
   function p6Fields(obj) {
     const doc = store.getDoc();
     const register = p6Register(doc);
-    const count = Object.keys(register.activities).length;
-    if (!count) return null;
+    if (!Object.keys(register.activities).length) return null;
 
-    const activityId = obj.data?.p6Id || '';
-    const activity = p6Activity(doc, activityId);
+    const linked = p6LinkedIds(obj);
+    const rollUp = p6RollUp(doc, obj);
+    const variance = p6Variance(doc, obj);
 
-    if (!activity) {
-      return [
-        el('div', { class: 'cx-hint', text: activityId
-          ? `Linked to ${activityId}, which is not in the imported schedule.`
-          : 'Not linked to a P6 activity.' }),
-        field('Activity ID', managedP6Select(obj, activityId)),
-      ];
-    }
+    const out = [];
 
-    const dates = p6Dates(activity);
-    const slip = p6Slip(activity);
-    const variance = p6Variance(obj, activity);
+    if (!linked.length) {
+      out.push(el('div', { class: 'cx-hint', text: 'Not tracked against any P6 activity. Drag one from the P6 Schedule pane onto this bar, or add it below.' }));
+    } else {
+      out.push(
+        el('div', { class: 'p6-links' }, linked.map((id) => {
+          const activity = register.activities[id];
+          const dates = activity ? p6Dates(activity) : null;
+          return el('div', { class: 'p6-chip' + (activity ? '' : ' unknown'), dataset: { p6: id } }, [
+            el('span', { class: 'p6-id', text: id }),
+            el('span', { class: 'p6-chip-name', text: activity ? activity.name : 'not in the register', title: activity?.name || '' }),
+            dates ? el('span', { class: 'p6-dates', text: `${fmtDate(dates.start, 'numeric')} → ${fmtDate(dates.end, 'numeric')}` }) : null,
+            el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Stop tracking this activity',
+              'aria-label': `Unlink ${id}`,
+              html: icon('x', { size: 10 }),
+              onClick: () => {
+                store.unlinkP6(obj.id, id);
+                renderer.requestRender();
+                render();
+              },
+            }),
+          ].filter(Boolean));
+        }))
+      );
 
-    return [
-      el('div', { class: 'p6-link' }, [
-        el('span', { class: 'p6-id', text: activity.id }),
-        el('span', { class: 'p6-dates', text: dates
-          ? `${fmtDate(dates.start, 'medium')} → ${fmtDate(dates.end, 'medium')}`
-          : 'no dates' }),
-        activity.missing ? badge('Not in P6', 'bad') : null,
-      ].filter(Boolean)),
+      if (rollUp) {
+        out.push(
+          el('div', { class: 'cx-hint', text: linked.length === 1
+            ? 'Measured against this activity.'
+            : `Measured against all ${rollUp.count} — earliest start to latest finish.` }),
+          el('div', { class: 'cx-chipstats', style: { marginTop: '4px' } }, [
+            chipStat('P6 span', `${fmtDate(rollUp.start, 'numeric')} → ${fmtDate(rollUp.end, 'numeric')}`, 'muted'),
+            chipStat('P6 slip', rollUpSlip(doc, obj), 'muted'),
+            variance ? chipStat('You', shift(variance.finishShift), !variance.differs ? 'muted' : variance.behind ? 'warn' : 'info') : null,
+          ].filter(Boolean))
+        );
+      }
 
-      el('div', { class: 'cx-hint', text: activity.name }),
-
-      el('div', { class: 'cx-chipstats', style: { marginTop: '4px' } }, [
-        slip?.changed
-          ? chipStat('P6 slip', shift(slip.finishShift), slip.finishShift > 0 ? 'bad' : 'good')
-          : chipStat('P6 slip', activity.baseline ? 'none' : '—', 'muted'),
-        variance
-          ? chipStat('You', shift(variance.finishShift), !variance.differs ? 'muted' : variance.behind ? 'warn' : 'info')
-          : null,
-      ].filter(Boolean)),
-
-      dates && variance?.differs
-        ? el('button', {
+      if (variance?.differs) {
+        out.push(
+          el('button', {
             class: 'cx-btn mini',
             html: icon('target', { size: 12 }) + '<span>Move onto the P6 dates</span>',
             onClick: () => {
-              store.adoptP6Dates([activity.id]);
+              store.adoptP6Dates(linked);
               renderer.requestRender();
+              render();
             },
           })
-        : null,
-
-      field('Activity ID', managedP6Select(obj, activityId)),
-    ].filter(Boolean);
-  }
-
-  /** Pick, change or clear the linked activity. */
-  function managedP6Select(obj, current) {
-    const doc = store.getDoc();
-    const register = p6Register(doc);
-    const options = Object.values(register.activities)
-      .sort((a, b) => a.order - b.order)
-      .slice(0, 400)
-      .map((a) => ({ value: a.id, label: `${a.id} — ${a.name}` }));
-
-    // Keep an unknown value selectable rather than snapping the field to blank.
-    if (current && !options.some((o) => o.value === current)) {
-      options.unshift({ value: current, label: `${current} — not in the register` });
+        );
+      }
     }
 
-    return selectInput({
-      value: current,
-      placeholder: '— not linked —',
-      options,
-      onChange: (v) => {
-        store.linkP6(obj.id, v || null);
+    out.push(
+      el('button', {
+        class: 'cx-btn mini',
+        style: { justifyContent: 'flex-start', width: '100%' },
+        html: icon('search', { size: 12 }) + '<span>Add a P6 activity…</span>',
+        onClick: () => openActivityPicker(obj, register, linked),
+      })
+    );
+
+    return out;
+  }
+
+  /** How far P6 has moved the linked work since its own baseline. */
+  function rollUpSlip(doc, obj) {
+    const before = p6RollUp(doc, obj, 'baseline');
+    const now = p6RollUp(doc, obj, 'progress');
+    if (!before || !now) return '—';
+    return shift(Math.round((now.end - before.end) / MS_DAY));
+  }
+
+  /**
+   * Search the register.
+   *
+   * A dropdown stops being navigable long before fifteen hundred entries, and
+   * nobody remembers an activity ID well enough to scroll to it.
+   */
+  function openActivityPicker(obj, register, alreadyLinked) {
+    const taken = new Set(alreadyLinked);
+    const items = Object.values(register.activities)
+      .filter((a) => !taken.has(a.id))
+      .sort((a, b) => a.order - b.order)
+      .map((a) => ({
+        value: a.id,
+        label: a.name,
+        meta: [a.id, a.wbs, p6Dates(a) ? `${fmtDate(p6Dates(a).start, 'numeric')} → ${fmtDate(p6Dates(a).end, 'numeric')}` : null]
+          .filter(Boolean).join(' · '),
+      }));
+
+    if (!items.length) {
+      return;
+    }
+
+    openPicker({
+      title: 'Add a P6 activity',
+      subtitle: `${items.length} not yet linked to this object.`,
+      placeholder: 'Activity ID, name or WBS…',
+      items,
+      empty: 'No activity matches.',
+      onPick: (activityId) => {
+        if (!activityId) return;
+        store.linkP6(obj.id, activityId);
         renderer.requestRender();
+        render();
       },
     });
   }
@@ -21682,6 +22095,7 @@ __mods["main.js"] = function (__x, __req) {
   const { buildLegend } = __req("ui/legend.js");
   const { installMenus } = __req("ui/menus.js");
   const { requireSignIn, installAccessMode } = __req("ui/auth.js");
+  const { installP6Drops } = __req("ui/p6.js");
   const { installShortcuts } = __req("ui/shortcuts.js");
   const { toast, showTooltip, hideTooltip, confirmDialog } = __req("ui/components.js");
   const { renderNote, notePreview } = __req("ui/notes.js");
@@ -21767,6 +22181,7 @@ __mods["main.js"] = function (__x, __req) {
     installShortcuts();
     installHoverPreview();
     installAccessMode();
+    installP6Drops();
     installConflictHandling();
     installViewPersistence();
     installResizeHandling();

@@ -34,6 +34,7 @@ import { buildMinimap } from './ui/minimap.js';
 import { buildLegend } from './ui/legend.js';
 import { installMenus } from './ui/menus.js';
 import { requireSignIn, installAccessMode } from './ui/auth.js';
+import { installP6Drops } from './ui/p6.js';
 import { installShortcuts } from './ui/shortcuts.js';
 import { toast, showTooltip, hideTooltip, confirmDialog } from './ui/components.js';
 import { renderNote, notePreview } from './ui/notes.js';
@@ -119,6 +120,7 @@ async function boot() {
   installShortcuts();
   installHoverPreview();
   installAccessMode();
+  installP6Drops();
   installConflictHandling();
   installViewPersistence();
   installResizeHandling();

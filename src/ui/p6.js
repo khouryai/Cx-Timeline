@@ -33,6 +33,7 @@ import {
   p6IsMilestone,
   p6Placed,
   p6PlacedIds,
+  p6LinkedIds,
   statusOf,
 } from '../core/model.js';
 import * as store from '../core/store.js';
@@ -42,6 +43,7 @@ import * as cmd from './commands.js';
 import { icon } from './icons.js';
 import {
   openModal,
+  openPicker,
   field,
   textInput,
   selectInput,
@@ -472,7 +474,7 @@ function activityRow(doc, activity) {
   const dates = p6Dates(activity);
   const slip = p6Slip(activity);
   const position = p6Position(activity);
-  const variance = placed ? p6Variance(objects[0], activity) : null;
+  const variance = placed ? p6Variance(doc, objects[0]) : null;
 
   const meta = [
     activity.id,
@@ -481,9 +483,11 @@ function activityRow(doc, activity) {
     activity.wbs || null,
   ].filter(Boolean).join(' · ');
 
-  return el('div', {
+  const row = el('div', {
     class: 'p6-row' + (placed ? ' placed' : ''),
     dataset: { p6: activity.id },
+    draggable: 'true',
+    title: 'Drag onto the timeline to place it, or onto an existing bar to link them',
     onClick: () => (placed ? reveal(objects[0].id) : place(activity.id)),
   }, [
     el('span', {
@@ -529,10 +533,27 @@ function activityRow(doc, activity) {
       activity.missing ? badge('Not in P6', 'bad') : null,
       slip?.changed ? badge(`P6 ${shiftLabel(slip.finishShift)}`, slip.finishShift > 0 ? 'bad' : 'good') : null,
       variance?.differs ? badge(`you ${shiftLabel(variance.finishShift)}`, variance.behind ? 'warn' : 'info') : null,
+    objects.length > 1 ? badge(`${objects.length} bars`, 'info') : null,
       !placed ? badge(POSITION_WORD[position], POSITION_TONE[position]) : null,
       placed && objects[0].status ? badge(statusOf(objects[0].status).label, statusOf(objects[0].status).tone) : null,
     ].filter(Boolean)),
   ]);
+
+  // Dragging is the obvious gesture for "put this there", and it is the only
+  // way to link without first knowing which of a hundred bars you want.
+  row.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData(P6_MIME, activity.id);
+    e.dataTransfer.setData('text/plain', `${activity.id} — ${activity.name}`);
+    e.dataTransfer.effectAllowed = 'copyLink';
+    row.classList.add('dragging');
+    document.body.classList.add('p6-dragging');
+  });
+  row.addEventListener('dragend', () => {
+    row.classList.remove('dragging');
+    document.body.classList.remove('p6-dragging');
+  });
+
+  return row;
 }
 
 /* ── Actions ───────────────────────────────────────────────────────────── */
@@ -579,11 +600,11 @@ function reveal(objectId) {
 async function unlink(objects, activity) {
   const ok = await confirmDialog({
     title: `Unlink ${activity.id}?`,
-    message: `${objects.length} object(s) will keep their dates and their place on the timeline — only the link to P6 is removed.`,
+    message: `${objects.length} object(s) keep their dates and their place on the timeline, and any other P6 activity they track. Only this link goes.`,
     confirmLabel: 'Unlink',
   });
   if (!ok) return;
-  for (const object of objects) store.linkP6(object.id, null);
+  for (const object of objects) store.unlinkP6(object.id, activity.id);
   renderer.requestRender();
   refresh();
 }
@@ -591,44 +612,39 @@ async function unlink(objects, activity) {
 /** Attach an activity to something already on the timeline. */
 function openLinkPicker(activity) {
   const doc = store.getDoc();
+  const lanes = new Map(doc.lanes.map((l) => [l.id, l.name]));
+  // A bar tracks a set of activities, so being linked already does not
+  // disqualify it — only already tracking *this* activity does.
   const candidates = doc.objects
-    .filter((o) => !o.data?.p6Id && TYPES[o.type])
+    .filter((o) => TYPES[o.type] && !p6LinkedIds(o).includes(activity.id))
     .sort((a, b) => a.start - b.start);
 
   if (!candidates.length) {
-    toast({ tone: 'warn', title: 'Nothing to link to', message: 'Every object is already linked to a P6 activity.' });
+    toast({ tone: 'warn', title: 'Nothing to link to', message: `Every object already tracks ${activity.id}.` });
     return;
   }
 
-  let objectId = '';
-  const lanes = new Map(doc.lanes.map((l) => [l.id, l.name]));
-
-  openModal({
+  openPicker({
     title: `Link ${activity.id}`,
-    subtitle: activity.name,
-    body: field('To which object', selectInput({
-      value: '',
-      placeholder: 'Choose…',
-      options: candidates.map((o) => ({
+    subtitle: `${activity.name} — the object keeps its own dates; linking records where they came from.`,
+    placeholder: 'Search by title or lane…',
+    items: candidates.map((o) => {
+      const tracked = p6LinkedIds(o).length;
+      return {
         value: o.id,
-        label: `${o.title} — ${lanes.get(o.lane) || 'no lane'} — ${fmtDate(o.start, 'numeric')}`,
-      })),
-      onChange: (v) => { objectId = v; },
-    }), 'The object keeps its own dates. Linking records where they came from, and lets the variance be shown.'),
-    actions: [
-      { label: 'Cancel' },
-      {
-        label: 'Link',
-        kind: 'primary',
-        onClick: () => {
-          if (!objectId) return;
-          store.linkP6(objectId, activity.id);
-          renderer.requestRender();
-          refresh();
-          toast({ tone: 'good', title: 'Linked', message: `${activity.id} is now tracked against that object.` });
-        },
-      },
-    ],
+        label: o.title,
+        meta: `${lanes.get(o.lane) || 'no lane'} · ${fmtDate(o.start, 'numeric')}`
+          + (tracked ? ` · tracks ${tracked}` : ''),
+      };
+    }),
+    empty: 'No object matches.',
+    onPick: (objectId) => {
+      if (!objectId) return;
+      store.linkP6(objectId, activity.id);
+      renderer.requestRender();
+      refresh();
+      toast({ tone: 'good', title: 'Linked', message: `${activity.id} is now tracked against that object.` });
+    },
   });
 }
 
@@ -652,6 +668,63 @@ function compare(kind) {
     message: rows.length
       ? `${rows.length} linked activit${rows.length === 1 ? 'y' : 'ies'}. Link more and the comparison follows.`
       : 'Place or link some P6 activities and the comparison fills in on its own.',
+  });
+}
+
+/* ── Dropping onto the canvas ──────────────────────────────────────────── */
+
+/** The type carried on a dragged activity. Also read by the canvas. */
+export const P6_MIME = 'application/x-cx-p6';
+
+/**
+ * Wire up what a dropped activity means.
+ *
+ * The canvas reports *where* something landed — on a bar, or in a lane — and
+ * knows nothing about Primavera. What that means is decided here.
+ */
+export function installP6Drops() {
+  on('canvas:drop', ({ data, objectId, laneId }) => {
+    const activityId = data?.[P6_MIME];
+    if (!activityId) return;
+
+    const activity = store.getP6Activity(activityId);
+    if (!activity) {
+      toast({ tone: 'bad', title: 'Unknown activity', message: `${activityId} is not in the register.` });
+      return;
+    }
+
+    // Onto a bar: link the two. Onto empty lane: place a new object there.
+    if (objectId) {
+      const target = store.getObject(objectId);
+      const already = p6LinkedIds(target);
+      if (already.includes(activityId)) {
+        toast({ tone: 'info', title: 'Already linked', message: `That bar is already tracking ${activityId}.` });
+        return;
+      }
+      // Additive: a bar standing for a test package collects activities as
+      // you drop them, rather than each one displacing the last.
+      store.linkP6(objectId, activityId);
+      renderer.requestRender();
+      refresh();
+      const total = already.length + 1;
+      toast({
+        tone: 'good',
+        title: 'Linked',
+        message: total > 1
+          ? `${target.title} now tracks ${total} P6 activities.`
+          : `${target.title} now tracks ${activityId}.`,
+      });
+      return;
+    }
+
+    const id = store.placeP6Activity(activityId, { lane: laneId });
+    if (!id) {
+      toast({ tone: 'bad', title: 'Could not place it', message: 'That activity has no usable dates.' });
+      return;
+    }
+    cmd.revealObject(id);
+    refresh();
+    toast({ tone: 'good', title: `${activityId} added`, message: 'Its P6 dates are the starting point, and are yours from here.' });
   });
 }
 

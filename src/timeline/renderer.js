@@ -124,6 +124,11 @@ export function getLayout() {
   return lastLayout;
 }
 
+/** The DOM node drawn for an object, if it is currently on screen. */
+export function elementFor(id) {
+  return objectNodes.get(id) || null;
+}
+
 /** Tell the viewport how much room it has. */
 export function measure() {
   if (!mounted) return;

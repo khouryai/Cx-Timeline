@@ -791,6 +791,9 @@ async function main() {
     'CX-Z3-0110,Dynamic Testing Campaign 1,Zone 3/Dynamic,24-Aug-26 08:00,02-Oct-26 17:00,0',
     'CX-Z3-0120,Zone 3 Ready for Service,Zone 3/Milestones,05-Oct-26 08:00,05-Oct-26 08:00,0',
     'CX-Z4-0100,IXL Static Testing,Zone 4/IXL,14-Sep-26 08:00,30-Oct-26 17:00,0',
+    // In both imports and never placed, so there is always one activity left
+    // to link once the checks below have used up the others.
+    'CX-Z4-0110,IXL Dynamic Testing,Zone 4/IXL,02-Nov-26 08:00,04-Dec-26 17:00,0',
   ].join('\n');
 
   await page.locator('#sidenav .nav-link[data-pane="p6"]').click();
@@ -811,7 +814,7 @@ async function main() {
 
   await importP6('baseline', p6Baseline, 'p6-baseline.csv');
   const previewChips = await page.locator('.cx-modal .cx-chipstat').allTextContents();
-  check('the import previews before writing anything', previewChips.some((c) => /Read4/.test(c)), previewChips.join(' '));
+  check('the import previews before writing anything', previewChips.some((c) => /Read5/.test(c)), previewChips.join(' '));
   const sample = await page.locator('.cx-modal .cx-listrow .lr-meta').allTextContents();
   check('a finish time does not push the date to the next day',
     sample[0]?.includes('Aug 21, 2026'), sample[0] || '');
@@ -820,7 +823,7 @@ async function main() {
 
   await page.locator('.cx-modal-foot .cx-btn.primary').click();
   await page.waitForTimeout(900);
-  check('the register lists every activity', (await page.locator('#dock .p6-row[data-p6]').count()) === 4);
+  check('the register lists every activity', (await page.locator('#dock .p6-row[data-p6]').count()) === 5);
   check('and records when the baseline came in',
     /baseline/i.test(await page.locator('#dock .p6-stamps').innerText()) &&
     !/baseline\s*not imported/i.test(await page.locator('#dock .p6-stamps').innerText()));
@@ -846,6 +849,7 @@ async function main() {
     'CX-Z3-0100,SCADA Interface Verification,Zone 3/SCADA,03-Aug-26 08:00,28-Aug-26 17:00,70',
     'CX-Z3-0110,Dynamic Testing Campaign 1,Zone 3/Dynamic,07-Sep-26 08:00,16-Oct-26 17:00,0',
     'CX-Z3-0120,Zone 3 Ready for Service,Zone 3/Milestones,19-Oct-26 08:00,19-Oct-26 08:00,0',
+    'CX-Z4-0110,IXL Dynamic Testing,Zone 4/IXL,09-Nov-26 08:00,18-Dec-26 17:00,0',
     'CX-Z5-0100,New Scope — Zone 5 Static,Zone 5/IXL,02-Nov-26 08:00,11-Dec-26 17:00,0',
   ].join('\n');
 
@@ -889,24 +893,126 @@ async function main() {
   // the rows for exactly that reason.
   const search = page.locator('#dock input[aria-label="Search P6 activities"]');
   await search.click();
-  await page.keyboard.type('CX-Z4', { delay: 25 });
+  await page.keyboard.type('CX-Z4-0100', { delay: 25 });
   await page.waitForTimeout(600);
   check('the P6 search box keeps focus while typing',
     await search.evaluate((n) => n === document.activeElement));
-  check('the whole search term reached the box', (await search.inputValue()) === 'CX-Z4', await search.inputValue());
+  check('the whole search term reached the box', (await search.inputValue()) === 'CX-Z4-0100', await search.inputValue());
   check('an activity can be found by its ID', (await page.locator('#dock .p6-row[data-p6]').count()) === 1);
 
   // Filtering must not lose it either.
   await page.locator('#dock .cx-seg button', { hasText: 'On timeline' }).click();
   await page.waitForTimeout(400);
   check('a filter narrows the register',
-    (await page.locator('#dock .p6-row[data-p6]').count()) === 0, 'CX-Z4 is not placed');
+    (await page.locator('#dock .p6-row[data-p6]').count()) === 0, 'CX-Z4-0100 is not placed');
   await page.locator('#dock .cx-seg button', { hasText: 'All' }).click();
   await page.waitForTimeout(300);
 
   await search.fill('');
   await page.waitForTimeout(400);
-  check('clearing the search restores the register', (await page.locator('#dock .p6-row[data-p6]').count()) === 5);
+  check('clearing the search restores the register', (await page.locator('#dock .p6-row[data-p6]').count()) === 6);
+
+  // ── One bar, several activities ──────────────────────────────────────
+  // A commissioning campaign is routinely a whole test package in P6, so a
+  // link is a set and the dates it is measured against are the roll-up.
+  // Select it through the register, not by title: the sample plan already
+  // contains a bar called "SCADA Interface Verification", and picking the
+  // wrong one would make every check below pass for the wrong reason.
+  await page.locator('#dock .p6-row[data-p6="CX-Z3-0100"] button[aria-label^="Show"]').click();
+  await page.waitForTimeout(600);
+  check('the inspector shows what a bar tracks',
+    (await page.locator('#inspector .p6-chip').count()) === 1,
+    `${await page.locator('#inspector .p6-chip').count()} chip(s)`);
+
+  // Add a second by searching — a dropdown of 1,500 would be unusable.
+  await page.locator('#inspector .cx-btn', { hasText: /add a p6 activity/i }).click();
+  await page.waitForTimeout(500);
+  check('activities are chosen by searching', (await page.locator('.cx-picker-list').count()) === 1);
+  const picker = page.locator('.cx-modal input[type="text"]').first();
+  await picker.click();
+  await page.keyboard.type('Dynamic', { delay: 25 });
+  await page.waitForTimeout(500);
+  check('the picker keeps focus while typing',
+    await picker.evaluate((n) => n === document.activeElement));
+  const options = await page.locator('.cx-picker-item').count();
+  check('typing narrows the register', options >= 1 && options < 5, `${options} shown`);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(700);
+
+  check('a bar can track more than one activity',
+    (await page.locator('#inspector .p6-chip').count()) === 2);
+  const spanText = await page.locator('#inspector .cx-chipstats').first().innerText();
+  check('and is measured against the whole span', /P6 span/i.test(spanText), spanText.replace(/\n/g, ' '));
+
+  // The roll-up must cover both, not just the first.
+  const rollUp = await page.evaluate(() => new Promise((res) => {
+    const r = indexedDB.open('cx-timeline');
+    r.onsuccess = () => {
+      const g = r.result.transaction('projects').objectStore('projects').getAll();
+      g.onsuccess = () => {
+        const doc = g.result.sort((a, b) => b.savedAt - a.savedAt)[0]?.doc;
+        const obj = (doc?.objects || []).find((o) => (o.data?.p6Ids || []).length === 2);
+        if (!obj) return res(null);
+        const acts = (obj.data.p6Ids || []).map((id) => doc.p6.activities[id]);
+        const dates = acts.map((a) => a.progress || a.baseline);
+        res({
+          ids: obj.data.p6Ids,
+          earliest: Math.min(...dates.map((d) => d.start)),
+          latest: Math.max(...dates.map((d) => d.end)),
+        });
+      };
+    };
+  }));
+  check('the link is stored as a set', rollUp && rollUp.ids.length === 2, JSON.stringify(rollUp?.ids));
+  check('the roll-up spans earliest start to latest finish',
+    rollUp && rollUp.latest > rollUp.earliest);
+
+  // Removing one leaves the other alone. Name the activity rather than
+  // taking whichever chip is first — the two are not interchangeable, and the
+  // one put back below has to be the one taken away.
+  await page.locator('#inspector .p6-chip[data-p6="CX-Z3-0110"] button[aria-label^="Unlink"]').click();
+  await page.waitForTimeout(600);
+  check('one activity can be removed without losing the rest',
+    (await page.locator('#inspector .p6-chip').count()) === 1
+      && (await page.locator('#inspector .p6-chip[data-p6="CX-Z3-0100"]').count()) === 1);
+
+  // Put it back for the comparison checks below.
+  await page.locator('#inspector .cx-btn', { hasText: /add a p6 activity/i }).click();
+  await page.waitForTimeout(450);
+  await page.locator('.cx-modal input[type="text"]').first().click();
+  await page.keyboard.type('Dynamic', { delay: 20 });
+  await page.waitForTimeout(400);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(600);
+  check('an unlinked activity can be linked again',
+    (await page.locator('#inspector .p6-chip').count()) === 2,
+    `${await page.locator('#inspector .p6-chip').count()} chip(s)`);
+
+  // Dropping onto a bar adds to it rather than displacing what is there.
+  const dropped = await page.evaluate(() => {
+    const row = document.querySelector('#dock .p6-row[data-p6="CX-Z4-0100"]');
+    // The selected bar is the one the register just revealed.
+    const bar = document.querySelector('.tl-obj.selected')
+      || [...document.querySelectorAll('.tl-obj')].find((n) => (n.getAttribute('data-label') || '').includes('SCADA'));
+    if (!row || !bar) return 'missing';
+
+    const dt = new DataTransfer();
+    row.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
+    const box = bar.getBoundingClientRect();
+    const at = { clientX: box.left + box.width / 2, clientY: box.top + box.height / 2, bubbles: true, dataTransfer: dt };
+    const canvas = document.querySelector('.tl-canvas');
+    canvas.dispatchEvent(new DragEvent('dragover', at));
+    canvas.dispatchEvent(new DragEvent('drop', at));
+    return 'done';
+  });
+  await page.waitForTimeout(800);
+  check('an activity can be dragged onto a bar', dropped === 'done', dropped);
+  check('dropping adds to what the bar tracks rather than replacing it',
+    (await page.locator('#inspector .p6-chip').count()) === 3,
+    `${await page.locator('#inspector .p6-chip').count()} chips`);
+
+  await page.locator('#sidenav .nav-link[data-pane="p6"]').click();
+  await page.waitForTimeout(400);
 
   // Both sides of the register become baselines on their own, and — the point
   // of them — they follow whatever is linked rather than freezing a copy.
@@ -932,8 +1038,8 @@ async function main() {
   check('comparing against P6 draws the difference', blSide.ghosts >= 1,
     `${blSide.ghosts} ghost(s), ${blSide.days.join(' ')}`);
 
-  // Link a third activity. The comparison must pick it up with no re-taking.
-  await page.locator('#dock .p6-row[data-p6="CX-Z3-0110"] button[aria-label^="Add"]').click();
+  // Link another activity. The comparison must pick it up with no re-taking.
+  await page.locator('#dock .p6-row[data-p6="CX-Z4-0110"] button[aria-label^="Add"]').click();
   await page.waitForTimeout(400);
   await page.locator('.cx-modal-foot .cx-btn.primary').click();
   await page.waitForTimeout(900);

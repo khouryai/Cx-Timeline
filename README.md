@@ -226,6 +226,16 @@ The register then shows, for all 1,500 of them, what is on your plan and what
 is not, searchable by activity ID — so when someone says "A1234" in a review,
 you have it.
 
+Linking is by search, not by dropdown — a menu of 1,500 activities is not a
+menu — and you can **drag a row straight onto the canvas**: onto empty space
+to place it, onto a bar to link the two.
+
+**A bar can track several activities.** "SCADA commissioning" on your plan is
+usually a dozen rows in P6, so a link is a set rather than a single pointer:
+drop as many as belong, and the bar is measured against the span of all of
+them — earliest start to latest finish. The inspector lists each one with its
+own dates, and removing one leaves the rest alone.
+
 Three numbers fall out and are never stored:
 
 | | |

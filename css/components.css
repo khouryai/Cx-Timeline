@@ -1273,3 +1273,100 @@
 .p6-row .p6-badges:empty {
   display: none;
 }
+
+/* ── Searchable picker ─────────────────────────────────────────────────── */
+
+/* A select stops being usable around fifty options; the P6 register has
+   fifteen hundred. Type to narrow, arrow keys to move, Enter to take. */
+.cx-picker-list {
+  max-height: 46vh;
+  margin-top: 10px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.cx-picker-item {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.cx-picker-item:last-child {
+  border-bottom: 0;
+}
+.cx-picker-item:hover {
+  background: var(--surface-3);
+}
+.cx-picker-item.on {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.cx-picker-item .pi-label {
+  font-size: var(--fs-small);
+  color: var(--text);
+}
+.cx-picker-item .pi-meta {
+  margin-top: 1px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-subtle);
+  letter-spacing: 0.03em;
+}
+
+.p6-row[draggable='true'] {
+  cursor: grab;
+}
+.p6-row.dragging {
+  opacity: 0.5;
+  border-color: var(--accent);
+}
+
+/* ── Linked P6 activities, in the inspector ────────────────────────────── */
+
+.p6-links {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.p6-chip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    'id    close'
+    'name  close'
+    'dates close';
+  align-items: center;
+  gap: 1px 6px;
+  padding: 6px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.p6-chip.unknown {
+  border-color: var(--bad);
+}
+.p6-chip .p6-id {
+  grid-area: id;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-main);
+}
+.p6-chip .p6-chip-name {
+  grid-area: name;
+  overflow: hidden;
+  font-size: var(--fs-tiny);
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.p6-chip .p6-dates {
+  grid-area: dates;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-subtle);
+}
+.p6-chip .cx-btn {
+  grid-area: close;
+}

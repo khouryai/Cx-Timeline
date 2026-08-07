@@ -9,7 +9,7 @@
  * Imports: util, events, icons.
  */
 
-import { el, clear, escapeHtml, uid, IS_MAC, clamp } from '../core/util.js';
+import { el, clear, escapeHtml, uid, IS_MAC, clamp, fold } from '../core/util.js';
 import { on, EV } from '../core/events.js';
 import { icon, searchIcons, hasIcon } from './icons.js';
 
@@ -587,6 +587,111 @@ export function emptyState({ iconName = 'inbox', title, message, action }) {
     message ? el('div', { class: 'ce-msg', text: message }) : null,
     action ? el('button', { class: 'cx-btn mini', text: action.label, onClick: action.onClick }) : null,
   ]);
+}
+
+/**
+ * Choose one thing from many, by typing.
+ *
+ * A `<select>` stops being usable somewhere around fifty options, and the P6
+ * register has fifteen hundred. This is a search box over a list: type to
+ * narrow, arrow keys to move, Enter to take it.
+ *
+ * @param {object}   opts
+ * @param {string}   opts.title
+ * @param {string}   [opts.subtitle]
+ * @param {Array}    opts.items      [{ value, label, meta?, badge? }]
+ * @param {string}   [opts.placeholder]
+ * @param {string}   [opts.empty]    Shown when nothing matches.
+ * @param {Function} opts.onPick     Called with the chosen value.
+ * @param {string}   [opts.clearLabel] Offers a "none" choice when given.
+ */
+export function openPicker(opts) {
+  const items = opts.items || [];
+  let filtered = items;
+  let cursor = 0;
+
+  const list = el('div', { class: 'cx-picker-list', role: 'listbox' });
+  const search = textInput({
+    value: '',
+    placeholder: opts.placeholder || 'Type to search…',
+    onInput: (v) => {
+      const needle = fold(v);
+      filtered = needle
+        ? items.filter((i) => fold(`${i.label} ${i.meta || ''}`).includes(needle))
+        : items;
+      cursor = 0;
+      draw();
+    },
+  });
+  search.setAttribute('aria-label', opts.title || 'Search');
+
+  let handle = null;
+
+  const take = (item) => {
+    if (!item) return;
+    handle?.close();
+    opts.onPick(item.value);
+  };
+
+  function draw() {
+    clear(list);
+    if (!filtered.length) {
+      list.appendChild(el('div', { class: 'cx-hint', style: { padding: '14px 10px' }, text: opts.empty || 'Nothing matches.' }));
+      return;
+    }
+    // A long list is slower to build than to read; typing narrows it.
+    filtered.slice(0, 200).forEach((item, index) => {
+      list.appendChild(
+        el('div', {
+          class: 'cx-picker-item' + (index === cursor ? ' on' : ''),
+          role: 'option',
+          'aria-selected': index === cursor ? 'true' : 'false',
+          dataset: { value: item.value },
+          onClick: () => take(item),
+        }, [
+          el('div', { class: 'pi-label', text: item.label }),
+          item.meta ? el('div', { class: 'pi-meta', text: item.meta }) : null,
+        ].filter(Boolean))
+      );
+    });
+    if (filtered.length > 200) {
+      list.appendChild(el('div', { class: 'cx-hint', style: { padding: '8px 10px' }, text: `${filtered.length - 200} more — keep typing.` }));
+    }
+    list.querySelector('.cx-picker-item.on')?.scrollIntoView({ block: 'nearest' });
+  }
+
+  search.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const limit = Math.min(filtered.length, 200);
+      if (!limit) return;
+      cursor = (cursor + (e.key === 'ArrowDown' ? 1 : -1) + limit) % limit;
+      draw();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      take(filtered[cursor]);
+    }
+  });
+
+  draw();
+
+  const actions = [{ label: 'Cancel' }];
+  if (opts.clearLabel) {
+    actions.push({
+      label: opts.clearLabel,
+      onClick: () => opts.onPick(null),
+    });
+  }
+
+  handle = openModal({
+    title: opts.title,
+    subtitle: opts.subtitle,
+    body: el('div', {}, [search, list]),
+    actions,
+  });
+
+  setTimeout(() => search.focus(), 40);
+  return handle;
 }
 
 /** Status/tone badge. */
