@@ -139,6 +139,42 @@ export function linkViolations(doc) {
 }
 
 /**
+ * What has to happen before a set of objects: the dependencies arriving at
+ * them, and the objects on the far end of those.
+ *
+ * One hop, not the whole upstream chain. Clicking a commissioning bar to ask
+ * "what am I waiting on" wants the answer to be a handful of bars; the
+ * transitive closure of a real plan is most of the plan, and highlighting it
+ * says nothing. The chain is what the critical path is for.
+ *
+ * Links whose predecessor is hidden are dropped — there would be nothing on
+ * the canvas for the highlight to point at.
+ *
+ * @returns {{objects: Set<string>, links: Set<string>}}
+ */
+export function predecessorsOf(doc, ids) {
+  const objects = new Set();
+  const links = new Set();
+  const selected = ids instanceof Set ? ids : new Set(ids || []);
+  if (!selected.size) return { objects, links };
+
+  // Asked for on every rendered frame, so this walks the objects once and
+  // collects only the hidden ones — normally none — rather than indexing them
+  // all to answer a question about a handful of links.
+  const hidden = new Set();
+  for (const obj of doc.objects) if (obj.hidden) hidden.add(obj.id);
+
+  for (const link of doc.links) {
+    if (!selected.has(link.to) || hidden.has(link.from)) continue;
+    // A predecessor that is itself selected is already marked as selected.
+    if (!selected.has(link.from)) objects.add(link.from);
+    links.add(link.id);
+  }
+
+  return { objects, links };
+}
+
+/**
  * The dates that would satisfy a link, for a one-click fix.
  * Moving the successor preserves its duration.
  */

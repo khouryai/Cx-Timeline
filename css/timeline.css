@@ -712,6 +712,43 @@
   inset: -2px;
 }
 
+/* ── What the selection is waiting on ───────────────────────────────────────
+   Selecting a bar marks its predecessors and the arrows arriving from them,
+   for as long as the selection stands. The ring is dashed where the selection's
+   own is solid, so "this is the one I clicked" and "this comes first" are never
+   confused. It is an outline rather than a pseudo-element on purpose: ::before
+   already carries the broken-dependency ring and ::after the selection ring,
+   and a predecessor may well be either. */
+.tl-obj.upstream {
+  outline: 2px dashed var(--upstream);
+  outline-offset: 2px;
+  border-radius: var(--obj-radius, 6px);
+}
+.tl-obj.shape-diamond.upstream,
+.tl-obj.shape-marker.upstream,
+.tl-obj.shape-release.upstream {
+  border-radius: 50%;
+}
+/* A filtered-out predecessor stays quiet: the filter is the stronger statement. */
+.tl-obj.filtered-out.upstream {
+  outline: none;
+}
+
+/* The flash. One-shot, fired by the renderer when the selection changes: it
+   says where to look, then gets out of the way of the standing highlight. */
+.tl-obj.upstream-flash {
+  animation: upstreamFlash 0.4s var(--easing) 3;
+}
+@keyframes upstreamFlash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--upstream-glow);
+  }
+  45% {
+    box-shadow: 0 0 0 5px var(--upstream-glow);
+  }
+}
+
 /* Resize handles */
 .tl-handle {
   position: absolute;
@@ -951,6 +988,25 @@
 .tl-link.critical {
   stroke: var(--bad);
   stroke-width: 2.2;
+}
+/* A dependency arriving at the selection. Wins over the critical-path colour —
+   the critical path is standing information, this is the answer to a click the
+   user just made — but not over a violation, which is a fault. */
+.tl-link.upstream:not(.violated) {
+  stroke: var(--upstream);
+  stroke-width: 2.6;
+}
+.tl-link.upstream.flash:not(.violated) {
+  animation: linkUpstream 0.4s var(--easing) 3;
+}
+@keyframes linkUpstream {
+  0%,
+  100% {
+    stroke-width: 2.6;
+  }
+  45% {
+    stroke-width: 5.5;
+  }
 }
 /* A dependency whose precedence constraint is currently impossible. */
 .tl-link.violated {

@@ -197,6 +197,11 @@
   --selection: rgba(91, 147, 245, 0.9);
   --selection-fill: rgba(91, 147, 245, 0.12);
   --connector: #7d8aa3;
+  /* What the selection is waiting on. Deliberately not the selection blue —
+     the two have to be told apart at a glance — and not the violation red,
+     which means something is wrong rather than something comes first. */
+  --upstream: #fbbf24;
+  --upstream-glow: rgba(251, 191, 36, 0.45);
   --scroll-track: rgba(255, 255, 255, 0.04);
   --scroll-thumb: rgba(255, 255, 255, 0.16);
 }
@@ -260,6 +265,8 @@
   --selection: #2563eb;
   --selection-fill: rgba(37, 99, 235, 0.1);
   --connector: #8b93a3;
+  --upstream: #d97706;
+  --upstream-glow: rgba(217, 119, 6, 0.38);
   --scroll-track: #f3f4f6;
   --scroll-thumb: #cfd5df;
 }
@@ -323,6 +330,8 @@
   --selection: #38bdf8;
   --selection-fill: rgba(56, 189, 248, 0.14);
   --connector: #6f8ba3;
+  --upstream: #fbbf24;
+  --upstream-glow: rgba(251, 191, 36, 0.45);
   --scroll-track: rgba(122, 209, 255, 0.05);
   --scroll-thumb: rgba(122, 209, 255, 0.2);
 
@@ -388,6 +397,8 @@
   --selection: #7dd3fc;
   --selection-fill: rgba(125, 211, 252, 0.16);
   --connector: #8fb8e8;
+  --upstream: #fcd34d;
+  --upstream-glow: rgba(252, 211, 77, 0.5);
   --scroll-track: rgba(160, 210, 255, 0.08);
   --scroll-thumb: rgba(160, 210, 255, 0.28);
 }
@@ -451,6 +462,8 @@
   --selection: #1d4ed8;
   --selection-fill: rgba(29, 78, 216, 0.1);
   --connector: #6b7280;
+  --upstream: #b45309;
+  --upstream-glow: rgba(180, 83, 9, 0.34);
   --scroll-track: #f1f3f6;
   --scroll-thumb: #c8cdd6;
 

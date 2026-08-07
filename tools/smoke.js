@@ -443,6 +443,53 @@ async function main() {
   await page.keyboard.press('Control+z');
   await page.waitForTimeout(400);
 
+  console.log('\nWhat the selection is waiting on');
+  // Selecting a bar has to answer "what comes before this" on the canvas, not
+  // just in the inspector: the predecessors and the arrows arriving from them
+  // are marked for as long as the selection stands, and flash once to say where
+  // to look. Same known finish-to-start pair as above.
+  const upstreamState = () => page.evaluate(() => ({
+    marked: [...document.querySelectorAll('.tl-obj.upstream')].map((n) => n.dataset.label),
+    flashing: document.querySelectorAll('.tl-obj.upstream-flash').length,
+    // Each highlighted link contributes both its line and its arrowhead.
+    links: document.querySelectorAll('.tl-connectors g[data-upstream]').length,
+    linkFlash: document.querySelectorAll('.tl-link.upstream.flash').length,
+    ring: (() => {
+      const node = document.querySelector('.tl-obj.upstream');
+      return node ? getComputedStyle(node).outlineStyle : '';
+    })(),
+  }));
+
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+  check('nothing is marked while nothing is selected', (await upstreamState()).marked.length === 0);
+
+  const successor = page.locator('.tl-obj[data-label^="Dynamic Testing Campaign 1"]').first();
+  const box = await successor.boundingBox();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await page.waitForTimeout(150);
+
+  const marked = await upstreamState();
+  check('selecting a task marks what feeds it',
+    marked.marked.includes('Regression Cycle 5'), marked.marked.join(' | ') || 'nothing marked');
+  check('the predecessor is ringed, not merely selected', marked.ring === 'dashed', marked.ring);
+  check('the arrows arriving at it are highlighted too', marked.links >= 1, `${marked.links}`);
+  check('both flash on the way in', marked.flashing >= 1 && marked.linkFlash >= 1,
+    `${marked.flashing} object(s), ${marked.linkFlash} arrow element(s)`);
+
+  // The flash is one-shot; the highlight is not.
+  await page.waitForTimeout(1500);
+  const settled = await upstreamState();
+  check('the flash stops on its own', settled.flashing === 0 && settled.linkFlash === 0,
+    `${settled.flashing} object(s), ${settled.linkFlash} arrow element(s)`);
+  check('the highlight stays while the selection does',
+    settled.marked.includes('Regression Cycle 5') && settled.links >= 1, settled.marked.join(' | '));
+
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+  const cleared = await upstreamState();
+  check('deselecting clears it', cleared.marked.length === 0 && cleared.links === 0, JSON.stringify(cleared));
+
   console.log('\nEditable lists');
   // Every dropdown vocabulary is project data. The pane and the "Manage…" row
   // at the foot of each dropdown are the same editor, so exercising the pane

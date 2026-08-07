@@ -21,7 +21,7 @@ import { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } from '../core/date
 import { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } from '../core/model.js';
 import { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
 import { filterPredicate } from '../core/query.js';
-import { linkViolations, criticalPath } from '../core/analysis.js';
+import { linkViolations, criticalPath, predecessorsOf } from '../core/analysis.js';
 import * as viewport from './viewport.js';
 import { computeLayout, stageHeight, ROW_HEIGHT } from './layout.js';
 import { fontString, textWidth, wrapText, resetTextCache } from './text.js';
@@ -154,16 +154,90 @@ export function renderNow() {
 
   dom.stage.style.height = `${stageHeight(layout.geometry)}px`;
 
+  const upstream = upstreamHighlight(doc);
+
   renderRuler(doc, settings);
   renderGutter(layout);
   renderGrid(doc, settings, layout);
   renderLaneRows(layout);
-  renderObjects(layout, settings);
+  renderObjects(layout, settings, upstream);
   renderBaseline(layout, settings);
-  renderLinks(doc, layout, settings);
+  renderLinks(doc, layout, settings, upstream);
   renderToday(doc, settings, layout);
+  if (upstream.flash) flashUpstream(upstream.objects);
 
   emit(EV.RENDER_DONE, { objects: layout.rects.length });
+}
+
+/* ── What the selection is waiting on ──────────────────────────────────── */
+
+/** How long the one-shot flash on a new selection runs, in ms. */
+const FLASH_MS = 1200;
+/** The selection the highlight currently stands for, so the flash fires once. */
+let upstreamKey = '';
+let flashTimer = null;
+/** When the current flash is due to finish — see `flashing` below. */
+let flashUntil = 0;
+
+/**
+ * The predecessors of the current selection, and how to flash them.
+ *
+ * Selecting a bar answers "what am I waiting on" — the objects feeding it and
+ * the arrows arriving from them stay marked for as long as the selection
+ * stands, so it can be read at leisure. The flash is separate and one-shot: it
+ * says *where to look*, and repeating it on every frame of a drag would make
+ * the canvas unreadable. It fires when the selection changes, which is the
+ * moment the answer is new.
+ *
+ * Two flags, because the two layers behave differently. Object nodes persist
+ * across frames, so `flash` tells the one frame where the selection changed to
+ * start their animation. The connector layer is rebuilt from scratch every
+ * frame, so it gets `flashing` instead — true for the whole window — otherwise
+ * the very next repaint (the mouseup after the click that selected, say) would
+ * rebuild the arrows without it and cut the flash off after one frame.
+ */
+function upstreamHighlight(doc) {
+  const selection = getSelection();
+  const key = selection.slice().sort().join(',');
+  const flash = key !== upstreamKey;
+  upstreamKey = key;
+  if (flash) startFlashWindow();
+  return { ...predecessorsOf(doc, selection), flash, flashing: Date.now() < flashUntil };
+}
+
+/**
+ * Open the flash window, and arrange for it to close itself.
+ *
+ * The closing repaint is the point: the connector layer only stops asking for
+ * the animation when it is next rebuilt, and without this it would carry the
+ * request until something else happened to redraw the canvas.
+ */
+function startFlashWindow() {
+  flashUntil = Date.now() + FLASH_MS;
+  if (flashTimer) clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => {
+    flashTimer = null;
+    for (const node of objectNodes.values()) node.classList.remove('upstream-flash');
+    requestRender();
+  }, FLASH_MS + 30);
+}
+
+/**
+ * Start the flash on the predecessor nodes.
+ *
+ * Object nodes are reused across frames, so the class has to be taken off and
+ * put back for the animation to restart — otherwise selecting two successors of
+ * the same bar in turn would flash it only the first time. Reading `offsetWidth`
+ * between the two is what forces the style to settle in between.
+ */
+function flashUpstream(ids) {
+  for (const id of ids) {
+    const node = objectNodes.get(id);
+    if (!node) continue;
+    node.classList.remove('upstream-flash');
+    void node.offsetWidth;
+    node.classList.add('upstream-flash');
+  }
 }
 
 /* ── Ruler ─────────────────────────────────────────────────────────────── */
@@ -382,7 +456,7 @@ function renderLaneRows(layout) {
 
 /* ── Objects ───────────────────────────────────────────────────────────── */
 
-function renderObjects(layout, settings) {
+function renderObjects(layout, settings, upstream) {
   const seen = new Set();
   const selection = new Set(getSelection());
   const violations = linkViolations(getDoc());
@@ -395,7 +469,9 @@ function renderObjects(layout, settings) {
       objectNodes.set(rect.id, node);
       dom.objects.appendChild(node);
     }
-    paintObject(node, rect, settings, selection.has(rect.id), violations.objects.get(rect.id) || null);
+    paintObject(node, rect, settings, selection.has(rect.id), violations.objects.get(rect.id) || null, {
+      upstream: upstream.objects.has(rect.id),
+    });
   }
 
   // Retire nodes for objects that scrolled out of view or were deleted.
@@ -412,7 +488,7 @@ function renderObjects(layout, settings) {
  * signature changes; position and size are always applied directly, which is
  * the path a drag takes.
  */
-function paintObject(node, rect, settings, selected, breaches) {
+function paintObject(node, rect, settings, selected, breaches, marks = {}) {
   const obj = rect.obj;
   const def = TYPES[obj.type] || TYPES.activity;
   const style = obj.style || {};
@@ -463,7 +539,10 @@ function paintObject(node, rect, settings, selected, breaches) {
     buildObjectMarkup(node, rect, def, color, settings, breaches);
   }
 
-  node.className = objectClass(rect, def, selected, breaches);
+  // The flash is a transient class the render pass does not own; a repaint in
+  // the middle of one (an autosave, a panel edit) must not cut it short.
+  node.className = objectClass(rect, def, selected, breaches, marks)
+    + (node.classList.contains('upstream-flash') ? ' upstream-flash' : '');
   if (breaches) node.dataset.violated = String(breaches.length);
   else delete node.dataset.violated;
   node.style.setProperty('--obj-radius', `${style.radius ?? 6}px`);
@@ -472,9 +551,10 @@ function paintObject(node, rect, settings, selected, breaches) {
   else node.style.transform = '';
 }
 
-function objectClass(rect, def, selected, breaches) {
+function objectClass(rect, def, selected, breaches, marks = {}) {
   let cls = `tl-obj shape-${def.shape}`;
   if (selected) cls += ' selected';
+  if (marks.upstream) cls += ' upstream';
   if (rect.obj.locked) cls += ' locked';
   if (rect.dimmed) cls += ' filtered-out';
   if (rect.obj.groupId) cls += ' grouped';
@@ -1032,7 +1112,7 @@ export function setCriticalIds(ids) {
   criticalIds = ids instanceof Set ? ids : new Set(ids || []);
 }
 
-function renderLinks(doc, layout, settings) {
+function renderLinks(doc, layout, settings, upstream) {
   if (!settings.showConnectors) {
     while (dom.connectors.firstChild) dom.connectors.removeChild(dom.connectors.firstChild);
     return;
@@ -1042,9 +1122,13 @@ function renderLinks(doc, layout, settings) {
   const routed = routeAll(doc.links, layout.byId, settings.connectorStyle, {
     criticalIds: settings.criticalPath ? criticalIds : null,
     violations: linkViolations(doc),
+    upstreamIds: upstream.links,
   });
   renderConnectors(dom.connectors, routed, {
     selectedLinkIds: selectedLinks,
+    // The connector layer is rebuilt from scratch every frame, so the flash has
+    // to be asked for at build time rather than added to a node afterwards.
+    flashUpstream: upstream.flashing,
     onSelect: (link, e) => emit('link:select', { link, event: e }),
   });
 }

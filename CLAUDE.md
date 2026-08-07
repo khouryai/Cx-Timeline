@@ -154,6 +154,17 @@ subscribes. That is what keeps the graph acyclic.
 - **Derived state is never stored.** Violations, critical path and float are
   computed from the document, so they appear and clear on their own. Do not
   add a `violated` field to a link — there is nothing to keep in step.
+- **Selecting a bar marks what it is waiting on.** `predecessorsOf()` returns
+  one hop — the links arriving at the selection and the objects on the far end —
+  and the renderer marks them `.upstream` for as long as the selection stands,
+  in `--upstream` rather than the selection blue so the two are never confused.
+  Not the transitive closure: the upstream chain of a real plan is most of the
+  plan, and that is what the critical path is for. The flash on top of it is
+  one-shot and says *where to look*, so it must not replay on every frame of a
+  drag — object nodes persist and get the class for one frame (`flash`), while
+  the connector layer is rebuilt every frame and so is told the whole window
+  (`flashing`), with a timer closing it. Anything else that wants to flash
+  something on the canvas has the same two cases to answer.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
 - **Dropdown vocabularies are document data, not constants.** Status,
@@ -217,7 +228,7 @@ subscribes. That is what keeps the graph acyclic.
 npm run build                        # must succeed — it also lints the module graph
 npm test                             # all three suites, must exit 0
 
-node tools/smoke.js                  # 196 checks — the application, local mode
+node tools/smoke.js                  # 204 checks — the application, local mode
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result
@@ -225,10 +236,11 @@ node tools/smoke.js --shot out.png   # …and eyeball the result
 
 `smoke.js` boots the real application in Chromium and checks rendering,
 selection, typing into panel fields without losing focus, snapping, undo/redo,
-zoom, the dropdown vocabularies, filter dim/hide, baseline comparison — down to
-measuring, at five zooms, that no ghost is drawn over a bar or over another
-ghost — all seventeen dock panes, all five themes, every exporter (including PDF
-header validation) and reload persistence. **Any console error fails the run.**
+zoom, the dropdown vocabularies, filter dim/hide, the predecessor highlight and
+its one-shot flash, baseline comparison — down to measuring, at five zooms, that
+no ghost is drawn over a bar or over another ghost — all seventeen dock panes,
+all five themes, every exporter (including PDF header validation) and reload
+persistence. **Any console error fails the run.**
 
 `smoke_hosted.js` boots it with a configured backend and a stubbed client, so
 the gate, invitations, sharing and read-only mode are covered without a

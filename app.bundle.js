@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 41   Built: 2026-08-07T20:27:41.810Z
+ * Modules: 41   Built: 2026-08-07T23:32:19.813Z
  */
 (function () {
   'use strict';
@@ -5532,6 +5532,42 @@ __mods["core/analysis.js"] = function (__x, __req) {
   }
 
   /**
+   * What has to happen before a set of objects: the dependencies arriving at
+   * them, and the objects on the far end of those.
+   *
+   * One hop, not the whole upstream chain. Clicking a commissioning bar to ask
+   * "what am I waiting on" wants the answer to be a handful of bars; the
+   * transitive closure of a real plan is most of the plan, and highlighting it
+   * says nothing. The chain is what the critical path is for.
+   *
+   * Links whose predecessor is hidden are dropped — there would be nothing on
+   * the canvas for the highlight to point at.
+   *
+   * @returns {{objects: Set<string>, links: Set<string>}}
+   */
+  function predecessorsOf(doc, ids) {
+    const objects = new Set();
+    const links = new Set();
+    const selected = ids instanceof Set ? ids : new Set(ids || []);
+    if (!selected.size) return { objects, links };
+
+    // Asked for on every rendered frame, so this walks the objects once and
+    // collects only the hidden ones — normally none — rather than indexing them
+    // all to answer a question about a handful of links.
+    const hidden = new Set();
+    for (const obj of doc.objects) if (obj.hidden) hidden.add(obj.id);
+
+    for (const link of doc.links) {
+      if (!selected.has(link.to) || hidden.has(link.from)) continue;
+      // A predecessor that is itself selected is already marked as selected.
+      if (!selected.has(link.from)) objects.add(link.from);
+      links.add(link.id);
+    }
+
+    return { objects, links };
+  }
+
+  /**
    * The dates that would satisfy a link, for a one-click fix.
    * Moving the successor preserves its duration.
    */
@@ -5858,6 +5894,7 @@ __mods["core/analysis.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "evaluateLink", { get: () => evaluateLink, enumerable: true });
   Object.defineProperty(__x, "linkViolations", { get: () => linkViolations, enumerable: true });
+  Object.defineProperty(__x, "predecessorsOf", { get: () => predecessorsOf, enumerable: true });
   Object.defineProperty(__x, "resolutionFor", { get: () => resolutionFor, enumerable: true });
   Object.defineProperty(__x, "criticalPath", { get: () => criticalPath, enumerable: true });
   Object.defineProperty(__x, "compareBaseline", { get: () => compareBaseline, enumerable: true });
@@ -7520,7 +7557,7 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
    * Route every link that has both endpoints laid out.
    * Returns render descriptors ready for the SVG layer and the exporters.
    */
-  function routeAll(links, layoutById, style = 'orthogonal', { criticalIds = null, violations = null } = {}) {
+  function routeAll(links, layoutById, style = 'orthogonal', { criticalIds = null, violations = null, upstreamIds = null } = {}) {
     const out = [];
     for (const link of links) {
       const fromRect = layoutById.get(link.from);
@@ -7537,6 +7574,8 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
         ...route,
         dimmed: fromRect.dimmed || toRect.dimmed,
         critical: criticalIds ? criticalIds.has(link.from) && criticalIds.has(link.to) : false,
+        // Arrives at the current selection: this is what it is waiting on.
+        upstream: upstreamIds ? upstreamIds.has(link.id) : false,
         violated,
         breach,
         // A broken link states the damage instead of its relationship type: the
@@ -7552,12 +7591,13 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
   /** Render routed connectors into an existing <svg> element. */
-  function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onSelect = null } = {}) {
+  function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onSelect = null, flashUpstream = false } = {}) {
     while (svg.firstChild) svg.removeChild(svg.firstChild);
 
     for (const item of routed) {
       const group = document.createElementNS(SVG_NS, 'g');
       group.dataset.linkId = item.link.id;
+      if (item.upstream) group.dataset.upstream = 'true';
 
       // A wide invisible stroke underneath makes thin connectors clickable.
       const hit = document.createElementNS(SVG_NS, 'path');
@@ -7574,6 +7614,10 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
       else if (item.critical) cls += ' critical';
       if (item.dimmed) cls += ' dim';
       if (selectedLinkIds.has(item.link.id)) cls += ' selected';
+      // A dependency feeding the selection. The caller decides when the flash is
+      // on — this layer is rebuilt every frame, so it cannot tell a new selection
+      // from a redraw of the same one.
+      if (item.upstream) cls += flashUpstream ? ' upstream flash' : ' upstream';
       path.setAttribute('class', cls);
       if (item.link.color && !item.violated) path.setAttribute('stroke', item.link.color);
       group.appendChild(path);
@@ -7590,6 +7634,8 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
       arrow.setAttribute('class', cls);
       arrow.style.fill = item.violated
         ? 'var(--bad)'
+        : item.upstream
+        ? 'var(--upstream)'
         : item.critical
         ? 'var(--bad)'
         : item.link.color || 'var(--connector)';
@@ -7891,7 +7937,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
   const { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } = __req("core/model.js");
   const { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
   const { filterPredicate } = __req("core/query.js");
-  const { linkViolations, criticalPath } = __req("core/analysis.js");
+  const { linkViolations, criticalPath, predecessorsOf } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const { computeLayout, stageHeight, ROW_HEIGHT } = __req("timeline/layout.js");
   const { fontString, textWidth, wrapText, resetTextCache } = __req("timeline/text.js");
@@ -8024,16 +8070,90 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
     dom.stage.style.height = `${stageHeight(layout.geometry)}px`;
 
+    const upstream = upstreamHighlight(doc);
+
     renderRuler(doc, settings);
     renderGutter(layout);
     renderGrid(doc, settings, layout);
     renderLaneRows(layout);
-    renderObjects(layout, settings);
+    renderObjects(layout, settings, upstream);
     renderBaseline(layout, settings);
-    renderLinks(doc, layout, settings);
+    renderLinks(doc, layout, settings, upstream);
     renderToday(doc, settings, layout);
+    if (upstream.flash) flashUpstream(upstream.objects);
 
     emit(EV.RENDER_DONE, { objects: layout.rects.length });
+  }
+
+  /* ── What the selection is waiting on ──────────────────────────────────── */
+
+  /** How long the one-shot flash on a new selection runs, in ms. */
+  const FLASH_MS = 1200;
+  /** The selection the highlight currently stands for, so the flash fires once. */
+  let upstreamKey = '';
+  let flashTimer = null;
+  /** When the current flash is due to finish — see `flashing` below. */
+  let flashUntil = 0;
+
+  /**
+   * The predecessors of the current selection, and how to flash them.
+   *
+   * Selecting a bar answers "what am I waiting on" — the objects feeding it and
+   * the arrows arriving from them stay marked for as long as the selection
+   * stands, so it can be read at leisure. The flash is separate and one-shot: it
+   * says *where to look*, and repeating it on every frame of a drag would make
+   * the canvas unreadable. It fires when the selection changes, which is the
+   * moment the answer is new.
+   *
+   * Two flags, because the two layers behave differently. Object nodes persist
+   * across frames, so `flash` tells the one frame where the selection changed to
+   * start their animation. The connector layer is rebuilt from scratch every
+   * frame, so it gets `flashing` instead — true for the whole window — otherwise
+   * the very next repaint (the mouseup after the click that selected, say) would
+   * rebuild the arrows without it and cut the flash off after one frame.
+   */
+  function upstreamHighlight(doc) {
+    const selection = getSelection();
+    const key = selection.slice().sort().join(',');
+    const flash = key !== upstreamKey;
+    upstreamKey = key;
+    if (flash) startFlashWindow();
+    return { ...predecessorsOf(doc, selection), flash, flashing: Date.now() < flashUntil };
+  }
+
+  /**
+   * Open the flash window, and arrange for it to close itself.
+   *
+   * The closing repaint is the point: the connector layer only stops asking for
+   * the animation when it is next rebuilt, and without this it would carry the
+   * request until something else happened to redraw the canvas.
+   */
+  function startFlashWindow() {
+    flashUntil = Date.now() + FLASH_MS;
+    if (flashTimer) clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => {
+      flashTimer = null;
+      for (const node of objectNodes.values()) node.classList.remove('upstream-flash');
+      requestRender();
+    }, FLASH_MS + 30);
+  }
+
+  /**
+   * Start the flash on the predecessor nodes.
+   *
+   * Object nodes are reused across frames, so the class has to be taken off and
+   * put back for the animation to restart — otherwise selecting two successors of
+   * the same bar in turn would flash it only the first time. Reading `offsetWidth`
+   * between the two is what forces the style to settle in between.
+   */
+  function flashUpstream(ids) {
+    for (const id of ids) {
+      const node = objectNodes.get(id);
+      if (!node) continue;
+      node.classList.remove('upstream-flash');
+      void node.offsetWidth;
+      node.classList.add('upstream-flash');
+    }
   }
 
   /* ── Ruler ─────────────────────────────────────────────────────────────── */
@@ -8252,7 +8372,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
   /* ── Objects ───────────────────────────────────────────────────────────── */
 
-  function renderObjects(layout, settings) {
+  function renderObjects(layout, settings, upstream) {
     const seen = new Set();
     const selection = new Set(getSelection());
     const violations = linkViolations(getDoc());
@@ -8265,7 +8385,9 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
         objectNodes.set(rect.id, node);
         dom.objects.appendChild(node);
       }
-      paintObject(node, rect, settings, selection.has(rect.id), violations.objects.get(rect.id) || null);
+      paintObject(node, rect, settings, selection.has(rect.id), violations.objects.get(rect.id) || null, {
+        upstream: upstream.objects.has(rect.id),
+      });
     }
 
     // Retire nodes for objects that scrolled out of view or were deleted.
@@ -8282,7 +8404,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
    * signature changes; position and size are always applied directly, which is
    * the path a drag takes.
    */
-  function paintObject(node, rect, settings, selected, breaches) {
+  function paintObject(node, rect, settings, selected, breaches, marks = {}) {
     const obj = rect.obj;
     const def = TYPES[obj.type] || TYPES.activity;
     const style = obj.style || {};
@@ -8333,7 +8455,10 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
       buildObjectMarkup(node, rect, def, color, settings, breaches);
     }
 
-    node.className = objectClass(rect, def, selected, breaches);
+    // The flash is a transient class the render pass does not own; a repaint in
+    // the middle of one (an autosave, a panel edit) must not cut it short.
+    node.className = objectClass(rect, def, selected, breaches, marks)
+      + (node.classList.contains('upstream-flash') ? ' upstream-flash' : '');
     if (breaches) node.dataset.violated = String(breaches.length);
     else delete node.dataset.violated;
     node.style.setProperty('--obj-radius', `${style.radius ?? 6}px`);
@@ -8342,9 +8467,10 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     else node.style.transform = '';
   }
 
-  function objectClass(rect, def, selected, breaches) {
+  function objectClass(rect, def, selected, breaches, marks = {}) {
     let cls = `tl-obj shape-${def.shape}`;
     if (selected) cls += ' selected';
+    if (marks.upstream) cls += ' upstream';
     if (rect.obj.locked) cls += ' locked';
     if (rect.dimmed) cls += ' filtered-out';
     if (rect.obj.groupId) cls += ' grouped';
@@ -8902,7 +9028,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     criticalIds = ids instanceof Set ? ids : new Set(ids || []);
   }
 
-  function renderLinks(doc, layout, settings) {
+  function renderLinks(doc, layout, settings, upstream) {
     if (!settings.showConnectors) {
       while (dom.connectors.firstChild) dom.connectors.removeChild(dom.connectors.firstChild);
       return;
@@ -8912,9 +9038,13 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const routed = routeAll(doc.links, layout.byId, settings.connectorStyle, {
       criticalIds: settings.criticalPath ? criticalIds : null,
       violations: linkViolations(doc),
+      upstreamIds: upstream.links,
     });
     renderConnectors(dom.connectors, routed, {
       selectedLinkIds: selectedLinks,
+      // The connector layer is rebuilt from scratch every frame, so the flash has
+      // to be asked for at build time rather than added to a node afterwards.
+      flashUpstream: upstream.flashing,
       onSelect: (link, e) => emit('link:select', { link, event: e }),
     });
   }
