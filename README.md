@@ -234,6 +234,21 @@ filter control.
 
 ### Export and import
 
+**Drawing options** (Import / Export → Drawing options) decide what a picture
+contains, and apply to PDF, print, SVG, PNG and JPEG alike:
+
+- **Dates on every object** — start, finish and duration under each label, so a
+  bar can be cross-referenced without reading it off the ruler. On by default,
+  because a month-scale ruler cannot be read to the day.
+- **Dependencies**, **progress fill**, **legend**, **gridlines**, **today**
+- **Baseline comparison**, against the baseline on screen or a different one
+- **Apply the active filters** — on by default
+- **Date range** — the whole plan, or just the window on screen
+- **Density** — compact, fit to the page, or detailed
+
+The choices are saved with the project, so a plan exports the same way for
+whoever opens it.
+
 | Export | Notes |
 |---|---|
 | **PDF** | True vector, landscape, multi-page with the lane gutter repeated. Selectable text. No external library. |

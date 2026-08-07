@@ -716,6 +716,68 @@ async function main() {
   await page.keyboard.press('Control+z');
   await page.waitForTimeout(400);
 
+  console.log('\nExport options');
+  await page.locator('#sidenav .nav-link[data-pane="io"]').click();
+  await page.waitForTimeout(400);
+  check('the drawing options are reachable',
+    (await page.locator('#dock .cx-btn', { hasText: /drawing options/i }).count()) === 1);
+  check('the pane says what the next export will contain',
+    /drawing the whole plan|on screen/i.test(await page.locator('#dock .cx-hint').nth(1).innerText()));
+
+  const grabSvg = () => page.evaluate(async () => {
+    document.querySelector('#sidenav .nav-link[data-pane="io"]').click();
+    await new Promise((r) => setTimeout(r, 350));
+    let href = null;
+    const real = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () { href = this.href; };
+    [...document.querySelectorAll('#dock .cx-btn')].find((b) => /svg/i.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 1500));
+    HTMLAnchorElement.prototype.click = real;
+    return href ? await (await fetch(href)).text() : '';
+  });
+
+  // Dates on objects are the point of the exercise: a bar on a month-scale
+  // ruler cannot be read to the day.
+  const withDates = await grabSvg();
+  const datePattern = /\d{1,2}\/\d{1,2}\/\d{4}\s*→/;
+  check('exported objects carry their dates', datePattern.test(withDates),
+    (withDates.match(/\d{1,2}\/\d{1,2}\/\d{4} → \d{1,2}\/\d{1,2}\/\d{4}\s+\(\d+d\)/) || ['none'])[0]);
+  check('and their duration', /\(\d+d\)/.test(withDates));
+
+  await page.locator('#dock .cx-btn', { hasText: /drawing options/i }).click();
+  await page.waitForTimeout(500);
+  check('the options dialog opens', (await page.locator('.cx-modal').count()) === 1);
+  const toggleCount = await page.locator('.cx-modal .cx-toggle, .cx-modal input[type="checkbox"]').count();
+  check('it offers the content toggles', toggleCount >= 5, `${toggleCount}`);
+
+  // Turn dates off and confirm the drawing actually changes.
+  await page.locator('.cx-modal', { hasText: 'Drawing options' })
+    .locator('label', { hasText: /dates on every object/i }).first().click();
+  await page.waitForTimeout(400);
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(500);
+
+  const withoutDates = await grabSvg();
+  check('turning dates off removes them', !datePattern.test(withoutDates));
+  check('and the rest of the plan is still drawn',
+    withoutDates.length > 8000 && withoutDates.includes('<rect'));
+  check('the choice is saved with the project', await page.evaluate(() => new Promise((res) => {
+    const r = indexedDB.open('cx-timeline');
+    r.onsuccess = () => {
+      const g = r.result.transaction('projects').objectStore('projects').getAll();
+      g.onsuccess = () => res(g.result.sort((a, b) => b.savedAt - a.savedAt)[0]?.doc?.settings?.exportOptions?.showDates);
+    };
+  })) === false);
+
+  // Put it back so later checks see the default.
+  await page.locator('#dock .cx-btn', { hasText: /drawing options/i }).click();
+  await page.waitForTimeout(450);
+  await page.locator('.cx-modal', { hasText: 'Drawing options' })
+    .locator('label', { hasText: /dates on every object/i }).first().click();
+  await page.waitForTimeout(300);
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(400);
+
   console.log('\nDock panes');
   const panes = ['lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links', 'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists', 'settings'];
   for (const pane of panes) {

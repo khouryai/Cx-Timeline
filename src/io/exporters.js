@@ -5,7 +5,8 @@
  * plus the active filters — so a CSV, an SVG and a PDF exported one after the
  * other always describe the same plan.
  *
- * Imports: util, dates, model, store, query, scene, svg, pdf, components.
+ * Imports: util, dates, model, store, query, analysis, viewport, scene, svg,
+ *          pdf, components.
  */
 
 import { download, slug, stripHtml } from '../core/util.js';
@@ -14,6 +15,7 @@ import { TYPES, statusOf, subsystemOf, durationDays, projectExtent, effectiveTod
 import { getDoc, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
 import { filterPredicate } from '../core/query.js';
 import { compareBaseline, criticalPath } from '../core/analysis.js';
+import * as viewport from '../timeline/viewport.js';
 import { buildScene, resolvePalette } from './scene.js';
 import { sceneToSvg, svgToRaster } from './svg.js';
 import { sceneToPdf, PAGE_SIZES } from './pdf.js';
@@ -171,20 +173,75 @@ function toCsv(rows) {
    Vector & raster images
    ═══════════════════════════════════════════════════════════════════════ */
 
+/**
+ * The saved export configuration, with anything the caller passes overriding
+ * it. One place decides what a drawing contains, so SVG, PNG, JPEG, PDF and
+ * Print cannot drift apart.
+ */
+export function exportSettings(overrides = {}) {
+  const doc = getDoc();
+  const stored = doc.settings?.exportOptions || {};
+  return {
+    showDates: true,
+    showLinks: true,
+    showLegend: true,
+    showGrid: true,
+    showToday: true,
+    showProgress: true,
+    // Until someone chooses otherwise, a drawing is what is on the screen —
+    // exporting while comparing against a baseline should not quietly drop
+    // the comparison.
+    showBaseline: doc.settings?.showBaseline === true,
+    baselineId: doc.settings?.activeBaseline || null,
+    respectFilters: true,
+    range: 'all',
+    density: 'fit',
+    ...stored,
+    ...overrides,
+  };
+}
+
+/** Density presets, in points per day. `fit` lets the scene choose. */
+const DENSITY = { fit: null, compact: 1.2, detailed: 7 };
+
 /** Build the export scene once, for whichever backend needs it. */
 function makeScene(opts = {}) {
   const doc = getDoc();
+  const cfg = exportSettings(opts);
+
+  // "Visible" means what is on screen now, which is usually what someone
+  // means when they export while looking at a particular quarter.
+  let range = cfg.range === 'visible' ? visibleRange() : undefined;
+  if (Array.isArray(opts.range)) range = opts.range;
+
   return buildScene(doc, {
-    filter: predicateFor(opts),
+    filter: predicateFor(cfg),
     maxWidth: opts.maxWidth || 2600,
-    pxPerDay: opts.pxPerDay,
-    range: opts.range,
-    showGrid: opts.showGrid !== false,
-    showLinks: opts.showLinks !== false,
-    showToday: opts.showToday !== false,
-    showLegend: opts.showLegend !== false,
+    pxPerDay: opts.pxPerDay ?? DENSITY[cfg.density] ?? null,
+    range,
+    showGrid: cfg.showGrid !== false,
+    showLinks: cfg.showLinks !== false,
+    showToday: cfg.showToday !== false,
+    showLegend: cfg.showLegend !== false,
+    showProgress: cfg.showProgress !== false,
+    showDates: cfg.showDates === true,
+    showBaseline: cfg.showBaseline === true,
+    baselineId: cfg.baselineId,
     palette: opts.palette,
   });
+}
+
+/** The window currently on screen, padded a little so nothing is clipped. */
+function visibleRange() {
+  try {
+    const start = viewport.getOrigin();
+    const end = viewport.endMs();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return undefined;
+    const pad = (end - start) * 0.02;
+    return [start - pad, end + pad];
+  } catch {
+    return undefined;
+  }
 }
 
 export function exportSvg(opts = {}) {

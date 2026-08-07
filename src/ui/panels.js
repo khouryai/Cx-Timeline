@@ -1025,7 +1025,14 @@ function paneHistory(root) {
 function paneIo(root) {
   root.appendChild(
     section('Export', [
-      el('div', { class: 'cx-hint', text: 'Exports honour the active filters, so a filtered view exports as a filtered plan.' }),
+      el('div', { class: 'cx-hint', text: 'PDF, print, SVG, PNG and JPEG all draw the same picture. What goes in it is up to you.' }),
+      el('button', {
+        class: 'cx-btn mini',
+        style: { justifyContent: 'flex-start', width: '100%', marginBottom: '4px' },
+        html: icon('sliders', { size: 12 }) + '<span>Drawing options…</span>',
+        onClick: () => openExportOptions(() => renderPane()),
+      }),
+      el('div', { class: 'cx-hint', style: { marginBottom: '8px' }, text: exportSummary() }),
       exportButton('PDF (vector, multi-page)', 'print', () => openPdfDialog()),
       exportButton('Print / Save as PDF', 'print', () => exporters.printPlan()),
       exportButton('SVG (vector)', 'image', () => exporters.exportSvg()),
@@ -1522,6 +1529,122 @@ async function removeCloudProject(project) {
   } catch (err) {
     toast({ tone: 'bad', title: 'Could not delete', message: err.message });
   }
+}
+
+/**
+ * What a drawn export contains.
+ *
+ * A printed plan gets cross-referenced against other documents, and the one
+ * thing it could not do was tell you what dates an object actually covers —
+ * a month-scale ruler cannot be read to the day. That is now a toggle, along
+ * with the rest of what makes a drawing worth printing.
+ *
+ * The choices live in the document, so a plan exports the same way for
+ * whoever opens it, and so the same settings apply to every image format.
+ */
+function openExportOptions(onClose = () => {}) {
+  const doc = store.getDoc();
+  const cfg = exporters.exportSettings();
+  const baselines = doc.baselines || [];
+
+  const set = (patch) => {
+    store.setSetting('exportOptions', { ...exporters.exportSettings(), ...patch }, 'Change export options');
+  };
+
+  const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, [
+    section('Content', [
+      toggle({
+        label: 'Dates on every object',
+        checked: cfg.showDates !== false,
+        onChange: (v) => set({ showDates: v }),
+      }),
+      el('div', { class: 'cx-hint', text: 'Start, finish and duration printed under each label, so a bar can be cross-referenced without reading it off the ruler.' }),
+      toggle({ label: 'Dependencies', checked: cfg.showLinks !== false, onChange: (v) => set({ showLinks: v }) }),
+      toggle({ label: 'Progress fill', checked: cfg.showProgress !== false, onChange: (v) => set({ showProgress: v }) }),
+      toggle({ label: 'Legend', checked: cfg.showLegend !== false, onChange: (v) => set({ showLegend: v }) }),
+      toggle({ label: 'Gridlines', checked: cfg.showGrid !== false, onChange: (v) => set({ showGrid: v }) }),
+      toggle({ label: 'Today marker', checked: cfg.showToday !== false, onChange: (v) => set({ showToday: v }) }),
+    ], { id: 'exp-content' }),
+
+    section('Baseline', baselines.length
+      ? [
+          toggle({
+            label: 'Show the comparison',
+            checked: cfg.showBaseline === true,
+            onChange: (v) => {
+              set({ showBaseline: v, baselineId: cfg.baselineId || doc.settings.activeBaseline || baselines[baselines.length - 1].id });
+              renderPane();
+            },
+          }),
+          field('Which baseline', selectInput({
+            value: cfg.baselineId || doc.settings.activeBaseline || '',
+            options: baselines.map((b) => ({ value: b.id, label: b.name })),
+            onChange: (v) => set({ baselineId: v }),
+          }), 'The export can compare against a different baseline from the one on screen.'),
+        ]
+      : [el('div', { class: 'cx-hint', text: 'No baselines yet. Take one from the Baselines pane and it can be drawn into an export.' })],
+      { id: 'exp-baseline' }),
+
+    section('Scope', [
+      toggle({
+        label: 'Apply the active filters',
+        checked: cfg.respectFilters !== false,
+        onChange: (v) => set({ respectFilters: v }),
+      }),
+      el('div', {
+        class: 'cx-hint',
+        text: store.hasActiveFilters()
+          ? 'Filters are active — with this off, the export shows the whole plan.'
+          : 'No filters are active, so this changes nothing right now.',
+      }),
+      field('Date range', segmented({
+        value: cfg.range || 'all',
+        stretch: true,
+        options: [
+          { value: 'all', label: 'Whole plan' },
+          { value: 'visible', label: 'On screen' },
+        ],
+        onChange: (v) => set({ range: v }),
+      })),
+      field('Density', segmented({
+        value: cfg.density || 'fit',
+        stretch: true,
+        options: [
+          { value: 'compact', label: 'Compact' },
+          { value: 'fit', label: 'Fit' },
+          { value: 'detailed', label: 'Detailed' },
+        ],
+        onChange: (v) => set({ density: v }),
+      }), 'Fit sizes the drawing to the page. Detailed gives each day more room, which suits a short window.'),
+    ], { id: 'exp-scope' }),
+  ]);
+
+  return openModal({
+    title: 'Drawing options',
+    subtitle: 'Applies to PDF, print, SVG, PNG and JPEG. Saved with the project.',
+    body,
+    actions: [{ label: 'Done', kind: 'primary' }],
+    onClose: () => {
+      renderer.requestRender();
+      onClose();
+    },
+  });
+}
+
+/** One line describing what the next drawn export will contain. */
+function exportSummary() {
+  const cfg = exporters.exportSettings();
+  const on = [
+    cfg.showDates !== false ? 'dates' : null,
+    cfg.showLinks !== false ? 'dependencies' : null,
+    cfg.showBaseline ? 'baseline' : null,
+    cfg.showLegend !== false ? 'legend' : null,
+  ].filter(Boolean);
+  const scope = [
+    cfg.range === 'visible' ? 'the window on screen' : 'the whole plan',
+    cfg.respectFilters !== false && store.hasActiveFilters() ? 'filtered' : null,
+  ].filter(Boolean).join(', ');
+  return `Drawing ${scope}${on.length ? ` with ${on.join(', ')}` : ' with nothing but the bars'}.`;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

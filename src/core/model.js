@@ -617,6 +617,21 @@ export function defaultSettings() {
     showLegend: true,
     showProgress: true,
     filterMode: 'dim',           // dim | hide — what happens to filtered-out objects
+    // How a drawn export (SVG/PNG/JPEG/PDF/print) is composed. Kept with the
+    // document so a plan exports the same way for whoever opens it.
+    exportOptions: {
+      showDates: true,
+      showLinks: true,
+      showLegend: true,
+      showGrid: true,
+      showToday: true,
+      showProgress: true,
+      // showBaseline / baselineId are deliberately absent: until someone
+      // chooses, an export matches what is on screen. See exportSettings().
+      respectFilters: true,
+      range: 'all',              // all | visible
+      density: 'fit',            // fit | compact | detailed
+    },
     showBaseline: false,
     activeBaseline: null,
     criticalPath: false,

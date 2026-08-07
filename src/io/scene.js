@@ -43,8 +43,17 @@ const EXPORT_FONTS = {
   title: fontString({ size: 8.5, weight: 600 }),
   titleBold: fontString({ size: 8.5, weight: 700 }),
   sub: fontString({ size: 7, weight: 400 }),
+  mono: fontString({ size: 6.8, weight: 400, mono: true }),
   lane: fontString({ size: 9.5, weight: 600 }),
 };
+
+/** The dates an object covers, in the project's own display order. */
+function dateLabel(obj) {
+  const def = TYPES[obj.type] || TYPES.activity;
+  if (!def.duration) return fmtDate(obj.start, 'numeric');
+  const days = Math.max(1, Math.round((obj.end - obj.start) / MS_DAY));
+  return `${fmtDate(obj.start, 'numeric')} → ${fmtDate(obj.end, 'numeric')}  (${days}d)`;
+}
 const EXPORT_LINE_H = 10;
 const EXPORT_SUB_LINE_H = 8.5;
 
@@ -55,21 +64,32 @@ const EXPORT_SUB_LINE_H = 8.5;
  * bar when it does not, centred under a point glyph — so a printed plan reads
  * the same as the screen and, like the screen, never truncates a label.
  */
-function exportLabel(obj, barWidth) {
+function exportLabel(obj, barWidth, showDates = false) {
   const def = TYPES[obj.type] || TYPES.activity;
   const title = String(obj.title || '');
   const subtitle = String(obj.subtitle || '').trim();
   const font = obj.style?.bold ? EXPORT_FONTS.titleBold : EXPORT_FONTS.title;
 
+  // Printed plans get cross-referenced against a row in a spreadsheet, and a
+  // bar on a month-scale ruler cannot be read to the day. The dates go on the
+  // object itself — measured here, so the packer reserves the room and the
+  // line never lands on top of the next row.
+  const dates = showDates ? dateLabel(obj) : '';
+
   const build = (width, placement) => {
     const t = wrapText(title, width, font, { lineHeight: EXPORT_LINE_H });
     const sub = subtitle ? wrapText(subtitle, width, EXPORT_FONTS.sub, { lineHeight: EXPORT_SUB_LINE_H }) : null;
+    const dateW = dates ? textWidth(dates, EXPORT_FONTS.mono) : 0;
     return {
       placement,
       lines: t.lines,
       subLines: sub ? sub.lines : [],
-      width: Math.ceil(Math.max(t.width, sub ? sub.width : 0)),
-      height: t.lines.length * EXPORT_LINE_H + (sub ? sub.lines.length * EXPORT_SUB_LINE_H : 0),
+      dates,
+      width: Math.ceil(Math.max(t.width, sub ? sub.width : 0, dateW)),
+      height:
+        t.lines.length * EXPORT_LINE_H +
+        (sub ? sub.lines.length * EXPORT_SUB_LINE_H : 0) +
+        (dates ? EXPORT_SUB_LINE_H : 0),
     };
   };
 
@@ -200,7 +220,7 @@ export function buildScene(doc, opts = {}) {
       const barWidth = hasDuration
         ? Math.max(M.barMinW, ((obj.end - obj.start) / MS_DAY) * pxPerDay)
         : M.pointR * 2;
-      const label = exportLabel(obj, barWidth);
+      const label = exportLabel(obj, barWidth, opts.showDates === true);
       const height = hasDuration
         ? Math.max(M.rowH, label.height + 5)
         : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
@@ -360,7 +380,13 @@ export function buildScene(doc, opts = {}) {
     for (const item of entry.measured) {
       const row = entry.rows.get(item.obj.id) || 0;
       const top = entry.y + M.lanePadY + (entry.rowTops[row] ?? 0);
-      const rect = drawObject(items, item, entry.lane, { top, msToX, palette, settings: doc.settings });
+      const rect = drawObject(items, item, entry.lane, {
+        top,
+        msToX,
+        palette,
+        // The export's own choice wins over the document's on-screen setting.
+        settings: { ...doc.settings, showProgress: opts.showProgress !== false && doc.settings.showProgress },
+      });
       if (rect) rectsById.set(item.obj.id, rect);
     }
   });
@@ -369,8 +395,14 @@ export function buildScene(doc, opts = {}) {
   // Drawn after the objects so the ghosts and their arrows sit on top, and
   // only when the document is actually in comparison mode — an export is
   // supposed to be the drawing on the screen, not a different one.
-  if (opts.showBaseline !== false && doc.settings.showBaseline) {
-    drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette });
+  if (opts.showBaseline && (doc.baselines || []).length) {
+    drawBaseline(items, doc, {
+      rectsById,
+      laneGeom,
+      msToX,
+      palette,
+      baselineId: opts.baselineId || doc.settings.activeBaseline,
+    });
   }
 
   items.push({ type: 'line', x1: M.gutter, y1: contentTop, x2: M.gutter, y2: contentTop + contentHeight, stroke: palette.border, strokeWidth: 1 });
@@ -481,6 +513,22 @@ function drawObject(items, measured, lane, { top, msToX, palette, settings }) {
     }
     for (const line of label.subLines) {
       items.push({ type: 'text', x, y, text: line, size: 7, fill: ink, anchor, opacity: opacity * 0.8 });
+      y += EXPORT_SUB_LINE_H;
+    }
+    if (label.dates) {
+      items.push({
+        type: 'text',
+        x,
+        y,
+        text: label.dates,
+        size: 6.8,
+        family: 'mono',
+        fill: ink,
+        anchor,
+        // Only slightly quieter than the title: this line exists to be read
+        // off a printed page, often photocopied.
+        opacity: opacity * 0.88,
+      });
       y += EXPORT_SUB_LINE_H;
     }
   };
@@ -606,8 +654,9 @@ function coarser(id) {
  * meeting as a PDF would show the current dates and no sign that anything had
  * moved — which is the one thing the reader is there to see.
  */
-function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette }) {
-  const baseline = (doc.baselines || []).find((b) => b.id === doc.settings.activeBaseline);
+function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette, baselineId }) {
+  const baseline = (doc.baselines || []).find((b) => b.id === baselineId)
+    || (doc.baselines || [])[doc.baselines.length - 1];
   if (!baseline) return;
 
   const seen = new Set();

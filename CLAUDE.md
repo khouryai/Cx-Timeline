@@ -162,6 +162,12 @@ subscribes. That is what keeps the graph acyclic.
 - **A new export format**: consume the scene from `io/scene.js` rather than
   re-walking the document — that is what keeps every export agreeing with
   every other.
+- **A new export toggle**: add it to `exportOptions` in `defaultSettings()`,
+  to `exportSettings()` in `io/exporters.js` (which is the one place that
+  merges stored, default and per-call values), and to the dialog in
+  `openExportOptions()`. Anything that changes an object's *size* — the date
+  line does — must be measured in `exportLabel()`, or the packer will not
+  reserve the room and the extra text will land on the next row.
 - **Schema changes**: bump `SCHEMA_VERSION` in `core/model.js` and append a
   step to `MIGRATIONS`. Never delete a migration step; old files must always
   be able to walk forward. A new top-level key also needs adding to
@@ -174,7 +180,7 @@ subscribes. That is what keeps the graph acyclic.
 npm run build                        # must succeed — it also lints the module graph
 npm test                             # all three suites, must exit 0
 
-node tools/smoke.js                  # 144 checks — the application, local mode
+node tools/smoke.js                  # 153 checks — the application, local mode
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result

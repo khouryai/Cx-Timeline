@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 39   Built: 2026-08-07T02:06:24.307Z
+ * Modules: 39   Built: 2026-08-07T02:37:31.330Z
  */
 (function () {
   'use strict';
@@ -1727,6 +1727,21 @@ __mods["core/model.js"] = function (__x, __req) {
       showLegend: true,
       showProgress: true,
       filterMode: 'dim',           // dim | hide — what happens to filtered-out objects
+      // How a drawn export (SVG/PNG/JPEG/PDF/print) is composed. Kept with the
+      // document so a plan exports the same way for whoever opens it.
+      exportOptions: {
+        showDates: true,
+        showLinks: true,
+        showLegend: true,
+        showGrid: true,
+        showToday: true,
+        showProgress: true,
+        // showBaseline / baselineId are deliberately absent: until someone
+        // chooses, an export matches what is on screen. See exportSettings().
+        respectFilters: true,
+        range: 'all',              // all | visible
+        density: 'fit',            // fit | compact | detailed
+      },
       showBaseline: false,
       activeBaseline: null,
       criticalPath: false,
@@ -12806,8 +12821,17 @@ __mods["io/scene.js"] = function (__x, __req) {
     title: fontString({ size: 8.5, weight: 600 }),
     titleBold: fontString({ size: 8.5, weight: 700 }),
     sub: fontString({ size: 7, weight: 400 }),
+    mono: fontString({ size: 6.8, weight: 400, mono: true }),
     lane: fontString({ size: 9.5, weight: 600 }),
   };
+
+  /** The dates an object covers, in the project's own display order. */
+  function dateLabel(obj) {
+    const def = TYPES[obj.type] || TYPES.activity;
+    if (!def.duration) return fmtDate(obj.start, 'numeric');
+    const days = Math.max(1, Math.round((obj.end - obj.start) / MS_DAY));
+    return `${fmtDate(obj.start, 'numeric')} → ${fmtDate(obj.end, 'numeric')}  (${days}d)`;
+  }
   const EXPORT_LINE_H = 10;
   const EXPORT_SUB_LINE_H = 8.5;
 
@@ -12818,21 +12842,32 @@ __mods["io/scene.js"] = function (__x, __req) {
    * bar when it does not, centred under a point glyph — so a printed plan reads
    * the same as the screen and, like the screen, never truncates a label.
    */
-  function exportLabel(obj, barWidth) {
+  function exportLabel(obj, barWidth, showDates = false) {
     const def = TYPES[obj.type] || TYPES.activity;
     const title = String(obj.title || '');
     const subtitle = String(obj.subtitle || '').trim();
     const font = obj.style?.bold ? EXPORT_FONTS.titleBold : EXPORT_FONTS.title;
 
+    // Printed plans get cross-referenced against a row in a spreadsheet, and a
+    // bar on a month-scale ruler cannot be read to the day. The dates go on the
+    // object itself — measured here, so the packer reserves the room and the
+    // line never lands on top of the next row.
+    const dates = showDates ? dateLabel(obj) : '';
+
     const build = (width, placement) => {
       const t = wrapText(title, width, font, { lineHeight: EXPORT_LINE_H });
       const sub = subtitle ? wrapText(subtitle, width, EXPORT_FONTS.sub, { lineHeight: EXPORT_SUB_LINE_H }) : null;
+      const dateW = dates ? textWidth(dates, EXPORT_FONTS.mono) : 0;
       return {
         placement,
         lines: t.lines,
         subLines: sub ? sub.lines : [],
-        width: Math.ceil(Math.max(t.width, sub ? sub.width : 0)),
-        height: t.lines.length * EXPORT_LINE_H + (sub ? sub.lines.length * EXPORT_SUB_LINE_H : 0),
+        dates,
+        width: Math.ceil(Math.max(t.width, sub ? sub.width : 0, dateW)),
+        height:
+          t.lines.length * EXPORT_LINE_H +
+          (sub ? sub.lines.length * EXPORT_SUB_LINE_H : 0) +
+          (dates ? EXPORT_SUB_LINE_H : 0),
       };
     };
 
@@ -12963,7 +12998,7 @@ __mods["io/scene.js"] = function (__x, __req) {
         const barWidth = hasDuration
           ? Math.max(M.barMinW, ((obj.end - obj.start) / MS_DAY) * pxPerDay)
           : M.pointR * 2;
-        const label = exportLabel(obj, barWidth);
+        const label = exportLabel(obj, barWidth, opts.showDates === true);
         const height = hasDuration
           ? Math.max(M.rowH, label.height + 5)
           : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
@@ -13123,7 +13158,13 @@ __mods["io/scene.js"] = function (__x, __req) {
       for (const item of entry.measured) {
         const row = entry.rows.get(item.obj.id) || 0;
         const top = entry.y + M.lanePadY + (entry.rowTops[row] ?? 0);
-        const rect = drawObject(items, item, entry.lane, { top, msToX, palette, settings: doc.settings });
+        const rect = drawObject(items, item, entry.lane, {
+          top,
+          msToX,
+          palette,
+          // The export's own choice wins over the document's on-screen setting.
+          settings: { ...doc.settings, showProgress: opts.showProgress !== false && doc.settings.showProgress },
+        });
         if (rect) rectsById.set(item.obj.id, rect);
       }
     });
@@ -13132,8 +13173,14 @@ __mods["io/scene.js"] = function (__x, __req) {
     // Drawn after the objects so the ghosts and their arrows sit on top, and
     // only when the document is actually in comparison mode — an export is
     // supposed to be the drawing on the screen, not a different one.
-    if (opts.showBaseline !== false && doc.settings.showBaseline) {
-      drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette });
+    if (opts.showBaseline && (doc.baselines || []).length) {
+      drawBaseline(items, doc, {
+        rectsById,
+        laneGeom,
+        msToX,
+        palette,
+        baselineId: opts.baselineId || doc.settings.activeBaseline,
+      });
     }
 
     items.push({ type: 'line', x1: M.gutter, y1: contentTop, x2: M.gutter, y2: contentTop + contentHeight, stroke: palette.border, strokeWidth: 1 });
@@ -13244,6 +13291,22 @@ __mods["io/scene.js"] = function (__x, __req) {
       }
       for (const line of label.subLines) {
         items.push({ type: 'text', x, y, text: line, size: 7, fill: ink, anchor, opacity: opacity * 0.8 });
+        y += EXPORT_SUB_LINE_H;
+      }
+      if (label.dates) {
+        items.push({
+          type: 'text',
+          x,
+          y,
+          text: label.dates,
+          size: 6.8,
+          family: 'mono',
+          fill: ink,
+          anchor,
+          // Only slightly quieter than the title: this line exists to be read
+          // off a printed page, often photocopied.
+          opacity: opacity * 0.88,
+        });
         y += EXPORT_SUB_LINE_H;
       }
     };
@@ -13369,8 +13432,9 @@ __mods["io/scene.js"] = function (__x, __req) {
    * meeting as a PDF would show the current dates and no sign that anything had
    * moved — which is the one thing the reader is there to see.
    */
-  function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette }) {
-    const baseline = (doc.baselines || []).find((b) => b.id === doc.settings.activeBaseline);
+  function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette, baselineId }) {
+    const baseline = (doc.baselines || []).find((b) => b.id === baselineId)
+      || (doc.baselines || [])[doc.baselines.length - 1];
     if (!baseline) return;
 
     const seen = new Set();
@@ -14225,7 +14289,8 @@ __mods["io/exporters.js"] = function (__x, __req) {
    * plus the active filters — so a CSV, an SVG and a PDF exported one after the
    * other always describe the same plan.
    *
-   * Imports: util, dates, model, store, query, scene, svg, pdf, components.
+   * Imports: util, dates, model, store, query, analysis, viewport, scene, svg,
+   *          pdf, components.
    */
 
   const { download, slug, stripHtml } = __req("core/util.js");
@@ -14234,6 +14299,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
   const { getDoc, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
   const { filterPredicate } = __req("core/query.js");
   const { compareBaseline, criticalPath } = __req("core/analysis.js");
+  const viewport = __req("timeline/viewport.js");
   const { buildScene, resolvePalette } = __req("io/scene.js");
   const { sceneToSvg, svgToRaster } = __req("io/svg.js");
   const { sceneToPdf, PAGE_SIZES } = __req("io/pdf.js");
@@ -14391,20 +14457,75 @@ __mods["io/exporters.js"] = function (__x, __req) {
      Vector & raster images
      ═══════════════════════════════════════════════════════════════════════ */
 
+  /**
+   * The saved export configuration, with anything the caller passes overriding
+   * it. One place decides what a drawing contains, so SVG, PNG, JPEG, PDF and
+   * Print cannot drift apart.
+   */
+  function exportSettings(overrides = {}) {
+    const doc = getDoc();
+    const stored = doc.settings?.exportOptions || {};
+    return {
+      showDates: true,
+      showLinks: true,
+      showLegend: true,
+      showGrid: true,
+      showToday: true,
+      showProgress: true,
+      // Until someone chooses otherwise, a drawing is what is on the screen —
+      // exporting while comparing against a baseline should not quietly drop
+      // the comparison.
+      showBaseline: doc.settings?.showBaseline === true,
+      baselineId: doc.settings?.activeBaseline || null,
+      respectFilters: true,
+      range: 'all',
+      density: 'fit',
+      ...stored,
+      ...overrides,
+    };
+  }
+
+  /** Density presets, in points per day. `fit` lets the scene choose. */
+  const DENSITY = { fit: null, compact: 1.2, detailed: 7 };
+
   /** Build the export scene once, for whichever backend needs it. */
   function makeScene(opts = {}) {
     const doc = getDoc();
+    const cfg = exportSettings(opts);
+
+    // "Visible" means what is on screen now, which is usually what someone
+    // means when they export while looking at a particular quarter.
+    let range = cfg.range === 'visible' ? visibleRange() : undefined;
+    if (Array.isArray(opts.range)) range = opts.range;
+
     return buildScene(doc, {
-      filter: predicateFor(opts),
+      filter: predicateFor(cfg),
       maxWidth: opts.maxWidth || 2600,
-      pxPerDay: opts.pxPerDay,
-      range: opts.range,
-      showGrid: opts.showGrid !== false,
-      showLinks: opts.showLinks !== false,
-      showToday: opts.showToday !== false,
-      showLegend: opts.showLegend !== false,
+      pxPerDay: opts.pxPerDay ?? DENSITY[cfg.density] ?? null,
+      range,
+      showGrid: cfg.showGrid !== false,
+      showLinks: cfg.showLinks !== false,
+      showToday: cfg.showToday !== false,
+      showLegend: cfg.showLegend !== false,
+      showProgress: cfg.showProgress !== false,
+      showDates: cfg.showDates === true,
+      showBaseline: cfg.showBaseline === true,
+      baselineId: cfg.baselineId,
       palette: opts.palette,
     });
+  }
+
+  /** The window currently on screen, padded a little so nothing is clipped. */
+  function visibleRange() {
+    try {
+      const start = viewport.getOrigin();
+      const end = viewport.endMs();
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return undefined;
+      const pad = (end - start) * 0.02;
+      return [start - pad, end + pad];
+    } catch {
+      return undefined;
+    }
   }
 
   function exportSvg(opts = {}) {
@@ -14557,6 +14678,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
   Object.defineProperty(__x, "exportCsv", { get: () => exportCsv, enumerable: true });
   Object.defineProperty(__x, "exportLinksCsv", { get: () => exportLinksCsv, enumerable: true });
   Object.defineProperty(__x, "exportBaselineCsv", { get: () => exportBaselineCsv, enumerable: true });
+  Object.defineProperty(__x, "exportSettings", { get: () => exportSettings, enumerable: true });
   Object.defineProperty(__x, "exportSvg", { get: () => exportSvg, enumerable: true });
   Object.defineProperty(__x, "exportRaster", { get: () => exportRaster, enumerable: true });
   Object.defineProperty(__x, "exportPng", { get: () => exportPng, enumerable: true });
@@ -16585,7 +16707,14 @@ __mods["ui/panels.js"] = function (__x, __req) {
   function paneIo(root) {
     root.appendChild(
       section('Export', [
-        el('div', { class: 'cx-hint', text: 'Exports honour the active filters, so a filtered view exports as a filtered plan.' }),
+        el('div', { class: 'cx-hint', text: 'PDF, print, SVG, PNG and JPEG all draw the same picture. What goes in it is up to you.' }),
+        el('button', {
+          class: 'cx-btn mini',
+          style: { justifyContent: 'flex-start', width: '100%', marginBottom: '4px' },
+          html: icon('sliders', { size: 12 }) + '<span>Drawing options…</span>',
+          onClick: () => openExportOptions(() => renderPane()),
+        }),
+        el('div', { class: 'cx-hint', style: { marginBottom: '8px' }, text: exportSummary() }),
         exportButton('PDF (vector, multi-page)', 'print', () => openPdfDialog()),
         exportButton('Print / Save as PDF', 'print', () => exporters.printPlan()),
         exportButton('SVG (vector)', 'image', () => exporters.exportSvg()),
@@ -17082,6 +17211,122 @@ __mods["ui/panels.js"] = function (__x, __req) {
     } catch (err) {
       toast({ tone: 'bad', title: 'Could not delete', message: err.message });
     }
+  }
+
+  /**
+   * What a drawn export contains.
+   *
+   * A printed plan gets cross-referenced against other documents, and the one
+   * thing it could not do was tell you what dates an object actually covers —
+   * a month-scale ruler cannot be read to the day. That is now a toggle, along
+   * with the rest of what makes a drawing worth printing.
+   *
+   * The choices live in the document, so a plan exports the same way for
+   * whoever opens it, and so the same settings apply to every image format.
+   */
+  function openExportOptions(onClose = () => {}) {
+    const doc = store.getDoc();
+    const cfg = exporters.exportSettings();
+    const baselines = doc.baselines || [];
+
+    const set = (patch) => {
+      store.setSetting('exportOptions', { ...exporters.exportSettings(), ...patch }, 'Change export options');
+    };
+
+    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, [
+      section('Content', [
+        toggle({
+          label: 'Dates on every object',
+          checked: cfg.showDates !== false,
+          onChange: (v) => set({ showDates: v }),
+        }),
+        el('div', { class: 'cx-hint', text: 'Start, finish and duration printed under each label, so a bar can be cross-referenced without reading it off the ruler.' }),
+        toggle({ label: 'Dependencies', checked: cfg.showLinks !== false, onChange: (v) => set({ showLinks: v }) }),
+        toggle({ label: 'Progress fill', checked: cfg.showProgress !== false, onChange: (v) => set({ showProgress: v }) }),
+        toggle({ label: 'Legend', checked: cfg.showLegend !== false, onChange: (v) => set({ showLegend: v }) }),
+        toggle({ label: 'Gridlines', checked: cfg.showGrid !== false, onChange: (v) => set({ showGrid: v }) }),
+        toggle({ label: 'Today marker', checked: cfg.showToday !== false, onChange: (v) => set({ showToday: v }) }),
+      ], { id: 'exp-content' }),
+
+      section('Baseline', baselines.length
+        ? [
+            toggle({
+              label: 'Show the comparison',
+              checked: cfg.showBaseline === true,
+              onChange: (v) => {
+                set({ showBaseline: v, baselineId: cfg.baselineId || doc.settings.activeBaseline || baselines[baselines.length - 1].id });
+                renderPane();
+              },
+            }),
+            field('Which baseline', selectInput({
+              value: cfg.baselineId || doc.settings.activeBaseline || '',
+              options: baselines.map((b) => ({ value: b.id, label: b.name })),
+              onChange: (v) => set({ baselineId: v }),
+            }), 'The export can compare against a different baseline from the one on screen.'),
+          ]
+        : [el('div', { class: 'cx-hint', text: 'No baselines yet. Take one from the Baselines pane and it can be drawn into an export.' })],
+        { id: 'exp-baseline' }),
+
+      section('Scope', [
+        toggle({
+          label: 'Apply the active filters',
+          checked: cfg.respectFilters !== false,
+          onChange: (v) => set({ respectFilters: v }),
+        }),
+        el('div', {
+          class: 'cx-hint',
+          text: store.hasActiveFilters()
+            ? 'Filters are active — with this off, the export shows the whole plan.'
+            : 'No filters are active, so this changes nothing right now.',
+        }),
+        field('Date range', segmented({
+          value: cfg.range || 'all',
+          stretch: true,
+          options: [
+            { value: 'all', label: 'Whole plan' },
+            { value: 'visible', label: 'On screen' },
+          ],
+          onChange: (v) => set({ range: v }),
+        })),
+        field('Density', segmented({
+          value: cfg.density || 'fit',
+          stretch: true,
+          options: [
+            { value: 'compact', label: 'Compact' },
+            { value: 'fit', label: 'Fit' },
+            { value: 'detailed', label: 'Detailed' },
+          ],
+          onChange: (v) => set({ density: v }),
+        }), 'Fit sizes the drawing to the page. Detailed gives each day more room, which suits a short window.'),
+      ], { id: 'exp-scope' }),
+    ]);
+
+    return openModal({
+      title: 'Drawing options',
+      subtitle: 'Applies to PDF, print, SVG, PNG and JPEG. Saved with the project.',
+      body,
+      actions: [{ label: 'Done', kind: 'primary' }],
+      onClose: () => {
+        renderer.requestRender();
+        onClose();
+      },
+    });
+  }
+
+  /** One line describing what the next drawn export will contain. */
+  function exportSummary() {
+    const cfg = exporters.exportSettings();
+    const on = [
+      cfg.showDates !== false ? 'dates' : null,
+      cfg.showLinks !== false ? 'dependencies' : null,
+      cfg.showBaseline ? 'baseline' : null,
+      cfg.showLegend !== false ? 'legend' : null,
+    ].filter(Boolean);
+    const scope = [
+      cfg.range === 'visible' ? 'the window on screen' : 'the whole plan',
+      cfg.respectFilters !== false && store.hasActiveFilters() ? 'filtered' : null,
+    ].filter(Boolean).join(', ');
+    return `Drawing ${scope}${on.length ? ` with ${on.join(', ')}` : ' with nothing but the bars'}.`;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
