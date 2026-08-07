@@ -56,6 +56,7 @@ import {
 import * as cmd from './commands.js';
 import { listEditor } from './lists.js';
 import { openShareDialog, paneTeam } from './auth.js';
+import { paneP6 } from './p6.js';
 import { openObjectDialog, openLaneDialog } from './dialogs.js';
 import { THEMES, applyTheme, getTheme } from './theme.js';
 import * as exporters from '../io/exporters.js';
@@ -63,7 +64,7 @@ import { importFile, buildDocFromRows } from '../io/importers.js';
 import { pickFiles } from '../core/util.js';
 
 export const PANES = [
-  'projects', 'team', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
+  'projects', 'team', 'p6', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
   'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
   'settings',
 ];
@@ -122,6 +123,9 @@ export function buildPanels() {
     rerender();
   });
   on(EV.DOC_REPLACED, rerender);
+  on(EV.PANE_REFRESH, (p) => {
+    if (!p?.pane || p.pane === active) renderPane();
+  });
   on(EV.SELECTION_CHANGED, () => {
     if (['outline', 'releases', 'campaigns', 'risks', 'links'].includes(active)) rerender();
   });
@@ -167,6 +171,7 @@ export function toggleDock() {
 const RENDERERS = {
   projects: paneProjects,
   team: paneTeam,
+  p6: paneP6,
   lanes: paneLanes,
   palette: panePalette,
   outline: paneOutline,
@@ -186,7 +191,7 @@ const RENDERERS = {
 };
 
 const TITLES = {
-  projects: 'Projects', team: 'Team & access',
+  projects: 'Projects', team: 'Team & access', p6: 'P6 schedule',
   lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
   campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
   baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',

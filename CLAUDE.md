@@ -117,6 +117,15 @@ subscribes. That is what keeps the graph acyclic.
   plan no longer does, and a banner naming the baseline. `io/scene.js` draws
   the same, so an exported PDF is the drawing on screen. All of it is derived
   per frame from the snapshot — there is no comparison state to go stale.
+- **P6 data is a register, not objects.** `doc.p6` holds every imported
+  activity keyed by activity ID — the only identifier P6 gives that survives a
+  rename — and an object points at one with `data.p6Id`. Each activity carries
+  a `baseline` and a `progress` date set, because that is how the reviews
+  work; slip, variance and schedule position are all derived from those and
+  never stored. An import writes the register and *proposes* changes to
+  objects; it never moves a bar without being told to. An activity missing
+  from a later file is flagged `missing`, never deleted — something on the
+  timeline may point at it.
 - **Derived state is never stored.** Violations, critical path and float are
   computed from the document, so they appear and clear on their own. Do not
   add a `violated` field to a link — there is nothing to keep in step.
@@ -153,7 +162,10 @@ subscribes. That is what keeps the graph acyclic.
   palette, context menus, legend, filters and CSV export all pick it up. Add a
   `build<Shape>` branch in `timeline/renderer.js` only if it needs a new shape.
 - **A new dock pane**: add it to `PANES`, `TITLES` and `RENDERERS` in
-  `ui/panels.js`, and to `NAV` in `ui/shell.js`.
+  `ui/panels.js`, and to `NAV` in `ui/shell.js`. A pane that changes only its
+  own view state — a filter, a search — must emit `EV.PANE_REFRESH` to redraw
+  itself: nothing in the document changed, so no `doc:changed` fires, and it
+  cannot import the dock without creating a cycle.
 - **A new editable list**: add the seed to `DEFAULT_LISTS` and an entry to
   `LIST_DEFS` in `core/model.js` saying where its values live on an object —
   `field` (a top-level property), `dataKeys` (inside `data`) or `styleKey`
@@ -180,7 +192,7 @@ subscribes. That is what keeps the graph acyclic.
 npm run build                        # must succeed — it also lints the module graph
 npm test                             # all three suites, must exit 0
 
-node tools/smoke.js                  # 153 checks — the application, local mode
+node tools/smoke.js                  # 173 checks — the application, local mode
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result

@@ -1126,3 +1126,150 @@
   color: var(--bad);
   font-weight: 600;
 }
+
+/* ── Chip-stat rows ────────────────────────────────────────────────────── */
+
+.cx-chipstats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ── P6 register ───────────────────────────────────────────────────────── */
+
+.p6-stamps {
+  display: flex;
+  gap: 8px;
+}
+.p6-stamp {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.p6-stamp-label {
+  display: block;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.p6-stamp-value {
+  display: block;
+  overflow: hidden;
+  font-size: var(--fs-tiny);
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.p6-stamp-value.none {
+  color: var(--text-subtle);
+  font-style: italic;
+}
+
+/* A placed activity is the common case; the marker carries it, so the row
+   itself stays quiet rather than shouting in green. */
+.cx-listrow.p6-row.active {
+  background: transparent;
+  border-color: var(--border);
+}
+.cx-listrow.p6-row.active:hover {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+.cx-listrow.p6-row .cx-badge {
+  flex: 0 0 auto;
+}
+
+/* The activity ID on a linked object, in the inspector. */
+.p6-link {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.p6-link .p6-id {
+  font-family: var(--f-mono);
+  font-size: var(--fs-tiny);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-main);
+}
+.p6-link .p6-dates {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-muted);
+}
+
+/* A P6 row carries a name, an id, dates and up to four badges. In a 250px
+   dock that cannot be one line — the name loses every time. Two rows, with
+   the badges wrapping under the meta. */
+.p6-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    'mark name  acts'
+    '.    meta  meta'
+    '.    badge badge';
+  align-items: center;
+  gap: 4px 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--easing), background var(--dur-fast) var(--easing);
+}
+.p6-row:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-3);
+}
+.p6-row.placed {
+  border-left: 2px solid var(--good);
+}
+.p6-row .p6-mark {
+  grid-area: mark;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+.p6-row .p6-name {
+  grid-area: name;
+  overflow: hidden;
+  font-size: var(--fs-small);
+  font-weight: 500;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.p6-row .p6-acts {
+  grid-area: acts;
+  display: flex;
+  gap: 2px;
+}
+.p6-row .p6-meta {
+  grid-area: meta;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-subtle);
+  letter-spacing: 0.03em;
+  overflow-wrap: anywhere;
+}
+.p6-row .p6-badges {
+  grid-area: badge;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.p6-row .p6-badges:empty {
+  display: none;
+}

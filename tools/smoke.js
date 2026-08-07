@@ -778,6 +778,134 @@ async function main() {
   await page.locator('.cx-modal-foot .cx-btn.primary').click();
   await page.waitForTimeout(400);
 
+  console.log('\nP6 schedule');
+  // A P6 export with the things that actually break importers: junk rows
+  // above the header, dd-MMM-yy dates carrying times, and a milestone whose
+  // start and finish are the same day.
+  const p6Baseline = [
+    'Line 1 CBTC — Testing & Commissioning',
+    'Filter: Discipline = Commissioning',
+    '',
+    'Activity ID,Activity Name,WBS,Start,Finish,% Complete',
+    'CX-Z3-0100,SCADA Interface Verification,Zone 3/SCADA,03-Aug-26 08:00,21-Aug-26 17:00,45',
+    'CX-Z3-0110,Dynamic Testing Campaign 1,Zone 3/Dynamic,24-Aug-26 08:00,02-Oct-26 17:00,0',
+    'CX-Z3-0120,Zone 3 Ready for Service,Zone 3/Milestones,05-Oct-26 08:00,05-Oct-26 08:00,0',
+    'CX-Z4-0100,IXL Static Testing,Zone 4/IXL,14-Sep-26 08:00,30-Oct-26 17:00,0',
+  ].join('\n');
+
+  await page.locator('#sidenav .nav-link[data-pane="p6"]').click();
+  await page.waitForTimeout(400);
+  check('the P6 pane explains itself when empty',
+    /no p6 schedule/i.test(await page.locator('#dock .ce-title').innerText()));
+
+  const importP6 = async (kind, csv, fileName) => {
+    await page.locator('#dock .cx-btn', { hasText: /import from p6/i }).click();
+    await page.waitForTimeout(400);
+    await page.locator('.cx-modal .cx-seg button', { hasText: kind === 'baseline' ? 'Baseline' : 'Progress' }).click();
+    await page.waitForTimeout(200);
+    await page.locator('.cx-modal input[type="file"]').setInputFiles({
+      name: fileName, mimeType: 'text/csv', buffer: Buffer.from(csv),
+    });
+    await page.waitForTimeout(900);
+  };
+
+  await importP6('baseline', p6Baseline, 'p6-baseline.csv');
+  const previewChips = await page.locator('.cx-modal .cx-chipstat').allTextContents();
+  check('the import previews before writing anything', previewChips.some((c) => /Read4/.test(c)), previewChips.join(' '));
+  const sample = await page.locator('.cx-modal .cx-listrow .lr-meta').allTextContents();
+  check('a finish time does not push the date to the next day',
+    sample[0]?.includes('Aug 21, 2026'), sample[0] || '');
+  check('a milestone keeps one date',
+    /Oct 5, 2026 → Oct 5, 2026/.test(sample[2] || ''), sample[2] || '');
+
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(900);
+  check('the register lists every activity', (await page.locator('#dock .p6-row[data-p6]').count()) === 4);
+  check('and records when the baseline came in',
+    /baseline/i.test(await page.locator('#dock .p6-stamps').innerText()) &&
+    !/baseline\s*not imported/i.test(await page.locator('#dock .p6-stamps').innerText()));
+
+  // Place two, one of which is the milestone.
+  for (const id of ['CX-Z3-0100', 'CX-Z3-0120']) {
+    await page.locator(`#dock .p6-row[data-p6="${id}"] button[aria-label^="Add"]`).click();
+    await page.waitForTimeout(400);
+    await page.locator('.cx-modal-foot .cx-btn.primary').click();
+    await page.waitForTimeout(600);
+  }
+  check('an activity can be placed on the timeline', await page.evaluate(() =>
+    [...document.querySelectorAll('.tl-obj')].some((n) => (n.getAttribute('data-label') || '').includes('SCADA Interface Verification'))));
+  check('a P6 milestone becomes a milestone, not a bar', await page.evaluate(() =>
+    [...document.querySelectorAll('.tl-obj')].some((n) =>
+      (n.getAttribute('data-label') || '').includes('Zone 3 Ready') && n.className.includes('shape-diamond'))));
+  check('the master says what is placed and what is not',
+    /on timeline\s*2/i.test((await page.locator('#dock .cx-chipstats').first().innerText()).replace(/\n/g, ' ')));
+
+  // Month two: a progress import that moves things, adds one and drops one.
+  const p6Progress = [
+    'Activity ID,Activity Name,WBS,Start,Finish,% Complete',
+    'CX-Z3-0100,SCADA Interface Verification,Zone 3/SCADA,03-Aug-26 08:00,28-Aug-26 17:00,70',
+    'CX-Z3-0110,Dynamic Testing Campaign 1,Zone 3/Dynamic,07-Sep-26 08:00,16-Oct-26 17:00,0',
+    'CX-Z3-0120,Zone 3 Ready for Service,Zone 3/Milestones,19-Oct-26 08:00,19-Oct-26 08:00,0',
+    'CX-Z5-0100,New Scope — Zone 5 Static,Zone 5/IXL,02-Nov-26 08:00,11-Dec-26 17:00,0',
+  ].join('\n');
+
+  await importP6('progress', p6Progress, 'p6-progress.csv');
+  check('a re-import warns when placed activities moved',
+    /on your timeline/i.test(await page.locator('.cx-modal').innerText()));
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(1100);
+
+  check('it then asks before moving any of your bars',
+    /follow the new p6 dates/i.test(await page.locator('.cx-modal-title').innerText()));
+  const adoptRows = await page.locator('.cx-modal .cx-listrow .lr-meta').allTextContents();
+  check('the first progress import measures against the baseline',
+    adoptRows.some((r) => /days later than the baseline/.test(r)), adoptRows.join(' | '));
+
+  // Take one, leave the other — the point of the dialog.
+  await page.locator('.cx-modal .cx-listrow input[type="checkbox"]').first().click();
+  await page.waitForTimeout(200);
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(900);
+
+  const registry = await page.evaluate(() =>
+    [...document.querySelectorAll('#dock .p6-row[data-p6]')].map((n) => ({
+      id: n.dataset.p6,
+      badges: [...n.querySelectorAll('.cx-badge')].map((b) => b.textContent),
+    })));
+  const byId = Object.fromEntries(registry.map((r) => [r.id, r.badges.join(' ')]));
+
+  check('P6 slip is computed per activity', /P6 \+7d/.test(byId['CX-Z3-0100'] || ''), byId['CX-Z3-0100']);
+  check('an activity absent from the file is marked, not deleted',
+    /Not in P6/.test(byId['CX-Z4-0100'] || ''), byId['CX-Z4-0100']);
+  check('new scope in P6 appears in the register', Boolean(byId['CX-Z5-0100']));
+  check('a bar that was not adopted records the divergence',
+    /you −\d+d/.test(byId['CX-Z3-0120'] || ''), byId['CX-Z3-0120']);
+  check('a bar that was adopted no longer diverges',
+    !/you [+−]\d+d/.test(byId['CX-Z3-0100'] || ''), byId['CX-Z3-0100']);
+
+  // The P6 activity ID has to be findable — that is the whole point.
+  const search = page.locator('#dock input[aria-label="Search P6 activities"]');
+  await search.fill('CX-Z4');
+  await page.waitForTimeout(500);
+  check('an activity can be found by its ID', (await page.locator('#dock .p6-row[data-p6]').count()) === 1);
+  await search.fill('');
+  await page.waitForTimeout(400);
+
+  // And the P6 baseline feeds the comparison that already exists.
+  await page.locator('#dock .cx-btn', { hasText: /baseline from p6/i }).click();
+  await page.waitForTimeout(900);
+  check('a baseline can be built from the P6 baseline dates', await page.evaluate(() =>
+    document.querySelectorAll('.tl-baseline').length > 0 || document.querySelector('.tl-baseline-bar') !== null));
+
+  await page.locator('#sidenav .nav-link[data-pane="baselines"]').click();
+  await page.waitForTimeout(400);
+  const blPane = await page.locator('#dock').innerText();
+  check('and it is listed with the others', /p6 baseline/i.test(blPane), blPane.split('\n').slice(0, 3).join(' · '));
+
+  // Put the canvas back for the sections that follow.
+  await page.locator('#sidenav .nav-link[data-pane="p6"]').click();
+  await page.waitForTimeout(300);
+
   console.log('\nDock panes');
   const panes = ['lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links', 'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists', 'settings'];
   for (const pane of panes) {

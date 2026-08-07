@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 39   Built: 2026-08-07T02:37:31.330Z
+ * Modules: 41   Built: 2026-08-07T17:53:15.647Z
  */
 (function () {
   'use strict';
@@ -527,6 +527,7 @@ __mods["core/events.js"] = function (__x, __req) {
     DOC_META_CHANGED: 'doc:meta', // name/description/settings only
     DOC_REPLACED: 'doc:replaced', // wholesale swap (import, restore, new)
     LISTS_CHANGED: 'lists:changed', // { listId } — a dropdown vocabulary was edited
+    P6_IMPORTED: 'p6:imported', // { kind, plan } — a Primavera export was applied
 
     /* Persistence */
     SAVE_START: 'save:start',
@@ -560,6 +561,10 @@ __mods["core/events.js"] = function (__x, __req) {
     THEME_CHANGED: 'theme:changed',
     FILTER_CHANGED: 'filter:changed',
     PANEL_CHANGED: 'panel:changed',
+    // A pane asking the dock to rebuild it. Panes cannot import the dock —
+    // that would be a cycle — and view-only state (a filter, a search) changes
+    // nothing in the document, so no doc:changed fires to do it for them.
+    PANE_REFRESH: 'panel:refresh',
     TOAST: 'ui:toast',
     STATUS: 'ui:status',
     PRESENT_MODE: 'ui:present',
@@ -1124,7 +1129,7 @@ __mods["core/model.js"] = function (__x, __req) {
   const { toMs, toISO, todayMs, addDays, MS_DAY, startOfMonth, addMonths } = __req("core/dates.js");
 
   /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
-  const SCHEMA_VERSION = 2;
+  const SCHEMA_VERSION = 3;
 
   /* ══════════════════════════════════════════════════════════════════════════
      Object type registry
@@ -1598,6 +1603,140 @@ __mods["core/model.js"] = function (__x, __req) {
   const CONNECTOR_STYLES = ['orthogonal', 'curved', 'straight'];
 
   /* ══════════════════════════════════════════════════════════════════════════
+     The P6 register
+
+     A Primavera schedule is the contract programme; this plan is the
+     commissioning narrative. They are different documents with different
+     owners, so P6 data is held apart from the objects rather than merged into
+     them: `doc.p6` is a register keyed by activity ID, and an object points at
+     an entry with `data.p6Id`.
+
+     Each activity carries two date sets, because that is how the reviews work:
+
+       baseline   the target programme. Imported once, replaced only by another
+                  baseline import.
+       progress   where it stands now. Re-imported monthly, and what an object
+                  is compared against.
+
+     Everything else is derived — slip, variance, whether an activity is on the
+     timeline, where it sits against today. Nothing derived is ever stored, so
+     it cannot go stale, and an import only has to carry four columns.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** The two kinds of import. A progress import never touches the baseline. */
+  const P6_KINDS = ['baseline', 'progress'];
+
+  function emptyRegister() {
+    return {
+      activities: {},   // activityId → entry
+      baseline: null,   // { importedAt, fileName, label, count }
+      progress: null,
+      history: [],      // the last few imports, newest first
+    };
+  }
+
+  /** One activity in the register. Dates are UTC-midnight ms, or null. */
+  function makeP6Activity(props = {}) {
+    return {
+      id: String(props.id || '').trim(),
+      name: String(props.name || '').trim(),
+      wbs: props.wbs ? String(props.wbs) : '',
+      baseline: props.baseline || null,       // { start, end }
+      progress: props.progress || null,       // { start, end }
+      previous: props.previous || null,       // the progress before the last import
+      percent: Number.isFinite(props.percent) ? props.percent : null,
+      status: props.status ? String(props.status) : '',
+      order: Number.isFinite(props.order) ? props.order : 0,
+      missing: !!props.missing,               // in an earlier import, not the latest
+      firstSeen: props.firstSeen || Date.now(),
+    };
+  }
+
+  /** The register, guaranteed to be the right shape. */
+  function p6Register(doc) {
+    const p6 = doc?.p6;
+    if (!p6 || typeof p6 !== 'object') return emptyRegister();
+    return {
+      activities: p6.activities && typeof p6.activities === 'object' ? p6.activities : {},
+      baseline: p6.baseline || null,
+      progress: p6.progress || null,
+      history: Array.isArray(p6.history) ? p6.history : [],
+    };
+  }
+
+  function p6Activity(doc, activityId) {
+    if (!activityId) return null;
+    return p6Register(doc).activities[String(activityId)] || null;
+  }
+
+  function p6Count(doc) {
+    return Object.keys(p6Register(doc).activities).length;
+  }
+
+  /**
+   * The dates an activity is currently understood to hold: its progress if a
+   * progress import has been taken, otherwise its baseline. A register with
+   * only a baseline is still useful, and this is what makes that true.
+   */
+  function p6Dates(activity) {
+    if (!activity) return null;
+    return activity.progress || activity.baseline || null;
+  }
+
+  /** How far P6 has moved its own activity since the baseline, in days. */
+  function p6Slip(activity) {
+    if (!activity?.baseline || !activity?.progress) return null;
+    const startShift = Math.round((activity.progress.start - activity.baseline.start) / MS_DAY);
+    const finishShift = Math.round((activity.progress.end - activity.baseline.end) / MS_DAY);
+    return { startShift, finishShift, slipped: finishShift > 0, changed: startShift !== 0 || finishShift !== 0 };
+  }
+
+  /** How far the plan differs from P6, in days, for an object that is linked. */
+  function p6Variance(obj, activity) {
+    const dates = p6Dates(activity);
+    if (!obj || !dates) return null;
+    const hasDuration = !!TYPES[obj.type]?.duration;
+    const startShift = Math.round((obj.start - dates.start) / MS_DAY);
+    const finishShift = hasDuration ? Math.round((obj.end - dates.end) / MS_DAY) : startShift;
+    return { startShift, finishShift, behind: finishShift > 0, differs: startShift !== 0 || finishShift !== 0 };
+  }
+
+  /**
+   * Where an activity sits against today.
+   *
+   * This is deliberately *not* called status. Dates cannot tell you whether
+   * work happened — an activity whose finish has passed may be complete or may
+   * never have started — so this reports the schedule position and leaves
+   * status to the object, where a person sets it.
+   */
+  function p6Position(activity, today = todayMs()) {
+    const dates = p6Dates(activity);
+    if (!dates) return 'unknown';
+    if (dates.end < today) return 'past';
+    if (dates.start > today) return 'future';
+    return 'current';
+  }
+
+  /** A milestone in P6 has no duration: start and finish are the same day. */
+  function p6IsMilestone(activity) {
+    const dates = p6Dates(activity);
+    return !!dates && dates.start === dates.end;
+  }
+
+  /** Objects on the timeline that point at a given activity. */
+  function p6Placed(doc, activityId) {
+    if (!activityId) return [];
+    return doc.objects.filter((o) => o.data?.p6Id === activityId);
+  }
+
+  /** Every activity id the plan currently references. */
+  function p6PlacedIds(doc) {
+    const ids = new Set();
+    for (const obj of doc.objects) if (obj.data?.p6Id) ids.add(obj.data.p6Id);
+    return ids;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
      Factories
      ═══════════════════════════════════════════════════════════════════════ */
 
@@ -1770,6 +1909,7 @@ __mods["core/model.js"] = function (__x, __req) {
       modified: Date.now(),
       settings: defaultSettings(),
       lists: defaultLists(),
+      p6: emptyRegister(),
       laneOrder: [],
       lanes: [],
       objects: [],
@@ -1887,6 +2027,14 @@ __mods["core/model.js"] = function (__x, __req) {
       doc.schema = 2;
       return doc;
     },
+
+    // v2 → v3: the P6 register. Nothing to convert — an older plan simply has
+    // no imported schedule yet.
+    (doc) => {
+      if (!doc.p6) doc.p6 = emptyRegister();
+      doc.schema = 3;
+      return doc;
+    },
   ];
 
   /**
@@ -1914,6 +2062,7 @@ __mods["core/model.js"] = function (__x, __req) {
     doc.modified = doc.modified || Date.now();
     doc.settings = { ...defaultSettings(), ...(doc.settings || {}) };
     doc.lists = normaliseLists(doc);
+    doc.p6 = normaliseRegister(doc);
     doc.baselines = Array.isArray(doc.baselines) ? doc.baselines : [];
     doc.groups = Array.isArray(doc.groups) ? doc.groups : [];
     doc.attachments = Array.isArray(doc.attachments) ? doc.attachments : [];
@@ -1952,6 +2101,32 @@ __mods["core/model.js"] = function (__x, __req) {
    * status therefore keeps working and becomes editable, rather than silently
    * reading as an unknown value forever.
    */
+  /**
+   * Bring the P6 register to a known shape.
+   *
+   * Entries are keyed by activity ID, which is the only stable identifier P6
+   * gives us — names get edited, dates move, but the ID survives. Anything
+   * without one is dropped, because it could never be matched on re-import.
+   */
+  function normaliseRegister(doc) {
+    const raw = doc?.p6;
+    const out = emptyRegister();
+    if (!raw || typeof raw !== 'object') return out;
+
+    out.baseline = raw.baseline || null;
+    out.progress = raw.progress || null;
+    out.history = Array.isArray(raw.history) ? raw.history.slice(0, 12) : [];
+
+    const source = raw.activities && typeof raw.activities === 'object' ? raw.activities : {};
+    for (const [key, value] of Object.entries(source)) {
+      if (!value || typeof value !== 'object') continue;
+      const id = String(value.id || key || '').trim();
+      if (!id) continue;
+      out.activities[id] = makeP6Activity({ ...value, id });
+    }
+    return out;
+  }
+
   function normaliseLists(doc) {
     const seeds = defaultLists();
     const out = {};
@@ -2120,6 +2295,19 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listValuesInUse", { get: () => listValuesInUse, enumerable: true });
   Object.defineProperty(__x, "LINK_TYPES", { get: () => LINK_TYPES, enumerable: true });
   Object.defineProperty(__x, "CONNECTOR_STYLES", { get: () => CONNECTOR_STYLES, enumerable: true });
+  Object.defineProperty(__x, "P6_KINDS", { get: () => P6_KINDS, enumerable: true });
+  Object.defineProperty(__x, "emptyRegister", { get: () => emptyRegister, enumerable: true });
+  Object.defineProperty(__x, "makeP6Activity", { get: () => makeP6Activity, enumerable: true });
+  Object.defineProperty(__x, "p6Register", { get: () => p6Register, enumerable: true });
+  Object.defineProperty(__x, "p6Activity", { get: () => p6Activity, enumerable: true });
+  Object.defineProperty(__x, "p6Count", { get: () => p6Count, enumerable: true });
+  Object.defineProperty(__x, "p6Dates", { get: () => p6Dates, enumerable: true });
+  Object.defineProperty(__x, "p6Slip", { get: () => p6Slip, enumerable: true });
+  Object.defineProperty(__x, "p6Variance", { get: () => p6Variance, enumerable: true });
+  Object.defineProperty(__x, "p6Position", { get: () => p6Position, enumerable: true });
+  Object.defineProperty(__x, "p6IsMilestone", { get: () => p6IsMilestone, enumerable: true });
+  Object.defineProperty(__x, "p6Placed", { get: () => p6Placed, enumerable: true });
+  Object.defineProperty(__x, "p6PlacedIds", { get: () => p6PlacedIds, enumerable: true });
   Object.defineProperty(__x, "defaultStyle", { get: () => defaultStyle, enumerable: true });
   Object.defineProperty(__x, "makeObject", { get: () => makeObject, enumerable: true });
   Object.defineProperty(__x, "makeLane", { get: () => makeLane, enumerable: true });
@@ -3159,7 +3347,11 @@ __mods["core/store.js"] = function (__x, __req) {
   const { deepClone, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { isReadOnly } = __req("core/cloud.js");
-  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage } = __req("core/model.js");
+  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds } = __req("core/model.js");
+
+
+
+
   const { History, diff, apply } = __req("core/history.js");
 
   /* ── Private state ─────────────────────────────────────────────────────── */
@@ -4005,6 +4197,206 @@ __mods["core/store.js"] = function (__x, __req) {
     });
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     The P6 register
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  function getP6() {
+    return p6Register(doc);
+  }
+
+  function getP6Activity(id) {
+    return p6Activity(doc, id);
+  }
+
+  function placedP6Ids() {
+    return p6PlacedIds(doc);
+  }
+
+  /**
+   * Apply an import.
+   *
+   * A baseline import writes the baseline dates and leaves progress alone; a
+   * progress import writes progress and keeps the previous progress so the next
+   * screen can say what moved. Neither ever touches an object's own dates —
+   * that is a separate, explicit step the user takes from the review.
+   *
+   * @param {string} kind      'baseline' | 'progress'
+   * @param {Array}  incoming  activities from `parseP6Rows`, each with `.dates`
+   * @param {object} meta      { fileName, label }
+   */
+  function importP6(kind, incoming, meta = {}) {
+    const isBaseline = kind === 'baseline';
+    const stamp = { importedAt: Date.now(), fileName: meta.fileName || '', label: meta.label || '', count: incoming.length };
+
+    return edit(`Import P6 ${isBaseline ? 'baseline' : 'progress'}`, (d) => {
+      const register = d.p6 && typeof d.p6 === 'object' ? d.p6 : emptyRegister();
+      register.activities = register.activities || {};
+
+      const incomingIds = new Set();
+
+      for (const activity of incoming) {
+        incomingIds.add(activity.id);
+        const current = register.activities[activity.id];
+
+        if (!current) {
+          register.activities[activity.id] = makeP6Activity({
+            ...activity,
+            [isBaseline ? 'baseline' : 'progress']: activity.dates,
+          });
+          continue;
+        }
+
+        // The name and WBS come from whichever import ran last: the scheduler
+        // renames things, and the newest file is the better authority.
+        current.name = activity.name || current.name;
+        if (activity.wbs) current.wbs = activity.wbs;
+        if (activity.percent != null) current.percent = activity.percent;
+        if (activity.status) current.status = activity.status;
+        current.order = activity.order;
+        current.missing = false;
+
+        if (isBaseline) {
+          current.baseline = activity.dates;
+        } else {
+          current.previous = current.progress || null;
+          current.progress = activity.dates;
+        }
+      }
+
+      // Anything the file did not mention is marked, never removed — an object
+      // may be linked to it, and a bar whose activity silently vanished is
+      // worse than one labelled "no longer in P6".
+      for (const activity of Object.values(register.activities)) {
+        if (!incomingIds.has(activity.id)) activity.missing = true;
+      }
+
+      register[isBaseline ? 'baseline' : 'progress'] = stamp;
+      register.history = [{ kind, ...stamp }, ...(register.history || [])].slice(0, 12);
+      d.p6 = register;
+    });
+  }
+
+  /** Forget every imported activity. Objects keep their links, harmlessly. */
+  function clearP6() {
+    return edit('Clear the P6 register', (d) => {
+      d.p6 = emptyRegister();
+    });
+  }
+
+  /**
+   * Put an activity on the timeline.
+   *
+   * The new object's dates start from P6 and are then yours: the link records
+   * where they came from, it does not tie them together.
+   */
+  function placeP6Activity(activityId, { lane = null, type = null } = {}) {
+    const activity = p6Activity(doc, activityId);
+    if (!activity) return null;
+    const dates = p6Dates(activity);
+    if (!dates) return null;
+
+    const laneId = lane || doc.laneOrder[0] || doc.lanes[0]?.id || null;
+    const isMilestone = dates.start === dates.end;
+
+    const object = makeObject({
+      type: type || (isMilestone ? 'milestone' : 'activity'),
+      lane: laneId,
+      title: activity.name || activityId,
+      subtitle: activityId,
+      start: dates.start,
+      end: dates.end,
+      data: { p6Id: activityId },
+    });
+
+    edit(`Add ${activityId} from P6`, (d) => {
+      d.objects.push(object);
+    });
+    return object.id;
+  }
+
+  /** Point an existing object at an activity, or at nothing. */
+  function linkP6(objectId, activityId) {
+    return edit(activityId ? `Link to ${activityId}` : 'Unlink from P6', (d) => {
+      const object = d.objects.find((o) => o.id === objectId);
+      if (!object) return false;
+      object.data = object.data || {};
+      if (activityId) object.data.p6Id = activityId;
+      else delete object.data.p6Id;
+    });
+  }
+
+  /**
+   * Move linked objects onto their P6 dates.
+   *
+   * This is the "accept" half of an import: the file proposes, and this applies
+   * only what was chosen. Everything not named keeps the dates it had.
+   */
+  function adoptP6Dates(activityIds) {
+    const wanted = new Set([].concat(activityIds));
+    if (!wanted.size) return false;
+
+    return edit('Adopt P6 dates', (d) => {
+      let touched = 0;
+      for (const object of d.objects) {
+        const id = object.data?.p6Id;
+        if (!id || !wanted.has(id)) continue;
+        const dates = p6Dates(d.p6?.activities?.[id]);
+        if (!dates) continue;
+        object.start = dates.start;
+        object.end = TYPES[object.type]?.duration ? dates.end : dates.start;
+        object.modified = Date.now();
+        touched++;
+      }
+      if (!touched) return false;
+    });
+  }
+
+  /**
+   * A baseline built from the imported P6 baseline.
+   *
+   * Rather than a second comparison mechanism, this feeds the one that already
+   * exists: the snapshot is written in the same shape a taken baseline uses, so
+   * comparison mode draws the ghosts and day counts with no further work.
+   */
+  function baselineFromP6(name = '') {
+    const register = p6Register(doc);
+    const snapshot = [];
+
+    for (const object of doc.objects) {
+      const id = object.data?.p6Id;
+      const activity = id ? register.activities[id] : null;
+      if (!activity?.baseline) continue;
+      snapshot.push({
+        id: object.id,
+        title: object.title,
+        lane: object.lane,
+        start: activity.baseline.start,
+        end: TYPES[object.type]?.duration ? activity.baseline.end : activity.baseline.start,
+        progress: 0,
+        status: object.status,
+      });
+    }
+
+    if (!snapshot.length) return null;
+
+    const baseline = {
+      id: `bl_p6_${Date.now().toString(36)}`,
+      name: name || `P6 baseline — ${snapshot.length} linked activities`,
+      created: Date.now(),
+      note: 'Generated from the imported P6 baseline dates.',
+      fromP6: true,
+      snapshot,
+    };
+
+    edit('Baseline from P6', (d) => {
+      d.baselines.push(baseline);
+      d.settings.activeBaseline = baseline.id;
+      d.settings.showBaseline = true;
+    });
+    return baseline.id;
+  }
+
   /* ── Groups ────────────────────────────────────────────────────────────── */
 
   function groupObjects(ids, name = 'Group') {
@@ -4127,6 +4519,15 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "removeListOption", { get: () => removeListOption, enumerable: true });
   Object.defineProperty(__x, "moveListOption", { get: () => moveListOption, enumerable: true });
   Object.defineProperty(__x, "resetList", { get: () => resetList, enumerable: true });
+  Object.defineProperty(__x, "getP6", { get: () => getP6, enumerable: true });
+  Object.defineProperty(__x, "getP6Activity", { get: () => getP6Activity, enumerable: true });
+  Object.defineProperty(__x, "placedP6Ids", { get: () => placedP6Ids, enumerable: true });
+  Object.defineProperty(__x, "importP6", { get: () => importP6, enumerable: true });
+  Object.defineProperty(__x, "clearP6", { get: () => clearP6, enumerable: true });
+  Object.defineProperty(__x, "placeP6Activity", { get: () => placeP6Activity, enumerable: true });
+  Object.defineProperty(__x, "linkP6", { get: () => linkP6, enumerable: true });
+  Object.defineProperty(__x, "adoptP6Dates", { get: () => adoptP6Dates, enumerable: true });
+  Object.defineProperty(__x, "baselineFromP6", { get: () => baselineFromP6, enumerable: true });
   Object.defineProperty(__x, "groupObjects", { get: () => groupObjects, enumerable: true });
   Object.defineProperty(__x, "ungroupObjects", { get: () => ungroupObjects, enumerable: true });
   Object.defineProperty(__x, "expandGroupSelection", { get: () => expandGroupSelection, enumerable: true });
@@ -11800,6 +12201,1977 @@ __mods["ui/auth.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// io/inflate.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["io/inflate.js"] = function (__x, __req) {
+  /**
+   * Minimal DEFLATE decompressor and ZIP reader.
+   *
+   * Exists so `.xlsx` files can be imported without a dependency: an xlsx is a
+   * ZIP of XML parts, and the parts are almost always DEFLATE-compressed. The
+   * browser's own DecompressionStream handles this when available (Chrome,
+   * Edge, Firefox, Safari 16.4+); the hand-written inflater below is the
+   * fallback so the feature works on any engine, offline, from `file://`.
+   *
+   * Implements RFC 1951 for stored, fixed-Huffman and dynamic-Huffman blocks —
+   * which is everything a spreadsheet writer emits.
+   *
+   * Imports: nothing (leaf).
+   */
+
+  /* ── Huffman decoding ──────────────────────────────────────────────────── */
+
+  /** Build a canonical Huffman decode table from a list of code lengths. */
+  function buildTree(lengths) {
+    const maxBits = Math.max(...lengths, 0);
+    const blCount = new Array(maxBits + 1).fill(0);
+    for (const len of lengths) if (len) blCount[len]++;
+
+    const nextCode = new Array(maxBits + 1).fill(0);
+    let code = 0;
+    for (let bits = 1; bits <= maxBits; bits++) {
+      code = (code + blCount[bits - 1]) << 1;
+      nextCode[bits] = code;
+    }
+
+    // Map "length:code" to a symbol. A flat object lookup is fast enough here
+    // and keeps the implementation short and auditable.
+    const table = new Map();
+    for (let symbol = 0; symbol < lengths.length; symbol++) {
+      const len = lengths[symbol];
+      if (!len) continue;
+      table.set(len * 65536 + nextCode[len], symbol);
+      nextCode[len]++;
+    }
+    return { table, maxBits };
+  }
+
+  class BitReader {
+    constructor(bytes) {
+      this.bytes = bytes;
+      this.pos = 0;
+      this.bitBuffer = 0;
+      this.bitCount = 0;
+    }
+
+    bits(n) {
+      while (this.bitCount < n) {
+        if (this.pos >= this.bytes.length) throw new Error('Unexpected end of compressed data');
+        this.bitBuffer |= this.bytes[this.pos++] << this.bitCount;
+        this.bitCount += 8;
+      }
+      const value = this.bitBuffer & ((1 << n) - 1);
+      this.bitBuffer >>>= n;
+      this.bitCount -= n;
+      return value;
+    }
+
+    /** Huffman codes are stored most-significant-bit first. */
+    decode(tree) {
+      let code = 0;
+      for (let len = 1; len <= tree.maxBits; len++) {
+        code = (code << 1) | this.bits(1);
+        const symbol = tree.table.get(len * 65536 + code);
+        if (symbol !== undefined) return symbol;
+      }
+      throw new Error('Invalid Huffman code');
+    }
+
+    alignToByte() {
+      this.bitBuffer = 0;
+      this.bitCount = 0;
+    }
+  }
+
+  const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+  const LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+  const DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+  const DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+  const CODE_LENGTH_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+
+  let fixedLiteral = null;
+  let fixedDistance = null;
+
+  function fixedTrees() {
+    if (!fixedLiteral) {
+      const lengths = new Array(288);
+      for (let i = 0; i < 144; i++) lengths[i] = 8;
+      for (let i = 144; i < 256; i++) lengths[i] = 9;
+      for (let i = 256; i < 280; i++) lengths[i] = 7;
+      for (let i = 280; i < 288; i++) lengths[i] = 8;
+      fixedLiteral = buildTree(lengths);
+      fixedDistance = buildTree(new Array(30).fill(5));
+    }
+    return [fixedLiteral, fixedDistance];
+  }
+
+  /**
+   * Inflate a raw DEFLATE stream (no zlib header).
+   * @param {Uint8Array} data
+   * @returns {Uint8Array}
+   */
+  function inflateRaw(data) {
+    const reader = new BitReader(data);
+    const out = [];
+    let output = new Uint8Array(Math.max(1024, data.length * 4));
+    let length = 0;
+
+    const push = (byte) => {
+      if (length >= output.length) {
+        const bigger = new Uint8Array(output.length * 2);
+        bigger.set(output);
+        output = bigger;
+      }
+      output[length++] = byte;
+    };
+
+    let final = false;
+    while (!final) {
+      final = reader.bits(1) === 1;
+      const type = reader.bits(2);
+
+      if (type === 0) {
+        reader.alignToByte();
+        const len = data[reader.pos] | (data[reader.pos + 1] << 8);
+        reader.pos += 4; // skip LEN and NLEN
+        for (let i = 0; i < len; i++) push(data[reader.pos++]);
+        continue;
+      }
+
+      let literalTree;
+      let distanceTree;
+
+      if (type === 1) {
+        [literalTree, distanceTree] = fixedTrees();
+      } else if (type === 2) {
+        const hlit = reader.bits(5) + 257;
+        const hdist = reader.bits(5) + 1;
+        const hclen = reader.bits(4) + 4;
+
+        const codeLengths = new Array(19).fill(0);
+        for (let i = 0; i < hclen; i++) codeLengths[CODE_LENGTH_ORDER[i]] = reader.bits(3);
+        const codeTree = buildTree(codeLengths);
+
+        const lengths = [];
+        while (lengths.length < hlit + hdist) {
+          const symbol = reader.decode(codeTree);
+          if (symbol < 16) {
+            lengths.push(symbol);
+          } else if (symbol === 16) {
+            const previous = lengths[lengths.length - 1];
+            const repeat = reader.bits(2) + 3;
+            for (let i = 0; i < repeat; i++) lengths.push(previous);
+          } else if (symbol === 17) {
+            const repeat = reader.bits(3) + 3;
+            for (let i = 0; i < repeat; i++) lengths.push(0);
+          } else {
+            const repeat = reader.bits(7) + 11;
+            for (let i = 0; i < repeat; i++) lengths.push(0);
+          }
+        }
+
+        literalTree = buildTree(lengths.slice(0, hlit));
+        distanceTree = buildTree(lengths.slice(hlit));
+      } else {
+        throw new Error('Invalid DEFLATE block type');
+      }
+
+      for (;;) {
+        const symbol = reader.decode(literalTree);
+        if (symbol === 256) break;
+        if (symbol < 256) {
+          push(symbol);
+          continue;
+        }
+        const lengthIndex = symbol - 257;
+        const copyLength = LENGTH_BASE[lengthIndex] + reader.bits(LENGTH_EXTRA[lengthIndex]);
+        const distSymbol = reader.decode(distanceTree);
+        const distance = DIST_BASE[distSymbol] + reader.bits(DIST_EXTRA[distSymbol]);
+        const from = length - distance;
+        if (from < 0) throw new Error('Invalid back-reference in compressed data');
+        for (let i = 0; i < copyLength; i++) push(output[from + i]);
+      }
+    }
+
+    return output.subarray(0, length);
+  }
+
+  /**
+   * Decompress using the platform where it exists, falling back to the
+   * implementation above. Always returns a promise for one call shape.
+   */
+  async function inflate(data) {
+    if (typeof DecompressionStream === 'function') {
+      try {
+        const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+        const buffer = await new Response(stream).arrayBuffer();
+        return new Uint8Array(buffer);
+      } catch {
+        /* fall through to the JavaScript inflater */
+      }
+    }
+    return inflateRaw(data);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     ZIP reading
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Read a ZIP archive from an ArrayBuffer.
+   * Returns a Map of path → Uint8Array. Only the stored (0) and deflate (8)
+   * methods are supported, which covers every spreadsheet writer in practice.
+   */
+  async function readZip(arrayBuffer) {
+    const bytes = new Uint8Array(arrayBuffer);
+    const view = new DataView(arrayBuffer);
+
+    // Locate the End Of Central Directory record by scanning backwards.
+    let eocd = -1;
+    for (let i = bytes.length - 22; i >= 0 && i > bytes.length - 66_000; i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) throw new Error('Not a valid ZIP archive (no end-of-directory record).');
+
+    const entryCount = view.getUint16(eocd + 10, true);
+    let offset = view.getUint32(eocd + 16, true);
+
+    const files = new Map();
+    const decoder = new TextDecoder('utf-8');
+
+    for (let i = 0; i < entryCount; i++) {
+      if (view.getUint32(offset, true) !== 0x02014b50) break;
+
+      const method = view.getUint16(offset + 10, true);
+      const compressedSize = view.getUint32(offset + 20, true);
+      const nameLength = view.getUint16(offset + 28, true);
+      const extraLength = view.getUint16(offset + 30, true);
+      const commentLength = view.getUint16(offset + 32, true);
+      const localOffset = view.getUint32(offset + 42, true);
+      const name = decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
+
+      // Re-read the local header: its extra field length can differ.
+      const localNameLength = view.getUint16(localOffset + 26, true);
+      const localExtraLength = view.getUint16(localOffset + 28, true);
+      const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+      const raw = bytes.subarray(dataStart, dataStart + compressedSize);
+
+      if (!name.endsWith('/')) {
+        if (method === 0) files.set(name, raw);
+        else if (method === 8) files.set(name, await inflate(raw));
+        // Any other method (bzip2, LZMA) is left out rather than corrupting data.
+      }
+
+      offset += 46 + nameLength + extraLength + commentLength;
+    }
+
+    return files;
+  }
+
+  /** Decode a ZIP entry as UTF-8 text. */
+  function zipText(files, path) {
+    const entry = files.get(path);
+    return entry ? new TextDecoder('utf-8').decode(entry) : null;
+  }
+
+  Object.defineProperty(__x, "inflateRaw", { get: () => inflateRaw, enumerable: true });
+  Object.defineProperty(__x, "inflate", { get: () => inflate, enumerable: true });
+  Object.defineProperty(__x, "readZip", { get: () => readZip, enumerable: true });
+  Object.defineProperty(__x, "zipText", { get: () => zipText, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// io/importers.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["io/importers.js"] = function (__x, __req) {
+  /**
+   * Import.
+   *
+   * Four routes in: the application's own JSON, generic CSV/TSV, Microsoft
+   * Project's CSV export, and `.xlsx` workbooks. Everything converges on one
+   * intermediate shape — a list of row objects with normalised column names —
+   * so the mapping logic is written once.
+   *
+   * Nothing is applied to the live document until the caller confirms; every
+   * function returns a *result* describing what would be imported, along with
+   * any warnings, so the UI can preview it first.
+   *
+   * Imports: util, dates, model, store, inflate.
+   */
+
+  const { readFileAsText, readFileAsArrayBuffer, fold } = __req("core/util.js");
+  const { toMs, toISO, MS_DAY, addDays, todayMs, getDateOrder } = __req("core/dates.js");
+  const { makeProject, makeObject, makeLane, makeLink, normalise, validate, TYPES, listOptions } = __req("core/model.js");
+
+
+
+
+
+
+
+
+
+  const { getDoc } = __req("core/store.js");
+  const { readZip, zipText } = __req("io/inflate.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Entry point
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Inspect a file and import it with the right reader.
+   * @returns {Promise<{kind:string, doc?:object, objects?:Array, lanes?:Array,
+   *                    links?:Array, warnings:string[], errors:string[], summary:string}>}
+   */
+  async function importFile(file) {
+    const name = (file.name || '').toLowerCase();
+
+    try {
+      if (name.endsWith('.json')) return await importJsonFile(file);
+      if (name.endsWith('.xlsx') || name.endsWith('.xlsm')) return await importXlsxFile(file);
+      if (name.endsWith('.csv') || name.endsWith('.tsv') || name.endsWith('.txt')) return await importCsvFile(file);
+
+      // Unknown extension: sniff the content rather than refusing outright.
+      const text = await readFileAsText(file);
+      if (text.trim().startsWith('{')) return parseJson(text);
+      return parseTabular(splitDelimited(text), file.name);
+    } catch (err) {
+      return { kind: 'error', warnings: [], errors: [err.message], summary: 'Import failed' };
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     JSON — a full project
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function importJsonFile(file) {
+    return parseJson(await readFileAsText(file));
+  }
+
+  function parseJson(text) {
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      return { kind: 'error', warnings: [], errors: [`The file is not valid JSON: ${err.message}`], summary: 'Import failed' };
+    }
+
+    const check = validate(parsed);
+    if (!check.ok) {
+      return { kind: 'error', warnings: check.warnings, errors: check.errors, summary: 'Import failed' };
+    }
+
+    const doc = normalise(parsed);
+    return {
+      kind: 'project',
+      doc,
+      warnings: check.warnings,
+      errors: [],
+      summary: `${doc.objects.length} objects across ${doc.lanes.length} lanes, ${doc.links.length} dependencies`,
+    };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     CSV / TSV
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function importCsvFile(file) {
+    const text = await readFileAsText(file);
+    return parseTabular(splitDelimited(text), file.name);
+  }
+
+  /**
+   * Split delimited text into a matrix, honouring RFC 4180 quoting and
+   * auto-detecting the separator (comma, semicolon or tab — European Excel
+   * exports use semicolons).
+   */
+  function splitDelimited(text) {
+    const clean = text.replace(/^﻿/, '');
+    const sample = clean.slice(0, 4000);
+    const counts = {
+      ',': (sample.match(/,/g) || []).length,
+      ';': (sample.match(/;/g) || []).length,
+      '\t': (sample.match(/\t/g) || []).length,
+    };
+    const delimiter = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+
+    const rows = [];
+    let row = [];
+    let cell = '';
+    let quoted = false;
+
+    for (let i = 0; i < clean.length; i++) {
+      const ch = clean[i];
+
+      if (quoted) {
+        if (ch === '"') {
+          if (clean[i + 1] === '"') {
+            cell += '"';
+            i++;
+          } else {
+            quoted = false;
+          }
+        } else {
+          cell += ch;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        quoted = true;
+      } else if (ch === delimiter) {
+        row.push(cell);
+        cell = '';
+      } else if (ch === '\n') {
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = '';
+      } else if (ch !== '\r') {
+        cell += ch;
+      }
+    }
+
+    if (cell.length || row.length) {
+      row.push(cell);
+      rows.push(row);
+    }
+
+    return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
+  }
+
+  /* ── Column mapping ────────────────────────────────────────────────────── */
+
+  /**
+   * Header aliases. The first match wins, so more specific names come first.
+   * Covers our own CSV export, Microsoft Project's CSV, and the column names
+   * people actually type into a spreadsheet.
+   */
+  const COLUMN_ALIASES = {
+    title: ['title', 'name', 'task name', 'task', 'activity', 'activity name', 'description', 'summary', 'subject'],
+    type: ['type', 'object type', 'category', 'kind'],
+    lane: ['lane', 'swimlane', 'group', 'workstream', 'discipline', 'resource names', 'resource', 'team', 'phase'],
+    start: ['start', 'start date', 'planned start', 'begin', 'from', 'baseline start', 'early start'],
+    end: ['finish', 'finish date', 'end', 'end date', 'planned finish', 'to', 'due', 'due date', 'baseline finish', 'early finish'],
+    duration: ['duration', 'duration days', 'duration_days', 'days'],
+    status: ['status', 'state', 'progress status'],
+    progress: ['percent complete', 'percent_complete', '% complete', 'complete', 'progress', 'pct complete'],
+    owner: ['owner', 'assigned to', 'assignee', 'responsible', 'engineer', 'lead'],
+    subsystem: ['subsystem', 'system', 'sub-system', 'discipline code'],
+    area: ['area', 'zone', 'section', 'location', 'site'],
+    tags: ['tags', 'labels', 'keywords'],
+    notes: ['notes', 'note', 'comments', 'remarks', 'detail'],
+    version: ['version', 'sw version', 'software version'],
+    releaseNumber: ['release number', 'release_number', 'release no', 'release'],
+    buildNumber: ['build number', 'build_number', 'build'],
+    testPackage: ['test package', 'test_package', 'package', 'tp'],
+    testKind: ['test type', 'test_type', 'test kind'],
+    severity: ['severity', 'priority', 'risk level'],
+    reference: ['reference', 'ref', 'ticket', 'issue id', 'defect'],
+    predecessors: ['predecessors', 'predecessor', 'depends on', 'dependency', 'dependencies'],
+    id: ['id', 'unique id', 'uid', 'task id', 'wbs'],
+    milestone: ['milestone'],
+    outline: ['outline level', 'outline_level', 'level'],
+  };
+
+  /** Map a header row onto our field names. */
+  function mapHeaders(header) {
+    const normalised = header.map((h) => fold(String(h).trim()));
+    const mapping = {};
+    for (const [field, aliases] of Object.entries(COLUMN_ALIASES)) {
+      for (const alias of aliases) {
+        const index = normalised.indexOf(alias);
+        if (index >= 0) {
+          mapping[field] = index;
+          break;
+        }
+      }
+    }
+    return mapping;
+  }
+
+  /**
+   * Turn a matrix into importable objects and lanes.
+   * @param {string[][]} rows
+   * @param {string} sourceName
+   */
+  function parseTabular(rows, sourceName = 'import') {
+    const warnings = [];
+    const errors = [];
+
+    if (rows.length < 2) {
+      return { kind: 'error', warnings, errors: ['The file has no data rows.'], summary: 'Import failed' };
+    }
+
+    const header = rows[0];
+    const mapping = mapHeaders(header);
+
+    if (mapping.title == null) {
+      return {
+        kind: 'error',
+        warnings,
+        errors: [`No recognisable title column. Expected one of: ${COLUMN_ALIASES.title.join(', ')}. Found: ${header.join(', ')}`],
+        summary: 'Import failed',
+      };
+    }
+    if (mapping.start == null) {
+      warnings.push('No start-date column found — imported items will start today and be spaced sequentially.');
+    }
+
+    const laneNames = new Map(); // lane label -> lane record
+    const objects = [];
+    const sourceIds = new Map(); // source id -> new object id
+    const pendingLinks = [];
+    let cursor = todayMs();
+
+    for (let r = 1; r < rows.length; r++) {
+      const row = rows[r];
+      const get = (field) => (mapping[field] != null ? String(row[mapping[field]] ?? '').trim() : '');
+
+      const title = get('title');
+      if (!title) continue;
+
+      /* Lane */
+      const laneLabel = get('lane') || 'Imported';
+      if (!laneNames.has(laneLabel)) {
+        laneNames.set(laneLabel, makeLane({ name: laneLabel, color: laneColour(laneNames.size) }));
+      }
+      const lane = laneNames.get(laneLabel);
+
+      /* Dates */
+      let start = parseDate(get('start'));
+      if (!Number.isFinite(start)) {
+        start = cursor;
+        cursor = addDays(cursor, 1);
+      }
+
+      let end = parseDate(get('end'));
+      const durationText = get('duration');
+      if (!Number.isFinite(end) && durationText) {
+        const days = parseDuration(durationText);
+        if (Number.isFinite(days)) end = addDays(start, Math.max(1, Math.round(days)));
+      }
+
+      /* Type */
+      const isMilestone =
+        truthy(get('milestone')) ||
+        (Number.isFinite(end) && end === start && !durationText) ||
+        /milestone|gate|acceptance/i.test(title);
+      const type = resolveType(get('type'), { isMilestone, title });
+
+      if (!Number.isFinite(end)) end = TYPES[type]?.duration ? addDays(start, TYPES[type].defaultDays || 5) : start;
+      if (TYPES[type]?.duration && end <= start) end = addDays(start, 1);
+
+      /* Everything else */
+      const obj = makeObject({
+        type,
+        lane: lane.id,
+        title,
+        start,
+        end,
+        status: resolveStatus(get('status'), get('progress')),
+        progress: parseProgress(get('progress')),
+        owner: get('owner'),
+        subsystem: resolveSubsystem(get('subsystem')),
+        area: get('area'),
+        tags: get('tags').split(/[;,|]/).map((t) => t.trim()).filter(Boolean),
+        notes: get('notes') ? `<p>${escapeText(get('notes'))}</p>` : '',
+        data: pruneEmpty({
+          version: get('version'),
+          releaseNumber: get('releaseNumber'),
+          buildNumber: get('buildNumber'),
+          testPackage: get('testPackage'),
+          testKind: resolveTestKind(get('testKind')),
+          severity: resolveSeverity(get('severity')),
+          reference: get('reference'),
+        }),
+      });
+
+      objects.push(obj);
+
+      const sourceId = get('id');
+      if (sourceId) sourceIds.set(sourceId, obj.id);
+
+      const predecessors = get('predecessors');
+      if (predecessors) pendingLinks.push({ to: obj.id, spec: predecessors });
+    }
+
+    if (!objects.length) {
+      return { kind: 'error', warnings, errors: ['No rows contained a usable title.'], summary: 'Import failed' };
+    }
+
+    /* Resolve predecessor references — Microsoft Project writes "12FS+3 days". */
+    const links = [];
+    let unresolved = 0;
+    for (const pending of pendingLinks) {
+      for (const part of pending.spec.split(/[;,]/)) {
+        const match = /^\s*([\w.-]+)\s*(FS|SS|FF|SF)?\s*([+-]\s*\d+)?/i.exec(part.trim());
+        if (!match) continue;
+        const fromId = sourceIds.get(match[1]);
+        if (!fromId) {
+          unresolved++;
+          continue;
+        }
+        links.push(
+          makeLink({
+            from: fromId,
+            to: pending.to,
+            type: (match[2] || 'FS').toUpperCase(),
+            lag: match[3] ? parseInt(match[3].replace(/\s+/g, ''), 10) : 0,
+          })
+        );
+      }
+    }
+    if (unresolved) warnings.push(`${unresolved} predecessor reference(s) pointed at rows that were not imported.`);
+
+    const lanes = Array.from(laneNames.values());
+    return {
+      kind: 'rows',
+      objects,
+      lanes,
+      links,
+      warnings,
+      errors,
+      summary: `${objects.length} objects, ${lanes.length} lanes, ${links.length} dependencies from ${sourceName}`,
+    };
+  }
+
+  /* ── Value coercion ────────────────────────────────────────────────────── */
+
+  /** Parse a date cell across the formats spreadsheets actually produce. */
+  function parseDate(value) {
+    const text = String(value || '').trim();
+    if (!text) return NaN;
+
+    // Excel serial number (days since 1899-12-30).
+    if (/^\d{5}(\.\d+)?$/.test(text)) {
+      const serial = parseFloat(text);
+      if (serial > 20000 && serial < 80000) return Date.UTC(1899, 11, 30) + Math.round(serial) * MS_DAY;
+    }
+
+    const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(text);
+    if (iso) return Date.UTC(+iso[1], +iso[2] - 1, +iso[3]);
+
+    // 3/5/2026 is genuinely ambiguous. Where one field is over 12 the order is
+    // decided for us; otherwise fall back to the project's display order, so a
+    // plan shown as M/D/Y also imports spreadsheets written as M/D/Y.
+    const slash = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})/.exec(text);
+    if (slash) {
+      const [, first, second, y] = slash;
+      const a = +first;
+      const b = +second;
+
+      let day;
+      let month;
+      if (a > 12 && b <= 12) {
+        day = a;
+        month = b;
+      } else if (b > 12 && a <= 12) {
+        month = a;
+        day = b;
+      } else if (getDateOrder() === 'dmy') {
+        day = a;
+        month = b;
+      } else {
+        month = a;
+        day = b;
+      }
+
+      let year = +y;
+      if (year < 100) year += year < 70 ? 2000 : 1900;
+      return Date.UTC(year, month - 1, day);
+    }
+
+    const parsed = Date.parse(text);
+    if (!Number.isNaN(parsed)) {
+      const d = new Date(parsed);
+      return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+    }
+    return NaN;
+  }
+
+  /** "12 days", "3 wks", "5d", "8h" → days. */
+  function parseDuration(value) {
+    const text = String(value).trim().toLowerCase();
+    const match = /^([\d.]+)\s*([a-z]*)/.exec(text);
+    if (!match) return NaN;
+    const n = parseFloat(match[1]);
+    if (!Number.isFinite(n)) return NaN;
+    const unit = match[2];
+    if (unit.startsWith('w')) return n * 7;
+    if (unit.startsWith('mo')) return n * 30.44;
+    if (unit.startsWith('h')) return n / 8;
+    if (unit.startsWith('m') && unit !== 'mo') return n * 30.44;
+    return n;
+  }
+
+  function parseProgress(value) {
+    const text = String(value || '').replace('%', '').trim();
+    const n = parseFloat(text);
+    if (!Number.isFinite(n)) return 0;
+    // Spreadsheets store percentages as 0–1 as often as 0–100.
+    return n <= 1 && text.includes('.') ? Math.round(n * 100) : Math.round(n);
+  }
+
+  function resolveType(value, { isMilestone, title }) {
+    const text = fold(value);
+    if (text) {
+      for (const [id, def] of Object.entries(TYPES)) {
+        if (fold(def.label) === text || id === text) return id;
+      }
+      if (/release|build|drop/.test(text)) return 'release';
+      if (/campaign|commission/.test(text)) return 'campaign';
+      if (/risk/.test(text)) return 'risk';
+      if (/issue|defect|bug/.test(text)) return 'issue';
+      if (/milestone|gate/.test(text)) return 'milestone';
+      if (/test/.test(text)) return 'testwindow';
+      if (/freeze/.test(text)) return 'freeze';
+      if (/outage/.test(text)) return 'outage';
+    }
+    if (isMilestone) return 'milestone';
+    if (/\brelease\b|\bv\d+\.\d+/i.test(title)) return 'release';
+    if (/\btest(ing)?\b/i.test(title)) return 'testwindow';
+    if (/\bcampaign\b/i.test(title)) return 'campaign';
+    return 'activity';
+  }
+
+  function resolveStatus(value, progressText) {
+    const text = fold(value);
+    if (text) {
+      for (const option of listOptions('status')) {
+        if (fold(option.label) === text || option.id === text) return option.id;
+      }
+      if (/complete|done|finish|closed/.test(text)) return 'complete';
+      if (/progress|active|started|ongoing|wip/.test(text)) return 'inprogress';
+      if (/late|delay|slip|overdue/.test(text)) return 'delayed';
+      if (/block|stopped/.test(text)) return 'blocked';
+      if (/cancel/.test(text)) return 'cancelled';
+      if (/hold|pause/.test(text)) return 'onhold';
+      if (/test/.test(text)) return 'testing';
+      if (/release/.test(text)) return 'released';
+    }
+    const progress = parseProgress(progressText);
+    if (progress >= 100) return 'complete';
+    if (progress > 0) return 'inprogress';
+    return 'planned';
+  }
+
+  function resolveSubsystem(value) {
+    const text = fold(value);
+    if (!text) return '';
+    const found = listOptions('subsystem').find((s) => s.id === text || fold(s.label) === text);
+    if (found) return found.id;
+    if (/interlock/.test(text)) return 'ixl';
+    if (/comm|radio|network/.test(text)) return 'comms';
+    if (/train|vehicle|rolling/.test(text)) return 'vehicle';
+    if (/scada|supervis/.test(text)) return 'scada';
+    if (/wayside|track/.test(text)) return 'wayside';
+    return '';
+  }
+
+  function resolveTestKind(value) {
+    const text = fold(value);
+    if (!text) return '';
+    const found = listOptions('testKind').find((t) => t.id === text || fold(t.label) === text);
+    return found ? found.id : '';
+  }
+
+  function resolveSeverity(value) {
+    const text = fold(value);
+    if (!text) return '';
+    if (/crit|1|highest|blocker/.test(text)) return 'critical';
+    if (/high|2|major/.test(text)) return 'high';
+    if (/med|3|moderate|normal/.test(text)) return 'medium';
+    if (/low|4|minor/.test(text)) return 'low';
+    return '';
+  }
+
+  function truthy(value) {
+    return /^(yes|y|true|1|x)$/i.test(String(value || '').trim());
+  }
+
+  function pruneEmpty(obj) {
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) if (v) out[k] = v;
+    return out;
+  }
+
+  function escapeText(text) {
+    return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  const LANE_COLOURS = ['#5b93f5', '#a855f7', '#16a571', '#e0900b', '#f2555b', '#0ea5e9', '#0d9488', '#f97316', '#818cf8', '#94a3b8'];
+  function laneColour(index) {
+    return LANE_COLOURS[index % LANE_COLOURS.length];
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     XLSX
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function importXlsxFile(file) {
+    const buffer = await readFileAsArrayBuffer(file);
+    const rows = await readXlsx(buffer);
+    if (!rows.length) {
+      return { kind: 'error', warnings: [], errors: ['No readable sheet was found in the workbook.'], summary: 'Import failed' };
+    }
+    const result = parseTabular(rows, file.name);
+    result.warnings.unshift('Imported from the first worksheet. Formatting, formulas and charts are not read.');
+    return result;
+  }
+
+  /**
+   * Read the first worksheet of an xlsx workbook into a matrix.
+   * Handles shared strings, inline strings, numbers and dates.
+   */
+  async function readXlsx(arrayBuffer) {
+    const files = await readZip(arrayBuffer);
+
+    /* Shared string table */
+    const sharedStrings = [];
+    const sharedXml = zipText(files, 'xl/sharedStrings.xml');
+    if (sharedXml) {
+      for (const si of sharedXml.match(/<si>[\s\S]*?<\/si>/g) || []) {
+        // A cell's text can be split across several runs; concatenate them all.
+        const parts = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
+        sharedStrings.push(parts.map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join(''));
+      }
+    }
+
+    /* Which sheet is first? Fall back to sheet1.xml if the map is missing. */
+    let sheetPath = 'xl/worksheets/sheet1.xml';
+    const workbookXml = zipText(files, 'xl/workbook.xml');
+    const relsXml = zipText(files, 'xl/_rels/workbook.xml.rels');
+    if (workbookXml && relsXml) {
+      const firstSheet = /<sheet[^>]*r:id="([^"]+)"/.exec(workbookXml);
+      if (firstSheet) {
+        const rel = new RegExp(`<Relationship[^>]*Id="${firstSheet[1]}"[^>]*Target="([^"]+)"`).exec(relsXml);
+        if (rel) {
+          const target = rel[1].replace(/^\/?xl\//, '').replace(/^\//, '');
+          if (files.has(`xl/${target}`)) sheetPath = `xl/${target}`;
+        }
+      }
+    }
+
+    const sheetXml = zipText(files, sheetPath);
+    if (!sheetXml) return [];
+
+    /* Date-formatted cells need the style table to be recognised as dates. */
+    const dateStyles = readDateStyles(zipText(files, 'xl/styles.xml'));
+
+    const rows = [];
+    for (const rowXml of sheetXml.match(/<row[\s\S]*?(?:\/>|<\/row>)/g) || []) {
+      const cells = [];
+      for (const cellXml of rowXml.match(/<c[\s\S]*?(?:\/>|<\/c>)/g) || []) {
+        const ref = /r="([A-Z]+)\d+"/.exec(cellXml);
+        const column = ref ? columnIndex(ref[1]) : cells.length;
+        const type = /t="([^"]+)"/.exec(cellXml)?.[1];
+        const styleIndex = /s="(\d+)"/.exec(cellXml)?.[1];
+
+        let value = '';
+        if (type === 'inlineStr') {
+          value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || []).map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join('');
+        } else {
+          const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
+          if (raw != null) {
+            if (type === 's') value = sharedStrings[parseInt(raw, 10)] ?? '';
+            else if (type === 'str' || type === 'e') value = decodeXml(raw);
+            else if (styleIndex != null && dateStyles.has(parseInt(styleIndex, 10))) {
+              value = toISO(Date.UTC(1899, 11, 30) + Math.round(parseFloat(raw)) * MS_DAY);
+            } else {
+              value = decodeXml(raw);
+            }
+          }
+        }
+
+        while (cells.length < column) cells.push('');
+        cells[column] = value;
+      }
+      if (cells.length) rows.push(cells);
+    }
+
+    return rows;
+  }
+
+  /** Style indices whose number format is a date/time format. */
+  function readDateStyles(stylesXml) {
+    const dateStyles = new Set();
+    if (!stylesXml) return dateStyles;
+
+    // Built-in numeric formats 14–22 and 45–47 are dates/times.
+    const builtInDates = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47]);
+    const customDates = new Set();
+    for (const fmt of stylesXml.match(/<numFmt[^>]*\/>/g) || []) {
+      const id = /numFmtId="(\d+)"/.exec(fmt)?.[1];
+      const code = /formatCode="([^"]*)"/.exec(fmt)?.[1] || '';
+      if (id && /[dmyh]/i.test(code) && !/[#0]/.test(code.replace(/\[[^\]]*\]/g, ''))) customDates.add(parseInt(id, 10));
+    }
+
+    const cellXfs = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] || '';
+    const xfs = cellXfs.match(/<xf[\s\S]*?(?:\/>|<\/xf>)/g) || [];
+    xfs.forEach((xf, index) => {
+      const id = parseInt(/numFmtId="(\d+)"/.exec(xf)?.[1] ?? '0', 10);
+      if (builtInDates.has(id) || customDates.has(id)) dateStyles.add(index);
+    });
+
+    return dateStyles;
+  }
+
+  /** 'A' → 0, 'B' → 1, 'AA' → 26 … */
+  function columnIndex(letters) {
+    let n = 0;
+    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n - 1;
+  }
+
+  function decodeXml(text) {
+    return String(text)
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(+code))
+      .replace(/&amp;/g, '&');
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Applying an import
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Turn a row-based import result into a document.
+   * `mode` is 'replace' (a new project from the rows) or 'merge' (append the
+   * rows to the open project, creating any lanes it needs).
+   */
+  function buildDocFromRows(result, { mode = 'replace', name = 'Imported plan' } = {}) {
+    if (mode === 'merge') {
+      const doc = JSON.parse(JSON.stringify(getDoc()));
+      const laneByName = new Map(doc.lanes.map((l) => [fold(l.name), l]));
+      const laneMap = new Map();
+
+      for (const lane of result.lanes) {
+        const existing = laneByName.get(fold(lane.name));
+        if (existing) {
+          laneMap.set(lane.id, existing.id);
+        } else {
+          doc.lanes.push(lane);
+          doc.laneOrder.push(lane.id);
+          laneMap.set(lane.id, lane.id);
+        }
+      }
+
+      for (const obj of result.objects) {
+        obj.lane = laneMap.get(obj.lane) || doc.laneOrder[0];
+        doc.objects.push(obj);
+      }
+      doc.links.push(...result.links);
+      return normalise(doc);
+    }
+
+    const doc = makeProject(name);
+    doc.lanes = result.lanes;
+    doc.laneOrder = result.lanes.map((l) => l.id);
+    doc.objects = result.objects;
+    doc.links = result.links;
+    return normalise(doc);
+  }
+
+  Object.defineProperty(__x, "importFile", { get: () => importFile, enumerable: true });
+  Object.defineProperty(__x, "parseJson", { get: () => parseJson, enumerable: true });
+  Object.defineProperty(__x, "splitDelimited", { get: () => splitDelimited, enumerable: true });
+  Object.defineProperty(__x, "parseTabular", { get: () => parseTabular, enumerable: true });
+  Object.defineProperty(__x, "parseDate", { get: () => parseDate, enumerable: true });
+  Object.defineProperty(__x, "readXlsx", { get: () => readXlsx, enumerable: true });
+  Object.defineProperty(__x, "buildDocFromRows", { get: () => buildDocFromRows, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// io/p6.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["io/p6.js"] = function (__x, __req) {
+  /**
+   * Reading a Primavera P6 export.
+   *
+   * P6 exports whatever columns the scheduler's layout happens to show, in
+   * whatever order, with whatever headings that version uses. So the reader
+   * asks for four things and takes the rest if it finds them:
+   *
+   *   required   Activity ID, Activity Name, Start, Finish
+   *   optional   WBS, % Complete, Activity Status, Total Float
+   *
+   * Requiring four columns means the scheduler can send a minimal export and it
+   * works; recognising more means a richer layout costs nothing extra.
+   *
+   * Two things here have bitten every P6 importer ever written:
+   *
+   *   Finish times. P6 writes a finish as `30-Oct-26 17:00` — the last working
+   *   moment of the 30th. Truncating the time is right; rounding up puts every
+   *   activity a day long, and the error is invisible until someone checks a
+   *   date against the schedule in a meeting.
+   *
+   *   Milestones. A start milestone has a finish and a finish milestone has a
+   *   start, both equal to the other. They are not zero-length bugs.
+   *
+   * Imports: util, dates, model, importers.
+   */
+
+  const { MS_DAY } = __req("core/dates.js");
+  const { makeP6Activity } = __req("core/model.js");
+  const { parseDate, splitDelimited, readXlsx } = __req("io/importers.js");
+
+  /* ── Column recognition ────────────────────────────────────────────────── */
+
+  /**
+   * Header patterns, most specific first.
+   *
+   * P6 and its various export layouts disagree on names — "Activity ID" is also
+   * "Task ID" and "Act ID"; "Finish" is also "End" and "Finish Date". These are
+   * matched against a folded heading, so spacing and case do not matter.
+   */
+  const COLUMNS = {
+    id: [/^activity ?id$/, /^act(ivity)? ?(id|code)$/, /^task ?id$/, /^id$/],
+    name: [/^activity ?name$/, /^act(ivity)? ?(name|description)$/, /^task ?name$/, /^description$/, /^name$/],
+    start: [/^(bl|baseline) ?(project )?start/, /^start( date)?$/, /^early start$/, /^actual start$/],
+    end: [/^(bl|baseline) ?(project )?finish/, /^finish( date)?$/, /^end( date)?$/, /^early finish$/, /^actual finish$/],
+    wbs: [/^wbs( ?(path|code|name))?$/, /^work breakdown/, /^phase$/],
+    percent: [/^(activity )?% ?(complete|comp)$/, /^percent ?complete$/, /^progress$/],
+    status: [/^(activity )?status$/, /^state$/],
+    float: [/^(total )?float$/, /^slack$/],
+  };
+
+  /** Lower-cased, collapsed, punctuation-light form of a heading. */
+  function fold(text) {
+    return String(text || '')
+      .toLowerCase()
+      .replace(/[_\-.]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * Work out which column is which.
+   *
+   * Returns the index of each field, or -1. The caller decides whether what was
+   * found is enough — this does not throw, because a preview that says "I could
+   * not find a Finish column" is far more use than an exception.
+   */
+  function mapColumns(headerRow) {
+    const headings = (headerRow || []).map(fold);
+    const found = {};
+
+    for (const [field, patterns] of Object.entries(COLUMNS)) {
+      found[field] = -1;
+      for (const pattern of patterns) {
+        const index = headings.findIndex((h, i) => pattern.test(h) && !Object.values(found).includes(i));
+        if (index >= 0) {
+          found[field] = index;
+          break;
+        }
+      }
+    }
+    return found;
+  }
+
+  /**
+   * Find the header row.
+   *
+   * P6's own Excel export puts the project name, a filter description and a
+   * blank line above the headings, so the first row is rarely the one wanted.
+   * The header is the first row within the top twenty that yields both an ID
+   * and a name column.
+   */
+  function findHeaderRow(rows) {
+    const limit = Math.min(rows.length, 20);
+    for (let i = 0; i < limit; i++) {
+      const mapped = mapColumns(rows[i]);
+      if (mapped.id >= 0 && mapped.name >= 0) return i;
+    }
+    return -1;
+  }
+
+  /* ── Dates ─────────────────────────────────────────────────────────────── */
+
+  /**
+   * A P6 date cell to a UTC-midnight day.
+   *
+   * The time is dropped rather than rounded: `30-Oct-26 17:00` is the 30th, and
+   * treating it as the 31st would lengthen every activity in the schedule by a
+   * day. `parseDate` handles the formats; this strips the P6 decorations first
+   * — a trailing `A` marks an actual date and `*` marks a constraint.
+   */
+  function parseP6Date(value) {
+    if (value == null) return null;
+    const text = String(value).trim().replace(/\s*[A*]$/i, '');
+    if (!text || /^(tbd|n\/?a|-+)$/i.test(text)) return null;
+
+    // Drop a time component; the day is what a plan is drawn against.
+    const dayOnly = text.replace(/[ T]\d{1,2}:\d{2}(:\d{2})?(\s*[AP]M)?$/i, '').trim();
+    const parsed = parseDate(dayOnly);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  /* ── Reading ───────────────────────────────────────────────────────────── */
+
+  /**
+   * Read a P6 export into activities.
+   *
+   * @returns {{activities: Array, mapping: object, headerRow: number,
+   *            skipped: number, duplicates: string[], warnings: string[]}}
+   */
+  function parseP6Rows(rows) {
+    const warnings = [];
+    const headerRow = findHeaderRow(rows);
+
+    if (headerRow < 0) {
+      return {
+        activities: [],
+        mapping: {},
+        headerRow: -1,
+        skipped: 0,
+        duplicates: [],
+        warnings: ['No Activity ID and Activity Name columns were found in the first 20 rows.'],
+      };
+    }
+
+    const mapping = mapColumns(rows[headerRow]);
+    const missing = ['id', 'name', 'start', 'end'].filter((f) => mapping[f] < 0);
+    if (missing.length) {
+      warnings.push(
+        `Missing column${missing.length === 1 ? '' : 's'}: ${missing
+          .map((f) => ({ id: 'Activity ID', name: 'Activity Name', start: 'Start', end: 'Finish' }[f]))
+          .join(', ')}.`
+      );
+    }
+
+    const cell = (row, field) => (mapping[field] >= 0 ? row[mapping[field]] : undefined);
+    const seen = new Map();
+    const duplicates = [];
+    const activities = [];
+    let skipped = 0;
+    let order = 0;
+    let undated = 0;
+
+    for (let i = headerRow + 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || !row.length) continue;
+
+      const id = String(cell(row, 'id') ?? '').trim();
+      if (!id) {
+        skipped++;
+        continue;
+      }
+      // P6 layouts repeat the header when grouped by WBS.
+      if (fold(id) === 'activity id') continue;
+
+      const start = parseP6Date(cell(row, 'start'));
+      const end = parseP6Date(cell(row, 'end'));
+      if (start == null && end == null) {
+        undated++;
+        skipped++;
+        continue;
+      }
+
+      // A milestone has one date; using it for both keeps every downstream
+      // calculation (duration, slip, variance) working without a special case.
+      const from = start ?? end;
+      const to = end ?? start;
+
+      if (seen.has(id)) {
+        duplicates.push(id);
+        continue;
+      }
+
+      const percentRaw = cell(row, 'percent');
+      const percent = percentRaw == null || percentRaw === ''
+        ? null
+        : Math.max(0, Math.min(100, Math.round(parseFloat(String(percentRaw).replace('%', '')) || 0)));
+
+      const activity = makeP6Activity({
+        id,
+        name: String(cell(row, 'name') ?? '').trim() || id,
+        wbs: String(cell(row, 'wbs') ?? '').trim(),
+        percent,
+        status: String(cell(row, 'status') ?? '').trim(),
+        order: order++,
+      });
+      activity.dates = { start: Math.min(from, to), end: Math.max(from, to) };
+
+      seen.set(id, activity);
+      activities.push(activity);
+    }
+
+    if (undated) warnings.push(`${undated} row${undated === 1 ? '' : 's'} had no readable dates and were skipped.`);
+    if (duplicates.length) {
+      warnings.push(
+        `${duplicates.length} duplicate activity ID${duplicates.length === 1 ? '' : 's'} ignored ` +
+          `(${duplicates.slice(0, 3).join(', ')}${duplicates.length > 3 ? '…' : ''}). ` +
+          'A multi-project export can repeat IDs.'
+      );
+    }
+
+    return { activities, mapping, headerRow, skipped, duplicates, warnings };
+  }
+
+  /** Read a `.xlsx`, `.csv` or `.txt` P6 export. */
+  async function readP6File(file) {
+    const name = (file.name || '').toLowerCase();
+
+    if (name.endsWith('.xlsx') || name.endsWith('.xlsm')) {
+      const buffer = await file.arrayBuffer();
+      return parseP6Rows(await readXlsx(buffer));
+    }
+
+    const text = await file.text();
+    return parseP6Rows(splitDelimited(text));
+  }
+
+  /* ── Reconciliation ────────────────────────────────────────────────────── */
+
+  /**
+   * Work out what an import would do, without doing it.
+   *
+   * The result is shown before anything is written, because an import that
+   * silently moved forty dates would be indistinguishable from one that
+   * silently moved four hundred.
+   *
+   * @param {object} register   The current `doc.p6`.
+   * @param {Array}  incoming   Activities from `parseP6Rows`.
+   * @param {string} kind       'baseline' | 'progress'
+   * @param {Set}    placedIds  Activity ids that appear on the timeline.
+   */
+  function reconcile(register, incoming, kind, placedIds = new Set()) {
+    const existing = register.activities || {};
+    const added = [];
+    const moved = [];
+    const unchanged = [];
+    const renamed = [];
+
+    for (const activity of incoming) {
+      const before = existing[activity.id];
+      const dates = activity.dates;
+
+      if (!before) {
+        added.push({ id: activity.id, name: activity.name, dates });
+        continue;
+      }
+
+      // What "moved" means depends on what we already knew. The first progress
+      // import has no previous progress, so the honest comparison is against the
+      // baseline — otherwise every activity reports "unchanged" on the very
+      // import that first shows the slip.
+      const previous = kind === 'baseline'
+        ? before.baseline
+        : before.progress || before.baseline;
+      const against = kind === 'baseline'
+        ? 'the previous baseline'
+        : before.progress ? 'the last progress import' : 'the baseline';
+
+      const startShift = previous ? Math.round((dates.start - previous.start) / MS_DAY) : null;
+      const finishShift = previous ? Math.round((dates.end - previous.end) / MS_DAY) : null;
+
+      if (before.name && activity.name && before.name !== activity.name) {
+        renamed.push({ id: activity.id, from: before.name, to: activity.name });
+      }
+
+      if (!previous || startShift !== 0 || finishShift !== 0) {
+        moved.push({
+          id: activity.id,
+          name: activity.name,
+          from: previous || null,
+          to: dates,
+          against,
+          startShift,
+          finishShift,
+          placed: placedIds.has(activity.id),
+        });
+      } else {
+        unchanged.push(activity.id);
+      }
+    }
+
+    // Activities the register knows about that this file does not mention.
+    // They are marked, never deleted: something on the timeline may point at
+    // one, and losing it silently would leave a bar with no explanation.
+    const incomingIds = new Set(incoming.map((a) => a.id));
+    const absent = Object.values(existing)
+      .filter((a) => !incomingIds.has(a.id))
+      .map((a) => ({ id: a.id, name: a.name, placed: placedIds.has(a.id) }));
+
+    return {
+      kind,
+      added,
+      moved,
+      renamed,
+      unchanged,
+      absent,
+      total: incoming.length,
+      placedAffected: moved.filter((m) => m.placed).length,
+    };
+  }
+
+  Object.defineProperty(__x, "mapColumns", { get: () => mapColumns, enumerable: true });
+  Object.defineProperty(__x, "findHeaderRow", { get: () => findHeaderRow, enumerable: true });
+  Object.defineProperty(__x, "parseP6Date", { get: () => parseP6Date, enumerable: true });
+  Object.defineProperty(__x, "parseP6Rows", { get: () => parseP6Rows, enumerable: true });
+  Object.defineProperty(__x, "readP6File", { get: () => readP6File, enumerable: true });
+  Object.defineProperty(__x, "reconcile", { get: () => reconcile, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/p6.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/p6.js"] = function (__x, __req) {
+  /**
+   * The P6 master list.
+   *
+   * Every imported activity, whether or not it is on the timeline. This is the
+   * answer to "they asked me about A1234" — search it, see its baseline dates,
+   * its current dates, how far P6 has moved it, and whether it is on your plan.
+   *
+   * Two things are deliberately kept apart here:
+   *
+   *   P6 slip      how far the scheduler has moved the activity since the
+   *                baseline. Their number, about their programme.
+   *   Your variance how far your plan differs from where P6 has it now. Your
+   *                number, and the one you have to be able to explain.
+   *
+   * And "position" is not "status". Dates say where an activity sits against
+   * today; they cannot say whether the work happened. Status stays on the
+   * object, where a person sets it.
+   *
+   * Imports: util, events, dates, model, store, renderer, io/p6, commands,
+   *          icons, components.
+   */
+
+  const { el, clear, debounce, fold } = __req("core/util.js");
+  const { on, emit, EV } = __req("core/events.js");
+  const { fmtDate, fmtTimestamp, MS_DAY } = __req("core/dates.js");
+  const { TYPES, p6Register, p6Dates, p6Slip, p6Variance, p6Position, p6IsMilestone, p6Placed, p6PlacedIds, statusOf } = __req("core/model.js");
+
+
+
+
+
+
+
+
+
+
+
+  const store = __req("core/store.js");
+  const renderer = __req("timeline/renderer.js");
+  const { readP6File, reconcile } = __req("io/p6.js");
+  const cmd = __req("ui/commands.js");
+  const { icon } = __req("ui/icons.js");
+  const { openModal, field, textInput, selectInput, segmented, checkbox, section, emptyState, badge, chipStat, toast, confirmDialog, skeleton } = __req("ui/components.js");
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The pane
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Filter state, kept between renders so a rebuild does not lose your place. */
+  const view = { text: '', show: 'all', sort: 'order' };
+
+  const POSITION_TONE = { past: 'muted', current: 'warn', future: 'info', unknown: 'muted' };
+  const POSITION_WORD = { past: 'Past', current: 'Current', future: 'Future', unknown: '—' };
+
+  function paneP6(root) {
+    const doc = store.getDoc();
+    const register = p6Register(doc);
+    const activities = Object.values(register.activities);
+
+    root.appendChild(importBar(register, activities.length));
+
+    if (!activities.length) {
+      root.appendChild(
+        emptyState({
+          iconName: 'table',
+          title: 'No P6 schedule imported',
+          message: 'Import an Excel or CSV export with Activity ID, Activity Name, Start and Finish. Anything else it carries is used too.',
+        })
+      );
+      return;
+    }
+
+    root.appendChild(summary(doc, activities));
+    root.appendChild(controls(activities));
+
+    const list = el('div', { class: 'cx-list' });
+    root.appendChild(list);
+    renderRows(list, doc, activities);
+  }
+
+  /* ── Import ────────────────────────────────────────────────────────────── */
+
+  function importBar(register, count) {
+    const stamp = (entry, label) =>
+      el('div', { class: 'p6-stamp' }, [
+        el('span', { class: 'p6-stamp-label', text: label }),
+        entry
+          ? el('span', { class: 'p6-stamp-value', text: fmtTimestamp(entry.importedAt), title: entry.fileName || '' })
+          : el('span', { class: 'p6-stamp-value none', text: 'not imported' }),
+      ]);
+
+    return el('div', { style: { marginBottom: '12px' } }, [
+      el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '9px' } }, [
+        el('button', {
+          class: 'cx-btn mini primary',
+          html: icon('upload', { size: 12 }) + '<span>Import from P6</span>',
+          onClick: () => openImport(),
+        }),
+        count
+          ? el('button', {
+              class: 'cx-btn mini',
+              html: icon('bookmark', { size: 12 }) + '<span>Baseline from P6</span>',
+              title: 'Build a baseline from the imported P6 baseline dates, so comparison mode shows the lag',
+              onClick: () => makeP6Baseline(),
+            })
+          : null,
+      ].filter(Boolean)),
+      el('div', { class: 'p6-stamps' }, [stamp(register.baseline, 'Baseline'), stamp(register.progress, 'Progress')]),
+    ]);
+  }
+
+  /**
+   * The import dialog.
+   *
+   * Nothing is written until the reconciliation has been shown. An import that
+   * silently moved forty dates would look exactly like one that moved four
+   * hundred, and only one of those is worth interrupting a review for.
+   */
+  function openImport(preset = 'progress') {
+    let kind = preset;
+    let parsed = null;
+    let file = null;
+
+    const status = el('div', { class: 'cx-hint', style: { minHeight: '18px' } });
+    const preview = el('div');
+    const input = el('input', {
+      type: 'file',
+      accept: '.xlsx,.xlsm,.csv,.tsv,.txt',
+      style: { display: 'none' },
+      onChange: async (e) => {
+        file = e.target.files?.[0];
+        if (file) await read(file);
+      },
+    });
+
+    async function read(chosen) {
+      clear(preview);
+      preview.appendChild(skeleton(2));
+      status.textContent = `Reading ${chosen.name}…`;
+      try {
+        parsed = await readP6File(chosen);
+        renderPreview();
+      } catch (err) {
+        parsed = null;
+        clear(preview);
+        status.textContent = '';
+        preview.appendChild(el('div', { class: 'cx-gate-msg bad', text: `Could not read the file: ${err.message}` }));
+      }
+    }
+
+    function renderPreview() {
+      clear(preview);
+      status.textContent = '';
+      if (!parsed) return;
+
+      for (const warning of parsed.warnings) {
+        preview.appendChild(el('div', { class: 'cx-gate-msg bad', style: { marginBottom: '8px' }, text: warning }));
+      }
+
+      if (!parsed.activities.length) return;
+
+      const doc = store.getDoc();
+      const plan = reconcile(p6Register(doc), parsed.activities, kind, p6PlacedIds(doc));
+
+      const found = Object.entries(parsed.mapping)
+        .filter(([, index]) => index >= 0)
+        .map(([f]) => ({ id: 'Activity ID', name: 'Name', start: 'Start', end: 'Finish', wbs: 'WBS', percent: '% Complete', status: 'Status', float: 'Float' }[f]))
+        .filter(Boolean);
+
+      preview.append(
+        el('div', { class: 'cx-chipstats', style: { marginBottom: '10px' } }, [
+          chipStat('Read', plan.total, 'info'),
+          chipStat('New', plan.added.length, plan.added.length ? 'good' : 'muted'),
+          chipStat('Moved', plan.moved.length - plan.added.length < 0 ? 0 : plan.moved.length, plan.moved.length ? 'warn' : 'muted'),
+          chipStat('Unchanged', plan.unchanged.length, 'muted'),
+          plan.absent.length ? chipStat('Not in file', plan.absent.length, 'bad') : null,
+        ].filter(Boolean)),
+        el('div', { class: 'cx-hint', text: `Columns recognised: ${found.join(', ')}.` })
+      );
+
+      if (plan.placedAffected) {
+        preview.appendChild(
+          el('div', { class: 'cx-gate-msg', style: { borderColor: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 12%, transparent)', marginTop: '9px' },
+            text: `${plan.placedAffected} of the activities that moved are on your timeline. After importing you can choose which of your bars follow the new dates.` })
+        );
+      }
+
+      const absentPlaced = plan.absent.filter((a) => a.placed);
+      if (absentPlaced.length) {
+        preview.appendChild(
+          el('div', { class: 'cx-gate-msg bad', style: { marginTop: '9px' },
+            text: `${absentPlaced.length} activity(s) on your timeline are not in this file — they will be marked, not removed.` })
+        );
+      }
+
+      // A sample, so a wrong column mapping is obvious before anything is written.
+      const sample = parsed.activities.slice(0, 4);
+      preview.appendChild(
+        el('div', { style: { marginTop: '11px' } }, [
+          el('div', { class: 'cx-section-label', text: 'First rows' }),
+          el('div', { class: 'cx-list' }, sample.map((a) =>
+            el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+              el('div', { class: 'lr-main' }, [
+                el('div', { class: 'lr-title', text: a.name }),
+                el('div', { class: 'lr-meta', text: `${a.id} · ${fmtDate(a.dates.start, 'medium')} → ${fmtDate(a.dates.end, 'medium')}` }),
+              ]),
+            ])
+          )),
+        ])
+      );
+
+    }
+
+    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+      field('This import is', segmented({
+        value: kind,
+        stretch: true,
+        options: [
+          { value: 'baseline', label: 'Baseline' },
+          { value: 'progress', label: 'Progress' },
+        ],
+        onChange: (v) => {
+          kind = v;
+          if (parsed) renderPreview();
+        },
+      }), 'A baseline is the target programme and is replaced only by another baseline. Progress is where the schedule stands now, and is re-imported each month.'),
+
+      el('button', {
+        class: 'cx-btn mini',
+        style: { justifyContent: 'flex-start' },
+        html: icon('upload', { size: 12 }) + '<span>Choose a file…</span>',
+        onClick: () => input.click(),
+      }),
+      input,
+      status,
+      preview,
+    ]);
+
+    return openModal({
+      title: 'Import from P6',
+      subtitle: 'Activity ID, Activity Name, Start and Finish are required. WBS, % complete and status are used if present.',
+      size: 'wide',
+      body,
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Import',
+          kind: 'primary',
+          onClick: () => {
+            if (!parsed?.activities.length) {
+              toast({ tone: 'warn', title: 'Nothing to import', message: 'Choose a P6 export first.' });
+              return false;
+            }
+            const doc = store.getDoc();
+            const plan = reconcile(p6Register(doc), parsed.activities, kind, p6PlacedIds(doc));
+            store.importP6(kind, parsed.activities, { fileName: file?.name || '' });
+            renderer.requestRender();
+            emit(EV.P6_IMPORTED, { kind, plan });
+            toast({
+              tone: 'good',
+              title: `P6 ${kind} imported`,
+              message: `${plan.total} activities · ${plan.added.length} new · ${plan.moved.length} moved.`,
+            });
+            if (plan.placedAffected) setTimeout(() => openAdoptDialog(plan), 350);
+            return undefined;
+          },
+        },
+      ],
+    });
+  }
+
+  /**
+   * After a progress import: which of your bars should follow the new dates.
+   *
+   * Defaulted to none. The plan is yours, and an import that moved your work
+   * without asking would make the tool untrustworthy for the one job it has.
+   */
+  function openAdoptDialog(plan) {
+    const affected = plan.moved.filter((m) => m.placed);
+    if (!affected.length) return;
+
+    const chosen = new Set();
+    const rows = el('div', { class: 'cx-list' });
+
+    for (const item of affected) {
+      rows.appendChild(
+        el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+          checkbox({
+            label: '',
+            checked: false,
+            onChange: (v) => (v ? chosen.add(item.id) : chosen.delete(item.id)),
+          }),
+          el('div', { class: 'lr-main' }, [
+            el('div', { class: 'lr-title', text: item.name }),
+            el('div', { class: 'lr-meta', text: `${item.id} · ${shiftWord(item.finishShift)} than ${item.against}` }),
+          ]),
+          badge(shiftLabel(item.finishShift), item.finishShift > 0 ? 'bad' : 'good'),
+        ])
+      );
+    }
+
+    openModal({
+      title: 'Follow the new P6 dates?',
+      subtitle: `${affected.length} activities on your timeline moved in this import. Your dates are unchanged unless you say so.`,
+      size: 'wide',
+      body: el('div', {}, [
+        el('div', { style: { display: 'flex', gap: '6px', marginBottom: '10px' } }, [
+          el('button', {
+            class: 'cx-btn mini',
+            text: 'Select all',
+            onClick: (e) => {
+              for (const box of e.currentTarget.closest('.cx-modal').querySelectorAll('input[type="checkbox"]')) {
+                if (!box.checked) box.click();
+              }
+            },
+          }),
+        ]),
+        rows,
+      ]),
+      actions: [
+        { label: 'Keep my dates' },
+        {
+          label: 'Apply to selected',
+          kind: 'primary',
+          onClick: () => {
+            if (!chosen.size) return;
+            store.adoptP6Dates([...chosen]);
+            renderer.requestRender();
+            toast({ tone: 'good', title: 'Dates updated', message: `${chosen.size} bar(s) moved onto their P6 dates.` });
+          },
+        },
+      ],
+    });
+  }
+
+  /* ── Summary ───────────────────────────────────────────────────────────── */
+
+  function summary(doc, activities) {
+    const placed = p6PlacedIds(doc);
+    let slipped = 0;
+    let missing = 0;
+    for (const activity of activities) {
+      const slip = p6Slip(activity);
+      if (slip?.slipped) slipped++;
+      if (activity.missing) missing++;
+    }
+
+    return el('div', { class: 'cx-chipstats', style: { marginBottom: '11px' } }, [
+      chipStat('Activities', activities.length, 'info'),
+      chipStat('On timeline', placed.size, placed.size ? 'good' : 'muted'),
+      chipStat('Slipped', slipped, slipped ? 'bad' : 'muted'),
+      missing ? chipStat('Not in P6', missing, 'warn') : null,
+    ].filter(Boolean));
+  }
+
+  /* ── Controls ──────────────────────────────────────────────────────────── */
+
+  function controls(activities) {
+    const search = textInput({
+      value: view.text,
+      placeholder: 'Activity ID or name…',
+      onInput: debounce((v) => {
+        view.text = v;
+        refresh();
+      }, 160),
+    });
+    search.setAttribute('aria-label', 'Search P6 activities');
+
+    return el('div', { style: { marginBottom: '10px' } }, [
+      field('Find', search),
+      segmented({
+        value: view.show,
+        stretch: true,
+        options: [
+          { value: 'all', label: 'All' },
+          { value: 'placed', label: 'On timeline' },
+          { value: 'unplaced', label: 'Not placed' },
+          { value: 'changed', label: 'Moved' },
+        ],
+        onChange: (v) => {
+          view.show = v;
+          refresh();
+        },
+      }),
+    ]);
+  }
+
+  /* ── Rows ──────────────────────────────────────────────────────────────── */
+
+  function matches(doc, activity) {
+    if (view.text) {
+      const needle = fold(view.text);
+      if (!fold(`${activity.id} ${activity.name} ${activity.wbs}`).includes(needle)) return false;
+    }
+    const placed = p6Placed(doc, activity.id).length > 0;
+    if (view.show === 'placed' && !placed) return false;
+    if (view.show === 'unplaced' && placed) return false;
+    if (view.show === 'changed') {
+      const slip = p6Slip(activity);
+      if (!slip?.changed) return false;
+    }
+    return true;
+  }
+
+  function renderRows(list, doc, activities) {
+    clear(list);
+    const shown = activities.filter((a) => matches(doc, a)).sort((a, b) => a.order - b.order);
+
+    if (!shown.length) {
+      list.appendChild(emptyState({ iconName: 'search', title: 'Nothing matches', message: 'Try a different search or filter.' }));
+      return;
+    }
+
+    // A 1,500-row list would be slower to build than to read; the rest are one
+    // click away and the filter is right there.
+    const LIMIT = 300;
+    for (const activity of shown.slice(0, LIMIT)) list.appendChild(activityRow(doc, activity));
+
+    if (shown.length > LIMIT) {
+      list.appendChild(
+        el('div', { class: 'cx-hint', style: { padding: '8px 4px' },
+          text: `Showing the first ${LIMIT} of ${shown.length}. Narrow the search to see the rest.` })
+      );
+    }
+  }
+
+  function activityRow(doc, activity) {
+    const objects = p6Placed(doc, activity.id);
+    const placed = objects.length > 0;
+    const dates = p6Dates(activity);
+    const slip = p6Slip(activity);
+    const position = p6Position(activity);
+    const variance = placed ? p6Variance(objects[0], activity) : null;
+
+    const meta = [
+      activity.id,
+      dates ? `${fmtDate(dates.start, 'numeric')} → ${fmtDate(dates.end, 'numeric')}` : 'no dates',
+      p6IsMilestone(activity) ? 'milestone' : null,
+      activity.wbs || null,
+    ].filter(Boolean).join(' · ');
+
+    return el('div', {
+      class: 'p6-row' + (placed ? ' placed' : ''),
+      dataset: { p6: activity.id },
+      onClick: () => (placed ? reveal(objects[0].id) : place(activity.id)),
+    }, [
+      el('span', {
+        class: 'p6-mark',
+        style: { background: placed ? 'var(--good)' : 'var(--text-subtle)' },
+        title: placed ? 'On the timeline' : 'Not placed',
+      }),
+
+      el('div', { class: 'p6-name', text: activity.name, title: activity.name }),
+
+      el('div', { class: 'p6-acts' }, [
+        placed
+          ? el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Show on the timeline',
+              'aria-label': `Show ${activity.id} on the timeline`,
+              html: icon('target', { size: 11 }),
+              onClick: (e) => { e.stopPropagation(); reveal(objects[0].id); },
+            })
+          : el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Add to the timeline',
+              'aria-label': `Add ${activity.id} to the timeline`,
+              html: icon('plus', { size: 11 }),
+              onClick: (e) => { e.stopPropagation(); place(activity.id); },
+            }),
+        el('button', {
+          class: 'cx-btn icon mini ghost',
+          title: placed ? 'Unlink' : 'Link to an existing object',
+          'aria-label': placed ? `Unlink ${activity.id}` : `Link ${activity.id} to an object`,
+          html: icon(placed ? 'x' : 'link', { size: 11 }),
+          onClick: (e) => {
+            e.stopPropagation();
+            if (placed) unlink(objects, activity);
+            else openLinkPicker(activity);
+          },
+        }),
+      ]),
+
+      el('div', { class: 'p6-meta', text: meta }),
+
+      el('div', { class: 'p6-badges' }, [
+        activity.missing ? badge('Not in P6', 'bad') : null,
+        slip?.changed ? badge(`P6 ${shiftLabel(slip.finishShift)}`, slip.finishShift > 0 ? 'bad' : 'good') : null,
+        variance?.differs ? badge(`you ${shiftLabel(variance.finishShift)}`, variance.behind ? 'warn' : 'info') : null,
+        !placed ? badge(POSITION_WORD[position], POSITION_TONE[position]) : null,
+        placed && objects[0].status ? badge(statusOf(objects[0].status).label, statusOf(objects[0].status).tone) : null,
+      ].filter(Boolean)),
+    ]);
+  }
+
+  /* ── Actions ───────────────────────────────────────────────────────────── */
+
+  function place(activityId) {
+    const lanes = store.orderedLanes();
+    if (!lanes.length) {
+      toast({ tone: 'warn', title: 'No lanes', message: 'Add a lane before placing activities.' });
+      return;
+    }
+
+    let laneId = lanes[0].id;
+    openModal({
+      title: 'Add to the timeline',
+      subtitle: `${activityId} — its P6 dates become the starting point, and are yours to change from then on.`,
+      body: field('Lane', selectInput({
+        value: laneId,
+        options: lanes.map((l) => ({ value: l.id, label: l.name })),
+        onChange: (v) => { laneId = v; },
+      })),
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Add',
+          kind: 'primary',
+          onClick: () => {
+            const id = store.placeP6Activity(activityId, { lane: laneId });
+            if (!id) {
+              toast({ tone: 'bad', title: 'Could not add it', message: 'That activity has no usable dates.' });
+              return;
+            }
+            cmd.revealObject(id);
+            refresh();
+          },
+        },
+      ],
+    });
+  }
+
+  function reveal(objectId) {
+    cmd.revealObject(objectId);
+  }
+
+  async function unlink(objects, activity) {
+    const ok = await confirmDialog({
+      title: `Unlink ${activity.id}?`,
+      message: `${objects.length} object(s) will keep their dates and their place on the timeline — only the link to P6 is removed.`,
+      confirmLabel: 'Unlink',
+    });
+    if (!ok) return;
+    for (const object of objects) store.linkP6(object.id, null);
+    renderer.requestRender();
+    refresh();
+  }
+
+  /** Attach an activity to something already on the timeline. */
+  function openLinkPicker(activity) {
+    const doc = store.getDoc();
+    const candidates = doc.objects
+      .filter((o) => !o.data?.p6Id && TYPES[o.type])
+      .sort((a, b) => a.start - b.start);
+
+    if (!candidates.length) {
+      toast({ tone: 'warn', title: 'Nothing to link to', message: 'Every object is already linked to a P6 activity.' });
+      return;
+    }
+
+    let objectId = '';
+    const lanes = new Map(doc.lanes.map((l) => [l.id, l.name]));
+
+    openModal({
+      title: `Link ${activity.id}`,
+      subtitle: activity.name,
+      body: field('To which object', selectInput({
+        value: '',
+        placeholder: 'Choose…',
+        options: candidates.map((o) => ({
+          value: o.id,
+          label: `${o.title} — ${lanes.get(o.lane) || 'no lane'} — ${fmtDate(o.start, 'numeric')}`,
+        })),
+        onChange: (v) => { objectId = v; },
+      }), 'The object keeps its own dates. Linking records where they came from, and lets the variance be shown.'),
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Link',
+          kind: 'primary',
+          onClick: () => {
+            if (!objectId) return;
+            store.linkP6(objectId, activity.id);
+            renderer.requestRender();
+            refresh();
+            toast({ tone: 'good', title: 'Linked', message: `${activity.id} is now tracked against that object.` });
+          },
+        },
+      ],
+    });
+  }
+
+  function makeP6Baseline() {
+    const id = store.baselineFromP6();
+    if (!id) {
+      toast({
+        tone: 'warn',
+        title: 'Nothing to baseline',
+        message: 'Import a P6 baseline and place some activities on the timeline first.',
+      });
+      return;
+    }
+    renderer.requestRender();
+    toast({
+      tone: 'good',
+      title: 'Baseline created',
+      message: 'Comparison mode is on — the ghosts show the P6 baseline dates.',
+    });
+  }
+
+  /* ── Helpers ───────────────────────────────────────────────────────────── */
+
+  function shiftLabel(days) {
+    if (days == null) return '—';
+    if (days === 0) return 'on plan';
+    return `${days > 0 ? '+' : '−'}${Math.abs(days)}d`;
+  }
+
+  function shiftWord(days) {
+    if (days == null) return 'newly dated';
+    if (!days) return 'unchanged';
+    return `${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ${days > 0 ? 'later' : 'earlier'}`;
+  }
+
+  /** Ask the dock to rebuild this pane. */
+  function refresh() {
+    emit(EV.PANE_REFRESH, { pane: 'p6' });
+  }
+
+  Object.defineProperty(__x, "paneP6", { get: () => paneP6, enumerable: true });
+  Object.defineProperty(__x, "openImport", { get: () => openImport, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/notes.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/notes.js"] = function (__x, __req) {
@@ -14689,994 +17061,6 @@ __mods["io/exporters.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
-// io/inflate.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["io/inflate.js"] = function (__x, __req) {
-  /**
-   * Minimal DEFLATE decompressor and ZIP reader.
-   *
-   * Exists so `.xlsx` files can be imported without a dependency: an xlsx is a
-   * ZIP of XML parts, and the parts are almost always DEFLATE-compressed. The
-   * browser's own DecompressionStream handles this when available (Chrome,
-   * Edge, Firefox, Safari 16.4+); the hand-written inflater below is the
-   * fallback so the feature works on any engine, offline, from `file://`.
-   *
-   * Implements RFC 1951 for stored, fixed-Huffman and dynamic-Huffman blocks —
-   * which is everything a spreadsheet writer emits.
-   *
-   * Imports: nothing (leaf).
-   */
-
-  /* ── Huffman decoding ──────────────────────────────────────────────────── */
-
-  /** Build a canonical Huffman decode table from a list of code lengths. */
-  function buildTree(lengths) {
-    const maxBits = Math.max(...lengths, 0);
-    const blCount = new Array(maxBits + 1).fill(0);
-    for (const len of lengths) if (len) blCount[len]++;
-
-    const nextCode = new Array(maxBits + 1).fill(0);
-    let code = 0;
-    for (let bits = 1; bits <= maxBits; bits++) {
-      code = (code + blCount[bits - 1]) << 1;
-      nextCode[bits] = code;
-    }
-
-    // Map "length:code" to a symbol. A flat object lookup is fast enough here
-    // and keeps the implementation short and auditable.
-    const table = new Map();
-    for (let symbol = 0; symbol < lengths.length; symbol++) {
-      const len = lengths[symbol];
-      if (!len) continue;
-      table.set(len * 65536 + nextCode[len], symbol);
-      nextCode[len]++;
-    }
-    return { table, maxBits };
-  }
-
-  class BitReader {
-    constructor(bytes) {
-      this.bytes = bytes;
-      this.pos = 0;
-      this.bitBuffer = 0;
-      this.bitCount = 0;
-    }
-
-    bits(n) {
-      while (this.bitCount < n) {
-        if (this.pos >= this.bytes.length) throw new Error('Unexpected end of compressed data');
-        this.bitBuffer |= this.bytes[this.pos++] << this.bitCount;
-        this.bitCount += 8;
-      }
-      const value = this.bitBuffer & ((1 << n) - 1);
-      this.bitBuffer >>>= n;
-      this.bitCount -= n;
-      return value;
-    }
-
-    /** Huffman codes are stored most-significant-bit first. */
-    decode(tree) {
-      let code = 0;
-      for (let len = 1; len <= tree.maxBits; len++) {
-        code = (code << 1) | this.bits(1);
-        const symbol = tree.table.get(len * 65536 + code);
-        if (symbol !== undefined) return symbol;
-      }
-      throw new Error('Invalid Huffman code');
-    }
-
-    alignToByte() {
-      this.bitBuffer = 0;
-      this.bitCount = 0;
-    }
-  }
-
-  const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
-  const LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
-  const DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
-  const DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
-  const CODE_LENGTH_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
-
-  let fixedLiteral = null;
-  let fixedDistance = null;
-
-  function fixedTrees() {
-    if (!fixedLiteral) {
-      const lengths = new Array(288);
-      for (let i = 0; i < 144; i++) lengths[i] = 8;
-      for (let i = 144; i < 256; i++) lengths[i] = 9;
-      for (let i = 256; i < 280; i++) lengths[i] = 7;
-      for (let i = 280; i < 288; i++) lengths[i] = 8;
-      fixedLiteral = buildTree(lengths);
-      fixedDistance = buildTree(new Array(30).fill(5));
-    }
-    return [fixedLiteral, fixedDistance];
-  }
-
-  /**
-   * Inflate a raw DEFLATE stream (no zlib header).
-   * @param {Uint8Array} data
-   * @returns {Uint8Array}
-   */
-  function inflateRaw(data) {
-    const reader = new BitReader(data);
-    const out = [];
-    let output = new Uint8Array(Math.max(1024, data.length * 4));
-    let length = 0;
-
-    const push = (byte) => {
-      if (length >= output.length) {
-        const bigger = new Uint8Array(output.length * 2);
-        bigger.set(output);
-        output = bigger;
-      }
-      output[length++] = byte;
-    };
-
-    let final = false;
-    while (!final) {
-      final = reader.bits(1) === 1;
-      const type = reader.bits(2);
-
-      if (type === 0) {
-        reader.alignToByte();
-        const len = data[reader.pos] | (data[reader.pos + 1] << 8);
-        reader.pos += 4; // skip LEN and NLEN
-        for (let i = 0; i < len; i++) push(data[reader.pos++]);
-        continue;
-      }
-
-      let literalTree;
-      let distanceTree;
-
-      if (type === 1) {
-        [literalTree, distanceTree] = fixedTrees();
-      } else if (type === 2) {
-        const hlit = reader.bits(5) + 257;
-        const hdist = reader.bits(5) + 1;
-        const hclen = reader.bits(4) + 4;
-
-        const codeLengths = new Array(19).fill(0);
-        for (let i = 0; i < hclen; i++) codeLengths[CODE_LENGTH_ORDER[i]] = reader.bits(3);
-        const codeTree = buildTree(codeLengths);
-
-        const lengths = [];
-        while (lengths.length < hlit + hdist) {
-          const symbol = reader.decode(codeTree);
-          if (symbol < 16) {
-            lengths.push(symbol);
-          } else if (symbol === 16) {
-            const previous = lengths[lengths.length - 1];
-            const repeat = reader.bits(2) + 3;
-            for (let i = 0; i < repeat; i++) lengths.push(previous);
-          } else if (symbol === 17) {
-            const repeat = reader.bits(3) + 3;
-            for (let i = 0; i < repeat; i++) lengths.push(0);
-          } else {
-            const repeat = reader.bits(7) + 11;
-            for (let i = 0; i < repeat; i++) lengths.push(0);
-          }
-        }
-
-        literalTree = buildTree(lengths.slice(0, hlit));
-        distanceTree = buildTree(lengths.slice(hlit));
-      } else {
-        throw new Error('Invalid DEFLATE block type');
-      }
-
-      for (;;) {
-        const symbol = reader.decode(literalTree);
-        if (symbol === 256) break;
-        if (symbol < 256) {
-          push(symbol);
-          continue;
-        }
-        const lengthIndex = symbol - 257;
-        const copyLength = LENGTH_BASE[lengthIndex] + reader.bits(LENGTH_EXTRA[lengthIndex]);
-        const distSymbol = reader.decode(distanceTree);
-        const distance = DIST_BASE[distSymbol] + reader.bits(DIST_EXTRA[distSymbol]);
-        const from = length - distance;
-        if (from < 0) throw new Error('Invalid back-reference in compressed data');
-        for (let i = 0; i < copyLength; i++) push(output[from + i]);
-      }
-    }
-
-    return output.subarray(0, length);
-  }
-
-  /**
-   * Decompress using the platform where it exists, falling back to the
-   * implementation above. Always returns a promise for one call shape.
-   */
-  async function inflate(data) {
-    if (typeof DecompressionStream === 'function') {
-      try {
-        const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-        const buffer = await new Response(stream).arrayBuffer();
-        return new Uint8Array(buffer);
-      } catch {
-        /* fall through to the JavaScript inflater */
-      }
-    }
-    return inflateRaw(data);
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     ZIP reading
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Read a ZIP archive from an ArrayBuffer.
-   * Returns a Map of path → Uint8Array. Only the stored (0) and deflate (8)
-   * methods are supported, which covers every spreadsheet writer in practice.
-   */
-  async function readZip(arrayBuffer) {
-    const bytes = new Uint8Array(arrayBuffer);
-    const view = new DataView(arrayBuffer);
-
-    // Locate the End Of Central Directory record by scanning backwards.
-    let eocd = -1;
-    for (let i = bytes.length - 22; i >= 0 && i > bytes.length - 66_000; i--) {
-      if (view.getUint32(i, true) === 0x06054b50) {
-        eocd = i;
-        break;
-      }
-    }
-    if (eocd < 0) throw new Error('Not a valid ZIP archive (no end-of-directory record).');
-
-    const entryCount = view.getUint16(eocd + 10, true);
-    let offset = view.getUint32(eocd + 16, true);
-
-    const files = new Map();
-    const decoder = new TextDecoder('utf-8');
-
-    for (let i = 0; i < entryCount; i++) {
-      if (view.getUint32(offset, true) !== 0x02014b50) break;
-
-      const method = view.getUint16(offset + 10, true);
-      const compressedSize = view.getUint32(offset + 20, true);
-      const nameLength = view.getUint16(offset + 28, true);
-      const extraLength = view.getUint16(offset + 30, true);
-      const commentLength = view.getUint16(offset + 32, true);
-      const localOffset = view.getUint32(offset + 42, true);
-      const name = decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
-
-      // Re-read the local header: its extra field length can differ.
-      const localNameLength = view.getUint16(localOffset + 26, true);
-      const localExtraLength = view.getUint16(localOffset + 28, true);
-      const dataStart = localOffset + 30 + localNameLength + localExtraLength;
-      const raw = bytes.subarray(dataStart, dataStart + compressedSize);
-
-      if (!name.endsWith('/')) {
-        if (method === 0) files.set(name, raw);
-        else if (method === 8) files.set(name, await inflate(raw));
-        // Any other method (bzip2, LZMA) is left out rather than corrupting data.
-      }
-
-      offset += 46 + nameLength + extraLength + commentLength;
-    }
-
-    return files;
-  }
-
-  /** Decode a ZIP entry as UTF-8 text. */
-  function zipText(files, path) {
-    const entry = files.get(path);
-    return entry ? new TextDecoder('utf-8').decode(entry) : null;
-  }
-
-  Object.defineProperty(__x, "inflateRaw", { get: () => inflateRaw, enumerable: true });
-  Object.defineProperty(__x, "inflate", { get: () => inflate, enumerable: true });
-  Object.defineProperty(__x, "readZip", { get: () => readZip, enumerable: true });
-  Object.defineProperty(__x, "zipText", { get: () => zipText, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
-// io/importers.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["io/importers.js"] = function (__x, __req) {
-  /**
-   * Import.
-   *
-   * Four routes in: the application's own JSON, generic CSV/TSV, Microsoft
-   * Project's CSV export, and `.xlsx` workbooks. Everything converges on one
-   * intermediate shape — a list of row objects with normalised column names —
-   * so the mapping logic is written once.
-   *
-   * Nothing is applied to the live document until the caller confirms; every
-   * function returns a *result* describing what would be imported, along with
-   * any warnings, so the UI can preview it first.
-   *
-   * Imports: util, dates, model, store, inflate.
-   */
-
-  const { readFileAsText, readFileAsArrayBuffer, fold } = __req("core/util.js");
-  const { toMs, toISO, MS_DAY, addDays, todayMs, getDateOrder } = __req("core/dates.js");
-  const { makeProject, makeObject, makeLane, makeLink, normalise, validate, TYPES, listOptions } = __req("core/model.js");
-
-
-
-
-
-
-
-
-
-  const { getDoc } = __req("core/store.js");
-  const { readZip, zipText } = __req("io/inflate.js");
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Entry point
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Inspect a file and import it with the right reader.
-   * @returns {Promise<{kind:string, doc?:object, objects?:Array, lanes?:Array,
-   *                    links?:Array, warnings:string[], errors:string[], summary:string}>}
-   */
-  async function importFile(file) {
-    const name = (file.name || '').toLowerCase();
-
-    try {
-      if (name.endsWith('.json')) return await importJsonFile(file);
-      if (name.endsWith('.xlsx') || name.endsWith('.xlsm')) return await importXlsxFile(file);
-      if (name.endsWith('.csv') || name.endsWith('.tsv') || name.endsWith('.txt')) return await importCsvFile(file);
-
-      // Unknown extension: sniff the content rather than refusing outright.
-      const text = await readFileAsText(file);
-      if (text.trim().startsWith('{')) return parseJson(text);
-      return parseTabular(splitDelimited(text), file.name);
-    } catch (err) {
-      return { kind: 'error', warnings: [], errors: [err.message], summary: 'Import failed' };
-    }
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     JSON — a full project
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  async function importJsonFile(file) {
-    return parseJson(await readFileAsText(file));
-  }
-
-  function parseJson(text) {
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch (err) {
-      return { kind: 'error', warnings: [], errors: [`The file is not valid JSON: ${err.message}`], summary: 'Import failed' };
-    }
-
-    const check = validate(parsed);
-    if (!check.ok) {
-      return { kind: 'error', warnings: check.warnings, errors: check.errors, summary: 'Import failed' };
-    }
-
-    const doc = normalise(parsed);
-    return {
-      kind: 'project',
-      doc,
-      warnings: check.warnings,
-      errors: [],
-      summary: `${doc.objects.length} objects across ${doc.lanes.length} lanes, ${doc.links.length} dependencies`,
-    };
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     CSV / TSV
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  async function importCsvFile(file) {
-    const text = await readFileAsText(file);
-    return parseTabular(splitDelimited(text), file.name);
-  }
-
-  /**
-   * Split delimited text into a matrix, honouring RFC 4180 quoting and
-   * auto-detecting the separator (comma, semicolon or tab — European Excel
-   * exports use semicolons).
-   */
-  function splitDelimited(text) {
-    const clean = text.replace(/^﻿/, '');
-    const sample = clean.slice(0, 4000);
-    const counts = {
-      ',': (sample.match(/,/g) || []).length,
-      ';': (sample.match(/;/g) || []).length,
-      '\t': (sample.match(/\t/g) || []).length,
-    };
-    const delimiter = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
-
-    const rows = [];
-    let row = [];
-    let cell = '';
-    let quoted = false;
-
-    for (let i = 0; i < clean.length; i++) {
-      const ch = clean[i];
-
-      if (quoted) {
-        if (ch === '"') {
-          if (clean[i + 1] === '"') {
-            cell += '"';
-            i++;
-          } else {
-            quoted = false;
-          }
-        } else {
-          cell += ch;
-        }
-        continue;
-      }
-
-      if (ch === '"') {
-        quoted = true;
-      } else if (ch === delimiter) {
-        row.push(cell);
-        cell = '';
-      } else if (ch === '\n') {
-        row.push(cell);
-        rows.push(row);
-        row = [];
-        cell = '';
-      } else if (ch !== '\r') {
-        cell += ch;
-      }
-    }
-
-    if (cell.length || row.length) {
-      row.push(cell);
-      rows.push(row);
-    }
-
-    return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
-  }
-
-  /* ── Column mapping ────────────────────────────────────────────────────── */
-
-  /**
-   * Header aliases. The first match wins, so more specific names come first.
-   * Covers our own CSV export, Microsoft Project's CSV, and the column names
-   * people actually type into a spreadsheet.
-   */
-  const COLUMN_ALIASES = {
-    title: ['title', 'name', 'task name', 'task', 'activity', 'activity name', 'description', 'summary', 'subject'],
-    type: ['type', 'object type', 'category', 'kind'],
-    lane: ['lane', 'swimlane', 'group', 'workstream', 'discipline', 'resource names', 'resource', 'team', 'phase'],
-    start: ['start', 'start date', 'planned start', 'begin', 'from', 'baseline start', 'early start'],
-    end: ['finish', 'finish date', 'end', 'end date', 'planned finish', 'to', 'due', 'due date', 'baseline finish', 'early finish'],
-    duration: ['duration', 'duration days', 'duration_days', 'days'],
-    status: ['status', 'state', 'progress status'],
-    progress: ['percent complete', 'percent_complete', '% complete', 'complete', 'progress', 'pct complete'],
-    owner: ['owner', 'assigned to', 'assignee', 'responsible', 'engineer', 'lead'],
-    subsystem: ['subsystem', 'system', 'sub-system', 'discipline code'],
-    area: ['area', 'zone', 'section', 'location', 'site'],
-    tags: ['tags', 'labels', 'keywords'],
-    notes: ['notes', 'note', 'comments', 'remarks', 'detail'],
-    version: ['version', 'sw version', 'software version'],
-    releaseNumber: ['release number', 'release_number', 'release no', 'release'],
-    buildNumber: ['build number', 'build_number', 'build'],
-    testPackage: ['test package', 'test_package', 'package', 'tp'],
-    testKind: ['test type', 'test_type', 'test kind'],
-    severity: ['severity', 'priority', 'risk level'],
-    reference: ['reference', 'ref', 'ticket', 'issue id', 'defect'],
-    predecessors: ['predecessors', 'predecessor', 'depends on', 'dependency', 'dependencies'],
-    id: ['id', 'unique id', 'uid', 'task id', 'wbs'],
-    milestone: ['milestone'],
-    outline: ['outline level', 'outline_level', 'level'],
-  };
-
-  /** Map a header row onto our field names. */
-  function mapHeaders(header) {
-    const normalised = header.map((h) => fold(String(h).trim()));
-    const mapping = {};
-    for (const [field, aliases] of Object.entries(COLUMN_ALIASES)) {
-      for (const alias of aliases) {
-        const index = normalised.indexOf(alias);
-        if (index >= 0) {
-          mapping[field] = index;
-          break;
-        }
-      }
-    }
-    return mapping;
-  }
-
-  /**
-   * Turn a matrix into importable objects and lanes.
-   * @param {string[][]} rows
-   * @param {string} sourceName
-   */
-  function parseTabular(rows, sourceName = 'import') {
-    const warnings = [];
-    const errors = [];
-
-    if (rows.length < 2) {
-      return { kind: 'error', warnings, errors: ['The file has no data rows.'], summary: 'Import failed' };
-    }
-
-    const header = rows[0];
-    const mapping = mapHeaders(header);
-
-    if (mapping.title == null) {
-      return {
-        kind: 'error',
-        warnings,
-        errors: [`No recognisable title column. Expected one of: ${COLUMN_ALIASES.title.join(', ')}. Found: ${header.join(', ')}`],
-        summary: 'Import failed',
-      };
-    }
-    if (mapping.start == null) {
-      warnings.push('No start-date column found — imported items will start today and be spaced sequentially.');
-    }
-
-    const laneNames = new Map(); // lane label -> lane record
-    const objects = [];
-    const sourceIds = new Map(); // source id -> new object id
-    const pendingLinks = [];
-    let cursor = todayMs();
-
-    for (let r = 1; r < rows.length; r++) {
-      const row = rows[r];
-      const get = (field) => (mapping[field] != null ? String(row[mapping[field]] ?? '').trim() : '');
-
-      const title = get('title');
-      if (!title) continue;
-
-      /* Lane */
-      const laneLabel = get('lane') || 'Imported';
-      if (!laneNames.has(laneLabel)) {
-        laneNames.set(laneLabel, makeLane({ name: laneLabel, color: laneColour(laneNames.size) }));
-      }
-      const lane = laneNames.get(laneLabel);
-
-      /* Dates */
-      let start = parseDate(get('start'));
-      if (!Number.isFinite(start)) {
-        start = cursor;
-        cursor = addDays(cursor, 1);
-      }
-
-      let end = parseDate(get('end'));
-      const durationText = get('duration');
-      if (!Number.isFinite(end) && durationText) {
-        const days = parseDuration(durationText);
-        if (Number.isFinite(days)) end = addDays(start, Math.max(1, Math.round(days)));
-      }
-
-      /* Type */
-      const isMilestone =
-        truthy(get('milestone')) ||
-        (Number.isFinite(end) && end === start && !durationText) ||
-        /milestone|gate|acceptance/i.test(title);
-      const type = resolveType(get('type'), { isMilestone, title });
-
-      if (!Number.isFinite(end)) end = TYPES[type]?.duration ? addDays(start, TYPES[type].defaultDays || 5) : start;
-      if (TYPES[type]?.duration && end <= start) end = addDays(start, 1);
-
-      /* Everything else */
-      const obj = makeObject({
-        type,
-        lane: lane.id,
-        title,
-        start,
-        end,
-        status: resolveStatus(get('status'), get('progress')),
-        progress: parseProgress(get('progress')),
-        owner: get('owner'),
-        subsystem: resolveSubsystem(get('subsystem')),
-        area: get('area'),
-        tags: get('tags').split(/[;,|]/).map((t) => t.trim()).filter(Boolean),
-        notes: get('notes') ? `<p>${escapeText(get('notes'))}</p>` : '',
-        data: pruneEmpty({
-          version: get('version'),
-          releaseNumber: get('releaseNumber'),
-          buildNumber: get('buildNumber'),
-          testPackage: get('testPackage'),
-          testKind: resolveTestKind(get('testKind')),
-          severity: resolveSeverity(get('severity')),
-          reference: get('reference'),
-        }),
-      });
-
-      objects.push(obj);
-
-      const sourceId = get('id');
-      if (sourceId) sourceIds.set(sourceId, obj.id);
-
-      const predecessors = get('predecessors');
-      if (predecessors) pendingLinks.push({ to: obj.id, spec: predecessors });
-    }
-
-    if (!objects.length) {
-      return { kind: 'error', warnings, errors: ['No rows contained a usable title.'], summary: 'Import failed' };
-    }
-
-    /* Resolve predecessor references — Microsoft Project writes "12FS+3 days". */
-    const links = [];
-    let unresolved = 0;
-    for (const pending of pendingLinks) {
-      for (const part of pending.spec.split(/[;,]/)) {
-        const match = /^\s*([\w.-]+)\s*(FS|SS|FF|SF)?\s*([+-]\s*\d+)?/i.exec(part.trim());
-        if (!match) continue;
-        const fromId = sourceIds.get(match[1]);
-        if (!fromId) {
-          unresolved++;
-          continue;
-        }
-        links.push(
-          makeLink({
-            from: fromId,
-            to: pending.to,
-            type: (match[2] || 'FS').toUpperCase(),
-            lag: match[3] ? parseInt(match[3].replace(/\s+/g, ''), 10) : 0,
-          })
-        );
-      }
-    }
-    if (unresolved) warnings.push(`${unresolved} predecessor reference(s) pointed at rows that were not imported.`);
-
-    const lanes = Array.from(laneNames.values());
-    return {
-      kind: 'rows',
-      objects,
-      lanes,
-      links,
-      warnings,
-      errors,
-      summary: `${objects.length} objects, ${lanes.length} lanes, ${links.length} dependencies from ${sourceName}`,
-    };
-  }
-
-  /* ── Value coercion ────────────────────────────────────────────────────── */
-
-  /** Parse a date cell across the formats spreadsheets actually produce. */
-  function parseDate(value) {
-    const text = String(value || '').trim();
-    if (!text) return NaN;
-
-    // Excel serial number (days since 1899-12-30).
-    if (/^\d{5}(\.\d+)?$/.test(text)) {
-      const serial = parseFloat(text);
-      if (serial > 20000 && serial < 80000) return Date.UTC(1899, 11, 30) + Math.round(serial) * MS_DAY;
-    }
-
-    const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(text);
-    if (iso) return Date.UTC(+iso[1], +iso[2] - 1, +iso[3]);
-
-    // 3/5/2026 is genuinely ambiguous. Where one field is over 12 the order is
-    // decided for us; otherwise fall back to the project's display order, so a
-    // plan shown as M/D/Y also imports spreadsheets written as M/D/Y.
-    const slash = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})/.exec(text);
-    if (slash) {
-      const [, first, second, y] = slash;
-      const a = +first;
-      const b = +second;
-
-      let day;
-      let month;
-      if (a > 12 && b <= 12) {
-        day = a;
-        month = b;
-      } else if (b > 12 && a <= 12) {
-        month = a;
-        day = b;
-      } else if (getDateOrder() === 'dmy') {
-        day = a;
-        month = b;
-      } else {
-        month = a;
-        day = b;
-      }
-
-      let year = +y;
-      if (year < 100) year += year < 70 ? 2000 : 1900;
-      return Date.UTC(year, month - 1, day);
-    }
-
-    const parsed = Date.parse(text);
-    if (!Number.isNaN(parsed)) {
-      const d = new Date(parsed);
-      return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
-    }
-    return NaN;
-  }
-
-  /** "12 days", "3 wks", "5d", "8h" → days. */
-  function parseDuration(value) {
-    const text = String(value).trim().toLowerCase();
-    const match = /^([\d.]+)\s*([a-z]*)/.exec(text);
-    if (!match) return NaN;
-    const n = parseFloat(match[1]);
-    if (!Number.isFinite(n)) return NaN;
-    const unit = match[2];
-    if (unit.startsWith('w')) return n * 7;
-    if (unit.startsWith('mo')) return n * 30.44;
-    if (unit.startsWith('h')) return n / 8;
-    if (unit.startsWith('m') && unit !== 'mo') return n * 30.44;
-    return n;
-  }
-
-  function parseProgress(value) {
-    const text = String(value || '').replace('%', '').trim();
-    const n = parseFloat(text);
-    if (!Number.isFinite(n)) return 0;
-    // Spreadsheets store percentages as 0–1 as often as 0–100.
-    return n <= 1 && text.includes('.') ? Math.round(n * 100) : Math.round(n);
-  }
-
-  function resolveType(value, { isMilestone, title }) {
-    const text = fold(value);
-    if (text) {
-      for (const [id, def] of Object.entries(TYPES)) {
-        if (fold(def.label) === text || id === text) return id;
-      }
-      if (/release|build|drop/.test(text)) return 'release';
-      if (/campaign|commission/.test(text)) return 'campaign';
-      if (/risk/.test(text)) return 'risk';
-      if (/issue|defect|bug/.test(text)) return 'issue';
-      if (/milestone|gate/.test(text)) return 'milestone';
-      if (/test/.test(text)) return 'testwindow';
-      if (/freeze/.test(text)) return 'freeze';
-      if (/outage/.test(text)) return 'outage';
-    }
-    if (isMilestone) return 'milestone';
-    if (/\brelease\b|\bv\d+\.\d+/i.test(title)) return 'release';
-    if (/\btest(ing)?\b/i.test(title)) return 'testwindow';
-    if (/\bcampaign\b/i.test(title)) return 'campaign';
-    return 'activity';
-  }
-
-  function resolveStatus(value, progressText) {
-    const text = fold(value);
-    if (text) {
-      for (const option of listOptions('status')) {
-        if (fold(option.label) === text || option.id === text) return option.id;
-      }
-      if (/complete|done|finish|closed/.test(text)) return 'complete';
-      if (/progress|active|started|ongoing|wip/.test(text)) return 'inprogress';
-      if (/late|delay|slip|overdue/.test(text)) return 'delayed';
-      if (/block|stopped/.test(text)) return 'blocked';
-      if (/cancel/.test(text)) return 'cancelled';
-      if (/hold|pause/.test(text)) return 'onhold';
-      if (/test/.test(text)) return 'testing';
-      if (/release/.test(text)) return 'released';
-    }
-    const progress = parseProgress(progressText);
-    if (progress >= 100) return 'complete';
-    if (progress > 0) return 'inprogress';
-    return 'planned';
-  }
-
-  function resolveSubsystem(value) {
-    const text = fold(value);
-    if (!text) return '';
-    const found = listOptions('subsystem').find((s) => s.id === text || fold(s.label) === text);
-    if (found) return found.id;
-    if (/interlock/.test(text)) return 'ixl';
-    if (/comm|radio|network/.test(text)) return 'comms';
-    if (/train|vehicle|rolling/.test(text)) return 'vehicle';
-    if (/scada|supervis/.test(text)) return 'scada';
-    if (/wayside|track/.test(text)) return 'wayside';
-    return '';
-  }
-
-  function resolveTestKind(value) {
-    const text = fold(value);
-    if (!text) return '';
-    const found = listOptions('testKind').find((t) => t.id === text || fold(t.label) === text);
-    return found ? found.id : '';
-  }
-
-  function resolveSeverity(value) {
-    const text = fold(value);
-    if (!text) return '';
-    if (/crit|1|highest|blocker/.test(text)) return 'critical';
-    if (/high|2|major/.test(text)) return 'high';
-    if (/med|3|moderate|normal/.test(text)) return 'medium';
-    if (/low|4|minor/.test(text)) return 'low';
-    return '';
-  }
-
-  function truthy(value) {
-    return /^(yes|y|true|1|x)$/i.test(String(value || '').trim());
-  }
-
-  function pruneEmpty(obj) {
-    const out = {};
-    for (const [k, v] of Object.entries(obj)) if (v) out[k] = v;
-    return out;
-  }
-
-  function escapeText(text) {
-    return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  const LANE_COLOURS = ['#5b93f5', '#a855f7', '#16a571', '#e0900b', '#f2555b', '#0ea5e9', '#0d9488', '#f97316', '#818cf8', '#94a3b8'];
-  function laneColour(index) {
-    return LANE_COLOURS[index % LANE_COLOURS.length];
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     XLSX
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  async function importXlsxFile(file) {
-    const buffer = await readFileAsArrayBuffer(file);
-    const rows = await readXlsx(buffer);
-    if (!rows.length) {
-      return { kind: 'error', warnings: [], errors: ['No readable sheet was found in the workbook.'], summary: 'Import failed' };
-    }
-    const result = parseTabular(rows, file.name);
-    result.warnings.unshift('Imported from the first worksheet. Formatting, formulas and charts are not read.');
-    return result;
-  }
-
-  /**
-   * Read the first worksheet of an xlsx workbook into a matrix.
-   * Handles shared strings, inline strings, numbers and dates.
-   */
-  async function readXlsx(arrayBuffer) {
-    const files = await readZip(arrayBuffer);
-
-    /* Shared string table */
-    const sharedStrings = [];
-    const sharedXml = zipText(files, 'xl/sharedStrings.xml');
-    if (sharedXml) {
-      for (const si of sharedXml.match(/<si>[\s\S]*?<\/si>/g) || []) {
-        // A cell's text can be split across several runs; concatenate them all.
-        const parts = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
-        sharedStrings.push(parts.map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join(''));
-      }
-    }
-
-    /* Which sheet is first? Fall back to sheet1.xml if the map is missing. */
-    let sheetPath = 'xl/worksheets/sheet1.xml';
-    const workbookXml = zipText(files, 'xl/workbook.xml');
-    const relsXml = zipText(files, 'xl/_rels/workbook.xml.rels');
-    if (workbookXml && relsXml) {
-      const firstSheet = /<sheet[^>]*r:id="([^"]+)"/.exec(workbookXml);
-      if (firstSheet) {
-        const rel = new RegExp(`<Relationship[^>]*Id="${firstSheet[1]}"[^>]*Target="([^"]+)"`).exec(relsXml);
-        if (rel) {
-          const target = rel[1].replace(/^\/?xl\//, '').replace(/^\//, '');
-          if (files.has(`xl/${target}`)) sheetPath = `xl/${target}`;
-        }
-      }
-    }
-
-    const sheetXml = zipText(files, sheetPath);
-    if (!sheetXml) return [];
-
-    /* Date-formatted cells need the style table to be recognised as dates. */
-    const dateStyles = readDateStyles(zipText(files, 'xl/styles.xml'));
-
-    const rows = [];
-    for (const rowXml of sheetXml.match(/<row[\s\S]*?(?:\/>|<\/row>)/g) || []) {
-      const cells = [];
-      for (const cellXml of rowXml.match(/<c[\s\S]*?(?:\/>|<\/c>)/g) || []) {
-        const ref = /r="([A-Z]+)\d+"/.exec(cellXml);
-        const column = ref ? columnIndex(ref[1]) : cells.length;
-        const type = /t="([^"]+)"/.exec(cellXml)?.[1];
-        const styleIndex = /s="(\d+)"/.exec(cellXml)?.[1];
-
-        let value = '';
-        if (type === 'inlineStr') {
-          value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || []).map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join('');
-        } else {
-          const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
-          if (raw != null) {
-            if (type === 's') value = sharedStrings[parseInt(raw, 10)] ?? '';
-            else if (type === 'str' || type === 'e') value = decodeXml(raw);
-            else if (styleIndex != null && dateStyles.has(parseInt(styleIndex, 10))) {
-              value = toISO(Date.UTC(1899, 11, 30) + Math.round(parseFloat(raw)) * MS_DAY);
-            } else {
-              value = decodeXml(raw);
-            }
-          }
-        }
-
-        while (cells.length < column) cells.push('');
-        cells[column] = value;
-      }
-      if (cells.length) rows.push(cells);
-    }
-
-    return rows;
-  }
-
-  /** Style indices whose number format is a date/time format. */
-  function readDateStyles(stylesXml) {
-    const dateStyles = new Set();
-    if (!stylesXml) return dateStyles;
-
-    // Built-in numeric formats 14–22 and 45–47 are dates/times.
-    const builtInDates = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47]);
-    const customDates = new Set();
-    for (const fmt of stylesXml.match(/<numFmt[^>]*\/>/g) || []) {
-      const id = /numFmtId="(\d+)"/.exec(fmt)?.[1];
-      const code = /formatCode="([^"]*)"/.exec(fmt)?.[1] || '';
-      if (id && /[dmyh]/i.test(code) && !/[#0]/.test(code.replace(/\[[^\]]*\]/g, ''))) customDates.add(parseInt(id, 10));
-    }
-
-    const cellXfs = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] || '';
-    const xfs = cellXfs.match(/<xf[\s\S]*?(?:\/>|<\/xf>)/g) || [];
-    xfs.forEach((xf, index) => {
-      const id = parseInt(/numFmtId="(\d+)"/.exec(xf)?.[1] ?? '0', 10);
-      if (builtInDates.has(id) || customDates.has(id)) dateStyles.add(index);
-    });
-
-    return dateStyles;
-  }
-
-  /** 'A' → 0, 'B' → 1, 'AA' → 26 … */
-  function columnIndex(letters) {
-    let n = 0;
-    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
-    return n - 1;
-  }
-
-  function decodeXml(text) {
-    return String(text)
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&apos;/g, "'")
-      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(+code))
-      .replace(/&amp;/g, '&');
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Applying an import
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Turn a row-based import result into a document.
-   * `mode` is 'replace' (a new project from the rows) or 'merge' (append the
-   * rows to the open project, creating any lanes it needs).
-   */
-  function buildDocFromRows(result, { mode = 'replace', name = 'Imported plan' } = {}) {
-    if (mode === 'merge') {
-      const doc = JSON.parse(JSON.stringify(getDoc()));
-      const laneByName = new Map(doc.lanes.map((l) => [fold(l.name), l]));
-      const laneMap = new Map();
-
-      for (const lane of result.lanes) {
-        const existing = laneByName.get(fold(lane.name));
-        if (existing) {
-          laneMap.set(lane.id, existing.id);
-        } else {
-          doc.lanes.push(lane);
-          doc.laneOrder.push(lane.id);
-          laneMap.set(lane.id, lane.id);
-        }
-      }
-
-      for (const obj of result.objects) {
-        obj.lane = laneMap.get(obj.lane) || doc.laneOrder[0];
-        doc.objects.push(obj);
-      }
-      doc.links.push(...result.links);
-      return normalise(doc);
-    }
-
-    const doc = makeProject(name);
-    doc.lanes = result.lanes;
-    doc.laneOrder = result.lanes.map((l) => l.id);
-    doc.objects = result.objects;
-    doc.links = result.links;
-    return normalise(doc);
-  }
-
-  Object.defineProperty(__x, "importFile", { get: () => importFile, enumerable: true });
-  Object.defineProperty(__x, "parseJson", { get: () => parseJson, enumerable: true });
-  Object.defineProperty(__x, "splitDelimited", { get: () => splitDelimited, enumerable: true });
-  Object.defineProperty(__x, "parseTabular", { get: () => parseTabular, enumerable: true });
-  Object.defineProperty(__x, "parseDate", { get: () => parseDate, enumerable: true });
-  Object.defineProperty(__x, "readXlsx", { get: () => readXlsx, enumerable: true });
-  Object.defineProperty(__x, "buildDocFromRows", { get: () => buildDocFromRows, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
 // ui/panels.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/panels.js"] = function (__x, __req) {
@@ -15738,6 +17122,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const cmd = __req("ui/commands.js");
   const { listEditor } = __req("ui/lists.js");
   const { openShareDialog, paneTeam } = __req("ui/auth.js");
+  const { paneP6 } = __req("ui/p6.js");
   const { openObjectDialog, openLaneDialog } = __req("ui/dialogs.js");
   const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
   const exporters = __req("io/exporters.js");
@@ -15745,7 +17130,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const { pickFiles } = __req("core/util.js");
 
   const PANES = [
-    'projects', 'team', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
+    'projects', 'team', 'p6', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
     'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
     'settings',
   ];
@@ -15804,6 +17189,9 @@ __mods["ui/panels.js"] = function (__x, __req) {
       rerender();
     });
     on(EV.DOC_REPLACED, rerender);
+    on(EV.PANE_REFRESH, (p) => {
+      if (!p?.pane || p.pane === active) renderPane();
+    });
     on(EV.SELECTION_CHANGED, () => {
       if (['outline', 'releases', 'campaigns', 'risks', 'links'].includes(active)) rerender();
     });
@@ -15849,6 +17237,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const RENDERERS = {
     projects: paneProjects,
     team: paneTeam,
+    p6: paneP6,
     lanes: paneLanes,
     palette: panePalette,
     outline: paneOutline,
@@ -15868,7 +17257,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   };
 
   const TITLES = {
-    projects: 'Projects', team: 'Team & access',
+    projects: 'Projects', team: 'Team & access', p6: 'P6 schedule',
     lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
     campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
     baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',
@@ -17605,6 +18994,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
         { pane: 'risks', label: 'Risks & Issues', icon: 'warning' },
         { pane: 'links', label: 'Dependencies', icon: 'link' },
         { pane: 'baselines', label: 'Baselines', icon: 'bookmark' },
+        { pane: 'p6', label: 'P6 Schedule', icon: 'table' },
       ],
     },
     {
@@ -18130,7 +19520,12 @@ __mods["ui/inspector.js"] = function (__x, __req) {
   const { el, clear, debounce, clamp } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } = __req("core/dates.js");
-  const { TYPES, listOptions, LINK_TYPES, CONNECTOR_STYLES, durationDays, remainingDays, statusOf, effectiveToday } = __req("core/model.js");
+  const { TYPES, listOptions, p6Activity, p6Dates, p6Slip, p6Variance, p6Register, LINK_TYPES, CONNECTOR_STYLES, durationDays, remainingDays, statusOf, effectiveToday } = __req("core/model.js");
+
+
+
+
+
 
 
 
@@ -18311,6 +19706,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       sectionOf('notes', 'Notes', notesFields(obj)),
       sectionOf('attachments', 'Attachments', [attachmentList(obj.id).root]),
       sectionOf('links', 'Dependencies', linkFields(obj)),
+      sectionOf('p6', 'P6', p6Fields(obj)),
       sectionOf('appearance', 'Appearance', appearanceFields(obj)),
       sectionOf('text', 'Text', textFields(obj)),
       sectionOf('arrange', 'Arrange', arrangeFields(obj)),
@@ -18811,6 +20207,104 @@ __mods["ui/inspector.js"] = function (__x, __req) {
         onChange: (v) => setStyle({ rotation: v }, 'Rotate'),
       }), 'Applies to notes, callouts, text boxes and shapes.'),
     ];
+  }
+
+  /* ── P6 ────────────────────────────────────────────────────────────────── */
+
+  /**
+   * The P6 activity this object is tracked against, if any.
+   *
+   * Deliberately shows two numbers rather than one: how far P6 has moved the
+   * activity since its baseline, and how far this plan differs from where P6
+   * has it now. They answer different questions and conflating them is how a
+   * review goes wrong.
+   */
+  function p6Fields(obj) {
+    const doc = store.getDoc();
+    const register = p6Register(doc);
+    const count = Object.keys(register.activities).length;
+    if (!count) return null;
+
+    const activityId = obj.data?.p6Id || '';
+    const activity = p6Activity(doc, activityId);
+
+    if (!activity) {
+      return [
+        el('div', { class: 'cx-hint', text: activityId
+          ? `Linked to ${activityId}, which is not in the imported schedule.`
+          : 'Not linked to a P6 activity.' }),
+        field('Activity ID', managedP6Select(obj, activityId)),
+      ];
+    }
+
+    const dates = p6Dates(activity);
+    const slip = p6Slip(activity);
+    const variance = p6Variance(obj, activity);
+
+    return [
+      el('div', { class: 'p6-link' }, [
+        el('span', { class: 'p6-id', text: activity.id }),
+        el('span', { class: 'p6-dates', text: dates
+          ? `${fmtDate(dates.start, 'medium')} → ${fmtDate(dates.end, 'medium')}`
+          : 'no dates' }),
+        activity.missing ? badge('Not in P6', 'bad') : null,
+      ].filter(Boolean)),
+
+      el('div', { class: 'cx-hint', text: activity.name }),
+
+      el('div', { class: 'cx-chipstats', style: { marginTop: '4px' } }, [
+        slip?.changed
+          ? chipStat('P6 slip', shift(slip.finishShift), slip.finishShift > 0 ? 'bad' : 'good')
+          : chipStat('P6 slip', activity.baseline ? 'none' : '—', 'muted'),
+        variance
+          ? chipStat('You', shift(variance.finishShift), !variance.differs ? 'muted' : variance.behind ? 'warn' : 'info')
+          : null,
+      ].filter(Boolean)),
+
+      dates && variance?.differs
+        ? el('button', {
+            class: 'cx-btn mini',
+            html: icon('target', { size: 12 }) + '<span>Move onto the P6 dates</span>',
+            onClick: () => {
+              store.adoptP6Dates([activity.id]);
+              renderer.requestRender();
+            },
+          })
+        : null,
+
+      field('Activity ID', managedP6Select(obj, activityId)),
+    ].filter(Boolean);
+  }
+
+  /** Pick, change or clear the linked activity. */
+  function managedP6Select(obj, current) {
+    const doc = store.getDoc();
+    const register = p6Register(doc);
+    const options = Object.values(register.activities)
+      .sort((a, b) => a.order - b.order)
+      .slice(0, 400)
+      .map((a) => ({ value: a.id, label: `${a.id} — ${a.name}` }));
+
+    // Keep an unknown value selectable rather than snapping the field to blank.
+    if (current && !options.some((o) => o.value === current)) {
+      options.unshift({ value: current, label: `${current} — not in the register` });
+    }
+
+    return selectInput({
+      value: current,
+      placeholder: '— not linked —',
+      options,
+      onChange: (v) => {
+        store.linkP6(obj.id, v || null);
+        renderer.requestRender();
+      },
+    });
+  }
+
+  function shift(days) {
+    if (days == null) return '—';
+    if (days === 0) return 'on plan';
+    return `${days > 0 ? '+' : '−'}${Math.abs(days)}d`;
   }
 
   /* ── Text ──────────────────────────────────────────────────────────────── */

@@ -81,6 +81,7 @@ export const EV = {
   DOC_META_CHANGED: 'doc:meta', // name/description/settings only
   DOC_REPLACED: 'doc:replaced', // wholesale swap (import, restore, new)
   LISTS_CHANGED: 'lists:changed', // { listId } — a dropdown vocabulary was edited
+  P6_IMPORTED: 'p6:imported', // { kind, plan } — a Primavera export was applied
 
   /* Persistence */
   SAVE_START: 'save:start',
@@ -114,6 +115,10 @@ export const EV = {
   THEME_CHANGED: 'theme:changed',
   FILTER_CHANGED: 'filter:changed',
   PANEL_CHANGED: 'panel:changed',
+  // A pane asking the dock to rebuild it. Panes cannot import the dock —
+  // that would be a cycle — and view-only state (a filter, a search) changes
+  // nothing in the document, so no doc:changed fires to do it for them.
+  PANE_REFRESH: 'panel:refresh',
   TOAST: 'ui:toast',
   STATUS: 'ui:status',
   PRESENT_MODE: 'ui:present',

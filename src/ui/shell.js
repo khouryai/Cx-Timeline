@@ -45,6 +45,7 @@ const NAV = [
       { pane: 'risks', label: 'Risks & Issues', icon: 'warning' },
       { pane: 'links', label: 'Dependencies', icon: 'link' },
       { pane: 'baselines', label: 'Baselines', icon: 'bookmark' },
+      { pane: 'p6', label: 'P6 Schedule', icon: 'table' },
     ],
   },
   {

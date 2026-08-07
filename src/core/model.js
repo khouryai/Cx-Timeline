@@ -14,7 +14,7 @@ import { uid, deepClone, clamp } from './util.js';
 import { toMs, toISO, todayMs, addDays, MS_DAY, startOfMonth, addMonths } from './dates.js';
 
 /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /* ══════════════════════════════════════════════════════════════════════════
    Object type registry
@@ -488,6 +488,140 @@ export const LINK_TYPES = {
 export const CONNECTOR_STYLES = ['orthogonal', 'curved', 'straight'];
 
 /* ══════════════════════════════════════════════════════════════════════════
+   The P6 register
+
+   A Primavera schedule is the contract programme; this plan is the
+   commissioning narrative. They are different documents with different
+   owners, so P6 data is held apart from the objects rather than merged into
+   them: `doc.p6` is a register keyed by activity ID, and an object points at
+   an entry with `data.p6Id`.
+
+   Each activity carries two date sets, because that is how the reviews work:
+
+     baseline   the target programme. Imported once, replaced only by another
+                baseline import.
+     progress   where it stands now. Re-imported monthly, and what an object
+                is compared against.
+
+   Everything else is derived — slip, variance, whether an activity is on the
+   timeline, where it sits against today. Nothing derived is ever stored, so
+   it cannot go stale, and an import only has to carry four columns.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** The two kinds of import. A progress import never touches the baseline. */
+export const P6_KINDS = ['baseline', 'progress'];
+
+export function emptyRegister() {
+  return {
+    activities: {},   // activityId → entry
+    baseline: null,   // { importedAt, fileName, label, count }
+    progress: null,
+    history: [],      // the last few imports, newest first
+  };
+}
+
+/** One activity in the register. Dates are UTC-midnight ms, or null. */
+export function makeP6Activity(props = {}) {
+  return {
+    id: String(props.id || '').trim(),
+    name: String(props.name || '').trim(),
+    wbs: props.wbs ? String(props.wbs) : '',
+    baseline: props.baseline || null,       // { start, end }
+    progress: props.progress || null,       // { start, end }
+    previous: props.previous || null,       // the progress before the last import
+    percent: Number.isFinite(props.percent) ? props.percent : null,
+    status: props.status ? String(props.status) : '',
+    order: Number.isFinite(props.order) ? props.order : 0,
+    missing: !!props.missing,               // in an earlier import, not the latest
+    firstSeen: props.firstSeen || Date.now(),
+  };
+}
+
+/** The register, guaranteed to be the right shape. */
+export function p6Register(doc) {
+  const p6 = doc?.p6;
+  if (!p6 || typeof p6 !== 'object') return emptyRegister();
+  return {
+    activities: p6.activities && typeof p6.activities === 'object' ? p6.activities : {},
+    baseline: p6.baseline || null,
+    progress: p6.progress || null,
+    history: Array.isArray(p6.history) ? p6.history : [],
+  };
+}
+
+export function p6Activity(doc, activityId) {
+  if (!activityId) return null;
+  return p6Register(doc).activities[String(activityId)] || null;
+}
+
+export function p6Count(doc) {
+  return Object.keys(p6Register(doc).activities).length;
+}
+
+/**
+ * The dates an activity is currently understood to hold: its progress if a
+ * progress import has been taken, otherwise its baseline. A register with
+ * only a baseline is still useful, and this is what makes that true.
+ */
+export function p6Dates(activity) {
+  if (!activity) return null;
+  return activity.progress || activity.baseline || null;
+}
+
+/** How far P6 has moved its own activity since the baseline, in days. */
+export function p6Slip(activity) {
+  if (!activity?.baseline || !activity?.progress) return null;
+  const startShift = Math.round((activity.progress.start - activity.baseline.start) / MS_DAY);
+  const finishShift = Math.round((activity.progress.end - activity.baseline.end) / MS_DAY);
+  return { startShift, finishShift, slipped: finishShift > 0, changed: startShift !== 0 || finishShift !== 0 };
+}
+
+/** How far the plan differs from P6, in days, for an object that is linked. */
+export function p6Variance(obj, activity) {
+  const dates = p6Dates(activity);
+  if (!obj || !dates) return null;
+  const hasDuration = !!TYPES[obj.type]?.duration;
+  const startShift = Math.round((obj.start - dates.start) / MS_DAY);
+  const finishShift = hasDuration ? Math.round((obj.end - dates.end) / MS_DAY) : startShift;
+  return { startShift, finishShift, behind: finishShift > 0, differs: startShift !== 0 || finishShift !== 0 };
+}
+
+/**
+ * Where an activity sits against today.
+ *
+ * This is deliberately *not* called status. Dates cannot tell you whether
+ * work happened — an activity whose finish has passed may be complete or may
+ * never have started — so this reports the schedule position and leaves
+ * status to the object, where a person sets it.
+ */
+export function p6Position(activity, today = todayMs()) {
+  const dates = p6Dates(activity);
+  if (!dates) return 'unknown';
+  if (dates.end < today) return 'past';
+  if (dates.start > today) return 'future';
+  return 'current';
+}
+
+/** A milestone in P6 has no duration: start and finish are the same day. */
+export function p6IsMilestone(activity) {
+  const dates = p6Dates(activity);
+  return !!dates && dates.start === dates.end;
+}
+
+/** Objects on the timeline that point at a given activity. */
+export function p6Placed(doc, activityId) {
+  if (!activityId) return [];
+  return doc.objects.filter((o) => o.data?.p6Id === activityId);
+}
+
+/** Every activity id the plan currently references. */
+export function p6PlacedIds(doc) {
+  const ids = new Set();
+  for (const obj of doc.objects) if (obj.data?.p6Id) ids.add(obj.data.p6Id);
+  return ids;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    Factories
    ═══════════════════════════════════════════════════════════════════════ */
 
@@ -660,6 +794,7 @@ export function makeProject(name = 'Untitled Programme') {
     modified: Date.now(),
     settings: defaultSettings(),
     lists: defaultLists(),
+    p6: emptyRegister(),
     laneOrder: [],
     lanes: [],
     objects: [],
@@ -777,6 +912,14 @@ const MIGRATIONS = [
     doc.schema = 2;
     return doc;
   },
+
+  // v2 → v3: the P6 register. Nothing to convert — an older plan simply has
+  // no imported schedule yet.
+  (doc) => {
+    if (!doc.p6) doc.p6 = emptyRegister();
+    doc.schema = 3;
+    return doc;
+  },
 ];
 
 /**
@@ -804,6 +947,7 @@ export function normalise(input) {
   doc.modified = doc.modified || Date.now();
   doc.settings = { ...defaultSettings(), ...(doc.settings || {}) };
   doc.lists = normaliseLists(doc);
+  doc.p6 = normaliseRegister(doc);
   doc.baselines = Array.isArray(doc.baselines) ? doc.baselines : [];
   doc.groups = Array.isArray(doc.groups) ? doc.groups : [];
   doc.attachments = Array.isArray(doc.attachments) ? doc.attachments : [];
@@ -842,6 +986,32 @@ export function normalise(input) {
  * status therefore keeps working and becomes editable, rather than silently
  * reading as an unknown value forever.
  */
+/**
+ * Bring the P6 register to a known shape.
+ *
+ * Entries are keyed by activity ID, which is the only stable identifier P6
+ * gives us — names get edited, dates move, but the ID survives. Anything
+ * without one is dropped, because it could never be matched on re-import.
+ */
+function normaliseRegister(doc) {
+  const raw = doc?.p6;
+  const out = emptyRegister();
+  if (!raw || typeof raw !== 'object') return out;
+
+  out.baseline = raw.baseline || null;
+  out.progress = raw.progress || null;
+  out.history = Array.isArray(raw.history) ? raw.history.slice(0, 12) : [];
+
+  const source = raw.activities && typeof raw.activities === 'object' ? raw.activities : {};
+  for (const [key, value] of Object.entries(source)) {
+    if (!value || typeof value !== 'object') continue;
+    const id = String(value.id || key || '').trim();
+    if (!id) continue;
+    out.activities[id] = makeP6Activity({ ...value, id });
+  }
+  return out;
+}
+
 function normaliseLists(doc) {
   const seeds = defaultLists();
   const out = {};

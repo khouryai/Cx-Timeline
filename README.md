@@ -203,6 +203,45 @@ values your lists have never seen keep them — the value is adopted rather than
 silently dropped. Owner and Area stay free text, offering what the plan
 already uses as suggestions rather than blocking a new name.
 
+### Primavera P6
+
+A P6 schedule is the contract programme; this is the commissioning narrative.
+They stay separate documents with separate owners, and the P6 side is a
+**register** rather than a copy of your plan.
+
+Import an Excel or CSV export carrying four columns — **Activity ID**,
+**Activity Name**, **Start**, **Finish**. `WBS`, `% Complete` and
+`Activity Status` are used if the layout happens to include them, and ignored
+if not. P6's own header rows, `dd-MMM-yy` dates with times, and milestones
+whose start and finish are the same day are all handled.
+
+Every import is tagged, and both are kept per activity:
+
+- **Baseline** — the target programme. Replaced only by another baseline.
+- **Progress** — where the schedule stands now. Re-imported monthly.
+
+Nothing is drawn until you choose. From the **P6 Schedule** pane you can
+place an activity on the timeline, or link one to an object you already have.
+The register then shows, for all 1,500 of them, what is on your plan and what
+is not, searchable by activity ID — so when someone says "A1234" in a review,
+you have it.
+
+Three numbers fall out and are never stored:
+
+| | |
+|---|---|
+| **P6 slip** | how far the scheduler has moved an activity since the baseline |
+| **Your variance** | how far your plan differs from where P6 has it now |
+| **Position** | where an activity sits against today — *not* status, because dates cannot tell you whether work happened |
+
+A re-import **never moves your bars**. It reports what changed and asks which
+of them should follow, defaulted to none; whatever you decline simply records
+the divergence. An activity that disappears from P6 is marked, not deleted.
+
+**Baseline from P6** turns the imported baseline into an ordinary baseline, so
+comparison mode draws the ghost bars and day counts against the P6 target
+with nothing further to set up.
+
 ### Search, filters and legend
 
 Global search covers titles, notes, owners, subsystems, areas, tags, versions,
@@ -264,6 +303,7 @@ whoever opens it.
 | **CSV / TSV** | Column names mapped automatically; comma, semicolon and tab delimiters detected |
 | **Microsoft Project CSV** | Predecessor syntax (`12FS+3 days`) parsed into real dependencies |
 | **Excel `.xlsx`** | Read directly — ZIP + DEFLATE + sheet XML, no dependency |
+| **Primavera P6** | Excel or CSV export, tagged baseline or progress — see above |
 
 Imports preview before they apply, and can either replace the project or merge
 into it.
@@ -315,8 +355,8 @@ src/
   timeline/    viewport · layout · connectors · renderer · interactions
   ui/          icons · components · lists · theme · shell · panels · inspector
                dialogs · menus · commands · shortcuts · notes · attachments
-               minimap · legend · auth
-  io/          scene · svg · pdf · inflate · exporters · importers
+               minimap · legend · auth · p6
+  io/          scene · svg · pdf · inflate · exporters · importers · p6
   main.js
 css/           tokens · base · components · layout · timeline · notes
 ```

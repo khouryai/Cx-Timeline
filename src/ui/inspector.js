@@ -16,6 +16,11 @@ import { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } from '../core/
 import {
   TYPES,
   listOptions,
+  p6Activity,
+  p6Dates,
+  p6Slip,
+  p6Variance,
+  p6Register,
   LINK_TYPES,
   CONNECTOR_STYLES,
   durationDays,
@@ -194,6 +199,7 @@ function renderSingle(obj) {
     sectionOf('notes', 'Notes', notesFields(obj)),
     sectionOf('attachments', 'Attachments', [attachmentList(obj.id).root]),
     sectionOf('links', 'Dependencies', linkFields(obj)),
+    sectionOf('p6', 'P6', p6Fields(obj)),
     sectionOf('appearance', 'Appearance', appearanceFields(obj)),
     sectionOf('text', 'Text', textFields(obj)),
     sectionOf('arrange', 'Arrange', arrangeFields(obj)),
@@ -694,6 +700,104 @@ function appearanceFields(obj) {
       onChange: (v) => setStyle({ rotation: v }, 'Rotate'),
     }), 'Applies to notes, callouts, text boxes and shapes.'),
   ];
+}
+
+/* ── P6 ────────────────────────────────────────────────────────────────── */
+
+/**
+ * The P6 activity this object is tracked against, if any.
+ *
+ * Deliberately shows two numbers rather than one: how far P6 has moved the
+ * activity since its baseline, and how far this plan differs from where P6
+ * has it now. They answer different questions and conflating them is how a
+ * review goes wrong.
+ */
+function p6Fields(obj) {
+  const doc = store.getDoc();
+  const register = p6Register(doc);
+  const count = Object.keys(register.activities).length;
+  if (!count) return null;
+
+  const activityId = obj.data?.p6Id || '';
+  const activity = p6Activity(doc, activityId);
+
+  if (!activity) {
+    return [
+      el('div', { class: 'cx-hint', text: activityId
+        ? `Linked to ${activityId}, which is not in the imported schedule.`
+        : 'Not linked to a P6 activity.' }),
+      field('Activity ID', managedP6Select(obj, activityId)),
+    ];
+  }
+
+  const dates = p6Dates(activity);
+  const slip = p6Slip(activity);
+  const variance = p6Variance(obj, activity);
+
+  return [
+    el('div', { class: 'p6-link' }, [
+      el('span', { class: 'p6-id', text: activity.id }),
+      el('span', { class: 'p6-dates', text: dates
+        ? `${fmtDate(dates.start, 'medium')} → ${fmtDate(dates.end, 'medium')}`
+        : 'no dates' }),
+      activity.missing ? badge('Not in P6', 'bad') : null,
+    ].filter(Boolean)),
+
+    el('div', { class: 'cx-hint', text: activity.name }),
+
+    el('div', { class: 'cx-chipstats', style: { marginTop: '4px' } }, [
+      slip?.changed
+        ? chipStat('P6 slip', shift(slip.finishShift), slip.finishShift > 0 ? 'bad' : 'good')
+        : chipStat('P6 slip', activity.baseline ? 'none' : '—', 'muted'),
+      variance
+        ? chipStat('You', shift(variance.finishShift), !variance.differs ? 'muted' : variance.behind ? 'warn' : 'info')
+        : null,
+    ].filter(Boolean)),
+
+    dates && variance?.differs
+      ? el('button', {
+          class: 'cx-btn mini',
+          html: icon('target', { size: 12 }) + '<span>Move onto the P6 dates</span>',
+          onClick: () => {
+            store.adoptP6Dates([activity.id]);
+            renderer.requestRender();
+          },
+        })
+      : null,
+
+    field('Activity ID', managedP6Select(obj, activityId)),
+  ].filter(Boolean);
+}
+
+/** Pick, change or clear the linked activity. */
+function managedP6Select(obj, current) {
+  const doc = store.getDoc();
+  const register = p6Register(doc);
+  const options = Object.values(register.activities)
+    .sort((a, b) => a.order - b.order)
+    .slice(0, 400)
+    .map((a) => ({ value: a.id, label: `${a.id} — ${a.name}` }));
+
+  // Keep an unknown value selectable rather than snapping the field to blank.
+  if (current && !options.some((o) => o.value === current)) {
+    options.unshift({ value: current, label: `${current} — not in the register` });
+  }
+
+  return selectInput({
+    value: current,
+    placeholder: '— not linked —',
+    options,
+    onChange: (v) => {
+      store.linkP6(obj.id, v || null);
+      renderer.requestRender();
+    },
+  });
+}
+
+function shift(days) {
+  if (days == null) return '—';
+  if (days === 0) return 'on plan';
+  return `${days > 0 ? '+' : '−'}${Math.abs(days)}d`;
 }
 
 /* ── Text ──────────────────────────────────────────────────────────────── */

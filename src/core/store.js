@@ -24,7 +24,11 @@
 import { deepClone, clamp } from './util.js';
 import { emit, EV } from './events.js';
 import { isReadOnly } from './cloud.js';
-import { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage } from './model.js';
+import {
+  normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES,
+  syncLists, defaultLists, LIST_DEFS, listUsage,
+  emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds,
+} from './model.js';
 import { History, diff, apply } from './history.js';
 
 /* ── Private state ─────────────────────────────────────────────────────── */
@@ -868,6 +872,206 @@ export function resetList(listId) {
     }
     d.lists[listId] = [...seeds, ...keep];
   });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The P6 register
+   ═══════════════════════════════════════════════════════════════════════ */
+
+export function getP6() {
+  return p6Register(doc);
+}
+
+export function getP6Activity(id) {
+  return p6Activity(doc, id);
+}
+
+export function placedP6Ids() {
+  return p6PlacedIds(doc);
+}
+
+/**
+ * Apply an import.
+ *
+ * A baseline import writes the baseline dates and leaves progress alone; a
+ * progress import writes progress and keeps the previous progress so the next
+ * screen can say what moved. Neither ever touches an object's own dates —
+ * that is a separate, explicit step the user takes from the review.
+ *
+ * @param {string} kind      'baseline' | 'progress'
+ * @param {Array}  incoming  activities from `parseP6Rows`, each with `.dates`
+ * @param {object} meta      { fileName, label }
+ */
+export function importP6(kind, incoming, meta = {}) {
+  const isBaseline = kind === 'baseline';
+  const stamp = { importedAt: Date.now(), fileName: meta.fileName || '', label: meta.label || '', count: incoming.length };
+
+  return edit(`Import P6 ${isBaseline ? 'baseline' : 'progress'}`, (d) => {
+    const register = d.p6 && typeof d.p6 === 'object' ? d.p6 : emptyRegister();
+    register.activities = register.activities || {};
+
+    const incomingIds = new Set();
+
+    for (const activity of incoming) {
+      incomingIds.add(activity.id);
+      const current = register.activities[activity.id];
+
+      if (!current) {
+        register.activities[activity.id] = makeP6Activity({
+          ...activity,
+          [isBaseline ? 'baseline' : 'progress']: activity.dates,
+        });
+        continue;
+      }
+
+      // The name and WBS come from whichever import ran last: the scheduler
+      // renames things, and the newest file is the better authority.
+      current.name = activity.name || current.name;
+      if (activity.wbs) current.wbs = activity.wbs;
+      if (activity.percent != null) current.percent = activity.percent;
+      if (activity.status) current.status = activity.status;
+      current.order = activity.order;
+      current.missing = false;
+
+      if (isBaseline) {
+        current.baseline = activity.dates;
+      } else {
+        current.previous = current.progress || null;
+        current.progress = activity.dates;
+      }
+    }
+
+    // Anything the file did not mention is marked, never removed — an object
+    // may be linked to it, and a bar whose activity silently vanished is
+    // worse than one labelled "no longer in P6".
+    for (const activity of Object.values(register.activities)) {
+      if (!incomingIds.has(activity.id)) activity.missing = true;
+    }
+
+    register[isBaseline ? 'baseline' : 'progress'] = stamp;
+    register.history = [{ kind, ...stamp }, ...(register.history || [])].slice(0, 12);
+    d.p6 = register;
+  });
+}
+
+/** Forget every imported activity. Objects keep their links, harmlessly. */
+export function clearP6() {
+  return edit('Clear the P6 register', (d) => {
+    d.p6 = emptyRegister();
+  });
+}
+
+/**
+ * Put an activity on the timeline.
+ *
+ * The new object's dates start from P6 and are then yours: the link records
+ * where they came from, it does not tie them together.
+ */
+export function placeP6Activity(activityId, { lane = null, type = null } = {}) {
+  const activity = p6Activity(doc, activityId);
+  if (!activity) return null;
+  const dates = p6Dates(activity);
+  if (!dates) return null;
+
+  const laneId = lane || doc.laneOrder[0] || doc.lanes[0]?.id || null;
+  const isMilestone = dates.start === dates.end;
+
+  const object = makeObject({
+    type: type || (isMilestone ? 'milestone' : 'activity'),
+    lane: laneId,
+    title: activity.name || activityId,
+    subtitle: activityId,
+    start: dates.start,
+    end: dates.end,
+    data: { p6Id: activityId },
+  });
+
+  edit(`Add ${activityId} from P6`, (d) => {
+    d.objects.push(object);
+  });
+  return object.id;
+}
+
+/** Point an existing object at an activity, or at nothing. */
+export function linkP6(objectId, activityId) {
+  return edit(activityId ? `Link to ${activityId}` : 'Unlink from P6', (d) => {
+    const object = d.objects.find((o) => o.id === objectId);
+    if (!object) return false;
+    object.data = object.data || {};
+    if (activityId) object.data.p6Id = activityId;
+    else delete object.data.p6Id;
+  });
+}
+
+/**
+ * Move linked objects onto their P6 dates.
+ *
+ * This is the "accept" half of an import: the file proposes, and this applies
+ * only what was chosen. Everything not named keeps the dates it had.
+ */
+export function adoptP6Dates(activityIds) {
+  const wanted = new Set([].concat(activityIds));
+  if (!wanted.size) return false;
+
+  return edit('Adopt P6 dates', (d) => {
+    let touched = 0;
+    for (const object of d.objects) {
+      const id = object.data?.p6Id;
+      if (!id || !wanted.has(id)) continue;
+      const dates = p6Dates(d.p6?.activities?.[id]);
+      if (!dates) continue;
+      object.start = dates.start;
+      object.end = TYPES[object.type]?.duration ? dates.end : dates.start;
+      object.modified = Date.now();
+      touched++;
+    }
+    if (!touched) return false;
+  });
+}
+
+/**
+ * A baseline built from the imported P6 baseline.
+ *
+ * Rather than a second comparison mechanism, this feeds the one that already
+ * exists: the snapshot is written in the same shape a taken baseline uses, so
+ * comparison mode draws the ghosts and day counts with no further work.
+ */
+export function baselineFromP6(name = '') {
+  const register = p6Register(doc);
+  const snapshot = [];
+
+  for (const object of doc.objects) {
+    const id = object.data?.p6Id;
+    const activity = id ? register.activities[id] : null;
+    if (!activity?.baseline) continue;
+    snapshot.push({
+      id: object.id,
+      title: object.title,
+      lane: object.lane,
+      start: activity.baseline.start,
+      end: TYPES[object.type]?.duration ? activity.baseline.end : activity.baseline.start,
+      progress: 0,
+      status: object.status,
+    });
+  }
+
+  if (!snapshot.length) return null;
+
+  const baseline = {
+    id: `bl_p6_${Date.now().toString(36)}`,
+    name: name || `P6 baseline — ${snapshot.length} linked activities`,
+    created: Date.now(),
+    note: 'Generated from the imported P6 baseline dates.',
+    fromP6: true,
+    snapshot,
+  };
+
+  edit('Baseline from P6', (d) => {
+    d.baselines.push(baseline);
+    d.settings.activeBaseline = baseline.id;
+    d.settings.showBaseline = true;
+  });
+  return baseline.id;
 }
 
 /* ── Groups ────────────────────────────────────────────────────────────── */
