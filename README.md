@@ -154,9 +154,22 @@ Activities carry percent complete, drawn as a progress fill, with remaining
 duration and a straight-line health assessment (on track / behind / overdue /
 ahead).
 
-Take a **baseline** at any time. The timeline then shows original-versus-current
-ghost bars, and the Baselines pane reports every slip, acceleration, reshape
-and scope change, exportable as CSV.
+Take a **baseline** at any time. Turn comparison on and the plan shows what
+changed, at a glance:
+
+- the **ghost** — each object at its baseline dates, drawn behind the live bar
+  at the same height, so the pair reads as one object that moved;
+- the **shift** — an arrow between the two finish edges labelled with the
+  number of days, red for a slip, green for an acceleration, amber for a
+  reshape. This is what makes a slip legible from across a lane;
+- **what is gone** — objects that were in the baseline and are no longer in
+  the plan, drawn as struck-through outlines where they used to sit. Nothing
+  else in the application shows those at all;
+- a **banner** naming the baseline and counting the differences.
+
+The Baselines pane reports every slip, acceleration, reshape and scope change
+and exports them as CSV. Exports draw the comparison too, so a PDF taken into
+a meeting shows the movement rather than just the current dates.
 
 ### Notes and attachments
 

@@ -629,6 +629,93 @@ async function main() {
   await filterText.fill('');
   await page.waitForTimeout(600);
 
+  console.log('\nBaseline comparison');
+  // A baseline is only worth having if the difference is visible, so this
+  // checks the drawing, not just that the data compared.
+  await page.locator('#sidenav .nav-link[data-pane="baselines"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('#dock .cx-btn', { hasText: /take baseline/i }).first().click();
+  await page.waitForTimeout(500);
+  if (await page.locator('.cx-modal').count()) {
+    await page.locator('.cx-modal-foot .cx-btn.primary').click();
+    await page.waitForTimeout(700);
+  }
+  check('a baseline can be taken', (await page.locator('#dock .cx-listrow').count()) >= 1);
+
+  const baselineState = () => page.evaluate(() => ({
+    ghosts: document.querySelectorAll('.tl-baseline').length,
+    arrows: document.querySelectorAll('.tl-shift').length,
+    gone: document.querySelectorAll('.tl-baseline-gone').length,
+    banner: document.querySelector('.tl-baseline-bar')?.textContent || '',
+    days: [...document.querySelectorAll('.tl-shift .sh-days')].map((n) => n.textContent),
+  }));
+
+  check('nothing is drawn while the plan matches its baseline', (await baselineState()).ghosts === 0);
+
+  // Move one bar later and another earlier, then delete a third. Earlier
+  // sections rename bars, so these are picked by position rather than by
+  // title — a selector that silently matches nothing would have made the
+  // checks below pass for the wrong reason.
+  const bars = page.locator('.tl-obj.shape-bar');
+  const barCount = await bars.count();
+  check('there are bars to compare', barCount >= 3, `${barCount}`);
+
+  const nudge = async (index, presses, key) => {
+    await bars.nth(index).click();
+    await page.waitForTimeout(250);
+    for (let i = 0; i < presses; i++) await page.keyboard.press(key);
+    await page.waitForTimeout(450);
+  };
+  await nudge(0, 6, 'Shift+ArrowRight');
+  await nudge(1, 3, 'Shift+ArrowLeft');
+  await bars.nth(2).click();
+  await page.waitForTimeout(250);
+  await page.keyboard.press('Delete');
+  await page.waitForTimeout(500);
+  await page.keyboard.press('Control+0');
+  await page.waitForTimeout(800);
+
+  const moved = await baselineState();
+  check('the original dates are ghosted', moved.ghosts >= 2, `${moved.ghosts} ghost(s)`);
+  check('an arrow measures each move', moved.arrows >= 2, `${moved.arrows} arrow(s)`);
+  check('the arrows are labelled in days', moved.days.every((d) => /^[+−]\d+d$/.test(d)), moved.days.join(' '));
+  check('a slip and an acceleration are told apart', await page.evaluate(() =>
+    document.querySelector('.tl-shift.slip') !== null && document.querySelector('.tl-shift.ahead') !== null));
+  check('objects removed since the baseline still appear', moved.gone >= 1, `${moved.gone}`);
+  check('the banner names the baseline and counts the changes',
+    /baseline/i.test(moved.banner) && /slipped/i.test(moved.banner), moved.banner.replace(/\n/g, ' '));
+
+  // The export is the same drawing, or a comparison taken to a meeting as a
+  // PDF would quietly show only the current dates.
+  const exported = await page.evaluate(async () => {
+    document.querySelector('#sidenav .nav-link[data-pane="io"]').click();
+    await new Promise((r) => setTimeout(r, 400));
+    let href = null;
+    const real = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () { href = this.href; };
+    const button = [...document.querySelectorAll('#dock .cx-btn')].find((b) => /svg/i.test(b.textContent));
+    button.click();
+    await new Promise((r) => setTimeout(r, 1500));
+    HTMLAnchorElement.prototype.click = real;
+    return href ? await (await fetch(href)).text() : '';
+  });
+  check('the export draws the ghosts too', (exported.match(/stroke-dasharray/g) || []).length >= 2);
+  check('and carries the day counts', /[+−]\d+d/.test(exported),
+    (exported.match(/>[+−]\d+d</g) || []).join(' '));
+
+  // Turning comparison off must leave nothing behind.
+  await page.locator('#sidenav .nav-link[data-pane="baselines"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('#dock .cx-toggle, #dock .cx-switch').first().click().catch(() => {});
+  await page.waitForTimeout(600);
+  const off = await baselineState();
+  check('switching comparison off clears the canvas',
+    off.ghosts === 0 && off.arrows === 0 && off.gone === 0 && off.banner === '',
+    JSON.stringify(off));
+
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(400);
+
   console.log('\nDock panes');
   const panes = ['lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links', 'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists', 'settings'];
   for (const pane of panes) {

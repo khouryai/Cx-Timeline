@@ -776,33 +776,137 @@
   background: var(--selection);
 }
 
-/* Baseline ghost */
+/* ══════════════════════════════════════════════════════════════════════════
+   Baseline comparison
+
+   The ghost sits behind the live bar at the same height, so the pair reads as
+   one object that moved. The arrow between their finish edges is what carries
+   the message across a lane — the ghost alone is easy to miss.
+   ═══════════════════════════════════════════════════════════════════════ */
+
 .tl-baseline {
   position: absolute;
-  border: 1px dashed var(--text-subtle);
-  border-radius: 4px;
+  border: 1.5px dashed var(--text-subtle);
+  border-radius: 5px;
   background: repeating-linear-gradient(
     45deg,
     transparent,
-    transparent 4px,
-    rgba(127, 127, 127, 0.14) 4px,
-    rgba(127, 127, 127, 0.14) 8px
+    transparent 5px,
+    color-mix(in srgb, var(--text-subtle) 22%, transparent) 5px,
+    color-mix(in srgb, var(--text-subtle) 22%, transparent) 10px
   );
   pointer-events: none;
-  z-index: 1;
+  /* Behind the objects (z 100) but above the lane bands. */
+  z-index: 60;
 }
 .tl-baseline.slip {
   border-color: var(--bad);
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 5px,
+    color-mix(in srgb, var(--bad) 20%, transparent) 5px,
+    color-mix(in srgb, var(--bad) 20%, transparent) 10px
+  );
 }
 .tl-baseline.ahead {
   border-color: var(--good);
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 5px,
+    color-mix(in srgb, var(--good) 20%, transparent) 5px,
+    color-mix(in srgb, var(--good) 20%, transparent) 10px
+  );
 }
-.tl-slip-arrow {
+.tl-baseline.reshaped {
+  border-color: var(--warn);
+}
+
+/* ── The shift ─────────────────────────────────────────────────────────── */
+
+.tl-shift {
   position: absolute;
-  height: 2px;
+  height: 0;
   pointer-events: none;
-  z-index: 1;
+  z-index: 140; /* above the bars: this is the headline */
 }
+.tl-shift .sh-line {
+  position: absolute;
+  top: -1px;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+}
+.tl-shift .sh-head {
+  position: absolute;
+  top: -4px;
+  width: 0;
+  height: 0;
+  border-top: 4.5px solid transparent;
+  border-bottom: 4.5px solid transparent;
+}
+.tl-shift.right .sh-head {
+  right: -1px;
+  border-left: 7px solid currentColor;
+}
+.tl-shift.left .sh-head {
+  left: -1px;
+  border-right: 7px solid currentColor;
+}
+.tl-shift .sh-days {
+  position: absolute;
+  top: -9px;
+  left: 50%;
+  padding: 1px 5px;
+  transform: translateX(-50%);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: var(--surface);
+  color: currentColor;
+  font-family: var(--f-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.tl-shift.slip {
+  color: var(--bad);
+}
+.tl-shift.ahead {
+  color: var(--good);
+}
+.tl-shift.reshaped {
+  color: var(--warn);
+}
+
+/* ── Gone since the baseline ───────────────────────────────────────────── */
+
+/* Nothing else in the application shows these: the object is not in the
+   document any more, so only the snapshot knows it existed. */
+.tl-baseline-gone {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  border: 1.5px dashed var(--bad);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bad) 8%, transparent);
+  opacity: 0.75;
+  pointer-events: none;
+  z-index: 60;
+}
+.tl-baseline-gone .bg-label {
+  overflow: hidden;
+  color: var(--bad);
+  font-size: var(--fs-micro);
+  font-style: italic;
+  text-decoration: line-through;
+  white-space: nowrap;
+}
+
 .tl-slip-arrow.slip {
   background: var(--bad);
 }
@@ -1166,4 +1270,75 @@ body.presenting .tl-root {
     overflow: visible;
     position: static;
   }
+}
+
+/* ── Baseline mode banner ──────────────────────────────────────────────── */
+
+/* Comparison changes what every bar means, so the canvas says so. */
+.tl-baseline-bar {
+  position: absolute;
+  /* Below the ruler, not over it — the ruler is how you read every date on
+     the canvas, and the banner covering it made the plan harder to read, not
+     easier. */
+  z-index: 30;
+  top: var(--ruler-h);
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-top: 0;
+  border-right: 0;
+  border-bottom-left-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  font-size: var(--fs-tiny);
+  pointer-events: none;
+}
+.tl-baseline-bar .bb-eyebrow {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.tl-baseline-bar .bb-name {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--text-main);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-baseline-bar .bb-sep {
+  width: 1px;
+  height: 13px;
+  background: var(--border-strong);
+}
+.tl-baseline-bar .bb-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.03em;
+}
+.tl-baseline-bar .bb-stat::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.tl-baseline-bar .bb-stat.slip { color: var(--bad); }
+.tl-baseline-bar .bb-stat.ahead { color: var(--good); }
+.tl-baseline-bar .bb-stat.reshaped { color: var(--warn); }
+.tl-baseline-bar .bb-stat.gone { color: var(--bad); }
+.tl-baseline-bar .bb-stat.none { color: var(--text-subtle); }
+
+/* Presentation mode strips the chrome, but this is content, not chrome. */
+body.presenting .tl-baseline-bar {
+  display: flex;
 }

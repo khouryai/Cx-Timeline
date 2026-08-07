@@ -365,6 +365,14 @@ export function buildScene(doc, opts = {}) {
     }
   });
 
+  /* ── Baseline comparison ───────────────────────────────────────────── */
+  // Drawn after the objects so the ghosts and their arrows sit on top, and
+  // only when the document is actually in comparison mode — an export is
+  // supposed to be the drawing on the screen, not a different one.
+  if (opts.showBaseline !== false && doc.settings.showBaseline) {
+    drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette });
+  }
+
   items.push({ type: 'line', x1: M.gutter, y1: contentTop, x2: M.gutter, y2: contentTop + contentHeight, stroke: palette.border, strokeWidth: 1 });
 
   /* ── Dependencies ──────────────────────────────────────────────────── */
@@ -589,6 +597,109 @@ function coarser(id) {
   const order = ['day', 'week', 'month', 'quarter', 'year'];
   const i = order.indexOf(id);
   return order[Math.min(order.length - 1, i + 1)];
+}
+
+/**
+ * Where the plan was, in the export.
+ *
+ * The canvas draws this too; without it here, a comparison taken into a
+ * meeting as a PDF would show the current dates and no sign that anything had
+ * moved — which is the one thing the reader is there to see.
+ */
+function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette }) {
+  const baseline = (doc.baselines || []).find((b) => b.id === doc.settings.activeBaseline);
+  if (!baseline) return;
+
+  const seen = new Set();
+
+  for (const snap of baseline.snapshot) {
+    const rect = rectsById.get(snap.id);
+    if (!rect) continue;
+    seen.add(snap.id);
+
+    const obj = doc.objects.find((o) => o.id === snap.id);
+    if (!obj) continue;
+
+    const hasDuration = !!TYPES[obj.type]?.duration;
+    const startShift = Math.round((obj.start - snap.start) / MS_DAY);
+    const endShift = hasDuration ? Math.round((obj.end - (snap.end ?? snap.start)) / MS_DAY) : startShift;
+    if (!startShift && !endShift) continue;
+
+    const ink = endShift > 0 ? palette.bad : endShift < 0 ? palette.good : palette.warn;
+    const gx = msToX(snap.start);
+    const gw = hasDuration ? Math.max(3, msToX(snap.end ?? snap.start) - gx) : 8;
+
+    items.push({
+      type: 'rect',
+      x: hasDuration ? gx : gx - 4,
+      y: rect.top,
+      w: gw,
+      h: Math.max(6, rect.bottom - rect.top),
+      radius: 3,
+      fill: withAlpha(ink, 0.12),
+      stroke: ink,
+      strokeWidth: 0.8,
+      dash: [3, 2],
+    });
+
+    // The arrow between the two finish edges, with its day count.
+    const reshaped = endShift === 0;
+    const fromX = reshaped ? gx : gx + gw;
+    const toX = reshaped ? rect.x : rect.right;
+    const shift = reshaped ? startShift : endShift;
+    const y = rect.cy;
+    if (Math.abs(toX - fromX) > 1) {
+      const dir = toX >= fromX ? 1 : -1;
+      items.push({ type: 'line', x1: fromX, y1: y, x2: toX, y2: y, stroke: ink, strokeWidth: 1.1 });
+      items.push({
+        type: 'polygon',
+        points: [[toX, y], [toX - 4 * dir, y - 2.6], [toX - 4 * dir, y + 2.6]],
+        fill: ink,
+      });
+      items.push({
+        type: 'text',
+        x: (fromX + toX) / 2,
+        y: y - 4,
+        text: `${shift > 0 ? '+' : '\u2212'}${Math.abs(shift)}d`,
+        size: 6.5,
+        weight: 700,
+        family: 'mono',
+        fill: ink,
+        anchor: 'middle',
+      });
+    }
+  }
+
+  // Objects the baseline had and the plan no longer does.
+  for (const snap of baseline.snapshot) {
+    if (seen.has(snap.id) || doc.objects.some((o) => o.id === snap.id)) continue;
+    const entry = laneGeom.find((g) => g.lane.id === snap.lane) || laneGeom[0];
+    if (!entry) continue;
+
+    const x = msToX(snap.start);
+    const w = Math.max(8, msToX(snap.end ?? snap.start) - x);
+    items.push({
+      type: 'rect',
+      x,
+      y: entry.y + M.lanePadY,
+      w,
+      h: 14,
+      radius: 3,
+      fill: withAlpha(palette.bad, 0.08),
+      stroke: palette.bad,
+      strokeWidth: 0.8,
+      dash: [3, 2],
+    });
+    items.push({
+      type: 'text',
+      x: x + 4,
+      y: entry.y + M.lanePadY + 10,
+      text: snap.title,
+      size: 6.5,
+      family: 'mono',
+      fill: palette.bad,
+    });
+  }
 }
 
 function legendRows(doc, filter) {

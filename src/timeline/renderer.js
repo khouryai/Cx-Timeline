@@ -17,7 +17,7 @@
 
 import { el, clear, rafBatch, withAlpha, readableInk, clamp } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
-import { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } from '../core/dates.js';
+import { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay, daysBetween } from '../core/dates.js';
 import { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } from '../core/model.js';
 import { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
 import { filterPredicate } from '../core/query.js';
@@ -865,47 +865,173 @@ function applyTextStyle(node, style, ink) {
   node.style.textAlign = style.align || 'left';
 }
 
-/* ── Baseline ghosts ───────────────────────────────────────────────────── */
+/* ── Baseline comparison ───────────────────────────────────────────────── */
 
+/**
+ * Where the plan *was*, drawn against where it is now.
+ *
+ * A baseline is only useful if the difference is obvious at a glance, so this
+ * draws three things rather than one marker:
+ *
+ *   the ghost      the object at its baseline dates, behind the live bar at
+ *                  the same height — so the two read as one object that moved,
+ *                  not as two unrelated shapes,
+ *   the shift      an arrow from the baseline finish to the current finish,
+ *                  labelled with the number of days, coloured by direction.
+ *                  This is the part that makes a slip legible across a lane,
+ *   what is gone   objects that were in the baseline and are no longer in the
+ *                  plan, drawn as hollow outlines where they used to sit.
+ *                  Nothing else in the application shows those at all.
+ *
+ * Everything here is derived from the document and the snapshot on every
+ * frame; no comparison state is stored, so it cannot go stale.
+ */
 function renderBaseline(layout, settings) {
-  const existing = dom.overlay.querySelectorAll('.tl-baseline, .tl-slip-arrow');
-  existing.forEach((n) => n.remove());
-  if (!settings.showBaseline) return;
+  dom.overlay.querySelectorAll('.tl-baseline, .tl-shift, .tl-baseline-gone').forEach((n) => n.remove());
+  const banner = dom.root?.querySelector('.tl-baseline-bar');
 
-  const baseline = activeBaseline();
-  if (!baseline) return;
+  const baseline = settings.showBaseline ? activeBaseline() : null;
+  if (!baseline) {
+    banner?.remove();
+    return;
+  }
 
   const snapshot = new Map(baseline.snapshot.map((s) => [s.id, s]));
   const fragment = document.createDocumentFragment();
+  const seen = new Set();
+  const counts = { slip: 0, ahead: 0, reshaped: 0, gone: 0 };
 
   for (const rect of layout.rects) {
     const snap = snapshot.get(rect.id);
     if (!snap) continue;
-    const startShift = rect.obj.start - snap.start;
-    const endShift = (rect.obj.end ?? rect.obj.start) - (snap.end ?? snap.start);
+    seen.add(rect.id);
+
+    const startShift = daysBetween(snap.start, rect.obj.start);
+    const endShift = rect.hasDuration
+      ? daysBetween(snap.end ?? snap.start, rect.obj.end)
+      : startShift;
     if (!startShift && !endShift) continue;
 
-    const x = viewport.msToPx(snap.start);
-    const width = TYPES[rect.obj.type]?.duration
-      ? Math.max(4, viewport.msToPx(snap.end) - x)
-      : 14;
-    const slipped = endShift > 0;
+    const tone = endShift > 0 ? 'slip' : endShift < 0 ? 'ahead' : 'reshaped';
+    counts[tone]++;
+    const ghostLeft = rect.hasDuration ? viewport.msToPx(snap.start) : viewport.msToPx(snap.start) - rect.w / 2;
+    const ghostWidth = rect.hasDuration
+      ? Math.max(4, viewport.msToPx(snap.end ?? snap.start) - viewport.msToPx(snap.start))
+      : rect.w;
 
     fragment.appendChild(
       el('div', {
-        class: 'tl-baseline ' + (slipped ? 'slip' : 'ahead'),
+        class: `tl-baseline ${tone}`,
         style: {
-          left: `${TYPES[rect.obj.type]?.duration ? x : x - 7}px`,
-          width: `${width}px`,
-          top: `${rect.y + rect.h + 2}px`,
-          height: '6px',
+          left: `${ghostLeft}px`,
+          top: `${rect.y}px`,
+          width: `${ghostWidth}px`,
+          height: `${rect.h}px`,
         },
-        title: `Baseline: ${fmtDate(snap.start, 'medium')}${TYPES[rect.obj.type]?.duration ? ' → ' + fmtDate(snap.end, 'medium') : ''}`,
+        title: baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration),
       })
     );
+
+    // The arrow runs between the two finish edges, which is the movement the
+    // reader cares about. A reshape (same finish, different start) gets the
+    // start edges instead, or there would be nothing to draw.
+    const shift = tone === 'reshaped' ? startShift : endShift;
+    const fromX = tone === 'reshaped' ? ghostLeft : ghostLeft + ghostWidth;
+    const toX = tone === 'reshaped' ? rect.x : rect.right;
+    if (shift) {
+      fragment.appendChild(shiftArrow(fromX, toX, rect.y + rect.h / 2, shift, tone));
+    }
+  }
+
+  // Objects the baseline had and the plan no longer does. They have no rect,
+  // so their position comes from the snapshot and from whichever lane they
+  // used to be in — falling back to the top of the canvas when that lane has
+  // gone too.
+  for (const [id, snap] of snapshot) {
+    if (seen.has(id) || layout.byId.has(id)) continue;
+    const entry = layout.geometry.lanes.find((l) => l.id === snap.lane) || layout.geometry.lanes[0];
+    if (!entry) continue;
+
+    const left = viewport.msToPx(snap.start);
+    const width = Math.max(10, viewport.msToPx(snap.end ?? snap.start) - left);
+
+    fragment.appendChild(
+      el('div', {
+        class: 'tl-baseline-gone',
+        style: {
+          left: `${left}px`,
+          top: `${entry.contentY}px`,
+          width: `${width}px`,
+          height: `${Math.min(22, entry.contentH)}px`,
+        },
+        title: `Removed since the baseline: ${snap.title}`,
+      }, [el('span', { class: 'bg-label', text: snap.title })])
+    );
+    counts.gone++;
   }
 
   dom.overlay.appendChild(fragment);
+  renderBaselineBar(baseline, counts);
+}
+
+/**
+ * A strip naming the baseline and counting the differences.
+ *
+ * Comparison mode changes what every bar on the canvas means, so it says so
+ * rather than leaving the reader to infer it from the hatching.
+ */
+function renderBaselineBar(baseline, counts) {
+  if (!dom.root) return;
+  let bar = dom.root.querySelector('.tl-baseline-bar');
+  if (!bar) {
+    bar = el('div', { class: 'tl-baseline-bar', role: 'status' });
+    dom.root.appendChild(bar);
+  }
+  clear(bar);
+
+  const total = counts.slip + counts.ahead + counts.reshaped + counts.gone;
+  bar.append(
+    el('span', { class: 'bb-eyebrow', text: 'Baseline' }),
+    el('span', { class: 'bb-name', text: baseline.name, title: baseline.name }),
+    el('span', { class: 'bb-sep' }),
+    ...(total
+      ? [
+          counts.slip ? el('span', { class: 'bb-stat slip', text: `${counts.slip} slipped` }) : null,
+          counts.ahead ? el('span', { class: 'bb-stat ahead', text: `${counts.ahead} ahead` }) : null,
+          counts.reshaped ? el('span', { class: 'bb-stat reshaped', text: `${counts.reshaped} reshaped` }) : null,
+          counts.gone ? el('span', { class: 'bb-stat gone', text: `${counts.gone} removed` }) : null,
+        ].filter(Boolean)
+      : [el('span', { class: 'bb-stat none', text: 'unchanged' })])
+  );
+}
+
+/** A measured arrow between the baseline edge and the current one. */
+function shiftArrow(fromX, toX, y, days, tone) {
+  const left = Math.min(fromX, toX);
+  const width = Math.abs(toX - fromX);
+  const label = `${days > 0 ? '+' : '−'}${Math.abs(days)}d`;
+
+  return el('div', {
+    class: `tl-shift ${tone} ${toX >= fromX ? 'right' : 'left'}`,
+    style: { left: `${left}px`, top: `${y}px`, width: `${Math.max(width, 1)}px` },
+  }, [
+    el('span', { class: 'sh-line' }),
+    el('span', { class: 'sh-head' }),
+    // The label is placed outside the line's own box so a short shift still
+    // shows its day count rather than clipping it to nothing.
+    el('span', { class: 'sh-days', text: label }),
+  ]);
+}
+
+function baselineTitle(obj, snap, startShift, endShift, hasDuration) {
+  const was = hasDuration
+    ? `${fmtDate(snap.start, 'medium')} → ${fmtDate(snap.end ?? snap.start, 'medium')}`
+    : fmtDate(snap.start, 'medium');
+  const moved = [
+    startShift ? `starts ${Math.abs(startShift)}d ${startShift > 0 ? 'later' : 'earlier'}` : null,
+    hasDuration && endShift ? `finishes ${Math.abs(endShift)}d ${endShift > 0 ? 'later' : 'earlier'}` : null,
+  ].filter(Boolean).join(', ');
+  return `Baseline: ${was}${moved ? ` — now ${moved}` : ''}`;
 }
 
 /* ── Connectors ────────────────────────────────────────────────────────── */

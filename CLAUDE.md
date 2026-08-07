@@ -111,6 +111,12 @@ subscribes. That is what keeps the graph acyclic.
   (`settings.filterMode`). Hiding drops them before packing in
   `computeLayout()`, so the rows reflow and the lanes close up; skipping them
   at paint time would leave the gaps they used to occupy. Exports always hide.
+- **Baseline comparison draws four things, not one** (`renderBaseline`): the
+  ghost at the baseline dates behind the live bar, an arrow between the two
+  finish edges labelled in days, outlines for objects the baseline had and the
+  plan no longer does, and a banner naming the baseline. `io/scene.js` draws
+  the same, so an exported PDF is the drawing on screen. All of it is derived
+  per frame from the snapshot — there is no comparison state to go stale.
 - **Derived state is never stored.** Violations, critical path and float are
   computed from the document, so they appear and clear on their own. Do not
   add a `violated` field to a link — there is nothing to keep in step.
@@ -166,15 +172,25 @@ subscribes. That is what keeps the graph acyclic.
 
 ```bash
 npm run build                        # must succeed — it also lints the module graph
-node tools/smoke.js                  # 101 end-to-end checks, must exit 0
+npm test                             # all three suites, must exit 0
+
+node tools/smoke.js                  # 144 checks — the application, local mode
+node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
+node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result
 ```
 
-The smoke test boots the real application in Chromium and checks rendering,
+`smoke.js` boots the real application in Chromium and checks rendering,
 selection, typing into panel fields without losing focus, snapping, undo/redo,
-zoom, editing the dropdown vocabularies, all sixteen dock panes, all five
-themes, every exporter (including PDF header validation) and reload
-persistence. **Any console error fails the run.**
+zoom, the dropdown vocabularies, filter dim/hide, baseline comparison, all
+seventeen dock panes, all five themes, every exporter (including PDF header
+validation) and reload persistence. **Any console error fails the run.**
+
+`smoke_hosted.js` boots it with a configured backend and a stubbed client, so
+the gate, invitations, sharing and read-only mode are covered without a
+network or an account. `test_sql.js` stands up a throwaway PostgreSQL, applies
+the real `schema.sql` against a stub of what Supabase provides, and becomes
+each user in turn; it never touches a real project.
 
 Two traps worth knowing, both of which have caused real bugs:
 

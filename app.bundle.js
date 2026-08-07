@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 39   Built: 2026-08-06T23:27:58.342Z
+ * Modules: 39   Built: 2026-08-07T02:06:24.307Z
  */
 (function () {
   'use strict';
@@ -7083,7 +7083,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
   const { el, clear, rafBatch, withAlpha, readableInk, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
-  const { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } = __req("core/dates.js");
+  const { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay, daysBetween } = __req("core/dates.js");
   const { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } = __req("core/model.js");
   const { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
   const { filterPredicate } = __req("core/query.js");
@@ -7931,47 +7931,173 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     node.style.textAlign = style.align || 'left';
   }
 
-  /* ── Baseline ghosts ───────────────────────────────────────────────────── */
+  /* ── Baseline comparison ───────────────────────────────────────────────── */
 
+  /**
+   * Where the plan *was*, drawn against where it is now.
+   *
+   * A baseline is only useful if the difference is obvious at a glance, so this
+   * draws three things rather than one marker:
+   *
+   *   the ghost      the object at its baseline dates, behind the live bar at
+   *                  the same height — so the two read as one object that moved,
+   *                  not as two unrelated shapes,
+   *   the shift      an arrow from the baseline finish to the current finish,
+   *                  labelled with the number of days, coloured by direction.
+   *                  This is the part that makes a slip legible across a lane,
+   *   what is gone   objects that were in the baseline and are no longer in the
+   *                  plan, drawn as hollow outlines where they used to sit.
+   *                  Nothing else in the application shows those at all.
+   *
+   * Everything here is derived from the document and the snapshot on every
+   * frame; no comparison state is stored, so it cannot go stale.
+   */
   function renderBaseline(layout, settings) {
-    const existing = dom.overlay.querySelectorAll('.tl-baseline, .tl-slip-arrow');
-    existing.forEach((n) => n.remove());
-    if (!settings.showBaseline) return;
+    dom.overlay.querySelectorAll('.tl-baseline, .tl-shift, .tl-baseline-gone').forEach((n) => n.remove());
+    const banner = dom.root?.querySelector('.tl-baseline-bar');
 
-    const baseline = activeBaseline();
-    if (!baseline) return;
+    const baseline = settings.showBaseline ? activeBaseline() : null;
+    if (!baseline) {
+      banner?.remove();
+      return;
+    }
 
     const snapshot = new Map(baseline.snapshot.map((s) => [s.id, s]));
     const fragment = document.createDocumentFragment();
+    const seen = new Set();
+    const counts = { slip: 0, ahead: 0, reshaped: 0, gone: 0 };
 
     for (const rect of layout.rects) {
       const snap = snapshot.get(rect.id);
       if (!snap) continue;
-      const startShift = rect.obj.start - snap.start;
-      const endShift = (rect.obj.end ?? rect.obj.start) - (snap.end ?? snap.start);
+      seen.add(rect.id);
+
+      const startShift = daysBetween(snap.start, rect.obj.start);
+      const endShift = rect.hasDuration
+        ? daysBetween(snap.end ?? snap.start, rect.obj.end)
+        : startShift;
       if (!startShift && !endShift) continue;
 
-      const x = viewport.msToPx(snap.start);
-      const width = TYPES[rect.obj.type]?.duration
-        ? Math.max(4, viewport.msToPx(snap.end) - x)
-        : 14;
-      const slipped = endShift > 0;
+      const tone = endShift > 0 ? 'slip' : endShift < 0 ? 'ahead' : 'reshaped';
+      counts[tone]++;
+      const ghostLeft = rect.hasDuration ? viewport.msToPx(snap.start) : viewport.msToPx(snap.start) - rect.w / 2;
+      const ghostWidth = rect.hasDuration
+        ? Math.max(4, viewport.msToPx(snap.end ?? snap.start) - viewport.msToPx(snap.start))
+        : rect.w;
 
       fragment.appendChild(
         el('div', {
-          class: 'tl-baseline ' + (slipped ? 'slip' : 'ahead'),
+          class: `tl-baseline ${tone}`,
           style: {
-            left: `${TYPES[rect.obj.type]?.duration ? x : x - 7}px`,
-            width: `${width}px`,
-            top: `${rect.y + rect.h + 2}px`,
-            height: '6px',
+            left: `${ghostLeft}px`,
+            top: `${rect.y}px`,
+            width: `${ghostWidth}px`,
+            height: `${rect.h}px`,
           },
-          title: `Baseline: ${fmtDate(snap.start, 'medium')}${TYPES[rect.obj.type]?.duration ? ' → ' + fmtDate(snap.end, 'medium') : ''}`,
+          title: baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration),
         })
       );
+
+      // The arrow runs between the two finish edges, which is the movement the
+      // reader cares about. A reshape (same finish, different start) gets the
+      // start edges instead, or there would be nothing to draw.
+      const shift = tone === 'reshaped' ? startShift : endShift;
+      const fromX = tone === 'reshaped' ? ghostLeft : ghostLeft + ghostWidth;
+      const toX = tone === 'reshaped' ? rect.x : rect.right;
+      if (shift) {
+        fragment.appendChild(shiftArrow(fromX, toX, rect.y + rect.h / 2, shift, tone));
+      }
+    }
+
+    // Objects the baseline had and the plan no longer does. They have no rect,
+    // so their position comes from the snapshot and from whichever lane they
+    // used to be in — falling back to the top of the canvas when that lane has
+    // gone too.
+    for (const [id, snap] of snapshot) {
+      if (seen.has(id) || layout.byId.has(id)) continue;
+      const entry = layout.geometry.lanes.find((l) => l.id === snap.lane) || layout.geometry.lanes[0];
+      if (!entry) continue;
+
+      const left = viewport.msToPx(snap.start);
+      const width = Math.max(10, viewport.msToPx(snap.end ?? snap.start) - left);
+
+      fragment.appendChild(
+        el('div', {
+          class: 'tl-baseline-gone',
+          style: {
+            left: `${left}px`,
+            top: `${entry.contentY}px`,
+            width: `${width}px`,
+            height: `${Math.min(22, entry.contentH)}px`,
+          },
+          title: `Removed since the baseline: ${snap.title}`,
+        }, [el('span', { class: 'bg-label', text: snap.title })])
+      );
+      counts.gone++;
     }
 
     dom.overlay.appendChild(fragment);
+    renderBaselineBar(baseline, counts);
+  }
+
+  /**
+   * A strip naming the baseline and counting the differences.
+   *
+   * Comparison mode changes what every bar on the canvas means, so it says so
+   * rather than leaving the reader to infer it from the hatching.
+   */
+  function renderBaselineBar(baseline, counts) {
+    if (!dom.root) return;
+    let bar = dom.root.querySelector('.tl-baseline-bar');
+    if (!bar) {
+      bar = el('div', { class: 'tl-baseline-bar', role: 'status' });
+      dom.root.appendChild(bar);
+    }
+    clear(bar);
+
+    const total = counts.slip + counts.ahead + counts.reshaped + counts.gone;
+    bar.append(
+      el('span', { class: 'bb-eyebrow', text: 'Baseline' }),
+      el('span', { class: 'bb-name', text: baseline.name, title: baseline.name }),
+      el('span', { class: 'bb-sep' }),
+      ...(total
+        ? [
+            counts.slip ? el('span', { class: 'bb-stat slip', text: `${counts.slip} slipped` }) : null,
+            counts.ahead ? el('span', { class: 'bb-stat ahead', text: `${counts.ahead} ahead` }) : null,
+            counts.reshaped ? el('span', { class: 'bb-stat reshaped', text: `${counts.reshaped} reshaped` }) : null,
+            counts.gone ? el('span', { class: 'bb-stat gone', text: `${counts.gone} removed` }) : null,
+          ].filter(Boolean)
+        : [el('span', { class: 'bb-stat none', text: 'unchanged' })])
+    );
+  }
+
+  /** A measured arrow between the baseline edge and the current one. */
+  function shiftArrow(fromX, toX, y, days, tone) {
+    const left = Math.min(fromX, toX);
+    const width = Math.abs(toX - fromX);
+    const label = `${days > 0 ? '+' : '−'}${Math.abs(days)}d`;
+
+    return el('div', {
+      class: `tl-shift ${tone} ${toX >= fromX ? 'right' : 'left'}`,
+      style: { left: `${left}px`, top: `${y}px`, width: `${Math.max(width, 1)}px` },
+    }, [
+      el('span', { class: 'sh-line' }),
+      el('span', { class: 'sh-head' }),
+      // The label is placed outside the line's own box so a short shift still
+      // shows its day count rather than clipping it to nothing.
+      el('span', { class: 'sh-days', text: label }),
+    ]);
+  }
+
+  function baselineTitle(obj, snap, startShift, endShift, hasDuration) {
+    const was = hasDuration
+      ? `${fmtDate(snap.start, 'medium')} → ${fmtDate(snap.end ?? snap.start, 'medium')}`
+      : fmtDate(snap.start, 'medium');
+    const moved = [
+      startShift ? `starts ${Math.abs(startShift)}d ${startShift > 0 ? 'later' : 'earlier'}` : null,
+      hasDuration && endShift ? `finishes ${Math.abs(endShift)}d ${endShift > 0 ? 'later' : 'earlier'}` : null,
+    ].filter(Boolean).join(', ');
+    return `Baseline: ${was}${moved ? ` — now ${moved}` : ''}`;
   }
 
   /* ── Connectors ────────────────────────────────────────────────────────── */
@@ -13002,6 +13128,14 @@ __mods["io/scene.js"] = function (__x, __req) {
       }
     });
 
+    /* ── Baseline comparison ───────────────────────────────────────────── */
+    // Drawn after the objects so the ghosts and their arrows sit on top, and
+    // only when the document is actually in comparison mode — an export is
+    // supposed to be the drawing on the screen, not a different one.
+    if (opts.showBaseline !== false && doc.settings.showBaseline) {
+      drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette });
+    }
+
     items.push({ type: 'line', x1: M.gutter, y1: contentTop, x2: M.gutter, y2: contentTop + contentHeight, stroke: palette.border, strokeWidth: 1 });
 
     /* ── Dependencies ──────────────────────────────────────────────────── */
@@ -13226,6 +13360,109 @@ __mods["io/scene.js"] = function (__x, __req) {
     const order = ['day', 'week', 'month', 'quarter', 'year'];
     const i = order.indexOf(id);
     return order[Math.min(order.length - 1, i + 1)];
+  }
+
+  /**
+   * Where the plan was, in the export.
+   *
+   * The canvas draws this too; without it here, a comparison taken into a
+   * meeting as a PDF would show the current dates and no sign that anything had
+   * moved — which is the one thing the reader is there to see.
+   */
+  function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette }) {
+    const baseline = (doc.baselines || []).find((b) => b.id === doc.settings.activeBaseline);
+    if (!baseline) return;
+
+    const seen = new Set();
+
+    for (const snap of baseline.snapshot) {
+      const rect = rectsById.get(snap.id);
+      if (!rect) continue;
+      seen.add(snap.id);
+
+      const obj = doc.objects.find((o) => o.id === snap.id);
+      if (!obj) continue;
+
+      const hasDuration = !!TYPES[obj.type]?.duration;
+      const startShift = Math.round((obj.start - snap.start) / MS_DAY);
+      const endShift = hasDuration ? Math.round((obj.end - (snap.end ?? snap.start)) / MS_DAY) : startShift;
+      if (!startShift && !endShift) continue;
+
+      const ink = endShift > 0 ? palette.bad : endShift < 0 ? palette.good : palette.warn;
+      const gx = msToX(snap.start);
+      const gw = hasDuration ? Math.max(3, msToX(snap.end ?? snap.start) - gx) : 8;
+
+      items.push({
+        type: 'rect',
+        x: hasDuration ? gx : gx - 4,
+        y: rect.top,
+        w: gw,
+        h: Math.max(6, rect.bottom - rect.top),
+        radius: 3,
+        fill: withAlpha(ink, 0.12),
+        stroke: ink,
+        strokeWidth: 0.8,
+        dash: [3, 2],
+      });
+
+      // The arrow between the two finish edges, with its day count.
+      const reshaped = endShift === 0;
+      const fromX = reshaped ? gx : gx + gw;
+      const toX = reshaped ? rect.x : rect.right;
+      const shift = reshaped ? startShift : endShift;
+      const y = rect.cy;
+      if (Math.abs(toX - fromX) > 1) {
+        const dir = toX >= fromX ? 1 : -1;
+        items.push({ type: 'line', x1: fromX, y1: y, x2: toX, y2: y, stroke: ink, strokeWidth: 1.1 });
+        items.push({
+          type: 'polygon',
+          points: [[toX, y], [toX - 4 * dir, y - 2.6], [toX - 4 * dir, y + 2.6]],
+          fill: ink,
+        });
+        items.push({
+          type: 'text',
+          x: (fromX + toX) / 2,
+          y: y - 4,
+          text: `${shift > 0 ? '+' : '\u2212'}${Math.abs(shift)}d`,
+          size: 6.5,
+          weight: 700,
+          family: 'mono',
+          fill: ink,
+          anchor: 'middle',
+        });
+      }
+    }
+
+    // Objects the baseline had and the plan no longer does.
+    for (const snap of baseline.snapshot) {
+      if (seen.has(snap.id) || doc.objects.some((o) => o.id === snap.id)) continue;
+      const entry = laneGeom.find((g) => g.lane.id === snap.lane) || laneGeom[0];
+      if (!entry) continue;
+
+      const x = msToX(snap.start);
+      const w = Math.max(8, msToX(snap.end ?? snap.start) - x);
+      items.push({
+        type: 'rect',
+        x,
+        y: entry.y + M.lanePadY,
+        w,
+        h: 14,
+        radius: 3,
+        fill: withAlpha(palette.bad, 0.08),
+        stroke: palette.bad,
+        strokeWidth: 0.8,
+        dash: [3, 2],
+      });
+      items.push({
+        type: 'text',
+        x: x + 4,
+        y: entry.y + M.lanePadY + 10,
+        text: snap.title,
+        size: 6.5,
+        family: 'mono',
+        fill: palette.bad,
+      });
+    }
   }
 
   function legendRows(doc, filter) {
