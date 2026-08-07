@@ -614,6 +614,67 @@ export function p6Placed(doc, activityId) {
   return doc.objects.filter((o) => o.data?.p6Id === activityId);
 }
 
+/**
+ * The comparison rows for a baseline.
+ *
+ * A baseline taken by hand is a snapshot: a frozen copy of where things were,
+ * and it must never change. A baseline that *tracks P6* is the opposite — it
+ * has to answer for whatever is linked right now, so linking another activity
+ * updates the comparison without anyone re-taking anything.
+ *
+ * So the P6 ones store no rows at all. They are a marker saying which side of
+ * the register to read, and the rows are computed here on demand. That is the
+ * same rule the rest of the application follows: derived state is not stored,
+ * so it cannot go stale.
+ */
+export function baselineSnapshot(doc, baseline) {
+  if (!baseline) return [];
+  if (baseline.source !== 'p6') return baseline.snapshot || [];
+
+  const register = p6Register(doc);
+  const side = baseline.p6Kind === 'progress' ? 'progress' : 'baseline';
+  const rows = [];
+
+  for (const obj of doc.objects) {
+    const activityId = obj.data?.p6Id;
+    if (!activityId) continue;
+    const dates = register.activities[activityId]?.[side];
+    if (!dates) continue;
+
+    rows.push({
+      id: obj.id,
+      title: obj.title,
+      lane: obj.lane,
+      start: dates.start,
+      end: TYPES[obj.type]?.duration ? dates.end : dates.start,
+      progress: 0,
+      status: obj.status,
+    });
+  }
+  return rows;
+}
+
+/** True when a baseline follows the P6 register rather than a frozen copy. */
+export function isDerivedBaseline(baseline) {
+  return baseline?.source === 'p6';
+}
+
+/** The marker for a P6-tracking baseline. Holds no rows on purpose. */
+export function makeP6Baseline(kind) {
+  const progress = kind === 'progress';
+  return {
+    id: `bl_p6_${kind}`,
+    name: progress ? 'P6 — current progress' : 'P6 — baseline',
+    created: Date.now(),
+    source: 'p6',
+    p6Kind: progress ? 'progress' : 'baseline',
+    note: progress
+      ? 'Follows the latest progress import, for every linked activity.'
+      : 'Follows the imported P6 baseline, for every linked activity.',
+    snapshot: [],
+  };
+}
+
 /** Every activity id the plan currently references. */
 export function p6PlacedIds(doc) {
   const ids = new Set();

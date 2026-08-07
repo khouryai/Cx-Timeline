@@ -238,9 +238,15 @@ A re-import **never moves your bars**. It reports what changed and asks which
 of them should follow, defaulted to none; whatever you decline simply records
 the divergence. An activity that disappears from P6 is marked, not deleted.
 
-**Baseline from P6** turns the imported baseline into an ordinary baseline, so
-comparison mode draws the ghost bars and day counts against the P6 target
-with nothing further to set up.
+**Both sides become baselines automatically.** Importing gives you *P6 —
+baseline* and *P6 — current progress* in the Baselines pane, and comparison
+mode draws the ghost bars and day counts against either.
+
+They are **live, not snapshots**. A baseline you take by hand is a frozen copy
+and must stay that way; a P6 one has to answer for whatever is linked *now*,
+so linking another activity updates the comparison immediately — nothing to
+re-take, and it cannot drift out of date. No rows are stored for them at all;
+the comparison is computed from the register on every frame.
 
 ### Search, filters and legend
 

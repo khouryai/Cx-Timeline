@@ -117,6 +117,13 @@ subscribes. That is what keeps the graph acyclic.
   plan no longer does, and a banner naming the baseline. `io/scene.js` draws
   the same, so an exported PDF is the drawing on screen. All of it is derived
   per frame from the snapshot — there is no comparison state to go stale.
+- **A P6 baseline is derived; a taken baseline is frozen.** Both live in
+  `doc.baselines`, but a P6 one carries `source: 'p6'` and **no rows** — the
+  comparison has to follow whatever is linked right now, so
+  `baselineSnapshot(doc, baseline)` computes it. Anything reading
+  `baseline.snapshot` directly is a bug: it will be empty for the P6 pair.
+  `ensureP6Baselines()` creates them on import; deleting one only means the
+  next import brings it back.
 - **P6 data is a register, not objects.** `doc.p6` holds every imported
   activity keyed by activity ID — the only identifier P6 gives that survives a
   rename — and an object points at one with `data.p6Id`. Each activity carries
@@ -192,7 +199,7 @@ subscribes. That is what keeps the graph acyclic.
 npm run build                        # must succeed — it also lints the module graph
 npm test                             # all three suites, must exit 0
 
-node tools/smoke.js                  # 177 checks — the application, local mode
+node tools/smoke.js                  # 182 checks — the application, local mode
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result

@@ -16,7 +16,7 @@
 
 import { clamp, withAlpha, readableInk } from '../core/util.js';
 import { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } from '../core/dates.js';
-import { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays } from '../core/model.js';
+import { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot } from '../core/model.js';
 import { criticalPath } from '../core/analysis.js';
 import { fontString, textWidth, wrapText, fitWidth } from '../timeline/text.js';
 
@@ -660,8 +660,9 @@ function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette, baselin
   if (!baseline) return;
 
   const seen = new Set();
+  const rows = baselineSnapshot(doc, baseline);
 
-  for (const snap of baseline.snapshot) {
+  for (const snap of rows) {
     const rect = rectsById.get(snap.id);
     if (!rect) continue;
     seen.add(snap.id);
@@ -720,7 +721,7 @@ function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette, baselin
   }
 
   // Objects the baseline had and the plan no longer does.
-  for (const snap of baseline.snapshot) {
+  for (const snap of rows) {
     if (seen.has(snap.id) || doc.objects.some((o) => o.id === snap.id)) continue;
     const entry = laneGeom.find((g) => g.lane.id === snap.lane) || laneGeom[0];
     if (!entry) continue;

@@ -24,6 +24,7 @@ import {
   effectiveToday,
   makeBaseline,
   makeProject,
+  isDerivedBaseline,
 } from '../core/model.js';
 import * as store from '../core/store.js';
 import { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted } from '../core/storage.js';
@@ -657,7 +658,11 @@ function paneBaselines(root) {
         el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon('bookmark', { size: 12 }) }),
         el('div', { class: 'lr-main' }, [
           el('div', { class: 'lr-title', text: baseline.name }),
-          el('div', { class: 'lr-meta', text: `${fmtTimestamp(baseline.created)} · ${baseline.snapshot.length} objects` }),
+          el('div', { class: 'lr-meta', text: isDerivedBaseline(baseline)
+            // A P6 baseline holds no rows: the count is whatever is linked
+            // right now, so it is read live rather than from the entry.
+            ? `Tracks P6 · ${store.snapshotOf(baseline).length} linked activities`
+            : `${fmtTimestamp(baseline.created)} · ${baseline.snapshot.length} objects` }),
         ]),
         el('div', { class: 'lr-actions' }, [
           iconBtn('trash', 'Delete baseline', async () => {

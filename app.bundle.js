@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 41   Built: 2026-08-07T18:03:27.162Z
+ * Modules: 41   Built: 2026-08-07T18:12:00.495Z
  */
 (function () {
   'use strict';
@@ -1729,6 +1729,67 @@ __mods["core/model.js"] = function (__x, __req) {
     return doc.objects.filter((o) => o.data?.p6Id === activityId);
   }
 
+  /**
+   * The comparison rows for a baseline.
+   *
+   * A baseline taken by hand is a snapshot: a frozen copy of where things were,
+   * and it must never change. A baseline that *tracks P6* is the opposite — it
+   * has to answer for whatever is linked right now, so linking another activity
+   * updates the comparison without anyone re-taking anything.
+   *
+   * So the P6 ones store no rows at all. They are a marker saying which side of
+   * the register to read, and the rows are computed here on demand. That is the
+   * same rule the rest of the application follows: derived state is not stored,
+   * so it cannot go stale.
+   */
+  function baselineSnapshot(doc, baseline) {
+    if (!baseline) return [];
+    if (baseline.source !== 'p6') return baseline.snapshot || [];
+
+    const register = p6Register(doc);
+    const side = baseline.p6Kind === 'progress' ? 'progress' : 'baseline';
+    const rows = [];
+
+    for (const obj of doc.objects) {
+      const activityId = obj.data?.p6Id;
+      if (!activityId) continue;
+      const dates = register.activities[activityId]?.[side];
+      if (!dates) continue;
+
+      rows.push({
+        id: obj.id,
+        title: obj.title,
+        lane: obj.lane,
+        start: dates.start,
+        end: TYPES[obj.type]?.duration ? dates.end : dates.start,
+        progress: 0,
+        status: obj.status,
+      });
+    }
+    return rows;
+  }
+
+  /** True when a baseline follows the P6 register rather than a frozen copy. */
+  function isDerivedBaseline(baseline) {
+    return baseline?.source === 'p6';
+  }
+
+  /** The marker for a P6-tracking baseline. Holds no rows on purpose. */
+  function makeP6Baseline(kind) {
+    const progress = kind === 'progress';
+    return {
+      id: `bl_p6_${kind}`,
+      name: progress ? 'P6 — current progress' : 'P6 — baseline',
+      created: Date.now(),
+      source: 'p6',
+      p6Kind: progress ? 'progress' : 'baseline',
+      note: progress
+        ? 'Follows the latest progress import, for every linked activity.'
+        : 'Follows the imported P6 baseline, for every linked activity.',
+      snapshot: [],
+    };
+  }
+
   /** Every activity id the plan currently references. */
   function p6PlacedIds(doc) {
     const ids = new Set();
@@ -2307,6 +2368,9 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "p6Position", { get: () => p6Position, enumerable: true });
   Object.defineProperty(__x, "p6IsMilestone", { get: () => p6IsMilestone, enumerable: true });
   Object.defineProperty(__x, "p6Placed", { get: () => p6Placed, enumerable: true });
+  Object.defineProperty(__x, "baselineSnapshot", { get: () => baselineSnapshot, enumerable: true });
+  Object.defineProperty(__x, "isDerivedBaseline", { get: () => isDerivedBaseline, enumerable: true });
+  Object.defineProperty(__x, "makeP6Baseline", { get: () => makeP6Baseline, enumerable: true });
   Object.defineProperty(__x, "p6PlacedIds", { get: () => p6PlacedIds, enumerable: true });
   Object.defineProperty(__x, "defaultStyle", { get: () => defaultStyle, enumerable: true });
   Object.defineProperty(__x, "makeObject", { get: () => makeObject, enumerable: true });
@@ -3347,7 +3411,8 @@ __mods["core/store.js"] = function (__x, __req) {
   const { deepClone, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { isReadOnly } = __req("core/cloud.js");
-  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds } = __req("core/model.js");
+  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds, makeP6Baseline, baselineSnapshot, isDerivedBaseline } = __req("core/model.js");
+
 
 
 
@@ -4274,6 +4339,7 @@ __mods["core/store.js"] = function (__x, __req) {
       register[isBaseline ? 'baseline' : 'progress'] = stamp;
       register.history = [{ kind, ...stamp }, ...(register.history || [])].slice(0, 12);
       d.p6 = register;
+      ensureP6Baselines(d);
     });
   }
 
@@ -4353,48 +4419,46 @@ __mods["core/store.js"] = function (__x, __req) {
   }
 
   /**
-   * A baseline built from the imported P6 baseline.
+   * Make sure the P6 comparisons exist as baselines.
    *
-   * Rather than a second comparison mechanism, this feeds the one that already
-   * exists: the snapshot is written in the same shape a taken baseline uses, so
-   * comparison mode draws the ghosts and day counts with no further work.
+   * They hold no rows: a P6 baseline has to answer for whatever is linked *now*,
+   * so linking another activity must change the comparison without anyone
+   * re-taking a snapshot. `baselineSnapshot()` computes the rows on demand, and
+   * these entries are only the marker saying which side of the register to read.
+   *
+   * Called after every import, so the pair appear on their own and stay in step.
    */
-  function baselineFromP6(name = '') {
-    const register = p6Register(doc);
-    const snapshot = [];
+  function ensureP6Baselines(d) {
+    const register = d.p6 || emptyRegister();
+    d.baselines = d.baselines || [];
 
-    for (const object of doc.objects) {
-      const id = object.data?.p6Id;
-      const activity = id ? register.activities[id] : null;
-      if (!activity?.baseline) continue;
-      snapshot.push({
-        id: object.id,
-        title: object.title,
-        lane: object.lane,
-        start: activity.baseline.start,
-        end: TYPES[object.type]?.duration ? activity.baseline.end : activity.baseline.start,
-        progress: 0,
-        status: object.status,
-      });
+    for (const kind of ['baseline', 'progress']) {
+      const imported = !!register[kind];
+      const index = d.baselines.findIndex((b) => b.source === 'p6' && b.p6Kind === kind);
+
+      if (!imported) continue;
+      if (index < 0) d.baselines.push(makeP6Baseline(kind));
     }
+  }
 
-    if (!snapshot.length) return null;
+  /**
+   * Show one of the P6 comparisons on the timeline.
+   * Returns the baseline id, or null when that side has not been imported.
+   */
+  function showP6Comparison(kind = 'progress') {
+    const target = doc.baselines.find((b) => b.source === 'p6' && b.p6Kind === kind);
+    if (!target) return null;
 
-    const baseline = {
-      id: `bl_p6_${Date.now().toString(36)}`,
-      name: name || `P6 baseline — ${snapshot.length} linked activities`,
-      created: Date.now(),
-      note: 'Generated from the imported P6 baseline dates.',
-      fromP6: true,
-      snapshot,
-    };
-
-    edit('Baseline from P6', (d) => {
-      d.baselines.push(baseline);
-      d.settings.activeBaseline = baseline.id;
+    edit(`Compare against the P6 ${kind}`, (d) => {
+      d.settings.activeBaseline = target.id;
       d.settings.showBaseline = true;
     });
-    return baseline.id;
+    return target.id;
+  }
+
+  /** The rows a baseline compares against, computed for the P6 ones. */
+  function snapshotOf(baseline) {
+    return baselineSnapshot(doc, baseline);
   }
 
   /* ── Groups ────────────────────────────────────────────────────────────── */
@@ -4527,7 +4591,8 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "placeP6Activity", { get: () => placeP6Activity, enumerable: true });
   Object.defineProperty(__x, "linkP6", { get: () => linkP6, enumerable: true });
   Object.defineProperty(__x, "adoptP6Dates", { get: () => adoptP6Dates, enumerable: true });
-  Object.defineProperty(__x, "baselineFromP6", { get: () => baselineFromP6, enumerable: true });
+  Object.defineProperty(__x, "showP6Comparison", { get: () => showP6Comparison, enumerable: true });
+  Object.defineProperty(__x, "snapshotOf", { get: () => snapshotOf, enumerable: true });
   Object.defineProperty(__x, "groupObjects", { get: () => groupObjects, enumerable: true });
   Object.defineProperty(__x, "ungroupObjects", { get: () => ungroupObjects, enumerable: true });
   Object.defineProperty(__x, "expandGroupSelection", { get: () => expandGroupSelection, enumerable: true });
@@ -5228,7 +5293,7 @@ __mods["core/analysis.js"] = function (__x, __req) {
    */
 
   const { MS_DAY, daysBetween, workingDaysBetween } = __req("core/dates.js");
-  const { TYPES, LINK_TYPES, effectiveToday } = __req("core/model.js");
+  const { TYPES, LINK_TYPES, effectiveToday, baselineSnapshot } = __req("core/model.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      Memoisation
@@ -5516,7 +5581,7 @@ __mods["core/analysis.js"] = function (__x, __req) {
   function compareBaseline(doc, baseline) {
     if (!baseline) return { rows: [], summary: emptySummary() };
 
-    const snapshot = new Map(baseline.snapshot.map((s) => [s.id, s]));
+    const snapshot = new Map(baselineSnapshot(doc, baseline).map((s) => [s.id, s]));
     const live = new Map(doc.objects.map((o) => [o.id, o]));
     const rows = [];
 
@@ -7500,7 +7565,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
   const { el, clear, rafBatch, withAlpha, readableInk, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay, daysBetween } = __req("core/dates.js");
-  const { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } = __req("core/model.js");
+  const { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf, baselineSnapshot } = __req("core/model.js");
   const { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
   const { filterPredicate } = __req("core/query.js");
   const { linkViolations, criticalPath } = __req("core/analysis.js");
@@ -8378,7 +8443,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
       return;
     }
 
-    const snapshot = new Map(baseline.snapshot.map((s) => [s.id, s]));
+    const snapshot = new Map(baselineSnapshot(getDoc(), baseline).map((s) => [s.id, s]));
     const fragment = document.createDocumentFragment();
     const seen = new Set();
     const counts = { slip: 0, ahead: 0, reshaped: 0, gone: 0 };
@@ -13656,12 +13721,20 @@ __mods["ui/p6.js"] = function (__x, __req) {
           html: icon('upload', { size: 12 }) + '<span>Import from P6</span>',
           onClick: () => openImport(),
         }),
-        count
+        register.baseline
           ? el('button', {
               class: 'cx-btn mini',
-              html: icon('bookmark', { size: 12 }) + '<span>Baseline from P6</span>',
-              title: 'Build a baseline from the imported P6 baseline dates, so comparison mode shows the lag',
-              onClick: () => makeP6Baseline(),
+              html: icon('bookmark', { size: 12 }) + '<span>Compare to baseline</span>',
+              title: 'Show the difference between your dates and the imported P6 baseline',
+              onClick: () => compare('baseline'),
+            })
+          : null,
+        register.progress
+          ? el('button', {
+              class: 'cx-btn mini',
+              html: icon('bookmark', { size: 12 }) + '<span>Compare to progress</span>',
+              title: 'Show the difference between your dates and the latest P6 progress',
+              onClick: () => compare('progress'),
             })
           : null,
       ].filter(Boolean)),
@@ -14150,21 +14223,26 @@ __mods["ui/p6.js"] = function (__x, __req) {
     });
   }
 
-  function makeP6Baseline() {
-    const id = store.baselineFromP6();
+  /**
+   * Turn on comparison against one side of the register.
+   *
+   * The two P6 baselines appear on their own when a file is imported and follow
+   * whatever is linked, so this only has to point the canvas at one of them.
+   */
+  function compare(kind) {
+    const id = store.showP6Comparison(kind);
     if (!id) {
-      toast({
-        tone: 'warn',
-        title: 'Nothing to baseline',
-        message: 'Import a P6 baseline and place some activities on the timeline first.',
-      });
+      toast({ tone: 'warn', title: 'Not imported', message: `No P6 ${kind} has been imported yet.` });
       return;
     }
+    const rows = store.snapshotOf(store.getDoc().baselines.find((b) => b.id === id));
     renderer.requestRender();
     toast({
-      tone: 'good',
-      title: 'Baseline created',
-      message: 'Comparison mode is on — the ghosts show the P6 baseline dates.',
+      tone: rows.length ? 'good' : 'warn',
+      title: rows.length ? `Comparing against the P6 ${kind}` : 'Nothing linked yet',
+      message: rows.length
+        ? `${rows.length} linked activit${rows.length === 1 ? 'y' : 'ies'}. Link more and the comparison follows.`
+        : 'Place or link some P6 activities and the comparison fills in on its own.',
     });
   }
 
@@ -15186,7 +15264,7 @@ __mods["io/scene.js"] = function (__x, __req) {
 
   const { clamp, withAlpha, readableInk } = __req("core/util.js");
   const { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } = __req("core/dates.js");
-  const { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays } = __req("core/model.js");
+  const { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot } = __req("core/model.js");
   const { criticalPath } = __req("core/analysis.js");
   const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
 
@@ -15830,8 +15908,9 @@ __mods["io/scene.js"] = function (__x, __req) {
     if (!baseline) return;
 
     const seen = new Set();
+    const rows = baselineSnapshot(doc, baseline);
 
-    for (const snap of baseline.snapshot) {
+    for (const snap of rows) {
       const rect = rectsById.get(snap.id);
       if (!rect) continue;
       seen.add(snap.id);
@@ -15890,7 +15969,7 @@ __mods["io/scene.js"] = function (__x, __req) {
     }
 
     // Objects the baseline had and the plan no longer does.
-    for (const snap of baseline.snapshot) {
+    for (const snap of rows) {
       if (seen.has(snap.id) || doc.objects.some((o) => o.id === snap.id)) continue;
       const entry = laneGeom.find((g) => g.lane.id === snap.lane) || laneGeom[0];
       if (!entry) continue;
@@ -17100,7 +17179,8 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const { el, clear, debounce, bytes, download } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } = __req("core/dates.js");
-  const { TYPES, listOptions, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline, makeProject } = __req("core/model.js");
+  const { TYPES, listOptions, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline, makeProject, isDerivedBaseline } = __req("core/model.js");
+
 
 
 
@@ -17743,7 +17823,11 @@ __mods["ui/panels.js"] = function (__x, __req) {
           el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon('bookmark', { size: 12 }) }),
           el('div', { class: 'lr-main' }, [
             el('div', { class: 'lr-title', text: baseline.name }),
-            el('div', { class: 'lr-meta', text: `${fmtTimestamp(baseline.created)} · ${baseline.snapshot.length} objects` }),
+            el('div', { class: 'lr-meta', text: isDerivedBaseline(baseline)
+              // A P6 baseline holds no rows: the count is whatever is linked
+              // right now, so it is read live rather than from the entry.
+              ? `Tracks P6 · ${store.snapshotOf(baseline).length} linked activities`
+              : `${fmtTimestamp(baseline.created)} · ${baseline.snapshot.length} objects` }),
           ]),
           el('div', { class: 'lr-actions' }, [
             iconBtn('trash', 'Delete baseline', async () => {

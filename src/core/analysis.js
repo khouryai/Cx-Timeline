@@ -10,7 +10,7 @@
  */
 
 import { MS_DAY, daysBetween, workingDaysBetween } from './dates.js';
-import { TYPES, LINK_TYPES, effectiveToday } from './model.js';
+import { TYPES, LINK_TYPES, effectiveToday, baselineSnapshot } from './model.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
    Memoisation
@@ -298,7 +298,7 @@ function durationMs(obj) {
 export function compareBaseline(doc, baseline) {
   if (!baseline) return { rows: [], summary: emptySummary() };
 
-  const snapshot = new Map(baseline.snapshot.map((s) => [s.id, s]));
+  const snapshot = new Map(baselineSnapshot(doc, baseline).map((s) => [s.id, s]));
   const live = new Map(doc.objects.map((o) => [o.id, o]));
   const rows = [];
 

@@ -908,16 +908,67 @@ async function main() {
   await page.waitForTimeout(400);
   check('clearing the search restores the register', (await page.locator('#dock .p6-row[data-p6]').count()) === 5);
 
-  // And the P6 baseline feeds the comparison that already exists.
-  await page.locator('#dock .cx-btn', { hasText: /baseline from p6/i }).click();
-  await page.waitForTimeout(900);
-  check('a baseline can be built from the P6 baseline dates', await page.evaluate(() =>
-    document.querySelectorAll('.tl-baseline').length > 0 || document.querySelector('.tl-baseline-bar') !== null));
-
+  // Both sides of the register become baselines on their own, and — the point
+  // of them — they follow whatever is linked rather than freezing a copy.
   await page.locator('#sidenav .nav-link[data-pane="baselines"]').click();
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(450);
   const blPane = await page.locator('#dock').innerText();
-  check('and it is listed with the others', /p6 baseline/i.test(blPane), blPane.split('\n').slice(0, 3).join(' · '));
+  check('importing creates a baseline for each side', /P6 — baseline/i.test(blPane) && /P6 — current progress/i.test(blPane),
+    blPane.replace(/\n/g, ' · ').slice(0, 120));
+  check('and they are marked as tracking P6', /tracks p6/i.test(blPane));
+
+  await page.locator('#sidenav .nav-link[data-pane="p6"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('#dock .cx-btn', { hasText: /compare to baseline/i }).click();
+  await page.waitForTimeout(900);
+
+  const ghosts = () => page.evaluate(() => ({
+    ghosts: document.querySelectorAll('.tl-baseline').length,
+    arrows: document.querySelectorAll('.tl-shift').length,
+    days: [...document.querySelectorAll('.tl-shift .sh-days')].map((n) => n.textContent),
+  }));
+
+  const blSide = await ghosts();
+  check('comparing against P6 draws the difference', blSide.ghosts >= 1,
+    `${blSide.ghosts} ghost(s), ${blSide.days.join(' ')}`);
+
+  // Link a third activity. The comparison must pick it up with no re-taking.
+  await page.locator('#dock .p6-row[data-p6="CX-Z3-0110"] button[aria-label^="Add"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(900);
+
+  // Move it so it differs from its P6 dates, or there is nothing to draw.
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.waitForTimeout(800);
+
+  const withExtra = await ghosts();
+  check('linking another activity updates the comparison on its own',
+    withExtra.ghosts > blSide.ghosts, `${blSide.ghosts} → ${withExtra.ghosts} ghost(s)`);
+
+  // Switching to the progress side compares against different dates.
+  await page.locator('#dock .cx-btn', { hasText: /compare to progress/i }).click();
+  await page.waitForTimeout(900);
+  const progressSide = await ghosts();
+  check('the progress side is a separate comparison', progressSide.ghosts >= 1,
+    `${progressSide.ghosts} ghost(s), ${progressSide.days.join(' ')}`);
+  check('and gives different day counts from the baseline side',
+    JSON.stringify(progressSide.days) !== JSON.stringify(blSide.days),
+    `${blSide.days.join(' ')} vs ${progressSide.days.join(' ')}`);
+
+  // A derived baseline is never written into the document — it is computed.
+  check('no rows are stored for a P6 baseline', await page.evaluate(() => new Promise((res) => {
+    const r = indexedDB.open('cx-timeline');
+    r.onsuccess = () => {
+      const g = r.result.transaction('projects').objectStore('projects').getAll();
+      g.onsuccess = () => {
+        const doc = g.result.sort((a, b) => b.savedAt - a.savedAt)[0]?.doc;
+        const p6bl = (doc?.baselines || []).filter((b) => b.source === 'p6');
+        res(p6bl.length === 2 && p6bl.every((b) => !b.snapshot || b.snapshot.length === 0));
+      };
+    };
+  })));
 
   // Put the canvas back for the sections that follow.
   await page.locator('#sidenav .nav-link[data-pane="p6"]').click();

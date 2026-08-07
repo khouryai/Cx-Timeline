@@ -28,6 +28,7 @@ import {
   normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES,
   syncLists, defaultLists, LIST_DEFS, listUsage,
   emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds,
+  makeP6Baseline, baselineSnapshot, isDerivedBaseline,
 } from './model.js';
 import { History, diff, apply } from './history.js';
 
@@ -951,6 +952,7 @@ export function importP6(kind, incoming, meta = {}) {
     register[isBaseline ? 'baseline' : 'progress'] = stamp;
     register.history = [{ kind, ...stamp }, ...(register.history || [])].slice(0, 12);
     d.p6 = register;
+    ensureP6Baselines(d);
   });
 }
 
@@ -1030,48 +1032,46 @@ export function adoptP6Dates(activityIds) {
 }
 
 /**
- * A baseline built from the imported P6 baseline.
+ * Make sure the P6 comparisons exist as baselines.
  *
- * Rather than a second comparison mechanism, this feeds the one that already
- * exists: the snapshot is written in the same shape a taken baseline uses, so
- * comparison mode draws the ghosts and day counts with no further work.
+ * They hold no rows: a P6 baseline has to answer for whatever is linked *now*,
+ * so linking another activity must change the comparison without anyone
+ * re-taking a snapshot. `baselineSnapshot()` computes the rows on demand, and
+ * these entries are only the marker saying which side of the register to read.
+ *
+ * Called after every import, so the pair appear on their own and stay in step.
  */
-export function baselineFromP6(name = '') {
-  const register = p6Register(doc);
-  const snapshot = [];
+function ensureP6Baselines(d) {
+  const register = d.p6 || emptyRegister();
+  d.baselines = d.baselines || [];
 
-  for (const object of doc.objects) {
-    const id = object.data?.p6Id;
-    const activity = id ? register.activities[id] : null;
-    if (!activity?.baseline) continue;
-    snapshot.push({
-      id: object.id,
-      title: object.title,
-      lane: object.lane,
-      start: activity.baseline.start,
-      end: TYPES[object.type]?.duration ? activity.baseline.end : activity.baseline.start,
-      progress: 0,
-      status: object.status,
-    });
+  for (const kind of ['baseline', 'progress']) {
+    const imported = !!register[kind];
+    const index = d.baselines.findIndex((b) => b.source === 'p6' && b.p6Kind === kind);
+
+    if (!imported) continue;
+    if (index < 0) d.baselines.push(makeP6Baseline(kind));
   }
+}
 
-  if (!snapshot.length) return null;
+/**
+ * Show one of the P6 comparisons on the timeline.
+ * Returns the baseline id, or null when that side has not been imported.
+ */
+export function showP6Comparison(kind = 'progress') {
+  const target = doc.baselines.find((b) => b.source === 'p6' && b.p6Kind === kind);
+  if (!target) return null;
 
-  const baseline = {
-    id: `bl_p6_${Date.now().toString(36)}`,
-    name: name || `P6 baseline — ${snapshot.length} linked activities`,
-    created: Date.now(),
-    note: 'Generated from the imported P6 baseline dates.',
-    fromP6: true,
-    snapshot,
-  };
-
-  edit('Baseline from P6', (d) => {
-    d.baselines.push(baseline);
-    d.settings.activeBaseline = baseline.id;
+  edit(`Compare against the P6 ${kind}`, (d) => {
+    d.settings.activeBaseline = target.id;
     d.settings.showBaseline = true;
   });
-  return baseline.id;
+  return target.id;
+}
+
+/** The rows a baseline compares against, computed for the P6 ones. */
+export function snapshotOf(baseline) {
+  return baselineSnapshot(doc, baseline);
 }
 
 /* ── Groups ────────────────────────────────────────────────────────────── */

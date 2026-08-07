@@ -18,7 +18,7 @@
 import { el, clear, rafBatch, withAlpha, readableInk, clamp } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
 import { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay, daysBetween } from '../core/dates.js';
-import { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } from '../core/model.js';
+import { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf, baselineSnapshot } from '../core/model.js';
 import { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
 import { filterPredicate } from '../core/query.js';
 import { linkViolations, criticalPath } from '../core/analysis.js';
@@ -896,7 +896,7 @@ function renderBaseline(layout, settings) {
     return;
   }
 
-  const snapshot = new Map(baseline.snapshot.map((s) => [s.id, s]));
+  const snapshot = new Map(baselineSnapshot(getDoc(), baseline).map((s) => [s.id, s]));
   const fragment = document.createDocumentFragment();
   const seen = new Set();
   const counts = { slip: 0, ahead: 0, reshaped: 0, gone: 0 };

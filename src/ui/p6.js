@@ -130,12 +130,20 @@ function importBar(register, count) {
         html: icon('upload', { size: 12 }) + '<span>Import from P6</span>',
         onClick: () => openImport(),
       }),
-      count
+      register.baseline
         ? el('button', {
             class: 'cx-btn mini',
-            html: icon('bookmark', { size: 12 }) + '<span>Baseline from P6</span>',
-            title: 'Build a baseline from the imported P6 baseline dates, so comparison mode shows the lag',
-            onClick: () => makeP6Baseline(),
+            html: icon('bookmark', { size: 12 }) + '<span>Compare to baseline</span>',
+            title: 'Show the difference between your dates and the imported P6 baseline',
+            onClick: () => compare('baseline'),
+          })
+        : null,
+      register.progress
+        ? el('button', {
+            class: 'cx-btn mini',
+            html: icon('bookmark', { size: 12 }) + '<span>Compare to progress</span>',
+            title: 'Show the difference between your dates and the latest P6 progress',
+            onClick: () => compare('progress'),
           })
         : null,
     ].filter(Boolean)),
@@ -624,21 +632,26 @@ function openLinkPicker(activity) {
   });
 }
 
-function makeP6Baseline() {
-  const id = store.baselineFromP6();
+/**
+ * Turn on comparison against one side of the register.
+ *
+ * The two P6 baselines appear on their own when a file is imported and follow
+ * whatever is linked, so this only has to point the canvas at one of them.
+ */
+function compare(kind) {
+  const id = store.showP6Comparison(kind);
   if (!id) {
-    toast({
-      tone: 'warn',
-      title: 'Nothing to baseline',
-      message: 'Import a P6 baseline and place some activities on the timeline first.',
-    });
+    toast({ tone: 'warn', title: 'Not imported', message: `No P6 ${kind} has been imported yet.` });
     return;
   }
+  const rows = store.snapshotOf(store.getDoc().baselines.find((b) => b.id === id));
   renderer.requestRender();
   toast({
-    tone: 'good',
-    title: 'Baseline created',
-    message: 'Comparison mode is on — the ghosts show the P6 baseline dates.',
+    tone: rows.length ? 'good' : 'warn',
+    title: rows.length ? `Comparing against the P6 ${kind}` : 'Nothing linked yet',
+    message: rows.length
+      ? `${rows.length} linked activit${rows.length === 1 ? 'y' : 'ies'}. Link more and the comparison follows.`
+      : 'Place or link some P6 activities and the comparison fills in on its own.',
   });
 }
 
