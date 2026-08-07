@@ -124,7 +124,15 @@ export function buildPanels() {
   });
   on(EV.DOC_REPLACED, rerender);
   on(EV.PANE_REFRESH, (p) => {
-    if (!p?.pane || p.pane === active) renderPane();
+    if (p?.pane && p.pane !== active) return;
+    // A pane asking for its own rebuild is subject to the same rule as any
+    // other: never replace a text field someone is typing into. Prefer
+    // redrawing just the part that changed; this is the backstop.
+    if (isTypingInDock()) {
+      pendingRender = true;
+      return;
+    }
+    renderPane();
   });
   on(EV.SELECTION_CHANGED, () => {
     if (['outline', 'releases', 'campaigns', 'risks', 'links'].includes(active)) rerender();

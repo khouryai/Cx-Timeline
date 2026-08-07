@@ -63,6 +63,16 @@ import {
 /** Filter state, kept between renders so a rebuild does not lose your place. */
 const view = { text: '', show: 'all', sort: 'order' };
 
+/**
+ * The rows container of the pane currently on screen.
+ *
+ * Searching must not rebuild the pane: the search box has focus, and
+ * replacing it under the caret drops focus after every character — the trap
+ * that `isTypingInDock()` exists to prevent, which a pane asking for its own
+ * rebuild walks straight past. Only the rows are redrawn.
+ */
+let listEl = null;
+
 const POSITION_TONE = { past: 'muted', current: 'warn', future: 'info', unknown: 'muted' };
 const POSITION_WORD = { past: 'Past', current: 'Current', future: 'Future', unknown: '—' };
 
@@ -87,9 +97,19 @@ export function paneP6(root) {
   root.appendChild(summary(doc, activities));
   root.appendChild(controls(activities));
 
-  const list = el('div', { class: 'cx-list' });
-  root.appendChild(list);
-  renderRows(list, doc, activities);
+  listEl = el('div', { class: 'cx-list' });
+  root.appendChild(listEl);
+  renderRows(listEl, doc, activities);
+}
+
+/** Redraw the rows in place, leaving the search box and its caret alone. */
+function refilter() {
+  if (!listEl || !listEl.isConnected) {
+    refresh();
+    return;
+  }
+  const doc = store.getDoc();
+  renderRows(listEl, doc, Object.values(p6Register(doc).activities));
 }
 
 /* ── Import ────────────────────────────────────────────────────────────── */
@@ -375,7 +395,7 @@ function controls(activities) {
     placeholder: 'Activity ID or name…',
     onInput: debounce((v) => {
       view.text = v;
-      refresh();
+      refilter();
     }, 160),
   });
   search.setAttribute('aria-label', 'Search P6 activities');
@@ -393,7 +413,7 @@ function controls(activities) {
       ],
       onChange: (v) => {
         view.show = v;
-        refresh();
+        refilter();
       },
     }),
   ]);

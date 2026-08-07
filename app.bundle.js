@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 41   Built: 2026-08-07T17:53:15.647Z
+ * Modules: 41   Built: 2026-08-07T18:03:27.162Z
  */
 (function () {
   'use strict';
@@ -13589,6 +13589,16 @@ __mods["ui/p6.js"] = function (__x, __req) {
   /** Filter state, kept between renders so a rebuild does not lose your place. */
   const view = { text: '', show: 'all', sort: 'order' };
 
+  /**
+   * The rows container of the pane currently on screen.
+   *
+   * Searching must not rebuild the pane: the search box has focus, and
+   * replacing it under the caret drops focus after every character — the trap
+   * that `isTypingInDock()` exists to prevent, which a pane asking for its own
+   * rebuild walks straight past. Only the rows are redrawn.
+   */
+  let listEl = null;
+
   const POSITION_TONE = { past: 'muted', current: 'warn', future: 'info', unknown: 'muted' };
   const POSITION_WORD = { past: 'Past', current: 'Current', future: 'Future', unknown: '—' };
 
@@ -13613,9 +13623,19 @@ __mods["ui/p6.js"] = function (__x, __req) {
     root.appendChild(summary(doc, activities));
     root.appendChild(controls(activities));
 
-    const list = el('div', { class: 'cx-list' });
-    root.appendChild(list);
-    renderRows(list, doc, activities);
+    listEl = el('div', { class: 'cx-list' });
+    root.appendChild(listEl);
+    renderRows(listEl, doc, activities);
+  }
+
+  /** Redraw the rows in place, leaving the search box and its caret alone. */
+  function refilter() {
+    if (!listEl || !listEl.isConnected) {
+      refresh();
+      return;
+    }
+    const doc = store.getDoc();
+    renderRows(listEl, doc, Object.values(p6Register(doc).activities));
   }
 
   /* ── Import ────────────────────────────────────────────────────────────── */
@@ -13901,7 +13921,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
       placeholder: 'Activity ID or name…',
       onInput: debounce((v) => {
         view.text = v;
-        refresh();
+        refilter();
       }, 160),
     });
     search.setAttribute('aria-label', 'Search P6 activities');
@@ -13919,7 +13939,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
         ],
         onChange: (v) => {
           view.show = v;
-          refresh();
+          refilter();
         },
       }),
     ]);
@@ -17190,7 +17210,15 @@ __mods["ui/panels.js"] = function (__x, __req) {
     });
     on(EV.DOC_REPLACED, rerender);
     on(EV.PANE_REFRESH, (p) => {
-      if (!p?.pane || p.pane === active) renderPane();
+      if (p?.pane && p.pane !== active) return;
+      // A pane asking for its own rebuild is subject to the same rule as any
+      // other: never replace a text field someone is typing into. Prefer
+      // redrawing just the part that changed; this is the backstop.
+      if (isTypingInDock()) {
+        pendingRender = true;
+        return;
+      }
+      renderPane();
     });
     on(EV.SELECTION_CHANGED, () => {
       if (['outline', 'releases', 'campaigns', 'risks', 'links'].includes(active)) rerender();

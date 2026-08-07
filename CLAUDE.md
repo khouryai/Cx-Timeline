@@ -192,7 +192,7 @@ subscribes. That is what keeps the graph acyclic.
 npm run build                        # must succeed — it also lints the module graph
 npm test                             # all three suites, must exit 0
 
-node tools/smoke.js                  # 173 checks — the application, local mode
+node tools/smoke.js                  # 177 checks — the application, local mode
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result
@@ -215,7 +215,10 @@ Two traps worth knowing, both of which have caused real bugs:
 - **Panels must not rebuild while a text field in them has focus.** They write
   to the store on every keystroke, and the resulting `doc:changed` would
   replace the input under the caret. `inspector.js` and `panels.js` each guard
-  this and defer the rebuild until focus leaves.
+  this and defer the rebuild until focus leaves. **A pane that rebuilds itself
+  is subject to the same rule** — `EV.PANE_REFRESH` now respects the guard,
+  but the real fix for a search box is to redraw only the rows and leave the
+  input alone, as `ui/p6.js` does. This has now bitten three times.
 - **A canvas mousedown calls `preventDefault()`**, which suppresses the focus
   change a click normally makes. The canvas carries `tabindex="-1"` and is
   focused explicitly on mousedown, otherwise keyboard focus stays in whatever

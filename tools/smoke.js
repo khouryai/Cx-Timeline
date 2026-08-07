@@ -883,13 +883,30 @@ async function main() {
   check('a bar that was adopted no longer diverges',
     !/you [+−]\d+d/.test(byId['CX-Z3-0100'] || ''), byId['CX-Z3-0100']);
 
-  // The P6 activity ID has to be findable — that is the whole point.
+  // The P6 activity ID has to be findable — that is the whole point — and the
+  // box has to survive being typed into. A pane that rebuilds itself on every
+  // keystroke throws focus out after one character; searching redraws only
+  // the rows for exactly that reason.
   const search = page.locator('#dock input[aria-label="Search P6 activities"]');
-  await search.fill('CX-Z4');
-  await page.waitForTimeout(500);
+  await search.click();
+  await page.keyboard.type('CX-Z4', { delay: 25 });
+  await page.waitForTimeout(600);
+  check('the P6 search box keeps focus while typing',
+    await search.evaluate((n) => n === document.activeElement));
+  check('the whole search term reached the box', (await search.inputValue()) === 'CX-Z4', await search.inputValue());
   check('an activity can be found by its ID', (await page.locator('#dock .p6-row[data-p6]').count()) === 1);
+
+  // Filtering must not lose it either.
+  await page.locator('#dock .cx-seg button', { hasText: 'On timeline' }).click();
+  await page.waitForTimeout(400);
+  check('a filter narrows the register',
+    (await page.locator('#dock .p6-row[data-p6]').count()) === 0, 'CX-Z4 is not placed');
+  await page.locator('#dock .cx-seg button', { hasText: 'All' }).click();
+  await page.waitForTimeout(300);
+
   await search.fill('');
   await page.waitForTimeout(400);
+  check('clearing the search restores the register', (await page.locator('#dock .p6-row[data-p6]').count()) === 5);
 
   // And the P6 baseline feeds the comparison that already exists.
   await page.locator('#dock .cx-btn', { hasText: /baseline from p6/i }).click();
