@@ -36,6 +36,10 @@ const M = {
   outsideGap: 5,
   outsideMaxW: 210,
   minInsideW: 44,
+  ghostH: 7,
+  ghostGap: 2,
+  goneH: 12,
+  shiftBadgeW: 30,
 };
 
 /* Fonts used by exported drawings, measured the same way the canvas is. */
@@ -206,6 +210,23 @@ export function buildScene(doc, opts = {}) {
     .map((id) => doc.lanes.find((l) => l.id === id))
     .filter((l) => l && !l.hidden);
 
+  // Comparison rows are resolved before the lanes are packed: a ghost takes up
+  // room in the drawing, so the packer has to know about it or the baseline
+  // prints on top of the plan. Same rule the canvas follows.
+  const comparison = comparisonRows(doc, opts);
+  const goneByLane = new Map();
+  if (comparison) {
+    const liveIds = new Set(doc.objects.map((o) => o.id));
+    const laneIds = new Set(lanes.map((l) => l.id));
+    for (const snap of comparison.values()) {
+      if (liveIds.has(snap.id)) continue;
+      const laneId = laneIds.has(snap.lane) ? snap.lane : lanes[0]?.id;
+      if (!laneId) continue;
+      if (!goneByLane.has(laneId)) goneByLane.set(laneId, []);
+      goneByLane.get(laneId).push(snap);
+    }
+  }
+
   const laneGeom = [];
   let y = M.headerH + M.rulerUpper + M.rulerLower;
   const contentTop = y;
@@ -221,15 +242,22 @@ export function buildScene(doc, opts = {}) {
         ? Math.max(M.barMinW, ((obj.end - obj.start) / MS_DAY) * pxPerDay)
         : M.pointR * 2;
       const label = exportLabel(obj, barWidth, opts.showDates === true);
+      const ghost = comparison ? exportGhost(obj, comparison.get(obj.id), barWidth, msToX, pxPerDay) : null;
       const height = hasDuration
         ? Math.max(M.rowH, label.height + 5)
         : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
-      return { obj, label, barWidth, height };
+      return { obj, label, barWidth, ghost, height: height + (ghost && ghost.stacked ? M.ghostH + M.ghostGap : 0) };
     });
 
-    const packed = packRowsForExport(measured, msToX);
+    // Outlines for what the baseline had and the plan has not. They pack with
+    // the live objects, so a removed bar gets a row rather than the top of the
+    // lane and whatever replaced it.
+    const goneItems = (goneByLane.get(lane.id) || []).map((snap) => exportGone(snap, msToX));
+
+    const packable = goneItems.length ? measured.concat(goneItems) : measured;
+    const packed = packRowsForExport(packable, msToX);
     const rowHeights = new Array(packed.rows).fill(M.rowH);
-    for (const item of measured) {
+    for (const item of packable) {
       const row = packed.assigned.get(item.obj.id) || 0;
       rowHeights[row] = Math.max(rowHeights[row], item.height);
     }
@@ -246,7 +274,7 @@ export function buildScene(doc, opts = {}) {
       Math.max(M.rowH, cursor - M.rowGap) + M.lanePadY * 2,
       laneNameWrap.lines.length * 11 + 20
     );
-    laneGeom.push({ lane, y, height, objects, measured, rows: packed.assigned, rowTops, laneNameWrap });
+    laneGeom.push({ lane, y, height, objects, measured, goneItems, rows: packed.assigned, rowTops, rowHeights, laneNameWrap });
     y += height;
   }
 
@@ -355,6 +383,7 @@ export function buildScene(doc, opts = {}) {
   items.push({ type: 'rect', x: 0, y: contentTop, w: M.gutter, h: contentHeight, fill: palette.chrome });
 
   const rectsById = new Map();
+  const goneRects = [];
 
   laneGeom.forEach((entry, index) => {
     const laneColor = solid(entry.lane.color, palette);
@@ -387,7 +416,20 @@ export function buildScene(doc, opts = {}) {
         // The export's own choice wins over the document's on-screen setting.
         settings: { ...doc.settings, showProgress: opts.showProgress !== false && doc.settings.showProgress },
       });
-      if (rect) rectsById.set(item.obj.id, rect);
+      if (rect) {
+        rect.ghost = item.ghost;
+        rectsById.set(item.obj.id, rect);
+      }
+    }
+
+    for (const item of entry.goneItems) {
+      const row = entry.rows.get(item.obj.id) || 0;
+      goneRects.push({
+        snap: item.gone,
+        x: item.left,
+        w: item.width,
+        y: entry.y + M.lanePadY + (entry.rowTops[row] ?? 0),
+      });
     }
   });
 
@@ -395,14 +437,8 @@ export function buildScene(doc, opts = {}) {
   // Drawn after the objects so the ghosts and their arrows sit on top, and
   // only when the document is actually in comparison mode — an export is
   // supposed to be the drawing on the screen, not a different one.
-  if (opts.showBaseline && (doc.baselines || []).length) {
-    drawBaseline(items, doc, {
-      rectsById,
-      laneGeom,
-      msToX,
-      palette,
-      baselineId: opts.baselineId || doc.settings.activeBaseline,
-    });
+  if (comparison) {
+    drawBaseline(items, { rectsById, goneRects, palette });
   }
 
   items.push({ type: 'line', x1: M.gutter, y1: contentTop, x2: M.gutter, y2: contentTop + contentHeight, stroke: palette.border, strokeWidth: 1 });
@@ -611,18 +647,24 @@ function drawObject(items, measured, lane, { top, msToX, palette, settings }) {
 /* ── Helpers ───────────────────────────────────────────────────────────── */
 
 /**
- * First-fit row packing over the *label* extent, not just the bar, so an
- * exported label can never be overprinted by the next object along.
+ * First-fit row packing over the *label* extent — and, in comparison mode, over
+ * the baseline ghost and its day badge as well — not just the bar, so nothing
+ * exported can be overprinted by the next object along.
  */
 function packRowsForExport(measured, msToX) {
   const rowEnds = [];
   const assigned = new Map();
 
-  for (const item of measured) {
+  for (const item of measured.slice().sort((a, b) => a.obj.start - b.obj.start)) {
     const hasDuration = !!TYPES[item.obj.type]?.duration;
     const startX = msToX(item.obj.start);
-    const from = (hasDuration ? startX : startX - M.pointR) - item.label.extraLeft;
-    const to = (hasDuration ? startX + item.barWidth : startX + M.pointR) + item.label.extraRight;
+    let from = (hasDuration ? startX : startX - M.pointR) - item.label.extraLeft;
+    let to = (hasDuration ? startX + item.barWidth : startX + M.pointR) + item.label.extraRight;
+
+    if (item.ghost) {
+      from = Math.min(from, item.ghost.from);
+      to = Math.max(to, item.ghost.to);
+    }
 
     let row = 0;
     while (row < rowEnds.length && (rowEnds[row] ?? -Infinity) > from) row++;
@@ -648,43 +690,102 @@ function coarser(id) {
 }
 
 /**
+ * The comparison rows for an export, keyed by object id, or null when the
+ * export is not comparing.
+ */
+function comparisonRows(doc, opts) {
+  if (!opts.showBaseline || !(doc.baselines || []).length) return null;
+  const id = opts.baselineId || doc.settings.activeBaseline;
+  const baseline = (doc.baselines || []).find((b) => b.id === id)
+    || (doc.baselines || [])[doc.baselines.length - 1];
+  if (!baseline) return null;
+  const rows = baselineSnapshot(doc, baseline);
+  return rows.length ? new Map(rows.map((row) => [row.id, row])) : null;
+}
+
+/**
+ * An object's ghost in an exported drawing, measured the way the canvas
+ * measures it: behind the bar while the two cover different dates, in a tier of
+ * its own below the bar the moment they do not. Printed at whatever density the
+ * export was asked for, so — as on screen — the split follows the scale.
+ */
+function exportGhost(obj, snap, barWidth, msToX, pxPerDay) {
+  if (!snap) return null;
+  const def = TYPES[obj.type] || TYPES.activity;
+  const hasDuration = !!def.duration;
+
+  const snapEnd = hasDuration ? (snap.end ?? snap.start) : snap.start;
+  const startShift = Math.round((obj.start - snap.start) / MS_DAY);
+  const endShift = hasDuration ? Math.round((obj.end - snapEnd) / MS_DAY) : startShift;
+  if (!startShift && !endShift) return null;
+
+  const x = hasDuration ? msToX(snap.start) : msToX(snap.start) - M.pointR;
+  const w = hasDuration ? Math.max(3, ((snapEnd - snap.start) / MS_DAY) * pxPerDay) : M.pointR * 2;
+  const barLeft = hasDuration ? msToX(obj.start) : msToX(obj.start) - M.pointR;
+  const barRight = barLeft + (hasDuration ? barWidth : M.pointR * 2);
+
+  const reshaped = endShift === 0;
+  const fromX = reshaped ? x : x + w;
+  const toX = reshaped ? barLeft : barRight;
+  const mid = (fromX + toX) / 2;
+  const canStack = hasDuration && def.shape !== 'band' && def.shape !== 'container';
+
+  return {
+    snap,
+    startShift,
+    endShift,
+    x,
+    w,
+    stacked: canStack && x < barRight + M.ghostGap && x + w > barLeft - M.ghostGap,
+    from: Math.min(x, mid - M.shiftBadgeW / 2),
+    to: Math.max(x + w, mid + M.shiftBadgeW / 2),
+  };
+}
+
+/** A phantom entry so a removed object packs like everything else. */
+function exportGone(snap, msToX) {
+  const x = msToX(snap.start);
+  const w = Math.max(8, msToX(snap.end ?? snap.start) - x);
+  const textW = textWidth(String(snap.title || ''), EXPORT_FONTS.mono) + 8;
+  return {
+    obj: { id: `gone:${snap.id}`, type: 'activity', start: snap.start, end: snap.end ?? snap.start },
+    gone: snap,
+    label: { extraLeft: 0, extraRight: Math.max(0, textW - w) },
+    barWidth: w,
+    ghost: null,
+    height: M.goneH,
+    left: x,
+    width: w,
+  };
+}
+
+/**
  * Where the plan was, in the export.
  *
  * The canvas draws this too; without it here, a comparison taken into a
  * meeting as a PDF would show the current dates and no sign that anything had
- * moved — which is the one thing the reader is there to see.
+ * moved — which is the one thing the reader is there to see. Every rectangle
+ * below was measured and packed with the objects, so nothing here has to work
+ * out whether it fits.
  */
-function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette, baselineId }) {
-  const baseline = (doc.baselines || []).find((b) => b.id === baselineId)
-    || (doc.baselines || [])[doc.baselines.length - 1];
-  if (!baseline) return;
+function drawBaseline(items, { rectsById, goneRects, palette }) {
+  for (const rect of rectsById.values()) {
+    const ghost = rect.ghost;
+    if (!ghost) continue;
 
-  const seen = new Set();
-  const rows = baselineSnapshot(doc, baseline);
-
-  for (const snap of rows) {
-    const rect = rectsById.get(snap.id);
-    if (!rect) continue;
-    seen.add(snap.id);
-
-    const obj = doc.objects.find((o) => o.id === snap.id);
-    if (!obj) continue;
-
-    const hasDuration = !!TYPES[obj.type]?.duration;
-    const startShift = Math.round((obj.start - snap.start) / MS_DAY);
-    const endShift = hasDuration ? Math.round((obj.end - (snap.end ?? snap.start)) / MS_DAY) : startShift;
-    if (!startShift && !endShift) continue;
-
+    const { startShift, endShift } = ghost;
     const ink = endShift > 0 ? palette.bad : endShift < 0 ? palette.good : palette.warn;
-    const gx = msToX(snap.start);
-    const gw = hasDuration ? Math.max(3, msToX(snap.end ?? snap.start) - gx) : 8;
+    const gx = ghost.x;
+    const gw = ghost.w;
+    const gy = ghost.stacked ? rect.bottom + M.ghostGap : rect.top;
+    const gh = ghost.stacked ? M.ghostH : Math.max(6, rect.bottom - rect.top);
 
     items.push({
       type: 'rect',
-      x: hasDuration ? gx : gx - 4,
-      y: rect.top,
+      x: gx,
+      y: gy,
       w: gw,
-      h: Math.max(6, rect.bottom - rect.top),
+      h: gh,
       radius: 3,
       fill: withAlpha(ink, 0.12),
       stroke: ink,
@@ -692,12 +793,13 @@ function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette, baselin
       dash: [3, 2],
     });
 
-    // The arrow between the two finish edges, with its day count.
+    // The arrow between the two finish edges, with its day count. It rides the
+    // ghost's own centre line, so a stacked ghost still points at its bar.
     const reshaped = endShift === 0;
     const fromX = reshaped ? gx : gx + gw;
     const toX = reshaped ? rect.x : rect.right;
     const shift = reshaped ? startShift : endShift;
-    const y = rect.cy;
+    const y = gy + gh / 2;
     if (Math.abs(toX - fromX) > 1) {
       const dir = toX >= fromX ? 1 : -1;
       items.push({ type: 'line', x1: fromX, y1: y, x2: toX, y2: y, stroke: ink, strokeWidth: 1.1 });
@@ -720,20 +822,16 @@ function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette, baselin
     }
   }
 
-  // Objects the baseline had and the plan no longer does.
-  for (const snap of rows) {
-    if (seen.has(snap.id) || doc.objects.some((o) => o.id === snap.id)) continue;
-    const entry = laneGeom.find((g) => g.lane.id === snap.lane) || laneGeom[0];
-    if (!entry) continue;
-
-    const x = msToX(snap.start);
-    const w = Math.max(8, msToX(snap.end ?? snap.start) - x);
+  // Objects the baseline had and the plan no longer does, on the row they were
+  // packed onto.
+  for (const gone of goneRects) {
+    const { snap, x, w, y } = gone;
     items.push({
       type: 'rect',
       x,
-      y: entry.y + M.lanePadY,
+      y,
       w,
-      h: 14,
+      h: M.goneH,
       radius: 3,
       fill: withAlpha(palette.bad, 0.08),
       stroke: palette.bad,
@@ -743,7 +841,7 @@ function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette, baselin
     items.push({
       type: 'text',
       x: x + 4,
-      y: entry.y + M.lanePadY + 10,
+      y: y + M.goneH - 3.5,
       text: snap.title,
       size: 6.5,
       family: 'mono',

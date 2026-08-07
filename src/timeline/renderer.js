@@ -17,8 +17,8 @@
 
 import { el, clear, rafBatch, withAlpha, readableInk, clamp } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
-import { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay, daysBetween } from '../core/dates.js';
-import { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf, baselineSnapshot } from '../core/model.js';
+import { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } from '../core/dates.js';
+import { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } from '../core/model.js';
 import { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
 import { filterPredicate } from '../core/query.js';
 import { linkViolations, criticalPath } from '../core/analysis.js';
@@ -901,37 +901,27 @@ function renderBaseline(layout, settings) {
     return;
   }
 
-  const snapshot = new Map(baselineSnapshot(getDoc(), baseline).map((s) => [s.id, s]));
   const fragment = document.createDocumentFragment();
-  const seen = new Set();
   const counts = { slip: 0, ahead: 0, reshaped: 0, gone: 0 };
 
+  // Every rectangle here was measured and packed by `computeLayout` — including
+  // the ghosts, which is why nothing below has to ask whether it fits.
   for (const rect of layout.rects) {
-    const snap = snapshot.get(rect.id);
-    if (!snap) continue;
-    seen.add(rect.id);
+    const ghost = rect.ghost;
+    if (!ghost) continue;
 
-    const startShift = daysBetween(snap.start, rect.obj.start);
-    const endShift = rect.hasDuration
-      ? daysBetween(snap.end ?? snap.start, rect.obj.end)
-      : startShift;
-    if (!startShift && !endShift) continue;
-
+    const { snap, startShift, endShift } = ghost;
     const tone = endShift > 0 ? 'slip' : endShift < 0 ? 'ahead' : 'reshaped';
     counts[tone]++;
-    const ghostLeft = rect.hasDuration ? viewport.msToPx(snap.start) : viewport.msToPx(snap.start) - rect.w / 2;
-    const ghostWidth = rect.hasDuration
-      ? Math.max(4, viewport.msToPx(snap.end ?? snap.start) - viewport.msToPx(snap.start))
-      : rect.w;
 
     fragment.appendChild(
       el('div', {
-        class: `tl-baseline ${tone}`,
+        class: `tl-baseline ${tone}${ghost.stacked ? ' stacked' : ''}`,
         style: {
-          left: `${ghostLeft}px`,
-          top: `${rect.y}px`,
-          width: `${ghostWidth}px`,
-          height: `${rect.h}px`,
+          left: `${ghost.x}px`,
+          top: `${ghost.y}px`,
+          width: `${ghost.w}px`,
+          height: `${ghost.h}px`,
         },
         title: baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration),
       })
@@ -939,38 +929,32 @@ function renderBaseline(layout, settings) {
 
     // The arrow runs between the two finish edges, which is the movement the
     // reader cares about. A reshape (same finish, different start) gets the
-    // start edges instead, or there would be nothing to draw.
+    // start edges instead, or there would be nothing to draw. It rides the
+    // ghost's own centre line, so a stacked ghost still points at its bar.
     const shift = tone === 'reshaped' ? startShift : endShift;
-    const fromX = tone === 'reshaped' ? ghostLeft : ghostLeft + ghostWidth;
+    const fromX = tone === 'reshaped' ? ghost.x : ghost.x + ghost.w;
     const toX = tone === 'reshaped' ? rect.x : rect.right;
     if (shift) {
-      fragment.appendChild(shiftArrow(fromX, toX, rect.y + rect.h / 2, shift, tone));
+      fragment.appendChild(shiftArrow(fromX, toX, ghost.y + ghost.h / 2, shift, tone));
     }
   }
 
-  // Objects the baseline had and the plan no longer does. They have no rect,
-  // so their position comes from the snapshot and from whichever lane they
-  // used to be in — falling back to the top of the canvas when that lane has
-  // gone too.
-  for (const [id, snap] of snapshot) {
-    if (seen.has(id) || layout.byId.has(id)) continue;
-    const entry = layout.geometry.lanes.find((l) => l.id === snap.lane) || layout.geometry.lanes[0];
-    if (!entry) continue;
-
-    const left = viewport.msToPx(snap.start);
-    const width = Math.max(10, viewport.msToPx(snap.end ?? snap.start) - left);
-
+  // Objects the baseline had and the plan no longer does. They have no object
+  // to hang off, so layout packs a phantom one into the lane they used to be in
+  // — a removed bar gets a row of its own rather than the top of the lane,
+  // where it used to sit on top of whatever replaced it.
+  for (const item of layout.removed) {
     fragment.appendChild(
       el('div', {
         class: 'tl-baseline-gone',
         style: {
-          left: `${left}px`,
-          top: `${entry.contentY}px`,
-          width: `${width}px`,
-          height: `${Math.min(22, entry.contentH)}px`,
+          left: `${item.x}px`,
+          top: `${item.y}px`,
+          width: `${item.w}px`,
+          height: `${item.h}px`,
         },
-        title: `Removed since the baseline: ${snap.title}`,
-      }, [el('span', { class: 'bg-label', text: snap.title })])
+        title: `Removed since the baseline: ${item.snap.title}`,
+      }, [el('span', { class: 'bg-label', text: item.snap.title })])
     );
     counts.gone++;
   }

@@ -117,6 +117,18 @@ subscribes. That is what keeps the graph acyclic.
   plan no longer does, and a banner naming the baseline. `io/scene.js` draws
   the same, so an exported PDF is the drawing on screen. All of it is derived
   per frame from the snapshot — there is no comparison state to go stale.
+- **A ghost is packed, not painted over.** `computeLayout()` measures the
+  comparison with the objects (`measureGhost`, `measureGone`) and `packRows()`
+  reserves the whole pair — bar, label, ghost and the arrow's day badge — so a
+  ghost can never land on another bar or on another ghost; the lane reflows
+  instead. Where a ghost covers the same dates as its *own* bar the two cannot
+  share a height, so it drops to a slim tier along the bottom of the row
+  (`rect.ghost.stacked`) and the row grows. That test is in pixels, so zooming
+  out until a gap closes splits them and zooming back in re-joins them. The
+  renderer and `io/scene.js` only draw what they are handed — `rect.ghost` and
+  `layout.removed` — and neither works out a position of its own. Never place a
+  comparison rectangle from the snapshot at paint time: it will be the one
+  thing on the canvas nothing else knows is there.
 - **A P6 baseline is derived; a taken baseline is frozen.** Both live in
   `doc.baselines`, but a P6 one carries `source: 'p6'` and **no rows** — the
   comparison has to follow whatever is linked right now, so
@@ -205,7 +217,7 @@ subscribes. That is what keeps the graph acyclic.
 npm run build                        # must succeed — it also lints the module graph
 npm test                             # all three suites, must exit 0
 
-node tools/smoke.js                  # 182 checks — the application, local mode
+node tools/smoke.js                  # 196 checks — the application, local mode
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result
@@ -213,9 +225,10 @@ node tools/smoke.js --shot out.png   # …and eyeball the result
 
 `smoke.js` boots the real application in Chromium and checks rendering,
 selection, typing into panel fields without losing focus, snapping, undo/redo,
-zoom, the dropdown vocabularies, filter dim/hide, baseline comparison, all
-seventeen dock panes, all five themes, every exporter (including PDF header
-validation) and reload persistence. **Any console error fails the run.**
+zoom, the dropdown vocabularies, filter dim/hide, baseline comparison — down to
+measuring, at five zooms, that no ghost is drawn over a bar or over another
+ghost — all seventeen dock panes, all five themes, every exporter (including PDF
+header validation) and reload persistence. **Any console error fails the run.**
 
 `smoke_hosted.js` boots it with a configured backend and a stubbed client, so
 the gate, invitations, sharing and read-only mode are covered without a

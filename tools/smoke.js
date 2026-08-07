@@ -668,6 +668,9 @@ async function main() {
   };
   await nudge(0, 6, 'Shift+ArrowRight');
   await nudge(1, 3, 'Shift+ArrowLeft');
+  // A move long enough to leave the ghost sitting where its neighbours are,
+  // which is the overlap the packer has to resolve by reflowing the lane.
+  await nudge(3, 26, 'Shift+ArrowRight');
   await bars.nth(2).click();
   await page.waitForTimeout(250);
   await page.keyboard.press('Delete');
@@ -684,6 +687,49 @@ async function main() {
   check('objects removed since the baseline still appear', moved.gone >= 1, `${moved.gone}`);
   check('the banner names the baseline and counts the changes',
     /baseline/i.test(moved.banner) && /slipped/i.test(moved.banner), moved.banner.replace(/\n/g, ' '));
+
+  // A ghost is a rectangle on the canvas like any other, so it is packed like
+  // one: it may not land on a bar, and two of them may not land on each other.
+  // Measured from the DOM at several zooms, because the split is a pixel
+  // decision — a ghost that clears its bar at day scale covers it at year
+  // scale, and the row has to grow and stack on its own.
+  const collisions = () => page.evaluate(() => {
+    const box = (n) => {
+      const r = n.getBoundingClientRect();
+      return { l: r.left, r: r.right, t: r.top, b: r.bottom };
+    };
+    // 1px of slack: adjacent edges are not an overlap.
+    const hits = (a, b) => a.l < b.r - 1 && b.l < a.r - 1 && a.t < b.b - 1 && b.t < a.b - 1;
+    // Bands and containers are lane-tall backdrops: everything sits on them by
+    // design, so they are not part of the question.
+    const bars = [...document.querySelectorAll('.tl-obj.shape-bar')].map(box);
+    const marks = [...document.querySelectorAll('.tl-baseline, .tl-baseline-gone')].map(box);
+
+    let onBars = 0;
+    let onEachOther = 0;
+    for (const mark of marks) for (const bar of bars) if (hits(mark, bar)) onBars++;
+    for (let i = 0; i < marks.length; i++) {
+      for (let j = i + 1; j < marks.length; j++) if (hits(marks[i], marks[j])) onEachOther++;
+    }
+    return { onBars, onEachOther, marks: marks.length };
+  });
+
+  const zoomOut = page.locator('#toolbar [aria-label="Zoom out"], #toolbar [title="Zoom out"]').first();
+  const zoomIn = page.locator('#toolbar [aria-label="Zoom in"], #toolbar [title="Zoom in"]').first();
+  const zooms = [{ at: 'fit', ...(await collisions()) }];
+  for (const step of ['out', 'out', 'in', 'in']) {
+    await (step === 'out' ? zoomOut : zoomIn).click();
+    await page.waitForTimeout(500);
+    zooms.push({ at: step, ...(await collisions()) });
+  }
+  check('no baseline ghost is drawn on top of a bar',
+    zooms.every((z) => z.marks > 0 && z.onBars === 0),
+    zooms.map((z) => `${z.at} ${z.onBars}/${z.marks}`).join(', '));
+  check('and no two of them are drawn on top of each other',
+    zooms.every((z) => z.onEachOther === 0),
+    zooms.map((z) => `${z.at} ${z.onEachOther}`).join(', '));
+  await page.keyboard.press('Control+0');
+  await page.waitForTimeout(600);
 
   // The export is the same drawing, or a comparison taken to a meeting as a
   // PDF would quietly show only the current dates.

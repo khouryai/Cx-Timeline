@@ -823,6 +823,14 @@
   border-color: var(--warn);
 }
 
+/* A ghost covering the same dates as its own bar cannot sit behind it — the two
+   would read as one pile. Layout gives it a slim tier under the bar instead and
+   grows the row, so it reads as the bar's shadow. */
+.tl-baseline.stacked {
+  border-width: 1px;
+  border-radius: 3px;
+}
+
 /* ── The shift ─────────────────────────────────────────────────────────── */
 
 .tl-shift {
@@ -898,8 +906,10 @@
   pointer-events: none;
   z-index: 60;
 }
+/* The name spills past a narrow outline rather than being clipped by it —
+   layout measured it and reserved the room, like every other timeline label. */
 .tl-baseline-gone .bg-label {
-  overflow: hidden;
+  flex: 0 0 auto;
   color: var(--bad);
   font-size: var(--fs-micro);
   font-style: italic;
