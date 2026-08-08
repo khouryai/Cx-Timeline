@@ -15,7 +15,8 @@ import { on, emit, EV } from '../core/events.js';
 import { fmtDate, fmtTimestamp, toISO } from '../core/dates.js';
 import { TYPES, typeGroups, effectiveToday, projectExtent } from '../core/model.js';
 import * as store from '../core/store.js';
-import { isFallback, isHosted } from '../core/storage.js';
+import { isFallback, isHosted, isFileMode } from '../core/storage.js';
+import * as filestore from '../core/filestore.js';
 import * as cloud from '../core/cloud.js';
 import { linkViolations } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
@@ -478,7 +479,16 @@ function refreshStatus() {
     : '';
   dom.violationText.style.display = violations.count ? '' : 'none';
   dom.zoomText.textContent = `${zoom.scale} · ${zoom.span}`;
-  dom.storageText.textContent = isHosted() ? 'Supabase' : isFallback() ? 'localStorage' : 'IndexedDB';
+  // Where the work is going. In a shared folder this is the most useful thing
+  // on the status bar, so it names the plan and says who holds the pen.
+  if (isFileMode()) {
+    const st = filestore.state();
+    dom.storageText.textContent = st.role === 'viewer' ? `${st.plan} · ${st.holder} editing` : `${st.plan} · folder`;
+    dom.storageText.title = `${st.folder}/${st.plan}`;
+  } else {
+    dom.storageText.textContent = isHosted() ? 'Supabase' : isFallback() ? 'localStorage' : 'IndexedDB';
+    dom.storageText.title = '';
+  }
 }
 
 const refreshCursor = debounce((ms) => {
@@ -516,6 +526,7 @@ function wireEvents() {
     refreshStatus();
   });
   on(EV.ACCESS_CHANGED, refresh);
+  on(EV.FILE_STATE, () => refreshStatus());
   on(EV.SELECTION_CHANGED, () => refreshStatus());
   on(EV.TOOL_CHANGED, () => refreshToolbar());
   on(EV.VIEW_CHANGED, debounce(() => {

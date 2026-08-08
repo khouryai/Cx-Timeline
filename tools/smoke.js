@@ -815,7 +815,9 @@ async function main() {
   check('the drawing options are reachable',
     (await page.locator('#dock .cx-btn', { hasText: /drawing options/i }).count()) === 1);
   check('the pane says what the next export will contain',
-    /drawing the whole plan|on screen/i.test(await page.locator('#dock .cx-hint').nth(1).innerText()));
+    /drawing the whole plan|on screen/i.test(
+      await page.locator('#dock [data-section="export"] .cx-hint').last().innerText()
+    ));
 
   const grabSvg = () => page.evaluate(async () => {
     document.querySelector('#sidenav .nav-link[data-pane="io"]').click();

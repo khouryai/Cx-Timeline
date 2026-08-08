@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 41   Built: 2026-08-07T23:32:19.813Z
+ * Modules: 42   Built: 2026-08-08T18:17:30.030Z
  */
 (function () {
   'use strict';
@@ -534,6 +534,11 @@ __mods["core/events.js"] = function (__x, __req) {
     SAVE_DONE: 'save:done',
     SAVE_ERROR: 'save:error',
     BACKUP_MADE: 'backup:made',
+
+    /* The shared folder (file mode only) */
+    FILE_STATE: 'file:state', // { connected, folder, plan, role, holder } — connection or pen changed
+    FILE_EXTERNAL_CHANGE: 'file:external', // a colleague's save landed in the folder
+    FILE_CONFLICT: 'file:conflict', // a write was refused because the file moved underneath us
 
     /* History */
     HISTORY_CHANGED: 'history:changed', // { canUndo, canRedo, depth }
@@ -4710,6 +4715,679 @@ __mods["core/store.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// core/filestore.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/filestore.js"] = function (__x, __req) {
+  /**
+   * The shared folder.
+   *
+   * This module is the *only* one that knows the File System Access API exists,
+   * the same way `core/cloud.js` is the only one that knows about Supabase.
+   * Everything above it — storage, the panels, the status bar — talks to the
+   * functions here and would keep working against a different file backend.
+   *
+   * It is inert unless the browser supports the API and the user has connected a
+   * folder. With nothing connected `isConnected()` returns false, nothing here is
+   * ever called, and CX Timeline behaves exactly as it always has.
+   *
+   * What lives in a connected folder
+   * --------------------------------
+   *   <plan>.json         the project, in exactly the format Export → JSON writes
+   *   <plan>.lock.json    who currently has the pen, and when they last touched it
+   *   attachments/<id>    attachment bytes, one file each
+   *
+   * The plan file format is deliberately unchanged: a folder full of these opens
+   * in the importer, reads in a text editor, and is versioned by whatever the
+   * folder is synced with. Nothing here is a proprietary container.
+   *
+   * On two people at once
+   * --------------------
+   * The lock file says who is editing, and the other person opens read-only. But
+   * a synced folder is not a database: the lock takes as long to arrive as the
+   * sync does, so two people opening within the same few seconds can both believe
+   * they hold it. The lock is therefore *courtesy*, and the guard that actually
+   * protects the work is `savePlan()` — it re-reads the file's size and modified
+   * time before every write and refuses if either moved since we last read it.
+   * That is the same promise the hosted path makes with its revision check: you
+   * may be told to reload, but you can never silently overwrite someone.
+   *
+   * Imports: util, events.
+   */
+
+  const { emit, EV } = __req("core/events.js");
+
+  /** How often the holder re-stamps the lock, in ms. */
+  const HEARTBEAT_MS = 30000;
+  /** A lock older than this is treated as abandoned — a crash, or a closed lid. */
+  const STALE_MS = 150000;
+  /** How often we look for someone else's save landing in the folder. */
+  const POLL_MS = 12000;
+  /** Where the folder handle is remembered between sessions. */
+  const DB_NAME = 'cx-timeline-folder';
+  const DB_STORE = 'handles';
+  const HANDLE_KEY = 'folder';
+
+  /* ── State ─────────────────────────────────────────────────────────────── */
+
+  let dirHandle = null;
+  let fileHandle = null;
+  let planName = '';
+  /** Size and modified time of the plan as we last saw it — the write guard. */
+  let stamp = null;
+  /** 'editor' when we hold the lock, 'viewer' when someone else does. */
+  let role = null;
+  /** Who holds the lock, when it is not us. */
+  let holder = '';
+  /** This tab's identity, so we recognise our own lock across a reload. */
+  const sessionId = `s_${Math.random().toString(36).slice(2, 10)}`;
+  let displayName = '';
+  let heartbeatTimer = null;
+  let pollTimer = null;
+
+  /* ── Capability ────────────────────────────────────────────────────────── */
+
+  /** True when this browser can open a folder at all. Chromium-based only. */
+  function isSupported() {
+    return typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function';
+  }
+
+  /** True when a plan in a connected folder is the live document. */
+  function isConnected() {
+    return !!(dirHandle && fileHandle);
+  }
+
+  /** True when someone else holds the pen, so this session must not write. */
+  function isViewer() {
+    return isConnected() && role === 'viewer';
+  }
+
+  /** Everything the interface needs to describe the current state. */
+  function state() {
+    return {
+      supported: isSupported(),
+      connected: isConnected(),
+      folder: dirHandle ? dirHandle.name : '',
+      plan: planName,
+      role: role || null,
+      holder,
+      savedAt: stamp ? stamp.lastModified : null,
+    };
+  }
+
+  /** The name a colleague will see in the lock. Set once, from the settings pane. */
+  function setDisplayName(name) {
+    displayName = String(name || '').trim();
+    writePref('name', displayName);
+  }
+
+  function getDisplayName() {
+    return displayName || readPref('name') || 'Someone';
+  }
+
+  /* ── Remembering the folder between sessions ───────────────────────────── */
+
+  /**
+   * Directory handles survive a reload, but only in IndexedDB — they are
+   * structured-cloneable and cannot be serialised to JSON. This is a database of
+   * its own rather than a table in the main one, so `core/storage.js` can import
+   * this module without this module importing it back.
+   */
+  function openHandleDb() {
+    return new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') {
+        reject(new Error('IndexedDB unavailable'));
+        return;
+      }
+      const request = indexedDB.open(DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains(DB_STORE)) request.result.createObjectStore(DB_STORE);
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async function rememberHandle(handle, plan) {
+    try {
+      const db = await openHandleDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE, 'readwrite');
+        tx.objectStore(DB_STORE).put({ handle, plan }, HANDLE_KEY);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+      db.close();
+    } catch (err) {
+      console.warn('[cx-timeline] could not remember the folder:', err.message);
+    }
+  }
+
+  async function recallHandle() {
+    try {
+      const db = await openHandleDb();
+      const record = await new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE);
+        const req = tx.objectStore(DB_STORE).get(HANDLE_KEY);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+      db.close();
+      return record;
+    } catch {
+      return null;
+    }
+  }
+
+  async function forgetHandle() {
+    try {
+      const db = await openHandleDb();
+      await new Promise((resolve) => {
+        const tx = db.transaction(DB_STORE, 'readwrite');
+        tx.objectStore(DB_STORE).delete(HANDLE_KEY);
+        tx.oncomplete = resolve;
+        tx.onerror = resolve;
+      });
+      db.close();
+    } catch {
+      /* nothing to forget */
+    }
+  }
+
+  /** Small device-scoped values (the display name, the last plan opened). */
+  function readPref(key) {
+    try {
+      return localStorage.getItem(`cxtl.folder.${key}`) || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function writePref(key, value) {
+    try {
+      localStorage.setItem(`cxtl.folder.${key}`, String(value || ''));
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /** The folder we remembered, if any — so the UI can offer to reconnect by name. */
+  async function storedFolder() {
+    const record = await recallHandle();
+    if (!record || !record.handle) return null;
+    return { folder: record.handle.name, plan: record.plan || '' };
+  }
+
+  /* ── Connecting ────────────────────────────────────────────────────────── */
+
+  /**
+   * Ask for a folder and remember it. Must be called from a user gesture — the
+   * browser refuses a picker that nobody clicked for.
+   *
+   * Returns the plans found inside so the caller can choose, rather than guessing
+   * on the user's behalf when a folder holds several.
+   */
+  async function chooseFolder() {
+    if (!isSupported()) throw new Error('This browser cannot open a folder. Use Edge or Chrome.');
+    const handle = await window.showDirectoryPicker({ id: 'cx-timeline-plans', mode: 'readwrite' });
+    if (!handle) return null;
+    if (!(await ensurePermission(handle))) throw new Error('Permission to edit that folder was declined.');
+
+    dirHandle = handle;
+    fileHandle = null;
+    planName = '';
+    await rememberHandle(handle, '');
+    emitState();
+    return { folder: handle.name, plans: await listPlans() };
+  }
+
+  /**
+   * Reconnect to the remembered folder without prompting.
+   *
+   * Resolves to the folder's plans when the browser still considers the grant
+   * live, and to null when it needs a click — which is why the caller shows a
+   * "reconnect" affordance rather than throwing the user into a dialog on boot.
+   */
+  async function reconnectSilently() {
+    if (!isSupported()) return null;
+    const record = await recallHandle();
+    if (!record || !record.handle) return null;
+
+    const granted = await queryPermission(record.handle);
+    if (!granted) return null;
+
+    dirHandle = record.handle;
+    fileHandle = null;
+    planName = '';
+    emitState();
+    return { folder: dirHandle.name, plans: await listPlans(), lastPlan: record.plan || '' };
+  }
+
+  /** Reconnect from a user gesture, prompting for permission if it has lapsed. */
+  async function reconnectWithPrompt() {
+    if (!isSupported()) return null;
+    const record = await recallHandle();
+    if (!record || !record.handle) return null;
+    if (!(await ensurePermission(record.handle))) return null;
+
+    dirHandle = record.handle;
+    fileHandle = null;
+    planName = '';
+    emitState();
+    return { folder: dirHandle.name, plans: await listPlans(), lastPlan: record.plan || '' };
+  }
+
+  async function queryPermission(handle) {
+    try {
+      return (await handle.queryPermission({ mode: 'readwrite' })) === 'granted';
+    } catch {
+      return false;
+    }
+  }
+
+  async function ensurePermission(handle) {
+    if (await queryPermission(handle)) return true;
+    try {
+      return (await handle.requestPermission({ mode: 'readwrite' })) === 'granted';
+    } catch {
+      return false;
+    }
+  }
+
+  /** Stop using the folder: release the lock and forget the handle. */
+  async function disconnect() {
+    await releaseLock();
+    stopTimers();
+    dirHandle = null;
+    fileHandle = null;
+    planName = '';
+    stamp = null;
+    role = null;
+    holder = '';
+    await forgetHandle();
+    emitState();
+  }
+
+  /* ── Plans in the folder ───────────────────────────────────────────────── */
+
+  /** Every plan in the connected folder, newest first. Lock files are not plans. */
+  async function listPlans() {
+    if (!dirHandle) return [];
+    const out = [];
+    try {
+      for await (const [name, handle] of dirHandle.entries()) {
+        if (handle.kind !== 'file') continue;
+        if (!name.toLowerCase().endsWith('.json')) continue;
+        if (name.toLowerCase().endsWith('.lock.json')) continue;
+        let size = 0;
+        let modified = 0;
+        try {
+          const file = await handle.getFile();
+          size = file.size;
+          modified = file.lastModified;
+        } catch {
+          /* listed but unreadable — still worth showing */
+        }
+        out.push({ name, size, modified });
+      }
+    } catch (err) {
+      console.warn('[cx-timeline] could not read the folder:', err.message);
+    }
+    return out.sort((a, b) => b.modified - a.modified);
+  }
+
+  /**
+   * Open a plan and take the pen if it is free.
+   *
+   * Returns `{ doc, role, holder }`. A `viewer` role is not a failure — it means
+   * a colleague is in there, and the document is still returned so it can be read.
+   */
+  async function openPlan(name) {
+    if (!dirHandle) throw new Error('No folder is connected.');
+    const handle = await dirHandle.getFileHandle(name);
+    const file = await handle.getFile();
+    const text = await file.text();
+
+    let doc;
+    try {
+      doc = JSON.parse(text);
+    } catch (err) {
+      throw new Error(`${name} is not a valid project file: ${err.message}`);
+    }
+
+    fileHandle = handle;
+    planName = name;
+    stamp = { size: file.size, lastModified: file.lastModified };
+    await rememberHandle(dirHandle, name);
+
+    const lock = await readLock();
+    if (lock && !isOurs(lock) && !isStale(lock)) {
+      role = 'viewer';
+      holder = lock.holder || 'Someone';
+    } else {
+      role = 'editor';
+      holder = '';
+      await writeLock();
+    }
+
+    startTimers();
+    emitState();
+    return { doc, role, holder };
+  }
+
+  /** Write a new plan into the folder and open it. */
+  async function createPlan(name, doc) {
+    if (!dirHandle) throw new Error('No folder is connected.');
+    const safe = name.toLowerCase().endsWith('.json') ? name : `${name}.json`;
+    const handle = await dirHandle.getFileHandle(safe, { create: true });
+
+    const writable = await handle.createWritable();
+    await writable.write(serialise(doc));
+    await writable.close();
+
+    fileHandle = handle;
+    planName = safe;
+    const file = await handle.getFile();
+    stamp = { size: file.size, lastModified: file.lastModified };
+    role = 'editor';
+    holder = '';
+    await rememberHandle(dirHandle, safe);
+    await writeLock();
+    startTimers();
+    emitState();
+    return safe;
+  }
+
+  /* ── Saving, with the guard ────────────────────────────────────────────── */
+
+  /**
+   * Write the document back, but never over someone else's work.
+   *
+   * The file is stat-ed first: if its size or modified time moved since we last
+   * read or wrote it, a colleague's save landed in between and this one is
+   * refused. That is the whole safety property of this mode — the caller is told
+   * to reload rather than being allowed to clobber.
+   */
+  async function savePlan(doc) {
+    if (!fileHandle) return { ok: false, reason: 'not-connected' };
+    if (role === 'viewer') return { ok: false, reason: 'read-only' };
+
+    try {
+      const current = await fileHandle.getFile();
+      if (stamp && (current.size !== stamp.size || current.lastModified !== stamp.lastModified)) {
+        emit(EV.FILE_CONFLICT, { plan: planName });
+        return { ok: false, reason: 'conflict', conflict: true };
+      }
+
+      const writable = await fileHandle.createWritable();
+      await writable.write(serialise(doc));
+      await writable.close();
+
+      const after = await fileHandle.getFile();
+      stamp = { size: after.size, lastModified: after.lastModified };
+      return { ok: true, at: after.lastModified };
+    } catch (err) {
+      // A lapsed permission grant is the common failure here, and it reads as a
+      // generic error unless we say so.
+      const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+      return { ok: false, reason: denied ? 'permission' : 'error', error: err };
+    }
+  }
+
+  /** Re-read the plan from the folder — the "they saved, catch up" path. */
+  async function refreshFromDisk() {
+    if (!fileHandle) return null;
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+    stamp = { size: file.size, lastModified: file.lastModified };
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      throw new Error(`${planName} could not be read: ${err.message}`);
+    }
+  }
+
+  /** The document as it is written to disk: the Export → JSON format, verbatim. */
+  function serialise(doc) {
+    return JSON.stringify(
+      {
+        ...doc,
+        exported: {
+          at: new Date().toISOString(),
+          application: 'CX Timeline',
+          note: 'Attachment file contents live in the attachments folder beside this file.',
+        },
+      },
+      null,
+      2
+    );
+  }
+
+  /* ── The lock ──────────────────────────────────────────────────────────── */
+
+  function lockName() {
+    return `${planName.replace(/\.json$/i, '')}.lock.json`;
+  }
+
+  async function readLock() {
+    if (!dirHandle || !planName) return null;
+    try {
+      const handle = await dirHandle.getFileHandle(lockName());
+      const text = await (await handle.getFile()).text();
+      return JSON.parse(text);
+    } catch {
+      return null; // absent, unreadable or mid-sync — treat as free
+    }
+  }
+
+  async function writeLock() {
+    if (!dirHandle || !planName) return;
+    try {
+      const handle = await dirHandle.getFileHandle(lockName(), { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(
+        JSON.stringify({ id: sessionId, holder: getDisplayName(), since: Date.now(), beat: Date.now() }, null, 2)
+      );
+      await writable.close();
+    } catch (err) {
+      // Failing to take the lock is not fatal: the write guard still protects the
+      // work, so the session continues without the courtesy.
+      console.warn('[cx-timeline] could not write the lock file:', err.message);
+    }
+  }
+
+  async function releaseLock() {
+    if (!dirHandle || !planName || role !== 'editor') return;
+    try {
+      const lock = await readLock();
+      if (lock && !isOurs(lock)) return; // someone took over; leave theirs alone
+      await dirHandle.removeEntry(lockName());
+    } catch {
+      /* the staleness timeout is the real release mechanism */
+    }
+  }
+
+  function isOurs(lock) {
+    return !!lock && lock.id === sessionId;
+  }
+
+  function isStale(lock) {
+    return !lock || !lock.beat || Date.now() - lock.beat > STALE_MS;
+  }
+
+  /**
+   * Claim a lock whose holder has gone away.
+   *
+   * Offered only when the lock reads as stale, so this is "the other session
+   * crashed" rather than "barge in on a colleague".
+   */
+  async function takeOver() {
+    if (!isConnected()) return false;
+    const lock = await readLock();
+    if (lock && !isOurs(lock) && !isStale(lock)) return false;
+    role = 'editor';
+    holder = '';
+    await writeLock();
+    emitState();
+    return true;
+  }
+
+  /** Who holds the pen right now, re-read from the folder. */
+  async function checkLock() {
+    if (!isConnected()) return null;
+    const lock = await readLock();
+
+    if (!lock || isOurs(lock) || isStale(lock)) {
+      // Nobody is in there. Promote a viewer that has been waiting.
+      if (role === 'viewer') {
+        role = 'editor';
+        holder = '';
+        await writeLock();
+        emitState();
+      }
+      return { role, holder, stale: !!lock && isStale(lock) };
+    }
+
+    if (role === 'editor') {
+      // Somebody else stamped the lock while we thought we had it — two sessions
+      // opened inside one sync window. Yield: their save would beat ours anyway.
+      role = 'viewer';
+      holder = lock.holder || 'Someone';
+      emitState();
+    } else if (holder !== (lock.holder || 'Someone')) {
+      holder = lock.holder || 'Someone';
+      emitState();
+    }
+    return { role, holder, stale: false };
+  }
+
+  /* ── Watching the folder ───────────────────────────────────────────────── */
+
+  function startTimers() {
+    stopTimers();
+    heartbeatTimer = setInterval(() => {
+      if (role === 'editor') writeLock();
+    }, HEARTBEAT_MS);
+
+    pollTimer = setInterval(async () => {
+      if (!fileHandle) return;
+      try {
+        await checkLock();
+        const file = await fileHandle.getFile();
+        if (stamp && (file.size !== stamp.size || file.lastModified !== stamp.lastModified)) {
+          // Do not update the stamp — the write guard needs to keep refusing
+          // until the document has actually been reloaded.
+          emit(EV.FILE_EXTERNAL_CHANGE, { plan: planName, at: file.lastModified });
+        }
+      } catch {
+        /* the folder went away — the next save will report it properly */
+      }
+    }, POLL_MS);
+  }
+
+  function stopTimers() {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (pollTimer) clearInterval(pollTimer);
+    heartbeatTimer = null;
+    pollTimer = null;
+  }
+
+  /** Release the lock on the way out. Best effort — unload cannot await. */
+  function handleUnload() {
+    releaseLock();
+    stopTimers();
+  }
+
+  function emitState() {
+    emit(EV.FILE_STATE, state());
+  }
+
+  /* ── Attachments ───────────────────────────────────────────────────────── */
+
+  async function attachmentsDir(create = false) {
+    if (!dirHandle) return null;
+    try {
+      return await dirHandle.getDirectoryHandle('attachments', { create });
+    } catch {
+      return null;
+    }
+  }
+
+  async function putBlob(id, file) {
+    const dir = await attachmentsDir(true);
+    if (!dir) throw new Error('Could not create the attachments folder.');
+    const handle = await dir.getFileHandle(id, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(file);
+    await writable.close();
+    return { id, name: file.name, type: file.type, size: file.size };
+  }
+
+  async function getBlob(id) {
+    const dir = await attachmentsDir(false);
+    if (!dir) return null;
+    try {
+      const handle = await dir.getFileHandle(id);
+      const file = await handle.getFile();
+      return { id, blob: file, name: file.name || id, type: file.type, size: file.size };
+    } catch {
+      return null;
+    }
+  }
+
+  async function deleteBlob(id) {
+    const dir = await attachmentsDir(false);
+    if (!dir) return;
+    try {
+      await dir.removeEntry(id);
+    } catch {
+      /* already gone */
+    }
+  }
+
+  /** Total bytes held in the attachments folder — shown in Settings. */
+  async function blobUsage() {
+    const dir = await attachmentsDir(false);
+    if (!dir) return { count: 0, bytes: 0 };
+    let count = 0;
+    let total = 0;
+    try {
+      for await (const [, handle] of dir.entries()) {
+        if (handle.kind !== 'file') continue;
+        count++;
+        total += (await handle.getFile()).size;
+      }
+    } catch {
+      /* partial answer is better than none */
+    }
+    return { count, bytes: total };
+  }
+
+  Object.defineProperty(__x, "isSupported", { get: () => isSupported, enumerable: true });
+  Object.defineProperty(__x, "isConnected", { get: () => isConnected, enumerable: true });
+  Object.defineProperty(__x, "isViewer", { get: () => isViewer, enumerable: true });
+  Object.defineProperty(__x, "state", { get: () => state, enumerable: true });
+  Object.defineProperty(__x, "setDisplayName", { get: () => setDisplayName, enumerable: true });
+  Object.defineProperty(__x, "getDisplayName", { get: () => getDisplayName, enumerable: true });
+  Object.defineProperty(__x, "storedFolder", { get: () => storedFolder, enumerable: true });
+  Object.defineProperty(__x, "chooseFolder", { get: () => chooseFolder, enumerable: true });
+  Object.defineProperty(__x, "reconnectSilently", { get: () => reconnectSilently, enumerable: true });
+  Object.defineProperty(__x, "reconnectWithPrompt", { get: () => reconnectWithPrompt, enumerable: true });
+  Object.defineProperty(__x, "disconnect", { get: () => disconnect, enumerable: true });
+  Object.defineProperty(__x, "listPlans", { get: () => listPlans, enumerable: true });
+  Object.defineProperty(__x, "openPlan", { get: () => openPlan, enumerable: true });
+  Object.defineProperty(__x, "createPlan", { get: () => createPlan, enumerable: true });
+  Object.defineProperty(__x, "savePlan", { get: () => savePlan, enumerable: true });
+  Object.defineProperty(__x, "refreshFromDisk", { get: () => refreshFromDisk, enumerable: true });
+  Object.defineProperty(__x, "takeOver", { get: () => takeOver, enumerable: true });
+  Object.defineProperty(__x, "checkLock", { get: () => checkLock, enumerable: true });
+  Object.defineProperty(__x, "handleUnload", { get: () => handleUnload, enumerable: true });
+  Object.defineProperty(__x, "putBlob", { get: () => putBlob, enumerable: true });
+  Object.defineProperty(__x, "getBlob", { get: () => getBlob, enumerable: true });
+  Object.defineProperty(__x, "deleteBlob", { get: () => deleteBlob, enumerable: true });
+  Object.defineProperty(__x, "blobUsage", { get: () => blobUsage, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // core/storage.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["core/storage.js"] = function (__x, __req) {
@@ -4726,6 +5404,12 @@ __mods["core/storage.js"] = function (__x, __req) {
    *   local mode   IndexedDB — the original behaviour, no account, no server.
    *   hosted mode  Postgres via `core/cloud.js`, with IndexedDB demoted to an
    *                offline cache so a dropped connection loses nothing.
+   *   file mode    a JSON file in a folder the user picked, via
+   *                `core/filestore.js` — a shared drive or a synced OneDrive
+   *                folder, with IndexedDB again demoted to a cache. No account
+   *                and no server: the folder's own permissions are the access
+   *                control, and a lock file plus a write guard keep two people
+   *                from overwriting each other.
    *
    * Storage stack (local, and the cache in hosted mode)
    * --------------------------------------------------
@@ -4736,12 +5420,13 @@ __mods["core/storage.js"] = function (__x, __req) {
    * browsing on some engines and when a page is opened from `file://` under a
    * hardened profile. The fallback is transparent to every caller.
    *
-   * Imports: util, events, cloud, model, store.
+   * Imports: util, events, cloud, filestore, model, store.
    */
 
   const { debounce, bytes } = __req("core/util.js");
   const { emit, on, EV } = __req("core/events.js");
   const cloud = __req("core/cloud.js");
+  const filestore = __req("core/filestore.js");
   const { normalise, makeStarterProject } = __req("core/model.js");
   const { getDoc, markClean, isDirty } = __req("core/store.js");
 
@@ -4768,6 +5453,13 @@ __mods["core/storage.js"] = function (__x, __req) {
    * answer to "where does this go" rather than a scattering of checks.
    */
   let hosted = false;
+
+  /**
+   * True once a plan in a connected folder is the live document. Mutually
+   * exclusive with `hosted`: a deployment has a backend or it has a folder, and
+   * the folder is only reachable when there is no backend to contradict it.
+   */
+  let fileMode = false;
 
   /* ── IndexedDB plumbing ────────────────────────────────────────────────── */
 
@@ -4875,9 +5567,74 @@ __mods["core/storage.js"] = function (__x, __req) {
       console.warn('[cx-timeline] signed in but could not open a project; falling back to local storage');
     }
 
+    if (!cloud.isConfigured()) {
+      const opened = await openFromFolder();
+      if (opened) return opened;
+    }
+
     const saved = await loadLatest();
     if (saved) return { doc: normalise(saved), fresh: false };
     return { doc: normalise(makeStarterProject()), fresh: true };
+  }
+
+  /**
+   * Re-open the plan this device was last working on in its shared folder.
+   *
+   * Only succeeds when the browser still considers the folder grant live. When it
+   * has lapsed — which is the common case after a browser restart — this returns
+   * null on purpose: re-granting needs a click, so the last local copy is loaded
+   * instead and the interface offers to reconnect. Booting into a permission
+   * dialog nobody asked for would be worse than booting into a cached plan.
+   */
+  async function openFromFolder() {
+    if (!filestore.isSupported()) return null;
+    try {
+      const connected = await filestore.reconnectSilently();
+      if (!connected) return null;
+
+      const wanted = connected.lastPlan || (connected.plans.length === 1 ? connected.plans[0].name : '');
+      if (!wanted) return null;
+
+      const { doc } = await filestore.openPlan(wanted);
+      fileMode = true;
+      editsSinceBackup = 0;
+      return { doc: normalise(doc), fresh: false };
+    } catch (err) {
+      console.warn('[cx-timeline] could not reopen the shared folder:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Open a plan from the connected folder and make it the live document.
+   * Called by the Shared folder pane once a folder has been picked.
+   */
+  async function openFolderPlan(name) {
+    const { doc, role, holder } = await filestore.openPlan(name);
+    fileMode = true;
+    hosted = false;
+    editsSinceBackup = 0;
+    return { doc: normalise(doc), role, holder };
+  }
+
+  /** Write the current document into the connected folder as a new plan. */
+  async function createFolderPlan(name, doc) {
+    const written = await filestore.createPlan(name, normalise(doc));
+    fileMode = true;
+    hosted = false;
+    editsSinceBackup = 0;
+    return written;
+  }
+
+  /** Stop using the folder and fall back to this device's own storage. */
+  async function leaveFolder() {
+    await filestore.disconnect();
+    fileMode = false;
+  }
+
+  /** True when the live document is a file in a connected folder. */
+  function isFileMode() {
+    return fileMode;
   }
 
   /**
@@ -5022,6 +5779,32 @@ __mods["core/storage.js"] = function (__x, __req) {
 
         // A local copy of every successful save is what makes a dropped
         // connection survivable, and what the crash-recovery path reads.
+        await cacheLocally(record);
+      } else if (fileMode) {
+        const result = await filestore.savePlan(doc);
+
+        if (!result.ok) {
+          // Somebody else has the pen. The user has already been told by the
+          // banner, so this is not an error to raise again.
+          if (result.reason === 'read-only') {
+            markClean();
+            emit(EV.SAVE_DONE, { at: Date.now(), skipped: true });
+            return true;
+          }
+          // The file moved underneath us, or the grant lapsed. Keep the work in
+          // the local cache either way, so nothing is lost while it is resolved.
+          await cacheLocally(record);
+          if (result.reason === 'conflict') {
+            emit(EV.SAVE_ERROR, { error: new Error('conflict'), conflict: true });
+            return false;
+          }
+          if (result.reason === 'permission') {
+            emit(EV.SAVE_ERROR, { error: new Error('permission'), permission: true });
+            return false;
+          }
+          throw result.error || new Error('the folder refused the write');
+        }
+
         await cacheLocally(record);
       } else if (usingFallback) {
         lsSetJSON(LS_DOC, doc);
@@ -5258,6 +6041,9 @@ __mods["core/storage.js"] = function (__x, __req) {
    */
   async function putBlob(id, file) {
     if (hosted) return cloud.putBlob(id, file);
+    // In a shared folder the bytes go beside the plan, so a colleague who syncs
+    // the folder gets the attachments along with it.
+    if (fileMode) return filestore.putBlob(id, file);
     const record = { id, name: file.name, type: file.type, size: file.size, added: Date.now(), blob: file };
     if (usingFallback) {
       throw new Error('Attachments require IndexedDB, which is not available in this browser session.');
@@ -5271,6 +6057,7 @@ __mods["core/storage.js"] = function (__x, __req) {
       const blob = await cloud.getBlob(id);
       return blob ? { id, blob, name: id, type: blob.type, size: blob.size } : null;
     }
+    if (fileMode) return filestore.getBlob(id);
     if (usingFallback) return null;
     const record = await wrap(tx(STORE_BLOBS).get(id));
     return record || null;
@@ -5281,12 +6068,20 @@ __mods["core/storage.js"] = function (__x, __req) {
       await cloud.deleteBlob(id);
       return;
     }
+    if (fileMode) {
+      await filestore.deleteBlob(id);
+      return;
+    }
     if (usingFallback) return;
     await wrap(tx(STORE_BLOBS, 'readwrite').delete(id));
   }
 
   /** Total bytes held in the blob store — shown in Settings. */
   async function blobUsage() {
+    if (fileMode) {
+      const used = await filestore.blobUsage();
+      return { ...used, label: bytes(used.bytes) };
+    }
     if (usingFallback) return { count: 0, bytes: 0, label: '0 B' };
     try {
       const all = await wrap(tx(STORE_BLOBS).getAll());
@@ -5351,9 +6146,11 @@ __mods["core/storage.js"] = function (__x, __req) {
     return {
       backend: hosted
         ? 'Supabase (this device keeps an offline copy)'
-        : usingFallback
-          ? 'localStorage (fallback)'
-          : 'IndexedDB',
+        : fileMode
+          ? `Shared folder — ${filestore.state().folder}/${filestore.state().plan}`
+          : usingFallback
+            ? 'localStorage (fallback)'
+            : 'IndexedDB',
       document: { bytes: docBytes, label: bytes(docBytes) },
       attachments: blobs,
       quota,
@@ -5361,6 +6158,10 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "init", { get: () => init, enumerable: true });
+  Object.defineProperty(__x, "openFolderPlan", { get: () => openFolderPlan, enumerable: true });
+  Object.defineProperty(__x, "createFolderPlan", { get: () => createFolderPlan, enumerable: true });
+  Object.defineProperty(__x, "leaveFolder", { get: () => leaveFolder, enumerable: true });
+  Object.defineProperty(__x, "isFileMode", { get: () => isFileMode, enumerable: true });
   Object.defineProperty(__x, "switchProject", { get: () => switchProject, enumerable: true });
   Object.defineProperty(__x, "createCloudProject", { get: () => createCloudProject, enumerable: true });
   Object.defineProperty(__x, "isHosted", { get: () => isHosted, enumerable: true });
@@ -11034,8 +11835,8 @@ __mods["ui/commands.js"] = function (__x, __req) {
    * call the same functions here, so a behaviour never drifts between the three
    * ways of reaching it and there is exactly one place to fix a bug.
    *
-   * Imports: util, events, dates, model, store, storage, viewport, renderer,
-   *          interactions, icons, components.
+   * Imports: util, events, dates, model, store, storage, filestore, viewport,
+   *          renderer, interactions, icons, components.
    */
 
   const { el, download, clamp } = __req("core/util.js");
@@ -11043,7 +11844,8 @@ __mods["ui/commands.js"] = function (__x, __req) {
   const { MS_DAY, toISO, fmtDate, addDays } = __req("core/dates.js");
   const { TYPES, makeBaseline, makeObject, projectExtent, effectiveToday, makeProject } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { saveNow, makeBackup } = __req("core/storage.js");
+  const { saveNow, makeBackup, openFolderPlan, createFolderPlan, leaveFolder } = __req("core/storage.js");
+  const filestore = __req("core/filestore.js");
   const { linkViolations, resolutionFor } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
@@ -11482,6 +12284,171 @@ __mods["ui/commands.js"] = function (__x, __req) {
     toast({ tone: 'good', title: 'Snapshot saved', message: 'A restore point was added to Backups.' });
   }
 
+  /* ── The shared folder ─────────────────────────────────────────────────── */
+
+  /**
+   * Connect a folder — a shared drive, or one synced by OneDrive or SharePoint —
+   * and open a plan in it.
+   *
+   * The picker must be opened from a click, so this is only ever reachable from a
+   * button. When the folder already holds exactly one plan it opens straight into
+   * it; otherwise the user chooses, because guessing between a colleague's plans
+   * is how you end up editing the wrong programme.
+   */
+  async function connectFolder() {
+    if (!filestore.isSupported()) {
+      toast({
+        tone: 'warn',
+        title: 'Not supported in this browser',
+        message: 'Opening a folder needs Edge or Chrome. Everything else works here as normal.',
+      });
+      return false;
+    }
+
+    let picked;
+    try {
+      picked = await filestore.chooseFolder();
+    } catch (err) {
+      // Cancelling the picker is not an error worth reporting.
+      if (err && err.name === 'AbortError') return false;
+      toast({ tone: 'bad', title: 'Could not open that folder', message: err.message });
+      return false;
+    }
+    if (!picked) return false;
+
+    if (!picked.plans.length) return createFolderPlanFromCurrent();
+    if (picked.plans.length === 1) return openFolderPlanByName(picked.plans[0].name);
+
+    emit(EV.PANE_REFRESH, { pane: 'io' });
+    toast({
+      tone: 'info',
+      title: `${picked.folder} connected`,
+      message: `${picked.plans.length} plans in this folder — choose one to open.`,
+    });
+    return true;
+  }
+
+  /** Re-grant access to the folder this device used last. */
+  async function reconnectFolder() {
+    const connected = await filestore.reconnectWithPrompt();
+    if (!connected) {
+      toast({ tone: 'warn', title: 'Could not reconnect', message: 'Choose the folder again to carry on.' });
+      return false;
+    }
+    const wanted = connected.lastPlan || (connected.plans.length === 1 ? connected.plans[0].name : '');
+    if (wanted) return openFolderPlanByName(wanted);
+    emit(EV.PANE_REFRESH, { pane: 'io' });
+    return true;
+  }
+
+  /** Open one of the plans in the connected folder. */
+  async function openFolderPlanByName(name) {
+    try {
+      const { doc, role, holder } = await openFolderPlan(name);
+      store.replaceDoc(doc, 'load');
+      emit(EV.FILE_STATE, filestore.state());
+      fitAll();
+      toast({
+        tone: role === 'viewer' ? 'warn' : 'good',
+        title: role === 'viewer' ? `${name} — read-only` : `${name} opened`,
+        message:
+          role === 'viewer'
+            ? `${holder} has this plan open. You can read it, and it becomes editable when they close it.`
+            : 'Saved straight to the folder from now on.',
+      });
+      return true;
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not open that plan', message: err.message });
+      return false;
+    }
+  }
+
+  /** Write the plan currently open into the connected folder for the first time. */
+  async function createFolderPlanFromCurrent() {
+    const doc = store.getDoc();
+    const suggested = `${(doc.name || 'programme').replace(/[^a-z0-9 \-_]+/gi, '').trim() || 'programme'}.json`;
+    const name = await promptDialog({
+      title: 'Put this plan in the folder',
+      label: 'File name',
+      value: suggested,
+      placeholder: 'programme.json',
+    });
+    if (!name) return false;
+
+    try {
+      const written = await createFolderPlan(name, doc);
+      emit(EV.FILE_STATE, filestore.state());
+      toast({
+        tone: 'good',
+        title: `${written} created`,
+        message: 'Every change from now on is written straight into the folder.',
+      });
+      return true;
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not write that file', message: err.message });
+      return false;
+    }
+  }
+
+  /** Stop using the folder. The plan stays on disk exactly as it is. */
+  async function disconnectFolder() {
+    const ok = await confirmDialog({
+      title: 'Disconnect the folder?',
+      message:
+        'The plan file stays where it is — this only stops CX Timeline writing to it. ' +
+        'Changes after this are kept in this browser instead.',
+      confirmLabel: 'Disconnect',
+    });
+    if (!ok) return false;
+    await leaveFolder();
+    emit(EV.FILE_STATE, filestore.state());
+    toast({ tone: 'info', title: 'Folder disconnected' });
+    return true;
+  }
+
+  /**
+   * Pull in a colleague's save.
+   *
+   * Offered when the file has moved on disk. Anything unsaved here would be lost,
+   * so it says so rather than discarding quietly.
+   */
+  async function reloadFromFolder({ confirm = true } = {}) {
+    if (confirm && store.isDirty()) {
+      const ok = await confirmDialog({
+        title: 'Reload from the folder?',
+        message: 'You have changes that have not been written. Reloading replaces them with the file on disk.',
+        confirmLabel: 'Reload',
+        danger: true,
+      });
+      if (!ok) return false;
+    }
+    try {
+      const doc = await filestore.refreshFromDisk();
+      if (!doc) return false;
+      store.replaceDoc(doc, 'load');
+      renderer.requestRender();
+      toast({ tone: 'good', title: 'Reloaded', message: 'You are looking at the latest saved version.' });
+      return true;
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not reload', message: err.message });
+      return false;
+    }
+  }
+
+  /**
+   * Take the pen when the lock has gone stale — a colleague whose browser closed
+   * without releasing it. Refused while their lock is still being stamped.
+   */
+  async function takeOverEditing() {
+    const took = await filestore.takeOver();
+    toast(
+      took
+        ? { tone: 'good', title: 'You have the pen', message: 'This plan is editable again.' }
+        : { tone: 'warn', title: 'Still in use', message: `${filestore.state().holder} is actively editing this plan.` }
+    );
+    return took;
+  }
+
   /* ── Navigation ────────────────────────────────────────────────────────── */
 
   /** Jump to and flash an object — used by search results and outline rows. */
@@ -11595,6 +12562,13 @@ __mods["ui/commands.js"] = function (__x, __req) {
   Object.defineProperty(__x, "togglePresentation", { get: () => togglePresentation, enumerable: true });
   Object.defineProperty(__x, "newProject", { get: () => newProject, enumerable: true });
   Object.defineProperty(__x, "saveSnapshot", { get: () => saveSnapshot, enumerable: true });
+  Object.defineProperty(__x, "connectFolder", { get: () => connectFolder, enumerable: true });
+  Object.defineProperty(__x, "reconnectFolder", { get: () => reconnectFolder, enumerable: true });
+  Object.defineProperty(__x, "openFolderPlanByName", { get: () => openFolderPlanByName, enumerable: true });
+  Object.defineProperty(__x, "createFolderPlanFromCurrent", { get: () => createFolderPlanFromCurrent, enumerable: true });
+  Object.defineProperty(__x, "disconnectFolder", { get: () => disconnectFolder, enumerable: true });
+  Object.defineProperty(__x, "reloadFromFolder", { get: () => reloadFromFolder, enumerable: true });
+  Object.defineProperty(__x, "takeOverEditing", { get: () => takeOverEditing, enumerable: true });
   Object.defineProperty(__x, "revealObject", { get: () => revealObject, enumerable: true });
   Object.defineProperty(__x, "SHORTCUTS", { get: () => SHORTCUTS, enumerable: true });
   Object.defineProperty(__x, "showShortcuts", { get: () => showShortcuts, enumerable: true });
@@ -12183,6 +13157,7 @@ __mods["ui/auth.js"] = function (__x, __req) {
   const { el, clear } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const cloud = __req("core/cloud.js");
+  const filestore = __req("core/filestore.js");
   const { icon } = __req("ui/icons.js");
   const { fmtDate } = __req("core/dates.js");
   const { openModal, field, textInput, selectInput, section, skeleton, toast, badge, confirmDialog, emptyState } = __req("ui/components.js");
@@ -12410,13 +13385,19 @@ __mods["ui/auth.js"] = function (__x, __req) {
    */
   function installAccessMode() {
     const apply = () => {
-      const readOnly = cloud.isReadOnly();
+      // Two things can make a session read-only, and they are never both live:
+      // a viewer role on a hosted project, or a colleague holding the pen on a
+      // plan in a shared folder. Either way the interface says the same thing —
+      // only the reason differs.
+      const viewingFolder = filestore.isViewer();
+      const readOnly = cloud.isReadOnly() || viewingFolder;
       document.body.classList.toggle('read-only', readOnly);
-      renderBanner(readOnly);
+      renderBanner(readOnly, viewingFolder ? filestore.state().holder : '');
     };
 
     on(EV.ACCESS_CHANGED, apply);
     on(EV.AUTH_CHANGED, apply);
+    on(EV.FILE_STATE, apply);
 
     // One notice per burst — a viewer holding an arrow key would otherwise
     // stack up a notification per repeat.
@@ -12435,17 +13416,23 @@ __mods["ui/auth.js"] = function (__x, __req) {
     apply();
   }
 
-  function renderBanner(readOnly) {
+  function renderBanner(readOnly, holder = '') {
     const existing = document.getElementById('cx-readonly-bar');
     if (!readOnly) {
       existing?.remove();
       return;
     }
-    if (existing) return;
+    // The message can change while the bar is up — a colleague closing the plan
+    // hands the pen over — so rebuild rather than bail out on an existing bar.
+    existing?.remove();
+
+    const message = holder
+      ? `Read-only — ${holder} has this plan open. It becomes editable when they close it.`
+      : 'Read-only — you have view access to this project.';
 
     const bar = el('div', { id: 'cx-readonly-bar', class: 'cx-readonly-bar', role: 'status' }, [
       el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),
-      el('span', { text: 'Read-only — you have view access to this project.' }),
+      el('span', { text: message }),
     ]);
     document.getElementById('main')?.prepend(bar);
   }
@@ -17966,7 +18953,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
    * showing and re-renders it when the document changes, so no pane has to
    * manage its own subscriptions.
    *
-   * Imports: util, events, dates, model, store, storage, query, analysis,
+   * Imports: util, events, dates, model, store, storage, filestore, query, analysis,
    *          viewport, renderer, io, icons, components, lists, notes, dialogs,
    *          theme.
    */
@@ -17989,6 +18976,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const store = __req("core/store.js");
   const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted } = __req("core/storage.js");
   const cloud = __req("core/cloud.js");
+  const filestore = __req("core/filestore.js");
   const { search, summarise, facet, filterPredicate } = __req("core/query.js");
   const { criticalPath, compareBaseline, programmeHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
@@ -18100,6 +19088,11 @@ __mods["ui/panels.js"] = function (__x, __req) {
     });
     on(EV.FILTER_CHANGED, () => {
       if (active === 'filters' || active === 'search') rerender();
+    });
+    // Connecting a folder, or a colleague picking up or dropping the pen, changes
+    // what the Import / export pane says about where the plan lives.
+    on(EV.FILE_STATE, () => {
+      if (active === 'io' || active === 'settings') rerender();
     });
     on('ui:focus-search', () => {
       const input = bodyEl.querySelector('[data-search-input]');
@@ -19000,7 +19993,134 @@ __mods["ui/panels.js"] = function (__x, __req) {
      Import / export
      ═══════════════════════════════════════════════════════════════════════ */
 
+  /**
+   * The shared-folder controls.
+   *
+   * This is the whole of file mode's interface: connect a folder, see which plan
+   * is live and who has the pen, and open another. It sits at the top of Import /
+   * export because that is where someone goes looking for "where does my data
+   * live", and it is hidden entirely on a hosted deployment, where the answer is
+   * the server and this would only confuse.
+   */
+  function sharedFolderSection() {
+    const st = filestore.state();
+
+    if (isHosted()) return el('div');
+
+    if (!st.supported) {
+      return section('Shared folder', [
+        el('div', {
+          class: 'cx-hint',
+          text:
+            'Saving straight into a shared or synced folder needs Edge or Chrome. ' +
+            'This browser keeps your work in its own storage instead — use Export → JSON to move a plan.',
+        }),
+      ], { id: 'shared-folder' });
+    }
+
+    const rows = [];
+    const wideBtn = (label, iconName, onClick, primary = false) =>
+      el('button', {
+        class: 'cx-btn mini' + (primary ? ' primary' : ''),
+        style: { justifyContent: 'flex-start', width: '100%' },
+        html: icon(iconName, { size: 12 }) + `<span>${label}</span>`,
+        onClick,
+      });
+
+    // Three states, and the middle one is easy to forget: a folder can be
+    // connected with no plan open yet, which happens whenever it holds more than
+    // one. Offering "connect a folder" again there is just confusing.
+    if (st.connected) {
+      const editing = st.role === 'editor';
+      rows.push(
+        el('div', { class: 'cx-listrow' + (editing ? ' active' : '') }, [
+          el('div', { class: 'lr-main' }, [
+            el('div', { class: 'lr-title', text: st.plan }),
+            el('div', {
+              class: 'lr-meta',
+              text: editing ? `${st.folder} · you have the pen` : `${st.folder} · ${st.holder} is editing`,
+            }),
+          ]),
+        ])
+      );
+      if (!editing) rows.push(wideBtn('Take over editing', 'refresh', () => cmd.takeOverEditing()));
+      rows.push(
+        wideBtn('Reload from the folder', 'download', () => cmd.reloadFromFolder()),
+        wideBtn('Disconnect', 'x', () => cmd.disconnectFolder())
+      );
+    } else if (st.folder) {
+      rows.push(
+        el('div', { class: 'cx-hint', text: `${st.folder} is connected. Choose the plan to work on.` }),
+        wideBtn('New plan in this folder…', 'plus', () => cmd.createFolderPlanFromCurrent()),
+        wideBtn('Pick a different folder…', 'folder', () => cmd.connectFolder())
+      );
+    } else {
+      rows.push(
+        el('div', {
+          class: 'cx-hint',
+          text:
+            'Keep the plan as a file in a shared or OneDrive-synced folder. ' +
+            'Both of you open the same file; whoever gets there first has the pen, the other reads.',
+        }),
+        wideBtn('Connect a folder…', 'folder', () => cmd.connectFolder(), true)
+      );
+    }
+
+    // Other plans sitting in the folder, so switching programmes does not mean
+    // going back through the picker.
+    const list = el('div', { class: 'cx-list', style: { marginTop: '8px' } });
+    if (st.folder) {
+      filestore
+        .listPlans()
+        .then((found) => {
+          clear(list);
+          const others = found.filter((plan) => plan.name !== st.plan);
+          if (!others.length) return;
+          list.appendChild(el('div', { class: 'cx-hint', text: st.connected ? 'Also in this folder' : 'Plans in this folder' }));
+          for (const plan of others) {
+            list.appendChild(
+              el('div', { class: 'cx-listrow', onClick: () => cmd.openFolderPlanByName(plan.name) }, [
+                el('div', { class: 'lr-main' }, [
+                  el('div', { class: 'lr-title', text: plan.name }),
+                  el('div', { class: 'lr-meta', text: plan.modified ? fmtTimestamp(plan.modified) : '' }),
+                ]),
+              ])
+            );
+          }
+        })
+        .catch(() => {
+          /* the folder went away — the state row already says so */
+        });
+    }
+    rows.push(list);
+
+    if (!st.connected && !st.folder) {
+      // A remembered folder whose permission has lapsed: one click gets it back,
+      // which is much better than making someone find it in the picker again.
+      const reconnect = el('div');
+      filestore
+        .storedFolder()
+        .then((stored) => {
+          if (!stored) return;
+          reconnect.appendChild(
+            el('button', {
+              class: 'cx-btn mini',
+              style: { justifyContent: 'flex-start', width: '100%', marginTop: '6px' },
+              html: icon('refresh', { size: 12 }) + `<span>Reconnect to ${stored.folder}</span>`,
+              onClick: () => cmd.reconnectFolder(),
+            })
+          );
+        })
+        .catch(() => {});
+      rows.push(reconnect);
+    }
+
+    return section('Shared folder', rows, { id: 'shared-folder' });
+  }
+
   function paneIo(root) {
+    root.appendChild(sharedFolderSection());
+
     root.appendChild(
       section('Export', [
         el('div', { class: 'cx-hint', text: 'PDF, print, SVG, PNG and JPEG all draw the same picture. What goes in it is up to you.' }),
@@ -19019,7 +20139,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
         exportButton('CSV (objects)', 'table', () => exporters.exportCsv()),
         exportButton('CSV (dependencies)', 'table', () => exporters.exportLinksCsv()),
         exportButton('JSON (full project)', 'save', () => exporters.exportJson()),
-      ])
+      ], { id: 'export' })
     );
 
     root.appendChild(
@@ -19871,7 +20991,8 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const { fmtDate, fmtTimestamp, toISO } = __req("core/dates.js");
   const { TYPES, typeGroups, effectiveToday, projectExtent } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { isFallback, isHosted } = __req("core/storage.js");
+  const { isFallback, isHosted, isFileMode } = __req("core/storage.js");
+  const filestore = __req("core/filestore.js");
   const cloud = __req("core/cloud.js");
   const { linkViolations } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
@@ -20334,7 +21455,16 @@ __mods["ui/shell.js"] = function (__x, __req) {
       : '';
     dom.violationText.style.display = violations.count ? '' : 'none';
     dom.zoomText.textContent = `${zoom.scale} · ${zoom.span}`;
-    dom.storageText.textContent = isHosted() ? 'Supabase' : isFallback() ? 'localStorage' : 'IndexedDB';
+    // Where the work is going. In a shared folder this is the most useful thing
+    // on the status bar, so it names the plan and says who holds the pen.
+    if (isFileMode()) {
+      const st = filestore.state();
+      dom.storageText.textContent = st.role === 'viewer' ? `${st.plan} · ${st.holder} editing` : `${st.plan} · folder`;
+      dom.storageText.title = `${st.folder}/${st.plan}`;
+    } else {
+      dom.storageText.textContent = isHosted() ? 'Supabase' : isFallback() ? 'localStorage' : 'IndexedDB';
+      dom.storageText.title = '';
+    }
   }
 
   const refreshCursor = debounce((ms) => {
@@ -20372,6 +21502,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
       refreshStatus();
     });
     on(EV.ACCESS_CHANGED, refresh);
+    on(EV.FILE_STATE, () => refreshStatus());
     on(EV.SELECTION_CHANGED, () => refreshStatus());
     on(EV.TOOL_CHANGED, () => refreshToolbar());
     on(EV.VIEW_CHANGED, debounce(() => {
@@ -22508,6 +23639,7 @@ __mods["main.js"] = function (__x, __req) {
   const store = __req("core/store.js");
   const { init: initStorage, takeRecovery, getPref, setPref, saveNow, isHosted } = __req("core/storage.js");
   const cloud = __req("core/cloud.js");
+  const filestore = __req("core/filestore.js");
   const { criticalPath } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
@@ -22522,6 +23654,7 @@ __mods["main.js"] = function (__x, __req) {
   const { requireSignIn, installAccessMode } = __req("ui/auth.js");
   const { installP6Drops } = __req("ui/p6.js");
   const { installShortcuts } = __req("ui/shortcuts.js");
+  const cmd = __req("ui/commands.js");
   const { toast, showTooltip, hideTooltip, confirmDialog } = __req("ui/components.js");
   const { renderNote, notePreview } = __req("ui/notes.js");
   const { TYPES, statusOf, durationDays } = __req("core/model.js");
@@ -22608,6 +23741,7 @@ __mods["main.js"] = function (__x, __req) {
     installAccessMode();
     installP6Drops();
     installConflictHandling();
+    installFolderHandling();
     installViewPersistence();
     installResizeHandling();
     installCriticalPathRecompute();
@@ -22653,7 +23787,65 @@ __mods["main.js"] = function (__x, __req) {
         cancelLabel: 'Not yet',
       });
       asking = false;
-      if (ok) window.location.reload();
+      if (!ok) return;
+      if (filestore.isConnected()) await cmd.reloadFromFolder({ confirm: false });
+      else window.location.reload();
+    });
+  }
+
+  /* ── The shared folder ─────────────────────────────────────────────────── */
+
+  /**
+   * Keeping two people in step through a synced folder.
+   *
+   * Three things need saying out loud, and none of them are errors:
+   *
+   *   a colleague saved     the file on disk moved on. Offer to catch up, rather
+   *                         than reloading under someone mid-sentence.
+   *   the write was refused the guard in `filestore.savePlan()` stopped an
+   *                         overwrite. The work is still here and still cached.
+   *   the grant lapsed      the browser wants the folder re-authorised, which
+   *                         needs a click and cannot be done silently.
+   *
+   * The lock is also released on the way out. That cannot be awaited at unload,
+   * which is exactly why the lock has a staleness timeout as its real release.
+   */
+  function installFolderHandling() {
+    let asking = false;
+
+    on(EV.FILE_EXTERNAL_CHANGE, async () => {
+      if (asking) return;
+      asking = true;
+      // A reader who has changed nothing gains nothing from a dialog: just pull
+      // their colleague's version in and say so.
+      if (filestore.isViewer() && !store.isDirty()) {
+        await cmd.reloadFromFolder({ confirm: false });
+        asking = false;
+        return;
+      }
+      const ok = await confirmDialog({
+        title: 'This plan changed in the folder',
+        message:
+          'Someone saved a newer version. Reload to pick it up — anything you have changed here since your last save would be replaced.',
+        confirmLabel: 'Reload',
+        cancelLabel: 'Not yet',
+      });
+      asking = false;
+      if (ok) await cmd.reloadFromFolder({ confirm: false });
+    });
+
+    on(EV.SAVE_ERROR, (payload) => {
+      if (!payload?.permission) return;
+      toast({
+        tone: 'warn',
+        title: 'The folder needs re-authorising',
+        message: 'Open Import / export and reconnect the folder to carry on saving.',
+        sticky: true,
+      });
+    });
+
+    window.addEventListener('beforeunload', () => {
+      if (filestore.isConnected()) filestore.handleUnload();
     });
   }
 

@@ -15,6 +15,12 @@ development and test path, not a deployment option: a build with a backend
 always requires an account (`requireAuth` defaults to true, and
 `tools/dist.js` refuses to publish a config with no backend).
 
+There is a third shape, and it is a real deployment: **file mode**, where the
+document is a JSON file in a folder the user picked — a shared drive, or one
+synced by OneDrive or SharePoint. It is reachable only when there is no backend
+configured, needs no account, and puts nothing anywhere but that folder. See
+the shared-folder bullet in Conventions, and `DEPLOY.md` for how to ship it.
+
 Local mode is also why the 126-check offline suite still passes untouched. If
 you add a hosted-only feature, hide it behind `cloud.isConfigured()` and cover
 it in `tools/smoke_hosted.js` instead.
@@ -69,6 +75,8 @@ else with a clear error:
 ```
 core/util · core/events · core/dates      leaves — import nothing
 core/cloud                                the only module that knows Supabase
+core/filestore                            the only module that knows the
+                                          File System Access API
 core/model → core/query · core/history · core/analysis
 core/store → core/storage
 timeline/viewport → timeline/layout → timeline/connectors
@@ -165,6 +173,18 @@ subscribes. That is what keeps the graph acyclic.
   the connector layer is rebuilt every frame and so is told the whole window
   (`flashing`), with a timer closing it. Anything else that wants to flash
   something on the canvas has the same two cases to answer.
+- **A shared folder is a third storage backend, not a export/import trick.**
+  `core/filestore.js` owns the File System Access API the way `core/cloud.js`
+  owns Supabase, and `core/storage.js` branches on `fileMode` beside `hosted`.
+  Two rules matter and both exist because a synced folder is not a database.
+  **The lock file is courtesy, the write guard is the control**: `savePlan()`
+  re-reads the file's size and modified time before every write and refuses if
+  either moved, so a colleague's save can never be silently overwritten even
+  when the lock has not synced yet. And **a directory handle only survives a
+  reload through IndexedDB** — it cannot be serialised — so it lives in a
+  database of its own, which is what lets `storage.js` import `filestore.js`
+  without the reverse. Anything that writes to the folder goes through
+  `filestore.js`; nothing else should ever hold a handle.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
 - **Dropdown vocabularies are document data, not constants.** Status,
@@ -229,6 +249,7 @@ npm run build                        # must succeed — it also lints the module
 npm test                             # all three suites, must exit 0
 
 node tools/smoke.js                  # 204 checks — the application, local mode
+node tools/smoke_folder.js           #  31 checks — the shared folder, stubbed
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result
@@ -241,6 +262,12 @@ its one-shot flash, baseline comparison — down to measuring, at five zooms, th
 no ghost is drawn over a bar or over another ghost — all seventeen dock panes,
 all five themes, every exporter (including PDF header validation) and reload
 persistence. **Any console error fails the run.**
+
+`smoke_folder.js` replaces `window.showDirectoryPicker` with an in-memory
+folder, so the lock, the read-only handover and the write guard are covered
+without a real filesystem. No browser lets a script click its own file dialog,
+so the picker and a genuine OneDrive folder stay on the manual checklist in
+`DEPLOY.md` rather than being pretended at.
 
 `smoke_hosted.js` boots it with a configured backend and a stubbed client, so
 the gate, invitations, sharing and read-only mode are covered without a

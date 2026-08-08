@@ -11,6 +11,12 @@
  *   local mode   IndexedDB — the original behaviour, no account, no server.
  *   hosted mode  Postgres via `core/cloud.js`, with IndexedDB demoted to an
  *                offline cache so a dropped connection loses nothing.
+ *   file mode    a JSON file in a folder the user picked, via
+ *                `core/filestore.js` — a shared drive or a synced OneDrive
+ *                folder, with IndexedDB again demoted to a cache. No account
+ *                and no server: the folder's own permissions are the access
+ *                control, and a lock file plus a write guard keep two people
+ *                from overwriting each other.
  *
  * Storage stack (local, and the cache in hosted mode)
  * --------------------------------------------------
@@ -21,12 +27,13 @@
  * browsing on some engines and when a page is opened from `file://` under a
  * hardened profile. The fallback is transparent to every caller.
  *
- * Imports: util, events, cloud, model, store.
+ * Imports: util, events, cloud, filestore, model, store.
  */
 
 import { debounce, bytes } from './util.js';
 import { emit, on, EV } from './events.js';
 import * as cloud from './cloud.js';
+import * as filestore from './filestore.js';
 import { normalise, makeStarterProject } from './model.js';
 import { getDoc, markClean, isDirty } from './store.js';
 
@@ -53,6 +60,13 @@ let lastSaveError = null;
  * answer to "where does this go" rather than a scattering of checks.
  */
 let hosted = false;
+
+/**
+ * True once a plan in a connected folder is the live document. Mutually
+ * exclusive with `hosted`: a deployment has a backend or it has a folder, and
+ * the folder is only reachable when there is no backend to contradict it.
+ */
+let fileMode = false;
 
 /* ── IndexedDB plumbing ────────────────────────────────────────────────── */
 
@@ -160,9 +174,74 @@ export async function init() {
     console.warn('[cx-timeline] signed in but could not open a project; falling back to local storage');
   }
 
+  if (!cloud.isConfigured()) {
+    const opened = await openFromFolder();
+    if (opened) return opened;
+  }
+
   const saved = await loadLatest();
   if (saved) return { doc: normalise(saved), fresh: false };
   return { doc: normalise(makeStarterProject()), fresh: true };
+}
+
+/**
+ * Re-open the plan this device was last working on in its shared folder.
+ *
+ * Only succeeds when the browser still considers the folder grant live. When it
+ * has lapsed — which is the common case after a browser restart — this returns
+ * null on purpose: re-granting needs a click, so the last local copy is loaded
+ * instead and the interface offers to reconnect. Booting into a permission
+ * dialog nobody asked for would be worse than booting into a cached plan.
+ */
+async function openFromFolder() {
+  if (!filestore.isSupported()) return null;
+  try {
+    const connected = await filestore.reconnectSilently();
+    if (!connected) return null;
+
+    const wanted = connected.lastPlan || (connected.plans.length === 1 ? connected.plans[0].name : '');
+    if (!wanted) return null;
+
+    const { doc } = await filestore.openPlan(wanted);
+    fileMode = true;
+    editsSinceBackup = 0;
+    return { doc: normalise(doc), fresh: false };
+  } catch (err) {
+    console.warn('[cx-timeline] could not reopen the shared folder:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Open a plan from the connected folder and make it the live document.
+ * Called by the Shared folder pane once a folder has been picked.
+ */
+export async function openFolderPlan(name) {
+  const { doc, role, holder } = await filestore.openPlan(name);
+  fileMode = true;
+  hosted = false;
+  editsSinceBackup = 0;
+  return { doc: normalise(doc), role, holder };
+}
+
+/** Write the current document into the connected folder as a new plan. */
+export async function createFolderPlan(name, doc) {
+  const written = await filestore.createPlan(name, normalise(doc));
+  fileMode = true;
+  hosted = false;
+  editsSinceBackup = 0;
+  return written;
+}
+
+/** Stop using the folder and fall back to this device's own storage. */
+export async function leaveFolder() {
+  await filestore.disconnect();
+  fileMode = false;
+}
+
+/** True when the live document is a file in a connected folder. */
+export function isFileMode() {
+  return fileMode;
 }
 
 /**
@@ -307,6 +386,32 @@ export async function saveNow() {
 
       // A local copy of every successful save is what makes a dropped
       // connection survivable, and what the crash-recovery path reads.
+      await cacheLocally(record);
+    } else if (fileMode) {
+      const result = await filestore.savePlan(doc);
+
+      if (!result.ok) {
+        // Somebody else has the pen. The user has already been told by the
+        // banner, so this is not an error to raise again.
+        if (result.reason === 'read-only') {
+          markClean();
+          emit(EV.SAVE_DONE, { at: Date.now(), skipped: true });
+          return true;
+        }
+        // The file moved underneath us, or the grant lapsed. Keep the work in
+        // the local cache either way, so nothing is lost while it is resolved.
+        await cacheLocally(record);
+        if (result.reason === 'conflict') {
+          emit(EV.SAVE_ERROR, { error: new Error('conflict'), conflict: true });
+          return false;
+        }
+        if (result.reason === 'permission') {
+          emit(EV.SAVE_ERROR, { error: new Error('permission'), permission: true });
+          return false;
+        }
+        throw result.error || new Error('the folder refused the write');
+      }
+
       await cacheLocally(record);
     } else if (usingFallback) {
       lsSetJSON(LS_DOC, doc);
@@ -543,6 +648,9 @@ function estimateSize(doc) {
  */
 export async function putBlob(id, file) {
   if (hosted) return cloud.putBlob(id, file);
+  // In a shared folder the bytes go beside the plan, so a colleague who syncs
+  // the folder gets the attachments along with it.
+  if (fileMode) return filestore.putBlob(id, file);
   const record = { id, name: file.name, type: file.type, size: file.size, added: Date.now(), blob: file };
   if (usingFallback) {
     throw new Error('Attachments require IndexedDB, which is not available in this browser session.');
@@ -556,6 +664,7 @@ export async function getBlob(id) {
     const blob = await cloud.getBlob(id);
     return blob ? { id, blob, name: id, type: blob.type, size: blob.size } : null;
   }
+  if (fileMode) return filestore.getBlob(id);
   if (usingFallback) return null;
   const record = await wrap(tx(STORE_BLOBS).get(id));
   return record || null;
@@ -566,12 +675,20 @@ export async function deleteBlob(id) {
     await cloud.deleteBlob(id);
     return;
   }
+  if (fileMode) {
+    await filestore.deleteBlob(id);
+    return;
+  }
   if (usingFallback) return;
   await wrap(tx(STORE_BLOBS, 'readwrite').delete(id));
 }
 
 /** Total bytes held in the blob store — shown in Settings. */
 export async function blobUsage() {
+  if (fileMode) {
+    const used = await filestore.blobUsage();
+    return { ...used, label: bytes(used.bytes) };
+  }
   if (usingFallback) return { count: 0, bytes: 0, label: '0 B' };
   try {
     const all = await wrap(tx(STORE_BLOBS).getAll());
@@ -636,9 +753,11 @@ export async function usage() {
   return {
     backend: hosted
       ? 'Supabase (this device keeps an offline copy)'
-      : usingFallback
-        ? 'localStorage (fallback)'
-        : 'IndexedDB',
+      : fileMode
+        ? `Shared folder — ${filestore.state().folder}/${filestore.state().plan}`
+        : usingFallback
+          ? 'localStorage (fallback)'
+          : 'IndexedDB',
     document: { bytes: docBytes, label: bytes(docBytes) },
     attachments: blobs,
     quota,
