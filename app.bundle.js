@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 42   Built: 2026-08-08T21:37:59.122Z
+ * Modules: 42   Built: 2026-08-08T22:09:38.881Z
  */
 (function () {
   'use strict';
@@ -539,6 +539,7 @@ __mods["core/events.js"] = function (__x, __req) {
     FILE_STATE: 'file:state', // { connected, folder, plan, role, holder } — connection or pen changed
     FILE_EXTERNAL_CHANGE: 'file:external', // a colleague's save landed in the folder
     FILE_CONFLICT: 'file:conflict', // a write was refused because the file moved underneath us
+    FILE_IDLE: 'file:idle', // the holder has been idle too long; flush a save and hand the pen back
 
     /* History */
     HISTORY_CHANGED: 'history:changed', // { canUndo, canRedo, depth }
@@ -4757,9 +4758,17 @@ __mods["core/filestore.js"] = function (__x, __req) {
   const { emit, EV } = __req("core/events.js");
 
   /** How often the holder re-stamps the lock, in ms. */
-  const HEARTBEAT_MS = 30000;
+  const HEARTBEAT_MS = 20000;
   /** A lock older than this is treated as abandoned — a crash, or a closed lid. */
-  const STALE_MS = 150000;
+  const STALE_MS = 75000;
+  /**
+   * An editor who has saved nothing for this long hands the pen back.
+   *
+   * Somebody who opened a plan before lunch should not hold it until they
+   * remember to close the tab. The pen is released and this session drops to
+   * read-only, so a colleague can pick it up without having to ask.
+   */
+  const IDLE_RELEASE_MS = 3600000;
   /** How often we look for someone else's save landing in the folder. */
   const POLL_MS = 12000;
   /** Where the folder handle is remembered between sessions. */
@@ -4778,9 +4787,11 @@ __mods["core/filestore.js"] = function (__x, __req) {
   let role = null;
   /** Who holds the lock, when it is not us. */
   let holder = '';
-  /** This tab's identity, so we recognise our own lock across a reload. */
+  /** This tab's identity — distinguishes two windows of the same browser. */
   const sessionId = `s_${Math.random().toString(36).slice(2, 10)}`;
   let displayName = '';
+  /** When this session last wrote the plan; drives the idle release above. */
+  let lastSaveAt = 0;
   let heartbeatTimer = null;
   let pollTimer = null;
 
@@ -4812,6 +4823,24 @@ __mods["core/filestore.js"] = function (__x, __req) {
       holder,
       savedAt: stamp ? stamp.lastModified : null,
     };
+  }
+
+  /**
+   * A stable identity for this browser profile.
+   *
+   * The tab id is not enough. It is regenerated on every page load, so closing
+   * the browser and reopening it made your own abandoned lock look like a
+   * stranger's — you were locked out of your own plan until it went stale. A
+   * device id persists, so a returning session recognises its own lock and takes
+   * it straight back.
+   */
+  function deviceId() {
+    let id = readPref('device');
+    if (!id) {
+      id = `d_${Math.random().toString(36).slice(2, 10)}`;
+      writePref('device', id);
+    }
+    return id;
   }
 
   /** The name a colleague will see in the lock. Set once, from the settings pane. */
@@ -5069,6 +5098,7 @@ __mods["core/filestore.js"] = function (__x, __req) {
       await writeLock();
     }
 
+    lastSaveAt = Date.now();
     startTimers();
     emitState();
     return { doc, role, holder };
@@ -5091,6 +5121,7 @@ __mods["core/filestore.js"] = function (__x, __req) {
     role = 'editor';
     holder = '';
     await rememberHandle(dirHandle, safe);
+    lastSaveAt = Date.now();
     await writeLock();
     startTimers();
     emitState();
@@ -5124,6 +5155,7 @@ __mods["core/filestore.js"] = function (__x, __req) {
 
       const after = await fileHandle.getFile();
       stamp = { size: after.size, lastModified: after.lastModified };
+      lastSaveAt = Date.now();
       return { ok: true, at: after.lastModified };
     } catch (err) {
       // A lapsed permission grant is the common failure here, and it reads as a
@@ -5185,7 +5217,11 @@ __mods["core/filestore.js"] = function (__x, __req) {
       const handle = await dirHandle.getFileHandle(lockName(), { create: true });
       const writable = await handle.createWritable();
       await writable.write(
-        JSON.stringify({ id: sessionId, holder: getDisplayName(), since: Date.now(), beat: Date.now() }, null, 2)
+        JSON.stringify(
+          { id: sessionId, device: deviceId(), holder: getDisplayName(), since: Date.now(), beat: Date.now() },
+          null,
+          2
+        )
       );
       await writable.close();
     } catch (err) {
@@ -5206,8 +5242,20 @@ __mods["core/filestore.js"] = function (__x, __req) {
     }
   }
 
+  /**
+   * Is this lock ours to take?
+   *
+   * Same tab is obviously ours. Same *browser* counts too, and deliberately: it
+   * is either our own abandoned lock — the case that used to lock people out —
+   * or another window of the same browser, and the person sitting in front of
+   * both should not have to negotiate with themselves. The other window finds
+   * out through `checkLock()` and drops to read-only, which is the same handling
+   * a colleague's takeover already gets.
+   */
   function isOurs(lock) {
-    return !!lock && lock.id === sessionId;
+    if (!lock) return false;
+    if (lock.id === sessionId) return true;
+    return !!lock.device && lock.device === deviceId();
   }
 
   function isStale(lock) {
@@ -5215,18 +5263,46 @@ __mods["core/filestore.js"] = function (__x, __req) {
   }
 
   /**
-   * Claim a lock whose holder has gone away.
+   * Take the pen.
    *
-   * Offered only when the lock reads as stale, so this is "the other session
-   * crashed" rather than "barge in on a colleague".
+   * This never refuses. It used to, whenever the existing lock looked live, which
+   * left the one situation that matters most — "I know that lock is dead, let me
+   * work" — with no way out. Refusing is also unnecessary: the write guard means
+   * whoever loses the race is *told* to reload rather than silently overwritten.
+   * Warning the user is the caller's job (`ui/commands.js` asks first when the
+   * holder looks alive); deciding for them is not this module's.
    */
   async function takeOver() {
     if (!isConnected()) return false;
-    const lock = await readLock();
-    if (lock && !isOurs(lock) && !isStale(lock)) return false;
     role = 'editor';
     holder = '';
+    lastSaveAt = Date.now();
     await writeLock();
+    emitState();
+    return true;
+  }
+
+  /**
+   * Who holds the lock right now, for a caller about to offer a takeover.
+   * `live` means someone else is actively stamping it — the only case worth a
+   * confirmation prompt.
+   */
+  async function lockStatus() {
+    const lock = await readLock();
+    if (!lock) return { live: false, mine: false, holder: '' };
+    const mine = isOurs(lock);
+    return { live: !mine && !isStale(lock), mine, holder: lock.holder || 'Someone' };
+  }
+
+  /**
+   * Hand the pen back without disconnecting: this session becomes a reader.
+   * Used by the idle release, once the caller has flushed a final save.
+   */
+  async function yieldPen() {
+    if (!isConnected() || role !== 'editor') return false;
+    await releaseLock();
+    role = 'viewer';
+    holder = '';
     emitState();
     return true;
   }
@@ -5265,7 +5341,15 @@ __mods["core/filestore.js"] = function (__x, __req) {
   function startTimers() {
     stopTimers();
     heartbeatTimer = setInterval(() => {
-      if (role === 'editor') writeLock();
+      if (role !== 'editor') return;
+      // Idle long enough that holding the pen is just in the way. Ask the
+      // application to flush a save and hand it back — this module cannot save
+      // the document itself, it only knows the file.
+      if (lastSaveAt && Date.now() - lastSaveAt > IDLE_RELEASE_MS) {
+        emit(EV.FILE_IDLE, { plan: planName, since: lastSaveAt });
+        return;
+      }
+      writeLock();
     }, HEARTBEAT_MS);
 
     pollTimer = setInterval(async () => {
@@ -5379,6 +5463,8 @@ __mods["core/filestore.js"] = function (__x, __req) {
   Object.defineProperty(__x, "savePlan", { get: () => savePlan, enumerable: true });
   Object.defineProperty(__x, "refreshFromDisk", { get: () => refreshFromDisk, enumerable: true });
   Object.defineProperty(__x, "takeOver", { get: () => takeOver, enumerable: true });
+  Object.defineProperty(__x, "lockStatus", { get: () => lockStatus, enumerable: true });
+  Object.defineProperty(__x, "yieldPen", { get: () => yieldPen, enumerable: true });
   Object.defineProperty(__x, "checkLock", { get: () => checkLock, enumerable: true });
   Object.defineProperty(__x, "handleUnload", { get: () => handleUnload, enumerable: true });
   Object.defineProperty(__x, "putBlob", { get: () => putBlob, enumerable: true });
@@ -12436,17 +12522,34 @@ __mods["ui/commands.js"] = function (__x, __req) {
   }
 
   /**
-   * Take the pen when the lock has gone stale — a colleague whose browser closed
-   * without releasing it. Refused while their lock is still being stamped.
+   * Take the pen.
+   *
+   * Always possible, because the alternative — refusing — leaves someone who
+   * knows the other session is dead with nowhere to go. When the lock is still
+   * being stamped it asks first, since that is a live colleague rather than an
+   * abandoned tab. Either way nobody's work is lost: whoever saves second is told
+   * to reload rather than overwriting.
    */
   async function takeOverEditing() {
-    const took = await filestore.takeOver();
-    toast(
-      took
-        ? { tone: 'good', title: 'You have the pen', message: 'This plan is editable again.' }
-        : { tone: 'warn', title: 'Still in use', message: `${filestore.state().holder} is actively editing this plan.` }
-    );
-    return took;
+    const status = await filestore.lockStatus();
+
+    if (status.live) {
+      const ok = await confirmDialog({
+        title: `${status.holder} is editing this plan`,
+        message:
+          `${status.holder} saved within the last minute, so they are probably still working. ` +
+          'Taking over means their next save is refused and they will be asked to reload — ' +
+          'anything they have not saved could be lost. Continue?',
+        confirmLabel: 'Take over anyway',
+        cancelLabel: 'Leave it',
+        danger: true,
+      });
+      if (!ok) return false;
+    }
+
+    await filestore.takeOver();
+    toast({ tone: 'good', title: 'You have the pen', message: 'This plan is editable again.' });
+    return true;
   }
 
   /* ── Navigation ────────────────────────────────────────────────────────── */
@@ -20106,6 +20209,23 @@ __mods["ui/panels.js"] = function (__x, __req) {
     }
     rows.push(list);
 
+    // Whose name goes in the lock. Without this both people see "Someone", which
+    // defeats the point of saying who has the pen. Written on blur rather than per
+    // keystroke: it is a device preference, not document data, so nothing rebuilds
+    // underneath the caret.
+    if (st.supported) {
+      const nameInput = textInput({
+        value: filestore.getDisplayName() === 'Someone' ? '' : filestore.getDisplayName(),
+        placeholder: 'Your name',
+      });
+      nameInput.addEventListener('change', () => filestore.setDisplayName(nameInput.value));
+      rows.push(
+        el('div', { style: { marginTop: '10px' } }, [
+          field('Your name in the lock', nameInput, 'What your colleague sees when you have the plan open.'),
+        ])
+      );
+    }
+
     if (!st.connected && !st.folder) {
       // A remembered folder whose permission has lapsed: one click gets it back,
       // which is much better than making someone find it in the picker again.
@@ -23844,6 +23964,22 @@ __mods["main.js"] = function (__x, __req) {
       });
       asking = false;
       if (ok) await cmd.reloadFromFolder({ confirm: false });
+    });
+
+    // Idle too long to keep holding the pen. Flush what is here, hand it back,
+    // and say so — a colleague can then pick it up without asking.
+    on(EV.FILE_IDLE, async () => {
+      await saveNow().catch(() => {});
+      const handed = await filestore.yieldPen();
+      if (!handed) return;
+      toast({
+        tone: 'info',
+        title: 'Editing handed back',
+        message:
+          'This plan has been idle for an hour, so it is saved and back to read-only. ' +
+          'Take over editing in Import / export when you want it again.',
+        timeout: 12000,
+      });
     });
 
     on(EV.SAVE_ERROR, (payload) => {

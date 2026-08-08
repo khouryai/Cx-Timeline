@@ -217,6 +217,22 @@ function installFolderHandling() {
     if (ok) await cmd.reloadFromFolder({ confirm: false });
   });
 
+  // Idle too long to keep holding the pen. Flush what is here, hand it back,
+  // and say so — a colleague can then pick it up without asking.
+  on(EV.FILE_IDLE, async () => {
+    await saveNow().catch(() => {});
+    const handed = await filestore.yieldPen();
+    if (!handed) return;
+    toast({
+      tone: 'info',
+      title: 'Editing handed back',
+      message:
+        'This plan has been idle for an hour, so it is saved and back to read-only. ' +
+        'Take over editing in Import / export when you want it again.',
+      timeout: 12000,
+    });
+  });
+
   on(EV.SAVE_ERROR, (payload) => {
     if (!payload?.permission) return;
     toast({

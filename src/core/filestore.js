@@ -37,9 +37,17 @@
 import { emit, EV } from './events.js';
 
 /** How often the holder re-stamps the lock, in ms. */
-const HEARTBEAT_MS = 30000;
+const HEARTBEAT_MS = 20000;
 /** A lock older than this is treated as abandoned — a crash, or a closed lid. */
-const STALE_MS = 150000;
+const STALE_MS = 75000;
+/**
+ * An editor who has saved nothing for this long hands the pen back.
+ *
+ * Somebody who opened a plan before lunch should not hold it until they
+ * remember to close the tab. The pen is released and this session drops to
+ * read-only, so a colleague can pick it up without having to ask.
+ */
+const IDLE_RELEASE_MS = 3600000;
 /** How often we look for someone else's save landing in the folder. */
 const POLL_MS = 12000;
 /** Where the folder handle is remembered between sessions. */
@@ -58,9 +66,11 @@ let stamp = null;
 let role = null;
 /** Who holds the lock, when it is not us. */
 let holder = '';
-/** This tab's identity, so we recognise our own lock across a reload. */
+/** This tab's identity — distinguishes two windows of the same browser. */
 const sessionId = `s_${Math.random().toString(36).slice(2, 10)}`;
 let displayName = '';
+/** When this session last wrote the plan; drives the idle release above. */
+let lastSaveAt = 0;
 let heartbeatTimer = null;
 let pollTimer = null;
 
@@ -92,6 +102,24 @@ export function state() {
     holder,
     savedAt: stamp ? stamp.lastModified : null,
   };
+}
+
+/**
+ * A stable identity for this browser profile.
+ *
+ * The tab id is not enough. It is regenerated on every page load, so closing
+ * the browser and reopening it made your own abandoned lock look like a
+ * stranger's — you were locked out of your own plan until it went stale. A
+ * device id persists, so a returning session recognises its own lock and takes
+ * it straight back.
+ */
+function deviceId() {
+  let id = readPref('device');
+  if (!id) {
+    id = `d_${Math.random().toString(36).slice(2, 10)}`;
+    writePref('device', id);
+  }
+  return id;
 }
 
 /** The name a colleague will see in the lock. Set once, from the settings pane. */
@@ -349,6 +377,7 @@ export async function openPlan(name) {
     await writeLock();
   }
 
+  lastSaveAt = Date.now();
   startTimers();
   emitState();
   return { doc, role, holder };
@@ -371,6 +400,7 @@ export async function createPlan(name, doc) {
   role = 'editor';
   holder = '';
   await rememberHandle(dirHandle, safe);
+  lastSaveAt = Date.now();
   await writeLock();
   startTimers();
   emitState();
@@ -404,6 +434,7 @@ export async function savePlan(doc) {
 
     const after = await fileHandle.getFile();
     stamp = { size: after.size, lastModified: after.lastModified };
+    lastSaveAt = Date.now();
     return { ok: true, at: after.lastModified };
   } catch (err) {
     // A lapsed permission grant is the common failure here, and it reads as a
@@ -465,7 +496,11 @@ async function writeLock() {
     const handle = await dirHandle.getFileHandle(lockName(), { create: true });
     const writable = await handle.createWritable();
     await writable.write(
-      JSON.stringify({ id: sessionId, holder: getDisplayName(), since: Date.now(), beat: Date.now() }, null, 2)
+      JSON.stringify(
+        { id: sessionId, device: deviceId(), holder: getDisplayName(), since: Date.now(), beat: Date.now() },
+        null,
+        2
+      )
     );
     await writable.close();
   } catch (err) {
@@ -486,8 +521,20 @@ async function releaseLock() {
   }
 }
 
+/**
+ * Is this lock ours to take?
+ *
+ * Same tab is obviously ours. Same *browser* counts too, and deliberately: it
+ * is either our own abandoned lock — the case that used to lock people out —
+ * or another window of the same browser, and the person sitting in front of
+ * both should not have to negotiate with themselves. The other window finds
+ * out through `checkLock()` and drops to read-only, which is the same handling
+ * a colleague's takeover already gets.
+ */
 function isOurs(lock) {
-  return !!lock && lock.id === sessionId;
+  if (!lock) return false;
+  if (lock.id === sessionId) return true;
+  return !!lock.device && lock.device === deviceId();
 }
 
 function isStale(lock) {
@@ -495,18 +542,46 @@ function isStale(lock) {
 }
 
 /**
- * Claim a lock whose holder has gone away.
+ * Take the pen.
  *
- * Offered only when the lock reads as stale, so this is "the other session
- * crashed" rather than "barge in on a colleague".
+ * This never refuses. It used to, whenever the existing lock looked live, which
+ * left the one situation that matters most — "I know that lock is dead, let me
+ * work" — with no way out. Refusing is also unnecessary: the write guard means
+ * whoever loses the race is *told* to reload rather than silently overwritten.
+ * Warning the user is the caller's job (`ui/commands.js` asks first when the
+ * holder looks alive); deciding for them is not this module's.
  */
 export async function takeOver() {
   if (!isConnected()) return false;
-  const lock = await readLock();
-  if (lock && !isOurs(lock) && !isStale(lock)) return false;
   role = 'editor';
   holder = '';
+  lastSaveAt = Date.now();
   await writeLock();
+  emitState();
+  return true;
+}
+
+/**
+ * Who holds the lock right now, for a caller about to offer a takeover.
+ * `live` means someone else is actively stamping it — the only case worth a
+ * confirmation prompt.
+ */
+export async function lockStatus() {
+  const lock = await readLock();
+  if (!lock) return { live: false, mine: false, holder: '' };
+  const mine = isOurs(lock);
+  return { live: !mine && !isStale(lock), mine, holder: lock.holder || 'Someone' };
+}
+
+/**
+ * Hand the pen back without disconnecting: this session becomes a reader.
+ * Used by the idle release, once the caller has flushed a final save.
+ */
+export async function yieldPen() {
+  if (!isConnected() || role !== 'editor') return false;
+  await releaseLock();
+  role = 'viewer';
+  holder = '';
   emitState();
   return true;
 }
@@ -545,7 +620,15 @@ export async function checkLock() {
 function startTimers() {
   stopTimers();
   heartbeatTimer = setInterval(() => {
-    if (role === 'editor') writeLock();
+    if (role !== 'editor') return;
+    // Idle long enough that holding the pen is just in the way. Ask the
+    // application to flush a save and hand it back — this module cannot save
+    // the document itself, it only knows the file.
+    if (lastSaveAt && Date.now() - lastSaveAt > IDLE_RELEASE_MS) {
+      emit(EV.FILE_IDLE, { plan: planName, since: lastSaveAt });
+      return;
+    }
+    writeLock();
   }, HEARTBEAT_MS);
 
   pollTimer = setInterval(async () => {

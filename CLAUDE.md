@@ -180,7 +180,13 @@ subscribes. That is what keeps the graph acyclic.
   **The lock file is courtesy, the write guard is the control**: `savePlan()`
   re-reads the file's size and modified time before every write and refuses if
   either moved, so a colleague's save can never be silently overwritten even
-  when the lock has not synced yet. And **a directory handle only survives a
+  when the lock has not synced yet. A lock is keyed on a **device** id kept in
+  localStorage, not the per-load tab id — with the tab id, closing the browser
+  and reopening it left you locked out of your own plan until the lock went
+  stale. And `takeOver()` never refuses: refusing left "I know that session is
+  dead" with nowhere to go, and the write guard already means the loser of a
+  race is told rather than overwritten. Warning the user is `ui/commands.js`'s
+  job; deciding for them is not the store's. And **a directory handle only survives a
   reload through IndexedDB** — it cannot be serialised — so it lives in a
   database of its own, which is what lets `storage.js` import `filestore.js`
   without the reverse. Anything that writes to the folder goes through
@@ -249,7 +255,7 @@ npm run build                        # must succeed — it also lints the module
 npm test                             # all three suites, must exit 0
 
 node tools/smoke.js                  # 204 checks — the application, local mode
-node tools/smoke_folder.js           #  31 checks — the shared folder, stubbed
+node tools/smoke_folder.js           #  39 checks — the shared folder, stubbed
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result

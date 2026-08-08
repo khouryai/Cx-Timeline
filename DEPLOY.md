@@ -278,12 +278,48 @@ is versioned by whatever the folder is versioned by.
 
 ## How two people stay out of each other's way
 
+Set **your name** in the Shared folder pane first — it goes in the lock, so your
+colleague sees who has the plan rather than "Someone".
+
 The lock file is a **courtesy** — a synced folder takes seconds to propagate, so
 two people opening at the same moment can both think they hold it. The guarantee
 is one layer down: every save re-reads the file's size and modified time first
 and refuses if either moved. You may be told to reload; you can never silently
-overwrite your colleague. An abandoned lock (a closed lid, a crash) goes stale
-after two and a half minutes and the next person can take over.
+overwrite your colleague.
+
+Three things release the pen:
+
+- **Closing the browser and coming back.** The lock records the *browser*, not the
+  tab, so a returning session recognises its own lock and takes it straight back.
+  No waiting.
+- **A crash on the other machine.** No heartbeat for 75 seconds and the lock
+  reads as abandoned; the next person to open it simply gets the pen.
+- **An hour with no saves.** The holder's session flushes what it has, hands the
+  pen back and drops to read-only, so somebody who opened a plan before lunch
+  does not hold it all afternoon.
+
+And **taking over is never refused.** If the holder still looks live you are
+warned that their unsaved work is at risk, but the decision is yours — the write
+guard means the loser of the race is told to reload, not overwritten.
+
+## Your colleague needs the folder *synced*, not opened in a browser
+
+This is the one thing that catches people out. The app writes to a real folder on
+the machine, so reaching the files through `onedrive.com` in a browser is not
+enough — there is nothing there for a file picker to point at.
+
+On your colleague's machine:
+
+1. Open the shared folder on **onedrive.com** (or the SharePoint library).
+2. **Add shortcut to My files** — or, in a SharePoint library, **Sync**.
+3. It now appears in **File Explorer** under OneDrive. Right-click it and choose
+   **Always keep on this device**, so the plan is a real local file rather than a
+   placeholder.
+4. In the app, **Connect a folder…** and pick it there.
+
+This needs the OneDrive desktop client, which is on any managed Windows machine
+and already signed in. If your organisation blocks syncing shared libraries, file
+mode will not work for that person — they would be back to exporting JSON by hand.
 
 ## Verifying it on your own machine
 

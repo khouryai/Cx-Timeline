@@ -1159,6 +1159,23 @@ function sharedFolderSection() {
   }
   rows.push(list);
 
+  // Whose name goes in the lock. Without this both people see "Someone", which
+  // defeats the point of saying who has the pen. Written on blur rather than per
+  // keystroke: it is a device preference, not document data, so nothing rebuilds
+  // underneath the caret.
+  if (st.supported) {
+    const nameInput = textInput({
+      value: filestore.getDisplayName() === 'Someone' ? '' : filestore.getDisplayName(),
+      placeholder: 'Your name',
+    });
+    nameInput.addEventListener('change', () => filestore.setDisplayName(nameInput.value));
+    rows.push(
+      el('div', { style: { marginTop: '10px' } }, [
+        field('Your name in the lock', nameInput, 'What your colleague sees when you have the plan open.'),
+      ])
+    );
+  }
+
   if (!st.connected && !st.folder) {
     // A remembered folder whose permission has lapsed: one click gets it back,
     // which is much better than making someone find it in the picker again.
