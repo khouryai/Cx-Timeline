@@ -18,7 +18,17 @@
                     blueprint|presentation">. Dark is the default.
    ========================================================================= */
 
-@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=Roboto+Mono:wght@400;500;600&display=swap');
+/* No webfont is fetched. The faces below name Archivo and Roboto Mono first and
+   fall back to the platform's own, which is what actually renders on a machine
+   that does not have them installed.
+
+   There used to be an `@import` from Google's font CDN here. It was removed for
+   two reasons: the shipped Content-Security-Policy sets `style-src 'self'`, so a
+   deployed build blocked it and silently used the fallbacks anyway; and it put a
+   request to a third party on every page load, which is not something a plan
+   this sensitive should do for the sake of a typeface. To use the real faces,
+   self-host the `.woff2` files and declare them with `@font-face` — `font-src`
+   already allows `'self'`. */
 
 :root {
   /* ── 1. INVARIANTS ─────────────────────────────────────────────────────── */

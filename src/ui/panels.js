@@ -1058,7 +1058,19 @@ function paneHistory(root) {
 function sharedFolderSection() {
   const st = filestore.state();
 
-  if (isHosted()) return el('div');
+  // A hosted build saves to the server, so the folder controls would not work
+  // — but rendering nothing was worse: the section simply vanished, with no way
+  // to tell that from a build where the feature was missing. Say which one it is.
+  if (isHosted()) {
+    return section('Shared folder', [
+      el('div', {
+        class: 'cx-hint',
+        text:
+          'This build saves to its server, so the plan cannot also live in a folder. ' +
+          'A folder deployment is a separate build with no backend — see DEPLOY.md.',
+      }),
+    ], { id: 'shared-folder' });
+  }
 
   if (!st.supported) {
     return section('Shared folder', [

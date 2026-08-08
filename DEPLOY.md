@@ -231,15 +231,35 @@ approves, and when two people taking turns is enough.
 
 ## Deploying it
 
-1. Leave `config.js` blank — no `supabaseUrl`, no key. That makes the entire
-   Supabase path inert; there is no gate and no sign-in.
-2. `npm run build`, then publish `index.html`, `app.bundle.js`, `config.js`,
-   `css/` and `vendor/` anywhere static. `tools/dist.js` deliberately refuses a
-   config with no backend, so copy those files directly rather than using it.
-3. Open the site, go to **Import / export → Shared folder → Connect a folder…**
-   and pick the synced folder. If it is empty the app offers to write the plan
-   you have open into it; if it already holds one, it opens it.
+**The repository decides the shape, not your CI settings.** `package.json` holds:
+
+```json
+"cxTimeline": { "deployment": "folder" }
+```
+
+`tools/dist.js` reads it, so **an existing hosted deployment needs no changes at
+all** — the same build command and even leftover `SUPABASE_URL` variables produce
+a folder build, and the log says the variables were ignored. Set it back to
+`"hosted"` to go the other way. This lives in the repo on purpose: a deployment
+shape decided by a dashboard setting nobody can see is how you end up with a site
+that looks right and quietly saves to the wrong place.
+
+1. Nothing to change in Cloudflare. Your existing build command
+   (`npm run build:dist`) now produces the folder build. Locally,
+   `npm run build:folder` forces it regardless of what `package.json` says.
+2. Tidy up when convenient: delete `SUPABASE_URL` and `SUPABASE_ANON_KEY` from
+   the Cloudflare variables — they are inert now, but leaving credentials lying
+   around is untidy — and delete the Supabase project once you have exported
+   anything you still want from it.
+3. Open the site. There is no sign-in — go straight to **Import / export →
+   Shared folder → Connect a folder…** and pick the synced folder. If it is
+   empty the app offers to write the plan you have open into it; if it already
+   holds plans, you choose one.
 4. Your colleague opens the same URL and picks the same folder on their machine.
+
+The published site is then about a megabyte of HTML, CSS and one JavaScript
+bundle. It talks to nothing — no backend, no CDN, not even a font service — so
+the only thing your host ever sees is a request for those files.
 
 Mark the folder **Always keep on this device** in OneDrive, so the plan is a real
 local file rather than a placeholder. Edge will ask permission to edit files in
@@ -287,7 +307,8 @@ hand once, on the real thing:
 ## Running it afterwards
 
 ```bash
-npm run build:dist   # what Cloudflare runs
+npm run build:dist   # a hosted deployment; fails without a backend configured
+npm run build:folder # a folder deployment; no backend, no vendored client
 npm test             # local UI, shared folder, hosted UI, permission model
 npm run serve        # http://localhost:8123, using config.js as committed
 ```
