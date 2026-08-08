@@ -231,19 +231,26 @@ approves, and when two people taking turns is enough.
 
 ## Deploying it
 
-1. **Remove `SUPABASE_URL` and `SUPABASE_ANON_KEY`** from the Cloudflare
-   project's environment variables. Leaving them set is the one thing that can
-   turn this back into a hosted build by accident, because `npm run build`
-   rewrites `config.js` from them.
-2. Build with the folder flag:
+**The repository decides the shape, not your CI settings.** `package.json` holds:
 
-   ```bash
-   npm run build:folder     # = npm run build && node tools/dist.js --no-backend
-   ```
+```json
+"cxTimeline": { "deployment": "folder" }
+```
 
-   That writes a blank `config.js` whatever the environment says, leaves the
-   vendored Supabase client out of `dist/` entirely, and strips its script tag
-   from `index.html`. Point Cloudflare's build command at it and publish `dist/`.
+`tools/dist.js` reads it, so **an existing hosted deployment needs no changes at
+all** — the same build command and even leftover `SUPABASE_URL` variables produce
+a folder build, and the log says the variables were ignored. Set it back to
+`"hosted"` to go the other way. This lives in the repo on purpose: a deployment
+shape decided by a dashboard setting nobody can see is how you end up with a site
+that looks right and quietly saves to the wrong place.
+
+1. Nothing to change in Cloudflare. Your existing build command
+   (`npm run build:dist`) now produces the folder build. Locally,
+   `npm run build:folder` forces it regardless of what `package.json` says.
+2. Tidy up when convenient: delete `SUPABASE_URL` and `SUPABASE_ANON_KEY` from
+   the Cloudflare variables — they are inert now, but leaving credentials lying
+   around is untidy — and delete the Supabase project once you have exported
+   anything you still want from it.
 3. Open the site. There is no sign-in — go straight to **Import / export →
    Shared folder → Connect a folder…** and pick the synced folder. If it is
    empty the app offers to write the plan you have open into it; if it already

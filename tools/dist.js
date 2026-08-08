@@ -31,8 +31,27 @@ const OUT = path.join(ROOT, 'dist');
 const FILES = ['index.html', 'app.bundle.js', 'config.js', '_headers'];
 const DIRS = ['css', 'vendor'];
 
-/** A deployment with no backend: see the flag note in the header. */
-const NO_BACKEND = process.argv.includes('--no-backend');
+/**
+ * Which shape to build.
+ *
+ * `package.json` → `cxTimeline.deployment` decides, so the answer lives in the
+ * repository and travels with a merge. That matters more than it sounds: the
+ * alternative is a build command and a set of environment variables in a CI
+ * dashboard, where getting one of them wrong produces a site that looks fine
+ * and quietly saves to the wrong place. `--no-backend` forces the folder shape
+ * for a one-off local build.
+ */
+function deploymentShape() {
+  if (process.argv.includes('--no-backend')) return 'folder';
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    return pkg.cxTimeline?.deployment === 'folder' ? 'folder' : 'hosted';
+  } catch {
+    return 'hosted';
+  }
+}
+
+const NO_BACKEND = deploymentShape() === 'folder';
 
 /** `config.js` for a folder deployment, written regardless of the environment. */
 const BLANK_CONFIG = `/**
@@ -97,6 +116,10 @@ function main() {
     fs.writeFileSync(html, stripped);
     console.log('✓ config.js     — no backend; the plan lives in a folder the user picks');
     console.log('✓ index.html    — Supabase client not shipped');
+    if (process.env.SUPABASE_URL) {
+      console.log('  note          — SUPABASE_URL is set in this environment and was ignored;');
+      console.log('                  package.json says this is a folder deployment.');
+    }
   } else {
     // Fail the build rather than publishing a site that cannot sign anyone in.
     const config = fs.readFileSync(path.join(OUT, 'config.js'), 'utf8');

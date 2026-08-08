@@ -16,6 +16,10 @@
     "build:dist": "node tools/build.js && node tools/dist.js",
     "build:folder": "node tools/build.js && node tools/dist.js --no-backend"
   },
+  "cxTimeline": {
+    "_comment": "deployment: 'hosted' saves to Supabase and requires a backend at build time; 'folder' publishes with no backend at all and keeps the plan in a folder the user picks. tools/dist.js reads this, so the shape of a deployment is decided here, in the repository, rather than in a CI setting nobody can see.",
+    "deployment": "folder"
+  },
   "engines": {
     "node": ">=18"
   },
