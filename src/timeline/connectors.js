@@ -140,7 +140,7 @@ function arrowHead(point, inDir) {
  * Route every link that has both endpoints laid out.
  * Returns render descriptors ready for the SVG layer and the exporters.
  */
-export function routeAll(links, layoutById, style = 'orthogonal', { criticalIds = null, violations = null } = {}) {
+export function routeAll(links, layoutById, style = 'orthogonal', { criticalIds = null, violations = null, upstreamIds = null } = {}) {
   const out = [];
   for (const link of links) {
     const fromRect = layoutById.get(link.from);
@@ -157,6 +157,8 @@ export function routeAll(links, layoutById, style = 'orthogonal', { criticalIds 
       ...route,
       dimmed: fromRect.dimmed || toRect.dimmed,
       critical: criticalIds ? criticalIds.has(link.from) && criticalIds.has(link.to) : false,
+      // Arrives at the current selection: this is what it is waiting on.
+      upstream: upstreamIds ? upstreamIds.has(link.id) : false,
       violated,
       breach,
       // A broken link states the damage instead of its relationship type: the
@@ -172,12 +174,13 @@ export function routeAll(links, layoutById, style = 'orthogonal', { criticalIds 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /** Render routed connectors into an existing <svg> element. */
-export function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onSelect = null } = {}) {
+export function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onSelect = null, flashUpstream = false } = {}) {
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
   for (const item of routed) {
     const group = document.createElementNS(SVG_NS, 'g');
     group.dataset.linkId = item.link.id;
+    if (item.upstream) group.dataset.upstream = 'true';
 
     // A wide invisible stroke underneath makes thin connectors clickable.
     const hit = document.createElementNS(SVG_NS, 'path');
@@ -194,6 +197,10 @@ export function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onS
     else if (item.critical) cls += ' critical';
     if (item.dimmed) cls += ' dim';
     if (selectedLinkIds.has(item.link.id)) cls += ' selected';
+    // A dependency feeding the selection. The caller decides when the flash is
+    // on — this layer is rebuilt every frame, so it cannot tell a new selection
+    // from a redraw of the same one.
+    if (item.upstream) cls += flashUpstream ? ' upstream flash' : ' upstream';
     path.setAttribute('class', cls);
     if (item.link.color && !item.violated) path.setAttribute('stroke', item.link.color);
     group.appendChild(path);
@@ -210,6 +217,8 @@ export function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onS
     arrow.setAttribute('class', cls);
     arrow.style.fill = item.violated
       ? 'var(--bad)'
+      : item.upstream
+      ? 'var(--upstream)'
       : item.critical
       ? 'var(--bad)'
       : item.link.color || 'var(--connector)';

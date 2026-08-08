@@ -15,6 +15,12 @@ development and test path, not a deployment option: a build with a backend
 always requires an account (`requireAuth` defaults to true, and
 `tools/dist.js` refuses to publish a config with no backend).
 
+There is a third shape, and it is a real deployment: **file mode**, where the
+document is a JSON file in a folder the user picked — a shared drive, or one
+synced by OneDrive or SharePoint. It is reachable only when there is no backend
+configured, needs no account, and puts nothing anywhere but that folder. See
+the shared-folder bullet in Conventions, and `DEPLOY.md` for how to ship it.
+
 Local mode is also why the 126-check offline suite still passes untouched. If
 you add a hosted-only feature, hide it behind `cloud.isConfigured()` and cover
 it in `tools/smoke_hosted.js` instead.
@@ -69,6 +75,8 @@ else with a clear error:
 ```
 core/util · core/events · core/dates      leaves — import nothing
 core/cloud                                the only module that knows Supabase
+core/filestore                            the only module that knows the
+                                          File System Access API
 core/model → core/query · core/history · core/analysis
 core/store → core/storage
 timeline/viewport → timeline/layout → timeline/connectors
@@ -117,6 +125,18 @@ subscribes. That is what keeps the graph acyclic.
   plan no longer does, and a banner naming the baseline. `io/scene.js` draws
   the same, so an exported PDF is the drawing on screen. All of it is derived
   per frame from the snapshot — there is no comparison state to go stale.
+- **A ghost is packed, not painted over.** `computeLayout()` measures the
+  comparison with the objects (`measureGhost`, `measureGone`) and `packRows()`
+  reserves the whole pair — bar, label, ghost and the arrow's day badge — so a
+  ghost can never land on another bar or on another ghost; the lane reflows
+  instead. Where a ghost covers the same dates as its *own* bar the two cannot
+  share a height, so it drops to a slim tier along the bottom of the row
+  (`rect.ghost.stacked`) and the row grows. That test is in pixels, so zooming
+  out until a gap closes splits them and zooming back in re-joins them. The
+  renderer and `io/scene.js` only draw what they are handed — `rect.ghost` and
+  `layout.removed` — and neither works out a position of its own. Never place a
+  comparison rectangle from the snapshot at paint time: it will be the one
+  thing on the canvas nothing else knows is there.
 - **A P6 baseline is derived; a taken baseline is frozen.** Both live in
   `doc.baselines`, but a P6 one carries `source: 'p6'` and **no rows** — the
   comparison has to follow whatever is linked right now, so
@@ -142,6 +162,29 @@ subscribes. That is what keeps the graph acyclic.
 - **Derived state is never stored.** Violations, critical path and float are
   computed from the document, so they appear and clear on their own. Do not
   add a `violated` field to a link — there is nothing to keep in step.
+- **Selecting a bar marks what it is waiting on.** `predecessorsOf()` returns
+  one hop — the links arriving at the selection and the objects on the far end —
+  and the renderer marks them `.upstream` for as long as the selection stands,
+  in `--upstream` rather than the selection blue so the two are never confused.
+  Not the transitive closure: the upstream chain of a real plan is most of the
+  plan, and that is what the critical path is for. The flash on top of it is
+  one-shot and says *where to look*, so it must not replay on every frame of a
+  drag — object nodes persist and get the class for one frame (`flash`), while
+  the connector layer is rebuilt every frame and so is told the whole window
+  (`flashing`), with a timer closing it. Anything else that wants to flash
+  something on the canvas has the same two cases to answer.
+- **A shared folder is a third storage backend, not a export/import trick.**
+  `core/filestore.js` owns the File System Access API the way `core/cloud.js`
+  owns Supabase, and `core/storage.js` branches on `fileMode` beside `hosted`.
+  Two rules matter and both exist because a synced folder is not a database.
+  **The lock file is courtesy, the write guard is the control**: `savePlan()`
+  re-reads the file's size and modified time before every write and refuses if
+  either moved, so a colleague's save can never be silently overwritten even
+  when the lock has not synced yet. And **a directory handle only survives a
+  reload through IndexedDB** — it cannot be serialised — so it lives in a
+  database of its own, which is what lets `storage.js` import `filestore.js`
+  without the reverse. Anything that writes to the folder goes through
+  `filestore.js`; nothing else should ever hold a handle.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
 - **Dropdown vocabularies are document data, not constants.** Status,
@@ -205,7 +248,8 @@ subscribes. That is what keeps the graph acyclic.
 npm run build                        # must succeed — it also lints the module graph
 npm test                             # all three suites, must exit 0
 
-node tools/smoke.js                  # 182 checks — the application, local mode
+node tools/smoke.js                  # 204 checks — the application, local mode
+node tools/smoke_folder.js           #  31 checks — the shared folder, stubbed
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result
@@ -213,9 +257,17 @@ node tools/smoke.js --shot out.png   # …and eyeball the result
 
 `smoke.js` boots the real application in Chromium and checks rendering,
 selection, typing into panel fields without losing focus, snapping, undo/redo,
-zoom, the dropdown vocabularies, filter dim/hide, baseline comparison, all
-seventeen dock panes, all five themes, every exporter (including PDF header
-validation) and reload persistence. **Any console error fails the run.**
+zoom, the dropdown vocabularies, filter dim/hide, the predecessor highlight and
+its one-shot flash, baseline comparison — down to measuring, at five zooms, that
+no ghost is drawn over a bar or over another ghost — all seventeen dock panes,
+all five themes, every exporter (including PDF header validation) and reload
+persistence. **Any console error fails the run.**
+
+`smoke_folder.js` replaces `window.showDirectoryPicker` with an in-memory
+folder, so the lock, the read-only handover and the write guard are covered
+without a real filesystem. No browser lets a script click its own file dialog,
+so the picker and a genuine OneDrive folder stay on the manual checklist in
+`DEPLOY.md` rather than being pretended at.
 
 `smoke_hosted.js` boots it with a configured backend and a stubbed client, so
 the gate, invitations, sharing and read-only mode are covered without a

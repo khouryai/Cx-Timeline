@@ -5,8 +5,8 @@
  * call the same functions here, so a behaviour never drifts between the three
  * ways of reaching it and there is exactly one place to fix a bug.
  *
- * Imports: util, events, dates, model, store, storage, viewport, renderer,
- *          interactions, icons, components.
+ * Imports: util, events, dates, model, store, storage, filestore, viewport,
+ *          renderer, interactions, icons, components.
  */
 
 import { el, download, clamp } from '../core/util.js';
@@ -14,7 +14,8 @@ import { emit, EV } from '../core/events.js';
 import { MS_DAY, toISO, fmtDate, addDays } from '../core/dates.js';
 import { TYPES, makeBaseline, makeObject, projectExtent, effectiveToday, makeProject } from '../core/model.js';
 import * as store from '../core/store.js';
-import { saveNow, makeBackup } from '../core/storage.js';
+import { saveNow, makeBackup, openFolderPlan, createFolderPlan, leaveFolder } from '../core/storage.js';
+import * as filestore from '../core/filestore.js';
 import { linkViolations, resolutionFor } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
@@ -451,6 +452,171 @@ export async function saveSnapshot() {
   await saveNow();
   await makeBackup('manual');
   toast({ tone: 'good', title: 'Snapshot saved', message: 'A restore point was added to Backups.' });
+}
+
+/* ── The shared folder ─────────────────────────────────────────────────── */
+
+/**
+ * Connect a folder — a shared drive, or one synced by OneDrive or SharePoint —
+ * and open a plan in it.
+ *
+ * The picker must be opened from a click, so this is only ever reachable from a
+ * button. When the folder already holds exactly one plan it opens straight into
+ * it; otherwise the user chooses, because guessing between a colleague's plans
+ * is how you end up editing the wrong programme.
+ */
+export async function connectFolder() {
+  if (!filestore.isSupported()) {
+    toast({
+      tone: 'warn',
+      title: 'Not supported in this browser',
+      message: 'Opening a folder needs Edge or Chrome. Everything else works here as normal.',
+    });
+    return false;
+  }
+
+  let picked;
+  try {
+    picked = await filestore.chooseFolder();
+  } catch (err) {
+    // Cancelling the picker is not an error worth reporting.
+    if (err && err.name === 'AbortError') return false;
+    toast({ tone: 'bad', title: 'Could not open that folder', message: err.message });
+    return false;
+  }
+  if (!picked) return false;
+
+  if (!picked.plans.length) return createFolderPlanFromCurrent();
+  if (picked.plans.length === 1) return openFolderPlanByName(picked.plans[0].name);
+
+  emit(EV.PANE_REFRESH, { pane: 'io' });
+  toast({
+    tone: 'info',
+    title: `${picked.folder} connected`,
+    message: `${picked.plans.length} plans in this folder — choose one to open.`,
+  });
+  return true;
+}
+
+/** Re-grant access to the folder this device used last. */
+export async function reconnectFolder() {
+  const connected = await filestore.reconnectWithPrompt();
+  if (!connected) {
+    toast({ tone: 'warn', title: 'Could not reconnect', message: 'Choose the folder again to carry on.' });
+    return false;
+  }
+  const wanted = connected.lastPlan || (connected.plans.length === 1 ? connected.plans[0].name : '');
+  if (wanted) return openFolderPlanByName(wanted);
+  emit(EV.PANE_REFRESH, { pane: 'io' });
+  return true;
+}
+
+/** Open one of the plans in the connected folder. */
+export async function openFolderPlanByName(name) {
+  try {
+    const { doc, role, holder } = await openFolderPlan(name);
+    store.replaceDoc(doc, 'load');
+    emit(EV.FILE_STATE, filestore.state());
+    fitAll();
+    toast({
+      tone: role === 'viewer' ? 'warn' : 'good',
+      title: role === 'viewer' ? `${name} — read-only` : `${name} opened`,
+      message:
+        role === 'viewer'
+          ? `${holder} has this plan open. You can read it, and it becomes editable when they close it.`
+          : 'Saved straight to the folder from now on.',
+    });
+    return true;
+  } catch (err) {
+    toast({ tone: 'bad', title: 'Could not open that plan', message: err.message });
+    return false;
+  }
+}
+
+/** Write the plan currently open into the connected folder for the first time. */
+export async function createFolderPlanFromCurrent() {
+  const doc = store.getDoc();
+  const suggested = `${(doc.name || 'programme').replace(/[^a-z0-9 \-_]+/gi, '').trim() || 'programme'}.json`;
+  const name = await promptDialog({
+    title: 'Put this plan in the folder',
+    label: 'File name',
+    value: suggested,
+    placeholder: 'programme.json',
+  });
+  if (!name) return false;
+
+  try {
+    const written = await createFolderPlan(name, doc);
+    emit(EV.FILE_STATE, filestore.state());
+    toast({
+      tone: 'good',
+      title: `${written} created`,
+      message: 'Every change from now on is written straight into the folder.',
+    });
+    return true;
+  } catch (err) {
+    toast({ tone: 'bad', title: 'Could not write that file', message: err.message });
+    return false;
+  }
+}
+
+/** Stop using the folder. The plan stays on disk exactly as it is. */
+export async function disconnectFolder() {
+  const ok = await confirmDialog({
+    title: 'Disconnect the folder?',
+    message:
+      'The plan file stays where it is — this only stops CX Timeline writing to it. ' +
+      'Changes after this are kept in this browser instead.',
+    confirmLabel: 'Disconnect',
+  });
+  if (!ok) return false;
+  await leaveFolder();
+  emit(EV.FILE_STATE, filestore.state());
+  toast({ tone: 'info', title: 'Folder disconnected' });
+  return true;
+}
+
+/**
+ * Pull in a colleague's save.
+ *
+ * Offered when the file has moved on disk. Anything unsaved here would be lost,
+ * so it says so rather than discarding quietly.
+ */
+export async function reloadFromFolder({ confirm = true } = {}) {
+  if (confirm && store.isDirty()) {
+    const ok = await confirmDialog({
+      title: 'Reload from the folder?',
+      message: 'You have changes that have not been written. Reloading replaces them with the file on disk.',
+      confirmLabel: 'Reload',
+      danger: true,
+    });
+    if (!ok) return false;
+  }
+  try {
+    const doc = await filestore.refreshFromDisk();
+    if (!doc) return false;
+    store.replaceDoc(doc, 'load');
+    renderer.requestRender();
+    toast({ tone: 'good', title: 'Reloaded', message: 'You are looking at the latest saved version.' });
+    return true;
+  } catch (err) {
+    toast({ tone: 'bad', title: 'Could not reload', message: err.message });
+    return false;
+  }
+}
+
+/**
+ * Take the pen when the lock has gone stale — a colleague whose browser closed
+ * without releasing it. Refused while their lock is still being stamped.
+ */
+export async function takeOverEditing() {
+  const took = await filestore.takeOver();
+  toast(
+    took
+      ? { tone: 'good', title: 'You have the pen', message: 'This plan is editable again.' }
+      : { tone: 'warn', title: 'Still in use', message: `${filestore.state().holder} is actively editing this plan.` }
+  );
+  return took;
 }
 
 /* ── Navigation ────────────────────────────────────────────────────────── */

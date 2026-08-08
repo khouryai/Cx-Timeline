@@ -22,6 +22,7 @@ import { projectExtent, effectiveToday } from './core/model.js';
 import * as store from './core/store.js';
 import { init as initStorage, takeRecovery, getPref, setPref, saveNow, isHosted } from './core/storage.js';
 import * as cloud from './core/cloud.js';
+import * as filestore from './core/filestore.js';
 import { criticalPath } from './core/analysis.js';
 import * as viewport from './timeline/viewport.js';
 import * as renderer from './timeline/renderer.js';
@@ -36,6 +37,7 @@ import { installMenus } from './ui/menus.js';
 import { requireSignIn, installAccessMode } from './ui/auth.js';
 import { installP6Drops } from './ui/p6.js';
 import { installShortcuts } from './ui/shortcuts.js';
+import * as cmd from './ui/commands.js';
 import { toast, showTooltip, hideTooltip, confirmDialog } from './ui/components.js';
 import { renderNote, notePreview } from './ui/notes.js';
 import { TYPES, statusOf, durationDays } from './core/model.js';
@@ -122,6 +124,7 @@ async function boot() {
   installAccessMode();
   installP6Drops();
   installConflictHandling();
+  installFolderHandling();
   installViewPersistence();
   installResizeHandling();
   installCriticalPathRecompute();
@@ -167,7 +170,65 @@ function installConflictHandling() {
       cancelLabel: 'Not yet',
     });
     asking = false;
-    if (ok) window.location.reload();
+    if (!ok) return;
+    if (filestore.isConnected()) await cmd.reloadFromFolder({ confirm: false });
+    else window.location.reload();
+  });
+}
+
+/* ── The shared folder ─────────────────────────────────────────────────── */
+
+/**
+ * Keeping two people in step through a synced folder.
+ *
+ * Three things need saying out loud, and none of them are errors:
+ *
+ *   a colleague saved     the file on disk moved on. Offer to catch up, rather
+ *                         than reloading under someone mid-sentence.
+ *   the write was refused the guard in `filestore.savePlan()` stopped an
+ *                         overwrite. The work is still here and still cached.
+ *   the grant lapsed      the browser wants the folder re-authorised, which
+ *                         needs a click and cannot be done silently.
+ *
+ * The lock is also released on the way out. That cannot be awaited at unload,
+ * which is exactly why the lock has a staleness timeout as its real release.
+ */
+function installFolderHandling() {
+  let asking = false;
+
+  on(EV.FILE_EXTERNAL_CHANGE, async () => {
+    if (asking) return;
+    asking = true;
+    // A reader who has changed nothing gains nothing from a dialog: just pull
+    // their colleague's version in and say so.
+    if (filestore.isViewer() && !store.isDirty()) {
+      await cmd.reloadFromFolder({ confirm: false });
+      asking = false;
+      return;
+    }
+    const ok = await confirmDialog({
+      title: 'This plan changed in the folder',
+      message:
+        'Someone saved a newer version. Reload to pick it up — anything you have changed here since your last save would be replaced.',
+      confirmLabel: 'Reload',
+      cancelLabel: 'Not yet',
+    });
+    asking = false;
+    if (ok) await cmd.reloadFromFolder({ confirm: false });
+  });
+
+  on(EV.SAVE_ERROR, (payload) => {
+    if (!payload?.permission) return;
+    toast({
+      tone: 'warn',
+      title: 'The folder needs re-authorising',
+      message: 'Open Import / export and reconnect the folder to carry on saving.',
+      sticky: true,
+    });
+  });
+
+  window.addEventListener('beforeunload', () => {
+    if (filestore.isConnected()) filestore.handleUnload();
   });
 }
 

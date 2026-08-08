@@ -207,11 +207,88 @@ themselves an administrator. It never touches your Supabase project.
 
 ---
 
+# The other deployment: a shared folder, no backend
+
+Everything above puts the data in Supabase. There is a second shape that puts it
+in a folder instead — a mapped drive, or one synced by OneDrive or SharePoint —
+with **no account, no database and no vendor holding anything**. The site is
+static files; the plan is a file on your own disk that your existing folder
+permissions and version history already cover.
+
+Choose this when the data cannot leave infrastructure your organisation already
+approves, and when two people taking turns is enough.
+
+## What you give up
+
+- **One editor at a time.** Whoever opens the plan first has the pen; the second
+  person gets read-only and a banner saying who is in there. It becomes editable
+  when they close it.
+- **No accounts, so no client access.** External viewers cannot reach a file on
+  your internal drive — export a PDF for them instead.
+- **Edge or Chrome only.** The API that writes to a folder you picked does not
+  exist in Firefox and is partial in Safari. Other browsers keep working, with
+  the plan in browser storage and Export → JSON to move it.
+
+## Deploying it
+
+1. Leave `config.js` blank — no `supabaseUrl`, no key. That makes the entire
+   Supabase path inert; there is no gate and no sign-in.
+2. `npm run build`, then publish `index.html`, `app.bundle.js`, `config.js`,
+   `css/` and `vendor/` anywhere static. `tools/dist.js` deliberately refuses a
+   config with no backend, so copy those files directly rather than using it.
+3. Open the site, go to **Import / export → Shared folder → Connect a folder…**
+   and pick the synced folder. If it is empty the app offers to write the plan
+   you have open into it; if it already holds one, it opens it.
+4. Your colleague opens the same URL and picks the same folder on their machine.
+
+Mark the folder **Always keep on this device** in OneDrive, so the plan is a real
+local file rather than a placeholder. Edge will ask permission to edit files in
+that folder the first time, and again after a browser restart — one click.
+
+## What ends up in the folder
+
+```
+bart-cbtc.json         the plan, in the same format Export → JSON writes
+bart-cbtc.lock.json    who has the pen, re-stamped every 30 seconds
+attachments/           attachment bytes, one file each
+```
+
+Nothing proprietary: the plan opens in the importer, reads in a text editor, and
+is versioned by whatever the folder is versioned by.
+
+## How two people stay out of each other's way
+
+The lock file is a **courtesy** — a synced folder takes seconds to propagate, so
+two people opening at the same moment can both think they hold it. The guarantee
+is one layer down: every save re-reads the file's size and modified time first
+and refuses if either moved. You may be told to reload; you can never silently
+overwrite your colleague. An abandoned lock (a closed lid, a crash) goes stale
+after two and a half minutes and the next person can take over.
+
+## Verifying it on your own machine
+
+`npm run test:folder` covers the lock, the read-only handover and the write
+guard against a stubbed folder — 26 checks. It cannot cover the file picker,
+because no browser lets a script click its own file dialog. Run these four by
+hand once, on the real thing:
+
+1. **Connect and create.** Connect an empty synced folder, accept the suggested
+   file name, and confirm the `.json` appears in File Explorer and syncs.
+2. **Reconnect.** Close the browser entirely, reopen the site, and confirm one
+   click on **Reconnect** in Import / export gets the plan back — no re-picking.
+3. **Two machines.** Open the same plan on both. The second should be read-only
+   and name the first person. Close the first; within about a minute the second
+   should become editable.
+4. **An attachment.** Attach a file, then confirm it appears under
+   `attachments/` in the folder and opens on the other machine after it syncs.
+
+---
+
 ## Running it afterwards
 
 ```bash
 npm run build:dist   # what Cloudflare runs
-npm test             # local UI, hosted UI, and the permission model
+npm test             # local UI, shared folder, hosted UI, permission model
 npm run serve        # http://localhost:8123, using config.js as committed
 ```
 

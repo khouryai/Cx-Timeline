@@ -13,13 +13,19 @@
  * reserves the space the label occupies as well as the bar, and rows and
  * lanes grow to whatever height the wrapped text needs.
  *
+ * Baseline ghosts obey the same rule. A ghost is a rectangle on the canvas
+ * like any other, so it is measured here and packed here: its span is part of
+ * what its object occupies, and when it covers the same dates as the live bar
+ * it drops to a tier of its own below it and the row grows. Comparison mode
+ * therefore never prints one bar on top of another, at any zoom.
+ *
  * Imports: util, dates, model, store, viewport, text.
  */
 
 import { clamp } from '../core/util.js';
-import { MS_DAY } from '../core/dates.js';
-import { TYPES, objectRange } from '../core/model.js';
-import { getDoc, orderedLanes, getLane } from '../core/store.js';
+import { MS_DAY, daysBetween } from '../core/dates.js';
+import { TYPES, objectRange, baselineSnapshot } from '../core/model.js';
+import { getDoc, orderedLanes, getLane, activeBaseline } from '../core/store.js';
 import { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } from './viewport.js';
 import { fontString, textWidth, wrapText, fitWidth } from './text.js';
 
@@ -51,6 +57,14 @@ const MAX_INSIDE_LINES = 3;
 const ICON_W = 18;
 /** Space the percentage readout takes inside a bar label. */
 const PCT_W = 30;
+/** Height of a baseline ghost that has to stack below its own bar. */
+const GHOST_HEIGHT = 11;
+/** Gap between a bar and the ghost stacked under it. */
+const GHOST_GAP = 3;
+/** Height of the outline drawn where a removed object used to sit. */
+const GONE_HEIGHT = 20;
+/** Room the day-count badge on a shift arrow needs, centred on the arrow. */
+const SHIFT_BADGE_W = 48;
 
 /* ── Fonts ─────────────────────────────────────────────────────────────── */
 
@@ -186,21 +200,138 @@ export function measureLabel(obj, barWidthPx) {
   };
 }
 
-/** Height one object needs on its packed row, label included. */
-function rowHeightFor(obj, label) {
+/** Height one object needs on its packed row, label and ghost included. */
+function rowHeightFor(obj, label, ghost = null) {
   const def = TYPES[obj.type] || TYPES.activity;
+  // A ghost that has to stack takes a tier of its own under the bar.
+  const tier = ghost && ghost.stacked ? GHOST_HEIGHT + GHOST_GAP : 0;
 
   if (!def.duration) {
-    return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove);
+    return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove) + tier;
   }
   if (label.placement === 'fill') {
-    return Math.max(46, label.height + LABEL_PAD_Y * 2 + 8);
+    return Math.max(46, label.height + LABEL_PAD_Y * 2 + 8) + tier;
   }
   if (label.placement === 'outside') {
     // The bar itself stays slim; the row must still clear the label beside it.
-    return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2);
+    return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2) + tier;
   }
-  return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2);
+  return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2) + tier;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Baseline comparison
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The comparison rows for this frame, keyed by object id — or null when the
+ * document is not comparing against anything.
+ *
+ * Derived from the snapshot on every frame like the rest of the comparison, so
+ * there is no state to go stale. Layout reads it because a ghost occupies room
+ * on the canvas: a packer that only knew about live bars would put the next
+ * object along straight underneath one.
+ */
+function comparisonRows(doc) {
+  if (!doc.settings || !doc.settings.showBaseline) return null;
+  const baseline = activeBaseline();
+  if (!baseline) return null;
+  const rows = baselineSnapshot(doc, baseline);
+  if (!rows.length) return null;
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
+/**
+ * Where an object's baseline ghost goes and how much room it needs.
+ *
+ * `stacked` is the answer to the overlap question. While the ghost and the
+ * live bar cover different dates they can share a height — the ghost behind,
+ * the arrow between their finish edges — and the pair reads as one object that
+ * moved. The moment they cover the same dates that reading is a pile: the
+ * ghost then takes a slim tier below the bar, and `rowHeightFor` grows the row
+ * to hold it. Because the test is in pixels, zooming out until two dates touch
+ * splits them, and zooming back in re-joins them.
+ *
+ * `from`/`to` are the span the ghost occupies, arrow badge included, which is
+ * what `packRows` reserves. No label term: a ghost carries no text of its own,
+ * and its neighbours reserve the room their labels need themselves.
+ */
+function measureGhost(obj, snap, barWidth) {
+  if (!snap) return null;
+  const def = TYPES[obj.type] || TYPES.activity;
+  const hasDuration = !!def.duration;
+
+  const snapStart = snap.start;
+  const snapEnd = hasDuration ? (snap.end ?? snap.start) : snap.start;
+  const startShift = daysBetween(snapStart, obj.start);
+  const endShift = hasDuration ? daysBetween(snapEnd, obj.end) : startShift;
+  // Nothing moved: there is no ghost to draw and nothing to reserve.
+  if (!startShift && !endShift) return null;
+
+  const left = hasDuration ? msToPx(snapStart) : msToPx(snapStart) - POINT_SIZE / 2;
+  const width = hasDuration ? Math.max(4, durationToPx(Math.max(snapEnd - snapStart, 0))) : POINT_SIZE;
+  const barLeft = hasDuration ? msToPx(obj.start) : msToPx(obj.start) - POINT_SIZE / 2;
+  const barRight = barLeft + (hasDuration ? barWidth : POINT_SIZE);
+
+  // A reshape (same finish, different start) is measured at the start edges
+  // instead, or the arrow would have no length. Mirrors the renderer.
+  const reshaped = endShift === 0;
+  const fromX = reshaped ? left : left + width;
+  const toX = reshaped ? barLeft : barRight;
+  const mid = (fromX + toX) / 2;
+
+  // Bands and containers are lane-tall backdrops with nothing to stack under,
+  // and a point glyph's label already owns the space below it.
+  const canStack = hasDuration && def.shape !== 'band' && def.shape !== 'container';
+
+  return {
+    snap,
+    startShift,
+    endShift,
+    startMs: snapStart,
+    endMs: snapEnd,
+    left,
+    width,
+    stacked: canStack && left < barRight + GHOST_GAP && left + width > barLeft - GHOST_GAP,
+    from: Math.min(left, mid - SHIFT_BADGE_W / 2),
+    to: Math.max(left + width, mid + SHIFT_BADGE_W / 2),
+  };
+}
+
+/**
+ * A stand-in for an object the baseline had and the plan no longer does.
+ *
+ * It has no object to hang off, so it gets a phantom one and joins the pack
+ * like everything else. Drawing these at the top of the lane instead — which
+ * is what happened before — put them straight on top of whatever now occupies
+ * the first row.
+ */
+function measureGone(snap) {
+  const font = fontString({ size: 10, weight: 500, italic: true });
+  const left = msToPx(snap.start);
+  const width = Math.max(10, msToPx(snap.end ?? snap.start) - left);
+  // The struck-through name is not clipped either, so if it is wider than the
+  // outline the packer has to know the outline is effectively that wide.
+  const textW = Math.ceil(textWidth(String(snap.title || ''), font)) + 14;
+
+  return {
+    obj: {
+      id: `gone:${snap.id}`,
+      type: 'activity',
+      lane: snap.lane,
+      start: snap.start,
+      end: snap.end ?? snap.start,
+      z: -1,
+      row: null,
+    },
+    gone: snap,
+    label: { extraLeft: 0, extraRight: Math.max(0, textW - width), extraAbove: 0, extraBelow: 0 },
+    barWidth: width,
+    ghost: null,
+    height: Math.max(ROW_HEIGHT, GONE_HEIGHT),
+    left,
+    width,
+  };
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -212,9 +343,11 @@ function rowHeightFor(obj, label) {
  * labels overlap.
  *
  * The occupied span of an object is the bar plus whatever its label needs on
- * either side, converted from pixels to time at the current zoom. That is
- * what guarantees a label placed beside a narrow bar can never be overprinted
- * by the next object along.
+ * either side, plus — in comparison mode — its baseline ghost and the badge on
+ * the arrow that measures the move, converted from pixels to time at the
+ * current zoom. That is what guarantees a label placed beside a narrow bar, or
+ * a ghost reaching back weeks before the bar it belongs to, can never be
+ * overprinted by the next object along.
  *
  * Objects keep an explicit `row` when the user has set one; otherwise a
  * first-fit packer places them on the lowest free row, in start order, which
@@ -226,12 +359,17 @@ export function packRows(entries, { minGapPx = 6 } = {}) {
   const assigned = new Map();
 
   for (const entry of sorted) {
-    const { obj, label, barWidth } = entry;
+    const { obj, label, barWidth, ghost } = entry;
     const startPx = msToPx(obj.start);
     const hasDuration = !!TYPES[obj.type]?.duration;
 
-    const from = (hasDuration ? startPx : startPx - POINT_SIZE / 2) - label.extraLeft;
-    const to = (hasDuration ? startPx + barWidth : startPx + POINT_SIZE / 2) + label.extraRight;
+    let from = (hasDuration ? startPx : startPx - POINT_SIZE / 2) - label.extraLeft;
+    let to = (hasDuration ? startPx + barWidth : startPx + POINT_SIZE / 2) + label.extraRight;
+
+    if (ghost) {
+      from = Math.min(from, ghost.from);
+      to = Math.max(to, ghost.to);
+    }
 
     if (Number.isFinite(obj.row) && obj.row > 0) {
       const row = Math.min(obj.row, 24);
@@ -270,12 +408,34 @@ export function packRows(entries, { minGapPx = 6 } = {}) {
  * Dropping them before packing rather than skipping them at paint time is what
  * makes the second mode worth having: skipping later would leave the gaps the
  * hidden objects were occupying.
+ *
+ * In comparison mode the baseline is part of the geometry: every object's ghost
+ * is measured with it, removed objects get a packed row of their own, and both
+ * are returned ready to draw (`rect.ghost`, `layout.removed`) so no consumer
+ * has to work out where they went a second time.
  */
 export function computeLayout({ filterFn = null, hideFiltered = false, includeOffscreen = false, gutterWidth = 190 } = {}) {
   const doc = getDoc();
   const lanes = orderedLanes(false);
   const rects = [];
   const byId = new Map();
+  const removed = [];
+
+  const snapshot = comparisonRows(doc);
+  const goneByLane = new Map();
+  if (snapshot) {
+    const liveIds = new Set(doc.objects.map((o) => o.id));
+    const laneIds = new Set(lanes.map((l) => l.id));
+    for (const snap of snapshot.values()) {
+      if (liveIds.has(snap.id)) continue;
+      // A snapshot can name a lane that has since been deleted too; those fall
+      // to the first lane, which is the only place left to say they existed.
+      const laneId = laneIds.has(snap.lane) ? snap.lane : lanes[0]?.id;
+      if (!laneId) continue;
+      if (!goneByLane.has(laneId)) goneByLane.set(laneId, []);
+      goneByLane.get(laneId).push(snap);
+    }
+  }
 
   const laneEntries = [];
   let y = 0;
@@ -293,18 +453,32 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
         ? Math.max(MIN_BAR_PX, durationToPx(Math.max(obj.end - obj.start, MS_DAY * 0.25)))
         : POINT_SIZE;
       const label = measureLabel(obj, barWidth);
-      return { obj, label, barWidth, height: rowHeightFor(obj, label) };
+      const ghost = snapshot ? measureGhost(obj, snapshot.get(obj.id), barWidth) : null;
+      return { obj, label, barWidth, ghost, height: rowHeightFor(obj, label, ghost) };
     });
 
-    const collapsed = lane.collapsed;
-    const { assigned, rows } = collapsed ? { assigned: new Map(measured.map((m) => [m.obj.id, 0])), rows: 1 } : packRows(measured);
+    // Outlines for what the baseline had and the plan has not. They pack with
+    // the live objects rather than beside them, so a removed bar cannot land on
+    // top of whatever took its place.
+    const goneItems = (goneByLane.get(lane.id) || []).map(measureGone);
 
-    // Each row is as tall as the tallest thing standing on it.
+    const collapsed = lane.collapsed;
+    const packable = goneItems.length ? measured.concat(goneItems) : measured;
+    const { assigned, rows } = collapsed
+      ? { assigned: new Map(packable.map((m) => [m.obj.id, 0])), rows: 1 }
+      : packRows(packable);
+
+    // Each row is as tall as the tallest thing standing on it. A row holding a
+    // ghost that had to stack also reserves a tier along its bottom edge — for
+    // the whole row, not just that one object, so bars sharing a row keep
+    // sharing a height and the row does not come out ragged.
     const rowHeights = new Array(rows).fill(ROW_HEIGHT);
+    const rowTiers = new Array(rows).fill(0);
     if (!collapsed) {
-      for (const entry of measured) {
+      for (const entry of packable) {
         const row = assigned.get(entry.obj.id) || 0;
         rowHeights[row] = Math.max(rowHeights[row], entry.height);
+        if (entry.ghost && entry.ghost.stacked) rowTiers[row] = GHOST_HEIGHT + GHOST_GAP;
       }
     }
 
@@ -332,19 +506,21 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
       contentH: Math.max(10, height - LANE_PAD * 2),
       rowTops,
       rowHeights,
+      rowTiers,
       rows,
     };
     laneEntries.push(entry);
     y += height;
 
     for (const item of measured) {
+      // A ghost can reach well outside its own object's dates, and the pair has
+      // to appear and leave together, so the span tested is both of them.
+      const from = Math.min(item.obj.start, item.ghost ? item.ghost.startMs : item.obj.start);
+      const liveEnd = TYPES[item.obj.type]?.duration ? item.obj.end : item.obj.start;
+      const to = Math.max(liveEnd, item.ghost ? item.ghost.endMs : liveEnd);
       const visible =
         includeOffscreen ||
-        rangeVisible(
-          item.obj.start - pxToDuration(item.label.extraLeft),
-          (TYPES[item.obj.type]?.duration ? item.obj.end : item.obj.start) + pxToDuration(item.label.extraRight),
-          400
-        );
+        rangeVisible(from - pxToDuration(item.label.extraLeft), to + pxToDuration(item.label.extraRight), 400);
       if (!visible) continue;
 
       const row = assigned.get(item.obj.id) || 0;
@@ -352,6 +528,21 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
       rect.dimmed = filterFn ? !filterFn(item.obj) : false;
       rects.push(rect);
       byId.set(item.obj.id, rect);
+    }
+
+    for (const item of goneItems) {
+      if (!includeOffscreen && !rangeVisible(item.obj.start, item.obj.end, 400)) continue;
+      const row = collapsed ? 0 : assigned.get(item.obj.id) || 0;
+      const rowTop = entry.contentY + (entry.rowTops[row] ?? 0);
+      removed.push({
+        snap: item.gone,
+        laneEntry: entry,
+        row,
+        x: item.left,
+        w: item.width,
+        y: collapsed ? entry.y + 4 : rowTop,
+        h: collapsed ? Math.max(8, entry.height - 8) : Math.min(GONE_HEIGHT, entry.rowHeights[row] ?? GONE_HEIGHT),
+      });
     }
   }
 
@@ -365,7 +556,7 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
   // backdrops rather than covering the work they contain.
   rects.sort((a, b) => backdropRank(a) - backdropRank(b) || a.obj.z - b.obj.z);
 
-  return { geometry, rects, byId, range: visibleRange() };
+  return { geometry, rects, byId, removed, range: visibleRange() };
 }
 
 function backdropRank(rect) {
@@ -397,7 +588,14 @@ export function objectRect(obj, laneEntry, row, measured, collapsed = false) {
 
   const x = msToPx(obj.start);
   const rowTop = laneEntry.contentY + (laneEntry.rowTops[row] ?? 0);
-  const rowH = laneEntry.rowHeights[row] ?? ROW_HEIGHT;
+  const fullRowH = laneEntry.rowHeights[row] ?? ROW_HEIGHT;
+
+  // A ghost that overlaps its own bar in time cannot share its height, so it
+  // takes a tier along the bottom of the row and the bars keep what is above.
+  // A collapsed lane has no room for tiers: there, the ghost stays behind.
+  const stacked = !!(measured.ghost && measured.ghost.stacked) && !collapsed;
+  const tier = collapsed ? 0 : (laneEntry.rowTiers?.[row] ?? 0);
+  const rowH = Math.max(ROW_HEIGHT, fullRowH - tier);
 
   let width;
   let left;
@@ -438,6 +636,21 @@ export function objectRect(obj, laneEntry, row, measured, collapsed = false) {
     shape,
     row,
     label,
+    /**
+     * Where the baseline ghost is drawn, in the same coordinates as the bar —
+     * behind it when the two are clear of each other, in its own tier under the
+     * row when they are not. Null unless the document is comparing.
+     */
+    ghost: measured.ghost
+      ? {
+          ...measured.ghost,
+          stacked,
+          x: measured.ghost.left,
+          w: measured.ghost.width,
+          y: stacked ? rowTop + rowH + GHOST_GAP : top,
+          h: stacked ? GHOST_HEIGHT : height,
+        }
+      : null,
     x: left,
     y: top,
     w: width,

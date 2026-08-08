@@ -6,7 +6,7 @@
  * showing and re-renders it when the document changes, so no pane has to
  * manage its own subscriptions.
  *
- * Imports: util, events, dates, model, store, storage, query, analysis,
+ * Imports: util, events, dates, model, store, storage, filestore, query, analysis,
  *          viewport, renderer, io, icons, components, lists, notes, dialogs,
  *          theme.
  */
@@ -29,6 +29,7 @@ import {
 import * as store from '../core/store.js';
 import { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted } from '../core/storage.js';
 import * as cloud from '../core/cloud.js';
+import * as filestore from '../core/filestore.js';
 import { search, summarise, facet, filterPredicate } from '../core/query.js';
 import { criticalPath, compareBaseline, programmeHealth, objectHealth, slipByLane, linkViolations, evaluateLink } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
@@ -140,6 +141,11 @@ export function buildPanels() {
   });
   on(EV.FILTER_CHANGED, () => {
     if (active === 'filters' || active === 'search') rerender();
+  });
+  // Connecting a folder, or a colleague picking up or dropping the pen, changes
+  // what the Import / export pane says about where the plan lives.
+  on(EV.FILE_STATE, () => {
+    if (active === 'io' || active === 'settings') rerender();
   });
   on('ui:focus-search', () => {
     const input = bodyEl.querySelector('[data-search-input]');
@@ -1040,7 +1046,134 @@ function paneHistory(root) {
    Import / export
    ═══════════════════════════════════════════════════════════════════════ */
 
+/**
+ * The shared-folder controls.
+ *
+ * This is the whole of file mode's interface: connect a folder, see which plan
+ * is live and who has the pen, and open another. It sits at the top of Import /
+ * export because that is where someone goes looking for "where does my data
+ * live", and it is hidden entirely on a hosted deployment, where the answer is
+ * the server and this would only confuse.
+ */
+function sharedFolderSection() {
+  const st = filestore.state();
+
+  if (isHosted()) return el('div');
+
+  if (!st.supported) {
+    return section('Shared folder', [
+      el('div', {
+        class: 'cx-hint',
+        text:
+          'Saving straight into a shared or synced folder needs Edge or Chrome. ' +
+          'This browser keeps your work in its own storage instead — use Export → JSON to move a plan.',
+      }),
+    ], { id: 'shared-folder' });
+  }
+
+  const rows = [];
+  const wideBtn = (label, iconName, onClick, primary = false) =>
+    el('button', {
+      class: 'cx-btn mini' + (primary ? ' primary' : ''),
+      style: { justifyContent: 'flex-start', width: '100%' },
+      html: icon(iconName, { size: 12 }) + `<span>${label}</span>`,
+      onClick,
+    });
+
+  // Three states, and the middle one is easy to forget: a folder can be
+  // connected with no plan open yet, which happens whenever it holds more than
+  // one. Offering "connect a folder" again there is just confusing.
+  if (st.connected) {
+    const editing = st.role === 'editor';
+    rows.push(
+      el('div', { class: 'cx-listrow' + (editing ? ' active' : '') }, [
+        el('div', { class: 'lr-main' }, [
+          el('div', { class: 'lr-title', text: st.plan }),
+          el('div', {
+            class: 'lr-meta',
+            text: editing ? `${st.folder} · you have the pen` : `${st.folder} · ${st.holder} is editing`,
+          }),
+        ]),
+      ])
+    );
+    if (!editing) rows.push(wideBtn('Take over editing', 'refresh', () => cmd.takeOverEditing()));
+    rows.push(
+      wideBtn('Reload from the folder', 'download', () => cmd.reloadFromFolder()),
+      wideBtn('Disconnect', 'x', () => cmd.disconnectFolder())
+    );
+  } else if (st.folder) {
+    rows.push(
+      el('div', { class: 'cx-hint', text: `${st.folder} is connected. Choose the plan to work on.` }),
+      wideBtn('New plan in this folder…', 'plus', () => cmd.createFolderPlanFromCurrent()),
+      wideBtn('Pick a different folder…', 'folder', () => cmd.connectFolder())
+    );
+  } else {
+    rows.push(
+      el('div', {
+        class: 'cx-hint',
+        text:
+          'Keep the plan as a file in a shared or OneDrive-synced folder. ' +
+          'Both of you open the same file; whoever gets there first has the pen, the other reads.',
+      }),
+      wideBtn('Connect a folder…', 'folder', () => cmd.connectFolder(), true)
+    );
+  }
+
+  // Other plans sitting in the folder, so switching programmes does not mean
+  // going back through the picker.
+  const list = el('div', { class: 'cx-list', style: { marginTop: '8px' } });
+  if (st.folder) {
+    filestore
+      .listPlans()
+      .then((found) => {
+        clear(list);
+        const others = found.filter((plan) => plan.name !== st.plan);
+        if (!others.length) return;
+        list.appendChild(el('div', { class: 'cx-hint', text: st.connected ? 'Also in this folder' : 'Plans in this folder' }));
+        for (const plan of others) {
+          list.appendChild(
+            el('div', { class: 'cx-listrow', onClick: () => cmd.openFolderPlanByName(plan.name) }, [
+              el('div', { class: 'lr-main' }, [
+                el('div', { class: 'lr-title', text: plan.name }),
+                el('div', { class: 'lr-meta', text: plan.modified ? fmtTimestamp(plan.modified) : '' }),
+              ]),
+            ])
+          );
+        }
+      })
+      .catch(() => {
+        /* the folder went away — the state row already says so */
+      });
+  }
+  rows.push(list);
+
+  if (!st.connected && !st.folder) {
+    // A remembered folder whose permission has lapsed: one click gets it back,
+    // which is much better than making someone find it in the picker again.
+    const reconnect = el('div');
+    filestore
+      .storedFolder()
+      .then((stored) => {
+        if (!stored) return;
+        reconnect.appendChild(
+          el('button', {
+            class: 'cx-btn mini',
+            style: { justifyContent: 'flex-start', width: '100%', marginTop: '6px' },
+            html: icon('refresh', { size: 12 }) + `<span>Reconnect to ${stored.folder}</span>`,
+            onClick: () => cmd.reconnectFolder(),
+          })
+        );
+      })
+      .catch(() => {});
+    rows.push(reconnect);
+  }
+
+  return section('Shared folder', rows, { id: 'shared-folder' });
+}
+
 function paneIo(root) {
+  root.appendChild(sharedFolderSection());
+
   root.appendChild(
     section('Export', [
       el('div', { class: 'cx-hint', text: 'PDF, print, SVG, PNG and JPEG all draw the same picture. What goes in it is up to you.' }),
@@ -1059,7 +1192,7 @@ function paneIo(root) {
       exportButton('CSV (objects)', 'table', () => exporters.exportCsv()),
       exportButton('CSV (dependencies)', 'table', () => exporters.exportLinksCsv()),
       exportButton('JSON (full project)', 'save', () => exporters.exportJson()),
-    ])
+    ], { id: 'export' })
   );
 
   root.appendChild(

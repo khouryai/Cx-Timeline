@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 41   Built: 2026-08-07T18:35:50.805Z
+ * Modules: 42   Built: 2026-08-08T18:17:30.030Z
  */
 (function () {
   'use strict';
@@ -534,6 +534,11 @@ __mods["core/events.js"] = function (__x, __req) {
     SAVE_DONE: 'save:done',
     SAVE_ERROR: 'save:error',
     BACKUP_MADE: 'backup:made',
+
+    /* The shared folder (file mode only) */
+    FILE_STATE: 'file:state', // { connected, folder, plan, role, holder } — connection or pen changed
+    FILE_EXTERNAL_CHANGE: 'file:external', // a colleague's save landed in the folder
+    FILE_CONFLICT: 'file:conflict', // a write was refused because the file moved underneath us
 
     /* History */
     HISTORY_CHANGED: 'history:changed', // { canUndo, canRedo, depth }
@@ -4710,6 +4715,679 @@ __mods["core/store.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// core/filestore.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/filestore.js"] = function (__x, __req) {
+  /**
+   * The shared folder.
+   *
+   * This module is the *only* one that knows the File System Access API exists,
+   * the same way `core/cloud.js` is the only one that knows about Supabase.
+   * Everything above it — storage, the panels, the status bar — talks to the
+   * functions here and would keep working against a different file backend.
+   *
+   * It is inert unless the browser supports the API and the user has connected a
+   * folder. With nothing connected `isConnected()` returns false, nothing here is
+   * ever called, and CX Timeline behaves exactly as it always has.
+   *
+   * What lives in a connected folder
+   * --------------------------------
+   *   <plan>.json         the project, in exactly the format Export → JSON writes
+   *   <plan>.lock.json    who currently has the pen, and when they last touched it
+   *   attachments/<id>    attachment bytes, one file each
+   *
+   * The plan file format is deliberately unchanged: a folder full of these opens
+   * in the importer, reads in a text editor, and is versioned by whatever the
+   * folder is synced with. Nothing here is a proprietary container.
+   *
+   * On two people at once
+   * --------------------
+   * The lock file says who is editing, and the other person opens read-only. But
+   * a synced folder is not a database: the lock takes as long to arrive as the
+   * sync does, so two people opening within the same few seconds can both believe
+   * they hold it. The lock is therefore *courtesy*, and the guard that actually
+   * protects the work is `savePlan()` — it re-reads the file's size and modified
+   * time before every write and refuses if either moved since we last read it.
+   * That is the same promise the hosted path makes with its revision check: you
+   * may be told to reload, but you can never silently overwrite someone.
+   *
+   * Imports: util, events.
+   */
+
+  const { emit, EV } = __req("core/events.js");
+
+  /** How often the holder re-stamps the lock, in ms. */
+  const HEARTBEAT_MS = 30000;
+  /** A lock older than this is treated as abandoned — a crash, or a closed lid. */
+  const STALE_MS = 150000;
+  /** How often we look for someone else's save landing in the folder. */
+  const POLL_MS = 12000;
+  /** Where the folder handle is remembered between sessions. */
+  const DB_NAME = 'cx-timeline-folder';
+  const DB_STORE = 'handles';
+  const HANDLE_KEY = 'folder';
+
+  /* ── State ─────────────────────────────────────────────────────────────── */
+
+  let dirHandle = null;
+  let fileHandle = null;
+  let planName = '';
+  /** Size and modified time of the plan as we last saw it — the write guard. */
+  let stamp = null;
+  /** 'editor' when we hold the lock, 'viewer' when someone else does. */
+  let role = null;
+  /** Who holds the lock, when it is not us. */
+  let holder = '';
+  /** This tab's identity, so we recognise our own lock across a reload. */
+  const sessionId = `s_${Math.random().toString(36).slice(2, 10)}`;
+  let displayName = '';
+  let heartbeatTimer = null;
+  let pollTimer = null;
+
+  /* ── Capability ────────────────────────────────────────────────────────── */
+
+  /** True when this browser can open a folder at all. Chromium-based only. */
+  function isSupported() {
+    return typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function';
+  }
+
+  /** True when a plan in a connected folder is the live document. */
+  function isConnected() {
+    return !!(dirHandle && fileHandle);
+  }
+
+  /** True when someone else holds the pen, so this session must not write. */
+  function isViewer() {
+    return isConnected() && role === 'viewer';
+  }
+
+  /** Everything the interface needs to describe the current state. */
+  function state() {
+    return {
+      supported: isSupported(),
+      connected: isConnected(),
+      folder: dirHandle ? dirHandle.name : '',
+      plan: planName,
+      role: role || null,
+      holder,
+      savedAt: stamp ? stamp.lastModified : null,
+    };
+  }
+
+  /** The name a colleague will see in the lock. Set once, from the settings pane. */
+  function setDisplayName(name) {
+    displayName = String(name || '').trim();
+    writePref('name', displayName);
+  }
+
+  function getDisplayName() {
+    return displayName || readPref('name') || 'Someone';
+  }
+
+  /* ── Remembering the folder between sessions ───────────────────────────── */
+
+  /**
+   * Directory handles survive a reload, but only in IndexedDB — they are
+   * structured-cloneable and cannot be serialised to JSON. This is a database of
+   * its own rather than a table in the main one, so `core/storage.js` can import
+   * this module without this module importing it back.
+   */
+  function openHandleDb() {
+    return new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') {
+        reject(new Error('IndexedDB unavailable'));
+        return;
+      }
+      const request = indexedDB.open(DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains(DB_STORE)) request.result.createObjectStore(DB_STORE);
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async function rememberHandle(handle, plan) {
+    try {
+      const db = await openHandleDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE, 'readwrite');
+        tx.objectStore(DB_STORE).put({ handle, plan }, HANDLE_KEY);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+      db.close();
+    } catch (err) {
+      console.warn('[cx-timeline] could not remember the folder:', err.message);
+    }
+  }
+
+  async function recallHandle() {
+    try {
+      const db = await openHandleDb();
+      const record = await new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE);
+        const req = tx.objectStore(DB_STORE).get(HANDLE_KEY);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+      db.close();
+      return record;
+    } catch {
+      return null;
+    }
+  }
+
+  async function forgetHandle() {
+    try {
+      const db = await openHandleDb();
+      await new Promise((resolve) => {
+        const tx = db.transaction(DB_STORE, 'readwrite');
+        tx.objectStore(DB_STORE).delete(HANDLE_KEY);
+        tx.oncomplete = resolve;
+        tx.onerror = resolve;
+      });
+      db.close();
+    } catch {
+      /* nothing to forget */
+    }
+  }
+
+  /** Small device-scoped values (the display name, the last plan opened). */
+  function readPref(key) {
+    try {
+      return localStorage.getItem(`cxtl.folder.${key}`) || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function writePref(key, value) {
+    try {
+      localStorage.setItem(`cxtl.folder.${key}`, String(value || ''));
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /** The folder we remembered, if any — so the UI can offer to reconnect by name. */
+  async function storedFolder() {
+    const record = await recallHandle();
+    if (!record || !record.handle) return null;
+    return { folder: record.handle.name, plan: record.plan || '' };
+  }
+
+  /* ── Connecting ────────────────────────────────────────────────────────── */
+
+  /**
+   * Ask for a folder and remember it. Must be called from a user gesture — the
+   * browser refuses a picker that nobody clicked for.
+   *
+   * Returns the plans found inside so the caller can choose, rather than guessing
+   * on the user's behalf when a folder holds several.
+   */
+  async function chooseFolder() {
+    if (!isSupported()) throw new Error('This browser cannot open a folder. Use Edge or Chrome.');
+    const handle = await window.showDirectoryPicker({ id: 'cx-timeline-plans', mode: 'readwrite' });
+    if (!handle) return null;
+    if (!(await ensurePermission(handle))) throw new Error('Permission to edit that folder was declined.');
+
+    dirHandle = handle;
+    fileHandle = null;
+    planName = '';
+    await rememberHandle(handle, '');
+    emitState();
+    return { folder: handle.name, plans: await listPlans() };
+  }
+
+  /**
+   * Reconnect to the remembered folder without prompting.
+   *
+   * Resolves to the folder's plans when the browser still considers the grant
+   * live, and to null when it needs a click — which is why the caller shows a
+   * "reconnect" affordance rather than throwing the user into a dialog on boot.
+   */
+  async function reconnectSilently() {
+    if (!isSupported()) return null;
+    const record = await recallHandle();
+    if (!record || !record.handle) return null;
+
+    const granted = await queryPermission(record.handle);
+    if (!granted) return null;
+
+    dirHandle = record.handle;
+    fileHandle = null;
+    planName = '';
+    emitState();
+    return { folder: dirHandle.name, plans: await listPlans(), lastPlan: record.plan || '' };
+  }
+
+  /** Reconnect from a user gesture, prompting for permission if it has lapsed. */
+  async function reconnectWithPrompt() {
+    if (!isSupported()) return null;
+    const record = await recallHandle();
+    if (!record || !record.handle) return null;
+    if (!(await ensurePermission(record.handle))) return null;
+
+    dirHandle = record.handle;
+    fileHandle = null;
+    planName = '';
+    emitState();
+    return { folder: dirHandle.name, plans: await listPlans(), lastPlan: record.plan || '' };
+  }
+
+  async function queryPermission(handle) {
+    try {
+      return (await handle.queryPermission({ mode: 'readwrite' })) === 'granted';
+    } catch {
+      return false;
+    }
+  }
+
+  async function ensurePermission(handle) {
+    if (await queryPermission(handle)) return true;
+    try {
+      return (await handle.requestPermission({ mode: 'readwrite' })) === 'granted';
+    } catch {
+      return false;
+    }
+  }
+
+  /** Stop using the folder: release the lock and forget the handle. */
+  async function disconnect() {
+    await releaseLock();
+    stopTimers();
+    dirHandle = null;
+    fileHandle = null;
+    planName = '';
+    stamp = null;
+    role = null;
+    holder = '';
+    await forgetHandle();
+    emitState();
+  }
+
+  /* ── Plans in the folder ───────────────────────────────────────────────── */
+
+  /** Every plan in the connected folder, newest first. Lock files are not plans. */
+  async function listPlans() {
+    if (!dirHandle) return [];
+    const out = [];
+    try {
+      for await (const [name, handle] of dirHandle.entries()) {
+        if (handle.kind !== 'file') continue;
+        if (!name.toLowerCase().endsWith('.json')) continue;
+        if (name.toLowerCase().endsWith('.lock.json')) continue;
+        let size = 0;
+        let modified = 0;
+        try {
+          const file = await handle.getFile();
+          size = file.size;
+          modified = file.lastModified;
+        } catch {
+          /* listed but unreadable — still worth showing */
+        }
+        out.push({ name, size, modified });
+      }
+    } catch (err) {
+      console.warn('[cx-timeline] could not read the folder:', err.message);
+    }
+    return out.sort((a, b) => b.modified - a.modified);
+  }
+
+  /**
+   * Open a plan and take the pen if it is free.
+   *
+   * Returns `{ doc, role, holder }`. A `viewer` role is not a failure — it means
+   * a colleague is in there, and the document is still returned so it can be read.
+   */
+  async function openPlan(name) {
+    if (!dirHandle) throw new Error('No folder is connected.');
+    const handle = await dirHandle.getFileHandle(name);
+    const file = await handle.getFile();
+    const text = await file.text();
+
+    let doc;
+    try {
+      doc = JSON.parse(text);
+    } catch (err) {
+      throw new Error(`${name} is not a valid project file: ${err.message}`);
+    }
+
+    fileHandle = handle;
+    planName = name;
+    stamp = { size: file.size, lastModified: file.lastModified };
+    await rememberHandle(dirHandle, name);
+
+    const lock = await readLock();
+    if (lock && !isOurs(lock) && !isStale(lock)) {
+      role = 'viewer';
+      holder = lock.holder || 'Someone';
+    } else {
+      role = 'editor';
+      holder = '';
+      await writeLock();
+    }
+
+    startTimers();
+    emitState();
+    return { doc, role, holder };
+  }
+
+  /** Write a new plan into the folder and open it. */
+  async function createPlan(name, doc) {
+    if (!dirHandle) throw new Error('No folder is connected.');
+    const safe = name.toLowerCase().endsWith('.json') ? name : `${name}.json`;
+    const handle = await dirHandle.getFileHandle(safe, { create: true });
+
+    const writable = await handle.createWritable();
+    await writable.write(serialise(doc));
+    await writable.close();
+
+    fileHandle = handle;
+    planName = safe;
+    const file = await handle.getFile();
+    stamp = { size: file.size, lastModified: file.lastModified };
+    role = 'editor';
+    holder = '';
+    await rememberHandle(dirHandle, safe);
+    await writeLock();
+    startTimers();
+    emitState();
+    return safe;
+  }
+
+  /* ── Saving, with the guard ────────────────────────────────────────────── */
+
+  /**
+   * Write the document back, but never over someone else's work.
+   *
+   * The file is stat-ed first: if its size or modified time moved since we last
+   * read or wrote it, a colleague's save landed in between and this one is
+   * refused. That is the whole safety property of this mode — the caller is told
+   * to reload rather than being allowed to clobber.
+   */
+  async function savePlan(doc) {
+    if (!fileHandle) return { ok: false, reason: 'not-connected' };
+    if (role === 'viewer') return { ok: false, reason: 'read-only' };
+
+    try {
+      const current = await fileHandle.getFile();
+      if (stamp && (current.size !== stamp.size || current.lastModified !== stamp.lastModified)) {
+        emit(EV.FILE_CONFLICT, { plan: planName });
+        return { ok: false, reason: 'conflict', conflict: true };
+      }
+
+      const writable = await fileHandle.createWritable();
+      await writable.write(serialise(doc));
+      await writable.close();
+
+      const after = await fileHandle.getFile();
+      stamp = { size: after.size, lastModified: after.lastModified };
+      return { ok: true, at: after.lastModified };
+    } catch (err) {
+      // A lapsed permission grant is the common failure here, and it reads as a
+      // generic error unless we say so.
+      const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+      return { ok: false, reason: denied ? 'permission' : 'error', error: err };
+    }
+  }
+
+  /** Re-read the plan from the folder — the "they saved, catch up" path. */
+  async function refreshFromDisk() {
+    if (!fileHandle) return null;
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+    stamp = { size: file.size, lastModified: file.lastModified };
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      throw new Error(`${planName} could not be read: ${err.message}`);
+    }
+  }
+
+  /** The document as it is written to disk: the Export → JSON format, verbatim. */
+  function serialise(doc) {
+    return JSON.stringify(
+      {
+        ...doc,
+        exported: {
+          at: new Date().toISOString(),
+          application: 'CX Timeline',
+          note: 'Attachment file contents live in the attachments folder beside this file.',
+        },
+      },
+      null,
+      2
+    );
+  }
+
+  /* ── The lock ──────────────────────────────────────────────────────────── */
+
+  function lockName() {
+    return `${planName.replace(/\.json$/i, '')}.lock.json`;
+  }
+
+  async function readLock() {
+    if (!dirHandle || !planName) return null;
+    try {
+      const handle = await dirHandle.getFileHandle(lockName());
+      const text = await (await handle.getFile()).text();
+      return JSON.parse(text);
+    } catch {
+      return null; // absent, unreadable or mid-sync — treat as free
+    }
+  }
+
+  async function writeLock() {
+    if (!dirHandle || !planName) return;
+    try {
+      const handle = await dirHandle.getFileHandle(lockName(), { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(
+        JSON.stringify({ id: sessionId, holder: getDisplayName(), since: Date.now(), beat: Date.now() }, null, 2)
+      );
+      await writable.close();
+    } catch (err) {
+      // Failing to take the lock is not fatal: the write guard still protects the
+      // work, so the session continues without the courtesy.
+      console.warn('[cx-timeline] could not write the lock file:', err.message);
+    }
+  }
+
+  async function releaseLock() {
+    if (!dirHandle || !planName || role !== 'editor') return;
+    try {
+      const lock = await readLock();
+      if (lock && !isOurs(lock)) return; // someone took over; leave theirs alone
+      await dirHandle.removeEntry(lockName());
+    } catch {
+      /* the staleness timeout is the real release mechanism */
+    }
+  }
+
+  function isOurs(lock) {
+    return !!lock && lock.id === sessionId;
+  }
+
+  function isStale(lock) {
+    return !lock || !lock.beat || Date.now() - lock.beat > STALE_MS;
+  }
+
+  /**
+   * Claim a lock whose holder has gone away.
+   *
+   * Offered only when the lock reads as stale, so this is "the other session
+   * crashed" rather than "barge in on a colleague".
+   */
+  async function takeOver() {
+    if (!isConnected()) return false;
+    const lock = await readLock();
+    if (lock && !isOurs(lock) && !isStale(lock)) return false;
+    role = 'editor';
+    holder = '';
+    await writeLock();
+    emitState();
+    return true;
+  }
+
+  /** Who holds the pen right now, re-read from the folder. */
+  async function checkLock() {
+    if (!isConnected()) return null;
+    const lock = await readLock();
+
+    if (!lock || isOurs(lock) || isStale(lock)) {
+      // Nobody is in there. Promote a viewer that has been waiting.
+      if (role === 'viewer') {
+        role = 'editor';
+        holder = '';
+        await writeLock();
+        emitState();
+      }
+      return { role, holder, stale: !!lock && isStale(lock) };
+    }
+
+    if (role === 'editor') {
+      // Somebody else stamped the lock while we thought we had it — two sessions
+      // opened inside one sync window. Yield: their save would beat ours anyway.
+      role = 'viewer';
+      holder = lock.holder || 'Someone';
+      emitState();
+    } else if (holder !== (lock.holder || 'Someone')) {
+      holder = lock.holder || 'Someone';
+      emitState();
+    }
+    return { role, holder, stale: false };
+  }
+
+  /* ── Watching the folder ───────────────────────────────────────────────── */
+
+  function startTimers() {
+    stopTimers();
+    heartbeatTimer = setInterval(() => {
+      if (role === 'editor') writeLock();
+    }, HEARTBEAT_MS);
+
+    pollTimer = setInterval(async () => {
+      if (!fileHandle) return;
+      try {
+        await checkLock();
+        const file = await fileHandle.getFile();
+        if (stamp && (file.size !== stamp.size || file.lastModified !== stamp.lastModified)) {
+          // Do not update the stamp — the write guard needs to keep refusing
+          // until the document has actually been reloaded.
+          emit(EV.FILE_EXTERNAL_CHANGE, { plan: planName, at: file.lastModified });
+        }
+      } catch {
+        /* the folder went away — the next save will report it properly */
+      }
+    }, POLL_MS);
+  }
+
+  function stopTimers() {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (pollTimer) clearInterval(pollTimer);
+    heartbeatTimer = null;
+    pollTimer = null;
+  }
+
+  /** Release the lock on the way out. Best effort — unload cannot await. */
+  function handleUnload() {
+    releaseLock();
+    stopTimers();
+  }
+
+  function emitState() {
+    emit(EV.FILE_STATE, state());
+  }
+
+  /* ── Attachments ───────────────────────────────────────────────────────── */
+
+  async function attachmentsDir(create = false) {
+    if (!dirHandle) return null;
+    try {
+      return await dirHandle.getDirectoryHandle('attachments', { create });
+    } catch {
+      return null;
+    }
+  }
+
+  async function putBlob(id, file) {
+    const dir = await attachmentsDir(true);
+    if (!dir) throw new Error('Could not create the attachments folder.');
+    const handle = await dir.getFileHandle(id, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(file);
+    await writable.close();
+    return { id, name: file.name, type: file.type, size: file.size };
+  }
+
+  async function getBlob(id) {
+    const dir = await attachmentsDir(false);
+    if (!dir) return null;
+    try {
+      const handle = await dir.getFileHandle(id);
+      const file = await handle.getFile();
+      return { id, blob: file, name: file.name || id, type: file.type, size: file.size };
+    } catch {
+      return null;
+    }
+  }
+
+  async function deleteBlob(id) {
+    const dir = await attachmentsDir(false);
+    if (!dir) return;
+    try {
+      await dir.removeEntry(id);
+    } catch {
+      /* already gone */
+    }
+  }
+
+  /** Total bytes held in the attachments folder — shown in Settings. */
+  async function blobUsage() {
+    const dir = await attachmentsDir(false);
+    if (!dir) return { count: 0, bytes: 0 };
+    let count = 0;
+    let total = 0;
+    try {
+      for await (const [, handle] of dir.entries()) {
+        if (handle.kind !== 'file') continue;
+        count++;
+        total += (await handle.getFile()).size;
+      }
+    } catch {
+      /* partial answer is better than none */
+    }
+    return { count, bytes: total };
+  }
+
+  Object.defineProperty(__x, "isSupported", { get: () => isSupported, enumerable: true });
+  Object.defineProperty(__x, "isConnected", { get: () => isConnected, enumerable: true });
+  Object.defineProperty(__x, "isViewer", { get: () => isViewer, enumerable: true });
+  Object.defineProperty(__x, "state", { get: () => state, enumerable: true });
+  Object.defineProperty(__x, "setDisplayName", { get: () => setDisplayName, enumerable: true });
+  Object.defineProperty(__x, "getDisplayName", { get: () => getDisplayName, enumerable: true });
+  Object.defineProperty(__x, "storedFolder", { get: () => storedFolder, enumerable: true });
+  Object.defineProperty(__x, "chooseFolder", { get: () => chooseFolder, enumerable: true });
+  Object.defineProperty(__x, "reconnectSilently", { get: () => reconnectSilently, enumerable: true });
+  Object.defineProperty(__x, "reconnectWithPrompt", { get: () => reconnectWithPrompt, enumerable: true });
+  Object.defineProperty(__x, "disconnect", { get: () => disconnect, enumerable: true });
+  Object.defineProperty(__x, "listPlans", { get: () => listPlans, enumerable: true });
+  Object.defineProperty(__x, "openPlan", { get: () => openPlan, enumerable: true });
+  Object.defineProperty(__x, "createPlan", { get: () => createPlan, enumerable: true });
+  Object.defineProperty(__x, "savePlan", { get: () => savePlan, enumerable: true });
+  Object.defineProperty(__x, "refreshFromDisk", { get: () => refreshFromDisk, enumerable: true });
+  Object.defineProperty(__x, "takeOver", { get: () => takeOver, enumerable: true });
+  Object.defineProperty(__x, "checkLock", { get: () => checkLock, enumerable: true });
+  Object.defineProperty(__x, "handleUnload", { get: () => handleUnload, enumerable: true });
+  Object.defineProperty(__x, "putBlob", { get: () => putBlob, enumerable: true });
+  Object.defineProperty(__x, "getBlob", { get: () => getBlob, enumerable: true });
+  Object.defineProperty(__x, "deleteBlob", { get: () => deleteBlob, enumerable: true });
+  Object.defineProperty(__x, "blobUsage", { get: () => blobUsage, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // core/storage.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["core/storage.js"] = function (__x, __req) {
@@ -4726,6 +5404,12 @@ __mods["core/storage.js"] = function (__x, __req) {
    *   local mode   IndexedDB — the original behaviour, no account, no server.
    *   hosted mode  Postgres via `core/cloud.js`, with IndexedDB demoted to an
    *                offline cache so a dropped connection loses nothing.
+   *   file mode    a JSON file in a folder the user picked, via
+   *                `core/filestore.js` — a shared drive or a synced OneDrive
+   *                folder, with IndexedDB again demoted to a cache. No account
+   *                and no server: the folder's own permissions are the access
+   *                control, and a lock file plus a write guard keep two people
+   *                from overwriting each other.
    *
    * Storage stack (local, and the cache in hosted mode)
    * --------------------------------------------------
@@ -4736,12 +5420,13 @@ __mods["core/storage.js"] = function (__x, __req) {
    * browsing on some engines and when a page is opened from `file://` under a
    * hardened profile. The fallback is transparent to every caller.
    *
-   * Imports: util, events, cloud, model, store.
+   * Imports: util, events, cloud, filestore, model, store.
    */
 
   const { debounce, bytes } = __req("core/util.js");
   const { emit, on, EV } = __req("core/events.js");
   const cloud = __req("core/cloud.js");
+  const filestore = __req("core/filestore.js");
   const { normalise, makeStarterProject } = __req("core/model.js");
   const { getDoc, markClean, isDirty } = __req("core/store.js");
 
@@ -4768,6 +5453,13 @@ __mods["core/storage.js"] = function (__x, __req) {
    * answer to "where does this go" rather than a scattering of checks.
    */
   let hosted = false;
+
+  /**
+   * True once a plan in a connected folder is the live document. Mutually
+   * exclusive with `hosted`: a deployment has a backend or it has a folder, and
+   * the folder is only reachable when there is no backend to contradict it.
+   */
+  let fileMode = false;
 
   /* ── IndexedDB plumbing ────────────────────────────────────────────────── */
 
@@ -4875,9 +5567,74 @@ __mods["core/storage.js"] = function (__x, __req) {
       console.warn('[cx-timeline] signed in but could not open a project; falling back to local storage');
     }
 
+    if (!cloud.isConfigured()) {
+      const opened = await openFromFolder();
+      if (opened) return opened;
+    }
+
     const saved = await loadLatest();
     if (saved) return { doc: normalise(saved), fresh: false };
     return { doc: normalise(makeStarterProject()), fresh: true };
+  }
+
+  /**
+   * Re-open the plan this device was last working on in its shared folder.
+   *
+   * Only succeeds when the browser still considers the folder grant live. When it
+   * has lapsed — which is the common case after a browser restart — this returns
+   * null on purpose: re-granting needs a click, so the last local copy is loaded
+   * instead and the interface offers to reconnect. Booting into a permission
+   * dialog nobody asked for would be worse than booting into a cached plan.
+   */
+  async function openFromFolder() {
+    if (!filestore.isSupported()) return null;
+    try {
+      const connected = await filestore.reconnectSilently();
+      if (!connected) return null;
+
+      const wanted = connected.lastPlan || (connected.plans.length === 1 ? connected.plans[0].name : '');
+      if (!wanted) return null;
+
+      const { doc } = await filestore.openPlan(wanted);
+      fileMode = true;
+      editsSinceBackup = 0;
+      return { doc: normalise(doc), fresh: false };
+    } catch (err) {
+      console.warn('[cx-timeline] could not reopen the shared folder:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Open a plan from the connected folder and make it the live document.
+   * Called by the Shared folder pane once a folder has been picked.
+   */
+  async function openFolderPlan(name) {
+    const { doc, role, holder } = await filestore.openPlan(name);
+    fileMode = true;
+    hosted = false;
+    editsSinceBackup = 0;
+    return { doc: normalise(doc), role, holder };
+  }
+
+  /** Write the current document into the connected folder as a new plan. */
+  async function createFolderPlan(name, doc) {
+    const written = await filestore.createPlan(name, normalise(doc));
+    fileMode = true;
+    hosted = false;
+    editsSinceBackup = 0;
+    return written;
+  }
+
+  /** Stop using the folder and fall back to this device's own storage. */
+  async function leaveFolder() {
+    await filestore.disconnect();
+    fileMode = false;
+  }
+
+  /** True when the live document is a file in a connected folder. */
+  function isFileMode() {
+    return fileMode;
   }
 
   /**
@@ -5022,6 +5779,32 @@ __mods["core/storage.js"] = function (__x, __req) {
 
         // A local copy of every successful save is what makes a dropped
         // connection survivable, and what the crash-recovery path reads.
+        await cacheLocally(record);
+      } else if (fileMode) {
+        const result = await filestore.savePlan(doc);
+
+        if (!result.ok) {
+          // Somebody else has the pen. The user has already been told by the
+          // banner, so this is not an error to raise again.
+          if (result.reason === 'read-only') {
+            markClean();
+            emit(EV.SAVE_DONE, { at: Date.now(), skipped: true });
+            return true;
+          }
+          // The file moved underneath us, or the grant lapsed. Keep the work in
+          // the local cache either way, so nothing is lost while it is resolved.
+          await cacheLocally(record);
+          if (result.reason === 'conflict') {
+            emit(EV.SAVE_ERROR, { error: new Error('conflict'), conflict: true });
+            return false;
+          }
+          if (result.reason === 'permission') {
+            emit(EV.SAVE_ERROR, { error: new Error('permission'), permission: true });
+            return false;
+          }
+          throw result.error || new Error('the folder refused the write');
+        }
+
         await cacheLocally(record);
       } else if (usingFallback) {
         lsSetJSON(LS_DOC, doc);
@@ -5258,6 +6041,9 @@ __mods["core/storage.js"] = function (__x, __req) {
    */
   async function putBlob(id, file) {
     if (hosted) return cloud.putBlob(id, file);
+    // In a shared folder the bytes go beside the plan, so a colleague who syncs
+    // the folder gets the attachments along with it.
+    if (fileMode) return filestore.putBlob(id, file);
     const record = { id, name: file.name, type: file.type, size: file.size, added: Date.now(), blob: file };
     if (usingFallback) {
       throw new Error('Attachments require IndexedDB, which is not available in this browser session.');
@@ -5271,6 +6057,7 @@ __mods["core/storage.js"] = function (__x, __req) {
       const blob = await cloud.getBlob(id);
       return blob ? { id, blob, name: id, type: blob.type, size: blob.size } : null;
     }
+    if (fileMode) return filestore.getBlob(id);
     if (usingFallback) return null;
     const record = await wrap(tx(STORE_BLOBS).get(id));
     return record || null;
@@ -5281,12 +6068,20 @@ __mods["core/storage.js"] = function (__x, __req) {
       await cloud.deleteBlob(id);
       return;
     }
+    if (fileMode) {
+      await filestore.deleteBlob(id);
+      return;
+    }
     if (usingFallback) return;
     await wrap(tx(STORE_BLOBS, 'readwrite').delete(id));
   }
 
   /** Total bytes held in the blob store — shown in Settings. */
   async function blobUsage() {
+    if (fileMode) {
+      const used = await filestore.blobUsage();
+      return { ...used, label: bytes(used.bytes) };
+    }
     if (usingFallback) return { count: 0, bytes: 0, label: '0 B' };
     try {
       const all = await wrap(tx(STORE_BLOBS).getAll());
@@ -5351,9 +6146,11 @@ __mods["core/storage.js"] = function (__x, __req) {
     return {
       backend: hosted
         ? 'Supabase (this device keeps an offline copy)'
-        : usingFallback
-          ? 'localStorage (fallback)'
-          : 'IndexedDB',
+        : fileMode
+          ? `Shared folder — ${filestore.state().folder}/${filestore.state().plan}`
+          : usingFallback
+            ? 'localStorage (fallback)'
+            : 'IndexedDB',
       document: { bytes: docBytes, label: bytes(docBytes) },
       attachments: blobs,
       quota,
@@ -5361,6 +6158,10 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "init", { get: () => init, enumerable: true });
+  Object.defineProperty(__x, "openFolderPlan", { get: () => openFolderPlan, enumerable: true });
+  Object.defineProperty(__x, "createFolderPlan", { get: () => createFolderPlan, enumerable: true });
+  Object.defineProperty(__x, "leaveFolder", { get: () => leaveFolder, enumerable: true });
+  Object.defineProperty(__x, "isFileMode", { get: () => isFileMode, enumerable: true });
   Object.defineProperty(__x, "switchProject", { get: () => switchProject, enumerable: true });
   Object.defineProperty(__x, "createCloudProject", { get: () => createCloudProject, enumerable: true });
   Object.defineProperty(__x, "isHosted", { get: () => isHosted, enumerable: true });
@@ -5529,6 +6330,42 @@ __mods["core/analysis.js"] = function (__x, __req) {
     const result = { byLink, objects, links, count: links.size, worst };
     violationCache.set(doc, result);
     return result;
+  }
+
+  /**
+   * What has to happen before a set of objects: the dependencies arriving at
+   * them, and the objects on the far end of those.
+   *
+   * One hop, not the whole upstream chain. Clicking a commissioning bar to ask
+   * "what am I waiting on" wants the answer to be a handful of bars; the
+   * transitive closure of a real plan is most of the plan, and highlighting it
+   * says nothing. The chain is what the critical path is for.
+   *
+   * Links whose predecessor is hidden are dropped — there would be nothing on
+   * the canvas for the highlight to point at.
+   *
+   * @returns {{objects: Set<string>, links: Set<string>}}
+   */
+  function predecessorsOf(doc, ids) {
+    const objects = new Set();
+    const links = new Set();
+    const selected = ids instanceof Set ? ids : new Set(ids || []);
+    if (!selected.size) return { objects, links };
+
+    // Asked for on every rendered frame, so this walks the objects once and
+    // collects only the hidden ones — normally none — rather than indexing them
+    // all to answer a question about a handful of links.
+    const hidden = new Set();
+    for (const obj of doc.objects) if (obj.hidden) hidden.add(obj.id);
+
+    for (const link of doc.links) {
+      if (!selected.has(link.to) || hidden.has(link.from)) continue;
+      // A predecessor that is itself selected is already marked as selected.
+      if (!selected.has(link.from)) objects.add(link.from);
+      links.add(link.id);
+    }
+
+    return { objects, links };
   }
 
   /**
@@ -5858,6 +6695,7 @@ __mods["core/analysis.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "evaluateLink", { get: () => evaluateLink, enumerable: true });
   Object.defineProperty(__x, "linkViolations", { get: () => linkViolations, enumerable: true });
+  Object.defineProperty(__x, "predecessorsOf", { get: () => predecessorsOf, enumerable: true });
   Object.defineProperty(__x, "resolutionFor", { get: () => resolutionFor, enumerable: true });
   Object.defineProperty(__x, "criticalPath", { get: () => criticalPath, enumerable: true });
   Object.defineProperty(__x, "compareBaseline", { get: () => compareBaseline, enumerable: true });
@@ -6612,13 +7450,19 @@ __mods["timeline/layout.js"] = function (__x, __req) {
    * reserves the space the label occupies as well as the bar, and rows and
    * lanes grow to whatever height the wrapped text needs.
    *
+   * Baseline ghosts obey the same rule. A ghost is a rectangle on the canvas
+   * like any other, so it is measured here and packed here: its span is part of
+   * what its object occupies, and when it covers the same dates as the live bar
+   * it drops to a tier of its own below it and the row grows. Comparison mode
+   * therefore never prints one bar on top of another, at any zoom.
+   *
    * Imports: util, dates, model, store, viewport, text.
    */
 
   const { clamp } = __req("core/util.js");
-  const { MS_DAY } = __req("core/dates.js");
-  const { TYPES, objectRange } = __req("core/model.js");
-  const { getDoc, orderedLanes, getLane } = __req("core/store.js");
+  const { MS_DAY, daysBetween } = __req("core/dates.js");
+  const { TYPES, objectRange, baselineSnapshot } = __req("core/model.js");
+  const { getDoc, orderedLanes, getLane, activeBaseline } = __req("core/store.js");
   const { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } = __req("timeline/viewport.js");
   const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
 
@@ -6650,6 +7494,14 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   const ICON_W = 18;
   /** Space the percentage readout takes inside a bar label. */
   const PCT_W = 30;
+  /** Height of a baseline ghost that has to stack below its own bar. */
+  const GHOST_HEIGHT = 11;
+  /** Gap between a bar and the ghost stacked under it. */
+  const GHOST_GAP = 3;
+  /** Height of the outline drawn where a removed object used to sit. */
+  const GONE_HEIGHT = 20;
+  /** Room the day-count badge on a shift arrow needs, centred on the arrow. */
+  const SHIFT_BADGE_W = 48;
 
   /* ── Fonts ─────────────────────────────────────────────────────────────── */
 
@@ -6785,21 +7637,138 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     };
   }
 
-  /** Height one object needs on its packed row, label included. */
-  function rowHeightFor(obj, label) {
+  /** Height one object needs on its packed row, label and ghost included. */
+  function rowHeightFor(obj, label, ghost = null) {
     const def = TYPES[obj.type] || TYPES.activity;
+    // A ghost that has to stack takes a tier of its own under the bar.
+    const tier = ghost && ghost.stacked ? GHOST_HEIGHT + GHOST_GAP : 0;
 
     if (!def.duration) {
-      return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove);
+      return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove) + tier;
     }
     if (label.placement === 'fill') {
-      return Math.max(46, label.height + LABEL_PAD_Y * 2 + 8);
+      return Math.max(46, label.height + LABEL_PAD_Y * 2 + 8) + tier;
     }
     if (label.placement === 'outside') {
       // The bar itself stays slim; the row must still clear the label beside it.
-      return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2);
+      return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2) + tier;
     }
-    return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2);
+    return Math.max(ROW_HEIGHT, label.height + LABEL_PAD_Y * 2) + tier;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Baseline comparison
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The comparison rows for this frame, keyed by object id — or null when the
+   * document is not comparing against anything.
+   *
+   * Derived from the snapshot on every frame like the rest of the comparison, so
+   * there is no state to go stale. Layout reads it because a ghost occupies room
+   * on the canvas: a packer that only knew about live bars would put the next
+   * object along straight underneath one.
+   */
+  function comparisonRows(doc) {
+    if (!doc.settings || !doc.settings.showBaseline) return null;
+    const baseline = activeBaseline();
+    if (!baseline) return null;
+    const rows = baselineSnapshot(doc, baseline);
+    if (!rows.length) return null;
+    return new Map(rows.map((row) => [row.id, row]));
+  }
+
+  /**
+   * Where an object's baseline ghost goes and how much room it needs.
+   *
+   * `stacked` is the answer to the overlap question. While the ghost and the
+   * live bar cover different dates they can share a height — the ghost behind,
+   * the arrow between their finish edges — and the pair reads as one object that
+   * moved. The moment they cover the same dates that reading is a pile: the
+   * ghost then takes a slim tier below the bar, and `rowHeightFor` grows the row
+   * to hold it. Because the test is in pixels, zooming out until two dates touch
+   * splits them, and zooming back in re-joins them.
+   *
+   * `from`/`to` are the span the ghost occupies, arrow badge included, which is
+   * what `packRows` reserves. No label term: a ghost carries no text of its own,
+   * and its neighbours reserve the room their labels need themselves.
+   */
+  function measureGhost(obj, snap, barWidth) {
+    if (!snap) return null;
+    const def = TYPES[obj.type] || TYPES.activity;
+    const hasDuration = !!def.duration;
+
+    const snapStart = snap.start;
+    const snapEnd = hasDuration ? (snap.end ?? snap.start) : snap.start;
+    const startShift = daysBetween(snapStart, obj.start);
+    const endShift = hasDuration ? daysBetween(snapEnd, obj.end) : startShift;
+    // Nothing moved: there is no ghost to draw and nothing to reserve.
+    if (!startShift && !endShift) return null;
+
+    const left = hasDuration ? msToPx(snapStart) : msToPx(snapStart) - POINT_SIZE / 2;
+    const width = hasDuration ? Math.max(4, durationToPx(Math.max(snapEnd - snapStart, 0))) : POINT_SIZE;
+    const barLeft = hasDuration ? msToPx(obj.start) : msToPx(obj.start) - POINT_SIZE / 2;
+    const barRight = barLeft + (hasDuration ? barWidth : POINT_SIZE);
+
+    // A reshape (same finish, different start) is measured at the start edges
+    // instead, or the arrow would have no length. Mirrors the renderer.
+    const reshaped = endShift === 0;
+    const fromX = reshaped ? left : left + width;
+    const toX = reshaped ? barLeft : barRight;
+    const mid = (fromX + toX) / 2;
+
+    // Bands and containers are lane-tall backdrops with nothing to stack under,
+    // and a point glyph's label already owns the space below it.
+    const canStack = hasDuration && def.shape !== 'band' && def.shape !== 'container';
+
+    return {
+      snap,
+      startShift,
+      endShift,
+      startMs: snapStart,
+      endMs: snapEnd,
+      left,
+      width,
+      stacked: canStack && left < barRight + GHOST_GAP && left + width > barLeft - GHOST_GAP,
+      from: Math.min(left, mid - SHIFT_BADGE_W / 2),
+      to: Math.max(left + width, mid + SHIFT_BADGE_W / 2),
+    };
+  }
+
+  /**
+   * A stand-in for an object the baseline had and the plan no longer does.
+   *
+   * It has no object to hang off, so it gets a phantom one and joins the pack
+   * like everything else. Drawing these at the top of the lane instead — which
+   * is what happened before — put them straight on top of whatever now occupies
+   * the first row.
+   */
+  function measureGone(snap) {
+    const font = fontString({ size: 10, weight: 500, italic: true });
+    const left = msToPx(snap.start);
+    const width = Math.max(10, msToPx(snap.end ?? snap.start) - left);
+    // The struck-through name is not clipped either, so if it is wider than the
+    // outline the packer has to know the outline is effectively that wide.
+    const textW = Math.ceil(textWidth(String(snap.title || ''), font)) + 14;
+
+    return {
+      obj: {
+        id: `gone:${snap.id}`,
+        type: 'activity',
+        lane: snap.lane,
+        start: snap.start,
+        end: snap.end ?? snap.start,
+        z: -1,
+        row: null,
+      },
+      gone: snap,
+      label: { extraLeft: 0, extraRight: Math.max(0, textW - width), extraAbove: 0, extraBelow: 0 },
+      barWidth: width,
+      ghost: null,
+      height: Math.max(ROW_HEIGHT, GONE_HEIGHT),
+      left,
+      width,
+    };
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -6811,9 +7780,11 @@ __mods["timeline/layout.js"] = function (__x, __req) {
    * labels overlap.
    *
    * The occupied span of an object is the bar plus whatever its label needs on
-   * either side, converted from pixels to time at the current zoom. That is
-   * what guarantees a label placed beside a narrow bar can never be overprinted
-   * by the next object along.
+   * either side, plus — in comparison mode — its baseline ghost and the badge on
+   * the arrow that measures the move, converted from pixels to time at the
+   * current zoom. That is what guarantees a label placed beside a narrow bar, or
+   * a ghost reaching back weeks before the bar it belongs to, can never be
+   * overprinted by the next object along.
    *
    * Objects keep an explicit `row` when the user has set one; otherwise a
    * first-fit packer places them on the lowest free row, in start order, which
@@ -6825,12 +7796,17 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     const assigned = new Map();
 
     for (const entry of sorted) {
-      const { obj, label, barWidth } = entry;
+      const { obj, label, barWidth, ghost } = entry;
       const startPx = msToPx(obj.start);
       const hasDuration = !!TYPES[obj.type]?.duration;
 
-      const from = (hasDuration ? startPx : startPx - POINT_SIZE / 2) - label.extraLeft;
-      const to = (hasDuration ? startPx + barWidth : startPx + POINT_SIZE / 2) + label.extraRight;
+      let from = (hasDuration ? startPx : startPx - POINT_SIZE / 2) - label.extraLeft;
+      let to = (hasDuration ? startPx + barWidth : startPx + POINT_SIZE / 2) + label.extraRight;
+
+      if (ghost) {
+        from = Math.min(from, ghost.from);
+        to = Math.max(to, ghost.to);
+      }
 
       if (Number.isFinite(obj.row) && obj.row > 0) {
         const row = Math.min(obj.row, 24);
@@ -6869,12 +7845,34 @@ __mods["timeline/layout.js"] = function (__x, __req) {
    * Dropping them before packing rather than skipping them at paint time is what
    * makes the second mode worth having: skipping later would leave the gaps the
    * hidden objects were occupying.
+   *
+   * In comparison mode the baseline is part of the geometry: every object's ghost
+   * is measured with it, removed objects get a packed row of their own, and both
+   * are returned ready to draw (`rect.ghost`, `layout.removed`) so no consumer
+   * has to work out where they went a second time.
    */
   function computeLayout({ filterFn = null, hideFiltered = false, includeOffscreen = false, gutterWidth = 190 } = {}) {
     const doc = getDoc();
     const lanes = orderedLanes(false);
     const rects = [];
     const byId = new Map();
+    const removed = [];
+
+    const snapshot = comparisonRows(doc);
+    const goneByLane = new Map();
+    if (snapshot) {
+      const liveIds = new Set(doc.objects.map((o) => o.id));
+      const laneIds = new Set(lanes.map((l) => l.id));
+      for (const snap of snapshot.values()) {
+        if (liveIds.has(snap.id)) continue;
+        // A snapshot can name a lane that has since been deleted too; those fall
+        // to the first lane, which is the only place left to say they existed.
+        const laneId = laneIds.has(snap.lane) ? snap.lane : lanes[0]?.id;
+        if (!laneId) continue;
+        if (!goneByLane.has(laneId)) goneByLane.set(laneId, []);
+        goneByLane.get(laneId).push(snap);
+      }
+    }
 
     const laneEntries = [];
     let y = 0;
@@ -6892,18 +7890,32 @@ __mods["timeline/layout.js"] = function (__x, __req) {
           ? Math.max(MIN_BAR_PX, durationToPx(Math.max(obj.end - obj.start, MS_DAY * 0.25)))
           : POINT_SIZE;
         const label = measureLabel(obj, barWidth);
-        return { obj, label, barWidth, height: rowHeightFor(obj, label) };
+        const ghost = snapshot ? measureGhost(obj, snapshot.get(obj.id), barWidth) : null;
+        return { obj, label, barWidth, ghost, height: rowHeightFor(obj, label, ghost) };
       });
 
-      const collapsed = lane.collapsed;
-      const { assigned, rows } = collapsed ? { assigned: new Map(measured.map((m) => [m.obj.id, 0])), rows: 1 } : packRows(measured);
+      // Outlines for what the baseline had and the plan has not. They pack with
+      // the live objects rather than beside them, so a removed bar cannot land on
+      // top of whatever took its place.
+      const goneItems = (goneByLane.get(lane.id) || []).map(measureGone);
 
-      // Each row is as tall as the tallest thing standing on it.
+      const collapsed = lane.collapsed;
+      const packable = goneItems.length ? measured.concat(goneItems) : measured;
+      const { assigned, rows } = collapsed
+        ? { assigned: new Map(packable.map((m) => [m.obj.id, 0])), rows: 1 }
+        : packRows(packable);
+
+      // Each row is as tall as the tallest thing standing on it. A row holding a
+      // ghost that had to stack also reserves a tier along its bottom edge — for
+      // the whole row, not just that one object, so bars sharing a row keep
+      // sharing a height and the row does not come out ragged.
       const rowHeights = new Array(rows).fill(ROW_HEIGHT);
+      const rowTiers = new Array(rows).fill(0);
       if (!collapsed) {
-        for (const entry of measured) {
+        for (const entry of packable) {
           const row = assigned.get(entry.obj.id) || 0;
           rowHeights[row] = Math.max(rowHeights[row], entry.height);
+          if (entry.ghost && entry.ghost.stacked) rowTiers[row] = GHOST_HEIGHT + GHOST_GAP;
         }
       }
 
@@ -6931,19 +7943,21 @@ __mods["timeline/layout.js"] = function (__x, __req) {
         contentH: Math.max(10, height - LANE_PAD * 2),
         rowTops,
         rowHeights,
+        rowTiers,
         rows,
       };
       laneEntries.push(entry);
       y += height;
 
       for (const item of measured) {
+        // A ghost can reach well outside its own object's dates, and the pair has
+        // to appear and leave together, so the span tested is both of them.
+        const from = Math.min(item.obj.start, item.ghost ? item.ghost.startMs : item.obj.start);
+        const liveEnd = TYPES[item.obj.type]?.duration ? item.obj.end : item.obj.start;
+        const to = Math.max(liveEnd, item.ghost ? item.ghost.endMs : liveEnd);
         const visible =
           includeOffscreen ||
-          rangeVisible(
-            item.obj.start - pxToDuration(item.label.extraLeft),
-            (TYPES[item.obj.type]?.duration ? item.obj.end : item.obj.start) + pxToDuration(item.label.extraRight),
-            400
-          );
+          rangeVisible(from - pxToDuration(item.label.extraLeft), to + pxToDuration(item.label.extraRight), 400);
         if (!visible) continue;
 
         const row = assigned.get(item.obj.id) || 0;
@@ -6951,6 +7965,21 @@ __mods["timeline/layout.js"] = function (__x, __req) {
         rect.dimmed = filterFn ? !filterFn(item.obj) : false;
         rects.push(rect);
         byId.set(item.obj.id, rect);
+      }
+
+      for (const item of goneItems) {
+        if (!includeOffscreen && !rangeVisible(item.obj.start, item.obj.end, 400)) continue;
+        const row = collapsed ? 0 : assigned.get(item.obj.id) || 0;
+        const rowTop = entry.contentY + (entry.rowTops[row] ?? 0);
+        removed.push({
+          snap: item.gone,
+          laneEntry: entry,
+          row,
+          x: item.left,
+          w: item.width,
+          y: collapsed ? entry.y + 4 : rowTop,
+          h: collapsed ? Math.max(8, entry.height - 8) : Math.min(GONE_HEIGHT, entry.rowHeights[row] ?? GONE_HEIGHT),
+        });
       }
     }
 
@@ -6964,7 +7993,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     // backdrops rather than covering the work they contain.
     rects.sort((a, b) => backdropRank(a) - backdropRank(b) || a.obj.z - b.obj.z);
 
-    return { geometry, rects, byId, range: visibleRange() };
+    return { geometry, rects, byId, removed, range: visibleRange() };
   }
 
   function backdropRank(rect) {
@@ -6996,7 +8025,14 @@ __mods["timeline/layout.js"] = function (__x, __req) {
 
     const x = msToPx(obj.start);
     const rowTop = laneEntry.contentY + (laneEntry.rowTops[row] ?? 0);
-    const rowH = laneEntry.rowHeights[row] ?? ROW_HEIGHT;
+    const fullRowH = laneEntry.rowHeights[row] ?? ROW_HEIGHT;
+
+    // A ghost that overlaps its own bar in time cannot share its height, so it
+    // takes a tier along the bottom of the row and the bars keep what is above.
+    // A collapsed lane has no room for tiers: there, the ghost stays behind.
+    const stacked = !!(measured.ghost && measured.ghost.stacked) && !collapsed;
+    const tier = collapsed ? 0 : (laneEntry.rowTiers?.[row] ?? 0);
+    const rowH = Math.max(ROW_HEIGHT, fullRowH - tier);
 
     let width;
     let left;
@@ -7037,6 +8073,21 @@ __mods["timeline/layout.js"] = function (__x, __req) {
       shape,
       row,
       label,
+      /**
+       * Where the baseline ghost is drawn, in the same coordinates as the bar —
+       * behind it when the two are clear of each other, in its own tier under the
+       * row when they are not. Null unless the document is comparing.
+       */
+      ghost: measured.ghost
+        ? {
+            ...measured.ghost,
+            stacked,
+            x: measured.ghost.left,
+            w: measured.ghost.width,
+            y: stacked ? rowTop + rowH + GHOST_GAP : top,
+            h: stacked ? GHOST_HEIGHT : height,
+          }
+        : null,
       x: left,
       y: top,
       w: width,
@@ -7307,7 +8358,7 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
    * Route every link that has both endpoints laid out.
    * Returns render descriptors ready for the SVG layer and the exporters.
    */
-  function routeAll(links, layoutById, style = 'orthogonal', { criticalIds = null, violations = null } = {}) {
+  function routeAll(links, layoutById, style = 'orthogonal', { criticalIds = null, violations = null, upstreamIds = null } = {}) {
     const out = [];
     for (const link of links) {
       const fromRect = layoutById.get(link.from);
@@ -7324,6 +8375,8 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
         ...route,
         dimmed: fromRect.dimmed || toRect.dimmed,
         critical: criticalIds ? criticalIds.has(link.from) && criticalIds.has(link.to) : false,
+        // Arrives at the current selection: this is what it is waiting on.
+        upstream: upstreamIds ? upstreamIds.has(link.id) : false,
         violated,
         breach,
         // A broken link states the damage instead of its relationship type: the
@@ -7339,12 +8392,13 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
   /** Render routed connectors into an existing <svg> element. */
-  function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onSelect = null } = {}) {
+  function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onSelect = null, flashUpstream = false } = {}) {
     while (svg.firstChild) svg.removeChild(svg.firstChild);
 
     for (const item of routed) {
       const group = document.createElementNS(SVG_NS, 'g');
       group.dataset.linkId = item.link.id;
+      if (item.upstream) group.dataset.upstream = 'true';
 
       // A wide invisible stroke underneath makes thin connectors clickable.
       const hit = document.createElementNS(SVG_NS, 'path');
@@ -7361,6 +8415,10 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
       else if (item.critical) cls += ' critical';
       if (item.dimmed) cls += ' dim';
       if (selectedLinkIds.has(item.link.id)) cls += ' selected';
+      // A dependency feeding the selection. The caller decides when the flash is
+      // on — this layer is rebuilt every frame, so it cannot tell a new selection
+      // from a redraw of the same one.
+      if (item.upstream) cls += flashUpstream ? ' upstream flash' : ' upstream';
       path.setAttribute('class', cls);
       if (item.link.color && !item.violated) path.setAttribute('stroke', item.link.color);
       group.appendChild(path);
@@ -7377,6 +8435,8 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
       arrow.setAttribute('class', cls);
       arrow.style.fill = item.violated
         ? 'var(--bad)'
+        : item.upstream
+        ? 'var(--upstream)'
         : item.critical
         ? 'var(--bad)'
         : item.link.color || 'var(--connector)';
@@ -7674,11 +8734,11 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
   const { el, clear, rafBatch, withAlpha, readableInk, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
-  const { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay, daysBetween } = __req("core/dates.js");
-  const { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf, baselineSnapshot } = __req("core/model.js");
+  const { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } = __req("core/dates.js");
+  const { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } = __req("core/model.js");
   const { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
   const { filterPredicate } = __req("core/query.js");
-  const { linkViolations, criticalPath } = __req("core/analysis.js");
+  const { linkViolations, criticalPath, predecessorsOf } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const { computeLayout, stageHeight, ROW_HEIGHT } = __req("timeline/layout.js");
   const { fontString, textWidth, wrapText, resetTextCache } = __req("timeline/text.js");
@@ -7811,16 +8871,90 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
     dom.stage.style.height = `${stageHeight(layout.geometry)}px`;
 
+    const upstream = upstreamHighlight(doc);
+
     renderRuler(doc, settings);
     renderGutter(layout);
     renderGrid(doc, settings, layout);
     renderLaneRows(layout);
-    renderObjects(layout, settings);
+    renderObjects(layout, settings, upstream);
     renderBaseline(layout, settings);
-    renderLinks(doc, layout, settings);
+    renderLinks(doc, layout, settings, upstream);
     renderToday(doc, settings, layout);
+    if (upstream.flash) flashUpstream(upstream.objects);
 
     emit(EV.RENDER_DONE, { objects: layout.rects.length });
+  }
+
+  /* ── What the selection is waiting on ──────────────────────────────────── */
+
+  /** How long the one-shot flash on a new selection runs, in ms. */
+  const FLASH_MS = 1200;
+  /** The selection the highlight currently stands for, so the flash fires once. */
+  let upstreamKey = '';
+  let flashTimer = null;
+  /** When the current flash is due to finish — see `flashing` below. */
+  let flashUntil = 0;
+
+  /**
+   * The predecessors of the current selection, and how to flash them.
+   *
+   * Selecting a bar answers "what am I waiting on" — the objects feeding it and
+   * the arrows arriving from them stay marked for as long as the selection
+   * stands, so it can be read at leisure. The flash is separate and one-shot: it
+   * says *where to look*, and repeating it on every frame of a drag would make
+   * the canvas unreadable. It fires when the selection changes, which is the
+   * moment the answer is new.
+   *
+   * Two flags, because the two layers behave differently. Object nodes persist
+   * across frames, so `flash` tells the one frame where the selection changed to
+   * start their animation. The connector layer is rebuilt from scratch every
+   * frame, so it gets `flashing` instead — true for the whole window — otherwise
+   * the very next repaint (the mouseup after the click that selected, say) would
+   * rebuild the arrows without it and cut the flash off after one frame.
+   */
+  function upstreamHighlight(doc) {
+    const selection = getSelection();
+    const key = selection.slice().sort().join(',');
+    const flash = key !== upstreamKey;
+    upstreamKey = key;
+    if (flash) startFlashWindow();
+    return { ...predecessorsOf(doc, selection), flash, flashing: Date.now() < flashUntil };
+  }
+
+  /**
+   * Open the flash window, and arrange for it to close itself.
+   *
+   * The closing repaint is the point: the connector layer only stops asking for
+   * the animation when it is next rebuilt, and without this it would carry the
+   * request until something else happened to redraw the canvas.
+   */
+  function startFlashWindow() {
+    flashUntil = Date.now() + FLASH_MS;
+    if (flashTimer) clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => {
+      flashTimer = null;
+      for (const node of objectNodes.values()) node.classList.remove('upstream-flash');
+      requestRender();
+    }, FLASH_MS + 30);
+  }
+
+  /**
+   * Start the flash on the predecessor nodes.
+   *
+   * Object nodes are reused across frames, so the class has to be taken off and
+   * put back for the animation to restart — otherwise selecting two successors of
+   * the same bar in turn would flash it only the first time. Reading `offsetWidth`
+   * between the two is what forces the style to settle in between.
+   */
+  function flashUpstream(ids) {
+    for (const id of ids) {
+      const node = objectNodes.get(id);
+      if (!node) continue;
+      node.classList.remove('upstream-flash');
+      void node.offsetWidth;
+      node.classList.add('upstream-flash');
+    }
   }
 
   /* ── Ruler ─────────────────────────────────────────────────────────────── */
@@ -8039,7 +9173,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
   /* ── Objects ───────────────────────────────────────────────────────────── */
 
-  function renderObjects(layout, settings) {
+  function renderObjects(layout, settings, upstream) {
     const seen = new Set();
     const selection = new Set(getSelection());
     const violations = linkViolations(getDoc());
@@ -8052,7 +9186,9 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
         objectNodes.set(rect.id, node);
         dom.objects.appendChild(node);
       }
-      paintObject(node, rect, settings, selection.has(rect.id), violations.objects.get(rect.id) || null);
+      paintObject(node, rect, settings, selection.has(rect.id), violations.objects.get(rect.id) || null, {
+        upstream: upstream.objects.has(rect.id),
+      });
     }
 
     // Retire nodes for objects that scrolled out of view or were deleted.
@@ -8069,7 +9205,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
    * signature changes; position and size are always applied directly, which is
    * the path a drag takes.
    */
-  function paintObject(node, rect, settings, selected, breaches) {
+  function paintObject(node, rect, settings, selected, breaches, marks = {}) {
     const obj = rect.obj;
     const def = TYPES[obj.type] || TYPES.activity;
     const style = obj.style || {};
@@ -8120,7 +9256,10 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
       buildObjectMarkup(node, rect, def, color, settings, breaches);
     }
 
-    node.className = objectClass(rect, def, selected, breaches);
+    // The flash is a transient class the render pass does not own; a repaint in
+    // the middle of one (an autosave, a panel edit) must not cut it short.
+    node.className = objectClass(rect, def, selected, breaches, marks)
+      + (node.classList.contains('upstream-flash') ? ' upstream-flash' : '');
     if (breaches) node.dataset.violated = String(breaches.length);
     else delete node.dataset.violated;
     node.style.setProperty('--obj-radius', `${style.radius ?? 6}px`);
@@ -8129,9 +9268,10 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     else node.style.transform = '';
   }
 
-  function objectClass(rect, def, selected, breaches) {
+  function objectClass(rect, def, selected, breaches, marks = {}) {
     let cls = `tl-obj shape-${def.shape}`;
     if (selected) cls += ' selected';
+    if (marks.upstream) cls += ' upstream';
     if (rect.obj.locked) cls += ' locked';
     if (rect.dimmed) cls += ' filtered-out';
     if (rect.obj.groupId) cls += ' grouped';
@@ -8558,37 +9698,27 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
       return;
     }
 
-    const snapshot = new Map(baselineSnapshot(getDoc(), baseline).map((s) => [s.id, s]));
     const fragment = document.createDocumentFragment();
-    const seen = new Set();
     const counts = { slip: 0, ahead: 0, reshaped: 0, gone: 0 };
 
+    // Every rectangle here was measured and packed by `computeLayout` — including
+    // the ghosts, which is why nothing below has to ask whether it fits.
     for (const rect of layout.rects) {
-      const snap = snapshot.get(rect.id);
-      if (!snap) continue;
-      seen.add(rect.id);
+      const ghost = rect.ghost;
+      if (!ghost) continue;
 
-      const startShift = daysBetween(snap.start, rect.obj.start);
-      const endShift = rect.hasDuration
-        ? daysBetween(snap.end ?? snap.start, rect.obj.end)
-        : startShift;
-      if (!startShift && !endShift) continue;
-
+      const { snap, startShift, endShift } = ghost;
       const tone = endShift > 0 ? 'slip' : endShift < 0 ? 'ahead' : 'reshaped';
       counts[tone]++;
-      const ghostLeft = rect.hasDuration ? viewport.msToPx(snap.start) : viewport.msToPx(snap.start) - rect.w / 2;
-      const ghostWidth = rect.hasDuration
-        ? Math.max(4, viewport.msToPx(snap.end ?? snap.start) - viewport.msToPx(snap.start))
-        : rect.w;
 
       fragment.appendChild(
         el('div', {
-          class: `tl-baseline ${tone}`,
+          class: `tl-baseline ${tone}${ghost.stacked ? ' stacked' : ''}`,
           style: {
-            left: `${ghostLeft}px`,
-            top: `${rect.y}px`,
-            width: `${ghostWidth}px`,
-            height: `${rect.h}px`,
+            left: `${ghost.x}px`,
+            top: `${ghost.y}px`,
+            width: `${ghost.w}px`,
+            height: `${ghost.h}px`,
           },
           title: baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration),
         })
@@ -8596,38 +9726,32 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
       // The arrow runs between the two finish edges, which is the movement the
       // reader cares about. A reshape (same finish, different start) gets the
-      // start edges instead, or there would be nothing to draw.
+      // start edges instead, or there would be nothing to draw. It rides the
+      // ghost's own centre line, so a stacked ghost still points at its bar.
       const shift = tone === 'reshaped' ? startShift : endShift;
-      const fromX = tone === 'reshaped' ? ghostLeft : ghostLeft + ghostWidth;
+      const fromX = tone === 'reshaped' ? ghost.x : ghost.x + ghost.w;
       const toX = tone === 'reshaped' ? rect.x : rect.right;
       if (shift) {
-        fragment.appendChild(shiftArrow(fromX, toX, rect.y + rect.h / 2, shift, tone));
+        fragment.appendChild(shiftArrow(fromX, toX, ghost.y + ghost.h / 2, shift, tone));
       }
     }
 
-    // Objects the baseline had and the plan no longer does. They have no rect,
-    // so their position comes from the snapshot and from whichever lane they
-    // used to be in — falling back to the top of the canvas when that lane has
-    // gone too.
-    for (const [id, snap] of snapshot) {
-      if (seen.has(id) || layout.byId.has(id)) continue;
-      const entry = layout.geometry.lanes.find((l) => l.id === snap.lane) || layout.geometry.lanes[0];
-      if (!entry) continue;
-
-      const left = viewport.msToPx(snap.start);
-      const width = Math.max(10, viewport.msToPx(snap.end ?? snap.start) - left);
-
+    // Objects the baseline had and the plan no longer does. They have no object
+    // to hang off, so layout packs a phantom one into the lane they used to be in
+    // — a removed bar gets a row of its own rather than the top of the lane,
+    // where it used to sit on top of whatever replaced it.
+    for (const item of layout.removed) {
       fragment.appendChild(
         el('div', {
           class: 'tl-baseline-gone',
           style: {
-            left: `${left}px`,
-            top: `${entry.contentY}px`,
-            width: `${width}px`,
-            height: `${Math.min(22, entry.contentH)}px`,
+            left: `${item.x}px`,
+            top: `${item.y}px`,
+            width: `${item.w}px`,
+            height: `${item.h}px`,
           },
-          title: `Removed since the baseline: ${snap.title}`,
-        }, [el('span', { class: 'bg-label', text: snap.title })])
+          title: `Removed since the baseline: ${item.snap.title}`,
+        }, [el('span', { class: 'bg-label', text: item.snap.title })])
       );
       counts.gone++;
     }
@@ -8705,7 +9829,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     criticalIds = ids instanceof Set ? ids : new Set(ids || []);
   }
 
-  function renderLinks(doc, layout, settings) {
+  function renderLinks(doc, layout, settings, upstream) {
     if (!settings.showConnectors) {
       while (dom.connectors.firstChild) dom.connectors.removeChild(dom.connectors.firstChild);
       return;
@@ -8715,9 +9839,13 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const routed = routeAll(doc.links, layout.byId, settings.connectorStyle, {
       criticalIds: settings.criticalPath ? criticalIds : null,
       violations: linkViolations(doc),
+      upstreamIds: upstream.links,
     });
     renderConnectors(dom.connectors, routed, {
       selectedLinkIds: selectedLinks,
+      // The connector layer is rebuilt from scratch every frame, so the flash has
+      // to be asked for at build time rather than added to a node afterwards.
+      flashUpstream: upstream.flashing,
       onSelect: (link, e) => emit('link:select', { link, event: e }),
     });
   }
@@ -10707,8 +11835,8 @@ __mods["ui/commands.js"] = function (__x, __req) {
    * call the same functions here, so a behaviour never drifts between the three
    * ways of reaching it and there is exactly one place to fix a bug.
    *
-   * Imports: util, events, dates, model, store, storage, viewport, renderer,
-   *          interactions, icons, components.
+   * Imports: util, events, dates, model, store, storage, filestore, viewport,
+   *          renderer, interactions, icons, components.
    */
 
   const { el, download, clamp } = __req("core/util.js");
@@ -10716,7 +11844,8 @@ __mods["ui/commands.js"] = function (__x, __req) {
   const { MS_DAY, toISO, fmtDate, addDays } = __req("core/dates.js");
   const { TYPES, makeBaseline, makeObject, projectExtent, effectiveToday, makeProject } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { saveNow, makeBackup } = __req("core/storage.js");
+  const { saveNow, makeBackup, openFolderPlan, createFolderPlan, leaveFolder } = __req("core/storage.js");
+  const filestore = __req("core/filestore.js");
   const { linkViolations, resolutionFor } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
@@ -11155,6 +12284,171 @@ __mods["ui/commands.js"] = function (__x, __req) {
     toast({ tone: 'good', title: 'Snapshot saved', message: 'A restore point was added to Backups.' });
   }
 
+  /* ── The shared folder ─────────────────────────────────────────────────── */
+
+  /**
+   * Connect a folder — a shared drive, or one synced by OneDrive or SharePoint —
+   * and open a plan in it.
+   *
+   * The picker must be opened from a click, so this is only ever reachable from a
+   * button. When the folder already holds exactly one plan it opens straight into
+   * it; otherwise the user chooses, because guessing between a colleague's plans
+   * is how you end up editing the wrong programme.
+   */
+  async function connectFolder() {
+    if (!filestore.isSupported()) {
+      toast({
+        tone: 'warn',
+        title: 'Not supported in this browser',
+        message: 'Opening a folder needs Edge or Chrome. Everything else works here as normal.',
+      });
+      return false;
+    }
+
+    let picked;
+    try {
+      picked = await filestore.chooseFolder();
+    } catch (err) {
+      // Cancelling the picker is not an error worth reporting.
+      if (err && err.name === 'AbortError') return false;
+      toast({ tone: 'bad', title: 'Could not open that folder', message: err.message });
+      return false;
+    }
+    if (!picked) return false;
+
+    if (!picked.plans.length) return createFolderPlanFromCurrent();
+    if (picked.plans.length === 1) return openFolderPlanByName(picked.plans[0].name);
+
+    emit(EV.PANE_REFRESH, { pane: 'io' });
+    toast({
+      tone: 'info',
+      title: `${picked.folder} connected`,
+      message: `${picked.plans.length} plans in this folder — choose one to open.`,
+    });
+    return true;
+  }
+
+  /** Re-grant access to the folder this device used last. */
+  async function reconnectFolder() {
+    const connected = await filestore.reconnectWithPrompt();
+    if (!connected) {
+      toast({ tone: 'warn', title: 'Could not reconnect', message: 'Choose the folder again to carry on.' });
+      return false;
+    }
+    const wanted = connected.lastPlan || (connected.plans.length === 1 ? connected.plans[0].name : '');
+    if (wanted) return openFolderPlanByName(wanted);
+    emit(EV.PANE_REFRESH, { pane: 'io' });
+    return true;
+  }
+
+  /** Open one of the plans in the connected folder. */
+  async function openFolderPlanByName(name) {
+    try {
+      const { doc, role, holder } = await openFolderPlan(name);
+      store.replaceDoc(doc, 'load');
+      emit(EV.FILE_STATE, filestore.state());
+      fitAll();
+      toast({
+        tone: role === 'viewer' ? 'warn' : 'good',
+        title: role === 'viewer' ? `${name} — read-only` : `${name} opened`,
+        message:
+          role === 'viewer'
+            ? `${holder} has this plan open. You can read it, and it becomes editable when they close it.`
+            : 'Saved straight to the folder from now on.',
+      });
+      return true;
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not open that plan', message: err.message });
+      return false;
+    }
+  }
+
+  /** Write the plan currently open into the connected folder for the first time. */
+  async function createFolderPlanFromCurrent() {
+    const doc = store.getDoc();
+    const suggested = `${(doc.name || 'programme').replace(/[^a-z0-9 \-_]+/gi, '').trim() || 'programme'}.json`;
+    const name = await promptDialog({
+      title: 'Put this plan in the folder',
+      label: 'File name',
+      value: suggested,
+      placeholder: 'programme.json',
+    });
+    if (!name) return false;
+
+    try {
+      const written = await createFolderPlan(name, doc);
+      emit(EV.FILE_STATE, filestore.state());
+      toast({
+        tone: 'good',
+        title: `${written} created`,
+        message: 'Every change from now on is written straight into the folder.',
+      });
+      return true;
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not write that file', message: err.message });
+      return false;
+    }
+  }
+
+  /** Stop using the folder. The plan stays on disk exactly as it is. */
+  async function disconnectFolder() {
+    const ok = await confirmDialog({
+      title: 'Disconnect the folder?',
+      message:
+        'The plan file stays where it is — this only stops CX Timeline writing to it. ' +
+        'Changes after this are kept in this browser instead.',
+      confirmLabel: 'Disconnect',
+    });
+    if (!ok) return false;
+    await leaveFolder();
+    emit(EV.FILE_STATE, filestore.state());
+    toast({ tone: 'info', title: 'Folder disconnected' });
+    return true;
+  }
+
+  /**
+   * Pull in a colleague's save.
+   *
+   * Offered when the file has moved on disk. Anything unsaved here would be lost,
+   * so it says so rather than discarding quietly.
+   */
+  async function reloadFromFolder({ confirm = true } = {}) {
+    if (confirm && store.isDirty()) {
+      const ok = await confirmDialog({
+        title: 'Reload from the folder?',
+        message: 'You have changes that have not been written. Reloading replaces them with the file on disk.',
+        confirmLabel: 'Reload',
+        danger: true,
+      });
+      if (!ok) return false;
+    }
+    try {
+      const doc = await filestore.refreshFromDisk();
+      if (!doc) return false;
+      store.replaceDoc(doc, 'load');
+      renderer.requestRender();
+      toast({ tone: 'good', title: 'Reloaded', message: 'You are looking at the latest saved version.' });
+      return true;
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not reload', message: err.message });
+      return false;
+    }
+  }
+
+  /**
+   * Take the pen when the lock has gone stale — a colleague whose browser closed
+   * without releasing it. Refused while their lock is still being stamped.
+   */
+  async function takeOverEditing() {
+    const took = await filestore.takeOver();
+    toast(
+      took
+        ? { tone: 'good', title: 'You have the pen', message: 'This plan is editable again.' }
+        : { tone: 'warn', title: 'Still in use', message: `${filestore.state().holder} is actively editing this plan.` }
+    );
+    return took;
+  }
+
   /* ── Navigation ────────────────────────────────────────────────────────── */
 
   /** Jump to and flash an object — used by search results and outline rows. */
@@ -11268,6 +12562,13 @@ __mods["ui/commands.js"] = function (__x, __req) {
   Object.defineProperty(__x, "togglePresentation", { get: () => togglePresentation, enumerable: true });
   Object.defineProperty(__x, "newProject", { get: () => newProject, enumerable: true });
   Object.defineProperty(__x, "saveSnapshot", { get: () => saveSnapshot, enumerable: true });
+  Object.defineProperty(__x, "connectFolder", { get: () => connectFolder, enumerable: true });
+  Object.defineProperty(__x, "reconnectFolder", { get: () => reconnectFolder, enumerable: true });
+  Object.defineProperty(__x, "openFolderPlanByName", { get: () => openFolderPlanByName, enumerable: true });
+  Object.defineProperty(__x, "createFolderPlanFromCurrent", { get: () => createFolderPlanFromCurrent, enumerable: true });
+  Object.defineProperty(__x, "disconnectFolder", { get: () => disconnectFolder, enumerable: true });
+  Object.defineProperty(__x, "reloadFromFolder", { get: () => reloadFromFolder, enumerable: true });
+  Object.defineProperty(__x, "takeOverEditing", { get: () => takeOverEditing, enumerable: true });
   Object.defineProperty(__x, "revealObject", { get: () => revealObject, enumerable: true });
   Object.defineProperty(__x, "SHORTCUTS", { get: () => SHORTCUTS, enumerable: true });
   Object.defineProperty(__x, "showShortcuts", { get: () => showShortcuts, enumerable: true });
@@ -11856,6 +13157,7 @@ __mods["ui/auth.js"] = function (__x, __req) {
   const { el, clear } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const cloud = __req("core/cloud.js");
+  const filestore = __req("core/filestore.js");
   const { icon } = __req("ui/icons.js");
   const { fmtDate } = __req("core/dates.js");
   const { openModal, field, textInput, selectInput, section, skeleton, toast, badge, confirmDialog, emptyState } = __req("ui/components.js");
@@ -12083,13 +13385,19 @@ __mods["ui/auth.js"] = function (__x, __req) {
    */
   function installAccessMode() {
     const apply = () => {
-      const readOnly = cloud.isReadOnly();
+      // Two things can make a session read-only, and they are never both live:
+      // a viewer role on a hosted project, or a colleague holding the pen on a
+      // plan in a shared folder. Either way the interface says the same thing —
+      // only the reason differs.
+      const viewingFolder = filestore.isViewer();
+      const readOnly = cloud.isReadOnly() || viewingFolder;
       document.body.classList.toggle('read-only', readOnly);
-      renderBanner(readOnly);
+      renderBanner(readOnly, viewingFolder ? filestore.state().holder : '');
     };
 
     on(EV.ACCESS_CHANGED, apply);
     on(EV.AUTH_CHANGED, apply);
+    on(EV.FILE_STATE, apply);
 
     // One notice per burst — a viewer holding an arrow key would otherwise
     // stack up a notification per repeat.
@@ -12108,17 +13416,23 @@ __mods["ui/auth.js"] = function (__x, __req) {
     apply();
   }
 
-  function renderBanner(readOnly) {
+  function renderBanner(readOnly, holder = '') {
     const existing = document.getElementById('cx-readonly-bar');
     if (!readOnly) {
       existing?.remove();
       return;
     }
-    if (existing) return;
+    // The message can change while the bar is up — a colleague closing the plan
+    // hands the pen over — so rebuild rather than bail out on an existing bar.
+    existing?.remove();
+
+    const message = holder
+      ? `Read-only — ${holder} has this plan open. It becomes editable when they close it.`
+      : 'Read-only — you have view access to this project.';
 
     const bar = el('div', { id: 'cx-readonly-bar', class: 'cx-readonly-bar', role: 'status' }, [
       el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),
-      el('span', { text: 'Read-only — you have view access to this project.' }),
+      el('span', { text: message }),
     ]);
     document.getElementById('main')?.prepend(bar);
   }
@@ -15654,6 +16968,10 @@ __mods["io/scene.js"] = function (__x, __req) {
     outsideGap: 5,
     outsideMaxW: 210,
     minInsideW: 44,
+    ghostH: 7,
+    ghostGap: 2,
+    goneH: 12,
+    shiftBadgeW: 30,
   };
 
   /* Fonts used by exported drawings, measured the same way the canvas is. */
@@ -15824,6 +17142,23 @@ __mods["io/scene.js"] = function (__x, __req) {
       .map((id) => doc.lanes.find((l) => l.id === id))
       .filter((l) => l && !l.hidden);
 
+    // Comparison rows are resolved before the lanes are packed: a ghost takes up
+    // room in the drawing, so the packer has to know about it or the baseline
+    // prints on top of the plan. Same rule the canvas follows.
+    const comparison = comparisonRows(doc, opts);
+    const goneByLane = new Map();
+    if (comparison) {
+      const liveIds = new Set(doc.objects.map((o) => o.id));
+      const laneIds = new Set(lanes.map((l) => l.id));
+      for (const snap of comparison.values()) {
+        if (liveIds.has(snap.id)) continue;
+        const laneId = laneIds.has(snap.lane) ? snap.lane : lanes[0]?.id;
+        if (!laneId) continue;
+        if (!goneByLane.has(laneId)) goneByLane.set(laneId, []);
+        goneByLane.get(laneId).push(snap);
+      }
+    }
+
     const laneGeom = [];
     let y = M.headerH + M.rulerUpper + M.rulerLower;
     const contentTop = y;
@@ -15839,15 +17174,22 @@ __mods["io/scene.js"] = function (__x, __req) {
           ? Math.max(M.barMinW, ((obj.end - obj.start) / MS_DAY) * pxPerDay)
           : M.pointR * 2;
         const label = exportLabel(obj, barWidth, opts.showDates === true);
+        const ghost = comparison ? exportGhost(obj, comparison.get(obj.id), barWidth, msToX, pxPerDay) : null;
         const height = hasDuration
           ? Math.max(M.rowH, label.height + 5)
           : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
-        return { obj, label, barWidth, height };
+        return { obj, label, barWidth, ghost, height: height + (ghost && ghost.stacked ? M.ghostH + M.ghostGap : 0) };
       });
 
-      const packed = packRowsForExport(measured, msToX);
+      // Outlines for what the baseline had and the plan has not. They pack with
+      // the live objects, so a removed bar gets a row rather than the top of the
+      // lane and whatever replaced it.
+      const goneItems = (goneByLane.get(lane.id) || []).map((snap) => exportGone(snap, msToX));
+
+      const packable = goneItems.length ? measured.concat(goneItems) : measured;
+      const packed = packRowsForExport(packable, msToX);
       const rowHeights = new Array(packed.rows).fill(M.rowH);
-      for (const item of measured) {
+      for (const item of packable) {
         const row = packed.assigned.get(item.obj.id) || 0;
         rowHeights[row] = Math.max(rowHeights[row], item.height);
       }
@@ -15864,7 +17206,7 @@ __mods["io/scene.js"] = function (__x, __req) {
         Math.max(M.rowH, cursor - M.rowGap) + M.lanePadY * 2,
         laneNameWrap.lines.length * 11 + 20
       );
-      laneGeom.push({ lane, y, height, objects, measured, rows: packed.assigned, rowTops, laneNameWrap });
+      laneGeom.push({ lane, y, height, objects, measured, goneItems, rows: packed.assigned, rowTops, rowHeights, laneNameWrap });
       y += height;
     }
 
@@ -15973,6 +17315,7 @@ __mods["io/scene.js"] = function (__x, __req) {
     items.push({ type: 'rect', x: 0, y: contentTop, w: M.gutter, h: contentHeight, fill: palette.chrome });
 
     const rectsById = new Map();
+    const goneRects = [];
 
     laneGeom.forEach((entry, index) => {
       const laneColor = solid(entry.lane.color, palette);
@@ -16005,7 +17348,20 @@ __mods["io/scene.js"] = function (__x, __req) {
           // The export's own choice wins over the document's on-screen setting.
           settings: { ...doc.settings, showProgress: opts.showProgress !== false && doc.settings.showProgress },
         });
-        if (rect) rectsById.set(item.obj.id, rect);
+        if (rect) {
+          rect.ghost = item.ghost;
+          rectsById.set(item.obj.id, rect);
+        }
+      }
+
+      for (const item of entry.goneItems) {
+        const row = entry.rows.get(item.obj.id) || 0;
+        goneRects.push({
+          snap: item.gone,
+          x: item.left,
+          w: item.width,
+          y: entry.y + M.lanePadY + (entry.rowTops[row] ?? 0),
+        });
       }
     });
 
@@ -16013,14 +17369,8 @@ __mods["io/scene.js"] = function (__x, __req) {
     // Drawn after the objects so the ghosts and their arrows sit on top, and
     // only when the document is actually in comparison mode — an export is
     // supposed to be the drawing on the screen, not a different one.
-    if (opts.showBaseline && (doc.baselines || []).length) {
-      drawBaseline(items, doc, {
-        rectsById,
-        laneGeom,
-        msToX,
-        palette,
-        baselineId: opts.baselineId || doc.settings.activeBaseline,
-      });
+    if (comparison) {
+      drawBaseline(items, { rectsById, goneRects, palette });
     }
 
     items.push({ type: 'line', x1: M.gutter, y1: contentTop, x2: M.gutter, y2: contentTop + contentHeight, stroke: palette.border, strokeWidth: 1 });
@@ -16229,18 +17579,24 @@ __mods["io/scene.js"] = function (__x, __req) {
   /* ── Helpers ───────────────────────────────────────────────────────────── */
 
   /**
-   * First-fit row packing over the *label* extent, not just the bar, so an
-   * exported label can never be overprinted by the next object along.
+   * First-fit row packing over the *label* extent — and, in comparison mode, over
+   * the baseline ghost and its day badge as well — not just the bar, so nothing
+   * exported can be overprinted by the next object along.
    */
   function packRowsForExport(measured, msToX) {
     const rowEnds = [];
     const assigned = new Map();
 
-    for (const item of measured) {
+    for (const item of measured.slice().sort((a, b) => a.obj.start - b.obj.start)) {
       const hasDuration = !!TYPES[item.obj.type]?.duration;
       const startX = msToX(item.obj.start);
-      const from = (hasDuration ? startX : startX - M.pointR) - item.label.extraLeft;
-      const to = (hasDuration ? startX + item.barWidth : startX + M.pointR) + item.label.extraRight;
+      let from = (hasDuration ? startX : startX - M.pointR) - item.label.extraLeft;
+      let to = (hasDuration ? startX + item.barWidth : startX + M.pointR) + item.label.extraRight;
+
+      if (item.ghost) {
+        from = Math.min(from, item.ghost.from);
+        to = Math.max(to, item.ghost.to);
+      }
 
       let row = 0;
       while (row < rowEnds.length && (rowEnds[row] ?? -Infinity) > from) row++;
@@ -16266,43 +17622,102 @@ __mods["io/scene.js"] = function (__x, __req) {
   }
 
   /**
+   * The comparison rows for an export, keyed by object id, or null when the
+   * export is not comparing.
+   */
+  function comparisonRows(doc, opts) {
+    if (!opts.showBaseline || !(doc.baselines || []).length) return null;
+    const id = opts.baselineId || doc.settings.activeBaseline;
+    const baseline = (doc.baselines || []).find((b) => b.id === id)
+      || (doc.baselines || [])[doc.baselines.length - 1];
+    if (!baseline) return null;
+    const rows = baselineSnapshot(doc, baseline);
+    return rows.length ? new Map(rows.map((row) => [row.id, row])) : null;
+  }
+
+  /**
+   * An object's ghost in an exported drawing, measured the way the canvas
+   * measures it: behind the bar while the two cover different dates, in a tier of
+   * its own below the bar the moment they do not. Printed at whatever density the
+   * export was asked for, so — as on screen — the split follows the scale.
+   */
+  function exportGhost(obj, snap, barWidth, msToX, pxPerDay) {
+    if (!snap) return null;
+    const def = TYPES[obj.type] || TYPES.activity;
+    const hasDuration = !!def.duration;
+
+    const snapEnd = hasDuration ? (snap.end ?? snap.start) : snap.start;
+    const startShift = Math.round((obj.start - snap.start) / MS_DAY);
+    const endShift = hasDuration ? Math.round((obj.end - snapEnd) / MS_DAY) : startShift;
+    if (!startShift && !endShift) return null;
+
+    const x = hasDuration ? msToX(snap.start) : msToX(snap.start) - M.pointR;
+    const w = hasDuration ? Math.max(3, ((snapEnd - snap.start) / MS_DAY) * pxPerDay) : M.pointR * 2;
+    const barLeft = hasDuration ? msToX(obj.start) : msToX(obj.start) - M.pointR;
+    const barRight = barLeft + (hasDuration ? barWidth : M.pointR * 2);
+
+    const reshaped = endShift === 0;
+    const fromX = reshaped ? x : x + w;
+    const toX = reshaped ? barLeft : barRight;
+    const mid = (fromX + toX) / 2;
+    const canStack = hasDuration && def.shape !== 'band' && def.shape !== 'container';
+
+    return {
+      snap,
+      startShift,
+      endShift,
+      x,
+      w,
+      stacked: canStack && x < barRight + M.ghostGap && x + w > barLeft - M.ghostGap,
+      from: Math.min(x, mid - M.shiftBadgeW / 2),
+      to: Math.max(x + w, mid + M.shiftBadgeW / 2),
+    };
+  }
+
+  /** A phantom entry so a removed object packs like everything else. */
+  function exportGone(snap, msToX) {
+    const x = msToX(snap.start);
+    const w = Math.max(8, msToX(snap.end ?? snap.start) - x);
+    const textW = textWidth(String(snap.title || ''), EXPORT_FONTS.mono) + 8;
+    return {
+      obj: { id: `gone:${snap.id}`, type: 'activity', start: snap.start, end: snap.end ?? snap.start },
+      gone: snap,
+      label: { extraLeft: 0, extraRight: Math.max(0, textW - w) },
+      barWidth: w,
+      ghost: null,
+      height: M.goneH,
+      left: x,
+      width: w,
+    };
+  }
+
+  /**
    * Where the plan was, in the export.
    *
    * The canvas draws this too; without it here, a comparison taken into a
    * meeting as a PDF would show the current dates and no sign that anything had
-   * moved — which is the one thing the reader is there to see.
+   * moved — which is the one thing the reader is there to see. Every rectangle
+   * below was measured and packed with the objects, so nothing here has to work
+   * out whether it fits.
    */
-  function drawBaseline(items, doc, { rectsById, laneGeom, msToX, palette, baselineId }) {
-    const baseline = (doc.baselines || []).find((b) => b.id === baselineId)
-      || (doc.baselines || [])[doc.baselines.length - 1];
-    if (!baseline) return;
+  function drawBaseline(items, { rectsById, goneRects, palette }) {
+    for (const rect of rectsById.values()) {
+      const ghost = rect.ghost;
+      if (!ghost) continue;
 
-    const seen = new Set();
-    const rows = baselineSnapshot(doc, baseline);
-
-    for (const snap of rows) {
-      const rect = rectsById.get(snap.id);
-      if (!rect) continue;
-      seen.add(snap.id);
-
-      const obj = doc.objects.find((o) => o.id === snap.id);
-      if (!obj) continue;
-
-      const hasDuration = !!TYPES[obj.type]?.duration;
-      const startShift = Math.round((obj.start - snap.start) / MS_DAY);
-      const endShift = hasDuration ? Math.round((obj.end - (snap.end ?? snap.start)) / MS_DAY) : startShift;
-      if (!startShift && !endShift) continue;
-
+      const { startShift, endShift } = ghost;
       const ink = endShift > 0 ? palette.bad : endShift < 0 ? palette.good : palette.warn;
-      const gx = msToX(snap.start);
-      const gw = hasDuration ? Math.max(3, msToX(snap.end ?? snap.start) - gx) : 8;
+      const gx = ghost.x;
+      const gw = ghost.w;
+      const gy = ghost.stacked ? rect.bottom + M.ghostGap : rect.top;
+      const gh = ghost.stacked ? M.ghostH : Math.max(6, rect.bottom - rect.top);
 
       items.push({
         type: 'rect',
-        x: hasDuration ? gx : gx - 4,
-        y: rect.top,
+        x: gx,
+        y: gy,
         w: gw,
-        h: Math.max(6, rect.bottom - rect.top),
+        h: gh,
         radius: 3,
         fill: withAlpha(ink, 0.12),
         stroke: ink,
@@ -16310,12 +17725,13 @@ __mods["io/scene.js"] = function (__x, __req) {
         dash: [3, 2],
       });
 
-      // The arrow between the two finish edges, with its day count.
+      // The arrow between the two finish edges, with its day count. It rides the
+      // ghost's own centre line, so a stacked ghost still points at its bar.
       const reshaped = endShift === 0;
       const fromX = reshaped ? gx : gx + gw;
       const toX = reshaped ? rect.x : rect.right;
       const shift = reshaped ? startShift : endShift;
-      const y = rect.cy;
+      const y = gy + gh / 2;
       if (Math.abs(toX - fromX) > 1) {
         const dir = toX >= fromX ? 1 : -1;
         items.push({ type: 'line', x1: fromX, y1: y, x2: toX, y2: y, stroke: ink, strokeWidth: 1.1 });
@@ -16338,20 +17754,16 @@ __mods["io/scene.js"] = function (__x, __req) {
       }
     }
 
-    // Objects the baseline had and the plan no longer does.
-    for (const snap of rows) {
-      if (seen.has(snap.id) || doc.objects.some((o) => o.id === snap.id)) continue;
-      const entry = laneGeom.find((g) => g.lane.id === snap.lane) || laneGeom[0];
-      if (!entry) continue;
-
-      const x = msToX(snap.start);
-      const w = Math.max(8, msToX(snap.end ?? snap.start) - x);
+    // Objects the baseline had and the plan no longer does, on the row they were
+    // packed onto.
+    for (const gone of goneRects) {
+      const { snap, x, w, y } = gone;
       items.push({
         type: 'rect',
         x,
-        y: entry.y + M.lanePadY,
+        y,
         w,
-        h: 14,
+        h: M.goneH,
         radius: 3,
         fill: withAlpha(palette.bad, 0.08),
         stroke: palette.bad,
@@ -16361,7 +17773,7 @@ __mods["io/scene.js"] = function (__x, __req) {
       items.push({
         type: 'text',
         x: x + 4,
-        y: entry.y + M.lanePadY + 10,
+        y: y + M.goneH - 3.5,
         text: snap.title,
         size: 6.5,
         family: 'mono',
@@ -17541,7 +18953,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
    * showing and re-renders it when the document changes, so no pane has to
    * manage its own subscriptions.
    *
-   * Imports: util, events, dates, model, store, storage, query, analysis,
+   * Imports: util, events, dates, model, store, storage, filestore, query, analysis,
    *          viewport, renderer, io, icons, components, lists, notes, dialogs,
    *          theme.
    */
@@ -17564,6 +18976,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const store = __req("core/store.js");
   const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted } = __req("core/storage.js");
   const cloud = __req("core/cloud.js");
+  const filestore = __req("core/filestore.js");
   const { search, summarise, facet, filterPredicate } = __req("core/query.js");
   const { criticalPath, compareBaseline, programmeHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
@@ -17675,6 +19088,11 @@ __mods["ui/panels.js"] = function (__x, __req) {
     });
     on(EV.FILTER_CHANGED, () => {
       if (active === 'filters' || active === 'search') rerender();
+    });
+    // Connecting a folder, or a colleague picking up or dropping the pen, changes
+    // what the Import / export pane says about where the plan lives.
+    on(EV.FILE_STATE, () => {
+      if (active === 'io' || active === 'settings') rerender();
     });
     on('ui:focus-search', () => {
       const input = bodyEl.querySelector('[data-search-input]');
@@ -18575,7 +19993,134 @@ __mods["ui/panels.js"] = function (__x, __req) {
      Import / export
      ═══════════════════════════════════════════════════════════════════════ */
 
+  /**
+   * The shared-folder controls.
+   *
+   * This is the whole of file mode's interface: connect a folder, see which plan
+   * is live and who has the pen, and open another. It sits at the top of Import /
+   * export because that is where someone goes looking for "where does my data
+   * live", and it is hidden entirely on a hosted deployment, where the answer is
+   * the server and this would only confuse.
+   */
+  function sharedFolderSection() {
+    const st = filestore.state();
+
+    if (isHosted()) return el('div');
+
+    if (!st.supported) {
+      return section('Shared folder', [
+        el('div', {
+          class: 'cx-hint',
+          text:
+            'Saving straight into a shared or synced folder needs Edge or Chrome. ' +
+            'This browser keeps your work in its own storage instead — use Export → JSON to move a plan.',
+        }),
+      ], { id: 'shared-folder' });
+    }
+
+    const rows = [];
+    const wideBtn = (label, iconName, onClick, primary = false) =>
+      el('button', {
+        class: 'cx-btn mini' + (primary ? ' primary' : ''),
+        style: { justifyContent: 'flex-start', width: '100%' },
+        html: icon(iconName, { size: 12 }) + `<span>${label}</span>`,
+        onClick,
+      });
+
+    // Three states, and the middle one is easy to forget: a folder can be
+    // connected with no plan open yet, which happens whenever it holds more than
+    // one. Offering "connect a folder" again there is just confusing.
+    if (st.connected) {
+      const editing = st.role === 'editor';
+      rows.push(
+        el('div', { class: 'cx-listrow' + (editing ? ' active' : '') }, [
+          el('div', { class: 'lr-main' }, [
+            el('div', { class: 'lr-title', text: st.plan }),
+            el('div', {
+              class: 'lr-meta',
+              text: editing ? `${st.folder} · you have the pen` : `${st.folder} · ${st.holder} is editing`,
+            }),
+          ]),
+        ])
+      );
+      if (!editing) rows.push(wideBtn('Take over editing', 'refresh', () => cmd.takeOverEditing()));
+      rows.push(
+        wideBtn('Reload from the folder', 'download', () => cmd.reloadFromFolder()),
+        wideBtn('Disconnect', 'x', () => cmd.disconnectFolder())
+      );
+    } else if (st.folder) {
+      rows.push(
+        el('div', { class: 'cx-hint', text: `${st.folder} is connected. Choose the plan to work on.` }),
+        wideBtn('New plan in this folder…', 'plus', () => cmd.createFolderPlanFromCurrent()),
+        wideBtn('Pick a different folder…', 'folder', () => cmd.connectFolder())
+      );
+    } else {
+      rows.push(
+        el('div', {
+          class: 'cx-hint',
+          text:
+            'Keep the plan as a file in a shared or OneDrive-synced folder. ' +
+            'Both of you open the same file; whoever gets there first has the pen, the other reads.',
+        }),
+        wideBtn('Connect a folder…', 'folder', () => cmd.connectFolder(), true)
+      );
+    }
+
+    // Other plans sitting in the folder, so switching programmes does not mean
+    // going back through the picker.
+    const list = el('div', { class: 'cx-list', style: { marginTop: '8px' } });
+    if (st.folder) {
+      filestore
+        .listPlans()
+        .then((found) => {
+          clear(list);
+          const others = found.filter((plan) => plan.name !== st.plan);
+          if (!others.length) return;
+          list.appendChild(el('div', { class: 'cx-hint', text: st.connected ? 'Also in this folder' : 'Plans in this folder' }));
+          for (const plan of others) {
+            list.appendChild(
+              el('div', { class: 'cx-listrow', onClick: () => cmd.openFolderPlanByName(plan.name) }, [
+                el('div', { class: 'lr-main' }, [
+                  el('div', { class: 'lr-title', text: plan.name }),
+                  el('div', { class: 'lr-meta', text: plan.modified ? fmtTimestamp(plan.modified) : '' }),
+                ]),
+              ])
+            );
+          }
+        })
+        .catch(() => {
+          /* the folder went away — the state row already says so */
+        });
+    }
+    rows.push(list);
+
+    if (!st.connected && !st.folder) {
+      // A remembered folder whose permission has lapsed: one click gets it back,
+      // which is much better than making someone find it in the picker again.
+      const reconnect = el('div');
+      filestore
+        .storedFolder()
+        .then((stored) => {
+          if (!stored) return;
+          reconnect.appendChild(
+            el('button', {
+              class: 'cx-btn mini',
+              style: { justifyContent: 'flex-start', width: '100%', marginTop: '6px' },
+              html: icon('refresh', { size: 12 }) + `<span>Reconnect to ${stored.folder}</span>`,
+              onClick: () => cmd.reconnectFolder(),
+            })
+          );
+        })
+        .catch(() => {});
+      rows.push(reconnect);
+    }
+
+    return section('Shared folder', rows, { id: 'shared-folder' });
+  }
+
   function paneIo(root) {
+    root.appendChild(sharedFolderSection());
+
     root.appendChild(
       section('Export', [
         el('div', { class: 'cx-hint', text: 'PDF, print, SVG, PNG and JPEG all draw the same picture. What goes in it is up to you.' }),
@@ -18594,7 +20139,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
         exportButton('CSV (objects)', 'table', () => exporters.exportCsv()),
         exportButton('CSV (dependencies)', 'table', () => exporters.exportLinksCsv()),
         exportButton('JSON (full project)', 'save', () => exporters.exportJson()),
-      ])
+      ], { id: 'export' })
     );
 
     root.appendChild(
@@ -19446,7 +20991,8 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const { fmtDate, fmtTimestamp, toISO } = __req("core/dates.js");
   const { TYPES, typeGroups, effectiveToday, projectExtent } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { isFallback, isHosted } = __req("core/storage.js");
+  const { isFallback, isHosted, isFileMode } = __req("core/storage.js");
+  const filestore = __req("core/filestore.js");
   const cloud = __req("core/cloud.js");
   const { linkViolations } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
@@ -19909,7 +21455,16 @@ __mods["ui/shell.js"] = function (__x, __req) {
       : '';
     dom.violationText.style.display = violations.count ? '' : 'none';
     dom.zoomText.textContent = `${zoom.scale} · ${zoom.span}`;
-    dom.storageText.textContent = isHosted() ? 'Supabase' : isFallback() ? 'localStorage' : 'IndexedDB';
+    // Where the work is going. In a shared folder this is the most useful thing
+    // on the status bar, so it names the plan and says who holds the pen.
+    if (isFileMode()) {
+      const st = filestore.state();
+      dom.storageText.textContent = st.role === 'viewer' ? `${st.plan} · ${st.holder} editing` : `${st.plan} · folder`;
+      dom.storageText.title = `${st.folder}/${st.plan}`;
+    } else {
+      dom.storageText.textContent = isHosted() ? 'Supabase' : isFallback() ? 'localStorage' : 'IndexedDB';
+      dom.storageText.title = '';
+    }
   }
 
   const refreshCursor = debounce((ms) => {
@@ -19947,6 +21502,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
       refreshStatus();
     });
     on(EV.ACCESS_CHANGED, refresh);
+    on(EV.FILE_STATE, () => refreshStatus());
     on(EV.SELECTION_CHANGED, () => refreshStatus());
     on(EV.TOOL_CHANGED, () => refreshToolbar());
     on(EV.VIEW_CHANGED, debounce(() => {
@@ -22083,6 +23639,7 @@ __mods["main.js"] = function (__x, __req) {
   const store = __req("core/store.js");
   const { init: initStorage, takeRecovery, getPref, setPref, saveNow, isHosted } = __req("core/storage.js");
   const cloud = __req("core/cloud.js");
+  const filestore = __req("core/filestore.js");
   const { criticalPath } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
@@ -22097,6 +23654,7 @@ __mods["main.js"] = function (__x, __req) {
   const { requireSignIn, installAccessMode } = __req("ui/auth.js");
   const { installP6Drops } = __req("ui/p6.js");
   const { installShortcuts } = __req("ui/shortcuts.js");
+  const cmd = __req("ui/commands.js");
   const { toast, showTooltip, hideTooltip, confirmDialog } = __req("ui/components.js");
   const { renderNote, notePreview } = __req("ui/notes.js");
   const { TYPES, statusOf, durationDays } = __req("core/model.js");
@@ -22183,6 +23741,7 @@ __mods["main.js"] = function (__x, __req) {
     installAccessMode();
     installP6Drops();
     installConflictHandling();
+    installFolderHandling();
     installViewPersistence();
     installResizeHandling();
     installCriticalPathRecompute();
@@ -22228,7 +23787,65 @@ __mods["main.js"] = function (__x, __req) {
         cancelLabel: 'Not yet',
       });
       asking = false;
-      if (ok) window.location.reload();
+      if (!ok) return;
+      if (filestore.isConnected()) await cmd.reloadFromFolder({ confirm: false });
+      else window.location.reload();
+    });
+  }
+
+  /* ── The shared folder ─────────────────────────────────────────────────── */
+
+  /**
+   * Keeping two people in step through a synced folder.
+   *
+   * Three things need saying out loud, and none of them are errors:
+   *
+   *   a colleague saved     the file on disk moved on. Offer to catch up, rather
+   *                         than reloading under someone mid-sentence.
+   *   the write was refused the guard in `filestore.savePlan()` stopped an
+   *                         overwrite. The work is still here and still cached.
+   *   the grant lapsed      the browser wants the folder re-authorised, which
+   *                         needs a click and cannot be done silently.
+   *
+   * The lock is also released on the way out. That cannot be awaited at unload,
+   * which is exactly why the lock has a staleness timeout as its real release.
+   */
+  function installFolderHandling() {
+    let asking = false;
+
+    on(EV.FILE_EXTERNAL_CHANGE, async () => {
+      if (asking) return;
+      asking = true;
+      // A reader who has changed nothing gains nothing from a dialog: just pull
+      // their colleague's version in and say so.
+      if (filestore.isViewer() && !store.isDirty()) {
+        await cmd.reloadFromFolder({ confirm: false });
+        asking = false;
+        return;
+      }
+      const ok = await confirmDialog({
+        title: 'This plan changed in the folder',
+        message:
+          'Someone saved a newer version. Reload to pick it up — anything you have changed here since your last save would be replaced.',
+        confirmLabel: 'Reload',
+        cancelLabel: 'Not yet',
+      });
+      asking = false;
+      if (ok) await cmd.reloadFromFolder({ confirm: false });
+    });
+
+    on(EV.SAVE_ERROR, (payload) => {
+      if (!payload?.permission) return;
+      toast({
+        tone: 'warn',
+        title: 'The folder needs re-authorising',
+        message: 'Open Import / export and reconnect the folder to carry on saving.',
+        sticky: true,
+      });
+    });
+
+    window.addEventListener('beforeunload', () => {
+      if (filestore.isConnected()) filestore.handleUnload();
     });
   }
 

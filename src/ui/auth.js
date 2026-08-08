@@ -16,6 +16,7 @@
 import { el, clear } from '../core/util.js';
 import { on, emit, EV } from '../core/events.js';
 import * as cloud from '../core/cloud.js';
+import * as filestore from '../core/filestore.js';
 import { icon } from './icons.js';
 import { fmtDate } from '../core/dates.js';
 import {
@@ -243,13 +244,19 @@ function gateLink(text, onClick) {
  */
 export function installAccessMode() {
   const apply = () => {
-    const readOnly = cloud.isReadOnly();
+    // Two things can make a session read-only, and they are never both live:
+    // a viewer role on a hosted project, or a colleague holding the pen on a
+    // plan in a shared folder. Either way the interface says the same thing —
+    // only the reason differs.
+    const viewingFolder = filestore.isViewer();
+    const readOnly = cloud.isReadOnly() || viewingFolder;
     document.body.classList.toggle('read-only', readOnly);
-    renderBanner(readOnly);
+    renderBanner(readOnly, viewingFolder ? filestore.state().holder : '');
   };
 
   on(EV.ACCESS_CHANGED, apply);
   on(EV.AUTH_CHANGED, apply);
+  on(EV.FILE_STATE, apply);
 
   // One notice per burst — a viewer holding an arrow key would otherwise
   // stack up a notification per repeat.
@@ -268,17 +275,23 @@ export function installAccessMode() {
   apply();
 }
 
-function renderBanner(readOnly) {
+function renderBanner(readOnly, holder = '') {
   const existing = document.getElementById('cx-readonly-bar');
   if (!readOnly) {
     existing?.remove();
     return;
   }
-  if (existing) return;
+  // The message can change while the bar is up — a colleague closing the plan
+  // hands the pen over — so rebuild rather than bail out on an existing bar.
+  existing?.remove();
+
+  const message = holder
+    ? `Read-only — ${holder} has this plan open. It becomes editable when they close it.`
+    : 'Read-only — you have view access to this project.';
 
   const bar = el('div', { id: 'cx-readonly-bar', class: 'cx-readonly-bar', role: 'status' }, [
     el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),
-    el('span', { text: 'Read-only — you have view access to this project.' }),
+    el('span', { text: message }),
   ]);
   document.getElementById('main')?.prepend(bar);
 }
