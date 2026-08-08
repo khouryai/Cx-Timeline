@@ -8,6 +8,16 @@
  * being deployed and nothing else.
  *
  * Run after `npm run build` — or use `npm run build:dist`, which does both.
+ *
+ * Two shapes come out of here, and the flag is deliberate rather than inferred:
+ *
+ *   (default)      a hosted deployment. Refuses to publish without a backend,
+ *                  because a hosted build with no account is a site that cannot
+ *                  sign anyone in and quietly keeps everything in one browser.
+ *   --no-backend   a folder deployment. No Supabase at all: the config is
+ *                  written blank whatever the environment says, the vendored
+ *                  client is left out, and the plan lives in a folder the user
+ *                  picks. Nothing of the user's reaches any vendor.
  */
 
 import fs from 'node:fs';
@@ -20,6 +30,23 @@ const OUT = path.join(ROOT, 'dist');
 /** Everything the browser actually loads, and nothing else. */
 const FILES = ['index.html', 'app.bundle.js', 'config.js', '_headers'];
 const DIRS = ['css', 'vendor'];
+
+/** A deployment with no backend: see the flag note in the header. */
+const NO_BACKEND = process.argv.includes('--no-backend');
+
+/** `config.js` for a folder deployment, written regardless of the environment. */
+const BLANK_CONFIG = `/**
+ * Deployment configuration — written by tools/dist.js --no-backend.
+ *
+ * There is no backend. The plan lives in a folder the user picks (Import /
+ * export → Shared folder), so nothing is sent anywhere and no account exists.
+ */
+window.CX_CONFIG = {
+  supabaseUrl: '',
+  supabaseAnonKey: '',
+  requireAuth: false,
+};
+`;
 
 function copyDir(from, to) {
   fs.mkdirSync(to, { recursive: true });
@@ -43,20 +70,45 @@ function main() {
     bytes += fs.statSync(src).size;
   }
   for (const dir of DIRS) {
+    if (NO_BACKEND && dir === 'vendor') continue; // nothing in there is used
     const src = path.join(ROOT, dir);
     if (!fs.existsSync(src)) continue;
     copyDir(src, path.join(OUT, dir));
   }
 
-  // Fail the build rather than publishing a site that cannot sign anyone in.
-  const config = fs.readFileSync(path.join(OUT, 'config.js'), 'utf8');
-  if (!/supabaseUrl:\s*['"]https?:\/\//.test(config) && !/"supabaseUrl":\s*"https?:\/\//.test(config)) {
-    console.error(
-      '✗ dist/config.js has no backend.\n' +
-        '  Set SUPABASE_URL and SUPABASE_ANON_KEY as build environment variables\n' +
-        '  (Cloudflare Pages → Settings → Environment variables) and build again.'
+  if (NO_BACKEND) {
+    // Overwrite whatever `build.js` wrote from the environment. Leaving stale
+    // Supabase variables set in CI must not be able to turn a folder
+    // deployment back into a hosted one by accident.
+    fs.writeFileSync(path.join(OUT, 'config.js'), BLANK_CONFIG);
+
+    // The vendored client is loaded by a plain script tag, so dropping the file
+    // without dropping the tag would log a 404 on every page load.
+    const html = path.join(OUT, 'index.html');
+    const source = fs.readFileSync(html, 'utf8');
+    const stripped = source.replace(
+      /\n\s*<!--\s*\n\s*The Supabase client[\s\S]*?-->\s*\n\s*<script src="vendor\/supabase\.js"><\/script>/,
+      '\n    <!-- No backend in this build: the Supabase client is not shipped. -->'
     );
-    process.exit(1);
+    if (stripped === source) {
+      console.error('✗ could not remove the Supabase script tag from index.html — check the markup.');
+      process.exit(1);
+    }
+    fs.writeFileSync(html, stripped);
+    console.log('✓ config.js     — no backend; the plan lives in a folder the user picks');
+    console.log('✓ index.html    — Supabase client not shipped');
+  } else {
+    // Fail the build rather than publishing a site that cannot sign anyone in.
+    const config = fs.readFileSync(path.join(OUT, 'config.js'), 'utf8');
+    if (!/supabaseUrl:\s*['"]https?:\/\//.test(config) && !/"supabaseUrl":\s*"https?:\/\//.test(config)) {
+      console.error(
+        '✗ dist/config.js has no backend.\n' +
+          '  Set SUPABASE_URL and SUPABASE_ANON_KEY as build environment variables\n' +
+          '  (Cloudflare Pages → Settings → Environment variables) and build again,\n' +
+          '  or run `npm run build:folder` for a deployment with no backend at all.'
+      );
+      process.exit(1);
+    }
   }
 
   const total = walkSize(OUT);

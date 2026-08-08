@@ -13,7 +13,8 @@
     "test:smoke": "node tools/smoke.js",
     "test:folder": "node tools/smoke_folder.js",
     "test:hosted": "node tools/smoke_hosted.js",
-    "build:dist": "node tools/build.js && node tools/dist.js"
+    "build:dist": "node tools/build.js && node tools/dist.js",
+    "build:folder": "node tools/build.js && node tools/dist.js --no-backend"
   },
   "engines": {
     "node": ">=18"

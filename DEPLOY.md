@@ -231,15 +231,28 @@ approves, and when two people taking turns is enough.
 
 ## Deploying it
 
-1. Leave `config.js` blank — no `supabaseUrl`, no key. That makes the entire
-   Supabase path inert; there is no gate and no sign-in.
-2. `npm run build`, then publish `index.html`, `app.bundle.js`, `config.js`,
-   `css/` and `vendor/` anywhere static. `tools/dist.js` deliberately refuses a
-   config with no backend, so copy those files directly rather than using it.
-3. Open the site, go to **Import / export → Shared folder → Connect a folder…**
-   and pick the synced folder. If it is empty the app offers to write the plan
-   you have open into it; if it already holds one, it opens it.
+1. **Remove `SUPABASE_URL` and `SUPABASE_ANON_KEY`** from the Cloudflare
+   project's environment variables. Leaving them set is the one thing that can
+   turn this back into a hosted build by accident, because `npm run build`
+   rewrites `config.js` from them.
+2. Build with the folder flag:
+
+   ```bash
+   npm run build:folder     # = npm run build && node tools/dist.js --no-backend
+   ```
+
+   That writes a blank `config.js` whatever the environment says, leaves the
+   vendored Supabase client out of `dist/` entirely, and strips its script tag
+   from `index.html`. Point Cloudflare's build command at it and publish `dist/`.
+3. Open the site. There is no sign-in — go straight to **Import / export →
+   Shared folder → Connect a folder…** and pick the synced folder. If it is
+   empty the app offers to write the plan you have open into it; if it already
+   holds plans, you choose one.
 4. Your colleague opens the same URL and picks the same folder on their machine.
+
+The published site is then about a megabyte of HTML, CSS and one JavaScript
+bundle. It talks to nothing — no backend, no CDN, not even a font service — so
+the only thing your host ever sees is a request for those files.
 
 Mark the folder **Always keep on this device** in OneDrive, so the plan is a real
 local file rather than a placeholder. Edge will ask permission to edit files in
@@ -287,7 +300,8 @@ hand once, on the real thing:
 ## Running it afterwards
 
 ```bash
-npm run build:dist   # what Cloudflare runs
+npm run build:dist   # a hosted deployment; fails without a backend configured
+npm run build:folder # a folder deployment; no backend, no vendored client
 npm test             # local UI, shared folder, hosted UI, permission model
 npm run serve        # http://localhost:8123, using config.js as committed
 ```

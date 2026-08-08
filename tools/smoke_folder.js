@@ -347,11 +347,11 @@ async function main() {
 
   /* ── Console ──────────────────────────────────────────────────────────── */
   console.log('\nConsole');
-  // Two kinds of noise are expected and not application faults: a page loaded
-  // from file:// reports resource failures, and the stub folder cannot be
-  // structured-cloned into IndexedDB, so remembering it warns. Same filter as
-  // smoke_hosted.js, which runs from file:// for the same reason.
-  const meaningful = consoleErrors.filter((e) => !/favicon|net::ERR|Failed to load resource/i.test(e));
+  // Nothing is filtered but the favicon. This used to allow network failures
+  // through, which was hiding a real one: css/tokens.css was importing a font
+  // from a CDN on every load. With that gone the check can be strict, and a
+  // regression that reintroduces an external request fails the build.
+  const meaningful = consoleErrors.filter((e) => !/favicon/i.test(e));
   check('no console errors', meaningful.length === 0, meaningful.slice(0, 3).join(' | '));
 
   const shotIndex = process.argv.indexOf('--shot');
