@@ -93,6 +93,7 @@ export const EV = {
   FILE_STATE: 'file:state', // { connected, folder, plan, role, holder } — connection or pen changed
   FILE_EXTERNAL_CHANGE: 'file:external', // a colleague's save landed in the folder
   FILE_CONFLICT: 'file:conflict', // a write was refused because the file moved underneath us
+  FILE_IDLE: 'file:idle', // the holder has been idle too long; flush a save and hand the pen back
 
   /* History */
   HISTORY_CHANGED: 'history:changed', // { canUndo, canRedo, depth }

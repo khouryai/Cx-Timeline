@@ -171,6 +171,12 @@ async function main() {
 
   /* ── Creating a plan ──────────────────────────────────────────────────── */
   console.log('\nPutting a plan in an empty folder');
+  // Name yourself first, so the lock says who rather than "Someone".
+  const nameField = page.locator('#dock [data-section="shared-folder"] input').first();
+  await nameField.fill('Aik');
+  await nameField.press('Tab');
+  await page.waitForTimeout(300);
+
   await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
   await page.waitForTimeout(700);
   check('an empty folder asks what to call the plan', (await page.locator('.cx-modal').count()) === 1);
@@ -182,6 +188,10 @@ async function main() {
   const afterCreate = await plans(page);
   check('the plan is written into the folder', afterCreate.includes('bart-cbtc.json'), afterCreate.join(', '));
   check('and the lock is taken', afterCreate.includes('bart-cbtc.lock.json'), afterCreate.join(', '));
+  const holderName = await page.evaluate(() => {
+    try { return JSON.parse(window.__folder.files['bart-cbtc.lock.json'].text).holder; } catch { return ''; }
+  });
+  check('the lock names who has it', holderName === 'Aik', `holder is "${holderName}"`);
 
   const written = await planText(page, 'bart-cbtc.json');
   let parsed = null;
@@ -292,6 +302,73 @@ async function main() {
   check('picking one opens it', /phase-3-outline\.json/.test(await page.locator('#statusbar').innerText()));
   check('and the other stays listed as also in the folder',
     /also in this folder/i.test(await page.locator('#dock [data-section="shared-folder"]').innerText()));
+
+  /* ── Reopening your own browser ───────────────────────────────────────── */
+  console.log('\nReopening your own browser');
+  // The case that actually bit: close the browser and come straight back. The
+  // lock left behind is ours, and waiting out a staleness timeout to edit your
+  // own plan is not acceptable behaviour.
+  await page.goto('about:blank');
+  await boot({
+    files: {
+      'bart-cbtc.json': { text: sharedPlan, lastModified: Date.now() },
+    },
+  });
+  await openIoPane();
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1400);
+  const myLock = await page.evaluate(() => {
+    try { return JSON.parse(window.__folder.files['bart-cbtc.lock.json'].text); } catch { return null; }
+  });
+  check('the lock records the browser, not just the tab', !!myLock && !!myLock.device, JSON.stringify(myLock?.device));
+
+  // Reload with that fresh lock still in place, exactly as closing and
+  // reopening the browser leaves it. localStorage survives, so the device id
+  // does too — which is what makes the lock recognisably ours.
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('.tl-root', { timeout: 20000 });
+  await page.waitForTimeout(1600);
+  await openIoPane();
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1500);
+
+  check('coming back to your own lock is editable immediately',
+    !(await page.evaluate(() => document.body.classList.contains('read-only'))));
+  check('and the pane does not offer to take over from yourself',
+    (await page.locator('#dock .cx-btn', { hasText: /take over/i }).count()) === 0);
+
+  /* ── Taking over from a live colleague ────────────────────────────────── */
+  console.log('\nTaking over from someone who is still there');
+  await page.goto('about:blank');
+  await boot({
+    files: {
+      'bart-cbtc.json': { text: sharedPlan, lastModified: Date.now() },
+      'bart-cbtc.lock.json': {
+        text: JSON.stringify({ id: 'their-tab', device: 'their-laptop', holder: 'Dana', since: Date.now(), beat: Date.now() }),
+        lastModified: Date.now(),
+      },
+    },
+  });
+  await openIoPane();
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1500);
+  check('a live colleague still means read-only',
+    await page.evaluate(() => document.body.classList.contains('read-only')));
+
+  await page.locator('#dock .cx-btn', { hasText: /take over/i }).click();
+  await page.waitForTimeout(600);
+  const warn = await page.locator('.cx-modal').innerText().catch(() => '');
+  check('taking over from a live holder warns first', /Dana/.test(warn) && /lost|refused/i.test(warn),
+    warn.replace(/\n/g, ' ').slice(0, 90));
+
+  await page.locator('.cx-modal .cx-btn', { hasText: /take over anyway/i }).click();
+  await page.waitForTimeout(1200);
+  check('but it is never a dead end — confirming takes the pen',
+    !(await page.evaluate(() => document.body.classList.contains('read-only'))));
+  const stolen = await page.evaluate(() => {
+    try { return JSON.parse(window.__folder.files['bart-cbtc.lock.json'].text).holder; } catch { return ''; }
+  });
+  check('and the lock now names the new holder', stolen !== 'Dana', `holder is now "${stolen}"`);
 
   /* ── An abandoned lock ────────────────────────────────────────────────── */
   console.log('\nWhen the lock was abandoned');

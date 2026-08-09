@@ -606,17 +606,34 @@ export async function reloadFromFolder({ confirm = true } = {}) {
 }
 
 /**
- * Take the pen when the lock has gone stale — a colleague whose browser closed
- * without releasing it. Refused while their lock is still being stamped.
+ * Take the pen.
+ *
+ * Always possible, because the alternative — refusing — leaves someone who
+ * knows the other session is dead with nowhere to go. When the lock is still
+ * being stamped it asks first, since that is a live colleague rather than an
+ * abandoned tab. Either way nobody's work is lost: whoever saves second is told
+ * to reload rather than overwriting.
  */
 export async function takeOverEditing() {
-  const took = await filestore.takeOver();
-  toast(
-    took
-      ? { tone: 'good', title: 'You have the pen', message: 'This plan is editable again.' }
-      : { tone: 'warn', title: 'Still in use', message: `${filestore.state().holder} is actively editing this plan.` }
-  );
-  return took;
+  const status = await filestore.lockStatus();
+
+  if (status.live) {
+    const ok = await confirmDialog({
+      title: `${status.holder} is editing this plan`,
+      message:
+        `${status.holder} saved within the last minute, so they are probably still working. ` +
+        'Taking over means their next save is refused and they will be asked to reload — ' +
+        'anything they have not saved could be lost. Continue?',
+      confirmLabel: 'Take over anyway',
+      cancelLabel: 'Leave it',
+      danger: true,
+    });
+    if (!ok) return false;
+  }
+
+  await filestore.takeOver();
+  toast({ tone: 'good', title: 'You have the pen', message: 'This plan is editable again.' });
+  return true;
 }
 
 /* ── Navigation ────────────────────────────────────────────────────────── */
