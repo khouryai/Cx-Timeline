@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 42   Built: 2026-08-08T22:09:38.881Z
+ * Modules: 42   Built: 2026-08-09T02:32:40.245Z
  */
 (function () {
   'use strict';
@@ -6198,6 +6198,45 @@ __mods["core/storage.js"] = function (__x, __req) {
     return removed;
   }
 
+  /**
+   * Delete this browser's copy of the work.
+   *
+   * In file mode the folder is the record and everything here is a convenience:
+   * a cache of the last save, local snapshot history, and the copy the unload
+   * handler leaves for crash recovery. On a shared or borrowed machine that
+   * convenience is the one place a plan lingers after you have finished with it,
+   * so it can be thrown away deliberately.
+   *
+   * The folder connection is left alone — the plan itself is untouched on disk,
+   * and re-picking the folder would be a pointless chore.
+   */
+  async function purgeLocalCopy() {
+    let cleared = 0;
+
+    for (const key of [LS_DOC, LS_DOC + '.recovery', LS_BACKUPS]) {
+      try {
+        if (localStorage.getItem(key) !== null) cleared++;
+        localStorage.removeItem(key);
+      } catch {
+        /* nothing we can do, and nothing lost */
+      }
+    }
+
+    if (!usingFallback && db) {
+      for (const store of [STORE_PROJECTS, STORE_BACKUPS, STORE_BLOBS]) {
+        try {
+          const all = await wrap(tx(store).getAll());
+          cleared += all.length;
+          await wrap(tx(store, 'readwrite').clear());
+        } catch (err) {
+          console.warn(`[cx-timeline] could not clear ${store}:`, err.message);
+        }
+      }
+    }
+
+    return cleared;
+  }
+
   /* ── Preferences (device-scoped, not part of the document) ─────────────── */
 
   function getPref(key, fallback = null) {
@@ -6269,6 +6308,7 @@ __mods["core/storage.js"] = function (__x, __req) {
   Object.defineProperty(__x, "deleteBlob", { get: () => deleteBlob, enumerable: true });
   Object.defineProperty(__x, "blobUsage", { get: () => blobUsage, enumerable: true });
   Object.defineProperty(__x, "collectGarbage", { get: () => collectGarbage, enumerable: true });
+  Object.defineProperty(__x, "purgeLocalCopy", { get: () => purgeLocalCopy, enumerable: true });
   Object.defineProperty(__x, "getPref", { get: () => getPref, enumerable: true });
   Object.defineProperty(__x, "setPref", { get: () => setPref, enumerable: true });
   Object.defineProperty(__x, "usage", { get: () => usage, enumerable: true });
@@ -19077,7 +19117,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
 
   const store = __req("core/store.js");
-  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted } = __req("core/storage.js");
+  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } = __req("core/storage.js");
   const cloud = __req("core/cloud.js");
   const filestore = __req("core/filestore.js");
   const { search, summarise, facet, filterPredicate } = __req("core/query.js");
@@ -21015,6 +21055,36 @@ __mods["ui/panels.js"] = function (__x, __req) {
         onClick: async () => {
           const removed = await collectGarbage();
           toast({ tone: 'good', title: `${removed} orphaned file${removed === 1 ? '' : 's'} removed` });
+          renderPane();
+        },
+      }),
+      // The one place a plan lingers on a machine after you have finished with
+      // it. Worth being able to throw away on purpose, especially on a shared or
+      // borrowed computer.
+      el('button', {
+        class: 'cx-btn mini danger',
+        html: icon('shield', { size: 12 }) + "<span>Clear this browser's copy…</span>",
+        onClick: async () => {
+          const inFolder = isFileMode();
+          const ok = await confirmDialog({
+            title: "Clear this browser's copy?",
+            message: inFolder
+              ? 'Deletes the cached copy of the plan, the local snapshot history and the crash-recovery copy from this browser. ' +
+                'The plan itself stays in the connected folder and is untouched — this only removes what is left behind on this machine.'
+              : 'Deletes the plan, the snapshot history and any attachments held in this browser. ' +
+                'This is the only copy unless you have exported one — export JSON first if you are not sure.',
+            confirmLabel: 'Clear it',
+            danger: true,
+          });
+          if (!ok) return;
+          const cleared = await purgeLocalCopy();
+          toast({
+            tone: 'good',
+            title: 'This browser is clear',
+            message: inFolder
+              ? `${cleared} local record${cleared === 1 ? '' : 's'} removed. The folder copy is untouched.`
+              : `${cleared} local record${cleared === 1 ? '' : 's'} removed.`,
+          });
           renderPane();
         },
       }),

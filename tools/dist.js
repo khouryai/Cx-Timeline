@@ -114,6 +114,24 @@ function main() {
       process.exit(1);
     }
     fs.writeFileSync(html, stripped);
+    // With no backend there is nowhere legitimate to connect to, and the
+    // application makes no network calls of its own. Narrow the policy to say
+    // so, so the browser enforces it rather than us asserting it.
+    const headers = path.join(OUT, '_headers');
+    if (fs.existsSync(headers)) {
+      const before = fs.readFileSync(headers, 'utf8');
+      const after = before.replace(
+        /connect-src 'self' https:\/\/\*\.supabase\.co wss:\/\/\*\.supabase\.co/,
+        "connect-src 'self'"
+      );
+      if (after === before) {
+        console.error('✗ could not narrow connect-src in _headers — check the policy.');
+        process.exit(1);
+      }
+      fs.writeFileSync(headers, after);
+      console.log("✓ _headers      — connect-src narrowed to 'self'");
+    }
+
     console.log('✓ config.js     — no backend; the plan lives in a folder the user picks');
     console.log('✓ index.html    — Supabase client not shipped');
     if (process.env.SUPABASE_URL) {

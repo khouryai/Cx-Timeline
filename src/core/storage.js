@@ -719,6 +719,45 @@ export async function collectGarbage() {
   return removed;
 }
 
+/**
+ * Delete this browser's copy of the work.
+ *
+ * In file mode the folder is the record and everything here is a convenience:
+ * a cache of the last save, local snapshot history, and the copy the unload
+ * handler leaves for crash recovery. On a shared or borrowed machine that
+ * convenience is the one place a plan lingers after you have finished with it,
+ * so it can be thrown away deliberately.
+ *
+ * The folder connection is left alone — the plan itself is untouched on disk,
+ * and re-picking the folder would be a pointless chore.
+ */
+export async function purgeLocalCopy() {
+  let cleared = 0;
+
+  for (const key of [LS_DOC, LS_DOC + '.recovery', LS_BACKUPS]) {
+    try {
+      if (localStorage.getItem(key) !== null) cleared++;
+      localStorage.removeItem(key);
+    } catch {
+      /* nothing we can do, and nothing lost */
+    }
+  }
+
+  if (!usingFallback && db) {
+    for (const store of [STORE_PROJECTS, STORE_BACKUPS, STORE_BLOBS]) {
+      try {
+        const all = await wrap(tx(store).getAll());
+        cleared += all.length;
+        await wrap(tx(store, 'readwrite').clear());
+      } catch (err) {
+        console.warn(`[cx-timeline] could not clear ${store}:`, err.message);
+      }
+    }
+  }
+
+  return cleared;
+}
+
 /* ── Preferences (device-scoped, not part of the document) ─────────────── */
 
 export function getPref(key, fallback = null) {

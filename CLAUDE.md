@@ -255,7 +255,7 @@ npm run build                        # must succeed — it also lints the module
 npm test                             # all three suites, must exit 0
 
 node tools/smoke.js                  # 204 checks — the application, local mode
-node tools/smoke_folder.js           #  39 checks — the shared folder, stubbed
+node tools/smoke_folder.js           #  43 checks — the shared folder, stubbed
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result

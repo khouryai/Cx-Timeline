@@ -27,7 +27,7 @@ import {
   isDerivedBaseline,
 } from '../core/model.js';
 import * as store from '../core/store.js';
-import { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted } from '../core/storage.js';
+import { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } from '../core/storage.js';
 import * as cloud from '../core/cloud.js';
 import * as filestore from '../core/filestore.js';
 import { search, summarise, facet, filterPredicate } from '../core/query.js';
@@ -1965,6 +1965,36 @@ function paneSettings(root) {
       onClick: async () => {
         const removed = await collectGarbage();
         toast({ tone: 'good', title: `${removed} orphaned file${removed === 1 ? '' : 's'} removed` });
+        renderPane();
+      },
+    }),
+    // The one place a plan lingers on a machine after you have finished with
+    // it. Worth being able to throw away on purpose, especially on a shared or
+    // borrowed computer.
+    el('button', {
+      class: 'cx-btn mini danger',
+      html: icon('shield', { size: 12 }) + "<span>Clear this browser's copy…</span>",
+      onClick: async () => {
+        const inFolder = isFileMode();
+        const ok = await confirmDialog({
+          title: "Clear this browser's copy?",
+          message: inFolder
+            ? 'Deletes the cached copy of the plan, the local snapshot history and the crash-recovery copy from this browser. ' +
+              'The plan itself stays in the connected folder and is untouched — this only removes what is left behind on this machine.'
+            : 'Deletes the plan, the snapshot history and any attachments held in this browser. ' +
+              'This is the only copy unless you have exported one — export JSON first if you are not sure.',
+          confirmLabel: 'Clear it',
+          danger: true,
+        });
+        if (!ok) return;
+        const cleared = await purgeLocalCopy();
+        toast({
+          tone: 'good',
+          title: 'This browser is clear',
+          message: inFolder
+            ? `${cleared} local record${cleared === 1 ? '' : 's'} removed. The folder copy is untouched.`
+            : `${cleared} local record${cleared === 1 ? '' : 's'} removed.`,
+        });
         renderPane();
       },
     }),
