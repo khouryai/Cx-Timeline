@@ -55,7 +55,7 @@ import {
 } from './components.js';
 import { managedSelect, suggestInput } from './lists.js';
 import { openNoteEditor, renderNote, notePreview } from './notes.js';
-import { resolveViolation } from './commands.js';
+import { resolveViolation, toggleLinkHidden } from './commands.js';
 import { attachmentList } from './attachments.js';
 
 let host = null;
@@ -156,7 +156,7 @@ function headerFor(kind, name, actions = []) {
       el('div', { class: 'ih-name', text: name, title: name }),
     ])
   );
-  for (const action of actions) headEl.appendChild(action);
+  for (const action of actions) if (action) headEl.appendChild(action);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1087,15 +1087,32 @@ function distribute(objects) {
    ═══════════════════════════════════════════════════════════════════════ */
 
 function renderLink(linkId) {
-  const link = store.getDoc().links.find((l) => l.id === linkId);
+  const doc = store.getDoc();
+  const link = doc.links.find((l) => l.id === linkId);
   if (!link) {
     renderProject();
     return;
   }
   const from = store.getObject(link.from);
   const to = store.getObject(link.to);
+  const violated = !!linkViolations(doc).byLink.get(link.id)?.violated;
 
   headerFor('Dependency', `${from?.title || '?'} → ${to?.title || '?'}`, [
+    // A broken dependency cannot be hidden — it would only reappear on its
+    // own the moment this render committed, so the button that would do
+    // nothing is not offered at all.
+    violated
+      ? null
+      : el('button', {
+          class: 'cx-btn icon mini ghost',
+          title: link.hidden ? 'Show dependency' : 'Hide dependency',
+          'aria-label': link.hidden ? 'Show dependency line' : 'Hide dependency line',
+          html: icon(link.hidden ? 'eye' : 'eye-off', { size: 13 }),
+          onClick: () => {
+            toggleLinkHidden(link.id);
+            render();
+          },
+        }),
     el('button', {
       class: 'cx-btn icon mini ghost',
       title: 'Delete dependency',
@@ -1109,6 +1126,16 @@ function renderLink(linkId) {
       },
     }),
   ]);
+
+  if (link.hidden) {
+    bodyEl.appendChild(
+      el('div', {
+        class: 'cx-hint',
+        style: { margin: '0 0 10px' },
+        text: 'Hidden — this line will not draw on the canvas or in exports unless it becomes broken.',
+      })
+    );
+  }
 
   bodyEl.appendChild(
     section('Relationship', [

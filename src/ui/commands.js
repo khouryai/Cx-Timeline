@@ -324,6 +324,26 @@ export function resolveViolation(linkId) {
 }
 
 /**
+ * Hide or show one dependency line.
+ *
+ * A currently-broken link cannot be hidden — setting the flag would only be
+ * cleared straight back by `installHiddenLinkGuard()` in `main.js`, so the
+ * button that would do it is not offered at all (see the inspector's link
+ * panel). Hiding is otherwise a plain toggle: the guard is what takes it away
+ * again, the moment the dependency it was hiding becomes a problem.
+ */
+export function toggleLinkHidden(id) {
+  const doc = store.getDoc();
+  const link = doc.links.find((l) => l.id === id);
+  if (!link) return false;
+  if (!link.hidden && linkViolations(doc).byLink.get(id)?.violated) return false;
+
+  store.updateLink(id, { hidden: !link.hidden }, link.hidden ? 'Show dependency' : 'Hide dependency');
+  renderer.requestRender();
+  return true;
+}
+
+/**
  * Resolve every broken dependency, repeatedly, so fixing one that cascades
  * into another settles the whole chain rather than leaving the next one red.
  */

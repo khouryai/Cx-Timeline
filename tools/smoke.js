@@ -376,6 +376,72 @@ async function main() {
   );
   await truncationAudit('long-title');
 
+  console.log('\nHiding a dependency');
+  {
+    // A hidden dependency line is a choice, not a fact about the schedule, and
+    // it must not survive the thing it was hiding turning into a problem. This
+    // runs before the "Dependency violations" section below so it starts from
+    // the sample plan's own finish-to-start pair while it is still healthy,
+    // and leaves it exactly as healthy and unhidden afterwards.
+    // A plain DOM read rather than a locator for presence/violated together —
+    // `locator.getAttribute()` waits for the element to attach, which would
+    // hang out a full timeout on the very failure this test exists to catch
+    // (the line never reappearing).
+    const linkState = (id) => page.evaluate((id) => {
+      const g = document.querySelector(`.tl-connectors g[data-link-id="${id}"]`);
+      return { visible: !!g, violated: g?.dataset.violated === 'true' };
+    }, id);
+
+    // Selecting a connector is a real mousedown on its hit-path, dispatched
+    // directly rather than clicked at a computed point — an elbow-routed path's
+    // bounding-box centre is not reliably on the line itself. Trying each
+    // connector in turn and reading the inspector's own header back is what the
+    // application already uses to decide which link a click landed on.
+    const findLink = (fromLabel, toLabel) => page.evaluate(([from, to]) => {
+      for (const g of document.querySelectorAll('.tl-connectors g[data-link-id]')) {
+        g.querySelector('.tl-link-hit')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        const name = document.querySelector('#inspector .ih-name')?.textContent || '';
+        if (name.includes(from) && name.includes(to)) return g.dataset.linkId;
+      }
+      return null;
+    }, [fromLabel, toLabel]);
+
+    const linkId = await findLink('Regression Cycle 5', 'Dynamic Testing Campaign 1');
+    check('the dependency under test is found and selected', !!linkId, linkId || '(not found)');
+    check('it starts visible on the canvas', (await linkState(linkId)).visible);
+
+    await page.locator('#inspector button[title="Hide dependency"]').click();
+    await page.waitForTimeout(150);
+    check('hiding it removes the line from the canvas', !(await linkState(linkId)).visible);
+    check('the inspector now offers to show it again',
+      (await page.locator('#inspector button[title="Show dependency"]').count()) === 1);
+    const hintText = await page.evaluate(() => document.querySelector('#inspector .cx-hint')?.textContent || '');
+    check('and says it is hidden', /Hidden/.test(hintText), hintText);
+
+    // Break the very dependency it is hiding.
+    await page.locator('.tl-obj[data-label^="Regression Cycle 5"]').first().click();
+    await page.waitForTimeout(200);
+    for (let i = 0; i < 14; i++) await page.keyboard.press('Shift+ArrowRight');
+    await page.waitForTimeout(700);
+
+    const broken = await linkState(linkId);
+    check('a broken dependency reappears even while hidden', broken.visible);
+    check('drawn as broken, not merely made visible', broken.violated);
+
+    // Put the dates back. The reappearance has to outlive the violation that
+    // caused it, or "hidden" never really went away — it just got painted over
+    // for as long as the line stayed broken.
+    for (let i = 0; i < 14; i++) await page.keyboard.press('Shift+ArrowLeft');
+    await page.waitForTimeout(700);
+    const settled = await linkState(linkId);
+    check('no longer flagged as broken', !settled.violated);
+    check('but it stays visible — hiding it again is a choice, not automatic', settled.visible);
+
+    const reselected = await findLink('Regression Cycle 5', 'Dynamic Testing Campaign 1');
+    check('the inspector agrees the hide was used up',
+      reselected === linkId && (await page.locator('#inspector button[title="Hide dependency"]').count()) === 1);
+  }
+
   console.log('\nDependency violations');
   // The starter plan links "Regression Cycle 5" → "Dynamic Testing Campaign 1"
   // (finish-to-start). Drag the predecessor far enough right and the

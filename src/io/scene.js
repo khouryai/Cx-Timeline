@@ -17,7 +17,7 @@
 import { clamp, withAlpha, readableInk } from '../core/util.js';
 import { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } from '../core/dates.js';
 import { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot } from '../core/model.js';
-import { criticalPath } from '../core/analysis.js';
+import { criticalPath, linkViolations } from '../core/analysis.js';
 import { fontString, textWidth, wrapText, fitWidth } from '../timeline/text.js';
 
 /** Layout constants for exported drawings, in points/pixels. */
@@ -446,7 +446,12 @@ export function buildScene(doc, opts = {}) {
   /* ── Dependencies ──────────────────────────────────────────────────── */
   if (opts.showLinks !== false && doc.settings.showConnectors) {
     const critical = doc.settings.criticalPath ? criticalPath(doc).critical : null;
+    // An export is the drawing on screen, not a different one: a link stays
+    // hidden here exactly as it does on the canvas — unhidden the moment it is
+    // violated, never by the mere fact of being exported.
+    const violations = linkViolations(doc);
     for (const link of doc.links) {
+      if (link.hidden && !violations.byLink.get(link.id)?.violated) continue;
       const from = rectsById.get(link.from);
       const to = rectsById.get(link.to);
       if (!from || !to) continue;

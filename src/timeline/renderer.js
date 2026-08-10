@@ -1119,9 +1119,16 @@ function renderLinks(doc, layout, settings, upstream) {
   }
   // Memoised on document identity, so asking every frame of a drag is free
   // once the document has settled.
-  const routed = routeAll(doc.links, layout.byId, settings.connectorStyle, {
+  const violations = linkViolations(doc);
+  // A hidden link stays off the canvas only while it holds — the moment a drag
+  // makes it violated it has to be seen, so this checks live rather than
+  // trusting the stored flag. `installHiddenLinkGuard()` in main.js clears the
+  // flag for good once the gesture commits, which is what makes "hidden" not
+  // survive the thing it was hiding turning into a problem.
+  const visible = doc.links.filter((l) => !l.hidden || violations.byLink.get(l.id)?.violated);
+  const routed = routeAll(visible, layout.byId, settings.connectorStyle, {
     criticalIds: settings.criticalPath ? criticalIds : null,
-    violations: linkViolations(doc),
+    violations,
     upstreamIds: upstream.links,
   });
   renderConnectors(dom.connectors, routed, {

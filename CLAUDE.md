@@ -171,6 +171,19 @@ subscribes. That is what keeps the graph acyclic.
 - **Derived state is never stored.** Violations, critical path and float are
   computed from the document, so they appear and clear on their own. Do not
   add a `violated` field to a link — there is nothing to keep in step.
+- **A hidden dependency line is a choice that does not survive going wrong.**
+  `link.hidden` is real, stored intent — unlike `violated`, nothing can derive
+  it — but it is not durable: `installHiddenLinkGuard()` in `main.js` watches
+  every settled `DOC_CHANGED`/`DOC_REPLACED` and clears it the moment
+  `linkViolations()` says that link is broken, through `store.revealBrokenLinks()`
+  so undo still walks back through it like any other edit. The renderer
+  (`timeline/renderer.js`) and the exported drawing (`io/scene.js`) both apply
+  the same live override — hidden-but-violated still draws — so a line breaking
+  mid-drag reappears before the guard ever gets a settled document to react to.
+  `toggleLinkHidden()` in `ui/commands.js` refuses to hide a link that is
+  already violated, for the same reason: it would just be cleared straight
+  back. This is why "hidden" always means "hidden right now, on purpose," never
+  "was hidden once."
 - **Selecting a bar marks what it is waiting on.** `predecessorsOf()` returns
   one hop — the links arriving at the selection and the objects on the far end —
   and the renderer marks them `.upstream` for as long as the selection stands,
