@@ -636,6 +636,100 @@ export async function takeOverEditing() {
   return true;
 }
 
+/**
+ * Say who has the plan, before anybody starts typing.
+ *
+ * The web build cannot do this: a browser tab has to draw an interface, open a
+ * folder and read a lock file in that order, so the news that a colleague has
+ * the pen always arrives after the canvas. The desktop shell reads the lock
+ * before the window exists (`startup_lock_check` in `src-tauri/src/main.rs`),
+ * which means this is the first thing on screen and not a correction to it.
+ *
+ * Three states, three different things worth saying:
+ *
+ *   a live colleague    a modal, because carrying on regardless means finding
+ *                       out at the first save. It offers the way out — taking
+ *                       over — rather than only stating the problem.
+ *   an abandoned lock   a note. The pen is already ours; `checkLock()` reclaims
+ *                       a stale lock without being asked. Silence here reads as
+ *                       "so it did not matter that their name was on it", and it
+ *                       did — they may have unsaved work in a dead session.
+ *   free, or ours       nothing at all.
+ */
+export async function announceStartupPen(pen) {
+  if (!pen || pen.mine) return null;
+
+  if (!pen.live) {
+    if (pen.free && pen.holder) {
+      toast({
+        tone: 'info',
+        title: 'You have the pen',
+        message: `${pen.holder} left this plan open but stopped saving ${sinceWords(pen.idle_ms)} ago, so it is yours to edit.`,
+        timeout: 9000,
+      });
+    }
+    return 'editing';
+  }
+
+  const holder = pen.holder || 'Someone else';
+  return new Promise((resolve) => {
+    let settled = false;
+    openModal({
+      title: `${holder} has this plan open`,
+      subtitle: `Last saved ${sinceWords(pen.idle_ms)} ago`,
+      body: el('div', { style: { fontSize: 'var(--fs-small)', color: 'var(--text-muted)', lineHeight: '1.6' } }, [
+        el('p', {
+          style: { margin: '0 0 10px' },
+          text:
+            `${holder} is editing it now, so it opens read-only. Their saves arrive here as they make them, ` +
+            'and it becomes editable on its own once they close it — nothing to do but carry on reading.',
+        }),
+        el('p', {
+          style: { margin: 0 },
+          text:
+            'Taking over now means their next save is refused and they are asked to reload, ' +
+            'so anything they have not saved could be lost. Worth a message first.',
+        }),
+      ]),
+      actions: [
+        'spacer',
+        {
+          label: 'Take over editing',
+          kind: 'danger',
+          onClick: async () => {
+            settled = true;
+            await filestore.takeOver();
+            emit(EV.FILE_STATE, filestore.state());
+            resolve('editing');
+          },
+        },
+        {
+          label: 'Open read-only',
+          kind: 'primary',
+          autofocus: true,
+          onClick: () => {
+            settled = true;
+            resolve('viewer');
+          },
+        },
+      ],
+      onClose: () => {
+        if (!settled) resolve('viewer');
+      },
+    });
+  });
+}
+
+/** "4 minutes", "2 hours" — enough to judge whether somebody is still there. */
+function sinceWords(ms) {
+  const seconds = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  if (seconds < 60) return `${seconds} second${seconds === 1 ? '' : 's'}`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  const hours = Math.round(minutes / 60);
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
 /* ── Navigation ────────────────────────────────────────────────────────── */
 
 /** Jump to and flash an object — used by search results and outline rows. */

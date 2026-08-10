@@ -7,18 +7,24 @@
   "scripts": {
     "build": "node tools/build.js",
     "watch": "node tools/build.js --watch",
-    "test": "node tools/smoke.js && node tools/smoke_folder.js && node tools/smoke_hosted.js && node tools/test_sql.js",
+    "test": "node tools/smoke.js && node tools/smoke_folder.js && node tools/smoke_desktop.js && node tools/smoke_hosted.js && node tools/test_sql.js",
     "serve": "node tools/serve.js",
     "test:sql": "node tools/test_sql.js",
     "test:smoke": "node tools/smoke.js",
     "test:folder": "node tools/smoke_folder.js",
+    "test:desktop": "node tools/smoke_desktop.js",
     "test:hosted": "node tools/smoke_hosted.js",
+    "test:rust": "cd src-tauri && cargo test --lib --no-default-features",
     "build:dist": "node tools/build.js && node tools/dist.js",
-    "build:folder": "node tools/build.js && node tools/dist.js --no-backend"
+    "build:folder": "node tools/build.js && node tools/dist.js --no-backend",
+    "build:desktop": "node tools/build.js && node tools/desktop.js",
+    "desktop": "npm run build:desktop && cd src-tauri && cargo tauri dev",
+    "desktop:installer": "npm run build:desktop && cd src-tauri && cargo tauri build"
   },
   "cxTimeline": {
-    "_comment": "deployment: 'hosted' saves to Supabase and requires a backend at build time; 'folder' publishes with no backend at all and keeps the plan in a folder the user picks. tools/dist.js reads this, so the shape of a deployment is decided here, in the repository, rather than in a CI setting nobody can see.",
-    "deployment": "folder"
+    "_comment": "deployment: 'hosted' saves to Supabase and requires a backend at build time; 'folder' publishes with no backend at all and keeps the plan in a folder the user picks. tools/dist.js reads this, so the shape of a deployment is decided here, in the repository, rather than in a CI setting nobody can see. updateChannel: the deployment an installed desktop copy follows for updates — blank means an installed copy never updates itself.",
+    "deployment": "folder",
+    "updateChannel": "https://cx-timeline.pages.dev"
   },
   "engines": {
     "node": ">=18"

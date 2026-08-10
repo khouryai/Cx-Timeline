@@ -406,6 +406,51 @@ async function main() {
   check('and the status bar stops claiming a folder',
     !/bart-cbtc/.test(await page.locator('#statusbar').innerText()));
 
+  /* ── Clearing this browser's copy ─────────────────────────────────────── */
+  console.log('\nClearing the local copy');
+  await page.goto('about:blank');
+  await boot({ files: { 'bart-cbtc.json': { text: sharedPlan, lastModified: Date.now() } } });
+  await openIoPane();
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1500);
+
+  // Make an edit so there is definitely something cached locally.
+  await page.locator('.tl-obj.shape-bar').first().click();
+  await page.waitForTimeout(250);
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.waitForTimeout(1600);
+
+  const cachedBefore = await page.evaluate(() => new Promise((res) => {
+    const r = indexedDB.open('cx-timeline');
+    r.onsuccess = () => {
+      const g = r.result.transaction('projects').objectStore('projects').getAll();
+      g.onsuccess = () => res(g.result.length);
+    };
+    r.onerror = () => res(-1);
+  }));
+  check('the browser keeps a cached copy while working', cachedBefore > 0, `${cachedBefore} record(s)`);
+
+  await page.locator('#sidenav .nav-link[data-pane="settings"]').click();
+  await page.waitForTimeout(500);
+  await page.locator('#dock .cx-btn', { hasText: /clear this browser/i }).click();
+  await page.waitForTimeout(500);
+  await page.locator('.cx-modal .cx-btn', { hasText: /clear it/i }).click();
+  await page.waitForTimeout(1200);
+
+  const cachedAfter = await page.evaluate(() => new Promise((res) => {
+    const r = indexedDB.open('cx-timeline');
+    r.onsuccess = () => {
+      const g = r.result.transaction('projects').objectStore('projects').getAll();
+      g.onsuccess = () => res(g.result.length);
+    };
+    r.onerror = () => res(-1);
+  }));
+  const recovery = await page.evaluate(() => localStorage.getItem('cxtl.doc.recovery'));
+  check('clearing it empties the browser cache', cachedAfter === 0, `${cachedAfter} record(s)`);
+  check('and leaves no crash-recovery copy behind', recovery === null);
+  check('but the plan in the folder is untouched',
+    (await planText(page, 'bart-cbtc.json')).length > 0);
+
   /* ── Unsupported browsers ─────────────────────────────────────────────── */
   console.log('\nWhere the API is missing');
   await page.goto('about:blank');

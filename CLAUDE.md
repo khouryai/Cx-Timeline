@@ -21,6 +21,13 @@ synced by OneDrive or SharePoint. It is reachable only when there is no backend
 configured, needs no account, and puts nothing anywhere but that folder. See
 the shared-folder bullet in Conventions, and `DEPLOY.md` for how to ship it.
 
+File mode ships in two places, and they are the same application: the deployed
+site, where a browser has to be granted the folder, and the **Windows desktop
+build** in `src-tauri/`, where the folder is a path and simply opens. Neither has
+a backend. The desktop build is not a fork — it runs the same
+`app.bundle.js`, fetched from the deployment, so a change deployed once reaches
+both. See the two desktop bullets in Conventions.
+
 Local mode is also why the 126-check offline suite still passes untouched. If
 you add a hosted-only feature, hide it behind `cloud.isConfigured()` and cover
 it in `tools/smoke_hosted.js` instead.
@@ -75,8 +82,10 @@ else with a clear error:
 ```
 core/util · core/events · core/dates      leaves — import nothing
 core/cloud                                the only module that knows Supabase
-core/filestore                            the only module that knows the
-                                          File System Access API
+core/desktop                              the only module that knows Tauri
+core/filestore → core/desktop             the only module that knows the File
+                                          System Access API, and the only caller
+                                          of the desktop bridge
 core/model → core/query · core/history · core/analysis
 core/store → core/storage
 timeline/viewport → timeline/layout → timeline/connectors
@@ -190,7 +199,33 @@ subscribes. That is what keeps the graph acyclic.
   reload through IndexedDB** — it cannot be serialised — so it lives in a
   database of its own, which is what lets `storage.js` import `filestore.js`
   without the reverse. Anything that writes to the folder goes through
-  `filestore.js`; nothing else should ever hold a handle.
+  `filestore.js`; nothing else should ever hold a handle. A lock is keyed on a
+  device id, and on the desktop that id belongs to the **shell**
+  (`settings.json`), adopted by `adoptSettings()` on every settings read —
+  minting a second one in localStorage would recreate, on the desktop, the exact
+  bug it was introduced to fix.
+- **`core/filestore.js` has two backends and one set of rules.** The I/O layer at
+  the top of it is the only place a browser (a directory handle) and the desktop
+  shell (a path) differ; every rule that matters — whose lock it is, when one is
+  stale, when a save is refused — sits below that line and runs identically in
+  both. `core/desktop.js` is the only module that knows Tauri exists and it
+  decides nothing: it moves bytes, and rethrows Rust's `{ kind, message }` so a
+  caller can branch on `err.kind === 'conflict'` from either backend. The Rust
+  side (`src-tauri/src/plan.rs`) is a Tauri-free library, tested with
+  `npm run test:rust` on a machine with no webview installed, and it gives the
+  desktop build two things a browser cannot have: no permission prompt on launch,
+  and an **atomic** write (temp file, then rename) so OneDrive never reads a
+  half-written plan.
+- **The desktop app is fed by the deployment, not by reinstalling.** The window
+  loads a local page; `tools/shell/loader.js` runs the newest copy the machine
+  has and fetches a newer one in the background for the *next* launch. Two rules
+  make that safe to leave running on someone else's laptop: launch never waits on
+  the network, and a downloaded copy is **on trial** until `main.js` calls
+  `CX_SHELL.confirmHealthy()` — a copy that cannot boot is thrown away rather
+  than retried forever, so a bad deploy cannot brick both laptops with no way
+  back. Publishing the site is the whole release: `tools/dist.js` writes
+  `dist/desktop/{version,payload}.json` alongside it. Rebuild the installer only
+  when the Rust side changes.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
 - **Dropdown vocabularies are document data, not constants.** Status,
@@ -252,10 +287,12 @@ subscribes. That is what keeps the graph acyclic.
 
 ```bash
 npm run build                        # must succeed — it also lints the module graph
-npm test                             # all three suites, must exit 0
+npm test                             # all four browser suites plus the SQL one, must exit 0
+npm run test:rust                    #  13 checks — the plan and lock rules, in Rust
 
 node tools/smoke.js                  # 204 checks — the application, local mode
-node tools/smoke_folder.js           #  39 checks — the shared folder, stubbed
+node tools/smoke_folder.js           #  43 checks — the shared folder, in a browser
+node tools/smoke_desktop.js          #  48 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result
@@ -274,6 +311,16 @@ folder, so the lock, the read-only handover and the write guard are covered
 without a real filesystem. No browser lets a script click its own file dialog,
 so the picker and a genuine OneDrive folder stay on the manual checklist in
 `DEPLOY.md` rather than being pretended at.
+
+`smoke_desktop.js` serves `dist-desktop/` — reassembled on every run, so it can
+never pass against code that has moved on — and replaces
+`window.__TAURI_INTERNALS__.invoke` with an in-memory folder. It covers the
+things the desktop build claims and the browser cannot do: the plan opening on
+launch with no picker and no prompt, the pen announced *before* anything is
+drawn, a save going through the shell, the guard refusing one, and the whole
+update path — downloaded in the background, applied on the next launch, and
+rolled back when the downloaded copy either throws or silently never boots. The
+Rust side is `npm run test:rust`, which needs no webview and no display.
 
 `smoke_hosted.js` boots it with a configured backend and a stubbed client, so
 the gate, invitations, sharing and read-only mode are covered without a

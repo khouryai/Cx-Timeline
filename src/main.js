@@ -23,6 +23,7 @@ import * as store from './core/store.js';
 import { init as initStorage, takeRecovery, getPref, setPref, saveNow, isHosted } from './core/storage.js';
 import * as cloud from './core/cloud.js';
 import * as filestore from './core/filestore.js';
+import * as desktop from './core/desktop.js';
 import { criticalPath } from './core/analysis.js';
 import * as viewport from './timeline/viewport.js';
 import * as renderer from './timeline/renderer.js';
@@ -48,6 +49,12 @@ const APP_VERSION = '1.0.0';
 
 async function boot() {
   const started = performance.now();
+
+  // Desktop only, and started first because it has to finish first: the shell
+  // reads the lock file before the window exists, so "your colleague has this
+  // open" can be the first thing on screen instead of a correction to it. In a
+  // browser this resolves to null immediately and nothing below it happens.
+  const startupPen = filestore.startupPen();
 
   /* ── 0. Account ──────────────────────────────────────────────────────── */
   if (cloud.isConfigured()) {
@@ -125,6 +132,7 @@ async function boot() {
   installP6Drops();
   installConflictHandling();
   installFolderHandling();
+  installDesktopShell();
   installViewPersistence();
   installResizeHandling();
   installCriticalPathRecompute();
@@ -135,7 +143,18 @@ async function boot() {
   /* ── Done ────────────────────────────────────────────────────────────── */
   dismissSplash();
 
+  // Tell the desktop shell this version came up. A copy downloaded from the
+  // deployment is on trial until this line runs: if it never does, the next
+  // launch throws it away and runs the installed one instead, so a bad deploy
+  // cannot leave anybody unable to open the application. Absent in a browser.
+  window.CX_SHELL?.confirmHealthy?.();
+
   console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
+
+  // The pen, said out loud. After the splash, so the dialog is not underneath
+  // it, and last, so booting is never held up by a question.
+  const pen = await startupPen;
+  if (pen) await cmd.announceStartupPen(pen);
 }
 
 /** Fade out the boot splash. Safe to call more than once. */
@@ -246,6 +265,49 @@ function installFolderHandling() {
   window.addEventListener('beforeunload', () => {
     if (filestore.isConnected()) filestore.handleUnload();
   });
+}
+
+/* ── The desktop shell ─────────────────────────────────────────────────── */
+
+/**
+ * The two things the desktop build has that a browser tab does not.
+ *
+ *   the title bar   which plan is open and who has the pen, legible from the
+ *                   taskbar without bringing the window forward. On a machine
+ *                   where two people take turns in one file, that is the state
+ *                   you want to be able to glance at.
+ *   an update       `tools/shell/loader.js` fetches a newer application in the
+ *                   background and keeps it for next launch. Swapping code under
+ *                   a running window would leave the document in one version and
+ *                   the interface in another, so it is announced, not applied.
+ *
+ * Both are inert in a browser: the event never fires and `setWindowTitle()`
+ * resolves to nothing.
+ */
+function installDesktopShell() {
+  window.addEventListener('cx-shell-update', (event) => {
+    const version = event.detail?.version || '';
+    toast({
+      tone: 'info',
+      title: version ? `Version ${version} is ready` : 'An update is ready',
+      message: 'It is already downloaded. Close CX Timeline and open it again to start using it.',
+      sticky: true,
+    });
+  });
+
+  if (!filestore.state().desktop) return;
+
+  const syncTitle = () => {
+    const file = filestore.state();
+    const doc = store.getDoc();
+    const name = file.plan || doc?.name || 'Untitled';
+    const pen = !file.connected ? '' : file.role === 'viewer' ? ` — read-only, ${file.holder || 'someone else'} has it` : '';
+    desktop.setWindowTitle(`${name}${pen} — CX Timeline`);
+  };
+
+  on(EV.FILE_STATE, syncTitle);
+  on(EV.DOC_CHANGED, debounce(syncTitle, 500));
+  syncTitle();
 }
 
 /* ── Recovery ──────────────────────────────────────────────────────────── */

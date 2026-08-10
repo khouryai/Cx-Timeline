@@ -46,12 +46,21 @@ changing it — by the database, not just by the interface.
 
 ### Deploying your own
 
-See **[DEPLOY.md](DEPLOY.md)**. Cloudflare Pages and Supabase, both free at
-this size, about twenty minutes.
+See **[DEPLOY.md](DEPLOY.md)**. There are three shapes and it covers all three:
+
+- **Hosted** — Cloudflare and Supabase, accounts, invitation-only sign-up. Both
+  free at this size, about twenty minutes.
+- **Shared folder** — no backend and no account at all: the plan is a JSON file
+  in a folder you picked, usually one OneDrive or SharePoint keeps in sync. Two
+  people take turns, and nothing of yours reaches any vendor.
+- **Desktop app** — the same folder, as a Windows application that opens your
+  plan on launch and needs no administrator to install. It is not a fork: it
+  runs the same bundle, fetched from the deployment, so a deploy reaches it on
+  its next launch without anybody reinstalling anything.
 
 ```bash
 npm run serve      # http://localhost:8123 — local development
-npm test           # local UI, hosted UI, and the permission model
+npm test           # local UI, shared folder, desktop shell, hosted UI, permissions
 ```
 
 ---
@@ -407,15 +416,19 @@ A few decisions worth knowing about:
 ### Working on it
 
 ```bash
-npm run build       # link src/ → app.bundle.js
-npm run watch       # rebuild on change
-npm run serve       # local dev server
-npm run build:dist  # what Cloudflare Pages runs
+npm run build         # link src/ → app.bundle.js
+npm run watch         # rebuild on change
+npm run serve         # local dev server
+npm run build:dist    # what Cloudflare runs
+npm run build:desktop # assemble the frontend the Windows installer contains
 
-npm test            # all three suites
-npm run test:smoke  # 126 checks — the application, local mode
-npm run test:hosted # 34 checks — sign-in, sharing and read-only mode
-npm run test:sql    # 57 checks — the permission model, on real PostgreSQL
+npm test              # every suite below except the Rust one
+npm run test:smoke    # 204 checks — the application, local mode
+npm run test:folder   #  43 checks — the shared folder, in a browser
+npm run test:desktop  #  48 checks — the desktop shell, and its updates
+npm run test:hosted   #  49 checks — sign-in, sharing and read-only mode
+npm run test:sql      #  78 checks — the permission model, on real PostgreSQL
+npm run test:rust     #  13 checks — the plan and lock rules; no webview needed
 ```
 
 After editing anything under `src/`, run `npm run build` — `index.html` loads
@@ -440,3 +453,11 @@ Your data goes to your own Supabase project and nowhere else — there is no
 analytics, no telemetry and no third-party script on the page. Sharing a
 project is the only way anyone else can see it, and an email address is never
 exposed to someone you do not share a project with.
+
+In the two shapes with no backend — the shared folder, and the desktop app —
+none of the first two apply. The plan is a file in your folder, attachments are
+files beside it, and the only thing leaving the machine is whatever your folder
+already syncs. The desktop app makes exactly one network request of its own: it
+asks the deployment whether a newer version of the application exists. It never
+sends anything, and its Content-Security-Policy allows that one host and nothing
+else.

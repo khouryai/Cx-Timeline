@@ -29,3 +29,16 @@
 # The vendored client is pinned, so it can be cached hard.
 /vendor/*
   Cache-Control: public, max-age=31536000, immutable
+
+# The update channel the installed desktop application follows.
+#
+# `Access-Control-Allow-Origin` is required and is not a widening of anything:
+# these two files are the application's own code and stylesheets, already served
+# to anyone who opens the site. The header only lets the desktop shell — which
+# runs on its own local origin — read what a browser tab may already read. It is
+# scoped to this path so nothing else on the site becomes cross-origin readable.
+#
+# Never cached: the whole point is that a launch sees the version just deployed.
+/desktop/*
+  Access-Control-Allow-Origin: *
+  Cache-Control: no-store

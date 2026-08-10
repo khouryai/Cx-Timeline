@@ -18,11 +18,17 @@
  *                  written blank whatever the environment says, the vendored
  *                  client is left out, and the plan lives in a folder the user
  *                  picks. Nothing of the user's reaches any vendor.
+ *
+ * A folder deployment also carries `desktop/version.json` and
+ * `desktop/payload.json` — the update channel the installed desktop application
+ * checks on launch. That is why deploying the site is all it takes to update the
+ * application on both people's laptops; see `tools/desktop.js`.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
+import { writeChannel } from './desktop.js';
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'dist');
@@ -114,6 +120,24 @@ function main() {
       process.exit(1);
     }
     fs.writeFileSync(html, stripped);
+    // With no backend there is nowhere legitimate to connect to, and the
+    // application makes no network calls of its own. Narrow the policy to say
+    // so, so the browser enforces it rather than us asserting it.
+    const headers = path.join(OUT, '_headers');
+    if (fs.existsSync(headers)) {
+      const before = fs.readFileSync(headers, 'utf8');
+      const after = before.replace(
+        /connect-src 'self' https:\/\/\*\.supabase\.co wss:\/\/\*\.supabase\.co/,
+        "connect-src 'self'"
+      );
+      if (after === before) {
+        console.error('✗ could not narrow connect-src in _headers — check the policy.');
+        process.exit(1);
+      }
+      fs.writeFileSync(headers, after);
+      console.log("✓ _headers      — connect-src narrowed to 'self'");
+    }
+
     console.log('✓ config.js     — no backend; the plan lives in a folder the user picks');
     console.log('✓ index.html    — Supabase client not shipped');
     if (process.env.SUPABASE_URL) {
@@ -133,6 +157,12 @@ function main() {
       process.exit(1);
     }
   }
+
+  // The desktop application follows this deployment, so publishing the site is
+  // also how an installed copy gets the update. Folder shape only: the desktop
+  // build has no backend by construction, and feeding it a bundle cut for a
+  // hosted deployment would leave it in local mode with no way to say why.
+  if (NO_BACKEND) writeChannel(OUT);
 
   const total = walkSize(OUT);
   console.log(`✓ dist/          — ${(total / 1024).toFixed(0)} kB ready to deploy`);

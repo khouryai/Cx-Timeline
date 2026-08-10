@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 42   Built: 2026-08-08T22:09:38.881Z
+ * Modules: 43   Built: 2026-08-10T15:11:32.086Z
  */
 (function () {
   'use strict';
@@ -4716,20 +4716,201 @@ __mods["core/store.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// core/desktop.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/desktop.js"] = function (__x, __req) {
+  /**
+   * The desktop shell's file bridge.
+   *
+   * This module is the *only* one that knows Tauri exists, the same way
+   * `core/cloud.js` is the only one that knows about Supabase and
+   * `core/filestore.js` owns the browser's File System Access API.
+   *
+   * It is inert in a browser: `isAvailable()` returns false, nothing here is ever
+   * called, and the web build behaves exactly as it always has.
+   *
+   * What the desktop build gets that the browser cannot have
+   * -------------------------------------------------------
+   *   real paths      A folder is remembered as a path, not an opaque handle, so
+   *                   the plan opens on launch with no permission prompt at all.
+   *                   The browser has to re-ask whenever its grant lapses.
+   *   atomic writes   The plan is written to a temporary file and renamed over the
+   *                   target, so a crash — or OneDrive reading mid-write — never
+   *                   sees a half-written plan.
+   *   one round trip  The guard compares the file and writes it inside a single
+   *                   call, narrowing the window a colleague's sync can land in.
+   *
+   * What it deliberately does *not* do is decide anything. Whose lock it is,
+   * whether a lock has gone stale, when to refuse a save — all of that lives in
+   * `core/filestore.js` and is covered by `tools/smoke_folder.js`. Two
+   * implementations of those rules is how they drift apart, so this only moves
+   * bytes.
+   *
+   * Imports: nothing (leaf).
+   */
+
+  /** Tauri v2 exposes its bridge here. Nothing else in a browser does. */
+  function bridge() {
+    return typeof window !== 'undefined' ? window.__TAURI_INTERNALS__ : null;
+  }
+
+  /** True when running inside the desktop shell. */
+  function isAvailable() {
+    const api = bridge();
+    return !!api && typeof api.invoke === 'function';
+  }
+
+  /**
+   * Call a command in the shell.
+   *
+   * Rust returns its failures as `{ kind, message, current?, expected? }`. Those
+   * are rethrown as an Error carrying the same fields, so a caller can branch on
+   * `err.kind === 'conflict'` exactly as it branches on the browser's stamp check.
+   */
+  async function call(command, args = {}) {
+    const api = bridge();
+    if (!api) throw new Error('The desktop bridge is not available.');
+    try {
+      return await api.invoke(command, args);
+    } catch (raw) {
+      if (raw && typeof raw === 'object' && raw.kind) {
+        const err = new Error(raw.message || 'The desktop shell refused that.');
+        err.kind = raw.kind;
+        err.current = raw.current;
+        err.expected = raw.expected;
+        throw err;
+      }
+      throw raw instanceof Error ? raw : new Error(String(raw));
+    }
+  }
+
+  /* ── Settings: which folder, which plan, who you are ───────────────────── */
+
+  function readSettings() {
+    return call('settings_read');
+  }
+
+  function writeSettings({ folder = '', plan = '', displayName = '' } = {}) {
+    return call('settings_write', { folder, plan, displayName });
+  }
+
+  /** The OS folder picker. Resolves to '' when cancelled. */
+  function pickFolder() {
+    return call('pick_folder');
+  }
+
+  /* ── Plans ─────────────────────────────────────────────────────────────── */
+
+  function listPlans(folder) {
+    return call('list_plans', { folder });
+  }
+
+  /** `{ text, stamp: { size, modified } }` */
+  function readPlan(folder, name) {
+    return call('read_plan', { folder, name });
+  }
+
+  /**
+   * Write a plan, refusing if it moved since `expected`.
+   * Pass `null` for `expected` when creating a file for the first time.
+   */
+  function writePlan(folder, name, text, expected) {
+    return call('write_plan', { folder, name, text, expected: expected || null });
+  }
+
+  /* ── The lock file, as bytes only ──────────────────────────────────────── */
+
+  async function readLockText(folder, name) {
+    const text = await call('lock_read', { folder, name });
+    return text || null;
+  }
+
+  function writeLockText(folder, name, text) {
+    return call('lock_write', { folder, name, text });
+  }
+
+  function removeLock(folder, name) {
+    return call('lock_remove', { folder, name });
+  }
+
+  /**
+   * Who has the pen, as the shell saw it before the window opened.
+   *
+   * The one thing the desktop build can genuinely do better than the web build:
+   * answer this before any interface exists, so a colleague holding the plan can
+   * be announced up front rather than walked back after the canvas has drawn.
+   */
+  function startupLockCheck() {
+    return call('startup_lock_check');
+  }
+
+  /* ── Attachments ───────────────────────────────────────────────────────── */
+
+  async function writeAttachment(folder, id, file) {
+    const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+    await call('attachment_write', { folder, id, bytes });
+    return { id, name: file.name, type: file.type, size: file.size };
+  }
+
+  async function readAttachment(folder, id, type = '') {
+    const bytes = await call('attachment_read', { folder, id });
+    const blob = new Blob([new Uint8Array(bytes)], { type: type || 'application/octet-stream' });
+    return { id, blob, name: id, type: blob.type, size: blob.size };
+  }
+
+  function deleteAttachment(folder, id) {
+    return call('attachment_delete', { folder, id });
+  }
+
+  async function attachmentUsage(folder) {
+    const [count, bytes] = await call('attachment_usage', { folder });
+    return { count, bytes };
+  }
+
+  /* ── Window ────────────────────────────────────────────────────────────── */
+
+  /**
+   * Put the plan and the pen in the window title, so the state reads from the
+   * taskbar without bringing the window forward. Best effort: a failure here is
+   * cosmetic and must never interrupt a save.
+   */
+  function setWindowTitle(title) {
+    return call('set_window_title', { title }).catch(() => {});
+  }
+
+  Object.defineProperty(__x, "isAvailable", { get: () => isAvailable, enumerable: true });
+  Object.defineProperty(__x, "readSettings", { get: () => readSettings, enumerable: true });
+  Object.defineProperty(__x, "writeSettings", { get: () => writeSettings, enumerable: true });
+  Object.defineProperty(__x, "pickFolder", { get: () => pickFolder, enumerable: true });
+  Object.defineProperty(__x, "listPlans", { get: () => listPlans, enumerable: true });
+  Object.defineProperty(__x, "readPlan", { get: () => readPlan, enumerable: true });
+  Object.defineProperty(__x, "writePlan", { get: () => writePlan, enumerable: true });
+  Object.defineProperty(__x, "readLockText", { get: () => readLockText, enumerable: true });
+  Object.defineProperty(__x, "writeLockText", { get: () => writeLockText, enumerable: true });
+  Object.defineProperty(__x, "removeLock", { get: () => removeLock, enumerable: true });
+  Object.defineProperty(__x, "startupLockCheck", { get: () => startupLockCheck, enumerable: true });
+  Object.defineProperty(__x, "writeAttachment", { get: () => writeAttachment, enumerable: true });
+  Object.defineProperty(__x, "readAttachment", { get: () => readAttachment, enumerable: true });
+  Object.defineProperty(__x, "deleteAttachment", { get: () => deleteAttachment, enumerable: true });
+  Object.defineProperty(__x, "attachmentUsage", { get: () => attachmentUsage, enumerable: true });
+  Object.defineProperty(__x, "setWindowTitle", { get: () => setWindowTitle, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // core/filestore.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["core/filestore.js"] = function (__x, __req) {
   /**
    * The shared folder.
    *
-   * This module is the *only* one that knows the File System Access API exists,
-   * the same way `core/cloud.js` is the only one that knows about Supabase.
-   * Everything above it — storage, the panels, the status bar — talks to the
-   * functions here and would keep working against a different file backend.
+   * This module owns "the plan is a file in a folder" for both builds. It is the
+   * only place that knows the browser's File System Access API exists, and — via
+   * `core/desktop.js` — the only place that knows the desktop shell exists.
+   * Everything above it (storage, the panels, the status bar) is unaware of which.
    *
-   * It is inert unless the browser supports the API and the user has connected a
-   * folder. With nothing connected `isConnected()` returns false, nothing here is
-   * ever called, and CX Timeline behaves exactly as it always has.
+   * It is inert unless a folder is connected. With nothing connected
+   * `isConnected()` returns false, nothing here is ever called, and CX Timeline
+   * behaves exactly as it always has.
    *
    * What lives in a connected folder
    * --------------------------------
@@ -4737,9 +4918,18 @@ __mods["core/filestore.js"] = function (__x, __req) {
    *   <plan>.lock.json    who currently has the pen, and when they last touched it
    *   attachments/<id>    attachment bytes, one file each
    *
-   * The plan file format is deliberately unchanged: a folder full of these opens
-   * in the importer, reads in a text editor, and is versioned by whatever the
-   * folder is synced with. Nothing here is a proprietary container.
+   * The format is deliberately unchanged: a folder full of these opens in the
+   * importer, reads in a text editor, and is versioned by whatever the folder is
+   * synced with. Nothing here is a proprietary container.
+   *
+   * Two backends, one set of rules
+   * ------------------------------
+   * The I/O layer near the top is the *only* place the two builds differ — a
+   * directory handle in a browser, a path string on the desktop. Every rule that
+   * matters (whose lock it is, when a lock is stale, when a save is refused) lives
+   * below that line and runs identically in both, because two implementations of
+   * those rules is how they drift apart. `tools/smoke_folder.js` exercises them
+   * through both backends for that reason.
    *
    * On two people at once
    * --------------------
@@ -4747,15 +4937,15 @@ __mods["core/filestore.js"] = function (__x, __req) {
    * a synced folder is not a database: the lock takes as long to arrive as the
    * sync does, so two people opening within the same few seconds can both believe
    * they hold it. The lock is therefore *courtesy*, and the guard that actually
-   * protects the work is `savePlan()` — it re-reads the file's size and modified
-   * time before every write and refuses if either moved since we last read it.
-   * That is the same promise the hosted path makes with its revision check: you
-   * may be told to reload, but you can never silently overwrite someone.
+   * protects the work is `savePlan()` — the file's size and modified time are
+   * checked against what we last saw, and a mismatch refuses the write. You may
+   * be told to reload; you can never silently overwrite someone.
    *
-   * Imports: util, events.
+   * Imports: events, desktop.
    */
 
   const { emit, EV } = __req("core/events.js");
+  const desktop = __req("core/desktop.js");
 
   /** How often the holder re-stamps the lock, in ms. */
   const HEARTBEAT_MS = 20000;
@@ -4765,21 +4955,23 @@ __mods["core/filestore.js"] = function (__x, __req) {
    * An editor who has saved nothing for this long hands the pen back.
    *
    * Somebody who opened a plan before lunch should not hold it until they
-   * remember to close the tab. The pen is released and this session drops to
+   * remember to close the window. The pen is released and this session drops to
    * read-only, so a colleague can pick it up without having to ask.
    */
   const IDLE_RELEASE_MS = 3600000;
   /** How often we look for someone else's save landing in the folder. */
   const POLL_MS = 12000;
-  /** Where the folder handle is remembered between sessions. */
+  /** Where a browser remembers its folder handle. Desktop uses its own settings. */
   const DB_NAME = 'cx-timeline-folder';
   const DB_STORE = 'handles';
   const HANDLE_KEY = 'folder';
 
   /* ── State ─────────────────────────────────────────────────────────────── */
 
-  let dirHandle = null;
-  let fileHandle = null;
+  /** A directory handle in a browser; a path string on the desktop. */
+  let folderRef = null;
+  /** What to call the folder in the interface. */
+  let folderName = '';
   let planName = '';
   /** Size and modified time of the plan as we last saw it — the write guard. */
   let stamp = null;
@@ -4787,79 +4979,243 @@ __mods["core/filestore.js"] = function (__x, __req) {
   let role = null;
   /** Who holds the lock, when it is not us. */
   let holder = '';
-  /** This tab's identity — distinguishes two windows of the same browser. */
+  /** This window's identity — distinguishes two windows of the same install. */
   const sessionId = `s_${Math.random().toString(36).slice(2, 10)}`;
   let displayName = '';
+  let deviceIdCache = '';
   /** When this session last wrote the plan; drives the idle release above. */
   let lastSaveAt = 0;
   let heartbeatTimer = null;
   let pollTimer = null;
 
-  /* ── Capability ────────────────────────────────────────────────────────── */
+  /* ══════════════════════════════════════════════════════════════════════════
+     The I/O layer — the only place the two builds differ
+     ═══════════════════════════════════════════════════════════════════════ */
 
-  /** True when this browser can open a folder at all. Chromium-based only. */
+  const onDesktop = () => desktop.isAvailable();
+
+  /** True when this build can open a folder at all. */
   function isSupported() {
+    if (onDesktop()) return true;
     return typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function';
   }
 
-  /** True when a plan in a connected folder is the live document. */
-  function isConnected() {
-    return !!(dirHandle && fileHandle);
-  }
-
-  /** True when someone else holds the pen, so this session must not write. */
-  function isViewer() {
-    return isConnected() && role === 'viewer';
-  }
-
-  /** Everything the interface needs to describe the current state. */
-  function state() {
-    return {
-      supported: isSupported(),
-      connected: isConnected(),
-      folder: dirHandle ? dirHandle.name : '',
-      plan: planName,
-      role: role || null,
-      holder,
-      savedAt: stamp ? stamp.lastModified : null,
-    };
-  }
-
-  /**
-   * A stable identity for this browser profile.
-   *
-   * The tab id is not enough. It is regenerated on every page load, so closing
-   * the browser and reopening it made your own abandoned lock look like a
-   * stranger's — you were locked out of your own plan until it went stale. A
-   * device id persists, so a returning session recognises its own lock and takes
-   * it straight back.
-   */
-  function deviceId() {
-    let id = readPref('device');
-    if (!id) {
-      id = `d_${Math.random().toString(36).slice(2, 10)}`;
-      writePref('device', id);
+  /** Ask for a folder. Resolves to `{ ref, name }`, or null when cancelled. */
+  async function ioPickFolder() {
+    if (onDesktop()) {
+      const path = await desktop.pickFolder();
+      if (!path) return null;
+      return { ref: path, name: basename(path) };
     }
-    return id;
+    const handle = await window.showDirectoryPicker({ id: 'cx-timeline-plans', mode: 'readwrite' });
+    if (!handle) return null;
+    if (!(await ensureWebPermission(handle))) throw new Error('Permission to edit that folder was declined.');
+    return { ref: handle, name: handle.name };
   }
 
-  /** The name a colleague will see in the lock. Set once, from the settings pane. */
-  function setDisplayName(name) {
-    displayName = String(name || '').trim();
-    writePref('name', displayName);
+  /** The folder this device used last, or null. `prompt` allows a permission ask. */
+  async function ioRecall({ prompt = false } = {}) {
+    if (onDesktop()) {
+      const settings = adoptSettings(await desktop.readSettings());
+      if (!settings || !settings.folder) return null;
+      return { ref: settings.folder, name: basename(settings.folder), plan: settings.plan || '' };
+    }
+    const record = await recallHandle();
+    if (!record || !record.handle) return null;
+    const granted = prompt ? await ensureWebPermission(record.handle) : await queryWebPermission(record.handle);
+    if (!granted) return null;
+    return { ref: record.handle, name: record.handle.name, plan: record.plan || '' };
   }
 
-  function getDisplayName() {
-    return displayName || readPref('name') || 'Someone';
+  async function ioRemember(ref, plan) {
+    if (onDesktop()) {
+      await desktop.writeSettings({ folder: ref, plan, displayName });
+      return;
+    }
+    await rememberHandle(ref, plan);
   }
 
-  /* ── Remembering the folder between sessions ───────────────────────────── */
+  async function ioForget() {
+    if (onDesktop()) {
+      await desktop.writeSettings({ folder: '', plan: '', displayName }).catch(() => {});
+      return;
+    }
+    await forgetHandle();
+  }
+
+  /** `[{ name, size, modified }]`, newest first. Lock files are not plans. */
+  async function ioListPlans(ref) {
+    if (onDesktop()) return desktop.listPlans(ref);
+
+    const out = [];
+    for await (const [name, handle] of ref.entries()) {
+      if (handle.kind !== 'file') continue;
+      const lower = name.toLowerCase();
+      if (!lower.endsWith('.json') || lower.endsWith('.lock.json')) continue;
+      let size = 0;
+      let modified = 0;
+      try {
+        const file = await handle.getFile();
+        size = file.size;
+        modified = file.lastModified;
+      } catch {
+        /* listed but unreadable — still worth showing */
+      }
+      out.push({ name, size, modified });
+    }
+    return out.sort((a, b) => b.modified - a.modified);
+  }
+
+  /** `{ text, stamp }` */
+  async function ioReadPlan(ref, name) {
+    if (onDesktop()) {
+      const read = await desktop.readPlan(ref, name);
+      return { text: read.text, stamp: read.stamp };
+    }
+    const handle = await ref.getFileHandle(name);
+    const file = await handle.getFile();
+    return { text: await file.text(), stamp: { size: file.size, modified: file.lastModified } };
+  }
 
   /**
-   * Directory handles survive a reload, but only in IndexedDB — they are
-   * structured-cloneable and cannot be serialised to JSON. This is a database of
-   * its own rather than a table in the main one, so `core/storage.js` can import
-   * this module without this module importing it back.
+   * Write a plan, refusing when it moved since `expected`.
+   *
+   * Throws an error carrying `kind: 'conflict'` in that case — the same shape from
+   * both backends, so the caller never has to know which one answered. On the
+   * desktop the comparison and the write happen inside one call, and the write is
+   * atomic; in a browser they are two calls and a truncating stream, which is the
+   * best the platform offers.
+   */
+  async function ioWritePlan(ref, name, text, expected) {
+    if (onDesktop()) return desktop.writePlan(ref, name, text, expected);
+
+    const handle = await ref.getFileHandle(name, { create: true });
+    if (expected) {
+      const current = await handle.getFile();
+      if (current.size !== expected.size || current.lastModified !== expected.modified) {
+        const err = new Error('this plan changed on disk since you opened it, so the save was refused');
+        err.kind = 'conflict';
+        err.current = { size: current.size, modified: current.lastModified };
+        err.expected = expected;
+        throw err;
+      }
+    }
+    const writable = await handle.createWritable();
+    await writable.write(text);
+    await writable.close();
+    const after = await handle.getFile();
+    return { size: after.size, modified: after.lastModified };
+  }
+
+  async function ioReadLock(ref, name) {
+    if (onDesktop()) return desktop.readLockText(ref, name);
+    try {
+      const handle = await ref.getFileHandle(lockNameFor(name));
+      return await (await handle.getFile()).text();
+    } catch {
+      return null; // absent, unreadable or mid-sync — treat as free
+    }
+  }
+
+  async function ioWriteLock(ref, name, text) {
+    if (onDesktop()) return desktop.writeLockText(ref, name, text);
+    const handle = await ref.getFileHandle(lockNameFor(name), { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(text);
+    await writable.close();
+  }
+
+  async function ioRemoveLock(ref, name) {
+    if (onDesktop()) return desktop.removeLock(ref, name);
+    await ref.removeEntry(lockNameFor(name));
+  }
+
+  async function ioPutBlob(ref, id, file) {
+    if (onDesktop()) return desktop.writeAttachment(ref, id, file);
+    const dir = await ref.getDirectoryHandle('attachments', { create: true });
+    const handle = await dir.getFileHandle(id, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(file);
+    await writable.close();
+    return { id, name: file.name, type: file.type, size: file.size };
+  }
+
+  async function ioGetBlob(ref, id) {
+    if (onDesktop()) return desktop.readAttachment(ref, id).catch(() => null);
+    try {
+      const dir = await ref.getDirectoryHandle('attachments');
+      const file = await (await dir.getFileHandle(id)).getFile();
+      return { id, blob: file, name: file.name || id, type: file.type, size: file.size };
+    } catch {
+      return null;
+    }
+  }
+
+  async function ioDeleteBlob(ref, id) {
+    if (onDesktop()) return desktop.deleteAttachment(ref, id).catch(() => false);
+    try {
+      const dir = await ref.getDirectoryHandle('attachments');
+      await dir.removeEntry(id);
+    } catch {
+      /* already gone */
+    }
+  }
+
+  async function ioBlobUsage(ref) {
+    if (onDesktop()) return desktop.attachmentUsage(ref).catch(() => ({ count: 0, bytes: 0 }));
+    let count = 0;
+    let total = 0;
+    try {
+      const dir = await ref.getDirectoryHandle('attachments');
+      for await (const [, handle] of dir.entries()) {
+        if (handle.kind !== 'file') continue;
+        count++;
+        total += (await handle.getFile()).size;
+      }
+    } catch {
+      /* no attachments folder yet, or a partial answer */
+    }
+    return { count, bytes: total };
+  }
+
+  /**
+   * Take on the identity the shell keeps for this machine.
+   *
+   * There must be exactly one device id per machine, and on the desktop it is the
+   * shell's: `settings.json` mints it, and `startup_lock_check` compares against
+   * it before any window exists. Letting the browser side mint a second one in
+   * localStorage would recreate, on the desktop, the precise bug that made the web
+   * build lock you out of your own plan — your last lock would look like a
+   * stranger's, and you would wait out a staleness timeout to edit your own file.
+   *
+   * Called from every path that reads the settings, so the identity is in hand
+   * before any lock is ever compared. The display name comes along for the same
+   * reason: it lives beside the folder rather than in browser storage, so clearing
+   * the webview's data does not turn a colleague's name back into "Someone".
+   */
+  function adoptSettings(settings) {
+    if (settings && settings.device) deviceIdCache = settings.device;
+    if (settings && settings.display_name && !displayName) displayName = settings.display_name;
+    return settings;
+  }
+
+  function basename(path) {
+    const parts = String(path).split(/[\\/]+/).filter(Boolean);
+    return parts[parts.length - 1] || String(path);
+  }
+
+  function lockNameFor(name) {
+    return `${String(name).replace(/\.json$/i, '')}.lock.json`;
+  }
+
+  /* ── The browser's handle store ────────────────────────────────────────── */
+
+  /**
+   * Directory handles survive a reload, but only through IndexedDB — they cannot
+   * be serialised. This is a database of its own rather than a table in the main
+   * one, so `core/storage.js` can import this module without the reverse.
+   *
+   * The desktop build needs none of this: it remembers a path.
    */
   function openHandleDb() {
     return new Promise((resolve, reject) => {
@@ -4922,7 +5278,72 @@ __mods["core/filestore.js"] = function (__x, __req) {
     }
   }
 
-  /** Small device-scoped values (the display name, the last plan opened). */
+  async function queryWebPermission(handle) {
+    try {
+      return (await handle.queryPermission({ mode: 'readwrite' })) === 'granted';
+    } catch {
+      return false;
+    }
+  }
+
+  async function ensureWebPermission(handle) {
+    if (await queryWebPermission(handle)) return true;
+    try {
+      return (await handle.requestPermission({ mode: 'readwrite' })) === 'granted';
+    } catch {
+      return false;
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Identity
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** True when a plan in a connected folder is the live document. */
+  function isConnected() {
+    return !!(folderRef && planName);
+  }
+
+  /** True when someone else holds the pen, so this session must not write. */
+  function isViewer() {
+    return isConnected() && role === 'viewer';
+  }
+
+  /** Everything the interface needs to describe the current state. */
+  function state() {
+    return {
+      supported: isSupported(),
+      desktop: onDesktop(),
+      connected: isConnected(),
+      folder: folderName,
+      plan: planName,
+      role: role || null,
+      holder,
+      savedAt: stamp ? stamp.modified : null,
+    };
+  }
+
+  /**
+   * A stable identity for this install.
+   *
+   * The window id is not enough. It is regenerated on every launch, so closing the
+   * application and reopening it made your own abandoned lock look like a
+   * stranger's — you were locked out of your own plan until it went stale. A
+   * device id persists, so a returning session recognises its own lock and takes
+   * it straight back.
+   */
+  function deviceId() {
+    if (deviceIdCache) return deviceIdCache;
+    let id = readPref('device');
+    if (!id) {
+      id = `d_${Math.random().toString(36).slice(2, 10)}`;
+      writePref('device', id);
+    }
+    deviceIdCache = id;
+    return id;
+  }
+
+  /** Small device-scoped values. */
   function readPref(key) {
     try {
       return localStorage.getItem(`cxtl.folder.${key}`) || '';
@@ -4939,154 +5360,154 @@ __mods["core/filestore.js"] = function (__x, __req) {
     }
   }
 
-  /** The folder we remembered, if any — so the UI can offer to reconnect by name. */
+  /** The name a colleague sees in the lock. */
+  function setDisplayName(name) {
+    displayName = String(name || '').trim();
+    writePref('name', displayName);
+    if (onDesktop() && folderRef) ioRemember(folderRef, planName).catch(() => {});
+  }
+
+  function getDisplayName() {
+    return displayName || readPref('name') || 'Someone';
+  }
+
+  /** The folder remembered from last time, so the UI can offer it by name. */
   async function storedFolder() {
+    if (onDesktop()) {
+      const settings = adoptSettings(await desktop.readSettings().catch(() => null));
+      if (!settings || !settings.folder) return null;
+      return { folder: basename(settings.folder), plan: settings.plan || '' };
+    }
     const record = await recallHandle();
     if (!record || !record.handle) return null;
     return { folder: record.handle.name, plan: record.plan || '' };
   }
 
-  /* ── Connecting ────────────────────────────────────────────────────────── */
+  /**
+   * Who has the pen, as the shell saw it before the window opened.
+   *
+   * Desktop only, and the reason it exists: the interface can announce that a
+   * colleague is in the plan up front, instead of drawing a canvas and then
+   * walking it back. Resolves to null in a browser, which has no such moment.
+   */
+  async function startupPen() {
+    if (!onDesktop()) return null;
+    try {
+      // Take on the shell's device id first, so everything downstream compares
+      // locks against the identity the shell just used to answer this question.
+      adoptSettings(await desktop.readSettings().catch(() => null));
+      return await desktop.startupLockCheck();
+    } catch {
+      return null;
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Connecting
+     ═══════════════════════════════════════════════════════════════════════ */
 
   /**
-   * Ask for a folder and remember it. Must be called from a user gesture — the
-   * browser refuses a picker that nobody clicked for.
+   * Ask for a folder and remember it. Must be called from a user gesture in a
+   * browser — no engine will open a picker nobody clicked for.
    *
    * Returns the plans found inside so the caller can choose, rather than guessing
    * on the user's behalf when a folder holds several.
    */
   async function chooseFolder() {
     if (!isSupported()) throw new Error('This browser cannot open a folder. Use Edge or Chrome.');
-    const handle = await window.showDirectoryPicker({ id: 'cx-timeline-plans', mode: 'readwrite' });
-    if (!handle) return null;
-    if (!(await ensurePermission(handle))) throw new Error('Permission to edit that folder was declined.');
+    const picked = await ioPickFolder();
+    if (!picked) return null;
 
-    dirHandle = handle;
-    fileHandle = null;
+    folderRef = picked.ref;
+    folderName = picked.name;
     planName = '';
-    await rememberHandle(handle, '');
+    await ioRemember(folderRef, '');
     emitState();
-    return { folder: handle.name, plans: await listPlans() };
+    return { folder: folderName, plans: await listPlans() };
   }
 
   /**
    * Reconnect to the remembered folder without prompting.
    *
-   * Resolves to the folder's plans when the browser still considers the grant
-   * live, and to null when it needs a click — which is why the caller shows a
-   * "reconnect" affordance rather than throwing the user into a dialog on boot.
+   * On the desktop this simply works — the folder is a path and needs no grant,
+   * which is what lets the application open your plan on launch. In a browser it
+   * resolves to null when the grant has lapsed, so the caller can offer a
+   * one-click reconnect rather than throwing the user into a dialog on boot.
    */
   async function reconnectSilently() {
     if (!isSupported()) return null;
-    const record = await recallHandle();
-    if (!record || !record.handle) return null;
+    const recalled = await ioRecall({ prompt: false });
+    if (!recalled) return null;
 
-    const granted = await queryPermission(record.handle);
-    if (!granted) return null;
-
-    dirHandle = record.handle;
-    fileHandle = null;
+    folderRef = recalled.ref;
+    folderName = recalled.name;
     planName = '';
     emitState();
-    return { folder: dirHandle.name, plans: await listPlans(), lastPlan: record.plan || '' };
+    return { folder: folderName, plans: await listPlans(), lastPlan: recalled.plan };
   }
 
   /** Reconnect from a user gesture, prompting for permission if it has lapsed. */
   async function reconnectWithPrompt() {
     if (!isSupported()) return null;
-    const record = await recallHandle();
-    if (!record || !record.handle) return null;
-    if (!(await ensurePermission(record.handle))) return null;
+    const recalled = await ioRecall({ prompt: true });
+    if (!recalled) return null;
 
-    dirHandle = record.handle;
-    fileHandle = null;
+    folderRef = recalled.ref;
+    folderName = recalled.name;
     planName = '';
     emitState();
-    return { folder: dirHandle.name, plans: await listPlans(), lastPlan: record.plan || '' };
+    return { folder: folderName, plans: await listPlans(), lastPlan: recalled.plan };
   }
 
-  async function queryPermission(handle) {
-    try {
-      return (await handle.queryPermission({ mode: 'readwrite' })) === 'granted';
-    } catch {
-      return false;
-    }
-  }
-
-  async function ensurePermission(handle) {
-    if (await queryPermission(handle)) return true;
-    try {
-      return (await handle.requestPermission({ mode: 'readwrite' })) === 'granted';
-    } catch {
-      return false;
-    }
-  }
-
-  /** Stop using the folder: release the lock and forget the handle. */
+  /** Stop using the folder: release the lock and forget where it was. */
   async function disconnect() {
     await releaseLock();
     stopTimers();
-    dirHandle = null;
-    fileHandle = null;
+    folderRef = null;
+    folderName = '';
     planName = '';
     stamp = null;
     role = null;
     holder = '';
-    await forgetHandle();
+    await ioForget();
     emitState();
   }
 
-  /* ── Plans in the folder ───────────────────────────────────────────────── */
+  /* ══════════════════════════════════════════════════════════════════════════
+     Plans
+     ═══════════════════════════════════════════════════════════════════════ */
 
-  /** Every plan in the connected folder, newest first. Lock files are not plans. */
+  /** Every plan in the connected folder, newest first. */
   async function listPlans() {
-    if (!dirHandle) return [];
-    const out = [];
+    if (!folderRef) return [];
     try {
-      for await (const [name, handle] of dirHandle.entries()) {
-        if (handle.kind !== 'file') continue;
-        if (!name.toLowerCase().endsWith('.json')) continue;
-        if (name.toLowerCase().endsWith('.lock.json')) continue;
-        let size = 0;
-        let modified = 0;
-        try {
-          const file = await handle.getFile();
-          size = file.size;
-          modified = file.lastModified;
-        } catch {
-          /* listed but unreadable — still worth showing */
-        }
-        out.push({ name, size, modified });
-      }
+      return await ioListPlans(folderRef);
     } catch (err) {
       console.warn('[cx-timeline] could not read the folder:', err.message);
+      return [];
     }
-    return out.sort((a, b) => b.modified - a.modified);
   }
 
   /**
    * Open a plan and take the pen if it is free.
    *
-   * Returns `{ doc, role, holder }`. A `viewer` role is not a failure — it means
-   * a colleague is in there, and the document is still returned so it can be read.
+   * Returns `{ doc, role, holder }`. A `viewer` role is not a failure — it means a
+   * colleague is in there, and the document is still returned so it can be read.
    */
   async function openPlan(name) {
-    if (!dirHandle) throw new Error('No folder is connected.');
-    const handle = await dirHandle.getFileHandle(name);
-    const file = await handle.getFile();
-    const text = await file.text();
+    if (!folderRef) throw new Error('No folder is connected.');
+    const read = await ioReadPlan(folderRef, name);
 
     let doc;
     try {
-      doc = JSON.parse(text);
+      doc = JSON.parse(read.text);
     } catch (err) {
       throw new Error(`${name} is not a valid project file: ${err.message}`);
     }
 
-    fileHandle = handle;
     planName = name;
-    stamp = { size: file.size, lastModified: file.lastModified };
-    await rememberHandle(dirHandle, name);
+    stamp = read.stamp;
+    await ioRemember(folderRef, name);
 
     const lock = await readLock();
     if (lock && !isOurs(lock) && !isStale(lock)) {
@@ -5106,21 +5527,14 @@ __mods["core/filestore.js"] = function (__x, __req) {
 
   /** Write a new plan into the folder and open it. */
   async function createPlan(name, doc) {
-    if (!dirHandle) throw new Error('No folder is connected.');
+    if (!folderRef) throw new Error('No folder is connected.');
     const safe = name.toLowerCase().endsWith('.json') ? name : `${name}.json`;
-    const handle = await dirHandle.getFileHandle(safe, { create: true });
 
-    const writable = await handle.createWritable();
-    await writable.write(serialise(doc));
-    await writable.close();
-
-    fileHandle = handle;
+    stamp = await ioWritePlan(folderRef, safe, serialise(doc), null);
     planName = safe;
-    const file = await handle.getFile();
-    stamp = { size: file.size, lastModified: file.lastModified };
     role = 'editor';
     holder = '';
-    await rememberHandle(dirHandle, safe);
+    await ioRemember(folderRef, safe);
     lastSaveAt = Date.now();
     await writeLock();
     startTimers();
@@ -5128,38 +5542,28 @@ __mods["core/filestore.js"] = function (__x, __req) {
     return safe;
   }
 
-  /* ── Saving, with the guard ────────────────────────────────────────────── */
-
   /**
    * Write the document back, but never over someone else's work.
    *
-   * The file is stat-ed first: if its size or modified time moved since we last
-   * read or wrote it, a colleague's save landed in between and this one is
-   * refused. That is the whole safety property of this mode — the caller is told
-   * to reload rather than being allowed to clobber.
+   * The guard is the whole safety property of this mode: the file's size and
+   * modified time are checked against what we last saw, and a mismatch refuses the
+   * write. The caller is told to reload rather than being allowed to clobber.
    */
   async function savePlan(doc) {
-    if (!fileHandle) return { ok: false, reason: 'not-connected' };
+    if (!isConnected()) return { ok: false, reason: 'not-connected' };
     if (role === 'viewer') return { ok: false, reason: 'read-only' };
 
     try {
-      const current = await fileHandle.getFile();
-      if (stamp && (current.size !== stamp.size || current.lastModified !== stamp.lastModified)) {
+      stamp = await ioWritePlan(folderRef, planName, serialise(doc), stamp);
+      lastSaveAt = Date.now();
+      return { ok: true, at: stamp.modified };
+    } catch (err) {
+      if (err && err.kind === 'conflict') {
         emit(EV.FILE_CONFLICT, { plan: planName });
         return { ok: false, reason: 'conflict', conflict: true };
       }
-
-      const writable = await fileHandle.createWritable();
-      await writable.write(serialise(doc));
-      await writable.close();
-
-      const after = await fileHandle.getFile();
-      stamp = { size: after.size, lastModified: after.lastModified };
-      lastSaveAt = Date.now();
-      return { ok: true, at: after.lastModified };
-    } catch (err) {
-      // A lapsed permission grant is the common failure here, and it reads as a
-      // generic error unless we say so.
+      // A lapsed permission grant is the common browser failure, and it reads as
+      // a generic error unless we say so.
       const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
       return { ok: false, reason: denied ? 'permission' : 'error', error: err };
     }
@@ -5167,12 +5571,11 @@ __mods["core/filestore.js"] = function (__x, __req) {
 
   /** Re-read the plan from the folder — the "they saved, catch up" path. */
   async function refreshFromDisk() {
-    if (!fileHandle) return null;
-    const file = await fileHandle.getFile();
-    const text = await file.text();
-    stamp = { size: file.size, lastModified: file.lastModified };
+    if (!isConnected()) return null;
+    const read = await ioReadPlan(folderRef, planName);
+    stamp = read.stamp;
     try {
-      return JSON.parse(text);
+      return JSON.parse(read.text);
     } catch (err) {
       throw new Error(`${planName} could not be read: ${err.message}`);
     }
@@ -5194,36 +5597,36 @@ __mods["core/filestore.js"] = function (__x, __req) {
     );
   }
 
-  /* ── The lock ──────────────────────────────────────────────────────────── */
+  /* ══════════════════════════════════════════════════════════════════════════
+     The lock
 
-  function lockName() {
-    return `${planName.replace(/\.json$/i, '')}.lock.json`;
-  }
+     Every rule here runs identically in both builds. The I/O layer above moves
+     the bytes; this decides what they mean.
+     ═══════════════════════════════════════════════════════════════════════ */
 
   async function readLock() {
-    if (!dirHandle || !planName) return null;
+    if (!folderRef || !planName) return null;
+    const text = await ioReadLock(folderRef, planName);
+    if (!text) return null;
     try {
-      const handle = await dirHandle.getFileHandle(lockName());
-      const text = await (await handle.getFile()).text();
       return JSON.parse(text);
     } catch {
-      return null; // absent, unreadable or mid-sync — treat as free
+      return null; // mid-sync, or truncated — treat as free
     }
   }
 
   async function writeLock() {
-    if (!dirHandle || !planName) return;
+    if (!folderRef || !planName) return;
     try {
-      const handle = await dirHandle.getFileHandle(lockName(), { create: true });
-      const writable = await handle.createWritable();
-      await writable.write(
+      await ioWriteLock(
+        folderRef,
+        planName,
         JSON.stringify(
           { id: sessionId, device: deviceId(), holder: getDisplayName(), since: Date.now(), beat: Date.now() },
           null,
           2
         )
       );
-      await writable.close();
     } catch (err) {
       // Failing to take the lock is not fatal: the write guard still protects the
       // work, so the session continues without the courtesy.
@@ -5232,11 +5635,11 @@ __mods["core/filestore.js"] = function (__x, __req) {
   }
 
   async function releaseLock() {
-    if (!dirHandle || !planName || role !== 'editor') return;
+    if (!folderRef || !planName || role !== 'editor') return;
     try {
       const lock = await readLock();
       if (lock && !isOurs(lock)) return; // someone took over; leave theirs alone
-      await dirHandle.removeEntry(lockName());
+      await ioRemoveLock(folderRef, planName);
     } catch {
       /* the staleness timeout is the real release mechanism */
     }
@@ -5245,12 +5648,12 @@ __mods["core/filestore.js"] = function (__x, __req) {
   /**
    * Is this lock ours to take?
    *
-   * Same tab is obviously ours. Same *browser* counts too, and deliberately: it
-   * is either our own abandoned lock — the case that used to lock people out —
-   * or another window of the same browser, and the person sitting in front of
-   * both should not have to negotiate with themselves. The other window finds
-   * out through `checkLock()` and drops to read-only, which is the same handling
-   * a colleague's takeover already gets.
+   * Same window is obviously ours. Same *machine* counts too, and deliberately:
+   * it is either our own abandoned lock — the case that used to lock people out —
+   * or another window of the same install, and the person sitting in front of both
+   * should not have to negotiate with themselves. The other window finds out
+   * through `checkLock()` and drops to read-only, which is the same handling a
+   * colleague's takeover already gets.
    */
   function isOurs(lock) {
     if (!lock) return false;
@@ -5269,8 +5672,8 @@ __mods["core/filestore.js"] = function (__x, __req) {
    * left the one situation that matters most — "I know that lock is dead, let me
    * work" — with no way out. Refusing is also unnecessary: the write guard means
    * whoever loses the race is *told* to reload rather than silently overwritten.
-   * Warning the user is the caller's job (`ui/commands.js` asks first when the
-   * holder looks alive); deciding for them is not this module's.
+   * Warning the user is `ui/commands.js`'s job; deciding for them is not this
+   * module's.
    */
   async function takeOver() {
     if (!isConnected()) return false;
@@ -5289,9 +5692,14 @@ __mods["core/filestore.js"] = function (__x, __req) {
    */
   async function lockStatus() {
     const lock = await readLock();
-    if (!lock) return { live: false, mine: false, holder: '' };
+    if (!lock) return { live: false, mine: false, holder: '', idleMs: 0 };
     const mine = isOurs(lock);
-    return { live: !mine && !isStale(lock), mine, holder: lock.holder || 'Someone' };
+    return {
+      live: !mine && !isStale(lock),
+      mine,
+      holder: lock.holder || 'Someone',
+      idleMs: lock.beat ? Date.now() - lock.beat : 0,
+    };
   }
 
   /**
@@ -5336,15 +5744,17 @@ __mods["core/filestore.js"] = function (__x, __req) {
     return { role, holder, stale: false };
   }
 
-  /* ── Watching the folder ───────────────────────────────────────────────── */
+  /* ══════════════════════════════════════════════════════════════════════════
+     Watching the folder
+     ═══════════════════════════════════════════════════════════════════════ */
 
   function startTimers() {
     stopTimers();
     heartbeatTimer = setInterval(() => {
       if (role !== 'editor') return;
       // Idle long enough that holding the pen is just in the way. Ask the
-      // application to flush a save and hand it back — this module cannot save
-      // the document itself, it only knows the file.
+      // application to flush a save and hand it back — this module cannot save the
+      // document itself, it only knows the file.
       if (lastSaveAt && Date.now() - lastSaveAt > IDLE_RELEASE_MS) {
         emit(EV.FILE_IDLE, { plan: planName, since: lastSaveAt });
         return;
@@ -5353,14 +5763,14 @@ __mods["core/filestore.js"] = function (__x, __req) {
     }, HEARTBEAT_MS);
 
     pollTimer = setInterval(async () => {
-      if (!fileHandle) return;
+      if (!isConnected()) return;
       try {
         await checkLock();
-        const file = await fileHandle.getFile();
-        if (stamp && (file.size !== stamp.size || file.lastModified !== stamp.lastModified)) {
-          // Do not update the stamp — the write guard needs to keep refusing
-          // until the document has actually been reloaded.
-          emit(EV.FILE_EXTERNAL_CHANGE, { plan: planName, at: file.lastModified });
+        const read = await ioReadPlan(folderRef, planName);
+        if (stamp && (read.stamp.size !== stamp.size || read.stamp.modified !== stamp.modified)) {
+          // Do not update the stamp — the write guard needs to keep refusing until
+          // the document has actually been reloaded.
+          emit(EV.FILE_EXTERNAL_CHANGE, { plan: planName, at: read.stamp.modified });
         }
       } catch {
         /* the folder went away — the next save will report it properly */
@@ -5385,65 +5795,29 @@ __mods["core/filestore.js"] = function (__x, __req) {
     emit(EV.FILE_STATE, state());
   }
 
-  /* ── Attachments ───────────────────────────────────────────────────────── */
-
-  async function attachmentsDir(create = false) {
-    if (!dirHandle) return null;
-    try {
-      return await dirHandle.getDirectoryHandle('attachments', { create });
-    } catch {
-      return null;
-    }
-  }
+  /* ══════════════════════════════════════════════════════════════════════════
+     Attachments
+     ═══════════════════════════════════════════════════════════════════════ */
 
   async function putBlob(id, file) {
-    const dir = await attachmentsDir(true);
-    if (!dir) throw new Error('Could not create the attachments folder.');
-    const handle = await dir.getFileHandle(id, { create: true });
-    const writable = await handle.createWritable();
-    await writable.write(file);
-    await writable.close();
-    return { id, name: file.name, type: file.type, size: file.size };
+    if (!folderRef) throw new Error('No folder is connected.');
+    return ioPutBlob(folderRef, id, file);
   }
 
   async function getBlob(id) {
-    const dir = await attachmentsDir(false);
-    if (!dir) return null;
-    try {
-      const handle = await dir.getFileHandle(id);
-      const file = await handle.getFile();
-      return { id, blob: file, name: file.name || id, type: file.type, size: file.size };
-    } catch {
-      return null;
-    }
+    if (!folderRef) return null;
+    return ioGetBlob(folderRef, id);
   }
 
   async function deleteBlob(id) {
-    const dir = await attachmentsDir(false);
-    if (!dir) return;
-    try {
-      await dir.removeEntry(id);
-    } catch {
-      /* already gone */
-    }
+    if (!folderRef) return;
+    await ioDeleteBlob(folderRef, id);
   }
 
   /** Total bytes held in the attachments folder — shown in Settings. */
   async function blobUsage() {
-    const dir = await attachmentsDir(false);
-    if (!dir) return { count: 0, bytes: 0 };
-    let count = 0;
-    let total = 0;
-    try {
-      for await (const [, handle] of dir.entries()) {
-        if (handle.kind !== 'file') continue;
-        count++;
-        total += (await handle.getFile()).size;
-      }
-    } catch {
-      /* partial answer is better than none */
-    }
-    return { count, bytes: total };
+    if (!folderRef) return { count: 0, bytes: 0 };
+    return ioBlobUsage(folderRef);
   }
 
   Object.defineProperty(__x, "isSupported", { get: () => isSupported, enumerable: true });
@@ -5453,6 +5827,7 @@ __mods["core/filestore.js"] = function (__x, __req) {
   Object.defineProperty(__x, "setDisplayName", { get: () => setDisplayName, enumerable: true });
   Object.defineProperty(__x, "getDisplayName", { get: () => getDisplayName, enumerable: true });
   Object.defineProperty(__x, "storedFolder", { get: () => storedFolder, enumerable: true });
+  Object.defineProperty(__x, "startupPen", { get: () => startupPen, enumerable: true });
   Object.defineProperty(__x, "chooseFolder", { get: () => chooseFolder, enumerable: true });
   Object.defineProperty(__x, "reconnectSilently", { get: () => reconnectSilently, enumerable: true });
   Object.defineProperty(__x, "reconnectWithPrompt", { get: () => reconnectWithPrompt, enumerable: true });
@@ -6198,6 +6573,45 @@ __mods["core/storage.js"] = function (__x, __req) {
     return removed;
   }
 
+  /**
+   * Delete this browser's copy of the work.
+   *
+   * In file mode the folder is the record and everything here is a convenience:
+   * a cache of the last save, local snapshot history, and the copy the unload
+   * handler leaves for crash recovery. On a shared or borrowed machine that
+   * convenience is the one place a plan lingers after you have finished with it,
+   * so it can be thrown away deliberately.
+   *
+   * The folder connection is left alone — the plan itself is untouched on disk,
+   * and re-picking the folder would be a pointless chore.
+   */
+  async function purgeLocalCopy() {
+    let cleared = 0;
+
+    for (const key of [LS_DOC, LS_DOC + '.recovery', LS_BACKUPS]) {
+      try {
+        if (localStorage.getItem(key) !== null) cleared++;
+        localStorage.removeItem(key);
+      } catch {
+        /* nothing we can do, and nothing lost */
+      }
+    }
+
+    if (!usingFallback && db) {
+      for (const store of [STORE_PROJECTS, STORE_BACKUPS, STORE_BLOBS]) {
+        try {
+          const all = await wrap(tx(store).getAll());
+          cleared += all.length;
+          await wrap(tx(store, 'readwrite').clear());
+        } catch (err) {
+          console.warn(`[cx-timeline] could not clear ${store}:`, err.message);
+        }
+      }
+    }
+
+    return cleared;
+  }
+
   /* ── Preferences (device-scoped, not part of the document) ─────────────── */
 
   function getPref(key, fallback = null) {
@@ -6269,6 +6683,7 @@ __mods["core/storage.js"] = function (__x, __req) {
   Object.defineProperty(__x, "deleteBlob", { get: () => deleteBlob, enumerable: true });
   Object.defineProperty(__x, "blobUsage", { get: () => blobUsage, enumerable: true });
   Object.defineProperty(__x, "collectGarbage", { get: () => collectGarbage, enumerable: true });
+  Object.defineProperty(__x, "purgeLocalCopy", { get: () => purgeLocalCopy, enumerable: true });
   Object.defineProperty(__x, "getPref", { get: () => getPref, enumerable: true });
   Object.defineProperty(__x, "setPref", { get: () => setPref, enumerable: true });
   Object.defineProperty(__x, "usage", { get: () => usage, enumerable: true });
@@ -12552,6 +12967,100 @@ __mods["ui/commands.js"] = function (__x, __req) {
     return true;
   }
 
+  /**
+   * Say who has the plan, before anybody starts typing.
+   *
+   * The web build cannot do this: a browser tab has to draw an interface, open a
+   * folder and read a lock file in that order, so the news that a colleague has
+   * the pen always arrives after the canvas. The desktop shell reads the lock
+   * before the window exists (`startup_lock_check` in `src-tauri/src/main.rs`),
+   * which means this is the first thing on screen and not a correction to it.
+   *
+   * Three states, three different things worth saying:
+   *
+   *   a live colleague    a modal, because carrying on regardless means finding
+   *                       out at the first save. It offers the way out — taking
+   *                       over — rather than only stating the problem.
+   *   an abandoned lock   a note. The pen is already ours; `checkLock()` reclaims
+   *                       a stale lock without being asked. Silence here reads as
+   *                       "so it did not matter that their name was on it", and it
+   *                       did — they may have unsaved work in a dead session.
+   *   free, or ours       nothing at all.
+   */
+  async function announceStartupPen(pen) {
+    if (!pen || pen.mine) return null;
+
+    if (!pen.live) {
+      if (pen.free && pen.holder) {
+        toast({
+          tone: 'info',
+          title: 'You have the pen',
+          message: `${pen.holder} left this plan open but stopped saving ${sinceWords(pen.idle_ms)} ago, so it is yours to edit.`,
+          timeout: 9000,
+        });
+      }
+      return 'editing';
+    }
+
+    const holder = pen.holder || 'Someone else';
+    return new Promise((resolve) => {
+      let settled = false;
+      openModal({
+        title: `${holder} has this plan open`,
+        subtitle: `Last saved ${sinceWords(pen.idle_ms)} ago`,
+        body: el('div', { style: { fontSize: 'var(--fs-small)', color: 'var(--text-muted)', lineHeight: '1.6' } }, [
+          el('p', {
+            style: { margin: '0 0 10px' },
+            text:
+              `${holder} is editing it now, so it opens read-only. Their saves arrive here as they make them, ` +
+              'and it becomes editable on its own once they close it — nothing to do but carry on reading.',
+          }),
+          el('p', {
+            style: { margin: 0 },
+            text:
+              'Taking over now means their next save is refused and they are asked to reload, ' +
+              'so anything they have not saved could be lost. Worth a message first.',
+          }),
+        ]),
+        actions: [
+          'spacer',
+          {
+            label: 'Take over editing',
+            kind: 'danger',
+            onClick: async () => {
+              settled = true;
+              await filestore.takeOver();
+              emit(EV.FILE_STATE, filestore.state());
+              resolve('editing');
+            },
+          },
+          {
+            label: 'Open read-only',
+            kind: 'primary',
+            autofocus: true,
+            onClick: () => {
+              settled = true;
+              resolve('viewer');
+            },
+          },
+        ],
+        onClose: () => {
+          if (!settled) resolve('viewer');
+        },
+      });
+    });
+  }
+
+  /** "4 minutes", "2 hours" — enough to judge whether somebody is still there. */
+  function sinceWords(ms) {
+    const seconds = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+    if (seconds < 60) return `${seconds} second${seconds === 1 ? '' : 's'}`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+    const hours = Math.round(minutes / 60);
+    return `${hours} hour${hours === 1 ? '' : 's'}`;
+  }
+
   /* ── Navigation ────────────────────────────────────────────────────────── */
 
   /** Jump to and flash an object — used by search results and outline rows. */
@@ -12672,6 +13181,7 @@ __mods["ui/commands.js"] = function (__x, __req) {
   Object.defineProperty(__x, "disconnectFolder", { get: () => disconnectFolder, enumerable: true });
   Object.defineProperty(__x, "reloadFromFolder", { get: () => reloadFromFolder, enumerable: true });
   Object.defineProperty(__x, "takeOverEditing", { get: () => takeOverEditing, enumerable: true });
+  Object.defineProperty(__x, "announceStartupPen", { get: () => announceStartupPen, enumerable: true });
   Object.defineProperty(__x, "revealObject", { get: () => revealObject, enumerable: true });
   Object.defineProperty(__x, "SHORTCUTS", { get: () => SHORTCUTS, enumerable: true });
   Object.defineProperty(__x, "showShortcuts", { get: () => showShortcuts, enumerable: true });
@@ -19077,7 +19587,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
 
   const store = __req("core/store.js");
-  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted } = __req("core/storage.js");
+  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } = __req("core/storage.js");
   const cloud = __req("core/cloud.js");
   const filestore = __req("core/filestore.js");
   const { search, summarise, facet, filterPredicate } = __req("core/query.js");
@@ -21015,6 +21525,36 @@ __mods["ui/panels.js"] = function (__x, __req) {
         onClick: async () => {
           const removed = await collectGarbage();
           toast({ tone: 'good', title: `${removed} orphaned file${removed === 1 ? '' : 's'} removed` });
+          renderPane();
+        },
+      }),
+      // The one place a plan lingers on a machine after you have finished with
+      // it. Worth being able to throw away on purpose, especially on a shared or
+      // borrowed computer.
+      el('button', {
+        class: 'cx-btn mini danger',
+        html: icon('shield', { size: 12 }) + "<span>Clear this browser's copy…</span>",
+        onClick: async () => {
+          const inFolder = isFileMode();
+          const ok = await confirmDialog({
+            title: "Clear this browser's copy?",
+            message: inFolder
+              ? 'Deletes the cached copy of the plan, the local snapshot history and the crash-recovery copy from this browser. ' +
+                'The plan itself stays in the connected folder and is untouched — this only removes what is left behind on this machine.'
+              : 'Deletes the plan, the snapshot history and any attachments held in this browser. ' +
+                'This is the only copy unless you have exported one — export JSON first if you are not sure.',
+            confirmLabel: 'Clear it',
+            danger: true,
+          });
+          if (!ok) return;
+          const cleared = await purgeLocalCopy();
+          toast({
+            tone: 'good',
+            title: 'This browser is clear',
+            message: inFolder
+              ? `${cleared} local record${cleared === 1 ? '' : 's'} removed. The folder copy is untouched.`
+              : `${cleared} local record${cleared === 1 ? '' : 's'} removed.`,
+          });
           renderPane();
         },
       }),
@@ -23772,6 +24312,7 @@ __mods["main.js"] = function (__x, __req) {
   const { init: initStorage, takeRecovery, getPref, setPref, saveNow, isHosted } = __req("core/storage.js");
   const cloud = __req("core/cloud.js");
   const filestore = __req("core/filestore.js");
+  const desktop = __req("core/desktop.js");
   const { criticalPath } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
@@ -23797,6 +24338,12 @@ __mods["main.js"] = function (__x, __req) {
 
   async function boot() {
     const started = performance.now();
+
+    // Desktop only, and started first because it has to finish first: the shell
+    // reads the lock file before the window exists, so "your colleague has this
+    // open" can be the first thing on screen instead of a correction to it. In a
+    // browser this resolves to null immediately and nothing below it happens.
+    const startupPen = filestore.startupPen();
 
     /* ── 0. Account ──────────────────────────────────────────────────────── */
     if (cloud.isConfigured()) {
@@ -23874,6 +24421,7 @@ __mods["main.js"] = function (__x, __req) {
     installP6Drops();
     installConflictHandling();
     installFolderHandling();
+    installDesktopShell();
     installViewPersistence();
     installResizeHandling();
     installCriticalPathRecompute();
@@ -23884,7 +24432,18 @@ __mods["main.js"] = function (__x, __req) {
     /* ── Done ────────────────────────────────────────────────────────────── */
     dismissSplash();
 
+    // Tell the desktop shell this version came up. A copy downloaded from the
+    // deployment is on trial until this line runs: if it never does, the next
+    // launch throws it away and runs the installed one instead, so a bad deploy
+    // cannot leave anybody unable to open the application. Absent in a browser.
+    window.CX_SHELL?.confirmHealthy?.();
+
     console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
+
+    // The pen, said out loud. After the splash, so the dialog is not underneath
+    // it, and last, so booting is never held up by a question.
+    const pen = await startupPen;
+    if (pen) await cmd.announceStartupPen(pen);
   }
 
   /** Fade out the boot splash. Safe to call more than once. */
@@ -23995,6 +24554,49 @@ __mods["main.js"] = function (__x, __req) {
     window.addEventListener('beforeunload', () => {
       if (filestore.isConnected()) filestore.handleUnload();
     });
+  }
+
+  /* ── The desktop shell ─────────────────────────────────────────────────── */
+
+  /**
+   * The two things the desktop build has that a browser tab does not.
+   *
+   *   the title bar   which plan is open and who has the pen, legible from the
+   *                   taskbar without bringing the window forward. On a machine
+   *                   where two people take turns in one file, that is the state
+   *                   you want to be able to glance at.
+   *   an update       `tools/shell/loader.js` fetches a newer application in the
+   *                   background and keeps it for next launch. Swapping code under
+   *                   a running window would leave the document in one version and
+   *                   the interface in another, so it is announced, not applied.
+   *
+   * Both are inert in a browser: the event never fires and `setWindowTitle()`
+   * resolves to nothing.
+   */
+  function installDesktopShell() {
+    window.addEventListener('cx-shell-update', (event) => {
+      const version = event.detail?.version || '';
+      toast({
+        tone: 'info',
+        title: version ? `Version ${version} is ready` : 'An update is ready',
+        message: 'It is already downloaded. Close CX Timeline and open it again to start using it.',
+        sticky: true,
+      });
+    });
+
+    if (!filestore.state().desktop) return;
+
+    const syncTitle = () => {
+      const file = filestore.state();
+      const doc = store.getDoc();
+      const name = file.plan || doc?.name || 'Untitled';
+      const pen = !file.connected ? '' : file.role === 'viewer' ? ` — read-only, ${file.holder || 'someone else'} has it` : '';
+      desktop.setWindowTitle(`${name}${pen} — CX Timeline`);
+    };
+
+    on(EV.FILE_STATE, syncTitle);
+    on(EV.DOC_CHANGED, debounce(syncTitle, 500));
+    syncTitle();
   }
 
   /* ── Recovery ──────────────────────────────────────────────────────────── */

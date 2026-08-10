@@ -1,0 +1,110 @@
+# Build the Windows desktop application.
+#
+# Run it from the Actions tab (Run workflow), or push a tag like `v1.0.1`. It
+# produces two installers as downloadable artifacts:
+#
+#   CX Timeline_<version>_x64_en-US.msi    the plain Windows installer
+#   CX Timeline_<version>_x64-setup.exe    the NSIS one, per-user
+#
+# Why this workflow exists at all: a Windows executable cannot be
+# cross-compiled from Linux, so the machine that builds it has to be Windows.
+# `windows-latest` already has the WebView2 runtime and the MSVC toolchain, so
+# nothing here installs a webview.
+#
+# **This is not how a change reaches the application.** Editing `src/` and
+# deploying the site is — the installed copy checks the deployment on every
+# launch and picks up a newer build on the next one (see `tools/shell/loader.js`).
+# Rebuild the installer only when the Rust side changes, or for someone who has
+# never installed it.
+
+name: Desktop app
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  # The rules that decide whether somebody loses an afternoon — the write guard
+  # and the lock — are a plain Rust library with no webview dependency, so they
+  # are checked here in seconds rather than inside the Windows build.
+  rules:
+    name: Plan and lock rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the library
+        working-directory: src-tauri
+        run: cargo test --lib --no-default-features
+
+  installer:
+    name: Windows installer
+    needs: rules
+    runs-on: windows-latest
+    # Only the tag build writes anything, and only to its own release.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # No `npm install`: the build and the shell assembler use nothing but
+      # Node's own modules, and the only dependency in package.json is Playwright
+      # for the test suites, which do not run here.
+      - name: Build the bundle and the shell
+        run: |
+          node tools/build.js
+          node tools/desktop.js
+
+      - name: Check the shell was wired to a channel
+        shell: pwsh
+        run: |
+          $loader = Get-Content dist-desktop/loader.js -Raw
+          if ($loader -match '__CHANNEL__') {
+            Write-Error 'loader.js still has an unsubstituted channel placeholder.'
+            exit 1
+          }
+          if ($loader -notmatch "var CHANNEL = 'https://") {
+            Write-Error 'loader.js has no update channel, so an installed copy would never update.'
+            exit 1
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Build the installers
+        working-directory: src-tauri
+        run: cargo tauri build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cx-timeline-windows
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      # A tag build also attaches them to the release, so "send me the installer"
+      # is a link rather than a file in an email.
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
