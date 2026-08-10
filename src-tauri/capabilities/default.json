@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the page may reach. Only Tauri's own core surface: no shell, no arbitrary filesystem, no HTTP client. The application's folder access goes through this crate's own commands, which touch nothing but the folder the user picked.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

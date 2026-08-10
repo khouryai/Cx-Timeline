@@ -1,0 +1,36 @@
+[package]
+name = "cx-timeline"
+version = "1.0.0"
+description = "CX Timeline — commissioning planner"
+edition = "2021"
+rust-version = "1.77"
+
+# The plan/lock logic lives in a library with no Tauri dependency, so it can be
+# unit-tested anywhere — including a machine with no webview toolchain at all.
+# Only the thin command wrappers in main.rs need Tauri to compile.
+[lib]
+name = "cx_plan"
+path = "src/plan.rs"
+
+[[bin]]
+name = "cx-timeline"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+# Building the application needs the webview stack; testing the rules does not.
+# `cargo test --lib --no-default-features` is therefore the test command (see
+# `npm run test:rust`), and it runs on a bare Linux container with nothing
+# installed but Rust. Without this split, checking that a colleague's save can
+# never be overwritten would require gdk, webkit2gtk and a display.
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-plugin-dialog"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [], optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
