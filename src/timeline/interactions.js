@@ -369,15 +369,27 @@ function onCanvasContextMenu(e) {
       renderer.requestRender();
     }
     emit('canvas:contextmenu', { target: 'object', id, clientX: e.clientX, clientY: e.clientY });
-  } else {
-    emit('canvas:contextmenu', {
-      target: 'canvas',
-      ms: snapDate(viewport.pxToMs(point.x)),
-      laneId: laneEntry?.id || null,
-      clientX: e.clientX,
-      clientY: e.clientY,
-    });
+    return;
   }
+
+  // Objects paint over the connector layer, so this is only reached when the
+  // click landed on empty canvas or a connector showing through a gap.
+  const linkEl = closestData(e.target, 'linkId', dom.canvas);
+  if (linkEl) {
+    const id = linkEl.dataset.linkId;
+    store.clearSelection();
+    renderer.setSelectedLinks([id]);
+    emit('canvas:contextmenu', { target: 'link', id, clientX: e.clientX, clientY: e.clientY });
+    return;
+  }
+
+  emit('canvas:contextmenu', {
+    target: 'canvas',
+    ms: snapDate(viewport.pxToMs(point.x)),
+    laneId: laneEntry?.id || null,
+    clientX: e.clientX,
+    clientY: e.clientY,
+  });
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

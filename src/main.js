@@ -24,7 +24,7 @@ import { init as initStorage, takeRecovery, getPref, setPref, saveNow, isHosted 
 import * as cloud from './core/cloud.js';
 import * as filestore from './core/filestore.js';
 import * as desktop from './core/desktop.js';
-import { criticalPath } from './core/analysis.js';
+import { criticalPath, linkViolations } from './core/analysis.js';
 import * as viewport from './timeline/viewport.js';
 import * as renderer from './timeline/renderer.js';
 import { attach as attachInteractions } from './timeline/interactions.js';
@@ -136,6 +136,7 @@ async function boot() {
   installViewPersistence();
   installResizeHandling();
   installCriticalPathRecompute();
+  installHiddenLinkGuard();
   installClipboardBridge();
 
   renderer.renderNow();
@@ -435,6 +436,37 @@ function installCriticalPathRecompute() {
   });
   on(EV.DOC_REPLACED, recompute);
   recompute();
+}
+
+/**
+ * A hidden dependency line is a choice, not a fact about the schedule, and it
+ * must not survive the thing it was hiding turning into a problem. Whenever a
+ * plan settles into a state where a hidden link is violated, this reveals it
+ * — through `store.revealBrokenLinks()`, a real edit rather than a quiet one,
+ * so undo brings the hidden line back exactly like any other change, and the
+ * only way to hide it again afterwards is doing so on purpose.
+ *
+ * Runs on every settled document (`DOC_CHANGED` with no `transient` flag, plus
+ * `DOC_REPLACED` for load/import/restore/reload-from-folder) rather than on a
+ * render, because the correction has to be saved — a colleague opening the
+ * same plan must see the same dependency, not have it hidden again by their
+ * own idle reconcile. `revealBrokenLinks()` emits its own `DOC_CHANGED`; the
+ * second pass here finds nothing left to reveal and stops.
+ */
+function installHiddenLinkGuard() {
+  const reconcile = () => {
+    const doc = store.getDoc();
+    const violations = linkViolations(doc);
+    const broken = doc.links.filter((l) => l.hidden && violations.byLink.get(l.id)?.violated).map((l) => l.id);
+    if (broken.length) store.revealBrokenLinks(broken);
+  };
+
+  on(EV.DOC_CHANGED, (payload) => {
+    if (payload?.transient) return;
+    reconcile();
+  });
+  on(EV.DOC_REPLACED, reconcile);
+  reconcile();
 }
 
 /* ── Hover preview ─────────────────────────────────────────────────────── */

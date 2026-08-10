@@ -36,7 +36,32 @@ export function installMenus() {
 
 function onCanvasMenu(payload) {
   if (payload.target === 'object') objectMenu(payload);
+  else if (payload.target === 'link') linkMenu(payload);
   else canvasMenu(payload);
+}
+
+function linkMenu({ id, clientX, clientY }) {
+  const doc = store.getDoc();
+  const link = doc.links.find((l) => l.id === id);
+  if (!link) return;
+
+  const from = store.getObject(link.from);
+  const to = store.getObject(link.to);
+  const violated = !!linkViolations(doc).byLink.get(id)?.violated;
+
+  contextMenu(clientX, clientY, [
+    { heading: `${from?.title || '?'} → ${to?.title || '?'}` },
+    // A broken dependency cannot be hidden — see toggleLinkHidden() — so the
+    // item that would do nothing is left off the menu rather than disabled.
+    violated
+      ? null
+      : {
+          label: link.hidden ? 'Show dependency' : 'Hide dependency',
+          icon: link.hidden ? 'eye' : 'eye-off',
+          onClick: () => cmd.toggleLinkHidden(id),
+        },
+    { label: 'Delete dependency', icon: 'trash', danger: true, onClick: () => store.removeLinks([id]) },
+  ]);
 }
 
 function objectMenu({ id, clientX, clientY }) {

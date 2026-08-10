@@ -658,6 +658,31 @@ export function removeLinks(ids) {
   });
 }
 
+/**
+ * Un-hide links that have just become violated.
+ *
+ * The only caller is `installHiddenLinkGuard()` in `main.js`, which finds
+ * these by comparing the live document against `linkViolations()` after every
+ * settled edit. A broken dependency must be seen, so hiding it is a choice
+ * that does not survive the thing it was hiding becoming a problem — this is
+ * what makes it not survive, and why it is a real edit rather than a quiet
+ * one: undoing past it should bring the hidden line back, the same as any
+ * other change.
+ */
+export function revealBrokenLinks(ids) {
+  const set = new Set(ids);
+  return edit('Reveal broken dependency', (d) => {
+    let changed = false;
+    for (const l of d.links) {
+      if (set.has(l.id) && l.hidden) {
+        l.hidden = false;
+        changed = true;
+      }
+    }
+    return changed ? undefined : false;
+  });
+}
+
 /** Links touching any of the given object ids. */
 export function linksFor(ids) {
   const set = new Set([].concat(ids));

@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 43   Built: 2026-08-10T15:11:32.086Z
+ * Modules: 43   Built: 2026-08-10T18:48:44.369Z
  */
 (function () {
   'use strict';
@@ -1954,6 +1954,10 @@ __mods["core/model.js"] = function (__x, __req) {
       label: props.label ?? '',
       color: props.color ?? '',
       critical: false, // recomputed, never authoritative on disk
+      // A user choice, not derived — but not a durable one either: it is cleared
+      // the moment this link is violated (see installHiddenLinkGuard in main.js),
+      // so a dependency that breaks always reappears and has to be hidden again.
+      hidden: !!props.hidden,
     };
   }
 
@@ -4125,6 +4129,31 @@ __mods["core/store.js"] = function (__x, __req) {
     });
   }
 
+  /**
+   * Un-hide links that have just become violated.
+   *
+   * The only caller is `installHiddenLinkGuard()` in `main.js`, which finds
+   * these by comparing the live document against `linkViolations()` after every
+   * settled edit. A broken dependency must be seen, so hiding it is a choice
+   * that does not survive the thing it was hiding becoming a problem — this is
+   * what makes it not survive, and why it is a real edit rather than a quiet
+   * one: undoing past it should bring the hidden line back, the same as any
+   * other change.
+   */
+  function revealBrokenLinks(ids) {
+    const set = new Set(ids);
+    return edit('Reveal broken dependency', (d) => {
+      let changed = false;
+      for (const l of d.links) {
+        if (set.has(l.id) && l.hidden) {
+          l.hidden = false;
+          changed = true;
+        }
+      }
+      return changed ? undefined : false;
+    });
+  }
+
   /** Links touching any of the given object ids. */
   function linksFor(ids) {
     const set = new Set([].concat(ids));
@@ -4679,6 +4708,7 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "addLink", { get: () => addLink, enumerable: true });
   Object.defineProperty(__x, "updateLink", { get: () => updateLink, enumerable: true });
   Object.defineProperty(__x, "removeLinks", { get: () => removeLinks, enumerable: true });
+  Object.defineProperty(__x, "revealBrokenLinks", { get: () => revealBrokenLinks, enumerable: true });
   Object.defineProperty(__x, "linksFor", { get: () => linksFor, enumerable: true });
   Object.defineProperty(__x, "createsCycle", { get: () => createsCycle, enumerable: true });
   Object.defineProperty(__x, "setSetting", { get: () => setSetting, enumerable: true });
@@ -10337,9 +10367,16 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     }
     // Memoised on document identity, so asking every frame of a drag is free
     // once the document has settled.
-    const routed = routeAll(doc.links, layout.byId, settings.connectorStyle, {
+    const violations = linkViolations(doc);
+    // A hidden link stays off the canvas only while it holds — the moment a drag
+    // makes it violated it has to be seen, so this checks live rather than
+    // trusting the stored flag. `installHiddenLinkGuard()` in main.js clears the
+    // flag for good once the gesture commits, which is what makes "hidden" not
+    // survive the thing it was hiding turning into a problem.
+    const visible = doc.links.filter((l) => !l.hidden || violations.byLink.get(l.id)?.violated);
+    const routed = routeAll(visible, layout.byId, settings.connectorStyle, {
       criticalIds: settings.criticalPath ? criticalIds : null,
-      violations: linkViolations(doc),
+      violations,
       upstreamIds: upstream.links,
     });
     renderConnectors(dom.connectors, routed, {
@@ -10879,15 +10916,27 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
         renderer.requestRender();
       }
       emit('canvas:contextmenu', { target: 'object', id, clientX: e.clientX, clientY: e.clientY });
-    } else {
-      emit('canvas:contextmenu', {
-        target: 'canvas',
-        ms: snapDate(viewport.pxToMs(point.x)),
-        laneId: laneEntry?.id || null,
-        clientX: e.clientX,
-        clientY: e.clientY,
-      });
+      return;
     }
+
+    // Objects paint over the connector layer, so this is only reached when the
+    // click landed on empty canvas or a connector showing through a gap.
+    const linkEl = closestData(e.target, 'linkId', dom.canvas);
+    if (linkEl) {
+      const id = linkEl.dataset.linkId;
+      store.clearSelection();
+      renderer.setSelectedLinks([id]);
+      emit('canvas:contextmenu', { target: 'link', id, clientX: e.clientX, clientY: e.clientY });
+      return;
+    }
+
+    emit('canvas:contextmenu', {
+      target: 'canvas',
+      ms: snapDate(viewport.pxToMs(point.x)),
+      laneId: laneEntry?.id || null,
+      clientX: e.clientX,
+      clientY: e.clientY,
+    });
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -12655,6 +12704,26 @@ __mods["ui/commands.js"] = function (__x, __req) {
   }
 
   /**
+   * Hide or show one dependency line.
+   *
+   * A currently-broken link cannot be hidden — setting the flag would only be
+   * cleared straight back by `installHiddenLinkGuard()` in `main.js`, so the
+   * button that would do it is not offered at all (see the inspector's link
+   * panel). Hiding is otherwise a plain toggle: the guard is what takes it away
+   * again, the moment the dependency it was hiding becomes a problem.
+   */
+  function toggleLinkHidden(id) {
+    const doc = store.getDoc();
+    const link = doc.links.find((l) => l.id === id);
+    if (!link) return false;
+    if (!link.hidden && linkViolations(doc).byLink.get(id)?.violated) return false;
+
+    store.updateLink(id, { hidden: !link.hidden }, link.hidden ? 'Show dependency' : 'Hide dependency');
+    renderer.requestRender();
+    return true;
+  }
+
+  /**
    * Resolve every broken dependency, repeatedly, so fixing one that cascades
    * into another settles the whole chain rather than leaving the next one red.
    */
@@ -13163,6 +13232,7 @@ __mods["ui/commands.js"] = function (__x, __req) {
   Object.defineProperty(__x, "createObject", { get: () => createObject, enumerable: true });
   Object.defineProperty(__x, "addLane", { get: () => addLane, enumerable: true });
   Object.defineProperty(__x, "resolveViolation", { get: () => resolveViolation, enumerable: true });
+  Object.defineProperty(__x, "toggleLinkHidden", { get: () => toggleLinkHidden, enumerable: true });
   Object.defineProperty(__x, "resolveAllViolations", { get: () => resolveAllViolations, enumerable: true });
   Object.defineProperty(__x, "selectViolations", { get: () => selectViolations, enumerable: true });
   Object.defineProperty(__x, "takeBaseline", { get: () => takeBaseline, enumerable: true });
@@ -17562,7 +17632,7 @@ __mods["io/scene.js"] = function (__x, __req) {
   const { clamp, withAlpha, readableInk } = __req("core/util.js");
   const { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } = __req("core/dates.js");
   const { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot } = __req("core/model.js");
-  const { criticalPath } = __req("core/analysis.js");
+  const { criticalPath, linkViolations } = __req("core/analysis.js");
   const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
 
   /** Layout constants for exported drawings, in points/pixels. */
@@ -17991,7 +18061,12 @@ __mods["io/scene.js"] = function (__x, __req) {
     /* ── Dependencies ──────────────────────────────────────────────────── */
     if (opts.showLinks !== false && doc.settings.showConnectors) {
       const critical = doc.settings.criticalPath ? criticalPath(doc).critical : null;
+      // An export is the drawing on screen, not a different one: a link stays
+      // hidden here exactly as it does on the canvas — unhidden the moment it is
+      // violated, never by the mere fact of being exported.
+      const violations = linkViolations(doc);
       for (const link of doc.links) {
+        if (link.hidden && !violations.byLink.get(link.id)?.violated) continue;
         const from = rectsById.get(link.from);
         const to = rectsById.get(link.to);
         if (!from || !to) continue;
@@ -22272,7 +22347,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
 
   const { managedSelect, suggestInput } = __req("ui/lists.js");
   const { openNoteEditor, renderNote, notePreview } = __req("ui/notes.js");
-  const { resolveViolation } = __req("ui/commands.js");
+  const { resolveViolation, toggleLinkHidden } = __req("ui/commands.js");
   const { attachmentList } = __req("ui/attachments.js");
 
   let host = null;
@@ -22373,7 +22448,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
         el('div', { class: 'ih-name', text: name, title: name }),
       ])
     );
-    for (const action of actions) headEl.appendChild(action);
+    for (const action of actions) if (action) headEl.appendChild(action);
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -23304,15 +23379,32 @@ __mods["ui/inspector.js"] = function (__x, __req) {
      ═══════════════════════════════════════════════════════════════════════ */
 
   function renderLink(linkId) {
-    const link = store.getDoc().links.find((l) => l.id === linkId);
+    const doc = store.getDoc();
+    const link = doc.links.find((l) => l.id === linkId);
     if (!link) {
       renderProject();
       return;
     }
     const from = store.getObject(link.from);
     const to = store.getObject(link.to);
+    const violated = !!linkViolations(doc).byLink.get(link.id)?.violated;
 
     headerFor('Dependency', `${from?.title || '?'} → ${to?.title || '?'}`, [
+      // A broken dependency cannot be hidden — it would only reappear on its
+      // own the moment this render committed, so the button that would do
+      // nothing is not offered at all.
+      violated
+        ? null
+        : el('button', {
+            class: 'cx-btn icon mini ghost',
+            title: link.hidden ? 'Show dependency' : 'Hide dependency',
+            'aria-label': link.hidden ? 'Show dependency line' : 'Hide dependency line',
+            html: icon(link.hidden ? 'eye' : 'eye-off', { size: 13 }),
+            onClick: () => {
+              toggleLinkHidden(link.id);
+              render();
+            },
+          }),
       el('button', {
         class: 'cx-btn icon mini ghost',
         title: 'Delete dependency',
@@ -23326,6 +23418,16 @@ __mods["ui/inspector.js"] = function (__x, __req) {
         },
       }),
     ]);
+
+    if (link.hidden) {
+      bodyEl.appendChild(
+        el('div', {
+          class: 'cx-hint',
+          style: { margin: '0 0 10px' },
+          text: 'Hidden — this line will not draw on the canvas or in exports unless it becomes broken.',
+        })
+      );
+    }
 
     bodyEl.appendChild(
       section('Relationship', [
@@ -23800,7 +23902,32 @@ __mods["ui/menus.js"] = function (__x, __req) {
 
   function onCanvasMenu(payload) {
     if (payload.target === 'object') objectMenu(payload);
+    else if (payload.target === 'link') linkMenu(payload);
     else canvasMenu(payload);
+  }
+
+  function linkMenu({ id, clientX, clientY }) {
+    const doc = store.getDoc();
+    const link = doc.links.find((l) => l.id === id);
+    if (!link) return;
+
+    const from = store.getObject(link.from);
+    const to = store.getObject(link.to);
+    const violated = !!linkViolations(doc).byLink.get(id)?.violated;
+
+    contextMenu(clientX, clientY, [
+      { heading: `${from?.title || '?'} → ${to?.title || '?'}` },
+      // A broken dependency cannot be hidden — see toggleLinkHidden() — so the
+      // item that would do nothing is left off the menu rather than disabled.
+      violated
+        ? null
+        : {
+            label: link.hidden ? 'Show dependency' : 'Hide dependency',
+            icon: link.hidden ? 'eye' : 'eye-off',
+            onClick: () => cmd.toggleLinkHidden(id),
+          },
+      { label: 'Delete dependency', icon: 'trash', danger: true, onClick: () => store.removeLinks([id]) },
+    ]);
   }
 
   function objectMenu({ id, clientX, clientY }) {
@@ -24313,7 +24440,7 @@ __mods["main.js"] = function (__x, __req) {
   const cloud = __req("core/cloud.js");
   const filestore = __req("core/filestore.js");
   const desktop = __req("core/desktop.js");
-  const { criticalPath } = __req("core/analysis.js");
+  const { criticalPath, linkViolations } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
   const { attach: attachInteractions } = __req("timeline/interactions.js");
@@ -24425,6 +24552,7 @@ __mods["main.js"] = function (__x, __req) {
     installViewPersistence();
     installResizeHandling();
     installCriticalPathRecompute();
+    installHiddenLinkGuard();
     installClipboardBridge();
 
     renderer.renderNow();
@@ -24724,6 +24852,37 @@ __mods["main.js"] = function (__x, __req) {
     });
     on(EV.DOC_REPLACED, recompute);
     recompute();
+  }
+
+  /**
+   * A hidden dependency line is a choice, not a fact about the schedule, and it
+   * must not survive the thing it was hiding turning into a problem. Whenever a
+   * plan settles into a state where a hidden link is violated, this reveals it
+   * — through `store.revealBrokenLinks()`, a real edit rather than a quiet one,
+   * so undo brings the hidden line back exactly like any other change, and the
+   * only way to hide it again afterwards is doing so on purpose.
+   *
+   * Runs on every settled document (`DOC_CHANGED` with no `transient` flag, plus
+   * `DOC_REPLACED` for load/import/restore/reload-from-folder) rather than on a
+   * render, because the correction has to be saved — a colleague opening the
+   * same plan must see the same dependency, not have it hidden again by their
+   * own idle reconcile. `revealBrokenLinks()` emits its own `DOC_CHANGED`; the
+   * second pass here finds nothing left to reveal and stops.
+   */
+  function installHiddenLinkGuard() {
+    const reconcile = () => {
+      const doc = store.getDoc();
+      const violations = linkViolations(doc);
+      const broken = doc.links.filter((l) => l.hidden && violations.byLink.get(l.id)?.violated).map((l) => l.id);
+      if (broken.length) store.revealBrokenLinks(broken);
+    };
+
+    on(EV.DOC_CHANGED, (payload) => {
+      if (payload?.transient) return;
+      reconcile();
+    });
+    on(EV.DOC_REPLACED, reconcile);
+    reconcile();
   }
 
   /* ── Hover preview ─────────────────────────────────────────────────────── */

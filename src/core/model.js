@@ -833,6 +833,10 @@ export function makeLink(props = {}) {
     label: props.label ?? '',
     color: props.color ?? '',
     critical: false, // recomputed, never authoritative on disk
+    // A user choice, not derived — but not a durable one either: it is cleared
+    // the moment this link is violated (see installHiddenLinkGuard in main.js),
+    // so a dependency that breaks always reappears and has to be hidden again.
+    hidden: !!props.hidden,
   };
 }
 
