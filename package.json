@@ -24,7 +24,7 @@
   "cxTimeline": {
     "_comment": "deployment: 'hosted' saves to Supabase and requires a backend at build time; 'folder' publishes with no backend at all and keeps the plan in a folder the user picks. tools/dist.js reads this, so the shape of a deployment is decided here, in the repository, rather than in a CI setting nobody can see. updateChannel: the deployment an installed desktop copy follows for updates — blank means an installed copy never updates itself.",
     "deployment": "folder",
-    "updateChannel": "https://cx-timeline.pages.dev"
+    "updateChannel": "https://cx-timeline.aik-khoury.workers.dev"
   },
   "engines": {
     "node": ">=18"
