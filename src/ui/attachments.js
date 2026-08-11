@@ -93,7 +93,10 @@ export async function downloadAttachment(id) {
     toast({ tone: 'bad', title: 'File missing', message: 'The stored bytes for this attachment could not be found.' });
     return;
   }
-  download(record?.name || stored.name || 'attachment', stored.blob, stored.type);
+  const filename = record?.name || stored.name || 'attachment';
+  download(filename, stored.blob, stored.type);
+  // Nothing on screen changes when a file leaves the browser, so say it did.
+  toast({ tone: 'good', title: 'File downloaded', message: `${filename} · ${bytes(stored.blob.size)} — saved to your downloads.` });
 }
 
 /** Open an attachment in a new tab where the browser can display it. */

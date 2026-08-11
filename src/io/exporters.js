@@ -9,7 +9,7 @@
  *          pdf, components.
  */
 
-import { download, slug, stripHtml } from '../core/util.js';
+import { download, slug, stripHtml, bytes } from '../core/util.js';
 import { toISO, fmtDate } from '../core/dates.js';
 import { TYPES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES } from '../core/model.js';
 import { getDoc, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
@@ -24,6 +24,30 @@ import { toast } from '../ui/components.js';
 /** Filename stem shared by every export of the same project. */
 function stem(doc, suffix = '') {
   return `${slug(doc.name) || 'cx-timeline'}${suffix}-${toISO(Date.now())}`;
+}
+
+/**
+ * Hand a file to the browser, and say so.
+ *
+ * A download is the one thing the application does that leaves no trace on
+ * screen: the file lands somewhere the page cannot see, browsers no longer
+ * open a window for it, and exporting the same drawing twice looks identical
+ * to exporting it never. So every export goes through here rather than calling
+ * `download()` itself — the notification names the file and its size, which is
+ * what someone hunting through a downloads folder actually needs.
+ *
+ * The Blob is built once and handed to both jobs, so measuring it costs
+ * nothing on top of writing it.
+ */
+function saveFile(filename, data, mime, what) {
+  const blob = data instanceof Blob ? data : new Blob([data], { type: mime });
+  download(filename, blob, mime);
+  toast({
+    tone: 'good',
+    title: `${what} exported`,
+    message: `${filename} · ${bytes(blob.size)} — saved to your downloads.`,
+  });
+  return true;
 }
 
 /** The predicate to apply — respects the filter panel unless told otherwise. */
@@ -52,8 +76,7 @@ export function exportJson({ pretty = true } = {}) {
       note: 'Attachment file contents are stored in the browser and are not included in this file.',
     },
   };
-  download(`${stem(doc)}.json`, JSON.stringify(payload, null, pretty ? 2 : 0), 'application/json');
-  return true;
+  return saveFile(`${stem(doc)}.json`, JSON.stringify(payload, null, pretty ? 2 : 0), 'application/json', 'Project file');
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -109,8 +132,7 @@ export function exportCsv(opts = {}) {
   const rows = [CSV_COLUMNS.map((c) => c[0])];
   for (const obj of objects) rows.push(CSV_COLUMNS.map(([, fn]) => fn(obj, ctx)));
 
-  download(`${stem(doc)}.csv`, toCsv(rows), 'text/csv;charset=utf-8');
-  return true;
+  return saveFile(`${stem(doc)}.csv`, toCsv(rows), 'text/csv;charset=utf-8', `${objects.length} object${objects.length === 1 ? '' : 's'}`);
 }
 
 /** Export the dependency list as its own CSV. */
@@ -121,8 +143,7 @@ export function exportLinksCsv() {
   for (const link of doc.links) {
     rows.push([link.from, titles.get(link.from) || '', link.to, titles.get(link.to) || '', link.type, link.lag || 0, link.label || '']);
   }
-  download(`${stem(doc, '-dependencies')}.csv`, toCsv(rows), 'text/csv;charset=utf-8');
-  return true;
+  return saveFile(`${stem(doc, '-dependencies')}.csv`, toCsv(rows), 'text/csv;charset=utf-8', 'Dependencies');
 }
 
 /** Export the baseline variance report. */
@@ -154,8 +175,7 @@ export function exportBaselineCsv() {
       row.reason || '',
     ]);
   }
-  download(`${stem(doc, '-baseline')}.csv`, toCsv(rows), 'text/csv;charset=utf-8');
-  return true;
+  return saveFile(`${stem(doc, '-baseline')}.csv`, toCsv(rows), 'text/csv;charset=utf-8', 'Baseline variance');
 }
 
 /** RFC 4180 quoting, with a BOM so Excel opens UTF-8 correctly. */
@@ -255,8 +275,7 @@ export function exportSvg(opts = {}) {
     title: doc.name,
     description: [doc.client, doc.programme, doc.description].filter(Boolean).join(' — '),
   });
-  download(`${stem(doc)}.svg`, svg, 'image/svg+xml;charset=utf-8');
-  return true;
+  return saveFile(`${stem(doc)}.svg`, svg, 'image/svg+xml;charset=utf-8', 'SVG drawing');
 }
 
 export async function exportRaster({ type = 'image/png', scale = 2, ...opts } = {}) {
@@ -273,8 +292,7 @@ export async function exportRaster({ type = 'image/png', scale = 2, ...opts } = 
       background: type === 'image/jpeg' ? scene.meta.palette.bg : null,
     });
     const ext = type === 'image/jpeg' ? 'jpg' : 'png';
-    download(`${stem(doc)}.${ext}`, blob, type);
-    return true;
+    return saveFile(`${stem(doc)}.${ext}`, blob, type, ext.toUpperCase());
   } catch (err) {
     toast({ tone: 'bad', title: 'Image export failed', message: err.message });
     return false;
@@ -304,8 +322,7 @@ export function exportPdf(opts = {}) {
       subtitle: [doc.client, doc.programme].filter(Boolean).join('  ·  '),
       author: doc.client || 'CX Timeline',
     });
-    download(`${stem(doc)}.pdf`, blob, 'application/pdf');
-    return true;
+    return saveFile(`${stem(doc)}.pdf`, blob, 'application/pdf', 'PDF');
   } catch (err) {
     console.error('[cx-timeline] PDF export failed:', err);
     toast({ tone: 'bad', title: 'PDF export failed', message: err.message });

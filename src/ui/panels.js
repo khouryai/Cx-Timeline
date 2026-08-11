@@ -1329,10 +1329,10 @@ function openPdfDialog() {
       {
         label: 'Export PDF',
         kind: 'primary',
-        onClick: () => {
-          exporters.exportPdf({ pageSize, density, multiPage });
-          toast({ tone: 'good', title: 'PDF exported' });
-        },
+        // The exporter announces the file it wrote — including its name and
+        // size, and only when there is one. Saying it here as well both
+        // repeated the message and claimed success for a failed export.
+        onClick: () => exporters.exportPdf({ pageSize, density, multiPage }),
       },
     ],
   });
@@ -1489,7 +1489,14 @@ function paneBackups(root) {
             iconBtn('refresh', 'Restore this backup', () => restoreBackup(backup)),
             iconBtn('download', 'Download as JSON', async () => {
               const doc = await loadBackup(backup.key);
-              if (doc) download(`${doc.name || 'project'}-${toISO(backup.time)}.json`, JSON.stringify(doc, null, 2), 'application/json');
+              if (!doc) {
+                toast({ tone: 'bad', title: 'Backup unavailable', message: 'The stored copy could not be read.' });
+                return;
+              }
+              const filename = `${doc.name || 'project'}-${toISO(backup.time)}.json`;
+              const json = JSON.stringify(doc, null, 2);
+              download(filename, json, 'application/json');
+              toast({ tone: 'good', title: 'Backup downloaded', message: `${filename} · ${bytes(json.length)} — saved to your downloads.` });
             }),
             iconBtn('trash', 'Delete backup', async () => {
               await deleteBackup(backup.key);

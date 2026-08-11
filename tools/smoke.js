@@ -1452,6 +1452,9 @@ async function main() {
         button.click();
         await new Promise((r) => setTimeout(r, key === 'png' ? 1600 : 500));
         out[key] = captured.length > before ? captured[captured.length - 1].size : 0;
+        // A download leaves nothing on screen, so each one has to announce
+        // itself. The newest toast is the last child of the host.
+        out[`${key}Toast`] = document.querySelector('#cx-toasts .cx-toast:last-child')?.textContent || '';
       }
     } finally {
       URL.createObjectURL = originalCreate;
@@ -1464,6 +1467,14 @@ async function main() {
   check('PNG export produces bytes', Number(exportChecks.png) > 2000, String(exportChecks.png));
   check('CSV export produces bytes', Number(exportChecks.csv) > 200, String(exportChecks.csv));
   check('JSON export produces bytes', Number(exportChecks.json) > 1000, String(exportChecks.json));
+  // A file that lands silently in a folder the page cannot see is the one
+  // action in the application with no visible result. Every export says so.
+  for (const [key, ext] of [['svg', '.svg'], ['png', '.png'], ['csv', '.csv'], ['json', '.json']]) {
+    const text = exportChecks[`${key}Toast`] || '';
+    check(`the ${key.toUpperCase()} export says it was written`,
+      /exported/i.test(text) && text.includes(ext) && /saved to your downloads/i.test(text),
+      text.replace(/\s+/g, ' ').slice(0, 90) || '(no notification)');
+  }
 
   console.log('\nPDF');
   const pdfSize = await page.evaluate(async () => {
@@ -1494,6 +1505,10 @@ async function main() {
     }
   });
   check('PDF export produces a valid file', Number(pdfSize) > 3000, `${pdfSize} bytes`);
+  const pdfToast = await page.evaluate(() =>
+    document.querySelector('#cx-toasts .cx-toast:last-child')?.textContent || '');
+  check('and says so, naming the file', /PDF exported/i.test(pdfToast) && /\.pdf/.test(pdfToast),
+    pdfToast.replace(/\s+/g, ' ').slice(0, 90) || '(no notification)');
 
   console.log('\nPersistence');
   await page.evaluate(() => document.querySelectorAll('.cx-modal-overlay').forEach((n) => n.remove()));

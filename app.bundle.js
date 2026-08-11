@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 43   Built: 2026-08-11T16:57:26.718Z
+ * Modules: 43   Built: 2026-08-11T18:02:48.446Z
  */
 (function () {
   'use strict';
@@ -17508,7 +17508,10 @@ __mods["ui/attachments.js"] = function (__x, __req) {
       toast({ tone: 'bad', title: 'File missing', message: 'The stored bytes for this attachment could not be found.' });
       return;
     }
-    download(record?.name || stored.name || 'attachment', stored.blob, stored.type);
+    const filename = record?.name || stored.name || 'attachment';
+    download(filename, stored.blob, stored.type);
+    // Nothing on screen changes when a file leaves the browser, so say it did.
+    toast({ tone: 'good', title: 'File downloaded', message: `${filename} · ${bytes(stored.blob.size)} — saved to your downloads.` });
   }
 
   /** Open an attachment in a new tab where the browser can display it. */
@@ -19760,7 +19763,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
    *          pdf, components.
    */
 
-  const { download, slug, stripHtml } = __req("core/util.js");
+  const { download, slug, stripHtml, bytes } = __req("core/util.js");
   const { toISO, fmtDate } = __req("core/dates.js");
   const { TYPES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES } = __req("core/model.js");
   const { getDoc, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
@@ -19775,6 +19778,30 @@ __mods["io/exporters.js"] = function (__x, __req) {
   /** Filename stem shared by every export of the same project. */
   function stem(doc, suffix = '') {
     return `${slug(doc.name) || 'cx-timeline'}${suffix}-${toISO(Date.now())}`;
+  }
+
+  /**
+   * Hand a file to the browser, and say so.
+   *
+   * A download is the one thing the application does that leaves no trace on
+   * screen: the file lands somewhere the page cannot see, browsers no longer
+   * open a window for it, and exporting the same drawing twice looks identical
+   * to exporting it never. So every export goes through here rather than calling
+   * `download()` itself — the notification names the file and its size, which is
+   * what someone hunting through a downloads folder actually needs.
+   *
+   * The Blob is built once and handed to both jobs, so measuring it costs
+   * nothing on top of writing it.
+   */
+  function saveFile(filename, data, mime, what) {
+    const blob = data instanceof Blob ? data : new Blob([data], { type: mime });
+    download(filename, blob, mime);
+    toast({
+      tone: 'good',
+      title: `${what} exported`,
+      message: `${filename} · ${bytes(blob.size)} — saved to your downloads.`,
+    });
+    return true;
   }
 
   /** The predicate to apply — respects the filter panel unless told otherwise. */
@@ -19803,8 +19830,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
         note: 'Attachment file contents are stored in the browser and are not included in this file.',
       },
     };
-    download(`${stem(doc)}.json`, JSON.stringify(payload, null, pretty ? 2 : 0), 'application/json');
-    return true;
+    return saveFile(`${stem(doc)}.json`, JSON.stringify(payload, null, pretty ? 2 : 0), 'application/json', 'Project file');
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -19860,8 +19886,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
     const rows = [CSV_COLUMNS.map((c) => c[0])];
     for (const obj of objects) rows.push(CSV_COLUMNS.map(([, fn]) => fn(obj, ctx)));
 
-    download(`${stem(doc)}.csv`, toCsv(rows), 'text/csv;charset=utf-8');
-    return true;
+    return saveFile(`${stem(doc)}.csv`, toCsv(rows), 'text/csv;charset=utf-8', `${objects.length} object${objects.length === 1 ? '' : 's'}`);
   }
 
   /** Export the dependency list as its own CSV. */
@@ -19872,8 +19897,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
     for (const link of doc.links) {
       rows.push([link.from, titles.get(link.from) || '', link.to, titles.get(link.to) || '', link.type, link.lag || 0, link.label || '']);
     }
-    download(`${stem(doc, '-dependencies')}.csv`, toCsv(rows), 'text/csv;charset=utf-8');
-    return true;
+    return saveFile(`${stem(doc, '-dependencies')}.csv`, toCsv(rows), 'text/csv;charset=utf-8', 'Dependencies');
   }
 
   /** Export the baseline variance report. */
@@ -19905,8 +19929,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
         row.reason || '',
       ]);
     }
-    download(`${stem(doc, '-baseline')}.csv`, toCsv(rows), 'text/csv;charset=utf-8');
-    return true;
+    return saveFile(`${stem(doc, '-baseline')}.csv`, toCsv(rows), 'text/csv;charset=utf-8', 'Baseline variance');
   }
 
   /** RFC 4180 quoting, with a BOM so Excel opens UTF-8 correctly. */
@@ -20006,8 +20029,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
       title: doc.name,
       description: [doc.client, doc.programme, doc.description].filter(Boolean).join(' — '),
     });
-    download(`${stem(doc)}.svg`, svg, 'image/svg+xml;charset=utf-8');
-    return true;
+    return saveFile(`${stem(doc)}.svg`, svg, 'image/svg+xml;charset=utf-8', 'SVG drawing');
   }
 
   async function exportRaster({ type = 'image/png', scale = 2, ...opts } = {}) {
@@ -20024,8 +20046,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
         background: type === 'image/jpeg' ? scene.meta.palette.bg : null,
       });
       const ext = type === 'image/jpeg' ? 'jpg' : 'png';
-      download(`${stem(doc)}.${ext}`, blob, type);
-      return true;
+      return saveFile(`${stem(doc)}.${ext}`, blob, type, ext.toUpperCase());
     } catch (err) {
       toast({ tone: 'bad', title: 'Image export failed', message: err.message });
       return false;
@@ -20055,8 +20076,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
         subtitle: [doc.client, doc.programme].filter(Boolean).join('  ·  '),
         author: doc.client || 'CX Timeline',
       });
-      download(`${stem(doc)}.pdf`, blob, 'application/pdf');
-      return true;
+      return saveFile(`${stem(doc)}.pdf`, blob, 'application/pdf', 'PDF');
     } catch (err) {
       console.error('[cx-timeline] PDF export failed:', err);
       toast({ tone: 'bad', title: 'PDF export failed', message: err.message });
@@ -21494,10 +21514,10 @@ __mods["ui/panels.js"] = function (__x, __req) {
         {
           label: 'Export PDF',
           kind: 'primary',
-          onClick: () => {
-            exporters.exportPdf({ pageSize, density, multiPage });
-            toast({ tone: 'good', title: 'PDF exported' });
-          },
+          // The exporter announces the file it wrote — including its name and
+          // size, and only when there is one. Saying it here as well both
+          // repeated the message and claimed success for a failed export.
+          onClick: () => exporters.exportPdf({ pageSize, density, multiPage }),
         },
       ],
     });
@@ -21654,7 +21674,14 @@ __mods["ui/panels.js"] = function (__x, __req) {
               iconBtn('refresh', 'Restore this backup', () => restoreBackup(backup)),
               iconBtn('download', 'Download as JSON', async () => {
                 const doc = await loadBackup(backup.key);
-                if (doc) download(`${doc.name || 'project'}-${toISO(backup.time)}.json`, JSON.stringify(doc, null, 2), 'application/json');
+                if (!doc) {
+                  toast({ tone: 'bad', title: 'Backup unavailable', message: 'The stored copy could not be read.' });
+                  return;
+                }
+                const filename = `${doc.name || 'project'}-${toISO(backup.time)}.json`;
+                const json = JSON.stringify(doc, null, 2);
+                download(filename, json, 'application/json');
+                toast({ tone: 'good', title: 'Backup downloaded', message: `${filename} · ${bytes(json.length)} — saved to your downloads.` });
               }),
               iconBtn('trash', 'Delete backup', async () => {
                 await deleteBackup(backup.key);

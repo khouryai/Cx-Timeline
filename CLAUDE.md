@@ -267,6 +267,15 @@ subscribes. That is what keeps the graph acyclic.
   back. Publishing the site is the whole release: `tools/dist.js` writes
   `dist/desktop/{version,payload}.json` alongside it. Rebuild the installer only
   when the Rust side changes.
+- **A download is the one action with no visible result, so it says so.** The
+  file lands somewhere the page cannot see, and exporting the same drawing
+  twice looks exactly like exporting it never. Every export goes through
+  `saveFile()` in `io/exporters.js`, which builds the Blob once, hands it to
+  `download()` and raises the toast naming the file and its size — never call
+  `download()` from a new exporter. The two downloads outside that module (a
+  backup, an attachment) announce themselves at their own call site. Announce
+  only a file that exists: the PDF dialog used to toast beside the exporter and
+  so claimed success for an export that had thrown.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
 - **Dropdown vocabularies are document data, not constants.** Status,
@@ -311,7 +320,8 @@ subscribes. That is what keeps the graph acyclic.
   and the Dropdown Lists pane all follow from that one entry.
 - **A new export format**: consume the scene from `io/scene.js` rather than
   re-walking the document — that is what keeps every export agreeing with
-  every other.
+  every other, and hand the bytes to `saveFile()` so the download announces
+  itself like all the others.
 - **A new export toggle**: add it to `exportOptions` in `defaultSettings()`,
   to `exportSettings()` in `io/exporters.js` (which is the one place that
   merges stored, default and per-call values), and to the dialog in
@@ -331,7 +341,7 @@ npm run build                        # must succeed — it also lints the module
 npm test                             # all four browser suites plus the SQL one, must exit 0
 npm run test:rust                    #  13 checks — the plan and lock rules, in Rust
 
-node tools/smoke.js                  # 231 checks — the application, local mode
+node tools/smoke.js                  # 236 checks — the application, local mode
 node tools/smoke_folder.js           #  43 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  48 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
