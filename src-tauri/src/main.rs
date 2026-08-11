@@ -206,6 +206,39 @@ fn lock_write(folder: String, name: String, text: String) -> Reply<()> {
     })
 }
 
+/* ── Claims on the pen ─────────────────────────────────────────────────── */
+
+#[tauri::command]
+fn claims_read(folder: String, plan: String) -> Vec<plan::ClaimFile> {
+    plan::read_claims(Path::new(&folder), &plan).unwrap_or_default()
+}
+
+#[tauri::command]
+fn claim_write(folder: String, plan: String, device: String, text: String) -> Reply<()> {
+    plan::write_claim(Path::new(&folder), &plan, &device, &text).map_err(|e| Failure {
+        kind: "io".into(),
+        message: e.to_string(),
+        current: None,
+        expected: None,
+    })
+}
+
+#[tauri::command]
+fn claim_remove(folder: String, plan: String, device: String) -> bool {
+    plan::remove_claim(Path::new(&folder), &plan, &device)
+}
+
+/// Delete one file in the folder by name — used to retire a dead claim.
+/// Refuses anything that is not a lock or a claim, so a plan can never be
+/// deleted through this door.
+#[tauri::command]
+fn file_remove(folder: String, name: String) -> bool {
+    if !plan::is_lock_name(&name) {
+        return false;
+    }
+    std::fs::remove_file(Path::new(&folder).join(name)).is_ok()
+}
+
 /// Clear a sync client's conflict copies of the lock files out of the folder.
 /// Answers how many went, so the caller can say nothing when there were none.
 #[tauri::command]
@@ -285,6 +318,10 @@ fn main() {
             lock_write,
             lock_remove,
             lock_sweep,
+            claims_read,
+            claim_write,
+            claim_remove,
+            file_remove,
             startup_lock_check,
             attachment_write,
             attachment_read,

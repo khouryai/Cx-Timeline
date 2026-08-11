@@ -92,6 +92,8 @@ function fakeShell() {
   const bytes = (text) => new TextEncoder().encode(text).length;
   const stampOf = (record) => ({ size: bytes(record.text), modified: record.modified });
   const lockName = (name) => `${String(name).replace(/\.json$/i, '')}.lock.json`;
+  const claimName = (plan, device) =>
+    `${String(plan).replace(/\.json$/i, '')}.pen-${String(device).replace(/[^A-Za-z0-9_-]/g, '')}.json`;
 
   const commands = {
     settings_read: () => ({ ...shell.settings }),
@@ -104,7 +106,7 @@ function fakeShell() {
     pick_folder: () => shell.pickAnswer || '',
     list_plans: () =>
       Object.entries(shell.files)
-        .filter(([name]) => /\.json$/i.test(name) && !/\.lock\.json$/i.test(name) && !name.includes('/'))
+        .filter(([name]) => /\.json$/i.test(name) && !/\.(?:lock|pen)(?:[-_. (][^/]*)?\.json$/i.test(name) && !name.includes('/'))
         .map(([name, record]) => ({ name, size: bytes(record.text), modified: record.modified }))
         .sort((a, b) => b.modified - a.modified),
     read_plan: ({ name }) => {
@@ -140,6 +142,35 @@ function fakeShell() {
       const had = !!shell.files[lockName(name)];
       delete shell.files[lockName(name)];
       return had;
+    },
+    claims_read: ({ plan }) => {
+      const stem = String(plan).replace(/\.json$/i, '').toLowerCase();
+      return Object.entries(shell.files)
+        .filter(([name]) => name.toLowerCase().startsWith(`${stem}.pen-`) && name.toLowerCase().endsWith('.json'))
+        .map(([name, record]) => ({ name, text: record.text }));
+    },
+    claim_write: ({ plan, device, text }) => {
+      shell.files[claimName(plan, device)] = { text, modified: Date.now() };
+      return null;
+    },
+    claim_remove: ({ plan, device }) => {
+      const had = !!shell.files[claimName(plan, device)];
+      delete shell.files[claimName(plan, device)];
+      return had;
+    },
+    file_remove: ({ name }) => {
+      const had = !!shell.files[name];
+      delete shell.files[name];
+      return had;
+    },
+    lock_sweep: () => {
+      let removed = 0;
+      for (const name of Object.keys(shell.files)) {
+        if (!/\.lock[-_. (][^/]*\.json$/i.test(name)) continue;
+        delete shell.files[name];
+        removed++;
+      }
+      return removed;
     },
     startup_lock_check: () => ({ ...shell.startupPen }),
     attachment_write: ({ id, bytes: data }) => {
@@ -338,7 +369,14 @@ async function main() {
   const storageTip = await page.locator('#statusbar .sb-item.clickable').last().getAttribute('title');
   check('and the folder it came from is there to hover over',
     /BART CBTC/.test(storageTip || ''), storageTip || '(no tooltip)');
-  check('and the pen is taken on the way in', (await files()).includes('bart-cbtc.lock.json'), (await files()).join(', '));
+  // The claim is the statement that counts — one file per device, written by
+  // nobody else, which is what stops two machines both believing they hold it.
+  check('and a claim on the pen is staked on the way in',
+    (await files()).some((n) => /^bart-cbtc\.pen-.+\.json$/.test(n)), (await files()).join(', '));
+  // The old single lock is kept stamped beside it, for colleagues still running
+  // a copy from before claims existed.
+  check('with the old lock file stamped for older copies',
+    (await files()).includes('bart-cbtc.lock.json'), (await files()).join(', '));
   check('the window title carries the plan name',
     (await titles()).some((t) => /bart-cbtc\.json/.test(t)), (await titles()).slice(-1)[0] || '(none set)');
 

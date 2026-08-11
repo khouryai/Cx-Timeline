@@ -227,12 +227,25 @@ subscribes. That is what keeps the graph acyclic.
   `core/filestore.js` owns the File System Access API the way `core/cloud.js`
   owns Supabase, and `core/storage.js` branches on `fileMode` beside `hosted`.
   Two rules matter and both exist because a synced folder is not a database.
-  **The lock file is courtesy, the write guard is the control**: `savePlan()`
+  **The lock is courtesy, the write guard is the control**: `savePlan()`
   re-reads the file's size and modified time before every write and refuses if
   either moved, so a colleague's save can never be silently overwritten even
-  when the lock has not synced yet. A lock is keyed on a **device** id kept in
+  when the pen has not synced yet. **Nobody writes anybody else's file.** Each
+  session states its own claim in `<plan>.pen-<device>.json` and restates it on
+  every heartbeat — readers included, so the turn passes to whoever has waited
+  longest the moment a holder leaves — and who holds the pen is a *reading* of
+  all the claims (`penHolder()`: earliest live claim, an explicit `takeover`
+  outranking it, device id breaking an exact tie). `plan.rs` makes the identical
+  reading in `pen_holder()`, because the shell announces a holder before the
+  window opens and the application must not then announce a different one. This
+  replaced a single `<plan>.lock.json` that every holder rewrote every twenty
+  seconds: OneDrive cannot merge two versions of one file, so with two machines
+  open each mostly read back **its own** stamp, each concluded the pen was
+  theirs, and both edited all afternoon. That file is still *read* — an
+  un-updated copy still writes it — and the holder still stamps it for those
+  copies, but nothing relies on it. A claim is keyed on a **device** id kept in
   localStorage, not the per-load tab id — with the tab id, closing the browser
-  and reopening it left you locked out of your own plan until the lock went
+  and reopening it left you locked out of your own plan until the claim went
   stale. And `takeOver()` never refuses: refusing left "I know that session is
   dead" with nowhere to go, and the write guard already means the loser of a
   race is told rather than overwritten. Warning the user is `ui/commands.js`'s
@@ -347,11 +360,11 @@ subscribes. That is what keeps the graph acyclic.
 ```bash
 npm run build                        # must succeed — it also lints the module graph
 npm test                             # all four browser suites plus the SQL one, must exit 0
-npm run test:rust                    #  15 checks — the plan and lock rules, in Rust
+npm run test:rust                    #  19 checks — the plan and lock rules, in Rust
 
 node tools/smoke.js                  # 236 checks — the application, local mode
-node tools/smoke_folder.js           #  48 checks — the shared folder, in a browser
-node tools/smoke_desktop.js          #  48 checks — the desktop shell and its updates
+node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
+node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
 node tools/smoke.js --shot out.png   # …and eyeball the result

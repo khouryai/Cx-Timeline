@@ -277,6 +277,66 @@ async function main() {
   await page.waitForTimeout(1600);
   check('a reader never writes to the file', (await planText(page, 'bart-cbtc.json')) === untouched);
 
+  /* ── Two machines, one plan ───────────────────────────────────────────── */
+  console.log('\nTwo machines with the same plan open');
+  // The failure this design exists to prevent: both people editing. With one
+  // shared lock file each machine mostly read back its own stamp — a sync
+  // client cannot merge two versions of one file — so each concluded the pen
+  // was theirs. A claim is per device and only that device writes it, so both
+  // sides read the same set and settle on the same holder: the earlier claim.
+  await page.goto('about:blank');
+  const theirClaim = (beat, since) => JSON.stringify({
+    id: 'their-window',
+    device: 'dev-coworker',
+    holder: 'Dana',
+    since,
+    beat,
+  });
+  await boot({
+    files: {
+      'bart-cbtc.json': { text: sharedPlan, lastModified: Date.now() },
+      'bart-cbtc.pen-dev-coworker.json': {
+        text: theirClaim(Date.now(), Date.now() - 120000),
+        lastModified: Date.now(),
+      },
+    },
+  });
+  await openIoPane();
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1500);
+
+  check('the machine that opened it second reads',
+    await page.evaluate(() => document.body.classList.contains('read-only')));
+  check('and is told who is in there',
+    /Dana/.test(await page.locator('#statusbar').innerText()));
+
+  const claimFiles = () => page.evaluate(() =>
+    Object.keys(window.__folder.files).filter((n) => n.includes('.pen-')));
+  const mine = (await claimFiles()).filter((n) => !n.includes('dev-coworker'));
+  check('it states its own claim rather than overwriting theirs',
+    mine.length === 1 && (await claimFiles()).includes('bart-cbtc.pen-dev-coworker.json'),
+    (await claimFiles()).join(', '));
+  check("and leaves the colleague's claim exactly as it found it",
+    await page.evaluate(() => {
+      try {
+        return JSON.parse(window.__folder.files['bart-cbtc.pen-dev-coworker.json'].text).holder === 'Dana';
+      } catch { return false; }
+    }));
+
+  // The old bug in one line: restating our own claim must not make us the
+  // holder. Wait out a poll and a heartbeat and check we are still reading.
+  await page.waitForTimeout(22000);
+  check('restating its own claim does not take the pen',
+    await page.evaluate(() => document.body.classList.contains('read-only')));
+
+  // When their session stops beating, the turn passes with no handover.
+  await page.evaluate((text) => {
+    window.__folder.files['bart-cbtc.pen-dev-coworker.json'] = { text, lastModified: Date.now() };
+  }, theirClaim(Date.now() - 600000, Date.now() - 900000));
+  await page.waitForTimeout(14000);
+  check('and the pen passes on its own once they stop',
+    !(await page.evaluate(() => document.body.classList.contains('read-only'))));
+
   /* ── A folder with more than one plan ─────────────────────────────────── */
   console.log('\nWhen the folder holds several plans');
   await page.goto('about:blank');

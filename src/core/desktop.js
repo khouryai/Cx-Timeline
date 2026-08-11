@@ -123,6 +123,27 @@ export function sweepLocks(folder) {
   return call('lock_sweep', { folder });
 }
 
+/* ── Claims on the pen, one file per device ────────────────────────────── */
+
+/** `[{ name, text }]` for every device that has claimed this plan. */
+export async function readClaims(folder, plan) {
+  const claims = await call('claims_read', { folder, plan });
+  return Array.isArray(claims) ? claims : [];
+}
+
+export function writeClaim(folder, plan, device, text) {
+  return call('claim_write', { folder, plan, device, text });
+}
+
+export function removeClaim(folder, plan, device) {
+  return call('claim_remove', { folder, plan, device });
+}
+
+/** Delete one file in the folder by name — used to retire a dead claim. */
+export function removeNamed(folder, name) {
+  return call('file_remove', { folder, name });
+}
+
 /**
  * Who has the pen, as the shell saw it before the window opened.
  *

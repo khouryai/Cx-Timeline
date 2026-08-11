@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 43   Built: 2026-08-11T19:43:31.301Z
+ * Modules: 43   Built: 2026-08-11T20:04:47.091Z
  */
 (function () {
   'use strict';
@@ -4959,6 +4959,27 @@ __mods["core/desktop.js"] = function (__x, __req) {
     return call('lock_sweep', { folder });
   }
 
+  /* ── Claims on the pen, one file per device ────────────────────────────── */
+
+  /** `[{ name, text }]` for every device that has claimed this plan. */
+  async function readClaims(folder, plan) {
+    const claims = await call('claims_read', { folder, plan });
+    return Array.isArray(claims) ? claims : [];
+  }
+
+  function writeClaim(folder, plan, device, text) {
+    return call('claim_write', { folder, plan, device, text });
+  }
+
+  function removeClaim(folder, plan, device) {
+    return call('claim_remove', { folder, plan, device });
+  }
+
+  /** Delete one file in the folder by name — used to retire a dead claim. */
+  function removeNamed(folder, name) {
+    return call('file_remove', { folder, name });
+  }
+
   /**
    * Who has the pen, as the shell saw it before the window opened.
    *
@@ -5015,6 +5036,10 @@ __mods["core/desktop.js"] = function (__x, __req) {
   Object.defineProperty(__x, "writeLockText", { get: () => writeLockText, enumerable: true });
   Object.defineProperty(__x, "removeLock", { get: () => removeLock, enumerable: true });
   Object.defineProperty(__x, "sweepLocks", { get: () => sweepLocks, enumerable: true });
+  Object.defineProperty(__x, "readClaims", { get: () => readClaims, enumerable: true });
+  Object.defineProperty(__x, "writeClaim", { get: () => writeClaim, enumerable: true });
+  Object.defineProperty(__x, "removeClaim", { get: () => removeClaim, enumerable: true });
+  Object.defineProperty(__x, "removeNamed", { get: () => removeNamed, enumerable: true });
   Object.defineProperty(__x, "startupLockCheck", { get: () => startupLockCheck, enumerable: true });
   Object.defineProperty(__x, "writeAttachment", { get: () => writeAttachment, enumerable: true });
   Object.defineProperty(__x, "readAttachment", { get: () => readAttachment, enumerable: true });
@@ -5076,8 +5101,16 @@ __mods["core/filestore.js"] = function (__x, __req) {
 
   /** How often the holder re-stamps the lock, in ms. */
   const HEARTBEAT_MS = 20000;
-  /** A lock older than this is treated as abandoned — a crash, or a closed lid. */
+  /** A claim older than this is treated as abandoned — a crash, or a closed lid. */
   const STALE_MS = 75000;
+  /**
+   * A claim file this old is deleted rather than merely ignored.
+   *
+   * Far wider than staleness on purpose: ignoring a claim costs its owner
+   * nothing, but deleting the file loses their place in the queue, and a laptop
+   * that went to sleep for an hour should find its turn still there.
+   */
+  const ABANDONED_CLAIM_MS = 6 * 3600000;
   /**
    * An editor who has saved nothing for this long hands the pen back.
    *
@@ -5263,6 +5296,56 @@ __mods["core/filestore.js"] = function (__x, __req) {
     await ref.removeEntry(lockNameFor(name));
   }
 
+  /* ── Claims ────────────────────────────────────────────────────────────────
+     One file per device, and the device that owns it is the only thing that ever
+     writes it. That is the whole point: two machines sharing one lock file gave a
+     sync client two versions to reconcile, and it cannot merge — so each machine
+     went on reading back its own copy and both believed they held the pen. */
+
+  /** Every claim on this plan, as `{ name, text }`. */
+  async function ioReadClaims(ref, plan) {
+    if (onDesktop()) return desktop.readClaims(ref, plan).catch(() => []);
+
+    const out = [];
+    for await (const [name, handle] of ref.entries()) {
+      if (handle.kind !== 'file' || !isClaimFor(plan, name)) continue;
+      try {
+        out.push({ name, text: await (await handle.getFile()).text() });
+      } catch {
+        /* mid-sync or unreadable — it simply does not count this time round */
+      }
+    }
+    return out;
+  }
+
+  /** Delete one claim file by name. Used to retire claims that stopped beating. */
+  async function ioRemoveNamed(ref, name) {
+    if (onDesktop()) return desktop.removeNamed(ref, name).catch(() => false);
+    try {
+      await ref.removeEntry(name);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function ioWriteClaim(ref, plan, device, text) {
+    if (onDesktop()) return desktop.writeClaim(ref, plan, device, text);
+    const handle = await ref.getFileHandle(claimNameFor(plan, device), { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(text);
+    await writable.close();
+  }
+
+  async function ioRemoveClaim(ref, plan, device) {
+    if (onDesktop()) return desktop.removeClaim(ref, plan, device).catch(() => false);
+    try {
+      await ref.removeEntry(claimNameFor(plan, device));
+    } catch {
+      /* already gone */
+    }
+  }
+
   /**
    * Delete the conflict copies a sync client has made of the lock files.
    *
@@ -5380,7 +5463,20 @@ __mods["core/filestore.js"] = function (__x, __req) {
    * naming without swallowing a plan legitimately called `lockheed.json`.
    */
   function isLockFile(name) {
-    return /\.lock(?:[-_. (][^\\/]*)?\.json$/i.test(String(name));
+    return /\.(?:lock|pen)(?:[-_. (][^\\/]*)?\.json$/i.test(String(name));
+  }
+
+  /** One session's claim on the pen: `<plan>.pen-<device>.json`. */
+  function claimNameFor(plan, device) {
+    const stem = String(plan).replace(/\.json$/i, '');
+    return `${stem}.pen-${String(device).replace(/[^A-Za-z0-9_-]/g, '')}.json`;
+  }
+
+  /** True for any claim file belonging to this plan, whoever wrote it. */
+  function isClaimFor(plan, name) {
+    const stem = String(plan).replace(/\.json$/i, '').toLowerCase();
+    const lower = String(name).toLowerCase();
+    return lower.startsWith(`${stem}.pen-`) && lower.endsWith('.json');
   }
 
   /**
@@ -5391,7 +5487,10 @@ __mods["core/filestore.js"] = function (__x, __req) {
    */
   function isLockLitter(name) {
     const lower = String(name).toLowerCase();
-    return isLockFile(lower) && !lower.endsWith('.lock.json');
+    // Copies of the old single lock file only. A claim file is *not* litter: it
+    // is somebody's turn, written by the one device allowed to write it, and it
+    // is retired by age below rather than on sight.
+    return /\.lock[-_. (][^\\/]*\.json$/.test(lower);
   }
 
   /* ── The browser's handle store ────────────────────────────────────────── */
@@ -5696,15 +5795,17 @@ __mods["core/filestore.js"] = function (__x, __req) {
     stamp = read.stamp;
     await ioRemember(folderRef, name);
 
-    const lock = await readLock();
-    if (lock && !isOurs(lock) && !isStale(lock)) {
-      role = 'viewer';
-      holder = lock.holder || 'Someone';
-    } else {
-      role = 'editor';
-      holder = '';
-      await writeLock();
-    }
+    // State the claim first, then read every claim including our own and see who
+    // it belongs to. Claiming before reading is deliberate: two sessions opening
+    // together both end up in the list, so both settle on the same holder instead
+    // of each seeing an empty folder and taking the pen.
+    claimedAt = Date.now();
+    takeoverAt = 0;
+    role = null;
+    holder = '';
+    await writeClaim();
+    await settlePen();
+    await stampLegacyLock();
 
     lastSaveAt = Date.now();
     startTimers();
@@ -5724,7 +5825,10 @@ __mods["core/filestore.js"] = function (__x, __req) {
     holder = '';
     await ioRemember(folderRef, safe);
     lastSaveAt = Date.now();
-    await writeLock();
+    claimedAt = Date.now();
+    takeoverAt = 0;
+    await writeClaim();
+    await stampLegacyLock();
     startTimers();
     emitState();
     sweepLockLitter();
@@ -5787,39 +5891,165 @@ __mods["core/filestore.js"] = function (__x, __req) {
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
-     The lock
+     The pen
 
      Every rule here runs identically in both builds. The I/O layer above moves
      the bytes; this decides what they mean.
+
+     Each session states its own claim, in its own file, and nobody else ever
+     writes that file. Who holds the pen is then a *reading* — the earliest live
+     claim wins — rather than a race to own one shared file.
+
+     That distinction is the whole design. With one `<plan>.lock.json` rewritten
+     by every holder on every heartbeat, two machines on a synced folder handed
+     the sync client two versions of one file several times a minute. It cannot
+     merge them: it keeps one and renames the other after the machine that lost.
+     So each machine mostly read back *its own* stamp, each concluded the pen was
+     theirs, and both edited — for as long as the plan was open. Files nobody
+     writes together cannot conflict, so the claims always arrive intact and both
+     sides settle on the same answer within a poll of the sync landing.
      ═══════════════════════════════════════════════════════════════════════ */
 
-  async function readLock() {
-    if (!folderRef || !planName) return null;
-    const text = await ioReadLock(folderRef, planName);
+  /** When this session first claimed the pen, and when it last said so. */
+  let claimedAt = 0;
+  /** Set when the user has explicitly taken the pen from someone else. */
+  let takeoverAt = 0;
+
+  /**
+   * Every live-looking claim on this plan, ours included.
+   *
+   * A session that has not been updated yet still writes the old single lock
+   * file, so that is read as a claim too — a colleague running yesterday's copy
+   * is still a colleague, and must still be respected.
+   */
+  async function readClaims() {
+    if (!folderRef || !planName) return [];
+
+    const claims = [];
+    for (const { name, text } of await ioReadClaims(folderRef, planName)) {
+      const claim = parseClaim(text);
+      if (claim) claims.push({ ...claim, file: name });
+    }
+
+    const legacy = parseClaim(await ioReadLock(folderRef, planName));
+    // Ours is already in the list under its own name; a second copy of it would
+    // only compete with itself.
+    if (legacy && !isOurs(legacy)) claims.push({ ...legacy, legacy: true });
+
+    return claims;
+  }
+
+  function parseClaim(text) {
     if (!text) return null;
     try {
-      return JSON.parse(text);
+      const claim = JSON.parse(text);
+      return claim && typeof claim === 'object' ? claim : null;
     } catch {
-      return null; // mid-sync, or truncated — treat as free
+      return null; // truncated or mid-sync — it does not count this time round
     }
   }
 
-  async function writeLock() {
+  /**
+   * Which claim holds the pen.
+   *
+   * The earliest one still beating, so opening a plan to read it can never take
+   * the pen off whoever was already working. An explicit takeover outranks that —
+   * it is the one case where somebody has said "I know that session is gone" —
+   * and the latest takeover wins, so two of them still settle on one answer. The
+   * device id breaks a tie that is otherwise exact, only so that both sides break
+   * it the same way.
+   */
+  function penHolder(claims) {
+    const live = claims.filter((claim) => !isStale(claim));
+    if (!live.length) return null;
+
+    return live.reduce((best, claim) => {
+      const a = claim.takeover || 0;
+      const b = best.takeover || 0;
+      if (a !== b) return a > b ? claim : best;
+      if ((claim.since || 0) !== (best.since || 0)) return (claim.since || 0) < (best.since || 0) ? claim : best;
+      return String(claim.device || '') < String(best.device || '') ? claim : best;
+    });
+  }
+
+  /**
+   * State our claim, or restate it.
+   *
+   * Written on open and on every heartbeat — by readers as well as editors, which
+   * is what lets the pen pass to whoever has been waiting longest the moment the
+   * holder leaves, with no handover and nothing to negotiate.
+   */
+  async function writeClaim() {
     if (!folderRef || !planName) return;
+    if (!claimedAt) claimedAt = Date.now();
     try {
-      await ioWriteLock(
+      await ioWriteClaim(
         folderRef,
         planName,
+        deviceId(),
         JSON.stringify(
-          { id: sessionId, device: deviceId(), holder: getDisplayName(), since: Date.now(), beat: Date.now() },
+          {
+            id: sessionId,
+            device: deviceId(),
+            holder: getDisplayName(),
+            since: claimedAt,
+            beat: Date.now(),
+            ...(takeoverAt ? { takeover: takeoverAt } : {}),
+          },
           null,
           2
         )
       );
     } catch (err) {
-      // Failing to take the lock is not fatal: the write guard still protects the
-      // work, so the session continues without the courtesy.
-      console.warn('[cx-timeline] could not write the lock file:', err.message);
+      // Failing to claim is not fatal: the write guard still protects the work,
+      // so the session continues without the courtesy.
+      console.warn('[cx-timeline] could not write the claim file:', err.message);
+    }
+  }
+
+  /**
+   * Read the folder and settle who is holding the pen.
+   *
+   * The single place the role is decided, so the answer cannot differ between
+   * opening a plan, polling and taking over. Announces itself only on a change.
+   */
+  async function settlePen() {
+    const winner = penHolder(await readClaims());
+    const nextRole = !winner || isOurs(winner) ? 'editor' : 'viewer';
+    const nextHolder = nextRole === 'editor' ? '' : winner.holder || 'Someone';
+
+    if (nextRole === role && nextHolder === holder) return { role, holder, changed: false };
+
+    // Handing the pen over is not this module's decision to announce: it flushes
+    // through the same state event everything else uses.
+    role = nextRole;
+    holder = nextHolder;
+    emitState();
+    return { role, holder, changed: true };
+  }
+
+  /**
+   * The old single lock file, kept stamped while we hold the pen.
+   *
+   * Purely for colleagues still running a copy from before claims existed: they
+   * read this file and nothing else, so without it they would see a free plan and
+   * start editing beside us. We never *rely* on it — a stale one is ignored — and
+   * only the holder writes it, so there is no longer a crowd fighting over it.
+   */
+  async function stampLegacyLock() {
+    if (!folderRef || !planName || role !== 'editor') return;
+    try {
+      await ioWriteLock(
+        folderRef,
+        planName,
+        JSON.stringify(
+          { id: sessionId, device: deviceId(), holder: getDisplayName(), since: claimedAt || Date.now(), beat: Date.now() },
+          null,
+          2
+        )
+      );
+    } catch {
+      /* the claim is the real statement; this is a courtesy to old copies */
     }
   }
 
@@ -5839,20 +6069,46 @@ __mods["core/filestore.js"] = function (__x, __req) {
    */
   async function sweepLockLitter() {
     if (!folderRef || role !== 'editor') return 0;
+    let removed = 0;
     try {
-      return await ioSweepLocks(folderRef);
+      removed = await ioSweepLocks(folderRef);
     } catch (err) {
       console.warn('[cx-timeline] could not clear old lock files:', err.message);
-      return 0;
     }
+
+    // A session that crashed leaves its claim behind. It stops counting after
+    // STALE_MS — this is only about the file, so the margin is wide enough that
+    // no laptop coming back from lunch has its turn deleted out from under it.
+    try {
+      for (const claim of await readClaims()) {
+        if (!claim.file || isOurs(claim)) continue;
+        if (Date.now() - (claim.beat || 0) < ABANDONED_CLAIM_MS) continue;
+        if (await ioRemoveNamed(folderRef, claim.file)) removed++;
+      }
+    } catch {
+      /* tidying is never worth failing a session over */
+    }
+    return removed;
   }
 
+  /**
+   * Withdraw this session's claim.
+   *
+   * Only ever our own file, so leaving can never disturb anyone else's turn —
+   * and whoever has been waiting longest becomes the holder on their next poll,
+   * without being handed anything.
+   */
   async function releaseLock() {
-    if (!folderRef || !planName || role !== 'editor') return;
+    if (!folderRef || !planName) return;
+    claimedAt = 0;
+    takeoverAt = 0;
     try {
-      const lock = await readLock();
-      if (lock && !isOurs(lock)) return; // someone took over; leave theirs alone
-      await ioRemoveLock(folderRef, planName);
+      await ioRemoveClaim(folderRef, planName, deviceId());
+      // The compatibility stamp is ours to clear only while it is ours.
+      if (role === 'editor') {
+        const legacy = parseClaim(await ioReadLock(folderRef, planName));
+        if (!legacy || isOurs(legacy)) await ioRemoveLock(folderRef, planName);
+      }
     } catch {
       /* the staleness timeout is the real release mechanism */
     }
@@ -5890,28 +6146,32 @@ __mods["core/filestore.js"] = function (__x, __req) {
    */
   async function takeOver() {
     if (!isConnected()) return false;
+    // Stated in our own claim rather than by overwriting theirs: they find out by
+    // reading, on their next poll, and drop to read-only the same way we would.
+    takeoverAt = Date.now();
+    lastSaveAt = Date.now();
+    await writeClaim();
     role = 'editor';
     holder = '';
-    lastSaveAt = Date.now();
-    await writeLock();
+    await stampLegacyLock();
     emitState();
     return true;
   }
 
   /**
-   * Who holds the lock right now, for a caller about to offer a takeover.
-   * `live` means someone else is actively stamping it — the only case worth a
-   * confirmation prompt.
+   * Who holds the pen right now, for a caller about to offer a takeover.
+   * `live` means someone else is actively restating their claim — the only case
+   * worth a confirmation prompt.
    */
   async function lockStatus() {
-    const lock = await readLock();
-    if (!lock) return { live: false, mine: false, holder: '', idleMs: 0 };
-    const mine = isOurs(lock);
+    const winner = penHolder(await readClaims());
+    if (!winner) return { live: false, mine: false, holder: '', idleMs: 0 };
+    const mine = isOurs(winner);
     return {
-      live: !mine && !isStale(lock),
+      live: !mine,
       mine,
-      holder: lock.holder || 'Someone',
-      idleMs: lock.beat ? Date.now() - lock.beat : 0,
+      holder: winner.holder || 'Someone',
+      idleMs: winner.beat ? Date.now() - winner.beat : 0,
     };
   }
 
@@ -5928,33 +6188,23 @@ __mods["core/filestore.js"] = function (__x, __req) {
     return true;
   }
 
-  /** Who holds the pen right now, re-read from the folder. */
+  /**
+   * Who holds the pen right now, re-read from the folder.
+   *
+   * Both directions come out of the same reading. A reader whose turn has come —
+   * the holder closed the plan, or stopped beating — is promoted without asking
+   * anyone; and an editor who turns out to be the *later* claim yields, which is
+   * the case a synced folder makes routine: two people can open within one sync
+   * window and neither sees the other for a minute.
+   */
   async function checkLock() {
     if (!isConnected()) return null;
-    const lock = await readLock();
-
-    if (!lock || isOurs(lock) || isStale(lock)) {
-      // Nobody is in there. Promote a viewer that has been waiting.
-      if (role === 'viewer') {
-        role = 'editor';
-        holder = '';
-        await writeLock();
-        emitState();
-      }
-      return { role, holder, stale: !!lock && isStale(lock) };
-    }
-
-    if (role === 'editor') {
-      // Somebody else stamped the lock while we thought we had it — two sessions
-      // opened inside one sync window. Yield: their save would beat ours anyway.
-      role = 'viewer';
-      holder = lock.holder || 'Someone';
-      emitState();
-    } else if (holder !== (lock.holder || 'Someone')) {
-      holder = lock.holder || 'Someone';
-      emitState();
-    }
-    return { role, holder, stale: false };
+    const before = role;
+    const settled = await settlePen();
+    // Whoever holds it keeps the old lock file stamped, for colleagues still
+    // running a copy from before claims existed.
+    if (settled.role === 'editor' && before !== 'editor') await stampLegacyLock();
+    return { role: settled.role, holder: settled.holder, stale: false };
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -5964,15 +6214,18 @@ __mods["core/filestore.js"] = function (__x, __req) {
   function startTimers() {
     stopTimers();
     heartbeatTimer = setInterval(() => {
-      if (role !== 'editor') return;
       // Idle long enough that holding the pen is just in the way. Ask the
       // application to flush a save and hand it back — this module cannot save the
       // document itself, it only knows the file.
-      if (lastSaveAt && Date.now() - lastSaveAt > IDLE_RELEASE_MS) {
+      if (role === 'editor' && lastSaveAt && Date.now() - lastSaveAt > IDLE_RELEASE_MS) {
         emit(EV.FILE_IDLE, { plan: planName, since: lastSaveAt });
         return;
       }
-      writeLock();
+      // Readers restate their claim as well as editors: a claim that stopped
+      // beating is a claim that has given up, and a reader waiting for its turn
+      // has not. Nobody else writes this file, so it costs no one anything.
+      writeClaim();
+      stampLegacyLock();
     }, HEARTBEAT_MS);
 
     let polls = 0;

@@ -62,6 +62,13 @@ pub struct Lock {
     pub beat: u64,
 }
 
+/// One device's claim on the pen, as it sits in the folder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimFile {
+    pub name: String,
+    pub text: String,
+}
+
 /// What a lock means for the session asking about it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockState {
@@ -146,6 +153,100 @@ fn lock_path(dir: &Path, plan: &str) -> PathBuf {
     dir.join(format!("{stem}.lock.json"))
 }
 
+/* ── Claims on the pen ──────────────────────────────────────────────────────
+   One file per device, written only by that device. Two machines sharing a
+   single lock file gave OneDrive two versions of one file to reconcile several
+   times a minute; it cannot merge them, so each machine went on reading back
+   its own stamp and both believed they held the pen. Files nobody writes
+   together cannot conflict. */
+
+/// `<plan>.json` + a device → `<plan>.pen-<device>.json`
+fn claim_path(dir: &Path, plan: &str, device: &str) -> PathBuf {
+    let stem = plan.strip_suffix(".json").unwrap_or(plan);
+    let safe: String = device
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    dir.join(format!("{stem}.pen-{safe}.json"))
+}
+
+fn is_claim_for(plan: &str, name: &str) -> bool {
+    let stem = plan.strip_suffix(".json").unwrap_or(plan).to_lowercase();
+    let lower = name.to_lowercase();
+    lower.starts_with(&format!("{stem}.pen-")) && lower.ends_with(".json")
+}
+
+/// Every claim on a plan, as `{ name, text }`. Unreadable ones are skipped:
+/// a claim that cannot be read this time round simply does not count.
+pub fn read_claims(dir: &Path, plan: &str) -> Result<Vec<ClaimFile>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !is_claim_for(plan, &name) {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(entry.path()) {
+            out.push(ClaimFile { name, text });
+        }
+    }
+    Ok(out)
+}
+
+pub fn write_claim(dir: &Path, plan: &str, device: &str, text: &str) -> Result<()> {
+    fs::write(claim_path(dir, plan, device), text)?;
+    Ok(())
+}
+
+pub fn remove_claim(dir: &Path, plan: &str, device: &str) -> bool {
+    fs::remove_file(claim_path(dir, plan, device)).is_ok()
+}
+
+/// Which claim holds the pen — the same reading `penHolder()` makes in
+/// filestore.js, and it has to stay the same or the shell would announce one
+/// holder before the window opens and the application another after.
+///
+/// Earliest claim still beating, so opening a plan to read it never takes the
+/// pen off somebody already working. An explicit takeover outranks that, latest
+/// first; the device id breaks an exact tie, only so both sides break it alike.
+pub fn pen_holder(dir: &Path, plan: &str) -> Option<Lock> {
+    let now = now_ms();
+    let mut best: Option<(u64, Lock)> = None;
+
+    for claim in read_claims(dir, plan).unwrap_or_default() {
+        let Ok(lock) = serde_json::from_str::<Lock>(&claim.text) else {
+            continue;
+        };
+        if now.saturating_sub(lock.beat) > STALE_MS {
+            continue;
+        }
+        let takeover = serde_json::from_str::<serde_json::Value>(&claim.text)
+            .ok()
+            .and_then(|v| v.get("takeover").and_then(|t| t.as_u64()))
+            .unwrap_or(0);
+
+        best = Some(match best {
+            None => (takeover, lock),
+            Some((best_takeover, best_lock)) => {
+                let wins = if takeover != best_takeover {
+                    takeover > best_takeover
+                } else if lock.since != best_lock.since {
+                    lock.since < best_lock.since
+                } else {
+                    lock.device < best_lock.device
+                };
+                if wins {
+                    (takeover, lock)
+                } else {
+                    (best_takeover, best_lock)
+                }
+            }
+        });
+    }
+
+    best.map(|(_, lock)| lock)
+}
+
 /// A lock file, conflict copies included. Mirrors `isLockFile` in filestore.js.
 ///
 /// OneDrive cannot merge two edits of one file: it keeps both and appends the
@@ -158,13 +259,15 @@ pub fn is_lock_name(name: &str) -> bool {
     let Some(rest) = lower.strip_suffix(".json") else {
         return false;
     };
-    match rest.rfind(".lock") {
+    // `.lock` is the old single lock and its conflict copies; `.pen-<device>`
+    // is one session's claim. Neither is a plan.
+    [".lock", ".pen"].iter().any(|marker| match rest.rfind(marker) {
         None => false,
         Some(at) => {
-            let tail = &rest[at + ".lock".len()..];
+            let tail = &rest[at + marker.len()..];
             tail.is_empty() || tail.starts_with(['-', '_', '.', ' ', '('])
         }
-    }
+    })
 }
 
 /// A lock file nothing will ever read: a conflict copy rather than a lock.
@@ -173,7 +276,20 @@ pub fn is_lock_name(name: &str) -> bool {
 /// either build opens a name like this. A real `<plan>.lock.json` is left
 /// alone, because somebody may be holding it.
 pub fn is_lock_litter(name: &str) -> bool {
-    is_lock_name(name) && !name.to_lowercase().ends_with(".lock.json")
+    let lower = name.to_lowercase();
+    let Some(rest) = lower.strip_suffix(".json") else {
+        return false;
+    };
+    // Copies of the old single lock file only. A claim file is *not* litter: it
+    // is somebody's turn, written by the one device allowed to write it, and it
+    // is retired by age rather than on sight.
+    match rest.rfind(".lock") {
+        None => false,
+        Some(at) => {
+            let tail = &rest[at + ".lock".len()..];
+            !tail.is_empty() && tail.starts_with(['-', '_', '.', ' ', '('])
+        }
+    }
 }
 
 /// Clear the conflict copies out of a folder. Answers how many went.
@@ -275,7 +391,10 @@ pub fn read_lock(dir: &Path, plan: &str) -> Option<Lock> {
 
 /// What the current lock means for this window on this machine.
 pub fn lock_state(dir: &Path, plan: &str, session: &str, device: &str) -> LockState {
-    let Some(lock) = read_lock(dir, plan) else {
+    // Claims first — they are what the application itself goes by. The old
+    // single lock file is still read, so a colleague running a copy from before
+    // claims existed is still announced before the window opens.
+    let Some(lock) = pen_holder(dir, plan).or_else(|| read_lock(dir, plan)) else {
         return LockState {
             free: true,
             mine: false,
@@ -465,6 +584,106 @@ mod tests {
         assert!(names.contains(&"one.json".to_string()));
         // A plan is not a lock just because its name contains the letters.
         assert!(names.contains(&"lockheed.json".to_string()), "got {names:?}");
+    }
+
+    /// The bug this design exists to kill: two machines, both editing.
+    ///
+    /// With one shared lock file each machine mostly read back its own stamp,
+    /// because a sync client cannot merge two versions of one file. Claims are
+    /// per device and only that device writes one, so both sides read the same
+    /// set and come to the same answer — the earlier claim.
+    #[test]
+    fn the_earlier_claim_holds_the_pen() {
+        let s = Scratch::new("claims");
+        let now = now_ms();
+        let claim = |device: &str, holder: &str, since: u64| {
+            let text = format!(
+                r#"{{"id":"{device}-win","device":"{device}","holder":"{holder}","since":{since},"beat":{now}}}"#
+            );
+            write_claim(s.path(), "a.json", device, &text).unwrap();
+        };
+
+        claim("dev-aik", "Aik", now - 60_000);
+        claim("dev-coworker", "Sam", now - 20_000);
+
+        let holder = pen_holder(s.path(), "a.json").expect("someone holds it");
+        assert_eq!(holder.holder, "Aik", "the one who opened it first keeps it");
+
+        // Reading it does not steal it, however many readers arrive.
+        claim("dev-third", "Rae", now - 5_000);
+        assert_eq!(pen_holder(s.path(), "a.json").unwrap().holder, "Aik");
+    }
+
+    #[test]
+    fn a_claim_that_stopped_beating_does_not_hold_the_pen() {
+        let s = Scratch::new("claims-stale");
+        let now = now_ms();
+        write_claim(
+            s.path(),
+            "a.json",
+            "dev-gone",
+            &format!(r#"{{"id":"x","device":"dev-gone","holder":"Aik","since":{},"beat":{}}}"#,
+                now - 900_000, now - 600_000),
+        )
+        .unwrap();
+        assert!(pen_holder(s.path(), "a.json").is_none(), "a crashed session holds nothing");
+
+        write_claim(
+            s.path(),
+            "a.json",
+            "dev-here",
+            &format!(r#"{{"id":"y","device":"dev-here","holder":"Sam","since":{},"beat":{now}}}"#, now - 10_000),
+        )
+        .unwrap();
+        assert_eq!(pen_holder(s.path(), "a.json").unwrap().holder, "Sam");
+    }
+
+    /// Taking over is a statement in your own file, never a write to theirs.
+    #[test]
+    fn an_explicit_takeover_outranks_an_earlier_claim() {
+        let s = Scratch::new("claims-takeover");
+        let now = now_ms();
+        write_claim(
+            s.path(),
+            "a.json",
+            "dev-aik",
+            &format!(r#"{{"id":"x","device":"dev-aik","holder":"Aik","since":{},"beat":{now}}}"#, now - 60_000),
+        )
+        .unwrap();
+        write_claim(
+            s.path(),
+            "a.json",
+            "dev-sam",
+            &format!(
+                r#"{{"id":"y","device":"dev-sam","holder":"Sam","since":{},"beat":{now},"takeover":{now}}}"#,
+                now - 5_000
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(pen_holder(s.path(), "a.json").unwrap().holder, "Sam");
+        assert!(remove_claim(s.path(), "a.json", "dev-sam"));
+        assert_eq!(
+            pen_holder(s.path(), "a.json").unwrap().holder,
+            "Aik",
+            "and leaving hands it straight back"
+        );
+    }
+
+    /// Claims are not plans, and a claim file is not litter to be swept.
+    #[test]
+    fn claims_are_neither_plans_nor_litter() {
+        let s = Scratch::new("claims-listing");
+        write_plan(s.path(), "a.json", "{}", None).unwrap();
+        write_claim(s.path(), "a.json", "dev-aik", "{}").unwrap();
+        fs::write(s.path().join("a.lock-HRUSPITLT02820.json"), "{}").unwrap();
+
+        let names: Vec<String> = list_plans(s.path()).unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, vec!["a.json".to_string()], "got {names:?}");
+
+        assert_eq!(sweep_lock_litter(s.path()).unwrap(), 1);
+        assert!(pen_holder(s.path(), "a.json").is_none(), "an empty claim parses as nothing");
+        assert_eq!(read_claims(s.path(), "a.json").unwrap().len(), 1, "but the file is still there");
     }
 
     /// The litter is cleared; the live lock is somebody's and stays.
