@@ -14,6 +14,7 @@ import { toISO, toMs, fmtDate, fmtDuration, MS_DAY } from '../core/dates.js';
 import {
   TYPES,
   durationDays,
+  endForDuration,
 } from '../core/model.js';
 import * as store from '../core/store.js';
 import * as renderer from '../timeline/renderer.js';
@@ -152,7 +153,7 @@ function buildDetails(pane, obj, def) {
             value: durationDays(obj),
             min: 1,
             onChange: (v) => {
-              set({ end: obj.start + Math.max(1, v) * MS_DAY }, 'Change duration');
+              set({ end: endForDuration(obj.start, v) }, 'Change duration');
               durationOut.textContent = fmtDuration(Math.max(1, v));
             },
           }),

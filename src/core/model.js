@@ -11,7 +11,10 @@
  */
 
 import { uid, deepClone, clamp } from './util.js';
-import { toMs, toISO, todayMs, addDays, MS_DAY, startOfMonth, addMonths } from './dates.js';
+import {
+  toMs, toISO, todayMs, addDays, MS_DAY, startOfMonth, addMonths,
+  workingDaysBetween, addWorkingSpan, setWorkWeek,
+} from './dates.js';
 
 /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
 export const SCHEMA_VERSION = 4;
@@ -930,6 +933,9 @@ export function defaultSettings() {
     criticalPath: false,
     laneLabels: true,
     dateOrder: 'mdy',            // mdy | dmy | ymd — display order only
+    // working = a five-day week, holidays excluded; calendar = every day.
+    // Counting only — it never moves a bar.
+    durationUnit: 'working',
     autoBackupMinutes: 60,
     backupEveryEdits: 100,
     backupKeep: 20,
@@ -1267,9 +1273,52 @@ export function effectiveToday(doc) {
 }
 
 /** Duration in days (bars are half-open: start inclusive, end exclusive). */
+/* ── How long something takes ──────────────────────────────────────────── */
+
+/**
+ * Whether a duration counts the calendar or the working week.
+ *
+ * A commissioning plan is read in working days: a task "two weeks long" means
+ * ten days on site, and nobody counts the Saturdays. So the default is the
+ * five-day week, holidays excluded — `settings.durationUnit` switches a project
+ * back to calendar days if it wants them.
+ *
+ * Only the *counting* changes. Dates are dates: a bar still starts and finishes
+ * where it is drawn, still spans the weekend it covers, and every other
+ * calculation on this timeline — the ruler, the critical path, slip against a
+ * baseline — is untouched.
+ *
+ * Pushed in from the store on every document change, the way the dropdown
+ * vocabularies are: this module cannot read a setting for itself.
+ */
+let durationUnit = 'working';
+let workingHolidays = [];
+
+export function syncDurationBasis(settings) {
+  durationUnit = settings && settings.durationUnit === 'calendar' ? 'calendar' : 'working';
+  workingHolidays = Array.isArray(settings?.holidays) ? settings.holidays : [];
+  setWorkWeek(durationUnit === 'working' ? 5 : 7);
+}
+
+/** True when durations are counted on a five-day week. */
+export function countsWorkingDays() {
+  return durationUnit === 'working';
+}
+
 export function durationDays(obj) {
   if (!TYPES[obj.type]?.duration) return 0;
+  if (durationUnit === 'working') return Math.max(0, workingDaysBetween(obj.start, obj.end, workingHolidays));
   return Math.max(0, Math.round((obj.end - obj.start) / MS_DAY));
+}
+
+/**
+ * Where a bar `days` long starting at `start` finishes — the exact inverse of
+ * `durationDays`, so typing 10 into the duration field and reading it back
+ * gives 10 whichever way the project counts.
+ */
+export function endForDuration(start, days) {
+  const n = Math.max(1, Math.round(days));
+  return durationUnit === 'working' ? addWorkingSpan(start, n, workingHolidays) : start + n * MS_DAY;
 }
 
 /** Remaining duration in days given percent complete. */

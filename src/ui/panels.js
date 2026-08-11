@@ -1920,6 +1920,18 @@ function paneSettings(root) {
         ],
         onChange: (v) => set('weekStart', Number(v), 'Change week start'),
       })),
+      field('Count durations in', segmented({
+        value: settings.durationUnit === 'calendar' ? 'calendar' : 'working',
+        stretch: true,
+        options: [
+          { value: 'working', label: 'Working days' },
+          { value: 'calendar', label: 'Calendar days' },
+        ],
+        onChange: (v) => {
+          set('durationUnit', v, 'Change duration counting');
+          renderer.requestRender();
+        },
+      }), 'Working days are Monday to Friday, minus the holidays below. Counting only — it never moves a bar.'),
       field('Mouse wheel', segmented({
         value: settings.wheelMode || 'zoom',
         stretch: true,

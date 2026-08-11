@@ -666,6 +666,77 @@ async function main() {
   const cleared = await upstreamState();
   check('deselecting clears it', cleared.marked.length === 0 && cleared.links === 0, JSON.stringify(cleared));
 
+  console.log('\nDurations on a five-day week');
+  // A commissioning plan is read in working days: "two weeks" means ten days on
+  // site, and nobody counts the Saturdays. The counting changes; the bar does
+  // not move, and what is typed into the field has to read back unchanged.
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  await page.locator('.tl-obj.shape-bar').first().click();
+  await page.waitForTimeout(400);
+
+  // Read the fields by their labels: the panel grows and shrinks sections as
+  // the plan changes, so an index into its inputs means nothing.
+  const schedule = () => page.evaluate(() => {
+    const byLabel = (pattern) => {
+      const wrap = [...document.querySelectorAll('#inspector .cx-field')]
+        .find((f) => pattern.test(f.querySelector('.cx-label')?.textContent || ''));
+      return { value: wrap?.querySelector('input')?.value || '', label: wrap?.querySelector('.cx-label')?.textContent || '' };
+    };
+    const duration = byLabel(/^duration/i);
+    return {
+      start: byLabel(/^start$/i).value,
+      finish: byLabel(/^finish$/i).value,
+      duration: duration.value,
+      label: duration.label,
+    };
+  });
+
+  // Monday the 2nd of November 2026, so the week it spans is unambiguous.
+  const fieldByLabel = (pattern) =>
+    page.locator('#inspector .cx-field', { has: page.locator('.cx-label') })
+      .filter({ hasText: pattern }).locator('input').first();
+
+  const setField = async (pattern, value) => {
+    // Let any rebuild from the previous edit land before taking hold of the
+    // next field, or the value is typed into a node about to be replaced.
+    await page.waitForTimeout(400);
+    const input = fieldByLabel(pattern);
+    await input.fill(value);
+    // The panel holds still while one of its fields has focus, so the stored
+    // value only comes back once focus has genuinely left it.
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.waitForTimeout(800);
+  };
+
+  await setField(/^Start$/, '2026-11-02');
+  await setField(/^Duration/, '5');
+
+  const working = await schedule();
+  check('the duration field says it counts working days', /working days/i.test(working.label), working.label);
+  check('five working days from a Monday covers that week',
+    working.start === '2026-11-02' && working.finish === '2026-11-07', JSON.stringify(working));
+  check('and reads back as the five that was typed', working.duration === '5', working.duration);
+
+  await setField(/^Duration/, '10');
+  const twoWeeks = await schedule();
+  check('ten working days is a fortnight, weekend included',
+    twoWeeks.finish === '2026-11-14' && twoWeeks.duration === '10', JSON.stringify(twoWeeks));
+
+  // The same bar, counted the other way: the dates do not move.
+  await page.locator('#sidenav .nav-link[data-pane="settings"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('#dock .cx-seg button', { hasText: /^Calendar days$/ }).click();
+  await page.waitForTimeout(700);
+  const calendar = await schedule();
+  check('switching to calendar days counts the weekends in',
+    calendar.duration === '12' && calendar.start === twoWeeks.start && calendar.finish === twoWeeks.finish,
+    JSON.stringify(calendar));
+
+  await page.locator('#dock .cx-seg button', { hasText: /^Working days$/ }).click();
+  await page.waitForTimeout(700);
+  check('and switching back gives the working count again', (await schedule()).duration === '10');
+
   console.log('\nEditable lists');
   // Every dropdown vocabulary is project data. The pane and the "Manage…" row
   // at the foot of each dropdown are the same editor, so exercising the pane

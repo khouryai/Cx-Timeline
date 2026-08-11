@@ -61,7 +61,9 @@ const EXPORT_FONTS = {
 function dateLabel(obj) {
   const def = TYPES[obj.type] || TYPES.activity;
   if (!def.duration) return fmtDate(obj.start, 'numeric');
-  const days = Math.max(1, Math.round((obj.end - obj.start) / MS_DAY));
+  // However the project counts them — a printed plan must agree with the panel
+  // the reader was looking at when they asked for it.
+  const days = Math.max(1, durationDays(obj));
   return `${fmtDate(obj.start, 'numeric')} → ${fmtDate(obj.end, 'numeric')}  (${days}d)`;
 }
 const EXPORT_LINE_H = 10;

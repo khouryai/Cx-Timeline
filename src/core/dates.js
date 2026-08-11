@@ -155,6 +155,32 @@ export function workingDaysBetween(a, b, holidays = []) {
   return a <= b ? count : -count;
 }
 
+/**
+ * The finish instant of a span `n` working days long starting at `ms`.
+ *
+ * The exact inverse of `workingDaysBetween`, which is the whole reason it is
+ * not `addWorkingDays`: that one advances *past* n working days, so a Monday
+ * plus five lands on the following Monday and a Saturday plus one lands on
+ * Monday — measuring back gives five and nought. This counts the day it is
+ * standing on and then steps, so a five-day task starting Monday finishes at
+ * Saturday-morning — the exclusive edge every other duration here uses, and the
+ * bar covers exactly Monday to Friday.
+ */
+export function addWorkingSpan(ms, n, holidays = []) {
+  const set = new Set(holidays);
+  const days = Math.max(0, Math.round(n));
+  let cur = startOfDay(ms);
+  let counted = 0;
+  // A span has to end somewhere even if every day is a holiday; a whole year of
+  // stepping is far past any real plan and stops a bad list looping forever.
+  let guard = 0;
+  while (counted < days && guard++ < 4000) {
+    if (!isWeekend(cur) && !set.has(toISO(cur))) counted++;
+    cur += MS_DAY;
+  }
+  return cur;
+}
+
 /** Advance `ms` by `n` working days. */
 export function addWorkingDays(ms, n, holidays = []) {
   const set = new Set(holidays);
@@ -287,15 +313,33 @@ export function fmtDate(ms, preset = 'medium') {
 export function fmtDuration(days) {
   const n = Math.abs(Math.round(days));
   const sign = days < 0 ? '−' : '';
+  // A week is five days when durations are counted in working days, so ten of
+  // them read as "2w" rather than "1w 3d". Pushed in by the store, like the
+  // date order: this module is a leaf and cannot read a setting for itself.
+  const week = workWeek;
+  const month = week * 4.348;
+  const year = week * 52.18;
+
   if (n === 0) return '0d';
-  if (n < 14) return `${sign}${n}d`;
-  if (n < 70) {
-    const w = Math.floor(n / 7);
-    const d = n % 7;
+  if (n < week * 2) return `${sign}${n}d`;
+  if (n < week * 10) {
+    const w = Math.floor(n / week);
+    const d = n % week;
     return `${sign}${w}w${d ? ` ${d}d` : ''}`;
   }
-  if (n < 730) return `${sign}${Math.round(n / 30.44)}mo`;
-  return `${sign}${(n / 365.25).toFixed(1)}y`;
+  if (n < year * 2) return `${sign}${Math.round(n / month)}mo`;
+  return `${sign}${(n / year).toFixed(1)}y`;
+}
+
+/** Days in a working week, for the phrasing above. 7 counts the calendar. */
+let workWeek = 7;
+
+export function setWorkWeek(days) {
+  workWeek = days === 5 ? 5 : 7;
+}
+
+export function getWorkWeek() {
+  return workWeek;
 }
 
 /** Relative phrasing against a reference date: "in 4 days", "2 weeks ago". */

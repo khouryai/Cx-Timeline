@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 43   Built: 2026-08-11T20:04:47.091Z
+ * Modules: 43   Built: 2026-08-11T20:27:11.512Z
  */
 (function () {
   'use strict';
@@ -745,6 +745,32 @@ __mods["core/dates.js"] = function (__x, __req) {
     return a <= b ? count : -count;
   }
 
+  /**
+   * The finish instant of a span `n` working days long starting at `ms`.
+   *
+   * The exact inverse of `workingDaysBetween`, which is the whole reason it is
+   * not `addWorkingDays`: that one advances *past* n working days, so a Monday
+   * plus five lands on the following Monday and a Saturday plus one lands on
+   * Monday — measuring back gives five and nought. This counts the day it is
+   * standing on and then steps, so a five-day task starting Monday finishes at
+   * Saturday-morning — the exclusive edge every other duration here uses, and the
+   * bar covers exactly Monday to Friday.
+   */
+  function addWorkingSpan(ms, n, holidays = []) {
+    const set = new Set(holidays);
+    const days = Math.max(0, Math.round(n));
+    let cur = startOfDay(ms);
+    let counted = 0;
+    // A span has to end somewhere even if every day is a holiday; a whole year of
+    // stepping is far past any real plan and stops a bad list looping forever.
+    let guard = 0;
+    while (counted < days && guard++ < 4000) {
+      if (!isWeekend(cur) && !set.has(toISO(cur))) counted++;
+      cur += MS_DAY;
+    }
+    return cur;
+  }
+
   /** Advance `ms` by `n` working days. */
   function addWorkingDays(ms, n, holidays = []) {
     const set = new Set(holidays);
@@ -877,15 +903,33 @@ __mods["core/dates.js"] = function (__x, __req) {
   function fmtDuration(days) {
     const n = Math.abs(Math.round(days));
     const sign = days < 0 ? '−' : '';
+    // A week is five days when durations are counted in working days, so ten of
+    // them read as "2w" rather than "1w 3d". Pushed in by the store, like the
+    // date order: this module is a leaf and cannot read a setting for itself.
+    const week = workWeek;
+    const month = week * 4.348;
+    const year = week * 52.18;
+
     if (n === 0) return '0d';
-    if (n < 14) return `${sign}${n}d`;
-    if (n < 70) {
-      const w = Math.floor(n / 7);
-      const d = n % 7;
+    if (n < week * 2) return `${sign}${n}d`;
+    if (n < week * 10) {
+      const w = Math.floor(n / week);
+      const d = n % week;
       return `${sign}${w}w${d ? ` ${d}d` : ''}`;
     }
-    if (n < 730) return `${sign}${Math.round(n / 30.44)}mo`;
-    return `${sign}${(n / 365.25).toFixed(1)}y`;
+    if (n < year * 2) return `${sign}${Math.round(n / month)}mo`;
+    return `${sign}${(n / year).toFixed(1)}y`;
+  }
+
+  /** Days in a working week, for the phrasing above. 7 counts the calendar. */
+  let workWeek = 7;
+
+  function setWorkWeek(days) {
+    workWeek = days === 5 ? 5 : 7;
+  }
+
+  function getWorkWeek() {
+    return workWeek;
   }
 
   /** Relative phrasing against a reference date: "in 4 days", "2 weeks ago". */
@@ -1098,6 +1142,7 @@ __mods["core/dates.js"] = function (__x, __req) {
   Object.defineProperty(__x, "daysBetween", { get: () => daysBetween, enumerable: true });
   Object.defineProperty(__x, "isWeekend", { get: () => isWeekend, enumerable: true });
   Object.defineProperty(__x, "workingDaysBetween", { get: () => workingDaysBetween, enumerable: true });
+  Object.defineProperty(__x, "addWorkingSpan", { get: () => addWorkingSpan, enumerable: true });
   Object.defineProperty(__x, "addWorkingDays", { get: () => addWorkingDays, enumerable: true });
   Object.defineProperty(__x, "isoWeek", { get: () => isoWeek, enumerable: true });
   Object.defineProperty(__x, "quarterOf", { get: () => quarterOf, enumerable: true });
@@ -1106,6 +1151,8 @@ __mods["core/dates.js"] = function (__x, __req) {
   Object.defineProperty(__x, "getDateOrder", { get: () => getDateOrder, enumerable: true });
   Object.defineProperty(__x, "fmtDate", { get: () => fmtDate, enumerable: true });
   Object.defineProperty(__x, "fmtDuration", { get: () => fmtDuration, enumerable: true });
+  Object.defineProperty(__x, "setWorkWeek", { get: () => setWorkWeek, enumerable: true });
+  Object.defineProperty(__x, "getWorkWeek", { get: () => getWorkWeek, enumerable: true });
   Object.defineProperty(__x, "fmtRelative", { get: () => fmtRelative, enumerable: true });
   Object.defineProperty(__x, "fmtTimestamp", { get: () => fmtTimestamp, enumerable: true });
   Object.defineProperty(__x, "SCALES", { get: () => SCALES, enumerable: true });
@@ -1132,7 +1179,10 @@ __mods["core/model.js"] = function (__x, __req) {
    */
 
   const { uid, deepClone, clamp } = __req("core/util.js");
-  const { toMs, toISO, todayMs, addDays, MS_DAY, startOfMonth, addMonths } = __req("core/dates.js");
+  const { toMs, toISO, todayMs, addDays, MS_DAY, startOfMonth, addMonths, workingDaysBetween, addWorkingSpan, setWorkWeek } = __req("core/dates.js");
+
+
+
 
   /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
   const SCHEMA_VERSION = 4;
@@ -2051,6 +2101,9 @@ __mods["core/model.js"] = function (__x, __req) {
       criticalPath: false,
       laneLabels: true,
       dateOrder: 'mdy',            // mdy | dmy | ymd — display order only
+      // working = a five-day week, holidays excluded; calendar = every day.
+      // Counting only — it never moves a bar.
+      durationUnit: 'working',
       autoBackupMinutes: 60,
       backupEveryEdits: 100,
       backupKeep: 20,
@@ -2388,9 +2441,52 @@ __mods["core/model.js"] = function (__x, __req) {
   }
 
   /** Duration in days (bars are half-open: start inclusive, end exclusive). */
+  /* ── How long something takes ──────────────────────────────────────────── */
+
+  /**
+   * Whether a duration counts the calendar or the working week.
+   *
+   * A commissioning plan is read in working days: a task "two weeks long" means
+   * ten days on site, and nobody counts the Saturdays. So the default is the
+   * five-day week, holidays excluded — `settings.durationUnit` switches a project
+   * back to calendar days if it wants them.
+   *
+   * Only the *counting* changes. Dates are dates: a bar still starts and finishes
+   * where it is drawn, still spans the weekend it covers, and every other
+   * calculation on this timeline — the ruler, the critical path, slip against a
+   * baseline — is untouched.
+   *
+   * Pushed in from the store on every document change, the way the dropdown
+   * vocabularies are: this module cannot read a setting for itself.
+   */
+  let durationUnit = 'working';
+  let workingHolidays = [];
+
+  function syncDurationBasis(settings) {
+    durationUnit = settings && settings.durationUnit === 'calendar' ? 'calendar' : 'working';
+    workingHolidays = Array.isArray(settings?.holidays) ? settings.holidays : [];
+    setWorkWeek(durationUnit === 'working' ? 5 : 7);
+  }
+
+  /** True when durations are counted on a five-day week. */
+  function countsWorkingDays() {
+    return durationUnit === 'working';
+  }
+
   function durationDays(obj) {
     if (!TYPES[obj.type]?.duration) return 0;
+    if (durationUnit === 'working') return Math.max(0, workingDaysBetween(obj.start, obj.end, workingHolidays));
     return Math.max(0, Math.round((obj.end - obj.start) / MS_DAY));
+  }
+
+  /**
+   * Where a bar `days` long starting at `start` finishes — the exact inverse of
+   * `durationDays`, so typing 10 into the duration field and reading it back
+   * gives 10 whichever way the project counts.
+   */
+  function endForDuration(start, days) {
+    const n = Math.max(1, Math.round(days));
+    return durationUnit === 'working' ? addWorkingSpan(start, n, workingHolidays) : start + n * MS_DAY;
   }
 
   /** Remaining duration in days given percent complete. */
@@ -2504,7 +2600,10 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "normalise", { get: () => normalise, enumerable: true });
   Object.defineProperty(__x, "validate", { get: () => validate, enumerable: true });
   Object.defineProperty(__x, "effectiveToday", { get: () => effectiveToday, enumerable: true });
+  Object.defineProperty(__x, "syncDurationBasis", { get: () => syncDurationBasis, enumerable: true });
+  Object.defineProperty(__x, "countsWorkingDays", { get: () => countsWorkingDays, enumerable: true });
   Object.defineProperty(__x, "durationDays", { get: () => durationDays, enumerable: true });
+  Object.defineProperty(__x, "endForDuration", { get: () => endForDuration, enumerable: true });
   Object.defineProperty(__x, "remainingDays", { get: () => remainingDays, enumerable: true });
   Object.defineProperty(__x, "objectColor", { get: () => objectColor, enumerable: true });
   Object.defineProperty(__x, "objectRange", { get: () => objectRange, enumerable: true });
@@ -3532,7 +3631,8 @@ __mods["core/store.js"] = function (__x, __req) {
   const { deepClone, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { isReadOnly } = __req("core/cloud.js");
-  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, isDerivedBaseline } = __req("core/model.js");
+  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, isDerivedBaseline, syncDurationBasis } = __req("core/model.js");
+
 
 
 
@@ -3611,6 +3711,9 @@ __mods["core/store.js"] = function (__x, __req) {
     // The document owns its vocabularies; push them down to the model so the
     // renderer, legend and badge helpers resolve against this project's lists.
     syncLists(doc.lists);
+    // Counting durations on a five-day week is a project preference, and the
+    // model is below the store: it cannot read one for itself.
+    syncDurationBasis(doc.settings);
   }
   reindex();
 
@@ -18021,7 +18124,8 @@ __mods["ui/dialogs.js"] = function (__x, __req) {
 
   const { el, clear } = __req("core/util.js");
   const { toISO, toMs, fmtDate, fmtDuration, MS_DAY } = __req("core/dates.js");
-  const { TYPES, durationDays } = __req("core/model.js");
+  const { TYPES, durationDays, endForDuration } = __req("core/model.js");
+
 
 
 
@@ -18162,7 +18266,7 @@ __mods["ui/dialogs.js"] = function (__x, __req) {
               value: durationDays(obj),
               min: 1,
               onChange: (v) => {
-                set({ end: obj.start + Math.max(1, v) * MS_DAY }, 'Change duration');
+                set({ end: endForDuration(obj.start, v) }, 'Change duration');
                 durationOut.textContent = fmtDuration(Math.max(1, v));
               },
             }),
@@ -18474,7 +18578,9 @@ __mods["io/scene.js"] = function (__x, __req) {
   function dateLabel(obj) {
     const def = TYPES[obj.type] || TYPES.activity;
     if (!def.duration) return fmtDate(obj.start, 'numeric');
-    const days = Math.max(1, Math.round((obj.end - obj.start) / MS_DAY));
+    // However the project counts them — a printed plan must agree with the panel
+    // the reader was looking at when they asked for it.
+    const days = Math.max(1, durationDays(obj));
     return `${fmtDate(obj.start, 'numeric')} → ${fmtDate(obj.end, 'numeric')}  (${days}d)`;
   }
   const EXPORT_LINE_H = 10;
@@ -22462,6 +22568,18 @@ __mods["ui/panels.js"] = function (__x, __req) {
           ],
           onChange: (v) => set('weekStart', Number(v), 'Change week start'),
         })),
+        field('Count durations in', segmented({
+          value: settings.durationUnit === 'calendar' ? 'calendar' : 'working',
+          stretch: true,
+          options: [
+            { value: 'working', label: 'Working days' },
+            { value: 'calendar', label: 'Calendar days' },
+          ],
+          onChange: (v) => {
+            set('durationUnit', v, 'Change duration counting');
+            renderer.requestRender();
+          },
+        }), 'Working days are Monday to Friday, minus the holidays below. Counting only — it never moves a bar.'),
         field('Mouse wheel', segmented({
           value: settings.wheelMode || 'zoom',
           stretch: true,
@@ -23223,7 +23341,9 @@ __mods["ui/inspector.js"] = function (__x, __req) {
   const { el, clear, debounce, clamp, escapeHtml } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } = __req("core/dates.js");
-  const { TYPES, listOptions, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, LINK_TYPES, CONNECTOR_STYLES, durationDays, remainingDays, statusOf, effectiveToday, isDerivedBaseline, delayReason } = __req("core/model.js");
+  const { TYPES, listOptions, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, LINK_TYPES, CONNECTOR_STYLES, durationDays, endForDuration, countsWorkingDays, remainingDays, statusOf, effectiveToday, isDerivedBaseline, delayReason } = __req("core/model.js");
+
+
 
 
 
@@ -23589,10 +23709,12 @@ __mods["ui/inspector.js"] = function (__x, __req) {
           })),
         ]),
         el('div', { class: 'cx-row' }, [
-          field('Duration (days)', numberInput({
+          field(countsWorkingDays() ? 'Duration (working days)' : 'Duration (days)', numberInput({
             value: durationDays(obj),
             min: 1,
-            onChange: (v) => set(obj.id, { end: obj.start + Math.max(1, v) * MS_DAY }, 'Change duration'),
+            // `endForDuration` is the inverse of `durationDays`, so what is typed
+            // here reads back unchanged whichever way the project counts.
+            onChange: (v) => set(obj.id, { end: endForDuration(obj.start, v) }, 'Change duration'),
           })),
           field('Remaining', el('div', {
             class: 'cx-input mini',

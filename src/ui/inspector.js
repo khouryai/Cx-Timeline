@@ -24,6 +24,8 @@ import {
   LINK_TYPES,
   CONNECTOR_STYLES,
   durationDays,
+  endForDuration,
+  countsWorkingDays,
   remainingDays,
   statusOf,
   effectiveToday,
@@ -379,10 +381,12 @@ function scheduleFields(obj, def) {
         })),
       ]),
       el('div', { class: 'cx-row' }, [
-        field('Duration (days)', numberInput({
+        field(countsWorkingDays() ? 'Duration (working days)' : 'Duration (days)', numberInput({
           value: durationDays(obj),
           min: 1,
-          onChange: (v) => set(obj.id, { end: obj.start + Math.max(1, v) * MS_DAY }, 'Change duration'),
+          // `endForDuration` is the inverse of `durationDays`, so what is typed
+          // here reads back unchanged whichever way the project counts.
+          onChange: (v) => set(obj.id, { end: endForDuration(obj.start, v) }, 'Change duration'),
         })),
         field('Remaining', el('div', {
           class: 'cx-input mini',

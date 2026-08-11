@@ -29,6 +29,7 @@ import {
   syncLists, defaultLists, LIST_DEFS, listUsage,
   emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds,
   p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, isDerivedBaseline,
+  syncDurationBasis,
 } from './model.js';
 import { History, diff, apply } from './history.js';
 
@@ -103,6 +104,9 @@ function reindex() {
   // The document owns its vocabularies; push them down to the model so the
   // renderer, legend and badge helpers resolve against this project's lists.
   syncLists(doc.lists);
+  // Counting durations on a five-day week is a project preference, and the
+  // model is below the store: it cannot read one for itself.
+  syncDurationBasis(doc.settings);
 }
 reindex();
 

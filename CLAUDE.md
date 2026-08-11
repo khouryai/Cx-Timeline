@@ -310,6 +310,17 @@ subscribes. That is what keeps the graph acyclic.
   `removeListOption`, `moveListOption`, `resetList`), and `removeListOption`
   rewrites the objects that used the option in the *same* edit so one undo
   puts everything back.
+- **A duration is counted on a five-day week by default.** `settings.durationUnit`
+  (`working` | `calendar`) decides, and the store pushes it into the model with
+  `syncDurationBasis()` on every change, the way the dropdown vocabularies are
+  pushed — `core/model.js` is below the store and cannot read a setting for
+  itself. Only the *counting* changes: dates never move, and the ruler, the
+  critical path and slip against a baseline are all untouched. `durationDays()`
+  and `endForDuration()` are exact inverses, which is what makes the duration
+  field read back what was typed; `addWorkingSpan()` in `core/dates.js` exists
+  for that inverse and is deliberately not `addWorkingDays()`, which advances
+  *past* n working days and does not measure back to n. `fmtDuration()` divides
+  by five in working mode, so ten days read as "2w".
 - **Dates are UTC-midnight milliseconds internally**, `YYYY-MM-DD` on disk.
   Never call a local-time getter — a calendar date must not shift by a
   timezone. Display order (M/D/Y by default) is a preference pushed into
@@ -362,7 +373,7 @@ npm run build                        # must succeed — it also lints the module
 npm test                             # all four browser suites plus the SQL one, must exit 0
 npm run test:rust                    #  19 checks — the plan and lock rules, in Rust
 
-node tools/smoke.js                  # 236 checks — the application, local mode
+node tools/smoke.js                  # 242 checks — the application, local mode
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
