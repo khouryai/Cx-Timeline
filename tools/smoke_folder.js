@@ -303,6 +303,42 @@ async function main() {
   check('and the other stays listed as also in the folder',
     /also in this folder/i.test(await page.locator('#dock [data-section="shared-folder"]').innerText()));
 
+  /* ── What a sync client leaves behind ─────────────────────────────────── */
+  console.log('\nThe litter OneDrive makes of a lock file');
+  // OneDrive cannot merge two edits of one file: it keeps both and appends the
+  // machine name. The lock is rewritten every heartbeat, so a plan open on two
+  // machines mints these steadily — `.json` files sitting beside the plan that
+  // nothing ever reads and nothing ever removed.
+  await page.goto('about:blank');
+  await boot({
+    files: {
+      'bart-cbtc.json': { text: sharedPlan, lastModified: Date.now() },
+      'lockheed.json': { text: sharedPlan, lastModified: Date.now() - 3600000 },
+      'bart-cbtc.lock-HRUSPITLT02820.json': { text: '{}', lastModified: Date.now() },
+      'bart-cbtc.lock-HRUSPITLT02820-2.json': { text: '{}', lastModified: Date.now() },
+      'bart-cbtc.lock-HRusOAKLT05731.json': { text: '{}', lastModified: Date.now() },
+    },
+  });
+  await openIoPane();
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1500);
+
+  const listed = await page.locator('#dock [data-section="shared-folder"]').innerText();
+  check('a conflict copy of a lock is not offered as a plan',
+    !/lock-HRUS/i.test(listed), listed.replace(/\n/g, ' ').slice(0, 110));
+  // A plan is not a lock just because its name contains the letters.
+  check('but a plan whose name merely contains "lock" still is',
+    /lockheed\.json/i.test(listed), listed.replace(/\n/g, ' ').slice(0, 110));
+
+  await page.locator('#dock .cx-listrow', { hasText: 'bart-cbtc.json' }).first().click();
+  await page.waitForTimeout(1600);
+
+  const swept = await plans(page);
+  check('opening the plan clears the copies out of the folder',
+    !swept.some((n) => /lock-HRUS|lock-HRus/i.test(n)), swept.join(', '));
+  check('the live lock is left alone', swept.includes('bart-cbtc.lock.json'), swept.join(', '));
+  check('and so is every plan', swept.includes('bart-cbtc.json') && swept.includes('lockheed.json'), swept.join(', '));
+
   /* ── Reopening your own browser ───────────────────────────────────────── */
   console.log('\nReopening your own browser');
   // The case that actually bit: close the browser and come straight back. The

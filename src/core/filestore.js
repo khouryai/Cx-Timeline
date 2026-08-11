@@ -141,15 +141,21 @@ async function ioForget() {
   await forgetHandle();
 }
 
-/** `[{ name, size, modified }]`, newest first. Lock files are not plans. */
+/**
+ * `[{ name, size, modified }]`, newest first. Lock files are not plans.
+ *
+ * The desktop list is filtered here as well as in Rust: the shell is installed
+ * and updates on its own schedule, while this file arrives with every deploy,
+ * so this is the copy that reaches a machine today.
+ */
 async function ioListPlans(ref) {
-  if (onDesktop()) return desktop.listPlans(ref);
+  if (onDesktop()) return (await desktop.listPlans(ref)).filter((entry) => !isLockFile(entry.name));
 
   const out = [];
   for await (const [name, handle] of ref.entries()) {
     if (handle.kind !== 'file') continue;
     const lower = name.toLowerCase();
-    if (!lower.endsWith('.json') || lower.endsWith('.lock.json')) continue;
+    if (!lower.endsWith('.json') || isLockFile(lower)) continue;
     let size = 0;
     let modified = 0;
     try {
@@ -228,6 +234,29 @@ async function ioRemoveLock(ref, name) {
   await ref.removeEntry(lockNameFor(name));
 }
 
+/**
+ * Delete the conflict copies a sync client has made of the lock files.
+ *
+ * On the desktop this needs the shell, which only gains the command when the
+ * installer is rebuilt — an older shell simply sweeps nothing, and the listing
+ * filter above still keeps the litter out of sight until it catches up.
+ */
+async function ioSweepLocks(ref) {
+  if (onDesktop()) return desktop.sweepLocks(ref).catch(() => 0);
+
+  let removed = 0;
+  for await (const [name, handle] of ref.entries()) {
+    if (handle.kind !== 'file' || !isLockLitter(name)) continue;
+    try {
+      await ref.removeEntry(name);
+      removed++;
+    } catch {
+      /* someone else got there first, or the folder is read-only */
+    }
+  }
+  return removed;
+}
+
 async function ioPutBlob(ref, id, file) {
   if (onDesktop()) return desktop.writeAttachment(ref, id, file);
   const dir = await ref.getDirectoryHandle('attachments', { create: true });
@@ -304,6 +333,36 @@ function basename(path) {
 
 function lockNameFor(name) {
   return `${String(name).replace(/\.json$/i, '')}.lock.json`;
+}
+
+/**
+ * A lock file — including the litter a sync client makes of one.
+ *
+ * The lock is rewritten every heartbeat, and OneDrive cannot merge two edits of
+ * the same file: it keeps both and appends the machine name, giving
+ * `plan.lock-HRUSPITLT02820.json`, then `-2`, `-3`, … A plan open on two
+ * machines for an afternoon mints a pile of them.
+ *
+ * They matter for two reasons. They are `.json` files sitting beside the plan,
+ * so anything listing plans has to know they are not plans — and nothing ever
+ * reads them, so they would otherwise stay in the folder for ever.
+ *
+ * The `[-_. (]` after `.lock` is deliberate: it matches every sync client's
+ * naming without swallowing a plan legitimately called `lockheed.json`.
+ */
+function isLockFile(name) {
+  return /\.lock(?:[-_. (][^\\/]*)?\.json$/i.test(String(name));
+}
+
+/**
+ * A lock file no session will ever read: a conflict copy rather than the lock
+ * itself. Nothing in either build opens a name like this, whichever plan it
+ * belongs to, so it is safe to delete without knowing whose it was — while a
+ * real `<plan>.lock.json` is left alone, because someone may be holding it.
+ */
+function isLockLitter(name) {
+  const lower = String(name).toLowerCase();
+  return isLockFile(lower) && !lower.endsWith('.lock.json');
 }
 
 /* ── The browser's handle store ────────────────────────────────────────── */
@@ -559,6 +618,7 @@ export async function reconnectWithPrompt() {
 
 /** Stop using the folder: release the lock and forget where it was. */
 export async function disconnect() {
+  await sweepLockLitter();
   await releaseLock();
   stopTimers();
   folderRef = null;
@@ -620,6 +680,7 @@ export async function openPlan(name) {
   lastSaveAt = Date.now();
   startTimers();
   emitState();
+  sweepLockLitter();
   return { doc, role, holder };
 }
 
@@ -637,6 +698,7 @@ export async function createPlan(name, doc) {
   await writeLock();
   startTimers();
   emitState();
+  sweepLockLitter();
   return safe;
 }
 
@@ -729,6 +791,30 @@ async function writeLock() {
     // Failing to take the lock is not fatal: the write guard still protects the
     // work, so the session continues without the courtesy.
     console.warn('[cx-timeline] could not write the lock file:', err.message);
+  }
+}
+
+/**
+ * Take the sync client's litter back out of the folder.
+ *
+ * The lock is meant to be temporary — one file, deleted when the last session
+ * leaves. What survives it are the conflict copies, which nothing reads and
+ * nothing would ever remove. So the session that holds the pen clears them:
+ * when a plan is opened, every few minutes while it is held, and on the way
+ * out. Only the holder, because a reader has no business writing to the folder
+ * at all; and never the live `<plan>.lock.json` of any plan, which may be
+ * somebody's.
+ *
+ * Best effort throughout. Failing to tidy up is not a reason to fail anything
+ * the user actually asked for.
+ */
+async function sweepLockLitter() {
+  if (!folderRef || role !== 'editor') return 0;
+  try {
+    return await ioSweepLocks(folderRef);
+  } catch (err) {
+    console.warn('[cx-timeline] could not clear old lock files:', err.message);
+    return 0;
   }
 }
 
@@ -860,8 +946,14 @@ function startTimers() {
     writeLock();
   }, HEARTBEAT_MS);
 
+  let polls = 0;
   pollTimer = setInterval(async () => {
     if (!isConnected()) return;
+    // A sync client can mint a conflict copy at any point during a session, so
+    // one sweep at open is not enough — but they are litter, not a problem, so
+    // this rides the poll every twenty-fifth turn (about five minutes) rather
+    // than listing the folder every twelve seconds.
+    if (++polls % 25 === 0) sweepLockLitter();
     try {
       await checkLock();
       const read = await ioReadPlan(folderRef, planName);

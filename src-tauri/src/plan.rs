@@ -146,6 +146,61 @@ fn lock_path(dir: &Path, plan: &str) -> PathBuf {
     dir.join(format!("{stem}.lock.json"))
 }
 
+/// A lock file, conflict copies included. Mirrors `isLockFile` in filestore.js.
+///
+/// OneDrive cannot merge two edits of one file: it keeps both and appends the
+/// machine name, so the heartbeat leaves `plan.lock-HRUSPITLT02820.json` behind,
+/// then `-2`, `-3`. Those are `.json` files beside the plan, so they must never
+/// be listed as plans. The separator test keeps a plan called `lockheed.json`
+/// out of it.
+pub fn is_lock_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    let Some(rest) = lower.strip_suffix(".json") else {
+        return false;
+    };
+    match rest.rfind(".lock") {
+        None => false,
+        Some(at) => {
+            let tail = &rest[at + ".lock".len()..];
+            tail.is_empty() || tail.starts_with(['-', '_', '.', ' ', '('])
+        }
+    }
+}
+
+/// A lock file nothing will ever read: a conflict copy rather than a lock.
+///
+/// Deleting one is always safe, whichever plan it belongs to — no code path in
+/// either build opens a name like this. A real `<plan>.lock.json` is left
+/// alone, because somebody may be holding it.
+pub fn is_lock_litter(name: &str) -> bool {
+    is_lock_name(name) && !name.to_lowercase().ends_with(".lock.json")
+}
+
+/// Clear the conflict copies out of a folder. Answers how many went.
+///
+/// The lock is meant to be temporary — one file, removed when the last session
+/// leaves. Its conflict copies are what outlive it, and nothing else would ever
+/// tidy them up.
+pub fn sweep_lock_litter(dir: &Path) -> Result<u32> {
+    let mut removed = 0;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !is_lock_litter(&name) {
+            continue;
+        }
+        match entry.metadata() {
+            Ok(meta) if meta.is_file() => {}
+            _ => continue,
+        }
+        // A copy that has already gone is a success, not a failure.
+        if fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /* ── Plans ──────────────────────────────────────────────────────────────── */
 
 /// Every plan in a folder, newest first. Lock files are not plans.
@@ -155,7 +210,7 @@ pub fn list_plans(dir: &Path) -> Result<Vec<PlanInfo>> {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
         let lower = name.to_lowercase();
-        if !lower.ends_with(".json") || lower.ends_with(".lock.json") {
+        if !lower.ends_with(".json") || is_lock_name(&name) {
             continue;
         }
         let meta = match entry.metadata() {
@@ -391,6 +446,41 @@ mod tests {
         assert!(names.contains(&"one.json".to_string()));
         assert!(names.contains(&"two.json".to_string()));
         assert!(!names.iter().any(|n| n.contains("lock")));
+    }
+
+    /// OneDrive's conflict copies are `.json` files sitting beside the plan.
+    /// Listed as plans — which is what used to happen — the folder picker fills
+    /// up with junk that cannot be opened.
+    #[test]
+    fn a_sync_clients_copies_of_a_lock_are_not_plans() {
+        let s = Scratch::new("list-litter");
+        write_plan(s.path(), "one.json", "{}", None).unwrap();
+        write_plan(s.path(), "lockheed.json", "{}", None).unwrap();
+        write_lock(s.path(), "one.json", "sess", "dev", "Aik").unwrap();
+        fs::write(s.path().join("one.lock-HRUSPITLT02820.json"), "{}").unwrap();
+        fs::write(s.path().join("one.lock-HRUSPITLT02820-21.json"), "{}").unwrap();
+
+        let names: Vec<String> = list_plans(s.path()).unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names.len(), 2, "got {names:?}");
+        assert!(names.contains(&"one.json".to_string()));
+        // A plan is not a lock just because its name contains the letters.
+        assert!(names.contains(&"lockheed.json".to_string()), "got {names:?}");
+    }
+
+    /// The litter is cleared; the live lock is somebody's and stays.
+    #[test]
+    fn sweeping_removes_the_copies_and_keeps_the_lock() {
+        let s = Scratch::new("sweep");
+        write_plan(s.path(), "one.json", "{}", None).unwrap();
+        write_lock(s.path(), "one.json", "sess", "dev", "Aik").unwrap();
+        fs::write(s.path().join("one.lock-HRUSPITLT02820.json"), "{}").unwrap();
+        fs::write(s.path().join("one.lock-HRUSPITLT02820-2.json"), "{}").unwrap();
+        fs::write(s.path().join("one.lock-HRusOAKLT05731.json"), "{}").unwrap();
+
+        assert_eq!(sweep_lock_litter(s.path()).unwrap(), 3);
+        assert!(read_lock(s.path(), "one.json").is_some(), "the live lock survives");
+        assert!(read_plan(s.path(), "one.json").is_ok(), "so does the plan");
+        assert_eq!(sweep_lock_litter(s.path()).unwrap(), 0, "nothing left to sweep");
     }
 
     #[test]

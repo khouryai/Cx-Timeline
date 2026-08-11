@@ -206,6 +206,13 @@ fn lock_write(folder: String, name: String, text: String) -> Reply<()> {
     })
 }
 
+/// Clear a sync client's conflict copies of the lock files out of the folder.
+/// Answers how many went, so the caller can say nothing when there were none.
+#[tauri::command]
+fn lock_sweep(folder: String) -> u32 {
+    plan::sweep_lock_litter(Path::new(&folder)).unwrap_or(0)
+}
+
 #[tauri::command]
 fn lock_remove(folder: String, name: String) -> bool {
     let stem = name.strip_suffix(".json").unwrap_or(&name);
@@ -277,6 +284,7 @@ fn main() {
             lock_read,
             lock_write,
             lock_remove,
+            lock_sweep,
             startup_lock_check,
             attachment_write,
             attachment_read,

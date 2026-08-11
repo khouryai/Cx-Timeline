@@ -113,6 +113,17 @@ export function removeLock(folder, name) {
 }
 
 /**
+ * Delete the conflict copies a sync client has made of the lock files, and
+ * answer how many went.
+ *
+ * A shell built before this command existed rejects the call; the caller treats
+ * that as "swept nothing", which is exactly what happened.
+ */
+export function sweepLocks(folder) {
+  return call('lock_sweep', { folder });
+}
+
+/**
  * Who has the pen, as the shell saw it before the window opened.
  *
  * The one thing the desktop build can genuinely do better than the web build:

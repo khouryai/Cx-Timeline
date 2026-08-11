@@ -236,7 +236,15 @@ subscribes. That is what keeps the graph acyclic.
   stale. And `takeOver()` never refuses: refusing left "I know that session is
   dead" with nowhere to go, and the write guard already means the loser of a
   race is told rather than overwritten. Warning the user is `ui/commands.js`'s
-  job; deciding for them is not the store's. And **a directory handle only survives a
+  job; deciding for them is not the store's. **A sync client leaves copies of the
+  lock behind, and they are not plans**: OneDrive cannot merge two edits of one
+  file, so it keeps both and appends the machine name
+  (`plan.lock-HRUSPITLT02820.json`, then `-2`, `-3`). `isLockFile()` in
+  `filestore.js` and `is_lock_name()` in `plan.rs` are the same rule in both
+  languages — the separator test after `.lock` is what keeps a plan called
+  `lockheed.json` out of it — and the pen holder sweeps the copies away
+  (`sweepLockLitter()`) on open, every fifth minute and on the way out. Never
+  delete a bare `<plan>.lock.json`: it may be somebody's. And **a directory handle only survives a
   reload through IndexedDB** — it cannot be serialised — so it lives in a
   database of its own, which is what lets `storage.js` import `filestore.js`
   without the reverse. Anything that writes to the folder goes through
@@ -339,10 +347,10 @@ subscribes. That is what keeps the graph acyclic.
 ```bash
 npm run build                        # must succeed — it also lints the module graph
 npm test                             # all four browser suites plus the SQL one, must exit 0
-npm run test:rust                    #  13 checks — the plan and lock rules, in Rust
+npm run test:rust                    #  15 checks — the plan and lock rules, in Rust
 
 node tools/smoke.js                  # 236 checks — the application, local mode
-node tools/smoke_folder.js           #  43 checks — the shared folder, in a browser
+node tools/smoke_folder.js           #  48 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  48 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               #  78 checks — the permission model
