@@ -19,7 +19,7 @@ import { TYPES, listIds, statusOf, subsystemOf } from './model.js';
  */
 export function filterPredicate(doc, filters) {
   const f = filters || {};
-  const text = fold(f.text || '');
+  const terms = textTerms(f.text);
   const types = new Set(f.types || []);
   const statuses = new Set(f.statuses || []);
   const lanes = new Set(f.lanes || []);
@@ -46,11 +46,27 @@ export function filterPredicate(doc, filters) {
       if (to != null && start > to) return false;
     }
 
-    if (text) {
-      if (!fold(searchableText(obj)).includes(text)) return false;
-    }
+    // Any term is enough. Every other dimension here narrows, so the text box
+    // would too — but the thing people actually type into it is a list of the
+    // several things they are looking for at once ("power-up, cable pull"),
+    // and asking for all of them in one object matches nothing.
+    if (terms.length && !terms.some((term) => fold(searchableText(obj)).includes(term))) return false;
     return true;
   };
+}
+
+/**
+ * The text box, read as a list.
+ *
+ * Commas separate the terms, so several can be searched at once; anything
+ * between two commas stays one phrase, spaces included, because "cable pull"
+ * is one thing to look for and not two.
+ */
+export function textTerms(text) {
+  return String(text || '')
+    .split(',')
+    .map((part) => fold(part.trim()))
+    .filter(Boolean);
 }
 
 /** Everything about an object that global search should look inside. */
@@ -82,9 +98,12 @@ export function searchableText(obj) {
  * Returns ranked results: title matches first, then metadata, then notes.
  */
 export function search(doc, query, { limit = 60 } = {}) {
-  const q = fold(String(query || '').trim());
-  if (!q) return [];
-  const terms = q.split(/\s+/).filter(Boolean);
+  // Comma-separated groups, exactly as the filter reads its box: within a group
+  // every word must appear, and any group matching is enough. One list of
+  // things to look for, one answer.
+  const groups = textTerms(query).map((part) => part.split(/\s+/).filter(Boolean)).filter((g) => g.length);
+  if (!groups.length) return [];
+  const terms = groups.flat();
   const laneNames = new Map(doc.lanes.map((l) => [l.id, l.name]));
   const results = [];
 
@@ -95,19 +114,28 @@ export function search(doc, query, { limit = 60 } = {}) {
 
     let score = 0;
     let matchedIn = '';
-    for (const term of terms) {
-      if (title.includes(term)) {
-        score += title.startsWith(term) ? 12 : 8;
-        matchedIn = matchedIn || 'title';
-      } else if (meta.includes(term)) {
-        score += 4;
-        matchedIn = matchedIn || 'details';
-      } else if (notes.includes(term)) {
-        score += 2;
-        matchedIn = matchedIn || 'notes';
-      } else {
-        score = -1;
-        break;
+    for (const group of groups) {
+      let groupScore = 0;
+      let groupMatchedIn = '';
+      for (const term of group) {
+        if (title.includes(term)) {
+          groupScore += title.startsWith(term) ? 12 : 8;
+          groupMatchedIn = groupMatchedIn || 'title';
+        } else if (meta.includes(term)) {
+          groupScore += 4;
+          groupMatchedIn = groupMatchedIn || 'details';
+        } else if (notes.includes(term)) {
+          groupScore += 2;
+          groupMatchedIn = groupMatchedIn || 'notes';
+        } else {
+          groupScore = -1;
+          break;
+        }
+      }
+      // The best group wins the ranking; a group that missed says nothing.
+      if (groupScore > score) {
+        score = groupScore;
+        matchedIn = groupMatchedIn;
       }
     }
     if (score <= 0) continue;
@@ -129,7 +157,7 @@ export function search(doc, query, { limit = 60 } = {}) {
   }
 
   for (const lane of doc.lanes) {
-    if (terms.every((t) => fold(lane.name).includes(t))) {
+    if (groups.some((group) => group.every((t) => fold(lane.name).includes(t)))) {
       results.push({
         kind: 'lane',
         id: lane.id,

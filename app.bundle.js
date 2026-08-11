@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 43   Built: 2026-08-11T20:27:11.512Z
+ * Modules: 43   Built: 2026-08-11T20:28:27.785Z
  */
 (function () {
   'use strict';
@@ -8091,7 +8091,7 @@ __mods["core/query.js"] = function (__x, __req) {
    */
   function filterPredicate(doc, filters) {
     const f = filters || {};
-    const text = fold(f.text || '');
+    const terms = textTerms(f.text);
     const types = new Set(f.types || []);
     const statuses = new Set(f.statuses || []);
     const lanes = new Set(f.lanes || []);
@@ -8118,11 +8118,27 @@ __mods["core/query.js"] = function (__x, __req) {
         if (to != null && start > to) return false;
       }
 
-      if (text) {
-        if (!fold(searchableText(obj)).includes(text)) return false;
-      }
+      // Any term is enough. Every other dimension here narrows, so the text box
+      // would too — but the thing people actually type into it is a list of the
+      // several things they are looking for at once ("power-up, cable pull"),
+      // and asking for all of them in one object matches nothing.
+      if (terms.length && !terms.some((term) => fold(searchableText(obj)).includes(term))) return false;
       return true;
     };
+  }
+
+  /**
+   * The text box, read as a list.
+   *
+   * Commas separate the terms, so several can be searched at once; anything
+   * between two commas stays one phrase, spaces included, because "cable pull"
+   * is one thing to look for and not two.
+   */
+  function textTerms(text) {
+    return String(text || '')
+      .split(',')
+      .map((part) => fold(part.trim()))
+      .filter(Boolean);
   }
 
   /** Everything about an object that global search should look inside. */
@@ -8154,9 +8170,12 @@ __mods["core/query.js"] = function (__x, __req) {
    * Returns ranked results: title matches first, then metadata, then notes.
    */
   function search(doc, query, { limit = 60 } = {}) {
-    const q = fold(String(query || '').trim());
-    if (!q) return [];
-    const terms = q.split(/\s+/).filter(Boolean);
+    // Comma-separated groups, exactly as the filter reads its box: within a group
+    // every word must appear, and any group matching is enough. One list of
+    // things to look for, one answer.
+    const groups = textTerms(query).map((part) => part.split(/\s+/).filter(Boolean)).filter((g) => g.length);
+    if (!groups.length) return [];
+    const terms = groups.flat();
     const laneNames = new Map(doc.lanes.map((l) => [l.id, l.name]));
     const results = [];
 
@@ -8167,19 +8186,28 @@ __mods["core/query.js"] = function (__x, __req) {
 
       let score = 0;
       let matchedIn = '';
-      for (const term of terms) {
-        if (title.includes(term)) {
-          score += title.startsWith(term) ? 12 : 8;
-          matchedIn = matchedIn || 'title';
-        } else if (meta.includes(term)) {
-          score += 4;
-          matchedIn = matchedIn || 'details';
-        } else if (notes.includes(term)) {
-          score += 2;
-          matchedIn = matchedIn || 'notes';
-        } else {
-          score = -1;
-          break;
+      for (const group of groups) {
+        let groupScore = 0;
+        let groupMatchedIn = '';
+        for (const term of group) {
+          if (title.includes(term)) {
+            groupScore += title.startsWith(term) ? 12 : 8;
+            groupMatchedIn = groupMatchedIn || 'title';
+          } else if (meta.includes(term)) {
+            groupScore += 4;
+            groupMatchedIn = groupMatchedIn || 'details';
+          } else if (notes.includes(term)) {
+            groupScore += 2;
+            groupMatchedIn = groupMatchedIn || 'notes';
+          } else {
+            groupScore = -1;
+            break;
+          }
+        }
+        // The best group wins the ranking; a group that missed says nothing.
+        if (groupScore > score) {
+          score = groupScore;
+          matchedIn = groupMatchedIn;
         }
       }
       if (score <= 0) continue;
@@ -8201,7 +8229,7 @@ __mods["core/query.js"] = function (__x, __req) {
     }
 
     for (const lane of doc.lanes) {
-      if (terms.every((t) => fold(lane.name).includes(t))) {
+      if (groups.some((group) => group.every((t) => fold(lane.name).includes(t)))) {
         results.push({
           kind: 'lane',
           id: lane.id,
@@ -8291,6 +8319,7 @@ __mods["core/query.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "filterPredicate", { get: () => filterPredicate, enumerable: true });
+  Object.defineProperty(__x, "textTerms", { get: () => textTerms, enumerable: true });
   Object.defineProperty(__x, "searchableText", { get: () => searchableText, enumerable: true });
   Object.defineProperty(__x, "search", { get: () => search, enumerable: true });
   Object.defineProperty(__x, "summarise", { get: () => summarise, enumerable: true });
@@ -21402,7 +21431,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   function paneSearch(root) {
     const input = textInput({
       value: '',
-      placeholder: 'Search titles, notes, owners, versions…',
+      placeholder: 'Titles, notes, owners, versions… commas for several',
       type: 'search',
     });
     input.dataset.searchInput = '1';
@@ -21507,12 +21536,12 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
     root.appendChild(field('Text contains', textInput({
       value: filters.text,
-      placeholder: 'Free text',
+      placeholder: 'e.g. power-up, cable pull',
       onInput: debounce((v) => {
         store.setFilters({ text: v });
         renderer.requestRender();
       }, 200),
-    })));
+    }), 'Separate several with commas — anything matching any of them is kept.'));
 
     root.appendChild(
       el('div', { class: 'cx-row', style: { marginTop: '10px' } }, [

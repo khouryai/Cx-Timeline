@@ -299,6 +299,13 @@ subscribes. That is what keeps the graph acyclic.
   so claimed success for an export that had thrown.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
+- **The filter's text box holds a list, not a phrase.** `textTerms()` in
+  `core/query.js` splits it on commas and any term matching is enough — every
+  other dimension of the filter narrows, but what people type here is the
+  several things they are looking for at once, and asking for all of them in
+  one object matches nothing. A term keeps its spaces, so `cable pull` stays
+  one phrase. Global search reads its box the same way: within a comma group
+  every word must appear, and the best-scoring group ranks the result.
 - **Dropdown vocabularies are document data, not constants.** Status,
   subsystem, test type, severity, approval and the font menu live in
   `doc.lists`, seeded from `DEFAULT_LISTS` and described by `LIST_DEFS` in
@@ -373,7 +380,7 @@ npm run build                        # must succeed — it also lints the module
 npm test                             # all four browser suites plus the SQL one, must exit 0
 npm run test:rust                    #  19 checks — the plan and lock rules, in Rust
 
-node tools/smoke.js                  # 242 checks — the application, local mode
+node tools/smoke.js                  # 246 checks — the application, local mode
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only

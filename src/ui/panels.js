@@ -754,7 +754,7 @@ function varianceText(row) {
 function paneSearch(root) {
   const input = textInput({
     value: '',
-    placeholder: 'Search titles, notes, owners, versions…',
+    placeholder: 'Titles, notes, owners, versions… commas for several',
     type: 'search',
   });
   input.dataset.searchInput = '1';
@@ -859,12 +859,12 @@ function paneFilters(root) {
 
   root.appendChild(field('Text contains', textInput({
     value: filters.text,
-    placeholder: 'Free text',
+    placeholder: 'e.g. power-up, cable pull',
     onInput: debounce((v) => {
       store.setFilters({ text: v });
       renderer.requestRender();
     }, 200),
-  })));
+  }), 'Separate several with commas — anything matching any of them is kept.'));
 
   root.appendChild(
     el('div', { class: 'cx-row', style: { marginTop: '10px' } }, [

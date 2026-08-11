@@ -920,6 +920,32 @@ async function main() {
   await page.locator('#dock .cx-seg button', { hasText: 'Dim' }).click();
   await page.waitForTimeout(500);
   check('switching back restores them', (await shown()).dimmed > 0);
+
+  // Several things at once, comma separated. Every other filter narrows; this
+  // box holds a list of what you are looking for, so any of them is a keeper.
+  const kept = () => page.evaluate(() =>
+    [...document.querySelectorAll('.tl-obj')].filter((n) => !n.classList.contains('filtered-out'))
+      .map((n) => n.dataset.label || ''));
+
+  const one = await kept();
+  await filterText.fill('regression, radio');
+  await page.waitForTimeout(800);
+  const two = await kept();
+  check('a second term after a comma widens the filter', two.length > one.length,
+    `${one.length} → ${two.length} kept`);
+  check('and both terms are what came back',
+    two.some((t) => /regression/i.test(t)) && two.some((t) => /radio/i.test(t)), two.join(' | ').slice(0, 90));
+
+  // A term with a space in it stays one phrase rather than two words.
+  await filterText.fill('radio coverage, regression');
+  await page.waitForTimeout(800);
+  check('a phrase between commas is searched whole', (await kept()).some((t) => /radio coverage/i.test(t)),
+    (await kept()).join(' | ').slice(0, 90));
+
+  await filterText.fill('nothing here at all, still nothing');
+  await page.waitForTimeout(800);
+  check('and terms that match nothing keep nothing', (await kept()).length === 0, `${(await kept()).length} kept`);
+
   await filterText.fill('');
   await page.waitForTimeout(600);
 
