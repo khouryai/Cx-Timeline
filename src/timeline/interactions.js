@@ -12,15 +12,15 @@
  * Imports: util, events, dates, model, store, viewport, layout, renderer, connectors.
  */
 
-import { clamp, closestData, hasMod, isTyping } from '../core/util.js';
+import { clamp, closestData, el, hasMod, isTyping } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
 import { MS_DAY, snap as snapMs, fmtDate, toISO, addMonths, addWeeks, addWorkingDays } from '../core/dates.js';
-import { TYPES } from '../core/model.js';
+import { TYPES, LINK_TYPES, linkTypeBetween } from '../core/model.js';
 import * as store from '../core/store.js';
 import * as viewport from './viewport.js';
 import { hitTest, hitTestBox, laneAtY } from './layout.js';
 import * as renderer from './renderer.js';
-import { previewPath } from './connectors.js';
+import { previewPath, anchorUnder } from './connectors.js';
 
 /** Pixels the pointer must travel before a click becomes a drag. */
 const DRAG_THRESHOLD = 3;
@@ -237,6 +237,20 @@ function onCanvasMouseDown(e) {
   const point = toCanvas(e);
   const tool = store.getTool();
 
+  // A press on the striped baseline area is a request to say why the plan
+  // moved, and it is answered before anything else here: the handlers below
+  // would take it for a press on empty canvas and start a marquee.
+  const reasonEl = closestData(e.target, 'reasonFor', dom.canvas);
+  if (reasonEl && e.button === 0 && !spaceHeld && tool !== 'pan') {
+    e.preventDefault();
+    openReasonEditor(reasonEl.dataset.reasonFor);
+    return;
+  }
+  // Clicking away from an open field saves it, the way leaving any other input
+  // does. `blur` alone would not: this press lands before it, and the handlers
+  // below would tear the canvas down underneath the field first.
+  commitReason();
+
   // Object and handle presses call preventDefault to stop text selection,
   // which also suppresses the focus change a click would normally make. Left
   // alone, focus would stay in whatever toolbar dropdown or panel field was
@@ -252,7 +266,11 @@ function onCanvasMouseDown(e) {
     return;
   }
 
-  const anchorEl = closestData(e.target, 'anchor', dom.canvas);
+  // By target first, then by point: a dependency already drawn out of this
+  // anchor is painted over it, so the press lands on the line rather than the
+  // handle — and drawing a second dependency from the same edge has to keep
+  // working.
+  const anchorEl = closestData(e.target, 'anchor', dom.canvas) || anchorUnder(e);
   if (anchorEl) {
     const objEl = closestData(anchorEl, 'objId', dom.canvas);
     if (objEl) {
@@ -339,6 +357,11 @@ function onCanvasMouseLeave() {
 }
 
 function onCanvasDoubleClick(e) {
+  // The striped area belongs to the reason editor, which the first click of
+  // this pair already opened. Without this, the second click would read as a
+  // double-click on empty canvas and offer to create an object there.
+  if (closestData(e.target, 'reasonFor', dom.canvas)) return;
+
   const objEl = closestData(e.target, 'objId', dom.canvas);
   if (objEl) {
     emit(EV.OBJECT_ACTIVATED, { id: objEl.dataset.objId });
@@ -393,6 +416,108 @@ function onCanvasContextMenu(e) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   Why the plan moved
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Type the reason for a change straight into the striped area.
+ *
+ * A comparison already says *what* moved and by how many days; the reason is
+ * the one part of it nothing can derive, and the place to ask for it is the
+ * shape the reader is looking at. So the editor opens over the ghost itself —
+ * over the note beneath it once there is one — rather than in a dialog with the
+ * plan hidden behind it.
+ *
+ * The field is transient by design: it commits on Enter or on losing focus,
+ * abandons on Escape, and writes through `store.setDelayReason`, so one undo
+ * takes the sentence back like any other edit. Nothing about it is stored on
+ * the layout, which is free to reflow underneath the moment it closes.
+ */
+let reasonEditor = null;
+
+function openReasonEditor(objectId) {
+  // Moving from one striped area to the next saves the first, rather than
+  // quietly dropping what was typed into it.
+  commitReason();
+
+  const baseline = store.activeBaseline();
+  const rect = renderer.getLayout()?.byId.get(objectId);
+  const ghost = rect?.ghost;
+  if (!ghost || !baseline) return;
+
+  // A ghost stands for a real bar, and the question "why did this move" is
+  // usually asked with the rest of the activity in front of you — its notes,
+  // its dependencies, the P6 activities it is tracked against. So the press
+  // selects the object first: the inspector then shows all of it, with the
+  // comparison and the same reason field in its Baseline section. That part
+  // happens for a viewer too — reading the plan is not a write.
+  if (!store.isSelected(objectId)) {
+    store.setSelection([objectId]);
+    renderer.requestRender();
+  }
+
+  // A viewer may read the reason but not write one; the store would refuse the
+  // write anyway, and an editor that cannot save is worse than none.
+  if (store.isDocReadOnly()) return;
+
+  const box = ghost.reason || ghost;
+  const current = ghost.reason ? ghost.reason.text : '';
+
+  const input = el('textarea', {
+    class: 'tl-reason-input',
+    rows: '2',
+    placeholder: 'Why did this move?',
+    'aria-label': `Reason ${rect.obj.title} moved from the baseline`,
+    spellcheck: 'true',
+  });
+  input.value = current;
+  input.style.left = `${Math.round(box.x)}px`;
+  input.style.top = `${Math.round(box.y)}px`;
+  input.style.width = `${Math.round(Math.max(200, box.w))}px`;
+
+  // The canvas focuses itself on mousedown and its shortcuts listen on the
+  // window, so a press inside the field must not reach either.
+  input.addEventListener('mousedown', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeReasonEditor();
+    } else if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      commitReason();
+    }
+  });
+  input.addEventListener('blur', () => commitReason());
+
+  dom.overlay.appendChild(input);
+  reasonEditor = { input, objectId, baselineId: baseline.id, original: current };
+  input.focus({ preventScroll: true });
+  input.select();
+}
+
+/** Save what was typed, if it says something different, and close. */
+function commitReason() {
+  if (!reasonEditor) return;
+  const { input, objectId, baselineId, original } = reasonEditor;
+  const value = input.value;
+  closeReasonEditor();
+
+  if (value.trim() === original.trim()) return;
+  if (store.setDelayReason(objectId, baselineId, value)) renderer.requestRender();
+}
+
+/** Take the field away without saving. Safe to call when none is open. */
+function closeReasonEditor() {
+  const open = reasonEditor;
+  if (!open) return;
+  // Cleared first: removing the node fires `blur`, which would otherwise come
+  // straight back in here and commit a field that is already gone.
+  reasonEditor = null;
+  open.input.remove();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    Gestures
    ═══════════════════════════════════════════════════════════════════════ */
 
@@ -436,8 +561,49 @@ function startResize(id, edge, point) {
 }
 
 function startLink(id, side, point) {
-  gesture = { kind: 'link', from: id, side, x: point.x, y: point.y, moved: false };
+  gesture = { kind: 'link', from: id, side, x: point.x, y: point.y, moved: false, targetSide: 'start' };
   dom.canvas.classList.add('connecting');
+}
+
+/**
+ * Light up the end of the target the link is about to arrive at.
+ *
+ * Which edge the pointer is over now decides what kind of dependency this
+ * becomes, so it has to be visible before the mouse is released — otherwise
+ * dropping on the tail of a bar silently produces a different relationship
+ * from dropping on its head.
+ */
+let linkTargetKey = null;
+
+function markLinkTarget(id, side) {
+  const key = id ? `${id}:${side}` : null;
+  if (key === linkTargetKey) return;
+
+  if (linkTargetKey) {
+    const prev = renderer.nodeFor(linkTargetKey.split(':')[0]);
+    prev?.classList.remove('link-target');
+    prev?.querySelector('.tl-link-end')?.remove();
+  }
+  linkTargetKey = key;
+
+  const node = id ? renderer.nodeFor(id) : null;
+  if (!node) return;
+  node.classList.add('link-target');
+  node.appendChild(el('div', { class: `tl-link-end ${side === 'end' ? 'at-end' : 'at-start'}` }));
+}
+
+/**
+ * Which end of the target a dependency was dropped on.
+ *
+ * The far end of a bar means "finish"; anywhere else means "start", so the
+ * ordinary drag onto a bar still produces the finish-to-start link it always
+ * did, and reaching for the bar's tail is what asks for the other kind. A point
+ * object has one date and therefore only a start to arrive at.
+ */
+function dropSide(rect, x) {
+  if (!rect.hasDuration) return 'start';
+  const zone = Math.min(rect.w / 3, 44);
+  return x >= rect.right - zone ? 'end' : 'start';
 }
 
 function placeObject(type, point) {
@@ -510,7 +676,10 @@ function onWindowMouseMove(e) {
         renderer.showLinkPreview(previewPath(fromRect, gesture.side, point.x, point.y, store.getSettings().connectorStyle));
       }
       const hit = layout ? hitTest(layout, point.x, point.y) : null;
-      gesture.target = hit && hit.id !== gesture.from ? hit.id : null;
+      const onTarget = hit && hit.id !== gesture.from ? hit : null;
+      gesture.target = onTarget ? onTarget.id : null;
+      gesture.targetSide = onTarget ? dropSide(onTarget, point.x) : 'start';
+      markLinkTarget(gesture.target, gesture.targetSide);
       break;
     }
 
@@ -620,6 +789,7 @@ function onWindowMouseUp(e) {
   renderer.hideGuide();
   renderer.hideMarquee();
   renderer.hideLinkPreview();
+  markLinkTarget(null, null);
 
   switch (finished.kind) {
     case 'marquee': {
@@ -663,12 +833,16 @@ function onWindowMouseUp(e) {
 
     case 'link': {
       if (finished.target) {
-        const created = store.addLink({ from: finished.from, to: finished.target, type: 'FS' });
+        // The two edges the user dragged between name the relationship, which
+        // is what lets a second arrow join a pair that already has one: the
+        // same two bars can be start-to-start and finish-to-finish at once.
+        const type = linkTypeBetween(finished.side, finished.targetSide || 'start');
+        const created = store.addLink({ from: finished.from, to: finished.target, type });
         if (!created) {
           emit(EV.TOAST, {
             tone: 'warn',
             title: 'Dependency not created',
-            message: 'That link already exists, or it would create a circular dependency.',
+            message: `These two are already joined ${LINK_TYPES[type]?.short || type}, or the link would create a circular dependency.`,
           });
         }
       } else if (finished.moved) {

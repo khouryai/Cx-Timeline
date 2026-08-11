@@ -24,7 +24,7 @@
 
 import { clamp } from '../core/util.js';
 import { MS_DAY, daysBetween } from '../core/dates.js';
-import { TYPES, objectRange, baselineSnapshot } from '../core/model.js';
+import { TYPES, objectRange, baselineSnapshot, delayReason } from '../core/model.js';
 import { getDoc, orderedLanes, getLane, activeBaseline } from '../core/store.js';
 import { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } from './viewport.js';
 import { fontString, textWidth, wrapText, fitWidth } from './text.js';
@@ -65,6 +65,18 @@ const GHOST_GAP = 3;
 const GONE_HEIGHT = 20;
 /** Room the day-count badge on a shift arrow needs, centred on the arrow. */
 const SHIFT_BADGE_W = 48;
+/** Type size of the reason written into a ghost — matched by `.bl-reason` in CSS. */
+const REASON_SIZE = 10;
+/** Horizontal padding around the reason text. */
+const REASON_PAD_X = 6;
+/** Gap between the row (or a stacked ghost) and a reason note below it. */
+const REASON_GAP = 3;
+/** Vertical padding around a reason note placed below the row. */
+const REASON_PAD_Y = 1;
+/** Widest a reason note may be before it wraps. */
+const REASON_MAX_W = 240;
+/** Narrowest measure a wrapped reason note is fitted to. */
+const REASON_MIN_W = 90;
 
 /* ── Fonts ─────────────────────────────────────────────────────────────── */
 
@@ -200,11 +212,27 @@ export function measureLabel(obj, barWidthPx) {
   };
 }
 
+/**
+ * The band a comparison reserves along the bottom of its row: the tier a ghost
+ * drops to when it covers its own bar, plus the reason note when that has to be
+ * written under the row rather than inside the ghost. Read by the packer and by
+ * `objectRect`, so both agree on where the bars stop.
+ */
+function ghostTier(ghost) {
+  if (!ghost) return 0;
+  const stack = ghost.stacked ? GHOST_HEIGHT + GHOST_GAP : 0;
+  const note = ghost.reason && ghost.reason.placement === 'below'
+    ? ghost.reason.height + REASON_PAD_Y * 2 + REASON_GAP
+    : 0;
+  return stack + note;
+}
+
 /** Height one object needs on its packed row, label and ghost included. */
 function rowHeightFor(obj, label, ghost = null) {
   const def = TYPES[obj.type] || TYPES.activity;
-  // A ghost that has to stack takes a tier of its own under the bar.
-  const tier = ghost && ghost.stacked ? GHOST_HEIGHT + GHOST_GAP : 0;
+  // A ghost that has to stack takes a tier of its own under the bar, and a
+  // reason written under the row takes another.
+  const tier = ghostTier(ghost);
 
   if (!def.duration) {
     return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove) + tier;
@@ -238,7 +266,44 @@ function comparisonRows(doc) {
   if (!baseline) return null;
   const rows = baselineSnapshot(doc, baseline);
   if (!rows.length) return null;
-  return new Map(rows.map((row) => [row.id, row]));
+  // The baseline comes along because a ghost carries the reason written
+  // against *that* baseline, and the reason is text on the canvas: it has to
+  // be measured here with everything else.
+  return { baseline, byId: new Map(rows.map((row) => [row.id, row])) };
+}
+
+/**
+ * The reason note on a ghost: where it goes and how much room it needs.
+ *
+ * Inside the striped area when the whole sentence fits on one line in it —
+ * that is where the reader is already looking, and it costs the row nothing.
+ * Otherwise it wraps into a note along the bottom of the row, measured here so
+ * `packRows` can reserve the width and the row can grow to the height. A
+ * stacked ghost is an 11px tier with no room for type, so it never takes the
+ * text inside.
+ */
+function measureReason(text, ghostWidth, stacked) {
+  const value = String(text || '').trim();
+  if (!value) return null;
+
+  const font = fontString({ size: REASON_SIZE, weight: 600 });
+  const lineHeight = Math.round(REASON_SIZE * 1.28);
+  const oneLine = Math.ceil(textWidth(value, font));
+
+  if (!stacked && oneLine + REASON_PAD_X * 2 + 2 <= ghostWidth) {
+    return { text: value, placement: 'inside', lines: [value], lineHeight, width: oneLine, height: lineHeight };
+  }
+
+  const fitted = fitWidth(value, font, { maxWidth: REASON_MAX_W, maxLines: 3, minWidth: REASON_MIN_W });
+  const wrapped = wrapText(value, fitted.width, font, { lineHeight });
+  return {
+    text: value,
+    placement: 'below',
+    lines: wrapped.lines,
+    lineHeight,
+    width: Math.ceil(wrapped.width),
+    height: wrapped.lines.length * lineHeight,
+  };
 }
 
 /**
@@ -252,11 +317,12 @@ function comparisonRows(doc) {
  * to hold it. Because the test is in pixels, zooming out until two dates touch
  * splits them, and zooming back in re-joins them.
  *
- * `from`/`to` are the span the ghost occupies, arrow badge included, which is
- * what `packRows` reserves. No label term: a ghost carries no text of its own,
- * and its neighbours reserve the room their labels need themselves.
+ * `from`/`to` are the span the ghost occupies — arrow badge, and the reason
+ * written against this baseline, included. That is what `packRows` reserves,
+ * so an annotated ghost pushes its neighbours onto another row rather than
+ * printing over them.
  */
-function measureGhost(obj, snap, barWidth) {
+function measureGhost(obj, snap, barWidth, baselineId = null) {
   if (!snap) return null;
   const def = TYPES[obj.type] || TYPES.activity;
   const hasDuration = !!def.duration;
@@ -283,6 +349,12 @@ function measureGhost(obj, snap, barWidth) {
   // Bands and containers are lane-tall backdrops with nothing to stack under,
   // and a point glyph's label already owns the space below it.
   const canStack = hasDuration && def.shape !== 'band' && def.shape !== 'container';
+  const stacked = canStack && left < barRight + GHOST_GAP && left + width > barLeft - GHOST_GAP;
+
+  const reason = measureReason(delayReason(obj, baselineId), width, stacked);
+  const reasonRight = reason && reason.placement === 'below'
+    ? left + reason.width + REASON_PAD_X * 2
+    : -Infinity;
 
   return {
     snap,
@@ -292,9 +364,10 @@ function measureGhost(obj, snap, barWidth) {
     endMs: snapEnd,
     left,
     width,
-    stacked: canStack && left < barRight + GHOST_GAP && left + width > barLeft - GHOST_GAP,
+    stacked,
+    reason,
     from: Math.min(left, mid - SHIFT_BADGE_W / 2),
-    to: Math.max(left + width, mid + SHIFT_BADGE_W / 2),
+    to: Math.max(left + width, mid + SHIFT_BADGE_W / 2, reasonRight),
   };
 }
 
@@ -421,7 +494,9 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
   const byId = new Map();
   const removed = [];
 
-  const snapshot = comparisonRows(doc);
+  const comparison = comparisonRows(doc);
+  const snapshot = comparison ? comparison.byId : null;
+  const baselineId = comparison ? comparison.baseline.id : null;
   const goneByLane = new Map();
   if (snapshot) {
     const liveIds = new Set(doc.objects.map((o) => o.id));
@@ -453,7 +528,7 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
         ? Math.max(MIN_BAR_PX, durationToPx(Math.max(obj.end - obj.start, MS_DAY * 0.25)))
         : POINT_SIZE;
       const label = measureLabel(obj, barWidth);
-      const ghost = snapshot ? measureGhost(obj, snapshot.get(obj.id), barWidth) : null;
+      const ghost = snapshot ? measureGhost(obj, snapshot.get(obj.id), barWidth, baselineId) : null;
       return { obj, label, barWidth, ghost, height: rowHeightFor(obj, label, ghost) };
     });
 
@@ -469,18 +544,23 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
       : packRows(packable);
 
     // Each row is as tall as the tallest thing standing on it. A row holding a
-    // ghost that had to stack also reserves a tier along its bottom edge — for
-    // the whole row, not just that one object, so bars sharing a row keep
-    // sharing a height and the row does not come out ragged.
-    const rowHeights = new Array(rows).fill(ROW_HEIGHT);
+    // ghost that had to stack — or a reason written under the row — also
+    // reserves a tier along its bottom edge, for the whole row rather than that
+    // one object, so bars sharing a row keep sharing a height and the row does
+    // not come out ragged. The two are summed rather than maxed: the tier is
+    // taken out of the bars' height, so a row whose tallest label and whose
+    // deepest tier belong to different objects still clears both.
+    const rowContent = new Array(rows).fill(ROW_HEIGHT);
     const rowTiers = new Array(rows).fill(0);
     if (!collapsed) {
       for (const entry of packable) {
         const row = assigned.get(entry.obj.id) || 0;
-        rowHeights[row] = Math.max(rowHeights[row], entry.height);
-        if (entry.ghost && entry.ghost.stacked) rowTiers[row] = GHOST_HEIGHT + GHOST_GAP;
+        const tier = ghostTier(entry.ghost);
+        rowContent[row] = Math.max(rowContent[row], entry.height - tier);
+        rowTiers[row] = Math.max(rowTiers[row], tier);
       }
     }
+    const rowHeights = rowContent.map((height, r) => height + rowTiers[r]);
 
     const rowTops = [];
     let cursor = 0;
@@ -641,16 +721,7 @@ export function objectRect(obj, laneEntry, row, measured, collapsed = false) {
      * behind it when the two are clear of each other, in its own tier under the
      * row when they are not. Null unless the document is comparing.
      */
-    ghost: measured.ghost
-      ? {
-          ...measured.ghost,
-          stacked,
-          x: measured.ghost.left,
-          w: measured.ghost.width,
-          y: stacked ? rowTop + rowH + GHOST_GAP : top,
-          h: stacked ? GHOST_HEIGHT : height,
-        }
-      : null,
+    ghost: measured.ghost ? placedGhost(measured.ghost, { stacked, top, height, rowTop, rowH, collapsed }) : null,
     x: left,
     y: top,
     w: width,
@@ -664,6 +735,36 @@ export function objectRect(obj, laneEntry, row, measured, collapsed = false) {
     labelLeft: left - label.extraLeft,
     labelRight: left + width + label.extraRight,
   };
+}
+
+/**
+ * Turn a measured ghost into a drawn one: the striped rectangle, and the box
+ * its reason occupies.
+ *
+ * The note sits inside the rectangle when it was measured to fit there, and
+ * otherwise in the tier `ghostTier` reserved along the bottom of the row —
+ * under the stacked ghost when there is one, so the pair reads downwards from
+ * the bar. A collapsed lane has no tiers and no room for prose: the reason is
+ * still on the object, it is simply not drawn until the lane is opened.
+ */
+function placedGhost(ghost, { stacked, top, height, rowTop, rowH, collapsed }) {
+  const y = stacked ? rowTop + rowH + GHOST_GAP : top;
+  const h = stacked ? GHOST_HEIGHT : height;
+
+  let reason = null;
+  if (ghost.reason && !collapsed) {
+    reason = ghost.reason.placement === 'inside'
+      ? { ...ghost.reason, x: ghost.left, y, w: ghost.width, h }
+      : {
+          ...ghost.reason,
+          x: ghost.left,
+          y: (stacked ? y + h : rowTop + rowH) + REASON_GAP,
+          w: ghost.reason.width + REASON_PAD_X * 2,
+          h: ghost.reason.height + REASON_PAD_Y * 2,
+        };
+  }
+
+  return { ...ghost, stacked, reason, x: ghost.left, w: ghost.width, y, h };
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

@@ -27,6 +27,8 @@ import {
   remainingDays,
   statusOf,
   effectiveToday,
+  isDerivedBaseline,
+  delayReason,
 } from '../core/model.js';
 import * as store from '../core/store.js';
 import { objectHealth, linkViolations, evaluateLink } from '../core/analysis.js';
@@ -196,6 +198,7 @@ function renderSingle(obj) {
     healthStrip(obj),
     sectionOf('identity', 'Identity', identityFields(obj, def, lane)),
     sectionOf('schedule', 'Schedule', scheduleFields(obj, def)),
+    sectionOf('baseline', 'Baseline comparison', baselineFields(obj)),
     def.fields.length ? sectionOf('details', 'Details', detailFields(obj, def)) : null,
     sectionOf('notes', 'Notes', notesFields(obj)),
     sectionOf('attachments', 'Attachments', [attachmentList(obj.id).root]),
@@ -701,6 +704,74 @@ function appearanceFields(obj) {
       onChange: (v) => setStyle({ rotation: v }, 'Rotate'),
     }), 'Applies to notes, callouts, text boxes and shapes.'),
   ];
+}
+
+/* ── Baseline comparison ───────────────────────────────────────────────── */
+
+/**
+ * What the comparison on the canvas is saying about this object.
+ *
+ * Clicking the striped area selects the bar, so this is what the click leads
+ * to: where the baseline had it, where it is now, how far that is, and the
+ * reason — the same sentence the canvas holds, editable from either place.
+ *
+ * A derived baseline is named for what it is. Its dates are the roll-up of
+ * whatever P6 activities the bar is linked to right now, so the reader is sent
+ * to the P6 section rather than being left to assume a frozen snapshot.
+ * Null — and therefore no section at all — when the plan is not comparing.
+ */
+function baselineFields(obj) {
+  const doc = store.getDoc();
+  const baseline = store.activeBaseline();
+  if (!baseline || !doc.settings.showBaseline) return null;
+
+  const def = TYPES[obj.type] || TYPES.activity;
+  const snap = store.snapshotOf(baseline).find((row) => row.id === obj.id) || null;
+  const derived = isDerivedBaseline(baseline);
+  const out = [
+    el('div', { class: 'cx-hint', text: derived
+      ? `${baseline.name} — follows the P6 ${baseline.p6Kind === 'progress' ? 'progress' : 'baseline'} dates of whatever this bar is linked to.`
+      : `${baseline.name} — frozen ${fmtDate(baseline.created, 'medium')}.` }),
+  ];
+
+  if (!snap) {
+    out.push(el('div', { class: 'cx-hint', text: derived
+      ? 'Nothing linked from the P6 register, so there is nothing to compare against. Link an activity in the P6 section below.'
+      : 'Added since this baseline was taken: it has nothing to compare against.' }));
+    return out;
+  }
+
+  const snapEnd = def.duration ? (snap.end ?? snap.start) : snap.start;
+  const startShift = daysBetween(snap.start, obj.start);
+  const endShift = def.duration ? daysBetween(snapEnd, obj.end) : startShift;
+  const tone = endShift > 0 ? 'bad' : endShift < 0 ? 'good' : 'muted';
+
+  out.push(
+    el('div', { class: 'cx-chipstats' }, [
+      chipStat('Was', def.duration
+        ? `${fmtDate(snap.start, 'numeric')} → ${fmtDate(snapEnd, 'numeric')}`
+        : fmtDate(snap.start, 'numeric'), 'muted'),
+      chipStat('Now', def.duration
+        ? `${fmtDate(obj.start, 'numeric')} → ${fmtDate(obj.end, 'numeric')}`
+        : fmtDate(obj.start, 'numeric'), 'muted'),
+      chipStat('Start', shift(startShift), startShift ? tone : 'muted'),
+      def.duration ? chipStat('Finish', shift(endShift), endShift ? tone : 'muted') : null,
+    ].filter(Boolean)),
+    field('Reason for the change', textInput({
+      value: delayReason(obj, baseline.id),
+      placeholder: 'Why did this move?',
+      onInput: (v) => {
+        store.setDelayReason(obj.id, baseline.id, v);
+        renderer.requestRender();
+      },
+    }), 'Shown in the striped area on the timeline, in the variance export and in the PDF.')
+  );
+
+  if (!startShift && !endShift) {
+    out.push(el('div', { class: 'cx-hint', text: 'Sitting exactly where the baseline had it.' }));
+  }
+
+  return out;
 }
 
 /* ── P6 ────────────────────────────────────────────────────────────────── */

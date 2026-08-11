@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 43   Built: 2026-08-10T20:58:44.847Z
+ * Modules: 43   Built: 2026-08-11T16:57:26.718Z
  */
 (function () {
   'use strict';
@@ -1608,6 +1608,22 @@ __mods["core/model.js"] = function (__x, __req) {
 
   const CONNECTOR_STYLES = ['orthogonal', 'curved', 'straight'];
 
+  /**
+   * The relationship described by the two ends a dependency was drawn between.
+   *
+   * The four types are exactly the four pairs of edges, so a drag from one edge
+   * to another names its own type — which is what lets a pair of objects carry
+   * more than one dependency: "start together" and "finish together" are two
+   * different statements about the same two bars, and a plan routinely makes
+   * both. Falls back to FS, the relationship nine links in ten turn out to be.
+   */
+  function linkTypeBetween(fromSide, toSide) {
+    for (const [key, spec] of Object.entries(LINK_TYPES)) {
+      if (spec.from === fromSide && spec.to === toSide) return key;
+    }
+    return 'FS';
+  }
+
   /* ══════════════════════════════════════════════════════════════════════════
      The P6 register
 
@@ -1837,6 +1853,25 @@ __mods["core/model.js"] = function (__x, __req) {
   /** True when a baseline follows the P6 register rather than a frozen copy. */
   function isDerivedBaseline(baseline) {
     return baseline?.source === 'p6';
+  }
+
+  /**
+   * Why an object no longer sits where the baseline had it.
+   *
+   * A comparison shows *that* something moved and by how many days; the one
+   * thing the PMO asks next — why — is the only part of it that cannot be
+   * derived, so it is stored, on the object, keyed by the baseline it answers
+   * for. Keyed rather than a single field because a plan is routinely compared
+   * against more than one baseline, and "waiting on the client's power-up" is
+   * the reason against the March freeze, not against the P6 progress import.
+   *
+   * The P6 baselines keep stable ids (`bl_p6_baseline` / `bl_p6_progress`), so a
+   * reason written against one survives the next import re-creating it.
+   */
+  function delayReason(obj, baselineId) {
+    if (!obj || !baselineId) return '';
+    const reasons = obj.data?.delayReasons;
+    return reasons && typeof reasons === 'object' ? String(reasons[baselineId] || '') : '';
   }
 
   /** The marker for a P6-tracking baseline. Holds no rows on purpose. */
@@ -2438,6 +2473,7 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listValuesInUse", { get: () => listValuesInUse, enumerable: true });
   Object.defineProperty(__x, "LINK_TYPES", { get: () => LINK_TYPES, enumerable: true });
   Object.defineProperty(__x, "CONNECTOR_STYLES", { get: () => CONNECTOR_STYLES, enumerable: true });
+  Object.defineProperty(__x, "linkTypeBetween", { get: () => linkTypeBetween, enumerable: true });
   Object.defineProperty(__x, "P6_KINDS", { get: () => P6_KINDS, enumerable: true });
   Object.defineProperty(__x, "emptyRegister", { get: () => emptyRegister, enumerable: true });
   Object.defineProperty(__x, "makeP6Activity", { get: () => makeP6Activity, enumerable: true });
@@ -2454,6 +2490,7 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "p6Placed", { get: () => p6Placed, enumerable: true });
   Object.defineProperty(__x, "baselineSnapshot", { get: () => baselineSnapshot, enumerable: true });
   Object.defineProperty(__x, "isDerivedBaseline", { get: () => isDerivedBaseline, enumerable: true });
+  Object.defineProperty(__x, "delayReason", { get: () => delayReason, enumerable: true });
   Object.defineProperty(__x, "makeP6Baseline", { get: () => makeP6Baseline, enumerable: true });
   Object.defineProperty(__x, "p6PlacedIds", { get: () => p6PlacedIds, enumerable: true });
   Object.defineProperty(__x, "defaultStyle", { get: () => defaultStyle, enumerable: true });
@@ -4102,11 +4139,20 @@ __mods["core/store.js"] = function (__x, __req) {
 
   /* ── Links ─────────────────────────────────────────────────────────────── */
 
+  /**
+   * Add a dependency.
+   *
+   * A pair of objects may carry several of them, because the four relationship
+   * types are four different statements about the same two bars — "these start
+   * together" and "this cannot finish until that one has" are both true of a
+   * commissioning pair all the time, and each is drawn between its own two edges,
+   * so two of them never land on one another. What is refused is the same
+   * relationship twice: that one would draw exactly on top of itself.
+   */
   function addLink(props) {
     const link = makeLink(props);
     if (!link.from || !link.to || link.from === link.to) return null;
-    const exists = doc.links.some((l) => l.from === link.from && l.to === link.to);
-    if (exists) return null;
+    if (linkExists(doc.links, link.from, link.to, link.type)) return null;
     if (createsCycle(link.from, link.to)) return null;
     edit('Add dependency', (d) => {
       d.links.push(link);
@@ -4114,10 +4160,19 @@ __mods["core/store.js"] = function (__x, __req) {
     return link.id;
   }
 
+  /** True when these two objects are already joined by this relationship. */
+  function linkExists(links, from, to, type, exceptId = null) {
+    return links.some((l) => l.id !== exceptId && l.from === from && l.to === to && l.type === type);
+  }
+
   function updateLink(id, patch, label = 'Edit dependency') {
     return edit(label, (d) => {
       const l = d.links.find((x) => x.id === id);
       if (!l) return false;
+      // Retyping a link is another way to reach a pair that already has that
+      // relationship — and the two would then be drawn along the same edges, one
+      // invisibly beneath the other.
+      if (patch.type && patch.type !== l.type && linkExists(d.links, l.from, l.to, patch.type, l.id)) return false;
       Object.assign(l, patch);
     });
   }
@@ -4235,6 +4290,35 @@ __mods["core/store.js"] = function (__x, __req) {
         d.settings.activeBaseline = d.baselines.length ? d.baselines[d.baselines.length - 1].id : null;
         if (!d.settings.activeBaseline) d.settings.showBaseline = false;
       }
+    });
+  }
+
+  /**
+   * Record why an object moved away from a baseline — or clear it, when the text
+   * is emptied.
+   *
+   * Stored on the object, keyed by baseline, so it travels with the bar rather
+   * than with the comparison, and one undo puts it back like any other edit.
+   * The empty case removes the key rather than storing `''`: an object that was
+   * never annotated and one whose note was deleted must serialise the same.
+   */
+  function setDelayReason(objectId, baselineId, text) {
+    const value = String(text ?? '').trim();
+    if (!objectId || !baselineId) return false;
+
+    return edit(value ? 'Set reason for change' : 'Clear reason for change', (d) => {
+      const obj = d.objects.find((o) => o.id === objectId);
+      if (!obj) return false;
+      const reasons = { ...(obj.data?.delayReasons || {}) };
+      if (value === (reasons[baselineId] || '')) return false;
+
+      if (value) reasons[baselineId] = value;
+      else delete reasons[baselineId];
+
+      obj.data = { ...(obj.data || {}) };
+      if (Object.keys(reasons).length) obj.data.delayReasons = reasons;
+      else delete obj.data.delayReasons;
+      obj.modified = Date.now();
     });
   }
 
@@ -4716,6 +4800,7 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "setMeta", { get: () => setMeta, enumerable: true });
   Object.defineProperty(__x, "addBaseline", { get: () => addBaseline, enumerable: true });
   Object.defineProperty(__x, "removeBaseline", { get: () => removeBaseline, enumerable: true });
+  Object.defineProperty(__x, "setDelayReason", { get: () => setDelayReason, enumerable: true });
   Object.defineProperty(__x, "activeBaseline", { get: () => activeBaseline, enumerable: true });
   Object.defineProperty(__x, "addAttachmentRecord", { get: () => addAttachmentRecord, enumerable: true });
   Object.defineProperty(__x, "removeAttachmentRecord", { get: () => removeAttachmentRecord, enumerable: true });
@@ -6735,7 +6820,7 @@ __mods["core/analysis.js"] = function (__x, __req) {
    */
 
   const { MS_DAY, daysBetween, workingDaysBetween } = __req("core/dates.js");
-  const { TYPES, LINK_TYPES, effectiveToday, baselineSnapshot } = __req("core/model.js");
+  const { TYPES, LINK_TYPES, effectiveToday, baselineSnapshot, delayReason } = __req("core/model.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      Memoisation
@@ -7095,6 +7180,10 @@ __mods["core/analysis.js"] = function (__x, __req) {
         startShift,
         endShift,
         durationChange: nowDuration - baseDuration,
+        // What the planner wrote into the striped area on the canvas. The only
+        // part of a variance row that is not derived, and the part a review asks
+        // for first — so it travels with the row, into the pane and the CSV.
+        reason: delayReason(obj, baseline.id),
         baseline: snap,
         current: obj,
       });
@@ -7992,7 +8081,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
 
   const { clamp } = __req("core/util.js");
   const { MS_DAY, daysBetween } = __req("core/dates.js");
-  const { TYPES, objectRange, baselineSnapshot } = __req("core/model.js");
+  const { TYPES, objectRange, baselineSnapshot, delayReason } = __req("core/model.js");
   const { getDoc, orderedLanes, getLane, activeBaseline } = __req("core/store.js");
   const { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } = __req("timeline/viewport.js");
   const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
@@ -8033,6 +8122,18 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   const GONE_HEIGHT = 20;
   /** Room the day-count badge on a shift arrow needs, centred on the arrow. */
   const SHIFT_BADGE_W = 48;
+  /** Type size of the reason written into a ghost — matched by `.bl-reason` in CSS. */
+  const REASON_SIZE = 10;
+  /** Horizontal padding around the reason text. */
+  const REASON_PAD_X = 6;
+  /** Gap between the row (or a stacked ghost) and a reason note below it. */
+  const REASON_GAP = 3;
+  /** Vertical padding around a reason note placed below the row. */
+  const REASON_PAD_Y = 1;
+  /** Widest a reason note may be before it wraps. */
+  const REASON_MAX_W = 240;
+  /** Narrowest measure a wrapped reason note is fitted to. */
+  const REASON_MIN_W = 90;
 
   /* ── Fonts ─────────────────────────────────────────────────────────────── */
 
@@ -8168,11 +8269,27 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     };
   }
 
+  /**
+   * The band a comparison reserves along the bottom of its row: the tier a ghost
+   * drops to when it covers its own bar, plus the reason note when that has to be
+   * written under the row rather than inside the ghost. Read by the packer and by
+   * `objectRect`, so both agree on where the bars stop.
+   */
+  function ghostTier(ghost) {
+    if (!ghost) return 0;
+    const stack = ghost.stacked ? GHOST_HEIGHT + GHOST_GAP : 0;
+    const note = ghost.reason && ghost.reason.placement === 'below'
+      ? ghost.reason.height + REASON_PAD_Y * 2 + REASON_GAP
+      : 0;
+    return stack + note;
+  }
+
   /** Height one object needs on its packed row, label and ghost included. */
   function rowHeightFor(obj, label, ghost = null) {
     const def = TYPES[obj.type] || TYPES.activity;
-    // A ghost that has to stack takes a tier of its own under the bar.
-    const tier = ghost && ghost.stacked ? GHOST_HEIGHT + GHOST_GAP : 0;
+    // A ghost that has to stack takes a tier of its own under the bar, and a
+    // reason written under the row takes another.
+    const tier = ghostTier(ghost);
 
     if (!def.duration) {
       return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove) + tier;
@@ -8206,7 +8323,44 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     if (!baseline) return null;
     const rows = baselineSnapshot(doc, baseline);
     if (!rows.length) return null;
-    return new Map(rows.map((row) => [row.id, row]));
+    // The baseline comes along because a ghost carries the reason written
+    // against *that* baseline, and the reason is text on the canvas: it has to
+    // be measured here with everything else.
+    return { baseline, byId: new Map(rows.map((row) => [row.id, row])) };
+  }
+
+  /**
+   * The reason note on a ghost: where it goes and how much room it needs.
+   *
+   * Inside the striped area when the whole sentence fits on one line in it —
+   * that is where the reader is already looking, and it costs the row nothing.
+   * Otherwise it wraps into a note along the bottom of the row, measured here so
+   * `packRows` can reserve the width and the row can grow to the height. A
+   * stacked ghost is an 11px tier with no room for type, so it never takes the
+   * text inside.
+   */
+  function measureReason(text, ghostWidth, stacked) {
+    const value = String(text || '').trim();
+    if (!value) return null;
+
+    const font = fontString({ size: REASON_SIZE, weight: 600 });
+    const lineHeight = Math.round(REASON_SIZE * 1.28);
+    const oneLine = Math.ceil(textWidth(value, font));
+
+    if (!stacked && oneLine + REASON_PAD_X * 2 + 2 <= ghostWidth) {
+      return { text: value, placement: 'inside', lines: [value], lineHeight, width: oneLine, height: lineHeight };
+    }
+
+    const fitted = fitWidth(value, font, { maxWidth: REASON_MAX_W, maxLines: 3, minWidth: REASON_MIN_W });
+    const wrapped = wrapText(value, fitted.width, font, { lineHeight });
+    return {
+      text: value,
+      placement: 'below',
+      lines: wrapped.lines,
+      lineHeight,
+      width: Math.ceil(wrapped.width),
+      height: wrapped.lines.length * lineHeight,
+    };
   }
 
   /**
@@ -8220,11 +8374,12 @@ __mods["timeline/layout.js"] = function (__x, __req) {
    * to hold it. Because the test is in pixels, zooming out until two dates touch
    * splits them, and zooming back in re-joins them.
    *
-   * `from`/`to` are the span the ghost occupies, arrow badge included, which is
-   * what `packRows` reserves. No label term: a ghost carries no text of its own,
-   * and its neighbours reserve the room their labels need themselves.
+   * `from`/`to` are the span the ghost occupies — arrow badge, and the reason
+   * written against this baseline, included. That is what `packRows` reserves,
+   * so an annotated ghost pushes its neighbours onto another row rather than
+   * printing over them.
    */
-  function measureGhost(obj, snap, barWidth) {
+  function measureGhost(obj, snap, barWidth, baselineId = null) {
     if (!snap) return null;
     const def = TYPES[obj.type] || TYPES.activity;
     const hasDuration = !!def.duration;
@@ -8251,6 +8406,12 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     // Bands and containers are lane-tall backdrops with nothing to stack under,
     // and a point glyph's label already owns the space below it.
     const canStack = hasDuration && def.shape !== 'band' && def.shape !== 'container';
+    const stacked = canStack && left < barRight + GHOST_GAP && left + width > barLeft - GHOST_GAP;
+
+    const reason = measureReason(delayReason(obj, baselineId), width, stacked);
+    const reasonRight = reason && reason.placement === 'below'
+      ? left + reason.width + REASON_PAD_X * 2
+      : -Infinity;
 
     return {
       snap,
@@ -8260,9 +8421,10 @@ __mods["timeline/layout.js"] = function (__x, __req) {
       endMs: snapEnd,
       left,
       width,
-      stacked: canStack && left < barRight + GHOST_GAP && left + width > barLeft - GHOST_GAP,
+      stacked,
+      reason,
       from: Math.min(left, mid - SHIFT_BADGE_W / 2),
-      to: Math.max(left + width, mid + SHIFT_BADGE_W / 2),
+      to: Math.max(left + width, mid + SHIFT_BADGE_W / 2, reasonRight),
     };
   }
 
@@ -8389,7 +8551,9 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     const byId = new Map();
     const removed = [];
 
-    const snapshot = comparisonRows(doc);
+    const comparison = comparisonRows(doc);
+    const snapshot = comparison ? comparison.byId : null;
+    const baselineId = comparison ? comparison.baseline.id : null;
     const goneByLane = new Map();
     if (snapshot) {
       const liveIds = new Set(doc.objects.map((o) => o.id));
@@ -8421,7 +8585,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
           ? Math.max(MIN_BAR_PX, durationToPx(Math.max(obj.end - obj.start, MS_DAY * 0.25)))
           : POINT_SIZE;
         const label = measureLabel(obj, barWidth);
-        const ghost = snapshot ? measureGhost(obj, snapshot.get(obj.id), barWidth) : null;
+        const ghost = snapshot ? measureGhost(obj, snapshot.get(obj.id), barWidth, baselineId) : null;
         return { obj, label, barWidth, ghost, height: rowHeightFor(obj, label, ghost) };
       });
 
@@ -8437,18 +8601,23 @@ __mods["timeline/layout.js"] = function (__x, __req) {
         : packRows(packable);
 
       // Each row is as tall as the tallest thing standing on it. A row holding a
-      // ghost that had to stack also reserves a tier along its bottom edge — for
-      // the whole row, not just that one object, so bars sharing a row keep
-      // sharing a height and the row does not come out ragged.
-      const rowHeights = new Array(rows).fill(ROW_HEIGHT);
+      // ghost that had to stack — or a reason written under the row — also
+      // reserves a tier along its bottom edge, for the whole row rather than that
+      // one object, so bars sharing a row keep sharing a height and the row does
+      // not come out ragged. The two are summed rather than maxed: the tier is
+      // taken out of the bars' height, so a row whose tallest label and whose
+      // deepest tier belong to different objects still clears both.
+      const rowContent = new Array(rows).fill(ROW_HEIGHT);
       const rowTiers = new Array(rows).fill(0);
       if (!collapsed) {
         for (const entry of packable) {
           const row = assigned.get(entry.obj.id) || 0;
-          rowHeights[row] = Math.max(rowHeights[row], entry.height);
-          if (entry.ghost && entry.ghost.stacked) rowTiers[row] = GHOST_HEIGHT + GHOST_GAP;
+          const tier = ghostTier(entry.ghost);
+          rowContent[row] = Math.max(rowContent[row], entry.height - tier);
+          rowTiers[row] = Math.max(rowTiers[row], tier);
         }
       }
+      const rowHeights = rowContent.map((height, r) => height + rowTiers[r]);
 
       const rowTops = [];
       let cursor = 0;
@@ -8609,16 +8778,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
        * behind it when the two are clear of each other, in its own tier under the
        * row when they are not. Null unless the document is comparing.
        */
-      ghost: measured.ghost
-        ? {
-            ...measured.ghost,
-            stacked,
-            x: measured.ghost.left,
-            w: measured.ghost.width,
-            y: stacked ? rowTop + rowH + GHOST_GAP : top,
-            h: stacked ? GHOST_HEIGHT : height,
-          }
-        : null,
+      ghost: measured.ghost ? placedGhost(measured.ghost, { stacked, top, height, rowTop, rowH, collapsed }) : null,
       x: left,
       y: top,
       w: width,
@@ -8632,6 +8792,36 @@ __mods["timeline/layout.js"] = function (__x, __req) {
       labelLeft: left - label.extraLeft,
       labelRight: left + width + label.extraRight,
     };
+  }
+
+  /**
+   * Turn a measured ghost into a drawn one: the striped rectangle, and the box
+   * its reason occupies.
+   *
+   * The note sits inside the rectangle when it was measured to fit there, and
+   * otherwise in the tier `ghostTier` reserved along the bottom of the row —
+   * under the stacked ghost when there is one, so the pair reads downwards from
+   * the bar. A collapsed lane has no tiers and no room for prose: the reason is
+   * still on the object, it is simply not drawn until the lane is opened.
+   */
+  function placedGhost(ghost, { stacked, top, height, rowTop, rowH, collapsed }) {
+    const y = stacked ? rowTop + rowH + GHOST_GAP : top;
+    const h = stacked ? GHOST_HEIGHT : height;
+
+    let reason = null;
+    if (ghost.reason && !collapsed) {
+      reason = ghost.reason.placement === 'inside'
+        ? { ...ghost.reason, x: ghost.left, y, w: ghost.width, h }
+        : {
+            ...ghost.reason,
+            x: ghost.left,
+            y: (stacked ? y + h : rowTop + rowH) + REASON_GAP,
+            w: ghost.reason.width + REASON_PAD_X * 2,
+            h: ghost.reason.height + REASON_PAD_Y * 2,
+          };
+    }
+
+    return { ...ghost, stacked, reason, x: ghost.left, w: ghost.width, y, h };
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -8986,6 +9176,12 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
 
       if (onSelect) {
         hit.addEventListener('mousedown', (e) => {
+          // A connector leaves its bar exactly where that bar's link anchor sits,
+          // and the connector layer draws above the objects — so without this,
+          // the first dependency out of an anchor would block every later one
+          // from being drawn there. The anchor wins; the press falls through to
+          // the canvas, which starts the drag.
+          if (anchorUnder(e)) return;
           e.stopPropagation();
           onSelect(item.link, e);
         });
@@ -8993,6 +9189,20 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
 
       svg.appendChild(group);
     }
+  }
+
+  /**
+   * The link anchor under the pointer, if any.
+   *
+   * Asked by point rather than by event target: the thing that was hit is the
+   * connector, and the anchor is underneath it.
+   */
+  function anchorUnder(e) {
+    if (typeof document === 'undefined' || typeof document.elementsFromPoint !== 'function') return null;
+    for (const node of document.elementsFromPoint(e.clientX, e.clientY)) {
+      if (node.classList?.contains('tl-anchor')) return node;
+    }
+    return null;
   }
 
   /** Preview path drawn while the user drags a new dependency. */
@@ -9008,6 +9218,7 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
   Object.defineProperty(__x, "routeLink", { get: () => routeLink, enumerable: true });
   Object.defineProperty(__x, "routeAll", { get: () => routeAll, enumerable: true });
   Object.defineProperty(__x, "renderConnectors", { get: () => renderConnectors, enumerable: true });
+  Object.defineProperty(__x, "anchorUnder", { get: () => anchorUnder, enumerable: true });
   Object.defineProperty(__x, "previewPath", { get: () => previewPath, enumerable: true });
 };
 
@@ -10212,15 +10423,22 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
    *   the shift      an arrow from the baseline finish to the current finish,
    *                  labelled with the number of days, coloured by direction.
    *                  This is the part that makes a slip legible across a lane,
+   *   the reason     what the user typed into the striped area to explain the
+   *                  move — the one part of the comparison that cannot be
+   *                  derived, and the part a PMO reads first,
    *   what is gone   objects that were in the baseline and are no longer in the
    *                  plan, drawn as hollow outlines where they used to sit.
    *                  Nothing else in the application shows those at all.
    *
-   * Everything here is derived from the document and the snapshot on every
-   * frame; no comparison state is stored, so it cannot go stale.
+   * Everything but the reason is derived from the document and the snapshot on
+   * every frame; no comparison state is stored, so it cannot go stale. The
+   * reason is stored on the object, and it is placed by `computeLayout` like any
+   * other text on the canvas — this only prints what it was handed.
    */
   function renderBaseline(layout, settings) {
-    dom.overlay.querySelectorAll('.tl-baseline, .tl-shift, .tl-baseline-gone').forEach((n) => n.remove());
+    dom.overlay
+      .querySelectorAll('.tl-baseline, .tl-shift, .tl-baseline-gone, .tl-baseline-reason')
+      .forEach((n) => n.remove());
     const banner = dom.root?.querySelector('.tl-baseline-bar');
 
     const baseline = settings.showBaseline ? activeBaseline() : null;
@@ -10242,18 +10460,35 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
       const tone = endShift > 0 ? 'slip' : endShift < 0 ? 'ahead' : 'reshaped';
       counts[tone]++;
 
-      fragment.appendChild(
-        el('div', {
-          class: `tl-baseline ${tone}${ghost.stacked ? ' stacked' : ''}`,
-          style: {
-            left: `${ghost.x}px`,
-            top: `${ghost.y}px`,
-            width: `${ghost.w}px`,
-            height: `${ghost.h}px`,
-          },
-          title: baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration),
-        })
-      );
+      const reason = ghost.reason;
+      const node = el('div', {
+        class: `tl-baseline ${tone}${ghost.stacked ? ' stacked' : ''}${reason ? ' annotated' : ''}`,
+        // The striped area is where the reason is written, so it is a target
+        // rather than decoration; interactions turns a press on it into an
+        // editor over this box.
+        'data-reason-for': rect.obj.id,
+        role: 'button',
+        'aria-label': `${rect.obj.title} — ${reason ? `reason: ${reason.text}` : 'add a reason for this change'}`,
+        style: {
+          left: `${ghost.x}px`,
+          top: `${ghost.y}px`,
+          width: `${ghost.w}px`,
+          height: `${ghost.h}px`,
+        },
+        title: `${baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration)}\n${
+          reason ? `Reason: ${reason.text}\nClick to edit it.` : 'Click to write the reason for this change.'
+        }`,
+      });
+      if (reason && reason.placement === 'inside') {
+        node.appendChild(el('span', { class: 'bl-reason', text: reason.text, 'aria-hidden': 'true' }));
+      }
+      fragment.appendChild(node);
+
+      // Too long to sit in the striped area: it goes in the band layout reserved
+      // along the bottom of the row, wrapped exactly as it was measured.
+      if (reason && reason.placement === 'below') {
+        fragment.appendChild(reasonNote(rect.obj, reason, tone));
+      }
 
       // The arrow runs between the two finish edges, which is the movement the
       // reader cares about. A reshape (same finish, different start) gets the
@@ -10320,6 +10555,35 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
           ].filter(Boolean)
         : [el('span', { class: 'bb-stat none', text: 'unchanged' })])
     );
+  }
+
+  /**
+   * The reason for a move, written under the row when it will not fit inside the
+   * striped area.
+   *
+   * One span per measured line, like every other wrapped label on the canvas, so
+   * what is drawn is exactly what was measured and nothing is ever shortened to
+   * fit. The whole sentence lives on the node as `aria-label`, because the line
+   * spans are fragments of it.
+   */
+  function reasonNote(obj, reason, tone) {
+    const node = el('div', {
+      class: `tl-baseline-reason ${tone}`,
+      'data-reason-for': obj.id,
+      role: 'button',
+      'aria-label': `${obj.title} — reason: ${reason.text}`,
+      title: `Reason: ${reason.text}\nClick to edit it.`,
+      style: {
+        left: `${reason.x}px`,
+        top: `${reason.y}px`,
+        width: `${reason.w}px`,
+        height: `${reason.h}px`,
+      },
+    });
+    for (const line of reason.lines) {
+      node.appendChild(el('span', { class: 'br-line', text: line, 'aria-hidden': 'true' }));
+    }
+    return node;
   }
 
   /** A measured arrow between the baseline edge and the current one. */
@@ -10559,15 +10823,15 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
    * Imports: util, events, dates, model, store, viewport, layout, renderer, connectors.
    */
 
-  const { clamp, closestData, hasMod, isTyping } = __req("core/util.js");
+  const { clamp, closestData, el, hasMod, isTyping } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { MS_DAY, snap: snapMs, fmtDate, toISO, addMonths, addWeeks, addWorkingDays } = __req("core/dates.js");
-  const { TYPES } = __req("core/model.js");
+  const { TYPES, LINK_TYPES, linkTypeBetween } = __req("core/model.js");
   const store = __req("core/store.js");
   const viewport = __req("timeline/viewport.js");
   const { hitTest, hitTestBox, laneAtY } = __req("timeline/layout.js");
   const renderer = __req("timeline/renderer.js");
-  const { previewPath } = __req("timeline/connectors.js");
+  const { previewPath, anchorUnder } = __req("timeline/connectors.js");
 
   /** Pixels the pointer must travel before a click becomes a drag. */
   const DRAG_THRESHOLD = 3;
@@ -10784,6 +11048,20 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
     const point = toCanvas(e);
     const tool = store.getTool();
 
+    // A press on the striped baseline area is a request to say why the plan
+    // moved, and it is answered before anything else here: the handlers below
+    // would take it for a press on empty canvas and start a marquee.
+    const reasonEl = closestData(e.target, 'reasonFor', dom.canvas);
+    if (reasonEl && e.button === 0 && !spaceHeld && tool !== 'pan') {
+      e.preventDefault();
+      openReasonEditor(reasonEl.dataset.reasonFor);
+      return;
+    }
+    // Clicking away from an open field saves it, the way leaving any other input
+    // does. `blur` alone would not: this press lands before it, and the handlers
+    // below would tear the canvas down underneath the field first.
+    commitReason();
+
     // Object and handle presses call preventDefault to stop text selection,
     // which also suppresses the focus change a click would normally make. Left
     // alone, focus would stay in whatever toolbar dropdown or panel field was
@@ -10799,7 +11077,11 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
       return;
     }
 
-    const anchorEl = closestData(e.target, 'anchor', dom.canvas);
+    // By target first, then by point: a dependency already drawn out of this
+    // anchor is painted over it, so the press lands on the line rather than the
+    // handle — and drawing a second dependency from the same edge has to keep
+    // working.
+    const anchorEl = closestData(e.target, 'anchor', dom.canvas) || anchorUnder(e);
     if (anchorEl) {
       const objEl = closestData(anchorEl, 'objId', dom.canvas);
       if (objEl) {
@@ -10886,6 +11168,11 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
   }
 
   function onCanvasDoubleClick(e) {
+    // The striped area belongs to the reason editor, which the first click of
+    // this pair already opened. Without this, the second click would read as a
+    // double-click on empty canvas and offer to create an object there.
+    if (closestData(e.target, 'reasonFor', dom.canvas)) return;
+
     const objEl = closestData(e.target, 'objId', dom.canvas);
     if (objEl) {
       emit(EV.OBJECT_ACTIVATED, { id: objEl.dataset.objId });
@@ -10940,6 +11227,108 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
+     Why the plan moved
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Type the reason for a change straight into the striped area.
+   *
+   * A comparison already says *what* moved and by how many days; the reason is
+   * the one part of it nothing can derive, and the place to ask for it is the
+   * shape the reader is looking at. So the editor opens over the ghost itself —
+   * over the note beneath it once there is one — rather than in a dialog with the
+   * plan hidden behind it.
+   *
+   * The field is transient by design: it commits on Enter or on losing focus,
+   * abandons on Escape, and writes through `store.setDelayReason`, so one undo
+   * takes the sentence back like any other edit. Nothing about it is stored on
+   * the layout, which is free to reflow underneath the moment it closes.
+   */
+  let reasonEditor = null;
+
+  function openReasonEditor(objectId) {
+    // Moving from one striped area to the next saves the first, rather than
+    // quietly dropping what was typed into it.
+    commitReason();
+
+    const baseline = store.activeBaseline();
+    const rect = renderer.getLayout()?.byId.get(objectId);
+    const ghost = rect?.ghost;
+    if (!ghost || !baseline) return;
+
+    // A ghost stands for a real bar, and the question "why did this move" is
+    // usually asked with the rest of the activity in front of you — its notes,
+    // its dependencies, the P6 activities it is tracked against. So the press
+    // selects the object first: the inspector then shows all of it, with the
+    // comparison and the same reason field in its Baseline section. That part
+    // happens for a viewer too — reading the plan is not a write.
+    if (!store.isSelected(objectId)) {
+      store.setSelection([objectId]);
+      renderer.requestRender();
+    }
+
+    // A viewer may read the reason but not write one; the store would refuse the
+    // write anyway, and an editor that cannot save is worse than none.
+    if (store.isDocReadOnly()) return;
+
+    const box = ghost.reason || ghost;
+    const current = ghost.reason ? ghost.reason.text : '';
+
+    const input = el('textarea', {
+      class: 'tl-reason-input',
+      rows: '2',
+      placeholder: 'Why did this move?',
+      'aria-label': `Reason ${rect.obj.title} moved from the baseline`,
+      spellcheck: 'true',
+    });
+    input.value = current;
+    input.style.left = `${Math.round(box.x)}px`;
+    input.style.top = `${Math.round(box.y)}px`;
+    input.style.width = `${Math.round(Math.max(200, box.w))}px`;
+
+    // The canvas focuses itself on mousedown and its shortcuts listen on the
+    // window, so a press inside the field must not reach either.
+    input.addEventListener('mousedown', (e) => e.stopPropagation());
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeReasonEditor();
+      } else if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        commitReason();
+      }
+    });
+    input.addEventListener('blur', () => commitReason());
+
+    dom.overlay.appendChild(input);
+    reasonEditor = { input, objectId, baselineId: baseline.id, original: current };
+    input.focus({ preventScroll: true });
+    input.select();
+  }
+
+  /** Save what was typed, if it says something different, and close. */
+  function commitReason() {
+    if (!reasonEditor) return;
+    const { input, objectId, baselineId, original } = reasonEditor;
+    const value = input.value;
+    closeReasonEditor();
+
+    if (value.trim() === original.trim()) return;
+    if (store.setDelayReason(objectId, baselineId, value)) renderer.requestRender();
+  }
+
+  /** Take the field away without saving. Safe to call when none is open. */
+  function closeReasonEditor() {
+    const open = reasonEditor;
+    if (!open) return;
+    // Cleared first: removing the node fires `blur`, which would otherwise come
+    // straight back in here and commit a field that is already gone.
+    reasonEditor = null;
+    open.input.remove();
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
      Gestures
      ═══════════════════════════════════════════════════════════════════════ */
 
@@ -10983,8 +11372,49 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
   }
 
   function startLink(id, side, point) {
-    gesture = { kind: 'link', from: id, side, x: point.x, y: point.y, moved: false };
+    gesture = { kind: 'link', from: id, side, x: point.x, y: point.y, moved: false, targetSide: 'start' };
     dom.canvas.classList.add('connecting');
+  }
+
+  /**
+   * Light up the end of the target the link is about to arrive at.
+   *
+   * Which edge the pointer is over now decides what kind of dependency this
+   * becomes, so it has to be visible before the mouse is released — otherwise
+   * dropping on the tail of a bar silently produces a different relationship
+   * from dropping on its head.
+   */
+  let linkTargetKey = null;
+
+  function markLinkTarget(id, side) {
+    const key = id ? `${id}:${side}` : null;
+    if (key === linkTargetKey) return;
+
+    if (linkTargetKey) {
+      const prev = renderer.nodeFor(linkTargetKey.split(':')[0]);
+      prev?.classList.remove('link-target');
+      prev?.querySelector('.tl-link-end')?.remove();
+    }
+    linkTargetKey = key;
+
+    const node = id ? renderer.nodeFor(id) : null;
+    if (!node) return;
+    node.classList.add('link-target');
+    node.appendChild(el('div', { class: `tl-link-end ${side === 'end' ? 'at-end' : 'at-start'}` }));
+  }
+
+  /**
+   * Which end of the target a dependency was dropped on.
+   *
+   * The far end of a bar means "finish"; anywhere else means "start", so the
+   * ordinary drag onto a bar still produces the finish-to-start link it always
+   * did, and reaching for the bar's tail is what asks for the other kind. A point
+   * object has one date and therefore only a start to arrive at.
+   */
+  function dropSide(rect, x) {
+    if (!rect.hasDuration) return 'start';
+    const zone = Math.min(rect.w / 3, 44);
+    return x >= rect.right - zone ? 'end' : 'start';
   }
 
   function placeObject(type, point) {
@@ -11057,7 +11487,10 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
           renderer.showLinkPreview(previewPath(fromRect, gesture.side, point.x, point.y, store.getSettings().connectorStyle));
         }
         const hit = layout ? hitTest(layout, point.x, point.y) : null;
-        gesture.target = hit && hit.id !== gesture.from ? hit.id : null;
+        const onTarget = hit && hit.id !== gesture.from ? hit : null;
+        gesture.target = onTarget ? onTarget.id : null;
+        gesture.targetSide = onTarget ? dropSide(onTarget, point.x) : 'start';
+        markLinkTarget(gesture.target, gesture.targetSide);
         break;
       }
 
@@ -11167,6 +11600,7 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
     renderer.hideGuide();
     renderer.hideMarquee();
     renderer.hideLinkPreview();
+    markLinkTarget(null, null);
 
     switch (finished.kind) {
       case 'marquee': {
@@ -11210,12 +11644,16 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
 
       case 'link': {
         if (finished.target) {
-          const created = store.addLink({ from: finished.from, to: finished.target, type: 'FS' });
+          // The two edges the user dragged between name the relationship, which
+          // is what lets a second arrow join a pair that already has one: the
+          // same two bars can be start-to-start and finish-to-finish at once.
+          const type = linkTypeBetween(finished.side, finished.targetSide || 'start');
+          const created = store.addLink({ from: finished.from, to: finished.target, type });
           if (!created) {
             emit(EV.TOAST, {
               tone: 'warn',
               title: 'Dependency not created',
-              message: 'That link already exists, or it would create a circular dependency.',
+              message: `These two are already joined ${LINK_TYPES[type]?.short || type}, or the link would create a circular dependency.`,
             });
           }
         } else if (finished.moved) {
@@ -17631,7 +18069,7 @@ __mods["io/scene.js"] = function (__x, __req) {
 
   const { clamp, withAlpha, readableInk } = __req("core/util.js");
   const { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } = __req("core/dates.js");
-  const { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot } = __req("core/model.js");
+  const { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot, delayReason } = __req("core/model.js");
   const { criticalPath, linkViolations } = __req("core/analysis.js");
   const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
 
@@ -17655,6 +18093,11 @@ __mods["io/scene.js"] = function (__x, __req) {
     ghostGap: 2,
     goneH: 12,
     shiftBadgeW: 30,
+    reasonPadX: 4,
+    reasonGap: 2,
+    reasonLineH: 7.5,
+    reasonMaxW: 190,
+    reasonMinW: 70,
   };
 
   /* Fonts used by exported drawings, measured the same way the canvas is. */
@@ -17664,6 +18107,7 @@ __mods["io/scene.js"] = function (__x, __req) {
     sub: fontString({ size: 7, weight: 400 }),
     mono: fontString({ size: 6.8, weight: 400, mono: true }),
     lane: fontString({ size: 9.5, weight: 600 }),
+    reason: fontString({ size: 6.5, weight: 600 }),
   };
 
   /** The dates an object covers, in the project's own display order. */
@@ -17833,7 +18277,7 @@ __mods["io/scene.js"] = function (__x, __req) {
     if (comparison) {
       const liveIds = new Set(doc.objects.map((o) => o.id));
       const laneIds = new Set(lanes.map((l) => l.id));
-      for (const snap of comparison.values()) {
+      for (const snap of comparison.byId.values()) {
         if (liveIds.has(snap.id)) continue;
         const laneId = laneIds.has(snap.lane) ? snap.lane : lanes[0]?.id;
         if (!laneId) continue;
@@ -17857,11 +18301,13 @@ __mods["io/scene.js"] = function (__x, __req) {
           ? Math.max(M.barMinW, ((obj.end - obj.start) / MS_DAY) * pxPerDay)
           : M.pointR * 2;
         const label = exportLabel(obj, barWidth, opts.showDates === true);
-        const ghost = comparison ? exportGhost(obj, comparison.get(obj.id), barWidth, msToX, pxPerDay) : null;
+        const ghost = comparison
+          ? exportGhost(obj, comparison.byId.get(obj.id), barWidth, msToX, pxPerDay, comparison.baseline.id)
+          : null;
         const height = hasDuration
           ? Math.max(M.rowH, label.height + 5)
           : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
-        return { obj, label, barWidth, ghost, height: height + (ghost && ghost.stacked ? M.ghostH + M.ghostGap : 0) };
+        return { obj, label, barWidth, ghost, height: height + exportGhostTier(ghost) };
       });
 
       // Outlines for what the baseline had and the plan has not. They pack with
@@ -18320,7 +18766,9 @@ __mods["io/scene.js"] = function (__x, __req) {
       || (doc.baselines || [])[doc.baselines.length - 1];
     if (!baseline) return null;
     const rows = baselineSnapshot(doc, baseline);
-    return rows.length ? new Map(rows.map((row) => [row.id, row])) : null;
+    // The baseline itself comes along: a ghost carries the reason written
+    // against that baseline, and the reason is text in the drawing.
+    return rows.length ? { baseline, byId: new Map(rows.map((row) => [row.id, row])) } : null;
   }
 
   /**
@@ -18329,7 +18777,7 @@ __mods["io/scene.js"] = function (__x, __req) {
    * its own below the bar the moment they do not. Printed at whatever density the
    * export was asked for, so — as on screen — the split follows the scale.
    */
-  function exportGhost(obj, snap, barWidth, msToX, pxPerDay) {
+  function exportGhost(obj, snap, barWidth, msToX, pxPerDay, baselineId) {
     if (!snap) return null;
     const def = TYPES[obj.type] || TYPES.activity;
     const hasDuration = !!def.duration;
@@ -18349,6 +18797,10 @@ __mods["io/scene.js"] = function (__x, __req) {
     const toX = reshaped ? barLeft : barRight;
     const mid = (fromX + toX) / 2;
     const canStack = hasDuration && def.shape !== 'band' && def.shape !== 'container';
+    const stacked = canStack && x < barRight + M.ghostGap && x + w > barLeft - M.ghostGap;
+
+    const reason = exportReason(delayReason(obj, baselineId), w, stacked);
+    const reasonRight = reason && reason.placement === 'below' ? x + reason.width + M.reasonPadX * 2 : -Infinity;
 
     return {
       snap,
@@ -18356,10 +18808,46 @@ __mods["io/scene.js"] = function (__x, __req) {
       endShift,
       x,
       w,
-      stacked: canStack && x < barRight + M.ghostGap && x + w > barLeft - M.ghostGap,
+      stacked,
+      reason,
       from: Math.min(x, mid - M.shiftBadgeW / 2),
-      to: Math.max(x + w, mid + M.shiftBadgeW / 2),
+      to: Math.max(x + w, mid + M.shiftBadgeW / 2, reasonRight),
     };
+  }
+
+  /**
+   * The reason for a move, measured for print exactly as the canvas measures it
+   * for the screen: inside the striped area when the sentence fits on one line
+   * there, otherwise wrapped into a note under the row. Measured rather than
+   * guessed, so the packer reserves the room and the sentence is never shortened
+   * on the way to paper.
+   */
+  function exportReason(text, ghostWidth, stacked) {
+    const value = String(text || '').trim();
+    if (!value) return null;
+
+    const oneLine = textWidth(value, EXPORT_FONTS.reason);
+    if (!stacked && oneLine + M.reasonPadX * 2 + 1 <= ghostWidth) {
+      return { text: value, placement: 'inside', lines: [value], width: oneLine, height: M.reasonLineH };
+    }
+
+    const fitted = fitWidth(value, EXPORT_FONTS.reason, { maxWidth: M.reasonMaxW, maxLines: 3, minWidth: M.reasonMinW });
+    const wrapped = wrapText(value, fitted.width, EXPORT_FONTS.reason, { lineHeight: M.reasonLineH });
+    return {
+      text: value,
+      placement: 'below',
+      lines: wrapped.lines,
+      width: Math.ceil(wrapped.width),
+      height: wrapped.lines.length * M.reasonLineH,
+    };
+  }
+
+  /** The band an exported comparison reserves below its row. Mirrors `ghostTier`. */
+  function exportGhostTier(ghost) {
+    if (!ghost) return 0;
+    const stack = ghost.stacked ? M.ghostH + M.ghostGap : 0;
+    const note = ghost.reason && ghost.reason.placement === 'below' ? ghost.reason.height + M.reasonGap : 0;
+    return stack + note;
   }
 
   /** A phantom entry so a removed object packs like everything else. */
@@ -18412,6 +18900,44 @@ __mods["io/scene.js"] = function (__x, __req) {
         strokeWidth: 0.8,
         dash: [3, 2],
       });
+
+      // Why it moved, if anyone said. Inside the striped area when it was
+      // measured to fit there, otherwise in the band packing reserved below the
+      // row — the same two places the canvas uses, so the PDF a PMO is handed is
+      // the drawing the planner was looking at.
+      const reason = ghost.reason;
+      if (reason && reason.placement === 'inside') {
+        items.push({
+          type: 'text',
+          x: gx + M.reasonPadX,
+          y: gy + gh / 2 + 2.3,
+          text: reason.text,
+          size: 6.5,
+          weight: 600,
+          fill: ink,
+        });
+      } else if (reason) {
+        const noteTop = (ghost.stacked ? gy + gh : rect.bottom) + M.reasonGap;
+        items.push({
+          type: 'rect',
+          x: gx,
+          y: noteTop,
+          w: 1.4,
+          h: reason.height,
+          fill: ink,
+        });
+        reason.lines.forEach((line, i) => {
+          items.push({
+            type: 'text',
+            x: gx + M.reasonPadX,
+            y: noteTop + (i + 1) * M.reasonLineH - 1.5,
+            text: line,
+            size: 6.5,
+            weight: 600,
+            fill: ink,
+          });
+        });
+      }
 
       // The arrow between the two finish edges, with its day count. It rides the
       // ghost's own centre line, so a stacked ghost still points at its bar.
@@ -19360,7 +19886,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
     }
     const { rows: variance } = compareBaseline(doc, baseline);
     const laneNames = new Map(doc.lanes.map((l) => [l.id, l.name]));
-    const rows = [['title', 'lane', 'change', 'baseline_start', 'baseline_finish', 'current_start', 'current_finish', 'start_shift_days', 'finish_shift_days', 'duration_change_days']];
+    const rows = [['title', 'lane', 'change', 'baseline_start', 'baseline_finish', 'current_start', 'current_finish', 'start_shift_days', 'finish_shift_days', 'duration_change_days', 'reason']];
     for (const row of variance) {
       rows.push([
         row.title,
@@ -19373,6 +19899,10 @@ __mods["io/exporters.js"] = function (__x, __req) {
         row.startShift,
         row.endShift,
         row.durationChange,
+        // The reason the planner wrote on the canvas: the column the review is
+        // actually held on, and the reason this file exists rather than a
+        // screenshot.
+        row.reason || '',
       ]);
     }
     download(`${stem(doc, '-baseline')}.csv`, toCsv(rows), 'text/csv;charset=utf-8');
@@ -20361,11 +20891,15 @@ __mods["ui/panels.js"] = function (__x, __req) {
           el('div', { class: 'lr-main' }, [
             el('div', { class: 'lr-title', text: row.title }),
             el('div', { class: 'lr-meta', text: varianceText(row) }),
-          ]),
+            // Written into the striped area on the canvas; repeated here because
+            // this pane is what gets read out in a review.
+            row.reason ? el('div', { class: 'lr-meta', style: { color: 'var(--text)' }, text: `“${row.reason}”` }) : null,
+          ].filter(Boolean)),
         ])
       );
     }
     root.appendChild(section(`Variance (${rows.length})`, [varianceList]));
+    root.appendChild(el('div', { class: 'cx-hint', text: 'Click the striped baseline area on the timeline to write why something moved.' }));
   }
 
   function varianceText(row) {
@@ -22305,7 +22839,9 @@ __mods["ui/inspector.js"] = function (__x, __req) {
   const { el, clear, debounce, clamp, escapeHtml } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } = __req("core/dates.js");
-  const { TYPES, listOptions, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, LINK_TYPES, CONNECTOR_STYLES, durationDays, remainingDays, statusOf, effectiveToday } = __req("core/model.js");
+  const { TYPES, listOptions, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, LINK_TYPES, CONNECTOR_STYLES, durationDays, remainingDays, statusOf, effectiveToday, isDerivedBaseline, delayReason } = __req("core/model.js");
+
+
 
 
 
@@ -22488,6 +23024,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       healthStrip(obj),
       sectionOf('identity', 'Identity', identityFields(obj, def, lane)),
       sectionOf('schedule', 'Schedule', scheduleFields(obj, def)),
+      sectionOf('baseline', 'Baseline comparison', baselineFields(obj)),
       def.fields.length ? sectionOf('details', 'Details', detailFields(obj, def)) : null,
       sectionOf('notes', 'Notes', notesFields(obj)),
       sectionOf('attachments', 'Attachments', [attachmentList(obj.id).root]),
@@ -22993,6 +23530,74 @@ __mods["ui/inspector.js"] = function (__x, __req) {
         onChange: (v) => setStyle({ rotation: v }, 'Rotate'),
       }), 'Applies to notes, callouts, text boxes and shapes.'),
     ];
+  }
+
+  /* ── Baseline comparison ───────────────────────────────────────────────── */
+
+  /**
+   * What the comparison on the canvas is saying about this object.
+   *
+   * Clicking the striped area selects the bar, so this is what the click leads
+   * to: where the baseline had it, where it is now, how far that is, and the
+   * reason — the same sentence the canvas holds, editable from either place.
+   *
+   * A derived baseline is named for what it is. Its dates are the roll-up of
+   * whatever P6 activities the bar is linked to right now, so the reader is sent
+   * to the P6 section rather than being left to assume a frozen snapshot.
+   * Null — and therefore no section at all — when the plan is not comparing.
+   */
+  function baselineFields(obj) {
+    const doc = store.getDoc();
+    const baseline = store.activeBaseline();
+    if (!baseline || !doc.settings.showBaseline) return null;
+
+    const def = TYPES[obj.type] || TYPES.activity;
+    const snap = store.snapshotOf(baseline).find((row) => row.id === obj.id) || null;
+    const derived = isDerivedBaseline(baseline);
+    const out = [
+      el('div', { class: 'cx-hint', text: derived
+        ? `${baseline.name} — follows the P6 ${baseline.p6Kind === 'progress' ? 'progress' : 'baseline'} dates of whatever this bar is linked to.`
+        : `${baseline.name} — frozen ${fmtDate(baseline.created, 'medium')}.` }),
+    ];
+
+    if (!snap) {
+      out.push(el('div', { class: 'cx-hint', text: derived
+        ? 'Nothing linked from the P6 register, so there is nothing to compare against. Link an activity in the P6 section below.'
+        : 'Added since this baseline was taken: it has nothing to compare against.' }));
+      return out;
+    }
+
+    const snapEnd = def.duration ? (snap.end ?? snap.start) : snap.start;
+    const startShift = daysBetween(snap.start, obj.start);
+    const endShift = def.duration ? daysBetween(snapEnd, obj.end) : startShift;
+    const tone = endShift > 0 ? 'bad' : endShift < 0 ? 'good' : 'muted';
+
+    out.push(
+      el('div', { class: 'cx-chipstats' }, [
+        chipStat('Was', def.duration
+          ? `${fmtDate(snap.start, 'numeric')} → ${fmtDate(snapEnd, 'numeric')}`
+          : fmtDate(snap.start, 'numeric'), 'muted'),
+        chipStat('Now', def.duration
+          ? `${fmtDate(obj.start, 'numeric')} → ${fmtDate(obj.end, 'numeric')}`
+          : fmtDate(obj.start, 'numeric'), 'muted'),
+        chipStat('Start', shift(startShift), startShift ? tone : 'muted'),
+        def.duration ? chipStat('Finish', shift(endShift), endShift ? tone : 'muted') : null,
+      ].filter(Boolean)),
+      field('Reason for the change', textInput({
+        value: delayReason(obj, baseline.id),
+        placeholder: 'Why did this move?',
+        onInput: (v) => {
+          store.setDelayReason(obj.id, baseline.id, v);
+          renderer.requestRender();
+        },
+      }), 'Shown in the striped area on the timeline, in the variance export and in the PDF.')
+    );
+
+    if (!startShift && !endShift) {
+      out.push(el('div', { class: 'cx-hint', text: 'Sitting exactly where the baseline had it.' }));
+    }
+
+    return out;
   }
 
   /* ── P6 ────────────────────────────────────────────────────────────────── */

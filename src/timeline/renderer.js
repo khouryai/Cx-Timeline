@@ -964,15 +964,22 @@ function applyTextStyle(node, style, ink) {
  *   the shift      an arrow from the baseline finish to the current finish,
  *                  labelled with the number of days, coloured by direction.
  *                  This is the part that makes a slip legible across a lane,
+ *   the reason     what the user typed into the striped area to explain the
+ *                  move — the one part of the comparison that cannot be
+ *                  derived, and the part a PMO reads first,
  *   what is gone   objects that were in the baseline and are no longer in the
  *                  plan, drawn as hollow outlines where they used to sit.
  *                  Nothing else in the application shows those at all.
  *
- * Everything here is derived from the document and the snapshot on every
- * frame; no comparison state is stored, so it cannot go stale.
+ * Everything but the reason is derived from the document and the snapshot on
+ * every frame; no comparison state is stored, so it cannot go stale. The
+ * reason is stored on the object, and it is placed by `computeLayout` like any
+ * other text on the canvas — this only prints what it was handed.
  */
 function renderBaseline(layout, settings) {
-  dom.overlay.querySelectorAll('.tl-baseline, .tl-shift, .tl-baseline-gone').forEach((n) => n.remove());
+  dom.overlay
+    .querySelectorAll('.tl-baseline, .tl-shift, .tl-baseline-gone, .tl-baseline-reason')
+    .forEach((n) => n.remove());
   const banner = dom.root?.querySelector('.tl-baseline-bar');
 
   const baseline = settings.showBaseline ? activeBaseline() : null;
@@ -994,18 +1001,35 @@ function renderBaseline(layout, settings) {
     const tone = endShift > 0 ? 'slip' : endShift < 0 ? 'ahead' : 'reshaped';
     counts[tone]++;
 
-    fragment.appendChild(
-      el('div', {
-        class: `tl-baseline ${tone}${ghost.stacked ? ' stacked' : ''}`,
-        style: {
-          left: `${ghost.x}px`,
-          top: `${ghost.y}px`,
-          width: `${ghost.w}px`,
-          height: `${ghost.h}px`,
-        },
-        title: baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration),
-      })
-    );
+    const reason = ghost.reason;
+    const node = el('div', {
+      class: `tl-baseline ${tone}${ghost.stacked ? ' stacked' : ''}${reason ? ' annotated' : ''}`,
+      // The striped area is where the reason is written, so it is a target
+      // rather than decoration; interactions turns a press on it into an
+      // editor over this box.
+      'data-reason-for': rect.obj.id,
+      role: 'button',
+      'aria-label': `${rect.obj.title} — ${reason ? `reason: ${reason.text}` : 'add a reason for this change'}`,
+      style: {
+        left: `${ghost.x}px`,
+        top: `${ghost.y}px`,
+        width: `${ghost.w}px`,
+        height: `${ghost.h}px`,
+      },
+      title: `${baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration)}\n${
+        reason ? `Reason: ${reason.text}\nClick to edit it.` : 'Click to write the reason for this change.'
+      }`,
+    });
+    if (reason && reason.placement === 'inside') {
+      node.appendChild(el('span', { class: 'bl-reason', text: reason.text, 'aria-hidden': 'true' }));
+    }
+    fragment.appendChild(node);
+
+    // Too long to sit in the striped area: it goes in the band layout reserved
+    // along the bottom of the row, wrapped exactly as it was measured.
+    if (reason && reason.placement === 'below') {
+      fragment.appendChild(reasonNote(rect.obj, reason, tone));
+    }
 
     // The arrow runs between the two finish edges, which is the movement the
     // reader cares about. A reshape (same finish, different start) gets the
@@ -1072,6 +1096,35 @@ function renderBaselineBar(baseline, counts) {
         ].filter(Boolean)
       : [el('span', { class: 'bb-stat none', text: 'unchanged' })])
   );
+}
+
+/**
+ * The reason for a move, written under the row when it will not fit inside the
+ * striped area.
+ *
+ * One span per measured line, like every other wrapped label on the canvas, so
+ * what is drawn is exactly what was measured and nothing is ever shortened to
+ * fit. The whole sentence lives on the node as `aria-label`, because the line
+ * spans are fragments of it.
+ */
+function reasonNote(obj, reason, tone) {
+  const node = el('div', {
+    class: `tl-baseline-reason ${tone}`,
+    'data-reason-for': obj.id,
+    role: 'button',
+    'aria-label': `${obj.title} — reason: ${reason.text}`,
+    title: `Reason: ${reason.text}\nClick to edit it.`,
+    style: {
+      left: `${reason.x}px`,
+      top: `${reason.y}px`,
+      width: `${reason.w}px`,
+      height: `${reason.h}px`,
+    },
+  });
+  for (const line of reason.lines) {
+    node.appendChild(el('span', { class: 'br-line', text: line, 'aria-hidden': 'true' }));
+  }
+  return node;
 }
 
 /** A measured arrow between the baseline edge and the current one. */

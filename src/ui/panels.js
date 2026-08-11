@@ -726,11 +726,15 @@ function paneBaselines(root) {
         el('div', { class: 'lr-main' }, [
           el('div', { class: 'lr-title', text: row.title }),
           el('div', { class: 'lr-meta', text: varianceText(row) }),
-        ]),
+          // Written into the striped area on the canvas; repeated here because
+          // this pane is what gets read out in a review.
+          row.reason ? el('div', { class: 'lr-meta', style: { color: 'var(--text)' }, text: `“${row.reason}”` }) : null,
+        ].filter(Boolean)),
       ])
     );
   }
   root.appendChild(section(`Variance (${rows.length})`, [varianceList]));
+  root.appendChild(el('div', { class: 'cx-hint', text: 'Click the striped baseline area on the timeline to write why something moved.' }));
 }
 
 function varianceText(row) {

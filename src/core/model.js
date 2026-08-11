@@ -487,6 +487,22 @@ export const LINK_TYPES = {
 
 export const CONNECTOR_STYLES = ['orthogonal', 'curved', 'straight'];
 
+/**
+ * The relationship described by the two ends a dependency was drawn between.
+ *
+ * The four types are exactly the four pairs of edges, so a drag from one edge
+ * to another names its own type — which is what lets a pair of objects carry
+ * more than one dependency: "start together" and "finish together" are two
+ * different statements about the same two bars, and a plan routinely makes
+ * both. Falls back to FS, the relationship nine links in ten turn out to be.
+ */
+export function linkTypeBetween(fromSide, toSide) {
+  for (const [key, spec] of Object.entries(LINK_TYPES)) {
+    if (spec.from === fromSide && spec.to === toSide) return key;
+  }
+  return 'FS';
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    The P6 register
 
@@ -716,6 +732,25 @@ export function baselineSnapshot(doc, baseline) {
 /** True when a baseline follows the P6 register rather than a frozen copy. */
 export function isDerivedBaseline(baseline) {
   return baseline?.source === 'p6';
+}
+
+/**
+ * Why an object no longer sits where the baseline had it.
+ *
+ * A comparison shows *that* something moved and by how many days; the one
+ * thing the PMO asks next — why — is the only part of it that cannot be
+ * derived, so it is stored, on the object, keyed by the baseline it answers
+ * for. Keyed rather than a single field because a plan is routinely compared
+ * against more than one baseline, and "waiting on the client's power-up" is
+ * the reason against the March freeze, not against the P6 progress import.
+ *
+ * The P6 baselines keep stable ids (`bl_p6_baseline` / `bl_p6_progress`), so a
+ * reason written against one survives the next import re-creating it.
+ */
+export function delayReason(obj, baselineId) {
+  if (!obj || !baselineId) return '';
+  const reasons = obj.data?.delayReasons;
+  return reasons && typeof reasons === 'object' ? String(reasons[baselineId] || '') : '';
 }
 
 /** The marker for a P6-tracking baseline. Holds no rows on purpose. */

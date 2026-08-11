@@ -16,7 +16,7 @@
 
 import { clamp, withAlpha, readableInk } from '../core/util.js';
 import { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } from '../core/dates.js';
-import { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot } from '../core/model.js';
+import { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot, delayReason } from '../core/model.js';
 import { criticalPath, linkViolations } from '../core/analysis.js';
 import { fontString, textWidth, wrapText, fitWidth } from '../timeline/text.js';
 
@@ -40,6 +40,11 @@ const M = {
   ghostGap: 2,
   goneH: 12,
   shiftBadgeW: 30,
+  reasonPadX: 4,
+  reasonGap: 2,
+  reasonLineH: 7.5,
+  reasonMaxW: 190,
+  reasonMinW: 70,
 };
 
 /* Fonts used by exported drawings, measured the same way the canvas is. */
@@ -49,6 +54,7 @@ const EXPORT_FONTS = {
   sub: fontString({ size: 7, weight: 400 }),
   mono: fontString({ size: 6.8, weight: 400, mono: true }),
   lane: fontString({ size: 9.5, weight: 600 }),
+  reason: fontString({ size: 6.5, weight: 600 }),
 };
 
 /** The dates an object covers, in the project's own display order. */
@@ -218,7 +224,7 @@ export function buildScene(doc, opts = {}) {
   if (comparison) {
     const liveIds = new Set(doc.objects.map((o) => o.id));
     const laneIds = new Set(lanes.map((l) => l.id));
-    for (const snap of comparison.values()) {
+    for (const snap of comparison.byId.values()) {
       if (liveIds.has(snap.id)) continue;
       const laneId = laneIds.has(snap.lane) ? snap.lane : lanes[0]?.id;
       if (!laneId) continue;
@@ -242,11 +248,13 @@ export function buildScene(doc, opts = {}) {
         ? Math.max(M.barMinW, ((obj.end - obj.start) / MS_DAY) * pxPerDay)
         : M.pointR * 2;
       const label = exportLabel(obj, barWidth, opts.showDates === true);
-      const ghost = comparison ? exportGhost(obj, comparison.get(obj.id), barWidth, msToX, pxPerDay) : null;
+      const ghost = comparison
+        ? exportGhost(obj, comparison.byId.get(obj.id), barWidth, msToX, pxPerDay, comparison.baseline.id)
+        : null;
       const height = hasDuration
         ? Math.max(M.rowH, label.height + 5)
         : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
-      return { obj, label, barWidth, ghost, height: height + (ghost && ghost.stacked ? M.ghostH + M.ghostGap : 0) };
+      return { obj, label, barWidth, ghost, height: height + exportGhostTier(ghost) };
     });
 
     // Outlines for what the baseline had and the plan has not. They pack with
@@ -705,7 +713,9 @@ function comparisonRows(doc, opts) {
     || (doc.baselines || [])[doc.baselines.length - 1];
   if (!baseline) return null;
   const rows = baselineSnapshot(doc, baseline);
-  return rows.length ? new Map(rows.map((row) => [row.id, row])) : null;
+  // The baseline itself comes along: a ghost carries the reason written
+  // against that baseline, and the reason is text in the drawing.
+  return rows.length ? { baseline, byId: new Map(rows.map((row) => [row.id, row])) } : null;
 }
 
 /**
@@ -714,7 +724,7 @@ function comparisonRows(doc, opts) {
  * its own below the bar the moment they do not. Printed at whatever density the
  * export was asked for, so — as on screen — the split follows the scale.
  */
-function exportGhost(obj, snap, barWidth, msToX, pxPerDay) {
+function exportGhost(obj, snap, barWidth, msToX, pxPerDay, baselineId) {
   if (!snap) return null;
   const def = TYPES[obj.type] || TYPES.activity;
   const hasDuration = !!def.duration;
@@ -734,6 +744,10 @@ function exportGhost(obj, snap, barWidth, msToX, pxPerDay) {
   const toX = reshaped ? barLeft : barRight;
   const mid = (fromX + toX) / 2;
   const canStack = hasDuration && def.shape !== 'band' && def.shape !== 'container';
+  const stacked = canStack && x < barRight + M.ghostGap && x + w > barLeft - M.ghostGap;
+
+  const reason = exportReason(delayReason(obj, baselineId), w, stacked);
+  const reasonRight = reason && reason.placement === 'below' ? x + reason.width + M.reasonPadX * 2 : -Infinity;
 
   return {
     snap,
@@ -741,10 +755,46 @@ function exportGhost(obj, snap, barWidth, msToX, pxPerDay) {
     endShift,
     x,
     w,
-    stacked: canStack && x < barRight + M.ghostGap && x + w > barLeft - M.ghostGap,
+    stacked,
+    reason,
     from: Math.min(x, mid - M.shiftBadgeW / 2),
-    to: Math.max(x + w, mid + M.shiftBadgeW / 2),
+    to: Math.max(x + w, mid + M.shiftBadgeW / 2, reasonRight),
   };
+}
+
+/**
+ * The reason for a move, measured for print exactly as the canvas measures it
+ * for the screen: inside the striped area when the sentence fits on one line
+ * there, otherwise wrapped into a note under the row. Measured rather than
+ * guessed, so the packer reserves the room and the sentence is never shortened
+ * on the way to paper.
+ */
+function exportReason(text, ghostWidth, stacked) {
+  const value = String(text || '').trim();
+  if (!value) return null;
+
+  const oneLine = textWidth(value, EXPORT_FONTS.reason);
+  if (!stacked && oneLine + M.reasonPadX * 2 + 1 <= ghostWidth) {
+    return { text: value, placement: 'inside', lines: [value], width: oneLine, height: M.reasonLineH };
+  }
+
+  const fitted = fitWidth(value, EXPORT_FONTS.reason, { maxWidth: M.reasonMaxW, maxLines: 3, minWidth: M.reasonMinW });
+  const wrapped = wrapText(value, fitted.width, EXPORT_FONTS.reason, { lineHeight: M.reasonLineH });
+  return {
+    text: value,
+    placement: 'below',
+    lines: wrapped.lines,
+    width: Math.ceil(wrapped.width),
+    height: wrapped.lines.length * M.reasonLineH,
+  };
+}
+
+/** The band an exported comparison reserves below its row. Mirrors `ghostTier`. */
+function exportGhostTier(ghost) {
+  if (!ghost) return 0;
+  const stack = ghost.stacked ? M.ghostH + M.ghostGap : 0;
+  const note = ghost.reason && ghost.reason.placement === 'below' ? ghost.reason.height + M.reasonGap : 0;
+  return stack + note;
 }
 
 /** A phantom entry so a removed object packs like everything else. */
@@ -797,6 +847,44 @@ function drawBaseline(items, { rectsById, goneRects, palette }) {
       strokeWidth: 0.8,
       dash: [3, 2],
     });
+
+    // Why it moved, if anyone said. Inside the striped area when it was
+    // measured to fit there, otherwise in the band packing reserved below the
+    // row — the same two places the canvas uses, so the PDF a PMO is handed is
+    // the drawing the planner was looking at.
+    const reason = ghost.reason;
+    if (reason && reason.placement === 'inside') {
+      items.push({
+        type: 'text',
+        x: gx + M.reasonPadX,
+        y: gy + gh / 2 + 2.3,
+        text: reason.text,
+        size: 6.5,
+        weight: 600,
+        fill: ink,
+      });
+    } else if (reason) {
+      const noteTop = (ghost.stacked ? gy + gh : rect.bottom) + M.reasonGap;
+      items.push({
+        type: 'rect',
+        x: gx,
+        y: noteTop,
+        w: 1.4,
+        h: reason.height,
+        fill: ink,
+      });
+      reason.lines.forEach((line, i) => {
+        items.push({
+          type: 'text',
+          x: gx + M.reasonPadX,
+          y: noteTop + (i + 1) * M.reasonLineH - 1.5,
+          text: line,
+          size: 6.5,
+          weight: 600,
+          fill: ink,
+        });
+      });
+    }
 
     // The arrow between the two finish edges, with its day count. It rides the
     // ghost's own centre line, so a stacked ghost still points at its bar.

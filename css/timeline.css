@@ -832,7 +832,11 @@
     color-mix(in srgb, var(--text-subtle) 22%, transparent) 5px,
     color-mix(in srgb, var(--text-subtle) 22%, transparent) 10px
   );
-  pointer-events: none;
+  /* The striped area takes the reason the plan moved, so it accepts a press.
+     It still sits below the objects (z 100), which is what keeps a click on an
+     overlapping bar going to the bar. */
+  pointer-events: auto;
+  cursor: text;
   /* Behind the objects (z 100) but above the lane bands. */
   z-index: 60;
 }
@@ -858,6 +862,83 @@
 }
 .tl-baseline.reshaped {
   border-color: var(--warn);
+}
+
+/* ── Why it moved ──────────────────────────────────────────────────────── */
+
+/* Hovering says the area answers to a click without printing anything that
+   would have to be measured first. */
+.tl-baseline:hover {
+  border-style: solid;
+}
+body.read-only .tl-baseline,
+body.read-only .tl-baseline-reason {
+  cursor: default;
+}
+
+/* Written inside the ghost only when layout measured it to fit on one line
+   there — never clipped, so no overflow rule belongs here. */
+.tl-baseline .bl-reason {
+  display: block;
+  padding: 0 6px;
+  color: currentColor;
+  font-family: var(--f-ui);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 13px;
+  white-space: nowrap;
+}
+.tl-baseline.slip .bl-reason { color: var(--bad); }
+.tl-baseline.ahead .bl-reason { color: var(--good); }
+.tl-baseline.reshaped .bl-reason { color: var(--warn); }
+
+/* Too long for the striped area: it goes in the band packing reserved along
+   the bottom of the row, one span per measured line. */
+.tl-baseline-reason {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 1px 6px;
+  border-left: 2px solid currentColor;
+  border-radius: 0 3px 3px 0;
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  color: var(--text-subtle);
+  cursor: text;
+  pointer-events: auto;
+  z-index: 70;
+}
+.tl-baseline-reason.slip { color: var(--bad); }
+.tl-baseline-reason.ahead { color: var(--good); }
+.tl-baseline-reason.reshaped { color: var(--warn); }
+.tl-baseline-reason .br-line {
+  color: currentColor;
+  font-family: var(--f-ui);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 13px;
+  white-space: nowrap;
+}
+
+/* The editor itself: a plain field over the striped area, so typing happens
+   where the text will end up rather than in a dialog somewhere else. */
+.tl-reason-input {
+  position: absolute;
+  min-height: 34px;
+  padding: 4px 6px;
+  border: 1.5px solid var(--selection);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--f-ui);
+  font-size: 11px;
+  line-height: 14px;
+  resize: none;
+  box-shadow: var(--shadow-lg);
+  z-index: 400;
+}
+.tl-reason-input:focus {
+  outline: none;
 }
 
 /* A ghost covering the same dates as its own bar cannot sit behind it — the two
@@ -1419,6 +1500,35 @@ body.presenting .tl-baseline-bar {
   outline-offset: 2px;
   box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 22%, transparent);
 }
+/* ── The end a dependency will arrive at ───────────────────────────────── */
+
+/* Which edge of the target the pointer is over decides the relationship the
+   drop creates — finish-to-start or finish-to-finish are the same gesture
+   ending 40px apart — so the edge says so before the mouse is released. */
+.tl-obj.link-target {
+  outline: 1.5px solid var(--selection);
+  outline-offset: 1px;
+}
+/* A child element rather than a pseudo-element: `::after` is already the
+   selection ring and `::before` the broken-dependency badge, and a bar can be
+   selected while it is being linked to. */
+.tl-link-end {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 4px;
+  border-radius: 2px;
+  background: var(--selection);
+  pointer-events: none;
+  z-index: 6;
+}
+.tl-link-end.at-start {
+  left: -3px;
+}
+.tl-link-end.at-end {
+  right: -3px;
+}
+
 body.p6-dragging .tl-obj {
   transition: opacity var(--dur-fast) var(--easing);
 }

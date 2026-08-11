@@ -135,7 +135,7 @@ export function exportBaselineCsv() {
   }
   const { rows: variance } = compareBaseline(doc, baseline);
   const laneNames = new Map(doc.lanes.map((l) => [l.id, l.name]));
-  const rows = [['title', 'lane', 'change', 'baseline_start', 'baseline_finish', 'current_start', 'current_finish', 'start_shift_days', 'finish_shift_days', 'duration_change_days']];
+  const rows = [['title', 'lane', 'change', 'baseline_start', 'baseline_finish', 'current_start', 'current_finish', 'start_shift_days', 'finish_shift_days', 'duration_change_days', 'reason']];
   for (const row of variance) {
     rows.push([
       row.title,
@@ -148,6 +148,10 @@ export function exportBaselineCsv() {
       row.startShift,
       row.endShift,
       row.durationChange,
+      // The reason the planner wrote on the canvas: the column the review is
+      // actually held on, and the reason this file exists rather than a
+      // screenshot.
+      row.reason || '',
     ]);
   }
   download(`${stem(doc, '-baseline')}.csv`, toCsv(rows), 'text/csv;charset=utf-8');

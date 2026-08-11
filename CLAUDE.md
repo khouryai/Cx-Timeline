@@ -128,17 +128,35 @@ subscribes. That is what keeps the graph acyclic.
   (`settings.filterMode`). Hiding drops them before packing in
   `computeLayout()`, so the rows reflow and the lanes close up; skipping them
   at paint time would leave the gaps they used to occupy. Exports always hide.
-- **Baseline comparison draws four things, not one** (`renderBaseline`): the
+- **Baseline comparison draws five things, not one** (`renderBaseline`): the
   ghost at the baseline dates behind the live bar, an arrow between the two
-  finish edges labelled in days, outlines for objects the baseline had and the
-  plan no longer does, and a banner naming the baseline. `io/scene.js` draws
-  the same, so an exported PDF is the drawing on screen. All of it is derived
-  per frame from the snapshot — there is no comparison state to go stale.
+  finish edges labelled in days, the reason someone typed into the striped
+  area, outlines for objects the baseline had and the plan no longer does, and
+  a banner naming the baseline. `io/scene.js` draws the same, so an exported
+  PDF is the drawing on screen. All of it but the reason is derived per frame
+  from the snapshot — there is no comparison state to go stale.
+- **The reason a bar moved is the one part of a comparison that is stored.**
+  Everything else about a baseline is derived; why it slipped cannot be, so it
+  lives on the object in `data.delayReasons`, keyed by baseline id — a plan is
+  compared against several, and the answer differs per baseline. Read it with
+  `delayReason(obj, baselineId)`, write it with `store.setDelayReason()`, which
+  deletes the key rather than storing `''` so an un-annotated object and a
+  cleared one serialise the same. It is typed into the striped area on the
+  canvas (`interactions.js` opens a field over the ghost, and selects the
+  object so the inspector shows the rest of the activity), edited again in the
+  inspector's Baseline section, and it travels into `compareBaseline()` rows,
+  the variance CSV and the exported drawing. The P6 baselines keep fixed ids
+  (`bl_p6_baseline` / `bl_p6_progress`), which is what lets a reason survive
+  the next import re-creating them.
 - **A ghost is packed, not painted over.** `computeLayout()` measures the
   comparison with the objects (`measureGhost`, `measureGone`) and `packRows()`
-  reserves the whole pair — bar, label, ghost and the arrow's day badge — so a
-  ghost can never land on another bar or on another ghost; the lane reflows
-  instead. Where a ghost covers the same dates as its *own* bar the two cannot
+  reserves the whole pair — bar, label, ghost, the arrow's day badge and the
+  reason note — so a ghost can never land on another bar or on another ghost;
+  the lane reflows instead. The reason is measured like every other label
+  (`measureReason`): it sits inside the striped area when the whole sentence
+  fits on one line there, and otherwise wraps into the band `ghostTier()`
+  reserves along the bottom of the row, which is the same band a stacked ghost
+  drops into. Row height is content plus tier, never the larger of the two. Where a ghost covers the same dates as its *own* bar the two cannot
   share a height, so it drops to a slim tier along the bottom of the row
   (`rect.ghost.stacked`) and the row grows. That test is in pixels, so zooming
   out until a gap closes splits them and zooming back in re-joins them. The
@@ -184,6 +202,16 @@ subscribes. That is what keeps the graph acyclic.
   already violated, for the same reason: it would just be cleared straight
   back. This is why "hidden" always means "hidden right now, on purpose," never
   "was hidden once."
+- **A pair of objects may carry several dependencies — one per type.** The four
+  relationships are the four pairs of edges, so a drag names its own type:
+  `dropSide()` reads which end of the target the pointer is over and
+  `linkTypeBetween()` turns the two edges into FS/SS/FF/SF. `addLink()` refuses
+  only the *same* relationship twice (and `updateLink()` refuses retyping onto
+  one), because that is the only case that would draw one line exactly on top
+  of another. The connector layer paints above the bars, so a dependency
+  already drawn out of an anchor lies over it: `anchorUnder()` is why a press
+  there still starts a new drag instead of selecting the line — without it, the
+  first link out of an edge would block every later one.
 - **Selecting a bar marks what it is waiting on.** `predecessorsOf()` returns
   one hop — the links arriving at the selection and the objects on the far end —
   and the renderer marks them `.upstream` for as long as the selection stands,
@@ -303,7 +331,7 @@ npm run build                        # must succeed — it also lints the module
 npm test                             # all four browser suites plus the SQL one, must exit 0
 npm run test:rust                    #  13 checks — the plan and lock rules, in Rust
 
-node tools/smoke.js                  # 204 checks — the application, local mode
+node tools/smoke.js                  # 231 checks — the application, local mode
 node tools/smoke_folder.js           #  43 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  48 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
@@ -314,8 +342,9 @@ node tools/smoke.js --shot out.png   # …and eyeball the result
 `smoke.js` boots the real application in Chromium and checks rendering,
 selection, typing into panel fields without losing focus, snapping, undo/redo,
 zoom, the dropdown vocabularies, filter dim/hide, the predecessor highlight and
-its one-shot flash, baseline comparison — down to measuring, at five zooms, that
-no ghost is drawn over a bar or over another ghost — all seventeen dock panes,
+its one-shot flash, several dependencies between one pair of bars, baseline
+comparison — down to measuring, at five zooms, that no ghost, and no reason
+written on one, is drawn over a bar or over another ghost — all seventeen dock panes,
 all five themes, every exporter (including PDF header validation) and reload
 persistence. **Any console error fails the run.**
 

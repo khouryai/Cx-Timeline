@@ -631,11 +631,20 @@ export function moveLane(id, toIndex) {
 
 /* ── Links ─────────────────────────────────────────────────────────────── */
 
+/**
+ * Add a dependency.
+ *
+ * A pair of objects may carry several of them, because the four relationship
+ * types are four different statements about the same two bars — "these start
+ * together" and "this cannot finish until that one has" are both true of a
+ * commissioning pair all the time, and each is drawn between its own two edges,
+ * so two of them never land on one another. What is refused is the same
+ * relationship twice: that one would draw exactly on top of itself.
+ */
 export function addLink(props) {
   const link = makeLink(props);
   if (!link.from || !link.to || link.from === link.to) return null;
-  const exists = doc.links.some((l) => l.from === link.from && l.to === link.to);
-  if (exists) return null;
+  if (linkExists(doc.links, link.from, link.to, link.type)) return null;
   if (createsCycle(link.from, link.to)) return null;
   edit('Add dependency', (d) => {
     d.links.push(link);
@@ -643,10 +652,19 @@ export function addLink(props) {
   return link.id;
 }
 
+/** True when these two objects are already joined by this relationship. */
+function linkExists(links, from, to, type, exceptId = null) {
+  return links.some((l) => l.id !== exceptId && l.from === from && l.to === to && l.type === type);
+}
+
 export function updateLink(id, patch, label = 'Edit dependency') {
   return edit(label, (d) => {
     const l = d.links.find((x) => x.id === id);
     if (!l) return false;
+    // Retyping a link is another way to reach a pair that already has that
+    // relationship — and the two would then be drawn along the same edges, one
+    // invisibly beneath the other.
+    if (patch.type && patch.type !== l.type && linkExists(d.links, l.from, l.to, patch.type, l.id)) return false;
     Object.assign(l, patch);
   });
 }
@@ -764,6 +782,35 @@ export function removeBaseline(id) {
       d.settings.activeBaseline = d.baselines.length ? d.baselines[d.baselines.length - 1].id : null;
       if (!d.settings.activeBaseline) d.settings.showBaseline = false;
     }
+  });
+}
+
+/**
+ * Record why an object moved away from a baseline — or clear it, when the text
+ * is emptied.
+ *
+ * Stored on the object, keyed by baseline, so it travels with the bar rather
+ * than with the comparison, and one undo puts it back like any other edit.
+ * The empty case removes the key rather than storing `''`: an object that was
+ * never annotated and one whose note was deleted must serialise the same.
+ */
+export function setDelayReason(objectId, baselineId, text) {
+  const value = String(text ?? '').trim();
+  if (!objectId || !baselineId) return false;
+
+  return edit(value ? 'Set reason for change' : 'Clear reason for change', (d) => {
+    const obj = d.objects.find((o) => o.id === objectId);
+    if (!obj) return false;
+    const reasons = { ...(obj.data?.delayReasons || {}) };
+    if (value === (reasons[baselineId] || '')) return false;
+
+    if (value) reasons[baselineId] = value;
+    else delete reasons[baselineId];
+
+    obj.data = { ...(obj.data || {}) };
+    if (Object.keys(reasons).length) obj.data.delayReasons = reasons;
+    else delete obj.data.delayReasons;
+    obj.modified = Date.now();
   });
 }
 

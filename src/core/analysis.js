@@ -10,7 +10,7 @@
  */
 
 import { MS_DAY, daysBetween, workingDaysBetween } from './dates.js';
-import { TYPES, LINK_TYPES, effectiveToday, baselineSnapshot } from './model.js';
+import { TYPES, LINK_TYPES, effectiveToday, baselineSnapshot, delayReason } from './model.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
    Memoisation
@@ -370,6 +370,10 @@ export function compareBaseline(doc, baseline) {
       startShift,
       endShift,
       durationChange: nowDuration - baseDuration,
+      // What the planner wrote into the striped area on the canvas. The only
+      // part of a variance row that is not derived, and the part a review asks
+      // for first — so it travels with the row, into the pane and the CSV.
+      reason: delayReason(obj, baseline.id),
       baseline: snap,
       current: obj,
     });

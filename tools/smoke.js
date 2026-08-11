@@ -312,7 +312,8 @@ async function main() {
     const bad = await page.evaluate(() => {
       const offenders = [];
       const nodes = document.querySelectorAll(
-        '.tl-obj .ob-line, .tl-obj .ob-pct, .tl-tick span, .tl-lane-label .ll-name, .tl-today-flag'
+        '.tl-obj .ob-line, .tl-obj .ob-pct, .tl-tick span, .tl-lane-label .ll-name, .tl-today-flag,'
+        + ' .tl-baseline .bl-reason, .tl-baseline-reason .br-line'
       );
       for (const n of nodes) {
         const style = getComputedStyle(n);
@@ -508,6 +509,115 @@ async function main() {
 
   await page.keyboard.press('Control+z');
   await page.waitForTimeout(400);
+
+  console.log('\nMore than one dependency between a pair');
+  // Two bars can be related in more than one way at once — "these start
+  // together" and "this cannot finish until that one has" are both ordinary
+  // statements about the same pair — so the edge a drag lands on names the
+  // relationship, and only the *same* relationship twice is refused.
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  await page.keyboard.press('Control+0');
+  await page.waitForTimeout(600);
+
+  // Read the saved document rather than counting arrows: what matters is how
+  // many dependencies join *this* pair, which the canvas does not say.
+  const savedDoc = () => page.evaluate(() => new Promise((res) => {
+    const r = indexedDB.open('cx-timeline');
+    r.onsuccess = () => {
+      const g = r.result.transaction('projects').objectStore('projects').getAll();
+      g.onsuccess = () => res(g.result.sort((a, b) => b.savedAt - a.savedAt)[0]?.doc || null);
+      g.onerror = () => res(null);
+    };
+    r.onerror = () => res(null);
+  }));
+
+  const linkBars = await page.evaluate(() => [...document.querySelectorAll('.tl-obj.shape-bar')].map((n) => {
+    const r = n.getBoundingClientRect();
+    return { id: n.dataset.objId, label: n.dataset.label, left: r.left, right: r.right, top: r.top, height: r.height };
+  }).filter((b) => b.right - b.left > 40 && b.top > 120));
+
+  const startDoc = await savedDoc();
+  const joined = (doc, a, b) => (doc?.links || []).filter((l) => (l.from === a && l.to === b) || (l.from === b && l.to === a));
+
+  // A forward pair with nothing between them yet: a link that runs left to
+  // right cannot close a cycle, and a pair that is already joined would tell
+  // us nothing about a *second* relationship.
+  let pair = null;
+  const ordered = linkBars.slice().sort((a, b) => a.left - b.left);
+  for (let i = 0; i < ordered.length && !pair; i++) {
+    for (let j = i + 1; j < ordered.length && !pair; j++) {
+      if (ordered[j].left > ordered[i].right + 40 && !joined(startDoc, ordered[i].id, ordered[j].id).length) {
+        pair = { from: ordered[i], to: ordered[j] };
+      }
+    }
+  }
+  check('two unlinked bars are available', !!pair, pair ? `${pair.from.label} → ${pair.to.label}` : 'none found');
+
+  if (pair) {
+    // The anchors sit just outside each edge of a bar; this drags between them
+    // the way a user does rather than calling the store.
+    // Rectangles are re-read for every drag: creating a link can reflow the
+    // lane, and a stale coordinate would miss the anchor and quietly turn the
+    // check into "nothing happened, twice".
+    const boxOf = (id) => page.evaluate((objId) => {
+      const r = document.querySelector(`.tl-obj[data-obj-id="${objId}"]`)?.getBoundingClientRect();
+      return r ? { left: r.left, right: r.right, top: r.top, height: r.height } : null;
+    }, id);
+
+    const drag = async (fromSide, toSide) => {
+      const a = await boxOf(pair.from.id);
+      const b = await boxOf(pair.to.id);
+      if (!a || !b) return false;
+      await page.mouse.move(fromSide === 'end' ? a.right + 7 : a.left - 7, a.top + a.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(toSide === 'end' ? b.right - 6 : b.left + 6, b.top + b.height / 2, { steps: 14 });
+      const reached = await page.locator('.tl-canvas.connecting').count();
+      await page.mouse.up();
+      await page.waitForTimeout(900);
+      return reached > 0;
+    };
+    const between = async () => joined(await savedDoc(), pair.from.id, pair.to.id);
+
+    await drag('end', 'start');
+    const first = await between();
+    check('dragging finish → start creates a dependency',
+      first.length === 1 && first[0].type === 'FS', first.map((l) => l.type).join(' ') || 'none');
+
+    // Straight back out of the *same* anchor. The connector just drawn lies
+    // over it and the connector layer paints above the bars, so this is the
+    // press that used to select the line instead of starting a drag.
+    await drag('end', 'end');
+    const second = await between();
+    check('a second relationship out of the same anchor is allowed',
+      second.length === 2 && second.some((l) => l.type === 'FF'), second.map((l) => l.type).join(' '));
+
+    await drag('start', 'start');
+    const third = await between();
+    check('and a third, from the other edge', third.length === 3, third.map((l) => l.type).join(' '));
+    check('the edges dragged between name each one',
+      new Set(third.map((l) => l.type)).size === 3, third.map((l) => l.type).join(' '));
+    const routes = await page.evaluate((ids) =>
+      ids.map((id) => document.querySelector(`.tl-connectors g[data-link-id="${id}"] path.tl-link`)?.getAttribute('d') || ''),
+    third.map((l) => l.id));
+    check('none of them is drawn on top of another',
+      routes.length === 3 && routes.every(Boolean) && new Set(routes).size === 3, routes.join(' | ').slice(0, 90));
+
+    // The same relationship twice would draw one line exactly on top of
+    // another, so that one is still refused — out loud, not in silence.
+    const dragged = await drag('start', 'start');
+    const again = await between();
+    check('but the same relationship twice is refused',
+      dragged && again.length === 3, `${dragged ? '' : 'drag never started; '}${again.map((l) => l.type).join(' ')}`);
+    check('and says why', /already joined/i.test(await page.locator('#cx-toasts .cx-toast').last().innerText().catch(() => '')));
+
+    for (let i = 0; i < 3; i++) {
+      await page.keyboard.press('Control+z');
+      await page.waitForTimeout(400);
+    }
+    await page.waitForTimeout(700);
+    check('undo takes them back off one at a time', (await between()).length === 0, `${(await between()).length} left`);
+  }
 
   console.log('\nWhat the selection is waiting on');
   // Selecting a bar has to answer "what comes before this" on the canvas, not
@@ -806,6 +916,34 @@ async function main() {
   // Measured from the DOM at several zooms, because the split is a pixel
   // decision — a ghost that clears its bar at day scale covers it at year
   // scale, and the row has to grow and stack on its own.
+  // The striped area answers the question the comparison raises: why. It is
+  // typed into on the canvas, it is packed like every other piece of text, and
+  // it reaches the PDF a review is held on.
+  const REASON = 'Client power-up slipped; waiting on the substation';
+  await page.locator('.tl-baseline.slip').first().click();
+  await page.waitForTimeout(400);
+  check('clicking the striped area opens a field on it',
+    (await page.locator('.tl-reason-input').count()) === 1);
+  check('and selects the activity behind it, so its details are in view', await page.evaluate(() =>
+    !!document.querySelector('.tl-obj.selected') &&
+    /Baseline comparison/i.test(document.querySelector('#inspector')?.textContent || '')));
+
+  await page.locator('.tl-reason-input').fill(REASON);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(700);
+
+  const reasonState = () => page.evaluate(() => ({
+    inside: [...document.querySelectorAll('.tl-baseline .bl-reason')].map((n) => n.textContent),
+    below: [...document.querySelectorAll('.tl-baseline-reason')].map((n) => n.getAttribute('aria-label') || ''),
+    editors: document.querySelectorAll('.tl-reason-input').length,
+  }));
+  const written = await reasonState();
+  check('the reason is written onto the comparison',
+    written.editors === 0 && [...written.inside, ...written.below].some((t) => t.includes('substation')),
+    JSON.stringify(written).slice(0, 120));
+  check('and the inspector holds the same sentence', await page.evaluate((text) =>
+    [...document.querySelectorAll('#inspector input')].some((i) => i.value === text), REASON));
+
   const collisions = () => page.evaluate(() => {
     const box = (n) => {
       const r = n.getBoundingClientRect();
@@ -816,7 +954,9 @@ async function main() {
     // Bands and containers are lane-tall backdrops: everything sits on them by
     // design, so they are not part of the question.
     const bars = [...document.querySelectorAll('.tl-obj.shape-bar')].map(box);
-    const marks = [...document.querySelectorAll('.tl-baseline, .tl-baseline-gone')].map(box);
+    // The reason notes are part of the comparison and are packed with it, so
+    // they are held to the same rule: never over a bar, never over each other.
+    const marks = [...document.querySelectorAll('.tl-baseline, .tl-baseline-gone, .tl-baseline-reason')].map(box);
 
     let onBars = 0;
     let onEachOther = 0;
@@ -861,6 +1001,27 @@ async function main() {
   check('the export draws the ghosts too', (exported.match(/stroke-dasharray/g) || []).length >= 2);
   check('and carries the day counts', /[+−]\d+d/.test(exported),
     (exported.match(/>[+−]\d+d</g) || []).join(' '));
+  // The whole point of writing the reason down is the file someone else reads.
+  check('and the reason the plan moved', /substation/.test(exported));
+
+  // Back on the canvas: the note is a way into the same field, the sentence
+  // survives the round trip through the store, and it is an edit like any
+  // other — one undo takes it back, one redo puts it there again.
+  await page.locator('.tl-baseline-reason, .tl-baseline.annotated').first().click();
+  await page.waitForTimeout(400);
+  check('clicking the note reopens the field on what it says',
+    (await page.locator('.tl-reason-input').inputValue().catch(() => '')) === REASON);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(600);
+  check('undo takes the reason back off',
+    (await page.locator('.tl-baseline-reason, .tl-baseline .bl-reason').count()) === 0);
+  await page.keyboard.press('Control+Shift+z');
+  await page.waitForTimeout(600);
+  check('redo writes it back',
+    (await page.locator('.tl-baseline-reason, .tl-baseline .bl-reason').count()) >= 1);
 
   // Turning comparison off must leave nothing behind.
   await page.locator('#sidenav .nav-link[data-pane="baselines"]').click();

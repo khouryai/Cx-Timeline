@@ -237,6 +237,12 @@ export function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onS
 
     if (onSelect) {
       hit.addEventListener('mousedown', (e) => {
+        // A connector leaves its bar exactly where that bar's link anchor sits,
+        // and the connector layer draws above the objects — so without this,
+        // the first dependency out of an anchor would block every later one
+        // from being drawn there. The anchor wins; the press falls through to
+        // the canvas, which starts the drag.
+        if (anchorUnder(e)) return;
         e.stopPropagation();
         onSelect(item.link, e);
       });
@@ -244,6 +250,20 @@ export function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onS
 
     svg.appendChild(group);
   }
+}
+
+/**
+ * The link anchor under the pointer, if any.
+ *
+ * Asked by point rather than by event target: the thing that was hit is the
+ * connector, and the anchor is underneath it.
+ */
+export function anchorUnder(e) {
+  if (typeof document === 'undefined' || typeof document.elementsFromPoint !== 'function') return null;
+  for (const node of document.elementsFromPoint(e.clientX, e.clientY)) {
+    if (node.classList?.contains('tl-anchor')) return node;
+  }
+  return null;
 }
 
 /** Preview path drawn while the user drags a new dependency. */
