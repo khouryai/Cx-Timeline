@@ -24,7 +24,7 @@
 
 import { clamp } from '../core/util.js';
 import { MS_DAY, daysBetween } from '../core/dates.js';
-import { TYPES, objectRange, baselineSnapshot, delayReason } from '../core/model.js';
+import { TYPES, objectRange, baselineSnapshot, delayReason, visibleNote } from '../core/model.js';
 import { getDoc, orderedLanes, getLane, activeBaseline } from '../core/store.js';
 import { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } from './viewport.js';
 import { fontString, textWidth, wrapText, fitWidth } from './text.js';
@@ -65,6 +65,16 @@ const GHOST_GAP = 3;
 const GONE_HEIGHT = 20;
 /** Room the day-count badge on a shift arrow needs, centred on the arrow. */
 const SHIFT_BADGE_W = 48;
+/** Type size of a note shown under its object — matched by `.tl-note` in CSS. */
+const NOTE_SIZE = 10;
+/** Gap between an object and the note under it. */
+const NOTE_GAP = 3;
+/** Horizontal padding around a note. */
+const NOTE_PAD_X = 6;
+/** Widest a note may be before it wraps. */
+const NOTE_MAX_W = 260;
+/** Narrowest measure a note is wrapped to. */
+const NOTE_MIN_W = 120;
 /** Type size of the reason written into a ghost — matched by `.bl-reason` in CSS. */
 const REASON_SIZE = 10;
 /** Horizontal padding around the reason text. */
@@ -213,11 +223,49 @@ export function measureLabel(obj, barWidthPx) {
 }
 
 /**
- * The band a comparison reserves along the bottom of its row: the tier a ghost
- * drops to when it covers its own bar, plus the reason note when that has to be
- * written under the row rather than inside the ghost. Read by the packer and by
- * `objectRect`, so both agree on where the bars stop.
+ * The note an object shows under itself, wrapped and measured.
+ *
+ * Whole, or not at all: the note is the words someone wrote about the work, and
+ * shortening those is exactly the thing this canvas does not do. A note long
+ * enough to make its row unreadable is a note to turn off — which is what the
+ * switch beside it in the inspector is for.
  */
+function measureNote(obj, barWidth, hasDuration) {
+  const text = visibleNote(obj);
+  if (!text) return null;
+
+  const font = fontString({ size: NOTE_SIZE, weight: 400, italic: true });
+  const lineHeight = Math.round(NOTE_SIZE * 1.34);
+  const measure = hasDuration
+    ? clamp(barWidth - NOTE_PAD_X * 2, NOTE_MIN_W, NOTE_MAX_W)
+    : NOTE_MIN_W;
+  const wrapped = wrapText(text, measure, font, { lineHeight });
+
+  return {
+    text,
+    lines: wrapped.lines,
+    lineHeight,
+    width: Math.ceil(wrapped.width),
+    height: wrapped.lines.length * lineHeight,
+  };
+}
+
+/**
+ * The band an object reserves along the bottom of its row, and the order things
+ * stack in it: its own note first, then the ghost that had to drop out of the
+ * bar's way, then the reason written on that ghost.
+ *
+ * Read by the packer and by `objectRect`, so both agree on where the bars stop
+ * and every piece knows which floor it is standing on.
+ */
+function bottomTier(note, ghost) {
+  return noteTier(note) + ghostTier(ghost);
+}
+
+function noteTier(note) {
+  return note ? note.height + NOTE_GAP : 0;
+}
+
 function ghostTier(ghost) {
   if (!ghost) return 0;
   const stack = ghost.stacked ? GHOST_HEIGHT + GHOST_GAP : 0;
@@ -227,12 +275,12 @@ function ghostTier(ghost) {
   return stack + note;
 }
 
-/** Height one object needs on its packed row, label and ghost included. */
-function rowHeightFor(obj, label, ghost = null) {
+/** Height one object needs on its packed row: label, note and ghost included. */
+function rowHeightFor(obj, label, ghost = null, note = null) {
   const def = TYPES[obj.type] || TYPES.activity;
-  // A ghost that has to stack takes a tier of its own under the bar, and a
-  // reason written under the row takes another.
-  const tier = ghostTier(ghost);
+  // Its note, a ghost that has to stack, and a reason written under that ghost
+  // each take a floor of the band along the bottom of the row.
+  const tier = bottomTier(note, ghost);
 
   if (!def.duration) {
     return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove) + tier;
@@ -432,7 +480,7 @@ export function packRows(entries, { minGapPx = 6 } = {}) {
   const assigned = new Map();
 
   for (const entry of sorted) {
-    const { obj, label, barWidth, ghost } = entry;
+    const { obj, label, barWidth, ghost, note } = entry;
     const startPx = msToPx(obj.start);
     const hasDuration = !!TYPES[obj.type]?.duration;
 
@@ -442,6 +490,12 @@ export function packRows(entries, { minGapPx = 6 } = {}) {
     if (ghost) {
       from = Math.min(from, ghost.from);
       to = Math.max(to, ghost.to);
+    }
+    // A note wrapped wider than the bar it belongs to still may not be printed
+    // over its neighbour, so the packer reserves what it actually occupies.
+    if (note) {
+      const left = hasDuration ? startPx : startPx - POINT_SIZE / 2;
+      to = Math.max(to, left + note.width + NOTE_PAD_X * 2);
     }
 
     if (Number.isFinite(obj.row) && obj.row > 0) {
@@ -529,7 +583,8 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
         : POINT_SIZE;
       const label = measureLabel(obj, barWidth);
       const ghost = snapshot ? measureGhost(obj, snapshot.get(obj.id), barWidth, baselineId) : null;
-      return { obj, label, barWidth, ghost, height: rowHeightFor(obj, label, ghost) };
+      const note = doc.settings.showNotes === false ? null : measureNote(obj, barWidth, hasDuration);
+      return { obj, label, barWidth, ghost, note, height: rowHeightFor(obj, label, ghost, note) };
     });
 
     // Outlines for what the baseline had and the plan has not. They pack with
@@ -555,7 +610,7 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
     if (!collapsed) {
       for (const entry of packable) {
         const row = assigned.get(entry.obj.id) || 0;
-        const tier = ghostTier(entry.ghost);
+        const tier = bottomTier(entry.note, entry.ghost);
         rowContent[row] = Math.max(rowContent[row], entry.height - tier);
         rowTiers[row] = Math.max(rowTiers[row], tier);
       }
@@ -676,6 +731,11 @@ export function objectRect(obj, laneEntry, row, measured, collapsed = false) {
   const stacked = !!(measured.ghost && measured.ghost.stacked) && !collapsed;
   const tier = collapsed ? 0 : (laneEntry.rowTiers?.[row] ?? 0);
   const rowH = Math.max(ROW_HEIGHT, fullRowH - tier);
+  // The band below the row is shared by everything this object hangs under
+  // itself, in a fixed order: the note it shows, then a ghost that had to drop
+  // out of the bar's way, then the reason written on that ghost. Each object
+  // measures its own floor, and the packer has kept them horizontally apart.
+  const note = collapsed ? null : measured.note;
 
   let width;
   let left;
@@ -721,7 +781,22 @@ export function objectRect(obj, laneEntry, row, measured, collapsed = false) {
      * behind it when the two are clear of each other, in its own tier under the
      * row when they are not. Null unless the document is comparing.
      */
-    ghost: measured.ghost ? placedGhost(measured.ghost, { stacked, top, height, rowTop, rowH, collapsed }) : null,
+    ghost: measured.ghost
+      ? placedGhost(measured.ghost, { stacked, top, height, rowTop, rowH: rowH + noteTier(note), collapsed })
+      : null,
+    /**
+     * The note drawn under this object, in the same coordinates as the bar, or
+     * null when it has none or has been told not to show it.
+     */
+    note: note
+      ? {
+          ...note,
+          x: hasDuration ? x : x - POINT_SIZE / 2,
+          y: rowTop + rowH + NOTE_GAP,
+          w: note.width + NOTE_PAD_X * 2,
+          h: note.height,
+        }
+      : null,
     x: left,
     y: top,
     w: width,

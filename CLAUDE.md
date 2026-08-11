@@ -135,6 +135,17 @@ subscribes. That is what keeps the graph acyclic.
   a banner naming the baseline. `io/scene.js` draws the same, so an exported
   PDF is the drawing on screen. All of it but the reason is derived per frame
   from the snapshot — there is no comparison state to go stale.
+- **A note written on an object is shown on the timeline.** Writing one *is*
+  the request to see it: `data.showNotes` is only ever `false`, set by the
+  switch in the inspector's Notes section, and `settings.showNotes` hides the
+  lot at once. Read it with `visibleNote(obj)`, which answers the words or ''.
+  It is timeline text like any other — measured by `measureNote()`, packed with
+  its object, drawn whole over as many lines as it takes, and printed by
+  `io/scene.js`. It is never shortened: a note too long for its row is a note
+  to switch off, which is what the switch is for. It shares the band below the
+  row with the comparison, in a fixed order set by `bottomTier()` — the note
+  first, then a stacked ghost, then the reason on that ghost — so each object
+  knows which floor it is standing on.
 - **The reason a bar moved is the one part of a comparison that is stored.**
   Everything else about a baseline is derived; why it slipped cannot be, so it
   lives on the object in `data.delayReasons`, keyed by baseline id — a plan is
@@ -380,7 +391,7 @@ npm run build                        # must succeed — it also lints the module
 npm test                             # all four browser suites plus the SQL one, must exit 0
 npm run test:rust                    #  19 checks — the plan and lock rules, in Rust
 
-node tools/smoke.js                  # 246 checks — the application, local mode
+node tools/smoke.js                  # 254 checks — the application, local mode
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only

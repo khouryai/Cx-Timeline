@@ -1750,6 +1750,7 @@ function openExportOptions(onClose = () => {}) {
         onChange: (v) => set({ showDates: v }),
       }),
       el('div', { class: 'cx-hint', text: 'Start, finish and duration printed under each label, so a bar can be cross-referenced without reading it off the ruler.' }),
+      toggle({ label: 'Notes written on objects', checked: cfg.showNotes !== false, onChange: (v) => set({ showNotes: v }) }),
       toggle({ label: 'Dependencies', checked: cfg.showLinks !== false, onChange: (v) => set({ showLinks: v }) }),
       toggle({ label: 'Progress fill', checked: cfg.showProgress !== false, onChange: (v) => set({ showProgress: v }) }),
       toggle({ label: 'Legend', checked: cfg.showLegend !== false, onChange: (v) => set({ showLegend: v }) }),
@@ -1827,6 +1828,7 @@ function exportSummary() {
   const cfg = exporters.exportSettings();
   const on = [
     cfg.showDates !== false ? 'dates' : null,
+    cfg.showNotes !== false ? 'notes' : null,
     cfg.showLinks !== false ? 'dependencies' : null,
     cfg.showBaseline ? 'baseline' : null,
     cfg.showLegend !== false ? 'legend' : null,
@@ -1920,6 +1922,15 @@ function paneSettings(root) {
         ],
         onChange: (v) => set('weekStart', Number(v), 'Change week start'),
       })),
+      toggle({
+        label: 'Notes on the timeline',
+        checked: settings.showNotes !== false,
+        onChange: (v) => {
+          set('showNotes', v, 'Toggle notes on the timeline');
+          renderer.requestRender();
+        },
+      }),
+      el('div', { class: 'cx-hint', text: 'Each object can be switched off on its own in the inspector; this hides them all at once.' }),
       field('Count durations in', segmented({
         value: settings.durationUnit === 'calendar' ? 'calendar' : 'working',
         stretch: true,

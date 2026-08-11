@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 43   Built: 2026-08-11T20:28:27.785Z
+ * Modules: 43   Built: 2026-08-11T20:35:03.523Z
  */
 (function () {
   'use strict';
@@ -2090,6 +2090,7 @@ __mods["core/model.js"] = function (__x, __req) {
         showGrid: true,
         showToday: true,
         showProgress: true,
+        showNotes: true,
         // showBaseline / baselineId are deliberately absent: until someone
         // chooses, an export matches what is on screen. See exportSettings().
         respectFilters: true,
@@ -2100,6 +2101,9 @@ __mods["core/model.js"] = function (__x, __req) {
       activeBaseline: null,
       criticalPath: false,
       laneLabels: true,
+      // Notes written on objects appear under them. Per-object `data.showNotes`
+      // turns one off; this turns the lot off.
+      showNotes: true,
       dateOrder: 'mdy',            // mdy | dmy | ymd — display order only
       // working = a five-day week, holidays excluded; calendar = every day.
       // Counting only — it never moves a bar.
@@ -2495,6 +2499,41 @@ __mods["core/model.js"] = function (__x, __req) {
     return Math.max(0, Math.round(total * (1 - (obj.progress || 0) / 100)));
   }
 
+  /* ── Notes on the canvas ───────────────────────────────────────────────── */
+
+  /**
+   * The note an object shows on the timeline, as plain text — or '' when it has
+   * none, or has been told not to show it.
+   *
+   * Writing a note is itself the request to see it: `data.showNotes` is only
+   * ever *false*, set by turning the note off again, so a note added anywhere in
+   * the application appears on the plan without a second step. The notes
+   * themselves are rich text; what the canvas can lay out is the words.
+   */
+  function visibleNote(obj) {
+    if (!obj || obj.data?.showNotes === false) return '';
+    return noteText(obj.notes);
+  }
+
+  /** Whether this object would show its note if it had one. */
+  function notesShown(obj) {
+    return !obj || obj.data?.showNotes !== false;
+  }
+
+  /** A note's words, with the markup and the runs of blank space taken out. */
+  function noteText(notes) {
+    return String(notes || '')
+      .replace(/<br\s*\/?>/gi, ' ')
+      .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, ' ')
+      .replace(/<[^>]*>/g, '')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
   /** Resolve the accent colour for an object: explicit fill → status → type. */
   function objectColor(obj, lane) {
     if (obj.style?.fill) return obj.style.fill;
@@ -2605,6 +2644,9 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "durationDays", { get: () => durationDays, enumerable: true });
   Object.defineProperty(__x, "endForDuration", { get: () => endForDuration, enumerable: true });
   Object.defineProperty(__x, "remainingDays", { get: () => remainingDays, enumerable: true });
+  Object.defineProperty(__x, "visibleNote", { get: () => visibleNote, enumerable: true });
+  Object.defineProperty(__x, "notesShown", { get: () => notesShown, enumerable: true });
+  Object.defineProperty(__x, "noteText", { get: () => noteText, enumerable: true });
   Object.defineProperty(__x, "objectColor", { get: () => objectColor, enumerable: true });
   Object.defineProperty(__x, "objectRange", { get: () => objectRange, enumerable: true });
   Object.defineProperty(__x, "projectExtent", { get: () => projectExtent, enumerable: true });
@@ -8570,7 +8612,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
 
   const { clamp } = __req("core/util.js");
   const { MS_DAY, daysBetween } = __req("core/dates.js");
-  const { TYPES, objectRange, baselineSnapshot, delayReason } = __req("core/model.js");
+  const { TYPES, objectRange, baselineSnapshot, delayReason, visibleNote } = __req("core/model.js");
   const { getDoc, orderedLanes, getLane, activeBaseline } = __req("core/store.js");
   const { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } = __req("timeline/viewport.js");
   const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
@@ -8611,6 +8653,16 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   const GONE_HEIGHT = 20;
   /** Room the day-count badge on a shift arrow needs, centred on the arrow. */
   const SHIFT_BADGE_W = 48;
+  /** Type size of a note shown under its object — matched by `.tl-note` in CSS. */
+  const NOTE_SIZE = 10;
+  /** Gap between an object and the note under it. */
+  const NOTE_GAP = 3;
+  /** Horizontal padding around a note. */
+  const NOTE_PAD_X = 6;
+  /** Widest a note may be before it wraps. */
+  const NOTE_MAX_W = 260;
+  /** Narrowest measure a note is wrapped to. */
+  const NOTE_MIN_W = 120;
   /** Type size of the reason written into a ghost — matched by `.bl-reason` in CSS. */
   const REASON_SIZE = 10;
   /** Horizontal padding around the reason text. */
@@ -8759,11 +8811,49 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   }
 
   /**
-   * The band a comparison reserves along the bottom of its row: the tier a ghost
-   * drops to when it covers its own bar, plus the reason note when that has to be
-   * written under the row rather than inside the ghost. Read by the packer and by
-   * `objectRect`, so both agree on where the bars stop.
+   * The note an object shows under itself, wrapped and measured.
+   *
+   * Whole, or not at all: the note is the words someone wrote about the work, and
+   * shortening those is exactly the thing this canvas does not do. A note long
+   * enough to make its row unreadable is a note to turn off — which is what the
+   * switch beside it in the inspector is for.
    */
+  function measureNote(obj, barWidth, hasDuration) {
+    const text = visibleNote(obj);
+    if (!text) return null;
+
+    const font = fontString({ size: NOTE_SIZE, weight: 400, italic: true });
+    const lineHeight = Math.round(NOTE_SIZE * 1.34);
+    const measure = hasDuration
+      ? clamp(barWidth - NOTE_PAD_X * 2, NOTE_MIN_W, NOTE_MAX_W)
+      : NOTE_MIN_W;
+    const wrapped = wrapText(text, measure, font, { lineHeight });
+
+    return {
+      text,
+      lines: wrapped.lines,
+      lineHeight,
+      width: Math.ceil(wrapped.width),
+      height: wrapped.lines.length * lineHeight,
+    };
+  }
+
+  /**
+   * The band an object reserves along the bottom of its row, and the order things
+   * stack in it: its own note first, then the ghost that had to drop out of the
+   * bar's way, then the reason written on that ghost.
+   *
+   * Read by the packer and by `objectRect`, so both agree on where the bars stop
+   * and every piece knows which floor it is standing on.
+   */
+  function bottomTier(note, ghost) {
+    return noteTier(note) + ghostTier(ghost);
+  }
+
+  function noteTier(note) {
+    return note ? note.height + NOTE_GAP : 0;
+  }
+
   function ghostTier(ghost) {
     if (!ghost) return 0;
     const stack = ghost.stacked ? GHOST_HEIGHT + GHOST_GAP : 0;
@@ -8773,12 +8863,12 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     return stack + note;
   }
 
-  /** Height one object needs on its packed row, label and ghost included. */
-  function rowHeightFor(obj, label, ghost = null) {
+  /** Height one object needs on its packed row: label, note and ghost included. */
+  function rowHeightFor(obj, label, ghost = null, note = null) {
     const def = TYPES[obj.type] || TYPES.activity;
-    // A ghost that has to stack takes a tier of its own under the bar, and a
-    // reason written under the row takes another.
-    const tier = ghostTier(ghost);
+    // Its note, a ghost that has to stack, and a reason written under that ghost
+    // each take a floor of the band along the bottom of the row.
+    const tier = bottomTier(note, ghost);
 
     if (!def.duration) {
       return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove) + tier;
@@ -8978,7 +9068,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     const assigned = new Map();
 
     for (const entry of sorted) {
-      const { obj, label, barWidth, ghost } = entry;
+      const { obj, label, barWidth, ghost, note } = entry;
       const startPx = msToPx(obj.start);
       const hasDuration = !!TYPES[obj.type]?.duration;
 
@@ -8988,6 +9078,12 @@ __mods["timeline/layout.js"] = function (__x, __req) {
       if (ghost) {
         from = Math.min(from, ghost.from);
         to = Math.max(to, ghost.to);
+      }
+      // A note wrapped wider than the bar it belongs to still may not be printed
+      // over its neighbour, so the packer reserves what it actually occupies.
+      if (note) {
+        const left = hasDuration ? startPx : startPx - POINT_SIZE / 2;
+        to = Math.max(to, left + note.width + NOTE_PAD_X * 2);
       }
 
       if (Number.isFinite(obj.row) && obj.row > 0) {
@@ -9075,7 +9171,8 @@ __mods["timeline/layout.js"] = function (__x, __req) {
           : POINT_SIZE;
         const label = measureLabel(obj, barWidth);
         const ghost = snapshot ? measureGhost(obj, snapshot.get(obj.id), barWidth, baselineId) : null;
-        return { obj, label, barWidth, ghost, height: rowHeightFor(obj, label, ghost) };
+        const note = doc.settings.showNotes === false ? null : measureNote(obj, barWidth, hasDuration);
+        return { obj, label, barWidth, ghost, note, height: rowHeightFor(obj, label, ghost, note) };
       });
 
       // Outlines for what the baseline had and the plan has not. They pack with
@@ -9101,7 +9198,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
       if (!collapsed) {
         for (const entry of packable) {
           const row = assigned.get(entry.obj.id) || 0;
-          const tier = ghostTier(entry.ghost);
+          const tier = bottomTier(entry.note, entry.ghost);
           rowContent[row] = Math.max(rowContent[row], entry.height - tier);
           rowTiers[row] = Math.max(rowTiers[row], tier);
         }
@@ -9222,6 +9319,11 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     const stacked = !!(measured.ghost && measured.ghost.stacked) && !collapsed;
     const tier = collapsed ? 0 : (laneEntry.rowTiers?.[row] ?? 0);
     const rowH = Math.max(ROW_HEIGHT, fullRowH - tier);
+    // The band below the row is shared by everything this object hangs under
+    // itself, in a fixed order: the note it shows, then a ghost that had to drop
+    // out of the bar's way, then the reason written on that ghost. Each object
+    // measures its own floor, and the packer has kept them horizontally apart.
+    const note = collapsed ? null : measured.note;
 
     let width;
     let left;
@@ -9267,7 +9369,22 @@ __mods["timeline/layout.js"] = function (__x, __req) {
        * behind it when the two are clear of each other, in its own tier under the
        * row when they are not. Null unless the document is comparing.
        */
-      ghost: measured.ghost ? placedGhost(measured.ghost, { stacked, top, height, rowTop, rowH, collapsed }) : null,
+      ghost: measured.ghost
+        ? placedGhost(measured.ghost, { stacked, top, height, rowTop, rowH: rowH + noteTier(note), collapsed })
+        : null,
+      /**
+       * The note drawn under this object, in the same coordinates as the bar, or
+       * null when it has none or has been told not to show it.
+       */
+      note: note
+        ? {
+            ...note,
+            x: hasDuration ? x : x - POINT_SIZE / 2,
+            y: rowTop + rowH + NOTE_GAP,
+            w: note.width + NOTE_PAD_X * 2,
+            h: note.height,
+          }
+        : null,
       x: left,
       y: top,
       w: width,
@@ -10109,6 +10226,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     renderGrid(doc, settings, layout);
     renderLaneRows(layout);
     renderObjects(layout, settings, upstream);
+    renderNotes(layout);
     renderBaseline(layout, settings);
     renderLinks(doc, layout, settings, upstream);
     renderToday(doc, settings, layout);
@@ -10924,6 +11042,42 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
    * reason is stored on the object, and it is placed by `computeLayout` like any
    * other text on the canvas — this only prints what it was handed.
    */
+  /**
+   * The notes objects are showing, drawn under them.
+   *
+   * Whole, wrapped exactly as `computeLayout` measured them, in the band it
+   * reserved — so a note can no more land on a neighbour than a label can, and
+   * none of it is ever shortened to fit. Rebuilt each frame like the comparison:
+   * a note is text on the canvas, not a node with state to keep.
+   */
+  function renderNotes(layout) {
+    dom.overlay.querySelectorAll('.tl-note').forEach((n) => n.remove());
+
+    const fragment = document.createDocumentFragment();
+    for (const rect of layout.rects) {
+      const note = rect.note;
+      if (!note || rect.dimmed) continue;
+
+      const node = el('div', {
+        class: 'tl-note',
+        'data-note-for': rect.obj.id,
+        'aria-label': `${rect.obj.title} — note: ${note.text}`,
+        title: note.text,
+        style: {
+          left: `${note.x}px`,
+          top: `${note.y}px`,
+          width: `${note.w}px`,
+          height: `${note.h}px`,
+        },
+      });
+      for (const line of note.lines) {
+        node.appendChild(el('span', { class: 'tn-line', text: line, 'aria-hidden': 'true' }));
+      }
+      fragment.appendChild(node);
+    }
+    dom.overlay.appendChild(fragment);
+  }
+
   function renderBaseline(layout, settings) {
     dom.overlay
       .querySelectorAll('.tl-baseline, .tl-shift, .tl-baseline-gone, .tl-baseline-reason')
@@ -18562,7 +18716,7 @@ __mods["io/scene.js"] = function (__x, __req) {
 
   const { clamp, withAlpha, readableInk } = __req("core/util.js");
   const { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } = __req("core/dates.js");
-  const { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot, delayReason } = __req("core/model.js");
+  const { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot, delayReason, visibleNote } = __req("core/model.js");
   const { criticalPath, linkViolations } = __req("core/analysis.js");
   const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
 
@@ -18586,6 +18740,11 @@ __mods["io/scene.js"] = function (__x, __req) {
     ghostGap: 2,
     goneH: 12,
     shiftBadgeW: 30,
+    notePadX: 4,
+    noteGap: 2,
+    noteLineH: 8,
+    noteMaxW: 200,
+    noteMinW: 90,
     reasonPadX: 4,
     reasonGap: 2,
     reasonLineH: 7.5,
@@ -18601,6 +18760,7 @@ __mods["io/scene.js"] = function (__x, __req) {
     mono: fontString({ size: 6.8, weight: 400, mono: true }),
     lane: fontString({ size: 9.5, weight: 600 }),
     reason: fontString({ size: 6.5, weight: 600 }),
+    note: fontString({ size: 6.5, weight: 400 }),
   };
 
   /** The dates an object covers, in the project's own display order. */
@@ -18677,6 +18837,26 @@ __mods["io/scene.js"] = function (__x, __req) {
     label.extraRight = label.width + M.outsideGap + 3;
     label.extraVert = 0;
     return label;
+  }
+
+  /**
+   * An object's note, measured for print exactly as the canvas measures it for
+   * the screen: whole, wrapped, never shortened. The packer reserves the room,
+   * so a note can no more land on a neighbour on paper than it can on screen.
+   */
+  function exportNote(obj, barWidth, hasDuration) {
+    const text = visibleNote(obj);
+    if (!text) return null;
+    const measure = hasDuration
+      ? clamp(barWidth - M.notePadX * 2, M.noteMinW, M.noteMaxW)
+      : M.noteMinW;
+    const wrapped = wrapText(text, measure, EXPORT_FONTS.note, { lineHeight: M.noteLineH });
+    return {
+      text,
+      lines: wrapped.lines,
+      width: Math.ceil(wrapped.width),
+      height: wrapped.lines.length * M.noteLineH,
+    };
   }
 
   /**
@@ -18799,10 +18979,18 @@ __mods["io/scene.js"] = function (__x, __req) {
         const ghost = comparison
           ? exportGhost(obj, comparison.byId.get(obj.id), barWidth, msToX, pxPerDay, comparison.baseline.id)
           : null;
+        const note = opts.showNotes === false ? null : exportNote(obj, barWidth, hasDuration);
         const height = hasDuration
           ? Math.max(M.rowH, label.height + 5)
           : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
-        return { obj, label, barWidth, ghost, height: height + exportGhostTier(ghost) };
+        return {
+          obj,
+          label,
+          barWidth,
+          ghost,
+          note,
+          height: height + (note ? note.height + M.noteGap : 0) + exportGhostTier(ghost),
+        };
       });
 
       // Outlines for what the baseline had and the plan has not. They pack with
@@ -18973,6 +19161,26 @@ __mods["io/scene.js"] = function (__x, __req) {
           settings: { ...doc.settings, showProgress: opts.showProgress !== false && doc.settings.showProgress },
         });
         if (rect) {
+          // The note goes in the band reserved under the object, and the ghost —
+          // which stacks under that — is told where the floor now is.
+          if (item.note) {
+            const noteTop = rect.bottom + M.noteGap;
+            items.push({ type: 'rect', x: rect.x, y: noteTop, w: 1.2, h: item.note.height, fill: palette.textSubtle });
+            item.note.lines.forEach((line, i) => {
+              items.push({
+                type: 'text',
+                x: rect.x + M.notePadX,
+                y: noteTop + (i + 1) * M.noteLineH - 2,
+                text: line,
+                size: 6.5,
+                // No italic here: neither writer carries one, and a note that
+                // printed differently in SVG and PDF would break the promise
+                // that the two are the same drawing.
+                fill: palette.textMuted,
+              });
+            });
+            rect.bottom += item.note.height + M.noteGap;
+          }
           rect.ghost = item.ghost;
           rectsById.set(item.obj.id, rect);
         }
@@ -19225,6 +19433,9 @@ __mods["io/scene.js"] = function (__x, __req) {
       if (item.ghost) {
         from = Math.min(from, item.ghost.from);
         to = Math.max(to, item.ghost.to);
+      }
+      if (item.note) {
+        to = Math.max(to, (hasDuration ? startX : startX - M.pointR) + item.note.width + M.notePadX * 2);
       }
 
       let row = 0;
@@ -20458,6 +20669,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
       showGrid: true,
       showToday: true,
       showProgress: true,
+      showNotes: true,
       // Until someone chooses otherwise, a drawing is what is on the screen —
       // exporting while comparing against a baseline should not quietly drop
       // the comparison.
@@ -20494,6 +20706,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
       showToday: cfg.showToday !== false,
       showLegend: cfg.showLegend !== false,
       showProgress: cfg.showProgress !== false,
+      showNotes: cfg.showNotes !== false && getDoc().settings.showNotes !== false,
       showDates: cfg.showDates === true,
       showBaseline: cfg.showBaseline === true,
       baselineId: cfg.baselineId,
@@ -22427,6 +22640,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
           onChange: (v) => set({ showDates: v }),
         }),
         el('div', { class: 'cx-hint', text: 'Start, finish and duration printed under each label, so a bar can be cross-referenced without reading it off the ruler.' }),
+        toggle({ label: 'Notes written on objects', checked: cfg.showNotes !== false, onChange: (v) => set({ showNotes: v }) }),
         toggle({ label: 'Dependencies', checked: cfg.showLinks !== false, onChange: (v) => set({ showLinks: v }) }),
         toggle({ label: 'Progress fill', checked: cfg.showProgress !== false, onChange: (v) => set({ showProgress: v }) }),
         toggle({ label: 'Legend', checked: cfg.showLegend !== false, onChange: (v) => set({ showLegend: v }) }),
@@ -22504,6 +22718,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
     const cfg = exporters.exportSettings();
     const on = [
       cfg.showDates !== false ? 'dates' : null,
+      cfg.showNotes !== false ? 'notes' : null,
       cfg.showLinks !== false ? 'dependencies' : null,
       cfg.showBaseline ? 'baseline' : null,
       cfg.showLegend !== false ? 'legend' : null,
@@ -22597,6 +22812,15 @@ __mods["ui/panels.js"] = function (__x, __req) {
           ],
           onChange: (v) => set('weekStart', Number(v), 'Change week start'),
         })),
+        toggle({
+          label: 'Notes on the timeline',
+          checked: settings.showNotes !== false,
+          onChange: (v) => {
+            set('showNotes', v, 'Toggle notes on the timeline');
+            renderer.requestRender();
+          },
+        }),
+        el('div', { class: 'cx-hint', text: 'Each object can be switched off on its own in the inspector; this hides them all at once.' }),
         field('Count durations in', segmented({
           value: settings.durationUnit === 'calendar' ? 'calendar' : 'working',
           stretch: true,
@@ -23370,7 +23594,8 @@ __mods["ui/inspector.js"] = function (__x, __req) {
   const { el, clear, debounce, clamp, escapeHtml } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } = __req("core/dates.js");
-  const { TYPES, listOptions, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, LINK_TYPES, CONNECTOR_STYLES, durationDays, endForDuration, countsWorkingDays, remainingDays, statusOf, effectiveToday, isDerivedBaseline, delayReason } = __req("core/model.js");
+  const { TYPES, listOptions, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, LINK_TYPES, CONNECTOR_STYLES, durationDays, endForDuration, countsWorkingDays, remainingDays, statusOf, effectiveToday, isDerivedBaseline, delayReason, notesShown } = __req("core/model.js");
+
 
 
 
@@ -23925,6 +24150,18 @@ __mods["ui/inspector.js"] = function (__x, __req) {
 
     return [
       preview,
+      // Writing a note is itself the request to see it, so this starts on and the
+      // switch is here to turn it off again — for this object alone.
+      obj.notes
+        ? toggle({
+            label: 'Show on the timeline',
+            checked: notesShown(obj),
+            onChange: (v) => {
+              set(obj.id, { data: { showNotes: v } }, v ? 'Show note on the timeline' : 'Hide note from the timeline');
+              render();
+            },
+          })
+        : null,
       el('div', { class: 'cx-inline' }, [
         el('button', {
           class: 'cx-btn mini',

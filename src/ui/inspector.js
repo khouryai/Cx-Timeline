@@ -31,6 +31,7 @@ import {
   effectiveToday,
   isDerivedBaseline,
   delayReason,
+  notesShown,
 } from '../core/model.js';
 import * as store from '../core/store.js';
 import { objectHealth, linkViolations, evaluateLink } from '../core/analysis.js';
@@ -568,6 +569,18 @@ function notesFields(obj) {
 
   return [
     preview,
+    // Writing a note is itself the request to see it, so this starts on and the
+    // switch is here to turn it off again — for this object alone.
+    obj.notes
+      ? toggle({
+          label: 'Show on the timeline',
+          checked: notesShown(obj),
+          onChange: (v) => {
+            set(obj.id, { data: { showNotes: v } }, v ? 'Show note on the timeline' : 'Hide note from the timeline');
+            render();
+          },
+        })
+      : null,
     el('div', { class: 'cx-inline' }, [
       el('button', {
         class: 'cx-btn mini',

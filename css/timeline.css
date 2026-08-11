@@ -864,6 +864,32 @@
   border-color: var(--warn);
 }
 
+/* ── An object's note, shown under it ──────────────────────────────────── */
+
+/* Whole, wrapped as it was measured, in the band the packer reserved. No
+   overflow rule belongs here: this is one more piece of timeline text, and the
+   way to shorten it is to write less or switch it off. */
+.tl-note {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  padding: 0 6px;
+  border-left: 2px solid color-mix(in srgb, var(--text-subtle) 55%, transparent);
+  color: var(--text-muted);
+  pointer-events: none;
+  z-index: 55;
+}
+.tl-note .tn-line {
+  color: inherit;
+  font-family: var(--f-ui);
+  font-size: 10px;
+  font-style: italic;
+  font-weight: 400;
+  line-height: 13px;
+  white-space: nowrap;
+}
+
 /* ── Why it moved ──────────────────────────────────────────────────────── */
 
 /* Hovering says the area answers to a click without printing anything that

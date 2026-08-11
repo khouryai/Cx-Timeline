@@ -161,6 +161,7 @@ export function renderNow() {
   renderGrid(doc, settings, layout);
   renderLaneRows(layout);
   renderObjects(layout, settings, upstream);
+  renderNotes(layout);
   renderBaseline(layout, settings);
   renderLinks(doc, layout, settings, upstream);
   renderToday(doc, settings, layout);
@@ -976,6 +977,42 @@ function applyTextStyle(node, style, ink) {
  * reason is stored on the object, and it is placed by `computeLayout` like any
  * other text on the canvas — this only prints what it was handed.
  */
+/**
+ * The notes objects are showing, drawn under them.
+ *
+ * Whole, wrapped exactly as `computeLayout` measured them, in the band it
+ * reserved — so a note can no more land on a neighbour than a label can, and
+ * none of it is ever shortened to fit. Rebuilt each frame like the comparison:
+ * a note is text on the canvas, not a node with state to keep.
+ */
+function renderNotes(layout) {
+  dom.overlay.querySelectorAll('.tl-note').forEach((n) => n.remove());
+
+  const fragment = document.createDocumentFragment();
+  for (const rect of layout.rects) {
+    const note = rect.note;
+    if (!note || rect.dimmed) continue;
+
+    const node = el('div', {
+      class: 'tl-note',
+      'data-note-for': rect.obj.id,
+      'aria-label': `${rect.obj.title} — note: ${note.text}`,
+      title: note.text,
+      style: {
+        left: `${note.x}px`,
+        top: `${note.y}px`,
+        width: `${note.w}px`,
+        height: `${note.h}px`,
+      },
+    });
+    for (const line of note.lines) {
+      node.appendChild(el('span', { class: 'tn-line', text: line, 'aria-hidden': 'true' }));
+    }
+    fragment.appendChild(node);
+  }
+  dom.overlay.appendChild(fragment);
+}
+
 function renderBaseline(layout, settings) {
   dom.overlay
     .querySelectorAll('.tl-baseline, .tl-shift, .tl-baseline-gone, .tl-baseline-reason')

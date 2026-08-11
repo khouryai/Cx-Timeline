@@ -212,6 +212,7 @@ export function exportSettings(overrides = {}) {
     showGrid: true,
     showToday: true,
     showProgress: true,
+    showNotes: true,
     // Until someone chooses otherwise, a drawing is what is on the screen —
     // exporting while comparing against a baseline should not quietly drop
     // the comparison.
@@ -248,6 +249,7 @@ function makeScene(opts = {}) {
     showToday: cfg.showToday !== false,
     showLegend: cfg.showLegend !== false,
     showProgress: cfg.showProgress !== false,
+    showNotes: cfg.showNotes !== false && getDoc().settings.showNotes !== false,
     showDates: cfg.showDates === true,
     showBaseline: cfg.showBaseline === true,
     baselineId: cfg.baselineId,

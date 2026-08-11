@@ -16,7 +16,7 @@
 
 import { clamp, withAlpha, readableInk } from '../core/util.js';
 import { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } from '../core/dates.js';
-import { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot, delayReason } from '../core/model.js';
+import { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot, delayReason, visibleNote } from '../core/model.js';
 import { criticalPath, linkViolations } from '../core/analysis.js';
 import { fontString, textWidth, wrapText, fitWidth } from '../timeline/text.js';
 
@@ -40,6 +40,11 @@ const M = {
   ghostGap: 2,
   goneH: 12,
   shiftBadgeW: 30,
+  notePadX: 4,
+  noteGap: 2,
+  noteLineH: 8,
+  noteMaxW: 200,
+  noteMinW: 90,
   reasonPadX: 4,
   reasonGap: 2,
   reasonLineH: 7.5,
@@ -55,6 +60,7 @@ const EXPORT_FONTS = {
   mono: fontString({ size: 6.8, weight: 400, mono: true }),
   lane: fontString({ size: 9.5, weight: 600 }),
   reason: fontString({ size: 6.5, weight: 600 }),
+  note: fontString({ size: 6.5, weight: 400 }),
 };
 
 /** The dates an object covers, in the project's own display order. */
@@ -131,6 +137,26 @@ function exportLabel(obj, barWidth, showDates = false) {
   label.extraRight = label.width + M.outsideGap + 3;
   label.extraVert = 0;
   return label;
+}
+
+/**
+ * An object's note, measured for print exactly as the canvas measures it for
+ * the screen: whole, wrapped, never shortened. The packer reserves the room,
+ * so a note can no more land on a neighbour on paper than it can on screen.
+ */
+function exportNote(obj, barWidth, hasDuration) {
+  const text = visibleNote(obj);
+  if (!text) return null;
+  const measure = hasDuration
+    ? clamp(barWidth - M.notePadX * 2, M.noteMinW, M.noteMaxW)
+    : M.noteMinW;
+  const wrapped = wrapText(text, measure, EXPORT_FONTS.note, { lineHeight: M.noteLineH });
+  return {
+    text,
+    lines: wrapped.lines,
+    width: Math.ceil(wrapped.width),
+    height: wrapped.lines.length * M.noteLineH,
+  };
 }
 
 /**
@@ -253,10 +279,18 @@ export function buildScene(doc, opts = {}) {
       const ghost = comparison
         ? exportGhost(obj, comparison.byId.get(obj.id), barWidth, msToX, pxPerDay, comparison.baseline.id)
         : null;
+      const note = opts.showNotes === false ? null : exportNote(obj, barWidth, hasDuration);
       const height = hasDuration
         ? Math.max(M.rowH, label.height + 5)
         : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
-      return { obj, label, barWidth, ghost, height: height + exportGhostTier(ghost) };
+      return {
+        obj,
+        label,
+        barWidth,
+        ghost,
+        note,
+        height: height + (note ? note.height + M.noteGap : 0) + exportGhostTier(ghost),
+      };
     });
 
     // Outlines for what the baseline had and the plan has not. They pack with
@@ -427,6 +461,26 @@ export function buildScene(doc, opts = {}) {
         settings: { ...doc.settings, showProgress: opts.showProgress !== false && doc.settings.showProgress },
       });
       if (rect) {
+        // The note goes in the band reserved under the object, and the ghost —
+        // which stacks under that — is told where the floor now is.
+        if (item.note) {
+          const noteTop = rect.bottom + M.noteGap;
+          items.push({ type: 'rect', x: rect.x, y: noteTop, w: 1.2, h: item.note.height, fill: palette.textSubtle });
+          item.note.lines.forEach((line, i) => {
+            items.push({
+              type: 'text',
+              x: rect.x + M.notePadX,
+              y: noteTop + (i + 1) * M.noteLineH - 2,
+              text: line,
+              size: 6.5,
+              // No italic here: neither writer carries one, and a note that
+              // printed differently in SVG and PDF would break the promise
+              // that the two are the same drawing.
+              fill: palette.textMuted,
+            });
+          });
+          rect.bottom += item.note.height + M.noteGap;
+        }
         rect.ghost = item.ghost;
         rectsById.set(item.obj.id, rect);
       }
@@ -679,6 +733,9 @@ function packRowsForExport(measured, msToX) {
     if (item.ghost) {
       from = Math.min(from, item.ghost.from);
       to = Math.max(to, item.ghost.to);
+    }
+    if (item.note) {
+      to = Math.max(to, (hasDuration ? startX : startX - M.pointR) + item.note.width + M.notePadX * 2);
     }
 
     let row = 0;

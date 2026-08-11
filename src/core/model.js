@@ -922,6 +922,7 @@ export function defaultSettings() {
       showGrid: true,
       showToday: true,
       showProgress: true,
+      showNotes: true,
       // showBaseline / baselineId are deliberately absent: until someone
       // chooses, an export matches what is on screen. See exportSettings().
       respectFilters: true,
@@ -932,6 +933,9 @@ export function defaultSettings() {
     activeBaseline: null,
     criticalPath: false,
     laneLabels: true,
+    // Notes written on objects appear under them. Per-object `data.showNotes`
+    // turns one off; this turns the lot off.
+    showNotes: true,
     dateOrder: 'mdy',            // mdy | dmy | ymd — display order only
     // working = a five-day week, holidays excluded; calendar = every day.
     // Counting only — it never moves a bar.
@@ -1325,6 +1329,41 @@ export function endForDuration(start, days) {
 export function remainingDays(obj) {
   const total = durationDays(obj);
   return Math.max(0, Math.round(total * (1 - (obj.progress || 0) / 100)));
+}
+
+/* ── Notes on the canvas ───────────────────────────────────────────────── */
+
+/**
+ * The note an object shows on the timeline, as plain text — or '' when it has
+ * none, or has been told not to show it.
+ *
+ * Writing a note is itself the request to see it: `data.showNotes` is only
+ * ever *false*, set by turning the note off again, so a note added anywhere in
+ * the application appears on the plan without a second step. The notes
+ * themselves are rich text; what the canvas can lay out is the words.
+ */
+export function visibleNote(obj) {
+  if (!obj || obj.data?.showNotes === false) return '';
+  return noteText(obj.notes);
+}
+
+/** Whether this object would show its note if it had one. */
+export function notesShown(obj) {
+  return !obj || obj.data?.showNotes !== false;
+}
+
+/** A note's words, with the markup and the runs of blank space taken out. */
+export function noteText(notes) {
+  return String(notes || '')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, ' ')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /** Resolve the accent colour for an object: explicit fill → status → type. */

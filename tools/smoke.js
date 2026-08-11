@@ -313,7 +313,7 @@ async function main() {
       const offenders = [];
       const nodes = document.querySelectorAll(
         '.tl-obj .ob-line, .tl-obj .ob-pct, .tl-tick span, .tl-lane-label .ll-name, .tl-today-flag,'
-        + ' .tl-baseline .bl-reason, .tl-baseline-reason .br-line'
+        + ' .tl-baseline .bl-reason, .tl-baseline-reason .br-line, .tl-note .tn-line'
       );
       for (const n of nodes) {
         const style = getComputedStyle(n);
@@ -665,6 +665,84 @@ async function main() {
   await page.waitForTimeout(300);
   const cleared = await upstreamState();
   check('deselecting clears it', cleared.marked.length === 0 && cleared.links === 0, JSON.stringify(cleared));
+
+  console.log('\nNotes on the timeline');
+  // A note is written to be read, so writing one puts it on the plan. It is
+  // text on the canvas like any other: measured, packed, never shortened, and
+  // switchable off for one object or for the lot.
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  await page.locator('.tl-obj.shape-bar').first().click();
+  await page.waitForTimeout(400);
+
+  const NOTE = 'Awaiting client sign-off on the interface spec before test start';
+  await page.locator('#inspector .cx-btn', { hasText: /add notes|edit notes/i }).first().click();
+  await page.waitForTimeout(500);
+  await page.locator('.cx-modal [contenteditable]').first().click();
+  await page.keyboard.type(NOTE);
+  await page.waitForTimeout(300);
+  await page.locator('.cx-modal-foot .cx-btn.primary', { hasText: /save notes/i }).click();
+  await page.waitForTimeout(900);
+
+  const noteState = () => page.evaluate(() => {
+    const notes = [...document.querySelectorAll('.tl-note')];
+    return {
+      count: notes.length,
+      text: notes.map((n) => n.getAttribute('aria-label') || '').join(' | '),
+      // Every line is drawn; nothing is cut off to make it fit.
+      lines: notes.reduce((n, node) => n + node.querySelectorAll('.tn-line').length, 0),
+    };
+  });
+
+  const noted = await noteState();
+  check('a note appears on the timeline as soon as it is written',
+    noted.count === 1 && /interface spec/.test(noted.text), JSON.stringify(noted).slice(0, 120));
+  check('and it is drawn in full, over as many lines as it takes', noted.lines >= 2, `${noted.lines} line(s)`);
+
+  // The note is packed with the objects, so it can no more land on a bar than
+  // a label can. Measured at several zooms, like the baseline ghosts.
+  const noteCollisions = () => page.evaluate(() => {
+    const box = (n) => { const r = n.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom }; };
+    const hits = (a, b) => a.l < b.r - 1 && b.l < a.r - 1 && a.t < b.b - 1 && b.t < a.b - 1;
+    const bars = [...document.querySelectorAll('.tl-obj.shape-bar')].map(box);
+    const notes = [...document.querySelectorAll('.tl-note')].map(box);
+    let onBars = 0;
+    for (const note of notes) for (const bar of bars) if (hits(note, bar)) onBars++;
+    return { onBars, notes: notes.length };
+  });
+
+  const noteZooms = [{ at: 'fit', ...(await noteCollisions()) }];
+  for (const step of ['out', 'in']) {
+    await page.locator(`#toolbar [aria-label="Zoom ${step}"], #toolbar [title="Zoom ${step}"]`).first().click();
+    await page.waitForTimeout(500);
+    noteZooms.push({ at: step, ...(await noteCollisions()) });
+  }
+  check('a note is never drawn on top of a bar',
+    noteZooms.every((z) => z.notes > 0 && z.onBars === 0),
+    noteZooms.map((z) => `${z.at} ${z.onBars}/${z.notes}`).join(', '));
+  await page.keyboard.press('Control+0');
+  await page.waitForTimeout(600);
+
+  // One object at a time…
+  await page.locator('.tl-obj.shape-bar').first().click();
+  await page.waitForTimeout(400);
+  await page.locator('#inspector .cx-toggle, #inspector .cx-switch').filter({ hasText: /show on the timeline/i }).first().click();
+  await page.waitForTimeout(700);
+  check('the note can be switched off for that object alone', (await noteState()).count === 0);
+
+  await page.locator('#inspector .cx-toggle, #inspector .cx-switch').filter({ hasText: /show on the timeline/i }).first().click();
+  await page.waitForTimeout(700);
+  check('and switched back on again', (await noteState()).count === 1);
+
+  // …or all of them at once.
+  await page.locator('#sidenav .nav-link[data-pane="settings"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('#dock .cx-toggle, #dock .cx-switch').filter({ hasText: /notes on the timeline/i }).first().click();
+  await page.waitForTimeout(700);
+  check('the whole lot can be hidden from Settings', (await noteState()).count === 0);
+  await page.locator('#dock .cx-toggle, #dock .cx-switch').filter({ hasText: /notes on the timeline/i }).first().click();
+  await page.waitForTimeout(700);
+  check('and brought back', (await noteState()).count === 1);
 
   console.log('\nDurations on a five-day week');
   // A commissioning plan is read in working days: "two weeks" means ten days on
@@ -1100,6 +1178,8 @@ async function main() {
     (exported.match(/>[+−]\d+d</g) || []).join(' '));
   // The whole point of writing the reason down is the file someone else reads.
   check('and the reason the plan moved', /substation/.test(exported));
+  // A note is part of the drawing, so it prints with it.
+  check('and the notes written on objects', /interface spec/.test(exported));
 
   // Back on the canvas: the note is a way into the same field, the sentence
   // survives the round trip through the store, and it is an edit like any
