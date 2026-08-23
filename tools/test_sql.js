@@ -101,22 +101,36 @@ function main() {
 
     load('supabase/test/harness.sql');
     load('supabase/schema.sql');
-    console.log('✓ schema.sql applies cleanly\n');
+    console.log('✓ schema.sql applies cleanly');
+    // The resource calendar is a separate module with its own tables and its
+    // own two roles. It is applied second because it assumes `auth.users`,
+    // which the timeline's schema is what sets up in the stub.
+    load('supabase/rc_schema.sql');
+    console.log('✓ rc_schema.sql applies cleanly\n');
 
     // Every check reports through RAISE NOTICE, which psql writes to stderr;
     // stdout is only the empty result row of each `select assert(...)`. Run it
     // once and read both streams — the suite seeds accounts, so a second run
     // against the same database would collide on the first insert.
-    const res = spawnSync(
-      path.join(bin || '/usr/bin', 'psql'),
-      ['-h', run, '-p', PORT, '-U', 'postgres', '-d', 'cxt', '-v', 'ON_ERROR_STOP=1',
-       '-q', '-o', '/dev/null', '-f', path.join(ROOT, 'supabase/test/permissions.sql')],
-      { env, encoding: 'utf8' }
-    );
-    process.stdout.write(
-      (res.stderr || '').replace(/^psql:[^ ]* /gm, '').replace(/^NOTICE:  ?/gm, '')
-    );
-    if (res.status !== 0) throw new Error('a permission check failed');
+    const suite = (file) => {
+      const res = spawnSync(
+        path.join(bin || '/usr/bin', 'psql'),
+        ['-h', run, '-p', PORT, '-U', 'postgres', '-d', 'cxt', '-v', 'ON_ERROR_STOP=1',
+         '-q', '-o', '/dev/null', '-f', path.join(ROOT, file)],
+        { env, encoding: 'utf8' }
+      );
+      process.stdout.write(
+        (res.stderr || '').replace(/^psql:[^ ]* /gm, '').replace(/^NOTICE:  ?/gm, '')
+      );
+      if (res.status !== 0) throw new Error(`a permission check failed in ${file}`);
+    };
+
+    // Each suite seeds its own accounts, so it can only be run once against a
+    // given database — a second pass would collide on the first insert. The
+    // resource calendar suite runs second and reuses the accounts the first
+    // one created, which is also why it cannot be run on its own.
+    suite('supabase/test/permissions.sql');
+    suite('supabase/test/rc_permissions.sql');
     console.log('✓ every permission check passed');
   } catch (err) {
     const detail = (err.stderr || err.stdout || err.message || '').toString();
