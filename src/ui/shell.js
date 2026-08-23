@@ -18,6 +18,7 @@ import * as store from '../core/store.js';
 import { isFallback, isHosted, isFileMode } from '../core/storage.js';
 import * as filestore from '../core/filestore.js';
 import * as cloud from '../core/cloud.js';
+import * as rcClient from '../core/rc.js';
 import { linkViolations } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
@@ -25,6 +26,7 @@ import { icon } from './icons.js';
 import { contextMenu, popover, closePopover, promptDialog, toast, segmented, keyHint, attachTooltip } from './components.js';
 import { THEMES, applyTheme, getTheme } from './theme.js';
 import { showPane, currentPane, PANES } from './panels.js';
+import * as workspace from './workspace.js';
 import { accountBlock, openShareDialog } from './auth.js';
 
 /** Sidebar structure — sections of dock panes. */
@@ -103,6 +105,11 @@ function buildSidenav() {
     ])
   );
 
+  // The workspace switch. Two whole interfaces over two different stores, so
+  // it sits above the pane list rather than in it: choosing "Calendar" is not
+  // choosing a pane, it is leaving the timeline.
+  if (rcClient.isConfigured()) dom.sidenav.appendChild(workspaceSwitch());
+
   dom.navLinks = el('div', { class: 'sidenav-links' });
   for (const group of NAV) {
     dom.navLinks.appendChild(el('div', { class: 'sidenav-section-label', text: group.section }));
@@ -143,6 +150,28 @@ function buildSidenav() {
   );
 
   updateNav();
+}
+
+/**
+ * Timeline or calendar.
+ *
+ * Only rendered when a calendar backend is configured. A build with no
+ * `rcSupabaseUrl` — which is every build until one is set up — shows nothing
+ * here and behaves exactly as it always has.
+ */
+function workspaceSwitch() {
+  const button = (id, label, iconName) => el('button', {
+    class: 'ws-btn',
+    type: 'button',
+    'aria-pressed': String(workspace.current() === id),
+    html: icon(iconName, { size: 13 }) + `<span>${label}</span>`,
+    onClick: () => workspace.show(id),
+  });
+
+  return el('div', { class: 'ws-switch', role: 'group', 'aria-label': 'Workspace' }, [
+    button('timeline', 'Timeline', 'calendar'),
+    button('calendar', 'Calendar', 'users'),
+  ]);
 }
 
 /** What to call a project that has not been given a client or programme. */
@@ -204,8 +233,8 @@ function buildToolbar() {
   // The Add tool is an editing affordance; select and pan are how a reader
   // moves around, so they stay.
   dom.toolbar.append(
-    el('div', { class: 'tb-group' }, [dom.selectBtn, dom.panBtn]),
-    el('div', { class: 'tb-group editing' }, [dom.addBtn]),
+    el('div', { class: 'tb-group tb-timeline' }, [dom.selectBtn, dom.panBtn]),
+    el('div', { class: 'tb-group editing tb-timeline' }, [dom.addBtn]),
     el('div', { class: 'tb-sep' })
   );
 
@@ -224,7 +253,7 @@ function buildToolbar() {
       renderer.requestRender();
     },
   });
-  dom.toolbar.append(el('div', { class: 'tb-group' }, [dom.scaleSeg]));
+  dom.toolbar.append(el('div', { class: 'tb-group tb-timeline' }, [dom.scaleSeg]));
 
   /* Zoom & navigation */
   dom.toolbar.append(
@@ -260,10 +289,10 @@ function buildToolbar() {
   ]) {
     dom.snapSelect.appendChild(el('option', { value, text: label }));
   }
-  dom.toolbar.append(el('div', { class: 'tb-group' }, [dom.snapSelect]), el('div', { class: 'tb-sep' }));
+  dom.toolbar.append(el('div', { class: 'tb-group tb-timeline' }, [dom.snapSelect]), el('div', { class: 'tb-sep' }));
 
   /* View toggles */
-  dom.toggles = el('div', { class: 'tb-group' });
+  dom.toggles = el('div', { class: 'tb-group tb-timeline' });
   for (const [key, iconName, title] of [
     ['gridlines', 'grid', 'Gridlines'],
     ['showConnectors', 'link', 'Dependency arrows'],
@@ -526,6 +555,14 @@ function wireEvents() {
     refreshStatus();
   });
   on(EV.ACCESS_CHANGED, refresh);
+  // The switch is two buttons; repainting the sidebar to move a highlight
+  // would throw away the pane list and its scroll position for nothing.
+  on(EV.WORKSPACE_CHANGED, ({ workspace: which }) => {
+    for (const btn of dom.sidenav.querySelectorAll('.ws-btn')) {
+      const label = btn.querySelector('span')?.textContent.toLowerCase();
+      btn.setAttribute('aria-pressed', String(label === which));
+    }
+  });
   on(EV.FILE_STATE, () => refreshStatus());
   on(EV.SELECTION_CHANGED, () => refreshStatus());
   on(EV.TOOL_CHANGED, () => refreshToolbar());

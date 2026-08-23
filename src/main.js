@@ -38,6 +38,8 @@ import { installMenus } from './ui/menus.js';
 import { requireSignIn, installAccessMode } from './ui/auth.js';
 import { installP6Drops } from './ui/p6.js';
 import { installShortcuts } from './ui/shortcuts.js';
+import * as workspace from './ui/workspace.js';
+import * as rcUi from './ui/rc.js';
 import * as cmd from './ui/commands.js';
 import { toast, showTooltip, hideTooltip, confirmDialog } from './ui/components.js';
 import { renderNote, notePreview } from './ui/notes.js';
@@ -149,6 +151,13 @@ async function boot() {
   // launch throws it away and runs the installed one instead, so a bad deploy
   // cannot leave anybody unable to open the application. Absent in a browser.
   window.CX_SHELL?.confirmHealthy?.();
+
+  // The resource calendar is registered here and built on first use — after
+  // the line above, deliberately. It needs a network and an account, and the
+  // trial gate must not be waiting on either: a calendar that could not reach
+  // its backend would otherwise look exactly like a broken update and get
+  // rolled back.
+  workspace.registerCalendar(() => rcUi.build());
 
   console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
 

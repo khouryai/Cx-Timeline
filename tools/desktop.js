@@ -41,7 +41,7 @@ const SHELL_OUT = path.join(ROOT, 'dist-desktop');
 const PLACEHOLDER = '__CHANNEL__';
 
 /** Loaded in this order by `index.html`, so concatenated in this order too. */
-const STYLES = ['tokens.css', 'base.css', 'components.css', 'layout.css', 'timeline.css', 'notes.css'];
+const STYLES = ['tokens.css', 'base.css', 'components.css', 'layout.css', 'timeline.css', 'notes.css', 'calendar.css'];
 
 /** `config.js` for the desktop build. There is no backend and never was one. */
 const BLANK_CONFIG = `/**

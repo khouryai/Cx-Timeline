@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="css/layout.css" />
     <link rel="stylesheet" href="css/timeline.css" />
     <link rel="stylesheet" href="css/notes.css" />
+    <link rel="stylesheet" href="css/calendar.css" />
 
     <link
       rel="icon"
@@ -42,6 +43,12 @@
         <div id="workspace">
           <aside id="dock" aria-label="Panels"></aside>
           <div id="canvas-frame" role="application" aria-label="Timeline canvas"></div>
+          <!--
+            The resource calendar's stage, a peer of the canvas rather than a
+            dock pane. Empty until somebody switches to it: it needs a network
+            and an account, and boot must need neither.
+          -->
+          <div id="rc-frame" role="application" aria-label="Resource calendar" hidden></div>
           <aside id="inspector" aria-label="Properties"></aside>
         </div>
       </div>
