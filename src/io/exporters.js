@@ -38,8 +38,12 @@ function stem(doc, suffix = '') {
  *
  * The Blob is built once and handed to both jobs, so measuring it costs
  * nothing on top of writing it.
+ *
+ * Exported so the resource calendar's exports announce themselves the same
+ * way. A second download path that stayed quiet would be exactly the bug this
+ * function exists to prevent.
  */
-function saveFile(filename, data, mime, what) {
+export function saveFile(filename, data, mime, what) {
   const blob = data instanceof Blob ? data : new Blob([data], { type: mime });
   download(filename, blob, mime);
   toast({

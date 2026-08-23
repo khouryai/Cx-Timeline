@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 43   Built: 2026-08-11T20:35:03.523Z
+ * Modules: 53   Built: 2026-08-23T22:25:12.135Z
  */
 (function () {
   'use strict';
@@ -549,6 +549,16 @@ __mods["core/events.js"] = function (__x, __req) {
     ACCESS_CHANGED: 'access:changed', // { role, readOnly } — which project, and what you may do
     EDIT_REFUSED: 'access:refused', // a write was attempted without permission
     CLOUD_CONFLICT: 'cloud:conflict', // someone else saved the project first
+
+    /* The resource calendar — a separate module, with a separate backend and a
+       separate account. Deliberately not AUTH_CHANGED: signing in to the
+       calendar must not disturb the timeline, which needs no account at all. */
+    RC_AUTH_CHANGED: 'rc:auth', // { user, event }
+    RC_CHANGED: 'rc:changed', // { what } — a row was written; panes reload
+    RC_QUEUE_CHANGED: 'rc:queue', // { pending } — unsynced huddle entries
+
+    /* Which whole interface is on screen: the timeline, or the calendar. */
+    WORKSPACE_CHANGED: 'workspace:changed', // { workspace }
 
     /* Selection & interaction */
     SELECTION_CHANGED: 'selection:changed', // { ids }
@@ -5159,6 +5169,59 @@ __mods["core/desktop.js"] = function (__x, __req) {
     return { count, bytes };
   }
 
+  /* ── The intake folders ────────────────────────────────────────────────── */
+
+  /**
+   * Subfolders of the plan's folder, where the look-ahead workbook and the SAR
+   * PDFs arrive by hand.
+   *
+   * Every path is checked component by component on the Rust side, because these
+   * names come off a dropped file or a spreadsheet cell rather than from the
+   * application. Nothing here sanitises: an unsafe name comes back as
+   * `err.kind === 'refused'` and stays refused, since quietly writing
+   * `SAR12345` when asked for `SAR/12345` would file evidence somewhere nobody
+   * would ever look for it.
+   */
+  function intakeList(folder, path) {
+    return call('intake_list', { folder, path });
+  }
+
+  async function intakeRead(folder, path) {
+    const bytes = await call('intake_read', { folder, path });
+    return new Uint8Array(bytes).buffer;
+  }
+
+  /**
+   * Size and modified time, without reading the file — what the look-ahead
+   * watcher polls.
+   *
+   * The modified time on a synced folder is when OneDrive *delivered* the file,
+   * not when it was edited, so it is evidence of arrival rather than authorship.
+   * A snapshot records it and its own observation time as two separate facts.
+   */
+  function intakeStat(folder, path) {
+    return call('intake_stat', { folder, path });
+  }
+
+  async function intakeWrite(folder, path, data) {
+    const buffer = data instanceof Blob ? await data.arrayBuffer() : data;
+    return call('intake_write', { folder, path, bytes: Array.from(new Uint8Array(buffer)) });
+  }
+
+  /** File something from the inbox. Idempotent, and never overwrites. */
+  function intakeMove(folder, from, to) {
+    return call('intake_move', { folder, from, to });
+  }
+
+  function intakeDelete(folder, path) {
+    return call('intake_delete', { folder, path });
+  }
+
+  /** SHA-256 of a file, for deduping snapshots and identifying an archived one. */
+  function intakeHash(folder, path) {
+    return call('intake_hash', { folder, path });
+  }
+
   /* ── Window ────────────────────────────────────────────────────────────── */
 
   /**
@@ -5190,6 +5253,13 @@ __mods["core/desktop.js"] = function (__x, __req) {
   Object.defineProperty(__x, "readAttachment", { get: () => readAttachment, enumerable: true });
   Object.defineProperty(__x, "deleteAttachment", { get: () => deleteAttachment, enumerable: true });
   Object.defineProperty(__x, "attachmentUsage", { get: () => attachmentUsage, enumerable: true });
+  Object.defineProperty(__x, "intakeList", { get: () => intakeList, enumerable: true });
+  Object.defineProperty(__x, "intakeRead", { get: () => intakeRead, enumerable: true });
+  Object.defineProperty(__x, "intakeStat", { get: () => intakeStat, enumerable: true });
+  Object.defineProperty(__x, "intakeWrite", { get: () => intakeWrite, enumerable: true });
+  Object.defineProperty(__x, "intakeMove", { get: () => intakeMove, enumerable: true });
+  Object.defineProperty(__x, "intakeDelete", { get: () => intakeDelete, enumerable: true });
+  Object.defineProperty(__x, "intakeHash", { get: () => intakeHash, enumerable: true });
   Object.defineProperty(__x, "setWindowTitle", { get: () => setWindowTitle, enumerable: true });
 };
 
@@ -6416,6 +6486,153 @@ __mods["core/filestore.js"] = function (__x, __req) {
      Attachments
      ═══════════════════════════════════════════════════════════════════════ */
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     The intake folders
+
+     The look-ahead workbook and the SAR PDFs live in subfolders of the same
+     folder as the plan, and arrive by hand rather than through the application.
+     They belong here because this module owns the folder handle — nothing else
+     should ever hold one — but they are otherwise unrelated to the plan: no pen,
+     no write guard, no locking. Nobody edits these through CX Timeline; it reads
+     them, and files what somebody dropped in.
+
+     Both backends again: a path on the desktop, a directory handle in a browser.
+     The desktop side checks every path component in Rust, because these names
+     come off a dropped file rather than from the application.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Walk a relative path to its directory handle. `create` makes it on the way. */
+  async function webFolder(rel, { create = false } = {}) {
+    let dir = folderRef;
+    const parts = rel.split('/').filter(Boolean);
+    for (const part of parts) {
+      dir = await dir.getDirectoryHandle(part, { create });
+    }
+    return dir;
+  }
+
+  /**
+   * What is in an intake folder.
+   *
+   * A conflict copy is reported rather than skipped: two versions of the
+   * look-ahead means OneDrive could not merge somebody's edits, and quietly
+   * ingesting one of them would snapshot the same week twice and manufacture a
+   * change that never happened.
+   */
+  async function intakeList(rel) {
+    if (!folderRef) return [];
+    if (onDesktop()) return desktop.intakeList(folderRef, rel);
+
+    try {
+      const dir = await webFolder(rel);
+      const out = [];
+      for await (const [name, handle] of dir.entries()) {
+        if (handle.kind !== 'file') continue;
+        // Excel's sidecar while a workbook is open is never a file to read.
+        if (name.startsWith('~$')) continue;
+        const file = await handle.getFile();
+        out.push({ name, size: file.size, modified: file.lastModified, conflict: isConflictCopy(name) });
+      }
+      return out.sort((a, b) => b.modified - a.modified);
+    } catch {
+      // A folder nobody has created yet is empty, not broken.
+      return [];
+    }
+  }
+
+  /**
+   * A OneDrive conflict copy, for any extension — the same rule
+   * `isLockFile()` applies to locks, widened to the intake folders.
+   *
+   * Conservative on purpose: it wants a machine-name or copy-number tail, so an
+   * ordinary hyphenated name like `Four-Week Look-Ahead.xlsx` is not caught.
+   * `plan.rs::is_conflict_copy` is the same rule in Rust, and the two have to
+   * agree or the desktop and the browser would ingest different files.
+   */
+  function isConflictCopy(name) {
+    const stem = String(name).replace(/\.[^.]*$/, '');
+    const at = stem.lastIndexOf('-');
+    if (at < 0) return false;
+    const tail = stem.slice(at + 1);
+    if (!tail) return false;
+    if (/^\d{1,3}$/.test(tail)) return true;
+    return tail.length >= 8 && /^[A-Z0-9]+$/.test(tail) && /\d/.test(tail);
+  }
+
+  /** Read an intake file as an ArrayBuffer. */
+  async function intakeRead(rel) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeRead(folderRef, rel);
+    const parts = rel.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'));
+    const file = await (await dir.getFileHandle(name)).getFile();
+    return file.arrayBuffer();
+  }
+
+  /**
+   * Size and modified time, without reading it — what the watcher polls.
+   *
+   * On a synced folder the modified time is when OneDrive *delivered* the file,
+   * not when somebody edited it. A snapshot therefore records this and its own
+   * observation time as two separate facts, because for evidence the difference
+   * between "changed at" and "seen at" matters.
+   */
+  async function intakeStat(rel) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeStat(folderRef, rel);
+    const parts = rel.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'));
+    const file = await (await dir.getFileHandle(name)).getFile();
+    return { size: file.size, modified: file.lastModified };
+  }
+
+  /** Write bytes into an intake folder, creating it if needed. */
+  async function intakeWrite(rel, data) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeWrite(folderRef, rel, data);
+    const parts = rel.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'), { create: true });
+    const handle = await dir.getFileHandle(name, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(data);
+    await writable.close();
+    const file = await handle.getFile();
+    return { size: file.size, modified: file.lastModified };
+  }
+
+  /**
+   * File something out of the inbox.
+   *
+   * Copy, verify, then delete — never a bare rename. An interruption then leaves
+   * the file in the inbox to be re-filed, which is a duplicate rather than a
+   * loss. Idempotent: a destination already holding identical bytes just
+   * consumes the source, so re-running an ingest is always safe.
+   */
+  async function intakeMove(from, to) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeMove(folderRef, from, to);
+
+    const bytes = await intakeRead(from);
+    const stamp = await intakeWrite(to, bytes);
+    const parts = from.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'));
+    await dir.removeEntry(name);
+    return stamp;
+  }
+
+  /** SHA-256 of an intake file, for deduping snapshots. */
+  async function intakeHash(rel) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeHash(folderRef, rel);
+    const bytes = await intakeRead(rel);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
   async function putBlob(id, file) {
     if (!folderRef) throw new Error('No folder is connected.');
     return ioPutBlob(folderRef, id, file);
@@ -6459,6 +6676,13 @@ __mods["core/filestore.js"] = function (__x, __req) {
   Object.defineProperty(__x, "yieldPen", { get: () => yieldPen, enumerable: true });
   Object.defineProperty(__x, "checkLock", { get: () => checkLock, enumerable: true });
   Object.defineProperty(__x, "handleUnload", { get: () => handleUnload, enumerable: true });
+  Object.defineProperty(__x, "intakeList", { get: () => intakeList, enumerable: true });
+  Object.defineProperty(__x, "isConflictCopy", { get: () => isConflictCopy, enumerable: true });
+  Object.defineProperty(__x, "intakeRead", { get: () => intakeRead, enumerable: true });
+  Object.defineProperty(__x, "intakeStat", { get: () => intakeStat, enumerable: true });
+  Object.defineProperty(__x, "intakeWrite", { get: () => intakeWrite, enumerable: true });
+  Object.defineProperty(__x, "intakeMove", { get: () => intakeMove, enumerable: true });
+  Object.defineProperty(__x, "intakeHash", { get: () => intakeHash, enumerable: true });
   Object.defineProperty(__x, "putBlob", { get: () => putBlob, enumerable: true });
   Object.defineProperty(__x, "getBlob", { get: () => getBlob, enumerable: true });
   Object.defineProperty(__x, "deleteBlob", { get: () => deleteBlob, enumerable: true });
@@ -12590,6 +12814,575 @@ __mods["ui/theme.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// core/rc.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/rc.js"] = function (__x, __req) {
+  /**
+   * The Resource Calendar backend.
+   *
+   * A second, entirely separate Supabase client from `core/cloud.js`, and the
+   * separation is the feature rather than duplication.
+   *
+   * The timeline's plan is proprietary: it holds the P6 programme and it never
+   * leaves its OneDrive folder. The resource calendar holds none of that, so it
+   * lives in Postgres where the deputy and the team can reach it from a browser.
+   * Until now that boundary was guaranteed by the *build* — `tools/desktop.js`
+   * writes a blank config and `tools/dist.js --no-backend` strips the Supabase
+   * client outright, so the desktop application had no backend at all and could
+   * not have reached one. Putting a client back in the page reverses that, and a
+   * promise that used to be structural would become a convention.
+   *
+   * So it is made structural again, three ways:
+   *
+   *   1. A different configuration key. `CX_CONFIG.supabaseUrl` stays blank
+   *      forever and is the *plan's* backend; this module reads
+   *      `CX_CONFIG.rcSupabaseUrl` and nothing else. Neither can be mistaken for
+   *      the other.
+   *   2. A different module. Nothing on the plan's storage path imports this
+   *      file, and this file imports nothing that reads the plan — no store, no
+   *      storage, no filestore. The build fails on import cycles, and the layer
+   *      check in `tools/build.js` fails on a plan module reaching in here.
+   *   3. A test that proves it. `tools/smoke_isolation.js` boots with this
+   *      backend stubbed, edits the plan, and asserts that nothing carrying plan
+   *      content ever left.
+   *
+   * There is no document here and no autosave. The plan is one JSON object saved
+   * whole; this is rows, written one at a time, because the reports have to
+   * answer arbitrary date ranges and two people have to edit at once.
+   *
+   * Imports: util, events.
+   */
+
+  const { emit, EV } = __req("core/events.js");
+
+  /* ── Configuration ─────────────────────────────────────────────────────── */
+
+  function config() {
+    return (typeof window !== 'undefined' && window.CX_CONFIG) || {};
+  }
+
+  /**
+   * True when this build points at a resource-calendar backend.
+   *
+   * Deliberately *not* `cloud.isConfigured()`. A build can have this and not
+   * that — which is exactly the shape the deployment wants: the plan in a
+   * folder, the calendar in Postgres.
+   */
+  function isConfigured() {
+    const { rcSupabaseUrl, rcSupabaseAnonKey } = config();
+    return Boolean(rcSupabaseUrl && rcSupabaseAnonKey);
+  }
+
+  /* ── Private state ─────────────────────────────────────────────────────── */
+
+  let client = null;
+  let user = null;
+  let person = null;   // the caller's rc_people row, or null
+  let ready = false;
+
+  /* ── Lifecycle ─────────────────────────────────────────────────────────── */
+
+  /**
+   * Create the client and restore any session.
+   *
+   * Never throws, and never blocks. The timeline has to open with no network at
+   * all, so a backend that is unreachable degrades to "not signed in" and the
+   * Resource Calendar simply says so when you switch to it.
+   */
+  async function init() {
+    if (ready) return user;
+    if (!isConfigured()) return null;
+
+    const sdk = typeof window !== 'undefined' ? window.supabase : null;
+    if (!sdk || typeof sdk.createClient !== 'function') {
+      console.warn('[cx-timeline] the Supabase client did not load; the resource calendar is unavailable');
+      return null;
+    }
+
+    const { rcSupabaseUrl, rcSupabaseAnonKey } = config();
+    client = sdk.createClient(rcSupabaseUrl, rcSupabaseAnonKey, {
+      // A storage key of its own. The plan's client, in a build that has one,
+      // would otherwise share a session slot with this and the two would evict
+      // each other on every reload.
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: false,
+        storageKey: 'cx-rc-auth',
+      },
+    });
+
+    try {
+      const { data } = await client.auth.getSession();
+      user = data?.session?.user || null;
+      if (user) await refreshPerson();
+    } catch (err) {
+      console.warn('[cx-timeline] could not restore the resource-calendar session:', err.message);
+      user = null;
+    }
+
+    client.auth.onAuthStateChange((event, session) => {
+      const next = session?.user || null;
+      const changed = (next?.id || null) !== (user?.id || null);
+      user = next;
+      if (!next) person = null;
+      if (changed) emit(EV.RC_AUTH_CHANGED, { user, event });
+    });
+
+    ready = true;
+
+    // Restoring a session is a change of identity as much as signing in is, and
+    // the shell has already drawn itself by now — what it shows depends on the
+    // role, which only exists after this point. Without the event a returning
+    // viewer would keep whichever chrome the anonymous boot decided on.
+    if (user) emit(EV.RC_AUTH_CHANGED, { user, event: 'RESTORED' });
+    return user;
+  }
+
+  function raw() {
+    return client;
+  }
+
+  function currentUser() {
+    return user;
+  }
+
+  function isSignedIn() {
+    return Boolean(user);
+  }
+
+  /**
+   * The caller's own person row.
+   *
+   * Null is a real answer and not an error: an account with no `rc_people` row
+   * is somebody who can sign in but is not on the team, and the database will
+   * refuse their writes accordingly.
+   */
+  function me() {
+    return person;
+  }
+
+  /**
+   * True when the caller may see the KPI history and write the plan.
+   *
+   * This drives what the interface shows. It is *not* the control — every rule
+   * is a row-level security policy, so a member who bypasses the interface
+   * still gets nothing back from `rc_effort`. This exists to explain why
+   * something is missing, not to decide it.
+   */
+  function isAdmin() {
+    return person?.role === 'admin';
+  }
+
+  /** 'admin' | 'member' | 'viewer', or null for somebody not on the team. */
+  function role() {
+    return person?.role || null;
+  }
+
+  /**
+   * True when this account may write anything at all.
+   *
+   * A viewer has a person row and `me()` finds it, so an id comparison alone
+   * would let them record their own outcomes — which is the whole difference
+   * between read-only and not. `rc_can_act_for()` makes the same distinction in
+   * the database, and that is the control; this decides what to draw.
+   */
+  function canWrite() {
+    return person?.role === 'admin' || person?.role === 'member';
+  }
+
+  function isViewer() {
+    return person?.role === 'viewer';
+  }
+
+  function accountLabel() {
+    if (person?.name) return person.name;
+    if (!user) return '';
+    return user.user_metadata?.full_name || user.email || 'Signed in';
+  }
+
+  async function refreshPerson() {
+    person = null;
+    if (!client || !user) return null;
+    const { data, error } = await client
+      .from('rc_people')
+      .select('id, name, email, title, subsystem, role, active')
+      .eq('user_id', user.id)
+      .eq('active', true)
+      .maybeSingle();
+    if (error) {
+      console.warn('[cx-timeline] could not read your team record:', error.message);
+      return null;
+    }
+    person = data || null;
+    return person;
+  }
+
+  /* ── Account ───────────────────────────────────────────────────────────── */
+
+  async function signIn(email, password) {
+    requireClient();
+    const { data, error } = await client.auth.signInWithPassword({
+      email: String(email || '').trim(),
+      password,
+    });
+    if (error) throw friendlier(error);
+    user = data.user;
+    await refreshPerson();
+    emit(EV.RC_AUTH_CHANGED, { user, event: 'SIGNED_IN' });
+    return user;
+  }
+
+  async function signOut() {
+    if (!client) return;
+    await client.auth.signOut();
+    user = null;
+    person = null;
+    emit(EV.RC_AUTH_CHANGED, { user: null, event: 'SIGNED_OUT' });
+  }
+
+  function requireClient() {
+    if (!client) throw new Error('The resource calendar is not configured for this build.');
+  }
+
+  /** Supabase's wording is for developers; these messages are for people. */
+  function friendlier(error) {
+    const message = String(error?.message || 'Something went wrong.');
+    if (/invalid login credentials/i.test(message)) return new Error('That email and password do not match an account.');
+    if (/email not confirmed/i.test(message)) return new Error('Confirm your email address first — check your inbox.');
+    if (/failed to fetch|networkerror/i.test(message)) {
+      return new Error('Could not reach the server. The timeline still works offline; the resource calendar needs a connection.');
+    }
+    return new Error(message);
+  }
+
+  /* ── Reading ───────────────────────────────────────────────────────────── */
+
+  /**
+   * Every read goes through here so a failure has one shape.
+   *
+   * A refused SELECT is not an error in PostgREST — the policy excludes the rows
+   * and an empty list comes back — so callers must never read "no rows" as "no
+   * permission". Where the difference matters, ask `isAdmin()`.
+   */
+  async function select(table, build) {
+    requireClient();
+    let query = client.from(table).select('*');
+    if (build) query = build(query);
+    const { data, error } = await query;
+    if (error) throw new Error(`${table}: ${error.message}`);
+    return data || [];
+  }
+
+  function listPeople({ includeInactive = false } = {}) {
+    return select('rc_people', (q) => (includeInactive ? q : q.eq('active', true)).order('name'));
+  }
+
+  function listLocations({ includeInactive = false } = {}) {
+    return select('rc_locations', (q) => (includeInactive ? q : q.eq('active', true)).order('name'));
+  }
+
+  function listLocationAliases() {
+    return select('rc_location_alias', (q) => q.order('alias'));
+  }
+
+  function listCategories({ includeInactive = false } = {}) {
+    return select('rc_categories', (q) => (includeInactive ? q : q.eq('active', true)).order('sort'));
+  }
+
+  function listParties() {
+    return select('rc_parties', (q) => q.eq('active', true).order('name'));
+  }
+
+  function listLeaveKinds() {
+    return select('rc_leave_kinds', (q) => q.eq('active', true).order('name'));
+  }
+
+  /** Leave overlapping a window. Both ends are inclusive, as a calendar is. */
+  function listLeave(fromISO, toISO) {
+    return select('rc_leave', (q) =>
+      q.lte('start_date', toISO).gte('end_date', fromISO).neq('status', 'cancelled'));
+  }
+
+  /**
+   * The current plan across a date range.
+   *
+   * Reads the view, never the table: the table keeps every revision, and asking
+   * it directly would return the superseded rows alongside the live ones.
+   */
+  function listPlan(fromISO, toISO) {
+    return select('rc_plan_current', (q) =>
+      q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
+  }
+
+  /** Every revision of one day, oldest first — the audit trail for a claim. */
+  function planHistory(personId, dateISO) {
+    return select('rc_plan_entries', (q) =>
+      q.eq('person_id', personId).eq('work_date', dateISO).order('created_at'));
+  }
+
+  function listActuals(fromISO, toISO) {
+    return select('rc_actuals', (q) =>
+      q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
+  }
+
+  /** Carried tasks, oldest first — a chain on its fifth day is the headline. */
+  function listCarryChains() {
+    return select('rc_carry_chains', (q) => q.order('age_days', { ascending: false }));
+  }
+
+  /** The KPI base. Empty for a member, by policy rather than by omission. */
+  function listEffort(fromISO, toISO) {
+    return select('rc_effort', (q) =>
+      q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
+  }
+
+  function listIngestRuns({ limit = 100 } = {}) {
+    return select('rc_ingest_runs', (q) => q.order('ran_at', { ascending: false }).limit(limit));
+  }
+
+  function listSnapshots({ limit = 50 } = {}) {
+    return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(limit));
+  }
+
+  function listSnapshotRows(snapshotId) {
+    return select('rc_lookahead_rows', (q) => q.eq('snapshot_id', snapshotId).order('sheet_row'));
+  }
+
+  function listChangeEvents(fromISO, toISO) {
+    return select('rc_change_events', (q) =>
+      q.gte('detected_at', fromISO).lte('detected_at', toISO).order('detected_at', { ascending: false }));
+  }
+
+  function listAnnotations(eventIds) {
+    return select('rc_change_annotations', (q) => q.in('change_event_id', eventIds).order('created_at'));
+  }
+
+  function listSars() {
+    return select('rc_sars', (q) => q.is('superseded_by', null).order('week_start', { ascending: false }));
+  }
+
+  function listSarLinks() {
+    return select('rc_sar_links', (q) => q.order('confirmed_at'));
+  }
+
+  /** Work planned into a week with no SAR — access that was never confirmed. */
+  function listRowsWithoutSar() {
+    return select('rc_rows_without_sar', (q) => q.order('week_start'));
+  }
+
+  /** The mirror: access booked for work that has since gone. */
+  function listSarsWithoutRows() {
+    return select('rc_sars_without_rows', (q) => q.order('week_start'));
+  }
+
+  /* ── Writing ───────────────────────────────────────────────────────────── */
+
+  /**
+   * Insert rows and return them.
+   *
+   * A refused INSERT does raise — the WITH CHECK clause fails — so unlike an
+   * UPDATE this one can be trusted to report its own failure. The append-only
+   * tables have no UPDATE or DELETE privilege at all, so there is deliberately
+   * no `update()` here for them to be reached through.
+   */
+  async function insert(table, rows) {
+    requireClient();
+    const { data, error } = await client.from(table).insert(rows).select();
+    if (error) throw new Error(`${table}: ${error.message}`);
+    return data || [];
+  }
+
+  async function rpc(name, args) {
+    requireClient();
+    const { data, error } = await client.rpc(name, args);
+    if (error) throw new Error(`${name}: ${error.message}`);
+    return data;
+  }
+
+  /**
+   * Update reference data.
+   *
+   * Only ever used on the vocabularies, never on a plan entry or an outcome. A
+   * refused UPDATE matches nothing and reports success, so this checks the
+   * returned row count and raises instead — the same reason every plan save goes
+   * through `save_project()` on the other side of the application.
+   */
+  async function update(table, id, patch) {
+    requireClient();
+    const { data, error } = await client.from(table).update(patch).eq('id', id).select();
+    if (error) throw new Error(`${table}: ${error.message}`);
+    if (!data || !data.length) {
+      throw new Error(`${table}: that change was refused — you may not have permission.`);
+    }
+    return data[0];
+  }
+
+  const addPerson = (row) => insert('rc_people', [row]).then((r) => r[0]);
+  const updatePerson = (id, patch) => update('rc_people', id, patch);
+  const addLocation = (row) => insert('rc_locations', [row]).then((r) => r[0]);
+  const updateLocation = (id, patch) => update('rc_locations', id, patch);
+  const addLocationAlias = (locationId, alias) =>
+    insert('rc_location_alias', [{ location_id: locationId, alias }]).then((r) => r[0]);
+  const addCategory = (row) => insert('rc_categories', [row]).then((r) => r[0]);
+  const updateCategory = (id, patch) => update('rc_categories', id, patch);
+  const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r[0]);
+  const addLeave = (row) => insert('rc_leave', [row]).then((r) => r[0]);
+  const updateLeave = (id, patch) => update('rc_leave', id, patch);
+
+  const addPlanEntries = (rows) => insert('rc_plan_entries', rows);
+
+  /**
+   * Revise a day. Returns the id of the new entry.
+   *
+   * Not an update: the outgoing row stays, and the new one points at it. A plan
+   * that changed the evening before a shift is itself delay evidence, and there
+   * is no way to spend it twice — revising an already-revised entry raises.
+   */
+  const supersedePlan = (entryId, { locationId = null, task = null, categoryId = null, shift = 'day' } = {}) =>
+    rpc('rc_supersede_plan', {
+      p_entry: entryId,
+      p_location: locationId,
+      p_task: task,
+      p_category: categoryId,
+      p_shift: shift,
+    });
+
+  /**
+   * Record one huddle outcome. Idempotent on `clientUuid`.
+   *
+   * That uuid is generated before the row is sent, which is what lets the huddle
+   * screen queue entries locally and replay them when the connection returns.
+   * The meeting is at a fixed time whether or not the network is up.
+   */
+  const recordActual = ({
+    clientUuid, personId, date, status,
+    categoryId = null, locationId = null, note = null,
+    blockedReason = null, blockedPartyId = null,
+    carryChainId = null, planEntryId = null, shift = 'day',
+  }) =>
+    rpc('rc_record_actual', {
+      p_client_uuid: clientUuid,
+      p_person: personId,
+      p_date: date,
+      p_status: status,
+      p_category: categoryId,
+      p_location: locationId,
+      p_note: note,
+      p_blocked_reason: blockedReason,
+      p_blocked_party: blockedPartyId,
+      p_carry_chain: carryChainId,
+      p_plan_entry: planEntryId,
+      p_shift: shift,
+    });
+
+  const resolveLocation = (raw) => rpc('rc_resolve_location', { p_raw: raw });
+
+  const addIngestRun = (row) => insert('rc_ingest_runs', [row]).then((r) => r[0]);
+  const addSnapshot = (row) => insert('rc_lookahead_snapshots', [row]).then((r) => r[0]);
+  const addSnapshotRows = (rows) => insert('rc_lookahead_rows', rows);
+  const addChangeEvents = (rows) => insert('rc_change_events', rows);
+  const addSar = (row) => insert('rc_sars', [row]).then((r) => r[0]);
+  const addSarLinks = (rows) => insert('rc_sar_links', rows);
+
+  /**
+   * Annotate a change event: who caused a cancellation, which removal and
+   * addition were really one crew moving site.
+   *
+   * Insert only. Correcting one means adding another that supersedes it, because
+   * this is the record a delay claim gets challenged on and a judgement that
+   * could be quietly rewritten a year later would be worth nothing.
+   */
+  const addAnnotation = (row) => insert('rc_change_annotations', [row]).then((r) => r[0]);
+
+  /* ── Storage ───────────────────────────────────────────────────────────── */
+
+  /**
+   * Upload a SAR PDF so it opens in the deputy's browser.
+   *
+   * Only SARs. The look-ahead workbook is deliberately *not* uploaded: a .xlsx
+   * carries every other tab, hidden row, comment and forgotten pasted sheet
+   * along with the part that was wanted, and the only thing anyone needs from it
+   * is the parsed grid, which goes up as JSON. The bytes stay in the OneDrive
+   * archive.
+   */
+  async function uploadSar(path, blob) {
+    requireClient();
+    const { error } = await client.storage.from('sars').upload(path, blob, {
+      upsert: false,
+      contentType: blob?.type || 'application/pdf',
+    });
+    if (error) throw new Error(`upload: ${error.message}`);
+    return path;
+  }
+
+  async function sarUrl(path, seconds = 3600) {
+    requireClient();
+    const { data, error } = await client.storage.from('sars').createSignedUrl(path, seconds);
+    if (error) throw new Error(`link: ${error.message}`);
+    return data.signedUrl;
+  }
+
+  Object.defineProperty(__x, "isConfigured", { get: () => isConfigured, enumerable: true });
+  Object.defineProperty(__x, "init", { get: () => init, enumerable: true });
+  Object.defineProperty(__x, "raw", { get: () => raw, enumerable: true });
+  Object.defineProperty(__x, "currentUser", { get: () => currentUser, enumerable: true });
+  Object.defineProperty(__x, "isSignedIn", { get: () => isSignedIn, enumerable: true });
+  Object.defineProperty(__x, "me", { get: () => me, enumerable: true });
+  Object.defineProperty(__x, "isAdmin", { get: () => isAdmin, enumerable: true });
+  Object.defineProperty(__x, "role", { get: () => role, enumerable: true });
+  Object.defineProperty(__x, "canWrite", { get: () => canWrite, enumerable: true });
+  Object.defineProperty(__x, "isViewer", { get: () => isViewer, enumerable: true });
+  Object.defineProperty(__x, "accountLabel", { get: () => accountLabel, enumerable: true });
+  Object.defineProperty(__x, "signIn", { get: () => signIn, enumerable: true });
+  Object.defineProperty(__x, "signOut", { get: () => signOut, enumerable: true });
+  Object.defineProperty(__x, "listPeople", { get: () => listPeople, enumerable: true });
+  Object.defineProperty(__x, "listLocations", { get: () => listLocations, enumerable: true });
+  Object.defineProperty(__x, "listLocationAliases", { get: () => listLocationAliases, enumerable: true });
+  Object.defineProperty(__x, "listCategories", { get: () => listCategories, enumerable: true });
+  Object.defineProperty(__x, "listParties", { get: () => listParties, enumerable: true });
+  Object.defineProperty(__x, "listLeaveKinds", { get: () => listLeaveKinds, enumerable: true });
+  Object.defineProperty(__x, "listLeave", { get: () => listLeave, enumerable: true });
+  Object.defineProperty(__x, "listPlan", { get: () => listPlan, enumerable: true });
+  Object.defineProperty(__x, "planHistory", { get: () => planHistory, enumerable: true });
+  Object.defineProperty(__x, "listActuals", { get: () => listActuals, enumerable: true });
+  Object.defineProperty(__x, "listCarryChains", { get: () => listCarryChains, enumerable: true });
+  Object.defineProperty(__x, "listEffort", { get: () => listEffort, enumerable: true });
+  Object.defineProperty(__x, "listIngestRuns", { get: () => listIngestRuns, enumerable: true });
+  Object.defineProperty(__x, "listSnapshots", { get: () => listSnapshots, enumerable: true });
+  Object.defineProperty(__x, "listSnapshotRows", { get: () => listSnapshotRows, enumerable: true });
+  Object.defineProperty(__x, "listChangeEvents", { get: () => listChangeEvents, enumerable: true });
+  Object.defineProperty(__x, "listAnnotations", { get: () => listAnnotations, enumerable: true });
+  Object.defineProperty(__x, "listSars", { get: () => listSars, enumerable: true });
+  Object.defineProperty(__x, "listSarLinks", { get: () => listSarLinks, enumerable: true });
+  Object.defineProperty(__x, "listRowsWithoutSar", { get: () => listRowsWithoutSar, enumerable: true });
+  Object.defineProperty(__x, "listSarsWithoutRows", { get: () => listSarsWithoutRows, enumerable: true });
+  Object.defineProperty(__x, "addPerson", { get: () => addPerson, enumerable: true });
+  Object.defineProperty(__x, "updatePerson", { get: () => updatePerson, enumerable: true });
+  Object.defineProperty(__x, "addLocation", { get: () => addLocation, enumerable: true });
+  Object.defineProperty(__x, "updateLocation", { get: () => updateLocation, enumerable: true });
+  Object.defineProperty(__x, "addLocationAlias", { get: () => addLocationAlias, enumerable: true });
+  Object.defineProperty(__x, "addCategory", { get: () => addCategory, enumerable: true });
+  Object.defineProperty(__x, "updateCategory", { get: () => updateCategory, enumerable: true });
+  Object.defineProperty(__x, "addParty", { get: () => addParty, enumerable: true });
+  Object.defineProperty(__x, "addLeave", { get: () => addLeave, enumerable: true });
+  Object.defineProperty(__x, "updateLeave", { get: () => updateLeave, enumerable: true });
+  Object.defineProperty(__x, "addPlanEntries", { get: () => addPlanEntries, enumerable: true });
+  Object.defineProperty(__x, "supersedePlan", { get: () => supersedePlan, enumerable: true });
+  Object.defineProperty(__x, "recordActual", { get: () => recordActual, enumerable: true });
+  Object.defineProperty(__x, "resolveLocation", { get: () => resolveLocation, enumerable: true });
+  Object.defineProperty(__x, "addIngestRun", { get: () => addIngestRun, enumerable: true });
+  Object.defineProperty(__x, "addSnapshot", { get: () => addSnapshot, enumerable: true });
+  Object.defineProperty(__x, "addSnapshotRows", { get: () => addSnapshotRows, enumerable: true });
+  Object.defineProperty(__x, "addChangeEvents", { get: () => addChangeEvents, enumerable: true });
+  Object.defineProperty(__x, "addSar", { get: () => addSar, enumerable: true });
+  Object.defineProperty(__x, "addSarLinks", { get: () => addSarLinks, enumerable: true });
+  Object.defineProperty(__x, "addAnnotation", { get: () => addAnnotation, enumerable: true });
+  Object.defineProperty(__x, "uploadSar", { get: () => uploadSar, enumerable: true });
+  Object.defineProperty(__x, "sarUrl", { get: () => sarUrl, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/components.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/components.js"] = function (__x, __req) {
@@ -16465,6 +17258,21 @@ __mods["io/importers.js"] = function (__x, __req) {
    * Read the first worksheet of an xlsx workbook into a matrix.
    * Handles shared strings, inline strings, numbers and dates.
    */
+  /**
+   * Rows and cells: either a self-closing tag, or an open tag through its close.
+   *
+   * The obvious `/<row[\s\S]*?(?:\/>|<\/row>)/` is wrong, and wrong in a way that
+   * hides. A cell carrying a style but no value is written `<c r="D2" s="1"/>`,
+   * and a lazy match stops at that first `/>` — truncating the row and silently
+   * dropping every cell after it. A sheet whose cells all hold values never hits
+   * it, because those close with `</c>`, which is why this survived: the
+   * spreadsheets people import are full of values. A sheet where cells are
+   * formatted but empty hits it on nearly every row, and the four-week look-ahead
+   * is exactly that shape.
+   */
+  const ROW_RE = /<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g;
+  const CELL_RE = /<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g;
+
   async function readXlsx(arrayBuffer) {
     const files = await readZip(arrayBuffer);
 
@@ -16501,9 +17309,9 @@ __mods["io/importers.js"] = function (__x, __req) {
     const dateStyles = readDateStyles(zipText(files, 'xl/styles.xml'));
 
     const rows = [];
-    for (const rowXml of sheetXml.match(/<row[\s\S]*?(?:\/>|<\/row>)/g) || []) {
+    for (const rowXml of sheetXml.match(ROW_RE) || []) {
       const cells = [];
-      for (const cellXml of rowXml.match(/<c[\s\S]*?(?:\/>|<\/c>)/g) || []) {
+      for (const cellXml of rowXml.match(CELL_RE) || []) {
         const ref = /r="([A-Z]+)\d+"/.exec(cellXml);
         const column = ref ? columnIndex(ref[1]) : cells.length;
         const type = /t="([^"]+)"/.exec(cellXml)?.[1];
@@ -20495,6 +21303,10 @@ __mods["io/exporters.js"] = function (__x, __req) {
    *
    * The Blob is built once and handed to both jobs, so measuring it costs
    * nothing on top of writing it.
+   *
+   * Exported so the resource calendar's exports announce themselves the same
+   * way. A second download path that stayed quiet would be exactly the bug this
+   * function exists to prevent.
    */
   function saveFile(filename, data, mime, what) {
     const blob = data instanceof Blob ? data : new Blob([data], { type: mime });
@@ -20870,6 +21682,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
   /** Page-size options offered by the export dialog. */
   const PDF_PAGE_SIZES = Object.entries(PAGE_SIZES).map(([id, s]) => ({ value: id, label: s.label }));
 
+  Object.defineProperty(__x, "saveFile", { get: () => saveFile, enumerable: true });
   Object.defineProperty(__x, "exportJson", { get: () => exportJson, enumerable: true });
   Object.defineProperty(__x, "exportCsv", { get: () => exportCsv, enumerable: true });
   Object.defineProperty(__x, "exportLinksCsv", { get: () => exportLinksCsv, enumerable: true });
@@ -23007,6 +23820,110 @@ __mods["ui/panels.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/workspace.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/workspace.js"] = function (__x, __req) {
+  /**
+   * Which whole interface is on screen.
+   *
+   * Until now the application had exactly one stage — the timeline canvas — and
+   * the only thing resembling a mode was presentation mode, which hides the
+   * chrome around that same canvas. The resource calendar is a genuinely
+   * different interface over genuinely different data, so it needs a peer of the
+   * canvas rather than another dock pane.
+   *
+   * Two rules keep the switch cheap and safe:
+   *
+   * **The timeline is hidden, never unmounted.** `renderer.mount()` clears its
+   * host, so tearing the canvas down and rebuilding it would throw away the
+   * viewport, the selection and the render caches, and switching back would cost
+   * a full relayout. Hiding it with a class costs nothing and comes back exactly
+   * as it was left.
+   *
+   * **The calendar is built on first use, not at boot.** `main.js` calls
+   * `CX_SHELL.confirmHealthy()` at the end of boot, and that call is what tells
+   * the desktop shell a downloaded update actually works — anything that throws
+   * before it makes the next launch roll back. A module that needs a network and
+   * an account has no business in front of that gate, so nothing here runs until
+   * somebody asks for it.
+   *
+   * Imports: events (leaf).
+   */
+
+  const { emit, EV } = __req("core/events.js");
+
+  const WORKSPACES = ['timeline', 'calendar'];
+
+  let active = 'timeline';
+  let builder = null;
+  let built = false;
+
+  /**
+   * Register how to build the calendar stage, without building it.
+   *
+   * `main.js` hands the builder over during boot; it runs the first time
+   * somebody switches. Keeping the registration and the construction apart is
+   * what lets boot stay synchronous and network-free.
+   */
+  function registerCalendar(fn) {
+    builder = fn;
+  }
+
+  function current() {
+    return active;
+  }
+
+  function isTimeline() {
+    return active === 'timeline';
+  }
+
+  /**
+   * Show a workspace. Safe to call with the one already showing.
+   *
+   * The body carries `data-workspace` so CSS can hide whichever stage is not in
+   * use, and so a stylesheet can drop the timeline-only toolbar groups without
+   * every control having to know about modes.
+   */
+  function show(name) {
+    if (!WORKSPACES.includes(name) || name === active) return active;
+
+    if (name === 'calendar' && !built) {
+      built = true;
+      try {
+        builder?.();
+      } catch (err) {
+        // A calendar that cannot start must not take the timeline with it. The
+        // stage stays empty, the error is reported, and the switch back works.
+        built = false;
+        console.error('[cx-timeline] the resource calendar failed to start:', err);
+      }
+    }
+
+    active = name;
+    if (typeof document !== 'undefined') {
+      document.body.dataset.workspace = active;
+    }
+    emit(EV.WORKSPACE_CHANGED, { workspace: active });
+    return active;
+  }
+
+  /** For tests and teardown. */
+  function reset() {
+    active = 'timeline';
+    built = false;
+    builder = null;
+    if (typeof document !== 'undefined') document.body.dataset.workspace = 'timeline';
+  }
+
+  Object.defineProperty(__x, "WORKSPACES", { get: () => WORKSPACES, enumerable: true });
+  Object.defineProperty(__x, "registerCalendar", { get: () => registerCalendar, enumerable: true });
+  Object.defineProperty(__x, "current", { get: () => current, enumerable: true });
+  Object.defineProperty(__x, "isTimeline", { get: () => isTimeline, enumerable: true });
+  Object.defineProperty(__x, "show", { get: () => show, enumerable: true });
+  Object.defineProperty(__x, "reset", { get: () => reset, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/shell.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/shell.js"] = function (__x, __req) {
@@ -23030,6 +23947,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const { isFallback, isHosted, isFileMode } = __req("core/storage.js");
   const filestore = __req("core/filestore.js");
   const cloud = __req("core/cloud.js");
+  const rcClient = __req("core/rc.js");
   const { linkViolations } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
@@ -23037,6 +23955,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const { contextMenu, popover, closePopover, promptDialog, toast, segmented, keyHint, attachTooltip } = __req("ui/components.js");
   const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
   const { showPane, currentPane, PANES } = __req("ui/panels.js");
+  const workspace = __req("ui/workspace.js");
   const { accountBlock, openShareDialog } = __req("ui/auth.js");
 
   /** Sidebar structure — sections of dock panes. */
@@ -23115,6 +24034,20 @@ __mods["ui/shell.js"] = function (__x, __req) {
       ])
     );
 
+    // The workspace switch. Two whole interfaces over two different stores, so
+    // it sits above the pane list rather than in it: choosing "Calendar" is not
+    // choosing a pane, it is leaving the timeline.
+    //
+    // Hidden from a read-only account, and for a reason that is presentation
+    // rather than protection: the plan lives in a folder only its owner has
+    // granted, so a viewer could never load it. What they *would* see is
+    // `makeStarterProject()` — the built-in sample, with plausible-looking
+    // releases and campaigns — and mistaking fabricated demo content for a real
+    // programme is its own small problem.
+    if (rcClient.isConfigured() && !rcClient.isViewer()) {
+      dom.sidenav.appendChild(workspaceSwitch());
+    }
+
     dom.navLinks = el('div', { class: 'sidenav-links' });
     for (const group of NAV) {
       dom.navLinks.appendChild(el('div', { class: 'sidenav-section-label', text: group.section }));
@@ -23155,6 +24088,28 @@ __mods["ui/shell.js"] = function (__x, __req) {
     );
 
     updateNav();
+  }
+
+  /**
+   * Timeline or calendar.
+   *
+   * Only rendered when a calendar backend is configured. A build with no
+   * `rcSupabaseUrl` — which is every build until one is set up — shows nothing
+   * here and behaves exactly as it always has.
+   */
+  function workspaceSwitch() {
+    const button = (id, label, iconName) => el('button', {
+      class: 'ws-btn',
+      type: 'button',
+      'aria-pressed': String(workspace.current() === id),
+      html: icon(iconName, { size: 13 }) + `<span>${label}</span>`,
+      onClick: () => workspace.show(id),
+    });
+
+    return el('div', { class: 'ws-switch', role: 'group', 'aria-label': 'Workspace' }, [
+      button('timeline', 'Timeline', 'calendar'),
+      button('calendar', 'Calendar', 'users'),
+    ]);
   }
 
   /** What to call a project that has not been given a client or programme. */
@@ -23203,7 +24158,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
     /* Undo / redo */
     dom.undoBtn = toolButton('undo', 'Undo', () => store.undo(), 'mod+z');
     dom.redoBtn = toolButton('redo', 'Redo', () => store.redo(), 'mod+shift+z');
-    dom.toolbar.append(el('div', { class: 'tb-group editing' }, [dom.undoBtn, dom.redoBtn]), el('div', { class: 'tb-sep' }));
+    dom.toolbar.append(el('div', { class: 'tb-group editing tb-timeline' }, [dom.undoBtn, dom.redoBtn]), el('div', { class: 'tb-sep' }));
 
     /* Tools */
     dom.selectBtn = toolButton('cursor', 'Select', () => store.setTool('select'), 'v');
@@ -23216,8 +24171,8 @@ __mods["ui/shell.js"] = function (__x, __req) {
     // The Add tool is an editing affordance; select and pan are how a reader
     // moves around, so they stay.
     dom.toolbar.append(
-      el('div', { class: 'tb-group' }, [dom.selectBtn, dom.panBtn]),
-      el('div', { class: 'tb-group editing' }, [dom.addBtn]),
+      el('div', { class: 'tb-group tb-timeline' }, [dom.selectBtn, dom.panBtn]),
+      el('div', { class: 'tb-group editing tb-timeline' }, [dom.addBtn]),
       el('div', { class: 'tb-sep' })
     );
 
@@ -23236,11 +24191,11 @@ __mods["ui/shell.js"] = function (__x, __req) {
         renderer.requestRender();
       },
     });
-    dom.toolbar.append(el('div', { class: 'tb-group' }, [dom.scaleSeg]));
+    dom.toolbar.append(el('div', { class: 'tb-group tb-timeline' }, [dom.scaleSeg]));
 
     /* Zoom & navigation */
     dom.toolbar.append(
-      el('div', { class: 'tb-group' }, [
+      el('div', { class: 'tb-group tb-timeline' }, [
         toolButton('zoom-out', 'Zoom out', () => {
           viewport.zoomBy(0.7);
           renderer.requestRender();
@@ -23272,10 +24227,10 @@ __mods["ui/shell.js"] = function (__x, __req) {
     ]) {
       dom.snapSelect.appendChild(el('option', { value, text: label }));
     }
-    dom.toolbar.append(el('div', { class: 'tb-group' }, [dom.snapSelect]), el('div', { class: 'tb-sep' }));
+    dom.toolbar.append(el('div', { class: 'tb-group tb-timeline' }, [dom.snapSelect]), el('div', { class: 'tb-sep' }));
 
     /* View toggles */
-    dom.toggles = el('div', { class: 'tb-group' });
+    dom.toggles = el('div', { class: 'tb-group tb-timeline' });
     for (const [key, iconName, title] of [
       ['gridlines', 'grid', 'Gridlines'],
       ['showConnectors', 'link', 'Dependency arrows'],
@@ -23311,7 +24266,10 @@ __mods["ui/shell.js"] = function (__x, __req) {
           onClick: (e) => openThemeMenu(e.currentTarget),
         }),
         el('button', {
-          class: 'cx-btn',
+          // Exports the *plan*, so it goes with the timeline. The calendar has
+          // its own export, and two buttons called Export meaning different
+          // documents would be worse than one that comes and goes.
+          class: 'cx-btn tb-timeline',
           title: 'Export the plan',
           html: icon('download', { size: 14 }) + '<span>Export</span>',
           onClick: (e) => emit('ui:export-menu', { anchor: e.currentTarget }),
@@ -23537,7 +24495,21 @@ __mods["ui/shell.js"] = function (__x, __req) {
       buildSidenav();
       refreshStatus();
     });
+    // Whether the switch is drawn at all depends on the calendar's account, which
+    // is signed in long after the sidebar was first built.
+    on(EV.RC_AUTH_CHANGED, () => {
+      buildSidenav();
+      if (rcClient.isViewer()) workspace.show('calendar');
+    });
     on(EV.ACCESS_CHANGED, refresh);
+    // The switch is two buttons; repainting the sidebar to move a highlight
+    // would throw away the pane list and its scroll position for nothing.
+    on(EV.WORKSPACE_CHANGED, ({ workspace: which }) => {
+      for (const btn of dom.sidenav.querySelectorAll('.ws-btn')) {
+        const label = btn.querySelector('span')?.textContent.toLowerCase();
+        btn.setAttribute('aria-pressed', String(label === which));
+      }
+    });
     on(EV.FILE_STATE, () => refreshStatus());
     on(EV.SELECTION_CHANGED, () => refreshStatus());
     on(EV.TOOL_CHANGED, () => refreshToolbar());
@@ -25788,6 +26760,2952 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/rc_util.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/rc_util.js"] = function (__x, __req) {
+  /**
+   * Small shared helpers for the resource calendar's tabs.
+   *
+   * These live in a leaf of their own rather than in `ui/rc.js` because `rc.js`
+   * imports the tabs and the tabs need the helpers — putting them together would
+   * be a cycle, and the build rejects those outright rather than letting one
+   * quietly half-initialise.
+   *
+   * Imports: util, events, dates, components.
+   */
+
+  const { el } = __req("core/util.js");
+  const { emit, EV } = __req("core/events.js");
+  const { toISO, todayMs, fmtDate, addDays, MS_DAY } = __req("core/dates.js");
+  const { openModal } = __req("ui/components.js");
+
+  /**
+   * A modal whose confirm button does something that can fail.
+   *
+   * `openModal` closes on click unless the handler returns false, which is right
+   * for a menu and wrong for a form that writes to a database over a network.
+   * Here the dialog stays open, the button says what is happening, and a refusal
+   * is shown in place rather than as a toast over a form that has already gone —
+   * every write in this module can be refused by a policy, so that case is the
+   * normal one rather than the exception.
+   */
+  function formModal({ title, body, confirmLabel = 'Save', onConfirm }) {
+    const error = el('div', { class: 'rc-error', hidden: true });
+    const wrap = el('div', {}, [body, error]);
+    let busy = false;
+
+    const modal = openModal({
+      title,
+      body: wrap,
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: confirmLabel,
+          kind: 'primary',
+          keepOpen: true,
+          autofocus: true,
+          onClick: async (handle) => {
+            if (busy) return;
+            busy = true;
+            error.hidden = true;
+            try {
+              await onConfirm();
+              handle.close();
+            } catch (err) {
+              error.textContent = err?.message || String(err);
+              error.hidden = false;
+            } finally {
+              busy = false;
+            }
+          },
+        },
+      ],
+    });
+    return modal;
+  }
+
+  /**
+   * The Monday of the week containing `ms`.
+   *
+   * Mondays because that is what the look-ahead is keyed on, and matching the
+   * source's idea of a week is what lets a plan row and a look-ahead row be
+   * compared at all. `getUTCDay()` and not `getDay()`: a calendar date must not
+   * move because of a timezone.
+   */
+  function weekStart(ms) {
+    const day = new Date(ms).getUTCDay();
+    return ms - ((day + 6) % 7) * MS_DAY;
+  }
+
+  /** The five working days of a week, as ISO strings. */
+  function weekDays(startMs) {
+    return [0, 1, 2, 3, 4].map((n) => toISO(addDays(startMs, n)));
+  }
+
+  /** The seven days, for a view that has to show a weekend possession. */
+  function allWeekDays(startMs) {
+    return [0, 1, 2, 3, 4, 5, 6].map((n) => toISO(addDays(startMs, n)));
+  }
+
+  function todayISO() {
+    return toISO(todayMs());
+  }
+
+  /** An ISO date back to the millisecond scale the rest of the app uses. */
+  function isoToMs(iso) {
+    return new Date(`${iso}T00:00:00Z`).getTime();
+  }
+
+  function dayLabel(iso, preset = 'short') {
+    return fmtDate(isoToMs(iso), preset);
+  }
+
+  /** Index rows by id, so a join costs one pass rather than a query per row. */
+  function byId(rows) {
+    const map = new Map();
+    for (const row of rows || []) map.set(row.id, row);
+    return map;
+  }
+
+  /** Group rows under a key, for a grid that is people down and days across. */
+  function groupBy(rows, key) {
+    const map = new Map();
+    for (const row of rows || []) {
+      const k = typeof key === 'function' ? key(row) : row[key];
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(row);
+    }
+    return map;
+  }
+
+  /** A row was written. Whatever is on screen reloads. */
+  function notifyChanged(what) {
+    emit(EV.RC_CHANGED, { what });
+  }
+
+  /**
+   * The five statuses, split into the two families that must never be averaged.
+   *
+   * Performance is what an individual did. Health is what was done to them — a
+   * possession released late is not underperformance, and counting it as such
+   * would make the number worse than useless, because people would stop saying
+   * they were blocked.
+   */
+  const STATUSES = [
+    { id: 'completed', label: 'Completed', key: 'c', family: 'performance', tone: 'good' },
+    { id: 'partial', label: 'Partial', key: 'p', family: 'performance', tone: 'warn' },
+    { id: 'carried', label: 'Carried over', key: 'x', family: 'performance', tone: 'warn' },
+    { id: 'blocked', label: 'Blocked', key: 'b', family: 'health', tone: 'bad' },
+    { id: 'reassigned', label: 'Reassigned', key: 'r', family: 'health', tone: 'info' },
+    { id: 'absent', label: 'Away', key: 'a', family: 'absence', tone: 'muted' },
+  ];
+
+  const STATUS_BY_ID = new Map(STATUSES.map((s) => [s.id, s]));
+
+  const SHIFTS = [
+    { id: 'day', label: 'Day' },
+    { id: 'night', label: 'Night' },
+    { id: 'possession', label: 'Possession' },
+  ];
+
+  /**
+   * Whether somebody is available on a date.
+   *
+   * Leave is the reason this exists. Absence is a different fact from "carried
+   * over" or "reassigned", and without somewhere for it to go it gets silently
+   * distributed across the performance statuses — which is precisely what the
+   * five-status split is designed to prevent.
+   */
+  function availability(person, iso, leaveRows) {
+    const ms = isoToMs(iso);
+    const weekday = new Date(ms).getUTCDay() || 7; // ISO: Monday 1 … Sunday 7
+    const working = Array.isArray(person?.working_days) ? person.working_days : [1, 2, 3, 4, 5];
+
+    const leave = (leaveRows || []).find(
+      (l) => l.person_id === person.id && l.start_date <= iso && l.end_date >= iso
+        && l.status !== 'cancelled' && l.status !== 'declined'
+    );
+    if (leave) return { state: 'leave', leave };
+    if (!working.includes(weekday)) return { state: 'non-working' };
+    return { state: 'available' };
+  }
+
+  Object.defineProperty(__x, "formModal", { get: () => formModal, enumerable: true });
+  Object.defineProperty(__x, "weekStart", { get: () => weekStart, enumerable: true });
+  Object.defineProperty(__x, "weekDays", { get: () => weekDays, enumerable: true });
+  Object.defineProperty(__x, "allWeekDays", { get: () => allWeekDays, enumerable: true });
+  Object.defineProperty(__x, "todayISO", { get: () => todayISO, enumerable: true });
+  Object.defineProperty(__x, "isoToMs", { get: () => isoToMs, enumerable: true });
+  Object.defineProperty(__x, "dayLabel", { get: () => dayLabel, enumerable: true });
+  Object.defineProperty(__x, "byId", { get: () => byId, enumerable: true });
+  Object.defineProperty(__x, "groupBy", { get: () => groupBy, enumerable: true });
+  Object.defineProperty(__x, "notifyChanged", { get: () => notifyChanged, enumerable: true });
+  Object.defineProperty(__x, "STATUSES", { get: () => STATUSES, enumerable: true });
+  Object.defineProperty(__x, "STATUS_BY_ID", { get: () => STATUS_BY_ID, enumerable: true });
+  Object.defineProperty(__x, "SHIFTS", { get: () => SHIFTS, enumerable: true });
+  Object.defineProperty(__x, "availability", { get: () => availability, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/rc_roster.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/rc_roster.js"] = function (__x, __req) {
+  /**
+   * Organisation — the roster, locations, categories and leave.
+   *
+   * Reference data before transactional data: nothing else in the calendar means
+   * anything until there are people to schedule and places to send them.
+   *
+   * Two decisions run through it. **Nobody is ever deleted** — a leaver's history
+   * has to stay for the reports while they drop out of every picker, so `active`
+   * is the only thing that changes. And **every vocabulary is a table**, because
+   * the reports group by them and "doc" typed one week against "documentation"
+   * the next are two categories to a database and one to a person.
+   *
+   * Imports: util, events, dates, rc, icons, components, rc_util.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const { icon } = __req("ui/icons.js");
+  const { textInput, selectInput, toast, confirmDialog, promptDialog, field, badge } = __req("ui/components.js");
+
+
+  const { notifyChanged, byId, dayLabel, todayISO, formModal } = __req("ui/rc_util.js");
+
+  const SECTIONS = ['people', 'locations', 'categories', 'leave'];
+  let section = 'people';
+
+  async function render(root) {
+    const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
+    for (const id of SECTIONS) {
+      nav.appendChild(el('button', {
+        class: 'rc-tab',
+        type: 'button',
+        text: id[0].toUpperCase() + id.slice(1),
+        'aria-pressed': String(id === section),
+        onClick: () => {
+          section = id;
+          clear(root);
+          render(root);
+        },
+      }));
+    }
+    root.appendChild(nav);
+
+    const host = el('div');
+    root.appendChild(host);
+
+    if (section === 'people') await renderPeople(host);
+    else if (section === 'locations') await renderLocations(host);
+    else if (section === 'categories') await renderCategories(host);
+    else await renderLeave(host);
+  }
+
+  /* ── People ────────────────────────────────────────────────────────────── */
+
+  async function renderPeople(host) {
+    const people = await rc.listPeople({ includeInactive: true });
+    const admin = rc.isAdmin();
+
+    host.appendChild(sectionHead('Team', admin ? {
+      label: 'Add person',
+      onClick: () => editPerson(null),
+    } : null));
+
+    if (!people.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text: 'Nobody on the team yet.' }));
+      return;
+    }
+
+    const rows = people.map((p) => el('tr', { class: p.active ? '' : 'rc-inactive' }, [
+      el('td', {}, [
+        el('div', { text: p.name }),
+        p.email ? el('div', { class: 'rc-hint', text: p.email }) : null,
+      ].filter(Boolean)),
+      el('td', { text: p.title || '—' }),
+      el('td', { text: p.subsystem || '—' }),
+      el('td', {}, [
+        p.role === 'admin' ? badge('Admin', 'info') : badge('Member', 'muted'),
+      ]),
+      // A four-day contract is a fact the scheduler needs, and showing it here is
+      // what stops somebody being planned onto a Friday they never work.
+      el('td', { class: 'rc-num', text: (p.working_days || []).length + '/wk' }),
+      el('td', {}, admin ? [
+        el('button', {
+          class: 'cx-btn mini ghost', text: 'Edit', onClick: () => editPerson(p),
+        }),
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: p.active ? 'Retire' : 'Restore',
+          title: p.active
+            ? 'Removes them from every picker. Their history stays — the reports still need it.'
+            : 'Puts them back in the pickers.',
+          onClick: async () => {
+            await rc.updatePerson(p.id, { active: !p.active });
+            notifyChanged('people');
+          },
+        }),
+      ] : []),
+    ]));
+
+    host.appendChild(table(['Name', 'Title', 'Subsystem', 'Role', 'Days', ''], rows));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Retiring somebody keeps every outcome they ever recorded. Nobody is deleted, '
+        + 'because the reports would lose their history with them.',
+    }));
+  }
+
+  function editPerson(person) {
+    const name = textInput({ value: person?.name || '', placeholder: 'Full name' });
+    const email = textInput({ value: person?.email || '', placeholder: 'you@example.com', type: 'email' });
+    const title = textInput({ value: person?.title || '', placeholder: 'Test Engineer' });
+    const subsystem = textInput({ value: person?.subsystem || '', placeholder: 'ATS / IXL / SCADA' });
+    const role = selectInput({
+      value: person?.role || 'member',
+      options: [
+        { value: 'member', label: 'Member — records their own outcomes' },
+        { value: 'admin', label: 'Administrator — plans, and sees the KPIs' },
+      ],
+    });
+
+    // Which days they work at all. Scheduling somebody onto a day they do not
+    // work is the same class of mistake as scheduling them while on leave, and
+    // both are caught from this one field.
+    const days = [1, 2, 3, 4, 5, 6, 7].map((n) => {
+      const set = new Set(person?.working_days || [1, 2, 3, 4, 5]);
+      const box = el('input', { type: 'checkbox', checked: set.has(n) });
+      box.dataset.day = String(n);
+      return el('label', { class: 'cx-check', style: 'margin-right:10px' }, [
+        box, el('span', { text: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][n - 1] }),
+      ]);
+    });
+    const daysWrap = el('div', {}, days);
+
+    formModal({
+      title: person ? 'Edit person' : 'Add person',
+      body: el('div', { class: 'cx-form' }, [
+        field('Name', name),
+        field('Email', email, 'Only needed if they will sign in. Scheduling somebody never requires an account.'),
+        field('Title', title),
+        field('Subsystem', subsystem),
+        field('Role', role),
+        field('Working days', daysWrap),
+      ]),
+      confirmLabel: person ? 'Save' : 'Add',
+      onConfirm: async () => {
+        const working = [...daysWrap.querySelectorAll('input:checked')].map((b) => Number(b.dataset.day));
+        const patch = {
+          name: name.value.trim(),
+          email: email.value.trim() || null,
+          title: title.value.trim() || null,
+          subsystem: subsystem.value.trim() || null,
+          role: role.value,
+          working_days: working,
+        };
+        if (!patch.name) throw new Error('A name is needed.');
+        if (person) await rc.updatePerson(person.id, patch);
+        else await rc.addPerson(patch);
+        notifyChanged('people');
+        toast({ message: person ? `${patch.name} updated.` : `${patch.name} added.` });
+      },
+    });
+  }
+
+  /* ── Locations ─────────────────────────────────────────────────────────── */
+
+  async function renderLocations(host) {
+    const [locations, aliases] = await Promise.all([
+      rc.listLocations({ includeInactive: true }),
+      rc.listLocationAliases(),
+    ]);
+    const admin = rc.isAdmin();
+    const byLocation = new Map();
+    for (const a of aliases) {
+      if (!byLocation.has(a.location_id)) byLocation.set(a.location_id, []);
+      byLocation.get(a.location_id).push(a.alias);
+    }
+
+    host.appendChild(sectionHead('Locations', admin ? {
+      label: 'Add location',
+      onClick: async () => {
+        const name = await promptDialog({ title: 'Add location', label: 'Name', confirmLabel: 'Add' });
+        if (!name) return;
+        await rc.addLocation({ name: name.trim() });
+        notifyChanged('locations');
+      },
+    } : null));
+
+    const rows = locations.map((l) => el('tr', { class: l.active ? '' : 'rc-inactive' }, [
+      el('td', { text: l.name }),
+      el('td', { text: l.code || '—' }),
+      el('td', {}, [
+        el('div', { class: 'rc-hint', text: (byLocation.get(l.id) || []).join(', ') || 'no other spellings' }),
+      ]),
+      el('td', {}, admin ? [
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: 'Add spelling',
+          title: 'Another way this place is written in the look-ahead or on a SAR.',
+          onClick: async () => {
+            const alias = await promptDialog({
+              title: `Another spelling for ${l.name}`,
+              label: 'As it appears in the look-ahead or the SAR',
+              confirmLabel: 'Add',
+            });
+            if (!alias) return;
+            await rc.addLocationAlias(l.id, alias.trim());
+            notifyChanged('locations');
+          },
+        }),
+      ] : []),
+    ]));
+
+    host.appendChild(table(['Location', 'Code', 'Also written as', ''], rows));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Every match against the look-ahead and the SARs keys on location, never on '
+        + 'activity text — the descriptions are not reliable enough to carry evidence. '
+        + 'So a place written "TPSS 12" in one and "Traction Power 12" in the other needs '
+        + 'both spellings here, or the match silently fails on exactly the rows that matter. '
+        + 'Case and punctuation are folded automatically; wording is not.',
+    }));
+  }
+
+  /* ── Categories and parties ────────────────────────────────────────────── */
+
+  async function renderCategories(host) {
+    const [categories, parties] = await Promise.all([
+      rc.listCategories({ includeInactive: true }),
+      rc.listParties(),
+    ]);
+    const admin = rc.isAdmin();
+
+    host.appendChild(sectionHead('Task categories', admin ? {
+      label: 'Add category',
+      onClick: async () => {
+        const name = await promptDialog({ title: 'Add category', label: 'Name', confirmLabel: 'Add' });
+        if (!name) return;
+        await rc.addCategory({ name: name.trim(), sort: (categories.length + 1) * 10 });
+        notifyChanged('categories');
+      },
+    } : null));
+
+    host.appendChild(table(['Category', ''], categories.map((c) => el('tr', {
+      class: c.active ? '' : 'rc-inactive',
+    }, [
+      el('td', { text: c.name }),
+      el('td', {}, admin ? [
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: c.active ? 'Retire' : 'Restore',
+          onClick: async () => {
+            await rc.updateCategory(c.id, { active: !c.active });
+            notifyChanged('categories');
+          },
+        }),
+      ] : []),
+    ]))));
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Categories are a table rather than free text because every rollup groups by '
+        + 'them. "Doc" one week and "Documentation" the next would be two categories to '
+        + 'the database and one to everybody reading the report.',
+    }));
+
+    host.appendChild(el('div', { style: 'height:24px' }));
+    host.appendChild(sectionHead('Responsible parties', admin ? {
+      label: 'Add party',
+      onClick: async () => {
+        const name = await promptDialog({ title: 'Add party', label: 'Name', confirmLabel: 'Add' });
+        if (!name) return;
+        await rc.addParty(name.trim());
+        notifyChanged('parties');
+      },
+    } : null));
+
+    host.appendChild(table(['Party'], parties.map((p) => el('tr', {}, [el('td', { text: p.name })]))));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Who a block or a cancellation is down to. A table for the same reason, and a '
+        + 'sharper one: "blocked by BART" is a number somebody may eventually have to defend.',
+    }));
+  }
+
+  /* ── Leave ─────────────────────────────────────────────────────────────── */
+
+  async function renderLeave(host) {
+    const today = todayISO();
+    const [people, kinds, leave] = await Promise.all([
+      rc.listPeople(),
+      rc.listLeaveKinds(),
+      // A year either side: enough to see the balance and what is booked ahead.
+      rc.listLeave(`${today.slice(0, 4)}-01-01`, `${Number(today.slice(0, 4)) + 1}-12-31`),
+    ]);
+    const admin = rc.isAdmin();
+    const peopleById = byId(people);
+    const kindsById = byId(kinds);
+
+    host.appendChild(sectionHead('Leave', admin ? {
+      label: 'Book leave',
+      onClick: () => bookLeave(people, kinds),
+    } : null));
+
+    if (!leave.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text: 'Nothing booked.' }));
+    } else {
+      const sorted = [...leave].sort((a, b) => a.start_date.localeCompare(b.start_date));
+      host.appendChild(table(
+        ['Person', 'From', 'To', 'Kind', 'Status', ''],
+        sorted.map((l) => el('tr', {}, [
+          el('td', { text: peopleById.get(l.person_id)?.name || '—' }),
+          el('td', { text: dayLabel(l.start_date) }),
+          el('td', { text: dayLabel(l.end_date) }),
+          el('td', { text: kindsById.get(l.kind_id)?.name || '—' }),
+          el('td', {}, [badge(l.status, l.status === 'approved' ? 'good' : 'muted')]),
+          el('td', {}, admin && l.status !== 'cancelled' ? [
+            el('button', {
+              class: 'cx-btn mini ghost',
+              text: 'Cancel',
+              onClick: async () => {
+                const ok = await confirmDialog({
+                  title: 'Cancel this leave?',
+                  message: 'It stays on the record as cancelled rather than disappearing.',
+                  confirmLabel: 'Cancel leave',
+                });
+                if (!ok) return;
+                await rc.updateLeave(l.id, { status: 'cancelled' });
+                notifyChanged('leave');
+              },
+            }),
+          ] : []),
+        ]))
+      ));
+    }
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Leave is why the huddle can tell "away" apart from "carried over". Without it, '
+        + 'somebody being off gets quietly spread across the performance statuses and their '
+        + 'numbers suffer for a week they were not even there.',
+    }));
+  }
+
+  function bookLeave(people, kinds) {
+    const person = selectInput({
+      value: people[0]?.id,
+      options: people.map((p) => ({ value: p.id, label: p.name })),
+    });
+    const from = el('input', { type: 'date', class: 'cx-input' });
+    const to = el('input', { type: 'date', class: 'cx-input' });
+    const kind = selectInput({
+      value: kinds[0]?.id,
+      options: kinds.map((k) => ({ value: k.id, label: k.name })),
+    });
+    const note = textInput({ placeholder: 'Optional' });
+
+    formModal({
+      title: 'Book leave',
+      body: el('div', { class: 'cx-form' }, [
+        field('Person', person),
+        field('From', from),
+        field('To', to, 'Inclusive, as a calendar is.'),
+        field('Kind', kind),
+        field('Note', note),
+      ]),
+      confirmLabel: 'Book',
+      onConfirm: async () => {
+        if (!from.value || !to.value) throw new Error('Both dates are needed.');
+        if (to.value < from.value) throw new Error('The end is before the start.');
+        await rc.addLeave({
+          person_id: person.value,
+          start_date: from.value,
+          end_date: to.value,
+          kind_id: kind.value,
+          note: note.value.trim() || null,
+        });
+        notifyChanged('leave');
+        toast({ message: 'Leave booked.' });
+      },
+    });
+  }
+
+  /* ── Shared bits ───────────────────────────────────────────────────────── */
+
+  function sectionHead(title, action) {
+    return el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: title }),
+      action
+        ? el('button', {
+          class: 'cx-btn mini primary',
+          html: icon('plus', { size: 12 }) + `<span>${action.label}</span>`,
+          onClick: action.onClick,
+        })
+        : null,
+    ].filter(Boolean));
+  }
+
+  function table(headers, rows) {
+    return el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [el('tr', {}, headers.map((h) => el('th', { text: h })))]),
+        el('tbody', {}, rows),
+      ]),
+    ]);
+  }
+
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/rc_huddle.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/rc_huddle.js"] = function (__x, __req) {
+  /**
+   * The daily huddle, and the week plan behind it.
+   *
+   * One screen, everyone side by side, all subsystems in one meeting: yesterday's
+   * plan, yesterday's outcome, tomorrow's plan. It is used live, at a fixed time,
+   * in front of the whole team — which sets every constraint here.
+   *
+   * **It must not rebuild while somebody is typing into it.** Panes elsewhere in
+   * this application write to the store on every keystroke and rebuild on the
+   * resulting change event, which replaces the input under the caret; CLAUDE.md
+   * records that shipping three times. This screen is nothing *but* dense live
+   * text entry, so it takes the opposite approach: nothing is written until a
+   * field is left or Enter is pressed, and a save redraws one row rather than the
+   * screen.
+   *
+   * **It must work with no network.** The meeting happens at 3pm whether or not
+   * the wifi does. Every outcome is stamped with a uuid generated here, queued in
+   * localStorage, and replayed when the connection returns — `rc_record_actual`
+   * is idempotent on that uuid, so replaying one twice is harmless.
+   *
+   * Imports: util, events, dates, rc, icons, components, rc_util.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const { emit, EV } = __req("core/events.js");
+  const { toISO, addDays, todayMs } = __req("core/dates.js");
+  const rc = __req("core/rc.js");
+  const { icon } = __req("ui/icons.js");
+  const { selectInput, textInput, toast, badge } = __req("ui/components.js");
+  const { STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs, dayLabel, byId, availability, notifyChanged, formModal } = __req("ui/rc_util.js");
+
+
+
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The offline queue
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const QUEUE_KEY = 'cxrc.queue';
+
+  function readQueue() {
+    try {
+      return JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]');
+    } catch {
+      return [];
+    }
+  }
+
+  function writeQueue(rows) {
+    try {
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(rows));
+    } catch {
+      /* A full or disabled localStorage must not lose the meeting; the entry
+         still went to the server if the server was reachable. */
+    }
+    emit(EV.RC_QUEUE_CHANGED, { pending: rows.length });
+  }
+
+  function pendingCount() {
+    return readQueue().length;
+  }
+
+  /**
+   * Send one outcome, queueing it if that fails.
+   *
+   * The uuid is generated before the attempt rather than by the database, which
+   * is the whole trick: a queued entry and the row it eventually becomes are the
+   * same row, so a flush can run twice and the second pass changes nothing.
+   */
+  async function record(entry) {
+    try {
+      await rc.recordActual(entry);
+      return { sent: true };
+    } catch (err) {
+      const queue = readQueue();
+      queue.push(entry);
+      writeQueue(queue);
+      return { sent: false, error: err };
+    }
+  }
+
+  /**
+   * Push whatever is queued. Safe to call at any time, including twice at once.
+   *
+   * Entries that still fail stay queued in order. One that the server actively
+   * rejects — a category that has since been retired, say — would otherwise
+   * block everything behind it forever, so a refusal that is not a network
+   * problem is dropped with a toast rather than retried until the end of time.
+   */
+  async function flushQueue() {
+    const queue = readQueue();
+    if (!queue.length || !rc.isSignedIn()) return 0;
+
+    const remaining = [];
+    let sent = 0;
+    for (const entry of queue) {
+      try {
+        await rc.recordActual(entry);
+        sent++;
+      } catch (err) {
+        if (/fetch|network/i.test(String(err.message))) remaining.push(entry);
+        else {
+          console.warn('[cx-timeline] a queued outcome was refused and dropped:', err.message);
+          toast({ tone: 'warn', message: `An entry from ${entry.date} was refused: ${err.message}` });
+        }
+      }
+    }
+    writeQueue(remaining);
+    if (sent) notifyChanged('actuals');
+    return sent;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The huddle
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Which day is being reviewed. Defaults to today; the arrows move it. */
+  let onDate = null;
+
+  function currentDate() {
+    return onDate || todayISO();
+  }
+
+  /**
+   * Does anybody on the team work this day at all?
+   *
+   * Not a fixed Monday-to-Friday: commissioning runs weekend possessions, and a
+   * team with somebody on a Saturday rota has a Saturday worth reviewing. The
+   * roster is the authority, so this asks it.
+   */
+  function anybodyWorks(iso, people) {
+    const weekday = new Date(isoToMs(iso)).getUTCDay() || 7;
+    return people.some((p) => (p.working_days || [1, 2, 3, 4, 5]).includes(weekday));
+  }
+
+  /**
+   * The day whose outcomes are being captured.
+   *
+   * The previous *working* day, not literally yesterday. On a Monday the meeting
+   * reviews Friday — asking a team what they achieved on Sunday would produce a
+   * screen of blanks and, worse, would tempt somebody into recording "carried
+   * over" for a day nobody was there.
+   */
+  function reviewDate(iso, people) {
+    let ms = addDays(isoToMs(iso), -1);
+    for (let i = 0; i < 7 && !anybodyWorks(toISO(ms), people); i++) ms = addDays(ms, -1);
+    return toISO(ms);
+  }
+
+  /** The next working day. On a Friday the meeting plans Monday. */
+  function planDate(iso, people) {
+    let ms = addDays(isoToMs(iso), 1);
+    for (let i = 0; i < 7 && !anybodyWorks(toISO(ms), people); i++) ms = addDays(ms, 1);
+    return toISO(ms);
+  }
+
+  async function render(root) {
+    await flushQueue();
+
+    const date = currentDate();
+
+    // The roster decides which days count, so it is read before the window that
+    // depends on it. One extra round trip, and it is what keeps a Monday meeting
+    // pointed at Friday.
+    const people = await rc.listPeople();
+    const review = reviewDate(date, people);
+    const plan = planDate(date, people);
+
+    const [categories, locations, parties, leave, planRows, actuals] = await Promise.all([
+      rc.listCategories(),
+      rc.listLocations(),
+      rc.listParties(),
+      rc.listLeave(review, plan),
+      rc.listPlan(review, plan),
+      rc.listActuals(review, review),
+    ]);
+
+    const cats = byId(categories);
+    const locs = byId(locations);
+    const actualByPerson = new Map();
+    for (const a of actuals) actualByPerson.set(a.person_id, a);
+
+    const planFor = (personId, iso) =>
+      planRows.find((p) => p.person_id === personId && p.work_date === iso) || null;
+
+    root.appendChild(dateBar(date, review, plan, root));
+
+    if (!people.length) {
+      root.appendChild(el('p', { class: 'rc-hint', text: 'Add people in Organisation first.' }));
+      return;
+    }
+
+    const body = el('tbody');
+    for (const person of people) {
+      body.appendChild(personRow({
+        person, review, plan, planFor, actualByPerson, cats, locs,
+        categories, locations, parties, leave, root,
+      }));
+    }
+
+    root.appendChild(el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [
+          el('tr', {}, [
+            el('th', { text: 'Person' }),
+            el('th', { text: `Was planned — ${dayLabel(review)}` }),
+            el('th', { text: 'What happened' }),
+            el('th', { text: `Tomorrow — ${dayLabel(plan)}` }),
+          ]),
+        ]),
+        body,
+      ]),
+    ]));
+
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Nothing is written until you leave a field or press Enter, and saving redraws '
+        + 'one row rather than the screen — otherwise the meeting would keep losing the box '
+        + 'you were typing into. Entries made with no connection queue and go up on their own.',
+    }));
+  }
+
+  function dateBar(date, review, plan, root) {
+    const move = (days) => {
+      onDate = toISO(addDays(isoToMs(date), days));
+      clear(root);
+      render(root);
+    };
+
+    return el('div', { class: 'rc-section-head' }, [
+      el('button', {
+        class: 'cx-btn icon mini ghost',
+        'aria-label': 'Previous day',
+        html: icon('chevron-left', { size: 13 }),
+        onClick: () => move(-1),
+      }),
+      el('h3', { text: `Huddle — ${dayLabel(date, 'medium')}` }),
+      el('button', {
+        class: 'cx-btn icon mini ghost',
+        'aria-label': 'Next day',
+        html: icon('chevron-right', { size: 13 }),
+        onClick: () => move(1),
+      }),
+      date === todayISO() ? null : el('button', {
+        class: 'cx-btn mini ghost',
+        text: 'Today',
+        onClick: () => {
+          onDate = null;
+          clear(root);
+          render(root);
+        },
+      }),
+    ].filter(Boolean));
+  }
+
+  /**
+   * One person's row.
+   *
+   * Rebuilt in place on save — `replaceWith` on this node only — so the rest of
+   * the table, including any field somebody else is mid-way through, is left
+   * exactly alone.
+   */
+  function personRow(ctx) {
+    const { person, review, plan, planFor, actualByPerson, cats, locs, leave, root } = ctx;
+
+    const row = el('tr');
+    const redraw = () => {
+      const next = personRow(ctx);
+      row.replaceWith(next);
+    };
+
+    const away = availability(person, review, leave);
+    const wasPlanned = planFor(person.id, review);
+    const actual = actualByPerson.get(person.id) || null;
+    const tomorrow = planFor(person.id, plan);
+    const admin = rc.isAdmin();
+    // A viewer has a person row, so "is this my row" is true for them too. Asking
+    // whether they may write at all is the difference between read-only and not,
+    // and it is the same question `rc_can_act_for()` answers in the database.
+    const mine = person.id === rc.me()?.id && rc.canWrite();
+
+    /* Name, and why they are not being asked for a goal. */
+    row.appendChild(el('td', {}, [
+      el('div', { text: person.name }),
+      el('div', { class: 'rc-hint', text: person.subsystem || person.title || '' }),
+    ]));
+
+    /* What they were supposed to be doing. */
+    row.appendChild(el('td', {}, [
+      wasPlanned
+        ? el('div', {}, [
+          el('div', { text: wasPlanned.task || '—' }),
+          el('div', { class: 'rc-hint', text: locs.get(wasPlanned.location_id)?.name || '' }),
+        ])
+        : el('span', { class: 'rc-hint', text: 'nothing planned' }),
+    ]));
+
+    /* What happened. Absence is answered from the leave record rather than
+       asked for — somebody on leave did not carry anything over, and letting
+       that fall into a performance status is exactly what the five-way split
+       exists to prevent. */
+    if (away.state === 'leave') {
+      row.appendChild(el('td', {}, [badge('On leave', 'muted')]));
+    } else if (away.state === 'non-working') {
+      row.appendChild(el('td', {}, [el('span', { class: 'rc-hint', text: 'not a working day' })]));
+    } else if (actual) {
+      const status = STATUS_BY_ID.get(actual.status);
+      row.appendChild(el('td', {}, [
+        badge(status?.label || actual.status, status?.tone || 'muted'),
+        actual.blocked_reason
+          ? el('div', { class: 'rc-hint', text: actual.blocked_reason })
+          : null,
+        actual.note ? el('div', { class: 'rc-hint', text: actual.note }) : null,
+      ].filter(Boolean)));
+    } else if (admin || mine) {
+      row.appendChild(el('td', {}, [statusButtons(ctx, person, review, wasPlanned, redraw)]));
+    } else {
+      row.appendChild(el('td', {}, [el('span', { class: 'rc-hint', text: '—' })]));
+    }
+
+    /* Tomorrow. */
+    row.appendChild(el('td', {}, [
+      tomorrow
+        ? el('div', {}, [
+          el('div', { text: tomorrow.task || '—' }),
+          el('div', { class: 'rc-hint', text: locs.get(tomorrow.location_id)?.name || '' }),
+        ])
+        : admin
+          ? el('button', {
+            class: 'cx-btn mini ghost',
+            text: 'Set goal',
+            onClick: () => setGoal(ctx, person, plan, root),
+          })
+          : el('span', { class: 'rc-hint', text: '—' }),
+    ]));
+
+    return row;
+  }
+
+  /**
+   * One button per status, so a whole team can be gone through at speed.
+   *
+   * A dropdown would be two clicks and a read; this is one click. Blocked opens a
+   * dialog because it is the one status that cannot be recorded without more —
+   * a reason and somebody answerable — and the database refuses it otherwise.
+   */
+  function statusButtons(ctx, person, date, plannedEntry, redraw) {
+    const wrap = el('div', { style: 'display:flex;gap:3px;flex-wrap:wrap' });
+
+    for (const status of STATUSES) {
+      if (status.id === 'absent') continue;
+      wrap.appendChild(el('button', {
+        class: 'cx-btn mini ghost',
+        text: status.label,
+        title: status.family === 'health'
+          ? 'Programme health — never counted against the individual'
+          : 'Counts toward individual efficiency',
+        onClick: async () => {
+          if (status.id === 'blocked') {
+            blockedDialog(ctx, person, date, plannedEntry, redraw);
+            return;
+          }
+          const entry = {
+            clientUuid: newUuid(),
+            personId: person.id,
+            date,
+            status: status.id,
+            categoryId: plannedEntry?.category_id || null,
+            locationId: plannedEntry?.location_id || null,
+            planEntryId: plannedEntry?.id || null,
+            carryChainId: status.id === 'carried' ? carryChainFor(plannedEntry) : null,
+          };
+          const { sent, error } = await record(entry);
+          if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
+          notifyChanged('actuals');
+          redraw();
+        },
+      }));
+    }
+    return wrap;
+  }
+
+  /**
+   * The chain a carried task belongs to.
+   *
+   * Keyed on the plan entry it came from, so five days of the same stuck job are
+   * one chain rather than five separate failures charged to one person. What
+   * makes the report useful is the chain's *age*, not the count.
+   */
+  function carryChainFor(plannedEntry) {
+    if (!plannedEntry) return null;
+    return plannedEntry.id;
+  }
+
+  function blockedDialog(ctx, person, date, plannedEntry, redraw) {
+    const reason = textInput({ placeholder: 'What stopped it' });
+    const party = selectInput({
+      value: ctx.parties[0]?.id,
+      options: ctx.parties.map((p) => ({ value: p.id, label: p.name })),
+    });
+
+    formModal({
+      title: `${person.name} — blocked`,
+      body: el('div', { class: 'cx-form' }, [
+        el('p', {
+          class: 'rc-hint',
+          text: 'A block is programme health, not a mark against anyone — which is exactly '
+            + 'why it needs a reason and somebody answerable. The database refuses it without both.',
+        }),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Reason' }), reason]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Down to' }), party]),
+      ]),
+      confirmLabel: 'Record',
+      onConfirm: async () => {
+        if (!reason.value.trim()) throw new Error('A reason is needed.');
+        const entry = {
+          clientUuid: newUuid(),
+          personId: person.id,
+          date,
+          status: 'blocked',
+          categoryId: plannedEntry?.category_id || null,
+          locationId: plannedEntry?.location_id || null,
+          planEntryId: plannedEntry?.id || null,
+          blockedReason: reason.value.trim(),
+          blockedPartyId: party.value,
+        };
+        const { sent, error } = await record(entry);
+        if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
+        notifyChanged('actuals');
+        redraw();
+      },
+    });
+  }
+
+  function setGoal(ctx, person, date, root) {
+    const task = textInput({ placeholder: 'What they will do' });
+    const location = selectInput({
+      value: '',
+      placeholder: '— location —',
+      options: ctx.locations.map((l) => ({ value: l.id, label: l.name })),
+    });
+    const category = selectInput({
+      value: '',
+      placeholder: '— category —',
+      options: ctx.categories.map((c) => ({ value: c.id, label: c.name })),
+    });
+    const shift = selectInput({ value: 'day', options: SHIFTS.map((s) => ({ value: s.id, label: s.label })) });
+
+    formModal({
+      title: `${person.name} — ${dayLabel(date, 'medium')}`,
+      body: el('div', { class: 'cx-form' }, [
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Task' }), task]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Location' }), location]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Category' }), category]),
+        el('div', { class: 'cx-field' }, [
+          el('label', { class: 'cx-label', text: 'Shift' }), shift,
+          el('div', { class: 'cx-hint', text: 'A night shift belongs to the day it starts on.' }),
+        ]),
+      ]),
+      confirmLabel: 'Set',
+      onConfirm: async () => {
+        if (!task.value.trim()) throw new Error('A task is needed.');
+        await rc.addPlanEntries([{
+          person_id: person.id,
+          work_date: date,
+          shift: shift.value,
+          location_id: location.value || null,
+          task: task.value.trim(),
+          category_id: category.value || null,
+        }]);
+        notifyChanged('plan');
+        clear(root);
+        render(root);
+      },
+    });
+  }
+
+  /** A v4-shaped uuid. The database column is a uuid and will not take anything else. */
+  function newUuid() {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+    const hex = () => Math.floor(Math.random() * 16).toString(16);
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) =>
+      c === 'x' ? hex() : ((Math.floor(Math.random() * 4) + 8).toString(16)));
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The week plan
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  let weekOf = null;
+
+  /**
+   * People down, days across.
+   *
+   * Leave is drawn *behind* the assignments rather than in a calendar of its own,
+   * the way the timeline already draws a freeze period behind the work it
+   * affects: a clash is then something you can see rather than something you have
+   * to be told about.
+   */
+  async function renderWeek(root) {
+    const startMs = weekOf ?? weekStart(todayMs());
+    const days = weekDays(startMs);
+    const from = days[0];
+    const to = days[days.length - 1];
+
+    const [people, locations, leave, planRows] = await Promise.all([
+      rc.listPeople(),
+      rc.listLocations(),
+      rc.listLeave(from, to),
+      rc.listPlan(from, to),
+    ]);
+    const locs = byId(locations);
+
+    root.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('button', {
+        class: 'cx-btn icon mini ghost',
+        'aria-label': 'Previous week',
+        html: icon('chevron-left', { size: 13 }),
+        onClick: () => { weekOf = startMs - 7 * 86400000; clear(root); renderWeek(root); },
+      }),
+      el('h3', { text: `Week of ${dayLabel(from, 'medium')}` }),
+      el('button', {
+        class: 'cx-btn icon mini ghost',
+        'aria-label': 'Next week',
+        html: icon('chevron-right', { size: 13 }),
+        onClick: () => { weekOf = startMs + 7 * 86400000; clear(root); renderWeek(root); },
+      }),
+    ]));
+
+    /* How many people are actually available each day. This is the number that
+       stops work being promised that cannot be staffed. */
+    const coverage = days.map((iso) =>
+      people.filter((p) => availability(p, iso, leave).state === 'available').length);
+
+    const body = el('tbody');
+    for (const person of people) {
+      const cells = days.map((iso) => {
+        const state = availability(person, iso, leave);
+        const entry = planRows.find((p) => p.person_id === person.id && p.work_date === iso);
+        if (state.state === 'leave') return el('td', {}, [badge('Leave', 'muted')]);
+        if (state.state === 'non-working') return el('td', { class: 'rc-inactive' }, [el('span', { text: '·' })]);
+        if (!entry) return el('td', {}, [el('span', { class: 'rc-hint', text: '—' })]);
+        return el('td', {}, [
+          el('div', { text: entry.task || '—' }),
+          el('div', { class: 'rc-hint', text: locs.get(entry.location_id)?.name || '' }),
+        ]);
+      });
+      body.appendChild(el('tr', {}, [el('td', { text: person.name }), ...cells]));
+    }
+
+    body.appendChild(el('tr', {}, [
+      el('td', {}, [el('strong', { text: 'Available' })]),
+      ...coverage.map((n, i) => el('td', { class: 'rc-num' }, [
+        el('span', { text: `${n} of ${people.length}` }),
+      ])),
+    ]));
+
+    root.appendChild(el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [
+          el('tr', {}, [el('th', { text: 'Person' }), ...days.map((iso) => el('th', { text: dayLabel(iso) }))]),
+        ]),
+        body,
+      ]),
+    ]));
+
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Leave sits in the grid rather than in a calendar of its own, so a clash is '
+        + 'visible rather than merely flagged. The bottom row is what stops work being '
+        + 'promised for a day it cannot be staffed.',
+    }));
+  }
+
+  Object.defineProperty(__x, "pendingCount", { get: () => pendingCount, enumerable: true });
+  Object.defineProperty(__x, "flushQueue", { get: () => flushQueue, enumerable: true });
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+  Object.defineProperty(__x, "renderWeek", { get: () => renderWeek, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// io/lookahead.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["io/lookahead.js"] = function (__x, __req) {
+  /**
+   * Reading the four-week look-ahead.
+   *
+   * The look-ahead is an Excel workbook the deputy edits in place, and it encodes
+   * shift access in **cell fill colour** against a fixed legend. So this is not
+   * an importer in the usual sense: the values matter far less than the colours,
+   * and almost everything that can go wrong is invisible in a spreadsheet you
+   * open by hand.
+   *
+   * Four rules, each of which exists because of a specific way it breaks:
+   *
+   * **One sheet, chosen by name.** The workbook is large and the four-week grid
+   * is one tab among several. `readXlsx()` in `io/importers.js` takes whichever
+   * sheet is first, which would silently read a cover page. A missing sheet is an
+   * error here, never a fall back to sheet one.
+   *
+   * **Visible rows and columns only.** Rows are hidden by hand and by autofilter,
+   * both as `hidden="1"`. A hidden *column* matters more than a hidden row: with
+   * one column per day, dropping one removes a day from the week and nothing
+   * about the result looks wrong.
+   *
+   * **The real row number travels with the row.** Blank and absent rows mean the
+   * nth row in the file is not row n, so an array index is not an identity. Row
+   * identity is what change classification rests on.
+   *
+   * **A colour that is not in the legend is never guessed.** It goes to an
+   * unknown bucket for somebody to map. The legend is stable in practice, and
+   * relying on that would still be wrong, because the failure is silent and lands
+   * in evidence.
+   *
+   * Imports: inflate, dates (leaves).
+   */
+
+  const { inflateRaw } = __req("io/inflate.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     ZIP
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Read the container into `name -> Uint8Array`, via the central directory. */
+  function readZip(buffer) {
+    const view = new DataView(buffer);
+    const bytes = new Uint8Array(buffer);
+
+    let eocd = -1;
+    for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66000); i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) throw new Error('That file is not a .xlsx (no ZIP directory found).');
+
+    const count = view.getUint16(eocd + 10, true);
+    let at = view.getUint32(eocd + 16, true);
+
+    const out = new Map();
+    for (let i = 0; i < count; i++) {
+      if (view.getUint32(at, true) !== 0x02014b50) break;
+      const method = view.getUint16(at + 10, true);
+      const compressed = view.getUint32(at + 20, true);
+      const nameLen = view.getUint16(at + 28, true);
+      const extraLen = view.getUint16(at + 30, true);
+      const commentLen = view.getUint16(at + 32, true);
+      const localAt = view.getUint32(at + 42, true);
+      const name = new TextDecoder().decode(bytes.subarray(at + 46, at + 46 + nameLen));
+
+      // The local header repeats the name and carries its own extra field, whose
+      // length routinely differs from the one in the directory.
+      const localNameLen = view.getUint16(localAt + 26, true);
+      const localExtraLen = view.getUint16(localAt + 28, true);
+      const start = localAt + 30 + localNameLen + localExtraLen;
+      const raw = bytes.subarray(start, start + compressed);
+      out.set(name, method === 0 ? raw : inflateRaw(raw));
+
+      at += 46 + nameLen + extraLen + commentLen;
+    }
+    return out;
+  }
+
+  function partText(files, name) {
+    const part = files.get(name);
+    return part ? new TextDecoder().decode(part) : '';
+  }
+
+  function decodeXml(s) {
+    return String(s)
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+      .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d))
+      .replace(/&amp;/g, '&');
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Colour
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The legacy 56-entry palette an `indexed="n"` fill refers to.
+   *
+   * Excel still writes these for anything inherited from an older workbook, so a
+   * parser that only understands `rgb=` sees nothing at all on exactly those
+   * cells — and a blank cell reads as "no shift booked", which is a different
+   * fact entirely.
+   */
+  const INDEXED = [
+    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
+    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
+    '800000', '008000', '000080', '808000', '800080', '008080', 'C0C0C0', '808080',
+    '9999FF', '993366', 'FFFFCC', 'CCFFFF', '660066', 'FF8080', '0066CC', 'CCCCFF',
+    '000080', 'FF00FF', 'FFFF00', '00FFFF', '800080', '800000', '008080', '0000FF',
+    '00CCFF', 'CCFFFF', 'CCFFCC', 'FFFF99', '99CCFF', 'FF99CC', 'CC99FF', 'FFCC99',
+    '3366FF', '33CCCC', '99CC00', 'FFCC00', 'FF9900', 'FF6600', '666699', '969696',
+    '003366', '339966', '003300', '333300', '993300', '993366', '333399', '333333',
+  ];
+
+  /** `theme="n"` indexes the scheme with the dark/light pairs swapped. */
+  const THEME_ORDER = ['lt1', 'dk1', 'lt2', 'dk2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hlink', 'folHlink'];
+
+  function readTheme(xml) {
+    const scheme = /<a:clrScheme[^>]*>([\s\S]*?)<\/a:clrScheme>/.exec(xml)?.[1] || '';
+    const colors = {};
+    for (const m of scheme.matchAll(/<a:(\w+)>([\s\S]*?)<\/a:\1>/g)) {
+      const [, key, body] = m;
+      const srgb = /<a:srgbClr val="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
+      const sys = /<a:sysClr[^>]*lastClr="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
+      if (srgb || sys) colors[key] = (srgb || sys).toUpperCase();
+    }
+    return THEME_ORDER.map((key) => colors[key] || null);
+  }
+
+  /**
+   * Apply an OOXML tint, in HLS as the specification requires.
+   *
+   * Doing it in RGB gives a near miss, and a near miss against a legend keyed on
+   * exact colours is a lookup that fails. Accent 1 at -0.25 has to come out
+   * #2F5597 — what Excel calls "Blue, Accent 1, Darker 25%".
+   */
+  function applyTint(hex, tint) {
+    if (!tint) return hex;
+    const r = parseInt(hex.slice(0, 2), 16) / 255;
+    const g = parseInt(hex.slice(2, 4), 16) / 255;
+    const b = parseInt(hex.slice(4, 6), 16) / 255;
+
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    let lum = (max + min) / 2;
+    let hue = 0;
+    let sat = 0;
+    if (max !== min) {
+      const d = max - min;
+      sat = lum > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) hue = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+      else if (max === g) hue = ((b - r) / d + 2) / 6;
+      else hue = ((r - g) / d + 4) / 6;
+    }
+
+    lum = tint < 0 ? lum * (1 + tint) : lum * (1 - tint) + tint;
+    lum = Math.min(1, Math.max(0, lum));
+
+    const toRgb = (p, q, t) => {
+      let u = t;
+      if (u < 0) u += 1;
+      if (u > 1) u -= 1;
+      if (u < 1 / 6) return p + (q - p) * 6 * u;
+      if (u < 1 / 2) return q;
+      if (u < 2 / 3) return p + (q - p) * (2 / 3 - u) * 6;
+      return p;
+    };
+
+    let out;
+    if (sat === 0) out = [lum, lum, lum];
+    else {
+      const q = lum < 0.5 ? lum * (1 + sat) : lum + sat - lum * sat;
+      const p = 2 * lum - q;
+      out = [toRgb(p, q, hue + 1 / 3), toRgb(p, q, hue), toRgb(p, q, hue - 1 / 3)];
+    }
+    return out.map((v) => Math.round(v * 255).toString(16).padStart(2, '0').toUpperCase()).join('');
+  }
+
+  /**
+   * `styleIndex -> { hex, source }` for every cell format in the workbook.
+   *
+   * The chain is `cellXfs[s].fillId -> fills[id].patternFill.fgColor`, and the
+   * colour at the end arrives in one of three notations. Resolving all three to
+   * one hex is what lets the legend be keyed on the colour rather than on how it
+   * happened to be written.
+   */
+  function readFills(stylesXml, theme) {
+    const fillsBlock = /<fills[^>]*>([\s\S]*?)<\/fills>/.exec(stylesXml)?.[1] || '';
+    const fills = (fillsBlock.match(/<fill>[\s\S]*?<\/fill>/g) || []).map((fill) => {
+      const pattern = /patternType="(\w+)"/.exec(fill)?.[1] || 'none';
+      if (pattern === 'none') return { hex: null, source: 'none' };
+
+      const fg = /<fgColor([^>]*)\/>/.exec(fill)?.[1] || '';
+      const tint = parseFloat(/tint="(-?[\d.]+)"/.exec(fg)?.[1] || '0') || 0;
+
+      const rgb = /rgb="([0-9A-Fa-f]{6,8})"/.exec(fg)?.[1];
+      if (rgb) {
+        const base = (rgb.length === 8 ? rgb.slice(2) : rgb).toUpperCase();
+        return { hex: applyTint(base, tint), source: 'rgb' };
+      }
+
+      const themed = /theme="(\d+)"/.exec(fg)?.[1];
+      if (themed != null) {
+        const base = theme[parseInt(themed, 10)] || null;
+        return { hex: base ? applyTint(base, tint) : null, source: `theme:${themed}` };
+      }
+
+      const indexed = /indexed="(\d+)"/.exec(fg)?.[1];
+      if (indexed != null) {
+        const base = INDEXED[parseInt(indexed, 10)] || null;
+        return { hex: base ? applyTint(base, tint) : null, source: `indexed:${indexed}` };
+      }
+
+      return { hex: null, source: 'unresolved' };
+    });
+
+    const xfsBlock = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] || '';
+    const xfs = xfsBlock.match(/<xf[\s\S]*?(?:\/>|<\/xf>)/g) || [];
+    return xfs.map((xf) => {
+      const fillId = parseInt(/fillId="(\d+)"/.exec(xf)?.[1] ?? '0', 10);
+      return fills[fillId] || { hex: null, source: 'none' };
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The sheet
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Rows and cells, matched as either a self-closing tag or an open/close pair.
+   *
+   * The obvious `/<row[\s\S]*?(?:\/>|<\/row>)/` is wrong here, and wrong in a way
+   * that only shows up on a sheet like this one. A cell carrying a fill but no
+   * value is written `<c r="D2" s="1"/>`, and a lazy match stops at that first
+   * `/>` — truncating the row and dropping every cell after it. A workbook full
+   * of *values* never hits it, because those cells close with `</c>`. A workbook
+   * full of *colours* hits it on nearly every row.
+   */
+  const ROW_RE = /<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g;
+  const CELL_RE = /<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g;
+
+  /** 'A' -> 1, 'AA' -> 27. One-based, matching how a spreadsheet talks. */
+  function colNumber(letters) {
+    let n = 0;
+    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n;
+  }
+
+  function colLetters(n) {
+    let out = '';
+    let v = n;
+    while (v > 0) {
+      const rem = (v - 1) % 26;
+      out = String.fromCharCode(65 + rem) + out;
+      v = Math.floor((v - 1) / 26);
+    }
+    return out;
+  }
+
+  /** Every sheet in the workbook, with its hidden state and its part path. */
+  function readSheets(files) {
+    const workbook = partText(files, 'xl/workbook.xml');
+    const rels = partText(files, 'xl/_rels/workbook.xml.rels');
+    const sheets = [];
+
+    for (const m of workbook.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+      const attrs = m[1];
+      const rid = /r:id="([^"]+)"/.exec(attrs)?.[1] || '';
+      let zipPath = '';
+      if (rid) {
+        const rel = new RegExp(`<Relationship[^>]*Id="${rid}"[^>]*Target="([^"]+)"`).exec(rels);
+        if (rel) {
+          const target = rel[1].replace(/^\/?xl\//, '').replace(/^\//, '');
+          if (files.has(`xl/${target}`)) zipPath = `xl/${target}`;
+        }
+      }
+      sheets.push({
+        name: decodeXml(/name="([^"]*)"/.exec(attrs)?.[1] || ''),
+        state: /state="(\w+)"/.exec(attrs)?.[1] || 'visible',
+        zipPath,
+      });
+    }
+    return sheets;
+  }
+
+  /**
+   * Parse one named sheet into a grid of visible cells.
+   *
+   * Returns `{ sheet, rows, hiddenRows, hiddenColumns, merges, conditional }`.
+   * Each row is `{ row, cells: [{ col, ref, value, hex, source }] }` where `row`
+   * is the **spreadsheet** row number.
+   */
+  function parseSheet(buffer, sheetName) {
+    const files = readZip(buffer);
+    const sheets = readSheets(files);
+
+    const chosen = sheets.find((s) => s.name === sheetName);
+    if (!chosen) {
+      // Never fall back to the first sheet. Reading a cover page and reporting a
+      // week of no work would be worse than reporting nothing at all.
+      throw new Error(
+        `The workbook has no sheet called "${sheetName}". It has: ${sheets.map((s) => s.name).join(', ')}.`
+      );
+    }
+    if (!chosen.zipPath) throw new Error(`"${sheetName}" has no readable worksheet part.`);
+    if (chosen.state !== 'visible') {
+      // A hidden sheet under the configured name almost always means the name is
+      // stale and the live grid has moved to another tab.
+      throw new Error(`"${sheetName}" is hidden in the workbook — check which tab the look-ahead is on now.`);
+    }
+
+    const sharedStrings = [];
+    for (const si of partText(files, 'xl/sharedStrings.xml').match(/<si>[\s\S]*?<\/si>/g) || []) {
+      const parts = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
+      sharedStrings.push(parts.map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join(''));
+    }
+
+    const theme = readTheme(partText(files, 'xl/theme/theme1.xml'));
+    const styleFills = readFills(partText(files, 'xl/styles.xml'), theme);
+    const xml = new TextDecoder().decode(files.get(chosen.zipPath));
+
+    /* Hidden columns. One column per day, so a hidden one silently removes a day
+       from the week — and unlike a missing row, nothing about the result looks
+       wrong. */
+    const hiddenColumns = new Set();
+    const colsBlock = /<cols[^>]*>([\s\S]*?)<\/cols>/.exec(xml)?.[1] || '';
+    for (const m of colsBlock.matchAll(/<col\b([^>]*)\/?>/g)) {
+      if (!/hidden="1"/.test(m[1])) continue;
+      const min = parseInt(/min="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
+      const max = parseInt(/max="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
+      for (let c = min; c <= max; c++) hiddenColumns.add(c);
+    }
+
+    const merges = [];
+    const mergeBlock = /<mergeCells[^>]*>([\s\S]*?)<\/mergeCells>/.exec(xml)?.[1] || '';
+    for (const m of mergeBlock.matchAll(/<mergeCell[^>]*ref="([^"]+)"/g)) merges.push(m[1]);
+
+    /* Conditional formatting is reported, not evaluated. A colour that comes
+       from a rule is not in the cell's style at all, so if the grid is painted
+       that way this parser would see an empty sheet — and saying so is the only
+       honest thing to do about it. */
+    const conditional = [];
+    for (const m of xml.matchAll(/<conditionalFormatting[^>]*sqref="([^"]+)"/g)) conditional.push(m[1]);
+
+    const rows = [];
+    let hiddenRows = 0;
+
+    for (const rowXml of xml.match(ROW_RE) || []) {
+      const head = /<row\b([^>]*)>/.exec(rowXml)?.[1] || rowXml;
+      if (/hidden="1"/.test(head)) {
+        hiddenRows++;
+        continue;
+      }
+      const rowNumber = parseInt(/\br="(\d+)"/.exec(head)?.[1] ?? '0', 10);
+
+      const cells = [];
+      for (const cellXml of rowXml.match(CELL_RE) || []) {
+        const ref = /\br="([A-Z]+)(\d+)"/.exec(cellXml);
+        if (!ref) continue;
+        const col = colNumber(ref[1]);
+        if (hiddenColumns.has(col)) continue;
+
+        const styleIndex = parseInt(/\bs="(\d+)"/.exec(cellXml)?.[1] ?? '-1', 10);
+        const fill = styleIndex >= 0 ? styleFills[styleIndex] : null;
+        const type = /\bt="([^"]+)"/.exec(cellXml)?.[1];
+
+        let value = '';
+        if (type === 'inlineStr') {
+          value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [])
+            .map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join('');
+        } else {
+          const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
+          if (raw != null) value = type === 's' ? (sharedStrings[parseInt(raw, 10)] ?? '') : decodeXml(raw);
+        }
+
+        cells.push({
+          col,
+          ref: `${ref[1]}${ref[2]}`,
+          value,
+          hex: fill?.hex || null,
+          source: fill?.source || 'none',
+        });
+      }
+
+      // A row with no visible cells at all is not a row of the grid.
+      if (cells.length) rows.push({ row: rowNumber, cells });
+    }
+
+    return {
+      sheet: chosen.name,
+      sheets: sheets.map((s) => ({ name: s.name, state: s.state })),
+      rows,
+      hiddenRows,
+      hiddenColumns: [...hiddenColumns],
+      merges,
+      conditional,
+    };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The legend
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Turn a parsed grid into shifts, against the legend.
+   *
+   * `legend` is `[{ argb, meaning }]`. A colour that is not in it is collected in
+   * `unknown` rather than defaulted to anything — the legend is stable in
+   * practice and relying on that would still be wrong, because one stray shade
+   * from Excel's recent-colours picker would misclassify a shift with nothing on
+   * screen to show it happened, and the result lands in evidence.
+   */
+  function applyLegend(grid, legend) {
+    const byColour = new Map((legend || []).map((l) => [String(l.argb).toUpperCase(), l.meaning]));
+    const unknown = new Map();
+
+    const rows = grid.rows.map((row) => ({
+      row: row.row,
+      cells: row.cells.map((cell) => {
+        if (!cell.hex) return { ...cell, meaning: null };
+        const meaning = byColour.get(cell.hex) || null;
+        if (!meaning) {
+          const seen = unknown.get(cell.hex) || { hex: cell.hex, count: 0, samples: [] };
+          seen.count++;
+          if (seen.samples.length < 4) seen.samples.push(cell.ref);
+          unknown.set(cell.hex, seen);
+        }
+        return { ...cell, meaning };
+      }),
+    }));
+
+    return { ...grid, rows, unknown: [...unknown.values()].sort((a, b) => b.count - a.count) };
+  }
+
+  Object.defineProperty(__x, "readZip", { get: () => readZip, enumerable: true });
+  Object.defineProperty(__x, "readTheme", { get: () => readTheme, enumerable: true });
+  Object.defineProperty(__x, "applyTint", { get: () => applyTint, enumerable: true });
+  Object.defineProperty(__x, "readFills", { get: () => readFills, enumerable: true });
+  Object.defineProperty(__x, "colNumber", { get: () => colNumber, enumerable: true });
+  Object.defineProperty(__x, "colLetters", { get: () => colLetters, enumerable: true });
+  Object.defineProperty(__x, "readSheets", { get: () => readSheets, enumerable: true });
+  Object.defineProperty(__x, "parseSheet", { get: () => parseSheet, enumerable: true });
+  Object.defineProperty(__x, "applyLegend", { get: () => applyLegend, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// core/lookahead.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/lookahead.js"] = function (__x, __req) {
+  /**
+   * Comparing two look-ahead snapshots.
+   *
+   * The look-ahead is the contractual source of truth and the resource calendar
+   * is the execution record; the difference between two snapshots is what a
+   * delay claim is eventually built from. So the rules here are about being
+   * *honest* rather than clever — the system logs what it can see and asks a
+   * person about what it cannot.
+   *
+   * Two rules do most of the work, and both exist because the obvious version
+   * produces numbers that flatter or damn the wrong party.
+   *
+   * **Only weeks in both snapshots are compared.** A four-week window rolls
+   * forward, so a week appearing at the far edge is not scope being added and a
+   * week dropping off the back is not scope being removed. Counting them as such
+   * would book a batch of phantom additions every single week, and would count
+   * finished work as deleted scope — inflating exactly the number you would most
+   * want to defend.
+   *
+   * **A crew moving site is not inferred.** When work finishes early and a team
+   * moves, one row disappears and another appears with the same resources. The
+   * activity text is not reliable enough to match on — the spec says so and it is
+   * right — so it is logged honestly as a removal and an addition, and a person
+   * can relink the pair afterwards. Guessing would be the one failure mode
+   * nobody could audit.
+   *
+   * Imports: nothing (leaf).
+   */
+
+  /* ── Row identity ──────────────────────────────────────────────────────── */
+
+  /**
+   * A key for a row that survives the file being edited.
+   *
+   * The look-ahead has no activity IDs — no P6 numbers, nothing stable — and its
+   * descriptions are not matchable. Location, week and subsystem are what remain,
+   * plus an ordinal to separate two rows that share all three.
+   *
+   * The ordinal is the weak part, and knowingly so: inserting a row in the middle
+   * of a group shifts everything below it and produces a false removed/added
+   * pair. That is tolerable only because the manual relink exists to fix it, and
+   * because the alternative — matching on text — would produce *wrong* answers
+   * rather than noisy ones.
+   */
+  function rowKey({ weekStart, location, subsystem = '', ordinal = 0 }) {
+    return [weekStart, String(location || '').trim(), String(subsystem || '').trim(), ordinal].join('|');
+  }
+
+  /** Assign ordinals within each (week, location, subsystem) group. */
+  function keyRows(rows) {
+    const seen = new Map();
+    return rows.map((row) => {
+      const group = [row.weekStart, row.location, row.subsystem || ''].join('|');
+      const ordinal = seen.get(group) || 0;
+      seen.set(group, ordinal + 1);
+      return { ...row, rowKey: rowKey({ ...row, ordinal }) };
+    });
+  }
+
+  /* ── The window ────────────────────────────────────────────────────────── */
+
+  /**
+   * The weeks a snapshot actually covers, read from the snapshot itself.
+   *
+   * Deliberately not a constant. The spec calls it a four-week look-ahead and
+   * says it is maintained four to six weeks out, so a hard-coded 4 would
+   * misclassify the sixth week every time it appeared.
+   */
+  function windowOf(rows) {
+    const weeks = [...new Set(rows.map((r) => r.weekStart))].sort();
+    return { weeks, first: weeks[0] || null, last: weeks[weeks.length - 1] || null };
+  }
+
+  /* ── Comparing ─────────────────────────────────────────────────────────── */
+
+  /**
+   * Classify the difference between two keyed snapshots.
+   *
+   * `before` and `after` are arrays of `{ rowKey, weekStart, location, subsystem,
+   * label, cells, marks }`, where `cells` maps a date to a shift meaning and
+   * `marks` holds BART's own resource requests.
+   *
+   * Returns a list of `{ kind, weekStart, rowKey, before, after }`.
+   */
+  function classify(before, after, { cancelledMeaning = 'cancelled' } = {}) {
+    const beforeWindow = windowOf(before);
+    const afterWindow = windowOf(after);
+
+    // Only weeks present on both sides can be compared at all. Everything else
+    // is the window moving, which is recorded and kept out of the KPIs.
+    const shared = new Set(beforeWindow.weeks.filter((w) => afterWindow.weeks.includes(w)));
+
+    const events = [];
+    const beforeByKey = new Map(before.map((r) => [r.rowKey, r]));
+    const afterByKey = new Map(after.map((r) => [r.rowKey, r]));
+
+    /* Weeks entering and leaving the window. Not scope, and named so. */
+    for (const week of afterWindow.weeks) {
+      if (!beforeWindow.weeks.includes(week)) {
+        events.push({ kind: 'window_advanced', weekStart: week, rowKey: null, before: null, after: null });
+      }
+    }
+    for (const week of beforeWindow.weeks) {
+      if (!afterWindow.weeks.includes(week)) {
+        events.push({ kind: 'window_retired', weekStart: week, rowKey: null, before: null, after: null });
+      }
+    }
+
+    /* Rows added to, and removed from, a week that was already in view. */
+    for (const row of after) {
+      if (!shared.has(row.weekStart)) continue;
+      if (!beforeByKey.has(row.rowKey)) {
+        events.push({ kind: 'scope_added', weekStart: row.weekStart, rowKey: row.rowKey, before: null, after: row });
+      }
+    }
+    for (const row of before) {
+      if (!shared.has(row.weekStart)) continue;
+      if (!afterByKey.has(row.rowKey)) {
+        events.push({ kind: 'scope_removed', weekStart: row.weekStart, rowKey: row.rowKey, before: row, after: null });
+      }
+    }
+
+    /* Rows present on both sides: what changed inside them. */
+    for (const row of after) {
+      const prior = beforeByKey.get(row.rowKey);
+      if (!prior || !shared.has(row.weekStart)) continue;
+
+      const dates = [...new Set([...Object.keys(prior.cells || {}), ...Object.keys(row.cells || {})])].sort();
+      for (const date of dates) {
+        const was = (prior.cells || {})[date] || null;
+        const now = (row.cells || {})[date] || null;
+        if (was === now) continue;
+
+        // A shift turning red is a cancellation, and the colour alone cannot say
+        // whose. Whoever reviews it is asked; nothing is assumed.
+        const kind = now === cancelledMeaning && was && was !== cancelledMeaning
+          ? 'cancellation'
+          : 'shift_changed';
+
+        events.push({
+          kind,
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          date,
+          before: was,
+          after: now,
+          needsResponsibility: kind === 'cancellation',
+        });
+      }
+
+      // BART's own resource marks — an EIC added to an otherwise unchanged
+      // shift. The shift did not move, and the request still changed, so it is
+      // logged rather than folded into the row above.
+      const marksBefore = JSON.stringify(prior.marks || {});
+      const marksAfter = JSON.stringify(row.marks || {});
+      if (marksBefore !== marksAfter) {
+        events.push({
+          kind: 'resource_changed',
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          before: prior.marks || {},
+          after: row.marks || {},
+        });
+      }
+    }
+
+    return events;
+  }
+
+  /**
+   * Removals and additions in the same week that could be one crew moving site.
+   *
+   * Only ever a *suggestion*, surfaced for somebody to confirm. Work finishing
+   * early at one location and starting at another is not a cancellation, but the
+   * only evidence is that the same BART resources appear on both — and the
+   * activity text, which cannot be trusted. So the pairing is a human judgement
+   * by design, and the system's job is to make it easy rather than to guess.
+   */
+  function relinkCandidates(events) {
+    const removed = events.filter((e) => e.kind === 'scope_removed');
+    const added = events.filter((e) => e.kind === 'scope_added');
+    const out = [];
+
+    for (const gone of removed) {
+      for (const arrived of added) {
+        if (gone.weekStart !== arrived.weekStart) continue;
+        const a = JSON.stringify(gone.before?.marks || {});
+        const b = JSON.stringify(arrived.after?.marks || {});
+        if (a !== '{}' && a === b) {
+          out.push({ removed: gone, added: arrived, because: 'the same resources were requested' });
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Which events count toward the change KPIs.
+   *
+   * The window moving is real and recorded, and it is not a change of scope.
+   * Keeping the two apart is what stops the scope-added figure being meaningless
+   * within a month.
+   */
+  const KPI_KINDS = ['scope_added', 'scope_removed', 'cancellation', 'resource_changed', 'shift_changed'];
+
+  function countable(events) {
+    return events.filter((e) => KPI_KINDS.includes(e.kind));
+  }
+
+  /** A short, plain description of an event, for the change log. */
+  function describe(event) {
+    switch (event.kind) {
+      case 'scope_added': return `Added: ${event.after?.label || event.rowKey}`;
+      case 'scope_removed': return `Removed: ${event.before?.label || event.rowKey}`;
+      case 'cancellation': return `Cancelled on ${event.date}: was ${event.before}`;
+      case 'shift_changed': return `${event.date}: ${event.before || 'nothing'} → ${event.after || 'nothing'}`;
+      case 'resource_changed': return 'BART resource request changed';
+      case 'window_advanced': return `Week ${event.weekStart} came into the window`;
+      case 'window_retired': return `Week ${event.weekStart} left the window`;
+      case 'location_shift': return 'Relinked as one crew moving site';
+      default: return event.kind;
+    }
+  }
+
+  Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
+  Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
+  Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
+  Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
+  Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
+  Object.defineProperty(__x, "KPI_KINDS", { get: () => KPI_KINDS, enumerable: true });
+  Object.defineProperty(__x, "countable", { get: () => countable, enumerable: true });
+  Object.defineProperty(__x, "describe", { get: () => describe, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/rc_lookahead.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/rc_lookahead.js"] = function (__x, __req) {
+  /**
+   * The four-week look-ahead, and the SARs against it.
+   *
+   * The look-ahead is the contractual source of truth; the resource calendar is
+   * the execution record. This tab is where the two meet: it reads the workbook
+   * out of the OneDrive folder, snapshots it, works out what changed since last
+   * time, and lets somebody annotate the judgements the system cannot make.
+   *
+   * Ingestion is desktop-only in practice, and the reason is worth stating: a
+   * browser cannot watch a file in a synced folder. It can be granted one, but it
+   * cannot poll for changes in the background. So coverage has gaps whenever
+   * nobody has the application open — and a gap that is not recorded looks
+   * exactly like a week in which nothing changed. Every attempt therefore writes
+   * an `rc_ingest_runs` row, and the change log renders the gaps rather than
+   * showing a smooth history that is not true.
+   *
+   * Imports: util, events, dates, rc, filestore, io/lookahead, core/lookahead,
+   *          icons, components, rc_util.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const filestore = __req("core/filestore.js");
+  const { parseSheet, applyLegend } = __req("io/lookahead.js");
+  const { keyRows, classify, relinkCandidates, countable, describe } = __req("core/lookahead.js");
+  const { icon } = __req("ui/icons.js");
+  const { selectInput, textInput, toast, badge, emptyState } = __req("ui/components.js");
+  const { notifyChanged, byId, dayLabel, todayISO, formModal } = __req("ui/rc_util.js");
+
+  /** Where the workbook lives, relative to the folder the plan is in. */
+  const LOOKAHEAD_DIR = 'lookahead';
+  const SAR_INBOX = 'sars/inbox';
+
+  const SECTIONS = ['changes', 'snapshots', 'sars'];
+  let section = 'changes';
+
+  async function render(root) {
+    if (!rc.isAdmin()) {
+      root.appendChild(emptyState({
+        iconName: 'lock',
+        title: 'Administrators only',
+        message: 'The look-ahead register is the evidence base for delay claims, and it is '
+          + 'restricted in the database rather than by hiding this tab.',
+      }));
+      return;
+    }
+
+    const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
+    for (const id of SECTIONS) {
+      nav.appendChild(el('button', {
+        class: 'rc-tab',
+        type: 'button',
+        text: { changes: 'Changes', snapshots: 'Snapshots', sars: 'Site access' }[id],
+        'aria-pressed': String(id === section),
+        onClick: () => { section = id; clear(root); render(root); },
+      }));
+    }
+    root.appendChild(nav);
+
+    const host = el('div');
+    root.appendChild(host);
+
+    if (section === 'changes') await renderChanges(host);
+    else if (section === 'snapshots') await renderSnapshots(host);
+    else await renderSars(host);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Ingest
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Read the workbook, snapshot it if it has moved, and classify the difference.
+   *
+   * Deduped by content hash rather than by modified time, because OneDrive
+   * re-stamps a file when it syncs whether or not anybody edited it — so
+   * timestamps alone would manufacture a snapshot, and therefore a change event,
+   * out of a sync.
+   */
+  async function ingest({ sheetName, legend, silent = false } = {}) {
+    const run = { ran_at: new Date().toISOString(), outcome: 'error', note: null, file_hash: null, file_mtime: null };
+
+    let file = null;
+    try {
+      const files = await filestore.intakeList(LOOKAHEAD_DIR);
+      const workbooks = files.filter((f) => /\.xlsx$/i.test(f.name));
+
+      // Two versions of the look-ahead means somebody's edits are about to be
+      // lost. Ingesting one of them silently would be the worst possible answer.
+      const conflicted = workbooks.filter((f) => f.conflict);
+      if (conflicted.length) {
+        run.outcome = 'conflict';
+        run.note = `OneDrive kept a second copy: ${conflicted[0].name}`;
+        await rc.addIngestRun(run).catch(() => {});
+        throw new Error(
+          `${conflicted[0].name} is a OneDrive conflict copy — two people edited the look-ahead `
+          + 'and one set of changes is about to be lost. Sort that out in the folder first.'
+        );
+      }
+
+      const legacy = files.filter((f) => /\.xls$|\.xlsb$/i.test(f.name));
+      if (!workbooks.length && legacy.length) {
+        throw new Error(`${legacy[0].name} is not a .xlsx — open it in Excel and Save As → Excel Workbook.`);
+      }
+      file = workbooks[0];
+      if (!file) {
+        run.outcome = 'missing';
+        run.note = `Nothing in ${LOOKAHEAD_DIR}/`;
+        await rc.addIngestRun(run).catch(() => {});
+        throw new Error(`No workbook in ${LOOKAHEAD_DIR}/. Absence is recorded, not treated as "no change".`);
+      }
+
+      const rel = `${LOOKAHEAD_DIR}/${file.name}`;
+      const hash = await filestore.intakeHash(rel);
+      run.file_hash = hash;
+      run.file_mtime = new Date(file.modified).toISOString();
+
+      const snapshots = await rc.listSnapshots({ limit: 1 });
+      if (snapshots[0] && snapshots[0].file_hash === hash) {
+        run.outcome = 'unchanged';
+        await rc.addIngestRun(run);
+        if (!silent) toast({ message: 'The look-ahead has not changed since the last snapshot.' });
+        return { changed: false, events: [] };
+      }
+
+      const buffer = await filestore.intakeRead(rel);
+      const grid = applyLegend(parseSheet(buffer, sheetName), legend);
+
+      if (grid.conditional.length && !grid.rows.some((r) => r.cells.some((c) => c.hex))) {
+        throw new Error(
+          'That sheet has conditional formatting and no readable cell fills, so the shift '
+          + 'colours are coming from rules rather than from the cells. They cannot be read '
+          + 'from the style table — the ingestion design needs revisiting before this can work.'
+        );
+      }
+
+      const snapshot = await rc.addSnapshot({
+        file_hash: hash,
+        file_mtime: run.file_mtime,
+        sheet_name: grid.sheet,
+        grid: { rows: grid.rows, merges: grid.merges, hiddenColumns: grid.hiddenColumns, unknown: grid.unknown },
+      });
+
+      run.outcome = 'snapshot';
+      run.note = grid.unknown.length ? `${grid.unknown.length} colour(s) not in the legend` : null;
+      await rc.addIngestRun(run);
+
+      if (!silent && grid.unknown.length) {
+        toast({
+          tone: 'warn',
+          message: `${grid.unknown.length} colour(s) are not in the legend and were left unmapped — `
+            + 'nothing was guessed.',
+        });
+      }
+
+      notifyChanged('lookahead');
+      return { changed: true, snapshot, grid };
+    } catch (err) {
+      if (run.outcome === 'error') {
+        run.note = err.message;
+        await rc.addIngestRun(run).catch(() => {});
+      }
+      throw err;
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Changes
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function renderChanges(host) {
+    const today = todayISO();
+    const from = `${Number(today.slice(0, 4)) - 1}-01-01`;
+    const [events, runs, parties] = await Promise.all([
+      rc.listChangeEvents(from, `${today}T23:59:59Z`),
+      rc.listIngestRuns({ limit: 60 }),
+      rc.listParties(),
+    ]);
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'What the look-ahead did' }),
+      el('button', {
+        class: 'cx-btn mini primary',
+        html: icon('refresh', { size: 12 }) + '<span>Check now</span>',
+        onClick: async () => {
+          try {
+            await ingest({ sheetName: '4WLA', legend: [] });
+          } catch (err) {
+            toast({ tone: 'error', message: err.message });
+          }
+        },
+      }),
+    ]));
+
+    /* Coverage before content. Ingestion only happens when somebody has the
+       application open, so the history has holes — and a hole that is not drawn
+       reads as a quiet week. */
+    host.appendChild(coverageNote(runs));
+
+    if (!events.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text: 'No changes recorded yet.' }));
+      return;
+    }
+
+    const partyById = byId(parties);
+    const counted = countable(events);
+    host.appendChild(el('p', { class: 'rc-hint' }, [
+      el('span', { text: `${counted.length} change(s) that count, ` }),
+      el('span', { text: `${events.length - counted.length} window movement(s) that do not.` }),
+    ]));
+
+    const rows = events.map((e) => el('tr', {}, [
+      el('td', { text: e.week_start || '—' }),
+      el('td', {}, [badge(kindLabel(e.kind), kindTone(e.kind))]),
+      el('td', { text: describe({ ...e, weekStart: e.week_start, rowKey: e.row_key }) }),
+      el('td', { class: 'rc-hint', text: e.detected_at ? dayLabel(e.detected_at.slice(0, 10)) : '' }),
+      el('td', {}, e.kind === 'cancellation' ? [
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: 'Whose?',
+          title: 'Red says a shift was cancelled. It cannot say by whom.',
+          onClick: () => attribute(e, parties),
+        }),
+      ] : []),
+    ]));
+
+    host.appendChild(table(['Week', 'Kind', 'What', 'Seen', ''], rows));
+
+    const pairs = relinkCandidates(events.map((e) => ({
+      kind: e.kind, weekStart: e.week_start, rowKey: e.row_key, before: e.before, after: e.after,
+    })));
+    if (pairs.length) {
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: `${pairs.length} removal/addition pair(s) share the same requested resources, which `
+          + 'usually means a crew finished early and moved rather than anything being cancelled. '
+          + 'That cannot be told apart automatically — the activity text is not reliable enough to '
+          + 'match on — so it is offered rather than assumed.',
+      }));
+    }
+  }
+
+  /**
+   * Say where the history has holes.
+   *
+   * This is the honest half of "ingestion runs when the application is open".
+   * Without it the change log would look continuous and somebody would read a
+   * silent fortnight as a fortnight in which nothing moved.
+   */
+  function coverageNote(runs) {
+    if (!runs.length) {
+      return el('p', { class: 'rc-hint', text: 'The look-ahead has never been read on this account.' });
+    }
+    const last = runs[0];
+    const age = Math.floor((Date.now() - new Date(last.ran_at).getTime()) / 86400000);
+    const stale = age >= 7;
+
+    return el('p', {
+      class: stale ? 'rc-error' : 'rc-hint',
+      text: stale
+        ? `The look-ahead has not been read for ${age} days. Anything that changed and changed `
+          + 'back in that time is not in the log below — the gap is real, not a quiet spell.'
+        : `Last read ${age === 0 ? 'today' : `${age} day(s) ago`} — ${last.outcome}.`,
+    });
+  }
+
+  function attribute(event, parties) {
+    const party = selectInput({
+      value: parties[0]?.id,
+      options: parties.map((p) => ({ value: p.id, label: p.name })),
+    });
+    const note = textInput({ placeholder: 'What happened' });
+
+    formModal({
+      title: 'Who was this down to?',
+      body: el('div', { class: 'cx-form' }, [
+        el('p', {
+          class: 'rc-hint',
+          text: 'This is the record a claim gets challenged on, so it is attributed and dated, '
+            + 'and it cannot be edited afterwards — a correction is a new entry that supersedes '
+            + 'this one.',
+        }),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Down to' }), party]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Note' }), note]),
+      ]),
+      confirmLabel: 'Record',
+      onConfirm: async () => {
+        await rc.addAnnotation({
+          change_event_id: event.id,
+          kind: 'responsibility',
+          party_id: party.value,
+          note: note.value.trim() || null,
+        });
+        notifyChanged('annotations');
+      },
+    });
+  }
+
+  const KIND_LABELS = {
+    scope_added: 'Scope added', scope_removed: 'Scope removed', cancellation: 'Cancelled',
+    shift_changed: 'Shift changed', resource_changed: 'Resources', location_shift: 'Moved site',
+    window_advanced: 'Window advanced', window_retired: 'Window retired',
+  };
+  const kindLabel = (k) => KIND_LABELS[k] || k;
+  const kindTone = (k) => ({
+    cancellation: 'bad', scope_removed: 'warn', scope_added: 'info',
+    window_advanced: 'muted', window_retired: 'muted',
+  }[k] || 'neutral');
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Snapshots
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function renderSnapshots(host) {
+    const snapshots = await rc.listSnapshots({ limit: 40 });
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Snapshots' })]));
+
+    if (!snapshots.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text: 'Nothing captured yet.' }));
+      return;
+    }
+
+    host.appendChild(table(
+      ['Seen', 'File changed', 'Sheet', 'Rows', 'Unmapped colours'],
+      snapshots.map((s) => el('tr', {}, [
+        el('td', { text: s.taken_at ? s.taken_at.slice(0, 16).replace('T', ' ') : '—' }),
+        el('td', { text: s.file_mtime ? s.file_mtime.slice(0, 16).replace('T', ' ') : '—' }),
+        el('td', { text: s.sheet_name }),
+        el('td', { class: 'rc-num', text: String(s.grid?.rows?.length ?? 0) }),
+        el('td', { class: 'rc-num', text: String(s.grid?.unknown?.length ?? 0) }),
+      ]))
+    ));
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Two times, deliberately. "File changed" is what OneDrive stamped, which is when it '
+        + 'synced rather than when anybody edited it; "seen" is when this application read it. '
+        + 'For evidence the difference matters, so neither stands in for the other.',
+    }));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'The parsed grid is stored, not the workbook. A .xlsx carries every other tab, hidden '
+        + 'row and forgotten pasted sheet along with the part that was wanted — the original bytes '
+        + 'stay in the folder archive instead.',
+    }));
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Site access
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function renderSars(host) {
+    const [sars, locations, without, unlinked] = await Promise.all([
+      rc.listSars(),
+      rc.listLocations(),
+      rc.listRowsWithoutSar(),
+      rc.listSarsWithoutRows(),
+    ]);
+    const locs = byId(locations);
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'Site access requests' }),
+      el('button', {
+        class: 'cx-btn mini primary',
+        html: icon('plus', { size: 12 }) + '<span>Record a SAR</span>',
+        onClick: () => recordSar(locations),
+      }),
+    ]));
+
+    /* The alert the spec did not ask for and that nothing else surfaces: work
+       planned into a week with no access confirmed against it. */
+    if (without.length) {
+      host.appendChild(el('p', { class: 'rc-error' }, [
+        el('strong', { text: `${without.length} look-ahead row(s) have no SAR. ` }),
+        el('span', { text: 'That is work planned without confirmed access.' }),
+      ]));
+    }
+    if (unlinked.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text:
+        `${unlinked.length} SAR(s) match no look-ahead row — access booked for work that has gone.` }));
+    }
+
+    if (!sars.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text: 'No SARs recorded.' }));
+    } else {
+      host.appendChild(table(
+        ['SAR', 'Rev', 'Location', 'Week', 'Hours'],
+        sars.map((s) => el('tr', {}, [
+          el('td', { text: s.sar_number }),
+          el('td', { class: 'rc-num', text: String(s.revision) }),
+          el('td', { text: locs.get(s.location_id)?.name || s.raw_location || '—' }),
+          el('td', { text: s.week_start || '—' }),
+          el('td', { class: 'rc-num', text: s.authorized_hours ?? '—' }),
+        ]))
+      ));
+    }
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: `Drop a SAR PDF into ${SAR_INBOX}/ and record it here; it is then filed under its week. `
+        + 'Matching to look-ahead rows is by date and location only — never by activity text, which '
+        + 'is worded differently on the two sides and is not reliable enough to carry evidence. '
+        + 'One SAR covering several rows at a location is expected, not an ambiguity.',
+    }));
+  }
+
+  function recordSar(locations) {
+    const number = textInput({ placeholder: 'SAR-12345' });
+    const location = selectInput({
+      value: locations[0]?.id,
+      options: locations.map((l) => ({ value: l.id, label: l.name })),
+    });
+    const week = el('input', { type: 'date', class: 'cx-input' });
+    const hours = el('input', { type: 'number', class: 'cx-input', step: '0.5', min: '0' });
+
+    formModal({
+      title: 'Record a SAR',
+      body: el('div', { class: 'cx-form' }, [
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Number' }), number]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Location' }), location]),
+        el('div', { class: 'cx-field' }, [
+          el('label', { class: 'cx-label', text: 'Week beginning' }), week,
+          el('div', { class: 'cx-hint', text: 'The Monday, matching how the look-ahead is keyed.' }),
+        ]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Authorised hours' }), hours]),
+      ]),
+      confirmLabel: 'Record',
+      onConfirm: async () => {
+        if (!number.value.trim()) throw new Error('A SAR number is needed.');
+        await rc.addSar({
+          sar_number: number.value.trim(),
+          location_id: location.value || null,
+          week_start: week.value || null,
+          authorized_hours: hours.value ? Number(hours.value) : null,
+        });
+        notifyChanged('sars');
+      },
+    });
+  }
+
+  /* ── Shared ────────────────────────────────────────────────────────────── */
+
+  function table(headers, rows) {
+    return el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [el('tr', {}, headers.map((h) => el('th', { text: h })))]),
+        el('tbody', {}, rows),
+      ]),
+    ]);
+  }
+
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+  Object.defineProperty(__x, "ingest", { get: () => ingest, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/rc_reports.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/rc_reports.js"] = function (__x, __req) {
+  /**
+   * Reports.
+   *
+   * Every record carries its own date, person, category and location, so a report
+   * is a filter and an aggregation and nothing more. Arbitrary date ranges rather
+   * than fixed monthly buckets — "back one year from today" has to be as easy as
+   * "this month", which is what the relational store bought.
+   *
+   * Two things are deliberate and neither is a detail.
+   *
+   * **Nothing here is stored.** No efficiency column, no cached rollup. Every
+   * number is computed on the way out, so refining a definition never means a
+   * migration and no figure can go stale against the rows it came from.
+   *
+   * **Performance and programme health are never averaged together.** Completed,
+   * partial and carried are what somebody did; blocked and reassigned are what
+   * was done to them. A possession released late is not underperformance, and
+   * folding it in would make the number worse than useless — people would simply
+   * stop saying they were blocked.
+   *
+   * Imports: util, rc, icons, components, rc_util.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const { icon } = __req("ui/icons.js");
+  const { toast, badge, chipStat, emptyState, selectInput } = __req("ui/components.js");
+  const { byId, dayLabel, todayISO, isoToMs, STATUS_BY_ID } = __req("ui/rc_util.js");
+  const { saveFile } = __req("io/exporters.js");
+
+  /** Ranges people actually ask for, plus the one that matters most: any. */
+  const RANGES = [
+    { id: '7', label: 'Last 7 days', days: 7 },
+    { id: '30', label: 'Last 30 days', days: 30 },
+    { id: '90', label: 'Last quarter', days: 90 },
+    { id: '365', label: 'Last year', days: 365 },
+    { id: 'custom', label: 'Custom…', days: 0 },
+  ];
+
+  let range = '30';
+  let customFrom = '';
+  let customTo = '';
+  let groupBy = 'person';
+
+  function window_() {
+    const to = customTo || todayISO();
+    if (range === 'custom' && customFrom) return { from: customFrom, to };
+    const days = RANGES.find((r) => r.id === range)?.days || 30;
+    const fromMs = isoToMs(todayISO()) - days * 86400000;
+    return { from: new Date(fromMs).toISOString().slice(0, 10), to };
+  }
+
+  async function render(root) {
+    if (!rc.isAdmin()) {
+      // Not a hidden menu item: the view itself returns nothing to a member,
+      // enforced by the policy. This only explains why.
+      root.appendChild(emptyState({
+        iconName: 'lock',
+        title: 'Administrators only',
+        message: 'Reports are restricted in the database. A member reading the view directly '
+          + 'gets nothing back, so this is an explanation rather than the control.',
+      }));
+      return;
+    }
+
+    const { from, to } = window_();
+    const [effort, people, categories, locations, chains, events] = await Promise.all([
+      rc.listEffort(from, to),
+      rc.listPeople({ includeInactive: true }),
+      rc.listCategories({ includeInactive: true }),
+      rc.listLocations({ includeInactive: true }),
+      rc.listCarryChains(),
+      rc.listChangeEvents(`${from}T00:00:00Z`, `${to}T23:59:59Z`),
+    ]);
+
+    root.appendChild(controls(root, from, to));
+
+    if (!effort.length) {
+      root.appendChild(el('p', { class: 'rc-hint', text: 'Nothing recorded in that range.' }));
+    } else {
+      root.appendChild(summary(effort));
+      root.appendChild(breakdown(effort, people, categories, locations));
+    }
+
+    root.appendChild(carryOver(chains, people));
+    root.appendChild(lookaheadNumbers(events));
+
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'The two families are reported apart on purpose. Completed, partial and carried are '
+        + 'what somebody did; blocked and reassigned are what was done to them. Averaging them '
+        + 'together would flatter or damn the wrong party — and would teach people not to say '
+        + 'when they were blocked.',
+    }));
+  }
+
+  function controls(root, from, to) {
+    const picker = selectInput({
+      value: range,
+      options: RANGES.map((r) => ({ value: r.id, label: r.label })),
+      onChange: (v) => { range = v; clear(root); render(root); },
+    });
+
+    const grouping = selectInput({
+      value: groupBy,
+      options: [
+        { value: 'person', label: 'By person' },
+        { value: 'category', label: 'By category' },
+        { value: 'location', label: 'By location' },
+        { value: 'subsystem', label: 'By subsystem' },
+      ],
+      onChange: (v) => { groupBy = v; clear(root); render(root); },
+    });
+
+    const head = el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: `${dayLabel(from)} – ${dayLabel(to)}` }),
+      picker,
+      grouping,
+      el('button', {
+        class: 'cx-btn mini ghost',
+        html: icon('download', { size: 12 }) + '<span>CSV</span>',
+        onClick: () => exportCsv(from, to),
+      }),
+    ]);
+
+    if (range === 'custom') {
+      const fromEl = el('input', { type: 'date', class: 'cx-input mini', value: customFrom || from });
+      const toEl = el('input', { type: 'date', class: 'cx-input mini', value: customTo || to });
+      const apply = () => {
+        customFrom = fromEl.value;
+        customTo = toEl.value;
+        clear(root);
+        render(root);
+      };
+      fromEl.addEventListener('change', apply);
+      toEl.addEventListener('change', apply);
+      head.append(fromEl, toEl);
+    }
+    return head;
+  }
+
+  /* ── The numbers ───────────────────────────────────────────────────────── */
+
+  function summary(effort) {
+    const performance = effort.filter((e) => e.signal === 'performance');
+    const health = effort.filter((e) => e.signal === 'health');
+    const done = performance.filter((e) => e.status === 'completed').length;
+
+    // A rate over the performance family only. Including blocked days would make
+    // a team look worse for a possession somebody else lost.
+    const rate = performance.length ? Math.round((done / performance.length) * 100) : 0;
+
+    return el('div', { class: 'rc-section', style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
+      chipStat('Completed', `${rate}%`, rate >= 70 ? 'good' : rate >= 40 ? 'warn' : 'bad'),
+      chipStat('Days recorded', performance.length, 'muted'),
+      chipStat('Blocked', health.filter((e) => e.status === 'blocked').length, 'bad'),
+      chipStat('Reassigned', health.filter((e) => e.status === 'reassigned').length, 'info'),
+    ]);
+  }
+
+  function breakdown(effort, people, categories, locations) {
+    const peopleById = byId(people);
+    const catsById = byId(categories);
+    const locsById = byId(locations);
+
+    const keyOf = (row) => {
+      if (groupBy === 'person') return peopleById.get(row.person_id)?.name || row.person_name || '—';
+      if (groupBy === 'category') return catsById.get(row.category_id)?.name || 'Uncategorised';
+      if (groupBy === 'location') return locsById.get(row.location_id)?.name || 'No location';
+      return row.subsystem || '—';
+    };
+
+    const groups = new Map();
+    for (const row of effort) {
+      const key = keyOf(row);
+      const g = groups.get(key) || { key, completed: 0, partial: 0, carried: 0, blocked: 0, reassigned: 0, total: 0 };
+      if (g[row.status] !== undefined) g[row.status]++;
+      if (row.signal === 'performance') g.total++;
+      groups.set(key, g);
+    }
+
+    const rows = [...groups.values()]
+      .sort((a, b) => b.total - a.total)
+      .map((g) => el('tr', {}, [
+        el('td', { text: g.key }),
+        el('td', { class: 'rc-num', text: String(g.completed) }),
+        el('td', { class: 'rc-num', text: String(g.partial) }),
+        el('td', { class: 'rc-num', text: String(g.carried) }),
+        el('td', { class: 'rc-num', text: g.total ? `${Math.round((g.completed / g.total) * 100)}%` : '—' }),
+        el('td', { class: 'rc-num', text: String(g.blocked) }),
+        el('td', { class: 'rc-num', text: String(g.reassigned) }),
+      ]));
+
+    return el('div', { class: 'rc-section' }, [
+      el('div', { class: 'rc-scroll' }, [
+        el('table', { class: 'rc-table' }, [
+          el('thead', {}, [
+            el('tr', {}, [
+              el('th', { text: groupBy[0].toUpperCase() + groupBy.slice(1) }),
+              el('th', { text: 'Done' }), el('th', { text: 'Partial' }), el('th', { text: 'Carried' }),
+              el('th', { text: 'Rate' }),
+              el('th', { text: 'Blocked' }), el('th', { text: 'Reassigned' }),
+            ]),
+          ]),
+          el('tbody', {}, rows),
+        ]),
+      ]),
+    ]);
+  }
+
+  /**
+   * Carried tasks, oldest first.
+   *
+   * The count is not the story — the *age* is. A chain counts once however many
+   * days it ran, so one stuck job cannot produce five marks against one person,
+   * and a task on its fifth day is the most informative line in the report.
+   */
+  function carryOver(chains, people) {
+    const peopleById = byId(people);
+    const section = el('div', { class: 'rc-section' }, [
+      el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Still carrying' })]),
+    ]);
+
+    if (!chains.length) {
+      section.appendChild(el('p', { class: 'rc-hint', text: 'Nothing carried over.' }));
+      return section;
+    }
+
+    section.appendChild(el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [el('tr', {}, [
+          el('th', { text: 'Person' }), el('th', { text: 'First seen' }),
+          el('th', { text: 'Days old' }), el('th', { text: 'Times carried' }),
+        ])]),
+        el('tbody', {}, chains.map((c) => el('tr', {}, [
+          el('td', { text: peopleById.get(c.person_id)?.name || '—' }),
+          el('td', { text: c.first_seen ? dayLabel(c.first_seen) : '—' }),
+          el('td', {}, [badge(String(c.age_days), c.age_days >= 5 ? 'bad' : c.age_days >= 3 ? 'warn' : 'muted')]),
+          el('td', { class: 'rc-num', text: String(c.carries) }),
+        ]))),
+      ]),
+    ]));
+    section.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'One chain per stuck task, however many days it ran — five days of the same job is one '
+        + 'problem, not five failures. Ranked by age, which is the number worth acting on.',
+    }));
+    return section;
+  }
+
+  /**
+   * The look-ahead's own numbers, kept apart from the team's.
+   *
+   * One measures BART's behaviour and one measures this team's. Reporting them
+   * in one figure would attribute somebody else's cancellations to the people
+   * who turned up for them.
+   */
+  function lookaheadNumbers(events) {
+    const count = (kind) => events.filter((e) => e.kind === kind).length;
+    return el('div', { class: 'rc-section' }, [
+      el('div', { class: 'rc-section-head' }, [el('h3', { text: 'The look-ahead, same range' })]),
+      el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
+        chipStat('Scope added', count('scope_added'), 'info'),
+        chipStat('Scope removed', count('scope_removed'), 'warn'),
+        chipStat('Cancelled', count('cancellation'), 'bad'),
+        chipStat('Resources changed', count('resource_changed'), 'muted'),
+      ]),
+      el('p', {
+        class: 'rc-hint',
+        text: 'Weeks entering and leaving the four-week window are excluded — they are the window '
+          + 'rolling forward, not scope moving, and counting them would add a batch of phantom '
+          + 'changes every single week.',
+      }),
+    ]);
+  }
+
+  /* ── Export ────────────────────────────────────────────────────────────── */
+
+  /**
+   * The range, as CSV.
+   *
+   * Through `saveFile()` like every other export in the application, so the
+   * download announces itself — a file that lands somewhere the page cannot see
+   * is the one action with no visible result.
+   */
+  async function exportCsv(from, to) {
+    try {
+      const [effort, people, categories, locations] = await Promise.all([
+        rc.listEffort(from, to),
+        rc.listPeople({ includeInactive: true }),
+        rc.listCategories({ includeInactive: true }),
+        rc.listLocations({ includeInactive: true }),
+      ]);
+      const peopleById = byId(people);
+      const catsById = byId(categories);
+      const locsById = byId(locations);
+
+      const esc = (v) => {
+        const s = String(v ?? '');
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const header = ['Date', 'Person', 'Subsystem', 'Status', 'Signal', 'Category', 'Location'];
+      const lines = [header.join(',')];
+      for (const row of effort) {
+        lines.push([
+          row.work_date,
+          peopleById.get(row.person_id)?.name || row.person_name || '',
+          row.subsystem || '',
+          STATUS_BY_ID.get(row.status)?.label || row.status,
+          row.signal,
+          catsById.get(row.category_id)?.name || '',
+          locsById.get(row.location_id)?.name || '',
+        ].map(esc).join(','));
+      }
+
+      saveFile(
+        `resource-calendar-${from}-to-${to}.csv`,
+        lines.join('\n'),
+        'text/csv;charset=utf-8',
+        `${effort.length} record(s)`
+      );
+    } catch (err) {
+      toast({ tone: 'error', message: err.message });
+    }
+  }
+
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/rc.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/rc.js"] = function (__x, __req) {
+  /**
+   * The Resource Calendar interface.
+   *
+   * A peer of the timeline canvas rather than a dock pane: it is a different
+   * interface over different data, reached by the workspace switch in the
+   * sidebar. Nothing here runs until somebody switches to it — see
+   * `ui/workspace.js` for why boot must not touch it.
+   *
+   * The account gate lives here rather than in `main.js`, and that is the point.
+   * The timeline needs no account and must open with no network at all; only
+   * this module does. So signing in is something that happens when you arrive at
+   * the calendar, not something that happens before the application starts.
+   *
+   * Imports: util, events, rc, icons, components, and the tab modules.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const { on, EV } = __req("core/events.js");
+  const rc = __req("core/rc.js");
+  const { icon } = __req("ui/icons.js");
+  const { textInput, toast, emptyState } = __req("ui/components.js");
+  const roster = __req("ui/rc_roster.js");
+  const huddle = __req("ui/rc_huddle.js");
+  const lookahead = __req("ui/rc_lookahead.js");
+  const reports = __req("ui/rc_reports.js");
+
+  /**
+   * The tabs, in the order the work actually happens: run today's meeting, plan
+   * the week, see what the look-ahead did to it, then the numbers.
+   */
+  const TABS = [
+    { id: 'huddle', label: 'Daily huddle' },
+    { id: 'week', label: 'Week plan' },
+    { id: 'lookahead', label: 'Look-ahead' },
+    { id: 'reports', label: 'Reports' },
+    { id: 'org', label: 'Organisation' },
+  ];
+
+  const RENDERERS = {
+    huddle: huddle.render,
+    week: huddle.renderWeek,
+    lookahead: lookahead.render,
+    reports: reports.render,
+    org: roster.render,
+  };
+
+  let frame = null;
+  let bodyEl = null;
+  let headEl = null;
+  let active = 'huddle';
+  let started = false;
+
+  /* ── Build ─────────────────────────────────────────────────────────────── */
+
+  /**
+   * Build the stage. Called once, by the workspace switch, on first use.
+   *
+   * Deliberately synchronous: it paints something immediately and then loads.
+   * A blank rectangle while a network call decides what to draw is worse than a
+   * message that says what is happening.
+   */
+  function build() {
+    if (started) return;
+    frame = document.getElementById('rc-frame');
+    if (!frame) return;
+    started = true;
+
+    clear(frame);
+    frame.hidden = false;
+
+    headEl = el('div', { class: 'rc-head' });
+    bodyEl = el('div', { class: 'rc-body' });
+    frame.append(headEl, bodyEl);
+
+    // A row written anywhere reloads whatever is on screen. There is no document
+    // and no diff here, so the cheapest correct thing is to re-read — the
+    // volumes are a fortnight of one small team, not a programme's worth of bars.
+    on(EV.RC_CHANGED, () => render());
+    on(EV.RC_AUTH_CHANGED, () => render());
+    on(EV.RC_QUEUE_CHANGED, () => renderHead());
+
+    render();
+    init();
+  }
+
+  async function init() {
+    try {
+      await rc.init();
+    } catch (err) {
+      console.warn('[cx-timeline] resource calendar init failed:', err.message);
+    }
+    render();
+  }
+
+  /* ── Router ────────────────────────────────────────────────────────────── */
+
+  function showTab(id) {
+    if (!RENDERERS[id]) return;
+    active = id;
+    render();
+  }
+
+  function render() {
+    if (!frame) return;
+    renderHead();
+    clear(bodyEl);
+
+    if (!rc.isConfigured()) {
+      bodyEl.appendChild(notConfigured());
+      return;
+    }
+    if (!rc.isSignedIn()) {
+      bodyEl.appendChild(signInForm());
+      return;
+    }
+    if (!rc.me()) {
+      bodyEl.appendChild(notOnTheTeam());
+      return;
+    }
+
+    const view = el('div');
+    bodyEl.appendChild(view);
+    Promise.resolve(RENDERERS[active](view)).catch((err) => {
+      clear(view);
+      view.appendChild(loadFailed(err));
+    });
+  }
+
+  function renderHead() {
+    if (!headEl) return;
+    clear(headEl);
+
+    headEl.append(
+      el('span', { class: 'rc-eyebrow', text: 'Resource Calendar' })
+    );
+
+    if (rc.isSignedIn() && rc.me()) {
+      const tabs = el('div', { class: 'rc-tabs' });
+      // Look-ahead and Reports are administrators-only in the database and
+      // already say so. Showing them to a viewer offers a door that opens onto a
+      // wall, so they come out of the row entirely.
+      const visible = rc.isAdmin() ? TABS : TABS.filter((t) => t.id !== 'lookahead' && t.id !== 'reports');
+      if (!visible.some((t) => t.id === active)) active = visible[0].id;
+      for (const tab of visible) {
+        tabs.appendChild(el('button', {
+          class: 'rc-tab',
+          type: 'button',
+          text: tab.label,
+          'aria-pressed': String(tab.id === active),
+          onClick: () => showTab(tab.id),
+        }));
+      }
+      headEl.appendChild(tabs);
+
+      const pending = huddle.pendingCount();
+      headEl.appendChild(el('span', {
+        class: 'rc-queue',
+        hidden: pending === 0,
+        text: `${pending} unsynced`,
+        title: 'Entered while offline. They will go up on their own when the connection returns.',
+      }));
+
+      if (rc.isViewer()) {
+        headEl.appendChild(el('span', {
+          class: 'rc-queue',
+          style: 'background:var(--info-light);border-color:var(--info-border);color:var(--info)',
+          text: 'Read only',
+          title: 'You can see the schedule and what happened. Changing it is restricted in the database, not just here.',
+        }));
+      }
+
+      headEl.appendChild(el('button', {
+        class: 'cx-btn mini ghost',
+        text: rc.accountLabel(),
+        title: 'Sign out of the resource calendar',
+        onClick: async () => {
+          await rc.signOut();
+          toast({ message: 'Signed out of the resource calendar.' });
+        },
+      }));
+    }
+  }
+
+  /* ── The states that are not the calendar ──────────────────────────────── */
+
+  /**
+   * No backend in this build.
+   *
+   * Not an error. A build can legitimately have the timeline and not this — that
+   * is what every build has had until now — so it says what is missing and where
+   * it is configured rather than pretending something broke.
+   */
+  function notConfigured() {
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('database', { size: 32 }) }),
+      el('h2', { text: 'No resource calendar in this build' }),
+      el('p', {
+        text: 'The timeline works as it always has. The resource calendar needs a '
+          + 'Supabase project, named in config.js as rcSupabaseUrl and '
+          + 'rcSupabaseAnonKey — separate from the timeline, which stays in your folder.',
+      }),
+    ]);
+  }
+
+  /**
+   * Signed in to nothing yet.
+   *
+   * The form writes to the calendar's own client, which keeps its own session
+   * under its own storage key. Signing in here does not sign you in to anything
+   * the timeline uses, because the timeline uses nothing.
+   */
+  function signInForm() {
+    const email = textInput({ placeholder: 'you@example.com', type: 'email' });
+    const password = textInput({ placeholder: 'Password', type: 'password' });
+    const error = el('div', { class: 'rc-error', hidden: true });
+    const button = el('button', { class: 'cx-btn primary', text: 'Sign in' });
+
+    const submit = async () => {
+      error.hidden = true;
+      button.disabled = true;
+      button.textContent = 'Signing in…';
+      try {
+        await rc.signIn(email.value, password.value);
+        render();
+      } catch (err) {
+        error.textContent = err.message;
+        error.hidden = false;
+        button.disabled = false;
+        button.textContent = 'Sign in';
+      }
+    };
+
+    button.addEventListener('click', submit);
+    for (const field of [email, password]) {
+      field.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submit();
+      });
+    }
+
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('users', { size: 32 }) }),
+      el('h2', { text: 'Sign in to the resource calendar' }),
+      el('p', { text: 'The timeline needs no account and is already open behind this. Only the calendar does.' }),
+      el('div', { class: 'rc-signin' }, [email, password, error, button]),
+    ]);
+  }
+
+  /** An account that is not on the team. A real answer, not a failure. */
+  function notOnTheTeam() {
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('user', { size: 32 }) }),
+      el('h2', { text: 'You are signed in, but not on this team' }),
+      el('p', {
+        text: 'An administrator adds people in Organisation. Until your account is '
+          + 'linked to a team record, the database will not show you anything.',
+      }),
+      el('button', { class: 'cx-btn ghost', text: 'Sign out', onClick: () => rc.signOut() }),
+    ]);
+  }
+
+  function loadFailed(err) {
+    return emptyState({
+      iconName: 'warning',
+      title: 'Could not load',
+      message: String(err?.message || err),
+    });
+  }
+
+  /* The shared helpers the tabs use live in `ui/rc_util.js`, not here — this
+     module imports the tabs, so anything they needed back from it would be a
+     cycle, and the build rejects those. */
+
+  Object.defineProperty(__x, "build", { get: () => build, enumerable: true });
+  Object.defineProperty(__x, "showTab", { get: () => showTab, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // main.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["main.js"] = function (__x, __req) {
@@ -25831,6 +29749,9 @@ __mods["main.js"] = function (__x, __req) {
   const { requireSignIn, installAccessMode } = __req("ui/auth.js");
   const { installP6Drops } = __req("ui/p6.js");
   const { installShortcuts } = __req("ui/shortcuts.js");
+  const workspace = __req("ui/workspace.js");
+  const rcUi = __req("ui/rc.js");
+  const rcClient = __req("core/rc.js");
   const cmd = __req("ui/commands.js");
   const { toast, showTooltip, hideTooltip, confirmDialog } = __req("ui/components.js");
   const { renderNote, notePreview } = __req("ui/notes.js");
@@ -25942,6 +29863,27 @@ __mods["main.js"] = function (__x, __req) {
     // launch throws it away and runs the installed one instead, so a bad deploy
     // cannot leave anybody unable to open the application. Absent in a browser.
     window.CX_SHELL?.confirmHealthy?.();
+
+    // The resource calendar is registered here and built on first use — after
+    // the line above, deliberately. It needs a network and an account, and the
+    // trial gate must not be waiting on either: a calendar that could not reach
+    // its backend would otherwise look exactly like a broken update and get
+    // rolled back.
+    workspace.registerCalendar(() => rcUi.build());
+
+    // Resolve the calendar account, if there is a backend for one. This is the
+    // only thing here that touches a network, and it deliberately sits after the
+    // gate above so an unreachable backend can never look like a broken update.
+    //
+    // It is not awaited: the timeline is already usable, and whether somebody is
+    // a read-only viewer only changes what chrome to draw. When it settles it
+    // emits, the shell rebuilds, and a viewer lands on the calendar — which is
+    // the one case that cannot wait for a switch, because a viewer has no switch.
+    if (rcClient.isConfigured()) {
+      rcClient.init().catch((err) => {
+        console.warn('[cx-timeline] the resource calendar could not be reached:', err.message);
+      });
+    }
 
     console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
 

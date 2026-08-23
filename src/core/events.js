@@ -104,6 +104,16 @@ export const EV = {
   EDIT_REFUSED: 'access:refused', // a write was attempted without permission
   CLOUD_CONFLICT: 'cloud:conflict', // someone else saved the project first
 
+  /* The resource calendar — a separate module, with a separate backend and a
+     separate account. Deliberately not AUTH_CHANGED: signing in to the
+     calendar must not disturb the timeline, which needs no account at all. */
+  RC_AUTH_CHANGED: 'rc:auth', // { user, event }
+  RC_CHANGED: 'rc:changed', // { what } — a row was written; panes reload
+  RC_QUEUE_CHANGED: 'rc:queue', // { pending } — unsynced huddle entries
+
+  /* Which whole interface is on screen: the timeline, or the calendar. */
+  WORKSPACE_CHANGED: 'workspace:changed', // { workspace }
+
   /* Selection & interaction */
   SELECTION_CHANGED: 'selection:changed', // { ids }
   OBJECT_ACTIVATED: 'object:activated', // { id } — double-click / Enter

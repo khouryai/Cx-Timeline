@@ -30,4 +30,24 @@ window.CX_CONFIG = {
    * offering an anonymous, unshareable copy of someone's programme plan.
    */
   requireAuth: true,
+
+  /**
+   * The Resource Calendar's backend — a *different* Supabase project from the
+   * one above, and deliberately so.
+   *
+   * The two halves of this application hold different kinds of data. The plan
+   * carries the P6 programme and is proprietary; in the deployment this was
+   * built for it stays in a OneDrive folder and `supabaseUrl` above is left
+   * blank forever. The resource calendar carries people, shifts and outcomes,
+   * none of it proprietary, and goes to Postgres so the deputy and the team can
+   * reach it from a browser.
+   *
+   * Filling these in does *not* give the timeline a backend. Nothing on the
+   * plan's storage path reads them, nothing that reads the plan imports the
+   * client they create, and `tools/smoke_calendar.js` proves it by editing the
+   * plan and asserting that nothing carrying its content ever left. Leave them
+   * blank and the Calendar workspace simply does not appear.
+   */
+  rcSupabaseUrl: '',
+  rcSupabaseAnonKey: '',
 };

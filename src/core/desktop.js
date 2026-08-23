@@ -178,6 +178,59 @@ export async function attachmentUsage(folder) {
   return { count, bytes };
 }
 
+/* ── The intake folders ────────────────────────────────────────────────── */
+
+/**
+ * Subfolders of the plan's folder, where the look-ahead workbook and the SAR
+ * PDFs arrive by hand.
+ *
+ * Every path is checked component by component on the Rust side, because these
+ * names come off a dropped file or a spreadsheet cell rather than from the
+ * application. Nothing here sanitises: an unsafe name comes back as
+ * `err.kind === 'refused'` and stays refused, since quietly writing
+ * `SAR12345` when asked for `SAR/12345` would file evidence somewhere nobody
+ * would ever look for it.
+ */
+export function intakeList(folder, path) {
+  return call('intake_list', { folder, path });
+}
+
+export async function intakeRead(folder, path) {
+  const bytes = await call('intake_read', { folder, path });
+  return new Uint8Array(bytes).buffer;
+}
+
+/**
+ * Size and modified time, without reading the file — what the look-ahead
+ * watcher polls.
+ *
+ * The modified time on a synced folder is when OneDrive *delivered* the file,
+ * not when it was edited, so it is evidence of arrival rather than authorship.
+ * A snapshot records it and its own observation time as two separate facts.
+ */
+export function intakeStat(folder, path) {
+  return call('intake_stat', { folder, path });
+}
+
+export async function intakeWrite(folder, path, data) {
+  const buffer = data instanceof Blob ? await data.arrayBuffer() : data;
+  return call('intake_write', { folder, path, bytes: Array.from(new Uint8Array(buffer)) });
+}
+
+/** File something from the inbox. Idempotent, and never overwrites. */
+export function intakeMove(folder, from, to) {
+  return call('intake_move', { folder, from, to });
+}
+
+export function intakeDelete(folder, path) {
+  return call('intake_delete', { folder, path });
+}
+
+/** SHA-256 of a file, for deduping snapshots and identifying an archived one. */
+export function intakeHash(folder, path) {
+  return call('intake_hash', { folder, path });
+}
+
 /* ── Window ────────────────────────────────────────────────────────────── */
 
 /**

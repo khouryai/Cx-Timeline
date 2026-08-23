@@ -18,6 +18,7 @@ import * as store from '../core/store.js';
 import { isFallback, isHosted, isFileMode } from '../core/storage.js';
 import * as filestore from '../core/filestore.js';
 import * as cloud from '../core/cloud.js';
+import * as rcClient from '../core/rc.js';
 import { linkViolations } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
@@ -25,6 +26,7 @@ import { icon } from './icons.js';
 import { contextMenu, popover, closePopover, promptDialog, toast, segmented, keyHint, attachTooltip } from './components.js';
 import { THEMES, applyTheme, getTheme } from './theme.js';
 import { showPane, currentPane, PANES } from './panels.js';
+import * as workspace from './workspace.js';
 import { accountBlock, openShareDialog } from './auth.js';
 
 /** Sidebar structure — sections of dock panes. */
@@ -103,6 +105,20 @@ function buildSidenav() {
     ])
   );
 
+  // The workspace switch. Two whole interfaces over two different stores, so
+  // it sits above the pane list rather than in it: choosing "Calendar" is not
+  // choosing a pane, it is leaving the timeline.
+  //
+  // Hidden from a read-only account, and for a reason that is presentation
+  // rather than protection: the plan lives in a folder only its owner has
+  // granted, so a viewer could never load it. What they *would* see is
+  // `makeStarterProject()` — the built-in sample, with plausible-looking
+  // releases and campaigns — and mistaking fabricated demo content for a real
+  // programme is its own small problem.
+  if (rcClient.isConfigured() && !rcClient.isViewer()) {
+    dom.sidenav.appendChild(workspaceSwitch());
+  }
+
   dom.navLinks = el('div', { class: 'sidenav-links' });
   for (const group of NAV) {
     dom.navLinks.appendChild(el('div', { class: 'sidenav-section-label', text: group.section }));
@@ -143,6 +159,28 @@ function buildSidenav() {
   );
 
   updateNav();
+}
+
+/**
+ * Timeline or calendar.
+ *
+ * Only rendered when a calendar backend is configured. A build with no
+ * `rcSupabaseUrl` — which is every build until one is set up — shows nothing
+ * here and behaves exactly as it always has.
+ */
+function workspaceSwitch() {
+  const button = (id, label, iconName) => el('button', {
+    class: 'ws-btn',
+    type: 'button',
+    'aria-pressed': String(workspace.current() === id),
+    html: icon(iconName, { size: 13 }) + `<span>${label}</span>`,
+    onClick: () => workspace.show(id),
+  });
+
+  return el('div', { class: 'ws-switch', role: 'group', 'aria-label': 'Workspace' }, [
+    button('timeline', 'Timeline', 'calendar'),
+    button('calendar', 'Calendar', 'users'),
+  ]);
 }
 
 /** What to call a project that has not been given a client or programme. */
@@ -191,7 +229,7 @@ function buildToolbar() {
   /* Undo / redo */
   dom.undoBtn = toolButton('undo', 'Undo', () => store.undo(), 'mod+z');
   dom.redoBtn = toolButton('redo', 'Redo', () => store.redo(), 'mod+shift+z');
-  dom.toolbar.append(el('div', { class: 'tb-group editing' }, [dom.undoBtn, dom.redoBtn]), el('div', { class: 'tb-sep' }));
+  dom.toolbar.append(el('div', { class: 'tb-group editing tb-timeline' }, [dom.undoBtn, dom.redoBtn]), el('div', { class: 'tb-sep' }));
 
   /* Tools */
   dom.selectBtn = toolButton('cursor', 'Select', () => store.setTool('select'), 'v');
@@ -204,8 +242,8 @@ function buildToolbar() {
   // The Add tool is an editing affordance; select and pan are how a reader
   // moves around, so they stay.
   dom.toolbar.append(
-    el('div', { class: 'tb-group' }, [dom.selectBtn, dom.panBtn]),
-    el('div', { class: 'tb-group editing' }, [dom.addBtn]),
+    el('div', { class: 'tb-group tb-timeline' }, [dom.selectBtn, dom.panBtn]),
+    el('div', { class: 'tb-group editing tb-timeline' }, [dom.addBtn]),
     el('div', { class: 'tb-sep' })
   );
 
@@ -224,11 +262,11 @@ function buildToolbar() {
       renderer.requestRender();
     },
   });
-  dom.toolbar.append(el('div', { class: 'tb-group' }, [dom.scaleSeg]));
+  dom.toolbar.append(el('div', { class: 'tb-group tb-timeline' }, [dom.scaleSeg]));
 
   /* Zoom & navigation */
   dom.toolbar.append(
-    el('div', { class: 'tb-group' }, [
+    el('div', { class: 'tb-group tb-timeline' }, [
       toolButton('zoom-out', 'Zoom out', () => {
         viewport.zoomBy(0.7);
         renderer.requestRender();
@@ -260,10 +298,10 @@ function buildToolbar() {
   ]) {
     dom.snapSelect.appendChild(el('option', { value, text: label }));
   }
-  dom.toolbar.append(el('div', { class: 'tb-group' }, [dom.snapSelect]), el('div', { class: 'tb-sep' }));
+  dom.toolbar.append(el('div', { class: 'tb-group tb-timeline' }, [dom.snapSelect]), el('div', { class: 'tb-sep' }));
 
   /* View toggles */
-  dom.toggles = el('div', { class: 'tb-group' });
+  dom.toggles = el('div', { class: 'tb-group tb-timeline' });
   for (const [key, iconName, title] of [
     ['gridlines', 'grid', 'Gridlines'],
     ['showConnectors', 'link', 'Dependency arrows'],
@@ -299,7 +337,10 @@ function buildToolbar() {
         onClick: (e) => openThemeMenu(e.currentTarget),
       }),
       el('button', {
-        class: 'cx-btn',
+        // Exports the *plan*, so it goes with the timeline. The calendar has
+        // its own export, and two buttons called Export meaning different
+        // documents would be worse than one that comes and goes.
+        class: 'cx-btn tb-timeline',
         title: 'Export the plan',
         html: icon('download', { size: 14 }) + '<span>Export</span>',
         onClick: (e) => emit('ui:export-menu', { anchor: e.currentTarget }),
@@ -525,7 +566,21 @@ function wireEvents() {
     buildSidenav();
     refreshStatus();
   });
+  // Whether the switch is drawn at all depends on the calendar's account, which
+  // is signed in long after the sidebar was first built.
+  on(EV.RC_AUTH_CHANGED, () => {
+    buildSidenav();
+    if (rcClient.isViewer()) workspace.show('calendar');
+  });
   on(EV.ACCESS_CHANGED, refresh);
+  // The switch is two buttons; repainting the sidebar to move a highlight
+  // would throw away the pane list and its scroll position for nothing.
+  on(EV.WORKSPACE_CHANGED, ({ workspace: which }) => {
+    for (const btn of dom.sidenav.querySelectorAll('.ws-btn')) {
+      const label = btn.querySelector('span')?.textContent.toLowerCase();
+      btn.setAttribute('aria-pressed', String(label === which));
+    }
+  });
   on(EV.FILE_STATE, () => refreshStatus());
   on(EV.SELECTION_CHANGED, () => refreshStatus());
   on(EV.TOOL_CHANGED, () => refreshToolbar());
