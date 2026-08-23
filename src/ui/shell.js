@@ -220,7 +220,7 @@ function buildToolbar() {
   /* Undo / redo */
   dom.undoBtn = toolButton('undo', 'Undo', () => store.undo(), 'mod+z');
   dom.redoBtn = toolButton('redo', 'Redo', () => store.redo(), 'mod+shift+z');
-  dom.toolbar.append(el('div', { class: 'tb-group editing' }, [dom.undoBtn, dom.redoBtn]), el('div', { class: 'tb-sep' }));
+  dom.toolbar.append(el('div', { class: 'tb-group editing tb-timeline' }, [dom.undoBtn, dom.redoBtn]), el('div', { class: 'tb-sep' }));
 
   /* Tools */
   dom.selectBtn = toolButton('cursor', 'Select', () => store.setTool('select'), 'v');
@@ -257,7 +257,7 @@ function buildToolbar() {
 
   /* Zoom & navigation */
   dom.toolbar.append(
-    el('div', { class: 'tb-group' }, [
+    el('div', { class: 'tb-group tb-timeline' }, [
       toolButton('zoom-out', 'Zoom out', () => {
         viewport.zoomBy(0.7);
         renderer.requestRender();
@@ -328,7 +328,10 @@ function buildToolbar() {
         onClick: (e) => openThemeMenu(e.currentTarget),
       }),
       el('button', {
-        class: 'cx-btn',
+        // Exports the *plan*, so it goes with the timeline. The calendar has
+        // its own export, and two buttons called Export meaning different
+        // documents would be worse than one that comes and goes.
+        class: 'cx-btn tb-timeline',
         title: 'Export the plan',
         html: icon('download', { size: 14 }) + '<span>Export</span>',
         onClick: (e) => emit('ui:export-menu', { anchor: e.currentTarget }),

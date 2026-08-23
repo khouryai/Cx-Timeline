@@ -54,12 +54,24 @@ body[data-workspace='calendar'] #legend { display: none; }
 
 body[data-workspace='calendar'] #rc-frame { display: flex; }
 
-/* The toolbar and the dock belong to the timeline. Rather than teach every
-   control about modes, the ones that only mean something over a canvas are
-   dropped wholesale. */
+/* The toolbar, the dock and the pane list all belong to the timeline. Rather
+   than teach every control about modes, the ones that only mean something over
+   a canvas are dropped wholesale.
+
+   The pane links matter as much as the dock itself: leaving them visible would
+   offer Lanes and Baselines while the panel they open is hidden, so a click
+   would appear to do nothing at all. */
 body[data-workspace='calendar'] #dock,
 body[data-workspace='calendar'] #inspector,
-body[data-workspace='calendar'] .tb-timeline { display: none; }
+body[data-workspace='calendar'] .sidenav-links,
+body[data-workspace='calendar'] .tb-timeline,
+/* Separators between groups that have gone would otherwise be left floating
+   in an empty toolbar. */
+body[data-workspace='calendar'] .tb-sep { display: none; }
+
+/* Which leaves the switch at the top and the project tag at the bottom, so the
+   sidebar still says where you are and how to get back. */
+body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 
 /* ── The stage ──────────────────────────────────────────────────────────── */
 

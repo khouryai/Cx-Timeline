@@ -267,6 +267,89 @@ so linking another activity updates the comparison immediately — nothing to
 re-take, and it cannot drift out of date. No rows are stored for them at all;
 the comparison is computed from the register on every frame.
 
+### Resource Calendar
+
+A second interface in the same application, over different data and a different
+store. The **Timeline / Calendar** switch at the top of the sidebar moves
+between them; the timeline is hidden rather than closed, so switching back lands
+exactly where you left off.
+
+It exists because the timeline answers *what the programme is* and this answers
+*who is doing it today*. The two are deliberately not linked: the plan holds
+proprietary P6 data and never leaves its folder, while the calendar is
+non-proprietary and lives in Postgres so the whole team can reach it from a
+browser. Nothing in the plan's code path can even see the calendar's backend,
+and a test asserts it.
+
+**The daily huddle** is the screen it is built around. One page, everyone side
+by side, all subsystems in one meeting: what each person was planned to do
+yesterday, what actually happened, and what they are doing tomorrow. Five
+outcomes, one keypress each — and they fall into two families that are never
+averaged together:
+
+| Performance — what somebody did | Programme health — what was done to them |
+|---|---|
+| Completed · Partial · Carried over | Blocked · Reassigned |
+
+A possession released late is not underperformance. Counting it as such would
+make the number worse than useless, because people would stop saying they were
+blocked. **Blocked needs a reason and a responsible party**, refused by the
+database rather than by a dialog somebody dismisses at 3:07pm.
+
+The meeting happens whether or not the wifi does: entries queue on the machine
+and go up on their own when the connection returns.
+
+**Leave** is a third thing again. Somebody on annual leave did not carry
+anything over, and without somewhere for absence to go it gets quietly spread
+across the performance statuses. Leave sits behind the week grid, so a clash is
+visible rather than merely flagged, and the bottom row says how many people can
+actually be staffed each day.
+
+**Reports** run over any date range — "back one year from today" is as easy as
+"this month" — grouped by person, category, location or subsystem. A carried
+task counts **once** however many days it ran, ranked by age: five days of one
+stuck job is one problem, not five failures by one person.
+
+### The four-week look-ahead
+
+The look-ahead is an Excel file in a shared folder, edited by hand, encoding
+shift access in **cell fill colour** against a fixed legend. It is the
+contractual source of truth; the resource calendar is the execution record. The
+application reads it out of the folder, snapshots it whenever it changes, and
+works out what moved.
+
+Colours resolve whichever way Excel happened to write them — literal RGB, a
+theme colour with a tint, or the legacy indexed palette — so a legend is keyed
+on the colour rather than the notation. **A colour that is not in the legend is
+never guessed**: it goes into an unknown bucket for somebody to map, because
+that failure would otherwise be silent and would land in evidence.
+
+Only the named sheet is read, and only its visible rows and columns — the file
+is large and mostly hidden. A hidden *column* matters more than a hidden row:
+with one column per day, dropping one removes a day from the week and nothing
+about the result looks wrong.
+
+Changes are classified against the previous snapshot: scope added, scope
+removed, cancelled, shift changed, resources changed. Two things are recorded
+and deliberately kept **out** of the figures — a week arriving at the far edge
+of the window and a week falling off the back. Those are the window rolling
+forward, not scope moving, and counting them would book a batch of phantom
+additions every week and mark finished work as deleted.
+
+Where the system genuinely cannot tell, it says so rather than guessing. A crew
+finishing early and moving site looks exactly like a cancellation plus new
+scope, and the activity descriptions are not reliable enough to match on, so
+both halves are logged honestly and the pair is offered for a person to relink.
+Likewise a shift turning red says a cancellation happened but not whose, so it
+asks.
+
+**Site access requests** match look-ahead rows by date and location — never by
+activity text, which is worded differently on the two sides. One SAR covering
+several rows at a location is expected rather than ambiguous. Two reports fall
+out of having both registers: rows with no SAR, which is work planned without
+confirmed access, and SARs with no rows, which is access booked for work that
+has gone.
+
 ### Search, filters and legend
 
 Global search covers titles, notes, owners, subsystems, areas, tags, versions,
@@ -376,12 +459,15 @@ immediately.
 ```
 src/
   core/        util · events · dates · model · query · history · store
-               storage · cloud · analysis
+               storage · cloud · analysis · lookahead
+               rc            the resource calendar's separate Supabase client
   timeline/    viewport · layout · connectors · renderer · interactions
   ui/          icons · components · lists · theme · shell · panels · inspector
                dialogs · menus · commands · shortcuts · notes · attachments
                minimap · legend · auth · p6
-  io/          scene · svg · pdf · inflate · exporters · importers · p6
+               workspace · rc · rc_roster · rc_huddle · rc_lookahead
+               rc_reports · rc_util        the second interface
+  io/          scene · svg · pdf · inflate · exporters · importers · lookahead · p6
   main.js
 css/           tokens · base · components · layout · timeline · notes
 ```
@@ -423,12 +509,14 @@ npm run build:dist    # what Cloudflare runs
 npm run build:desktop # assemble the frontend the Windows installer contains
 
 npm test              # every suite below except the Rust one
-npm run test:smoke    # 204 checks — the application, local mode
+npm run test:smoke    # 254 checks — the application, local mode
+npm run test:lookahead #  45 checks — the look-ahead parser, no browser
+npm run test:calendar #  45 checks — the resource calendar, and its isolation
 npm run test:folder   #  43 checks — the shared folder, in a browser
 npm run test:desktop  #  48 checks — the desktop shell, and its updates
 npm run test:hosted   #  49 checks — sign-in, sharing and read-only mode
-npm run test:sql      #  78 checks — the permission model, on real PostgreSQL
-npm run test:rust     #  13 checks — the plan and lock rules; no webview needed
+npm run test:sql      # 140 checks — both permission models, on real PostgreSQL
+npm run test:rust     #  32 checks — the plan, lock and intake rules; no webview needed
 ```
 
 After editing anything under `src/`, run `npm run build` — `index.html` loads
@@ -447,7 +535,15 @@ account.
   project, with the same access rules
 - **IndexedDB** — an offline mirror of the open project, so a dropped
   connection loses nothing
-- **localStorage** — device preferences (theme, panel sizes) and the session
+- **localStorage** — device preferences (theme, panel sizes), the session, and
+  any huddle entries made while offline, until they sync
+
+The resource calendar is a **separate** Supabase project from the timeline's,
+named separately in `config.js`. That separation is the point: the plan holds
+proprietary programme data and stays in your folder, while the calendar holds
+people's names, attendance and outcomes and goes to the database so the team can
+reach it. Two different kinds of data, two different audiences, two different
+homes — and the personal half is worth its own retention answer.
 
 Your data goes to your own Supabase project and nowhere else — there is no
 analytics, no telemetry and no third-party script on the page. Sharing a

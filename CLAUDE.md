@@ -82,6 +82,9 @@ else with a clear error:
 ```
 core/util · core/events · core/dates      leaves — import nothing
 core/cloud                                the only module that knows Supabase
+core/rc                                   the resource calendar's *separate*
+                                          Supabase client — the plan's path
+                                          never imports it
 core/desktop                              the only module that knows Tauri
 core/filestore → core/desktop             the only module that knows the File
                                           System Access API, and the only caller
@@ -91,6 +94,8 @@ core/store → core/storage
 timeline/viewport → timeline/layout → timeline/connectors
                   → timeline/renderer → timeline/interactions
 ui/icons · ui/components → ui/lists · ui/auth → ui/theme → ui/commands
+ui/workspace → ui/rc → ui/rc_roster · ui/rc_huddle · ui/rc_lookahead
+             · ui/rc_reports → ui/rc_util   (the second interface)
                              → ui/dialogs → ui/panels → ui/shell
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
 main.js                                    the only module that may import freely
@@ -308,6 +313,58 @@ subscribes. That is what keeps the graph acyclic.
   backup, an attachment) announce themselves at their own call site. Announce
   only a file that exists: the PDF dialog used to toast beside the exporter and
   so claimed success for an export that had thrown.
+- **The resource calendar is a second module, not a second product.** It is a
+  peer of the timeline canvas (`#rc-frame` beside `#canvas-frame`, switched by
+  `ui/workspace.js`), over a *relational* Supabase schema (`supabase/rc_schema.sql`)
+  rather than the one-JSON-document model the plan uses — because its reports
+  answer arbitrary date ranges and two people edit it at once. It reuses the
+  themes, the tokens, `ui/components.js` and `saveFile()`; if you find yourself
+  writing a second toast system or a second palette, stop.
+  **The timeline is hidden on a switch, never unmounted** — `renderer.mount()`
+  clears its host, so tearing it down would throw away the viewport, the
+  selection and the render caches. And it is **built on first use, after
+  `CX_SHELL.confirmHealthy()`**: a module that needs a network in front of the
+  desktop trial gate would make an unreachable backend look exactly like a
+  broken update and get itself rolled back.
+- **Plan data must never reach Supabase, and that is enforced rather than
+  intended.** It used to be structural — the desktop build has no backend at
+  all, so it could not have sent anything — and putting a client back in the
+  page would have made it a convention. So: a separate config key
+  (`rcSupabaseUrl`, never `supabaseUrl`), a separate client module the plan's
+  storage path never imports, a separate auth storage key, and
+  `tools/smoke_calendar.js`, which edits the plan hard and asserts that nothing
+  carrying plan content ever left — through the client *or* over the wire. That
+  last check is the one that fails if somebody reaches across; every other
+  check would still pass.
+- **Two families of status, never averaged.** Completed / partial / carried are
+  what somebody did; blocked / reassigned are what was done to them. A
+  possession released late is not underperformance, and folding it in would
+  make the number worse than useless — people would stop saying they were
+  blocked. `rc_effort.signal` is where the split lives. Leave is a third thing
+  again, which is why `rc_leave` exists: without it, absence gets silently
+  distributed across the performance statuses.
+- **Evidence is append-only, in the database.** `rc_plan_entries` and
+  `rc_actuals` have no UPDATE or DELETE grant, and neither does
+  `rc_change_annotations` — a correction is a new row that supersedes the old.
+  The revoke has to name `authenticated`, not just `public, anon`: with the
+  privilege intact, RLS excludes the row instead, the statement matches nothing
+  and the driver reports success, so somebody editing an annotation would be
+  told it worked.
+- **The look-ahead's window moving is not a change of scope.** A four-week
+  window rolls forward, so a week arriving is `window_advanced` and one leaving
+  is `window_retired`; both are recorded and both are excluded from the KPIs.
+  Counting them would book a batch of phantom scope additions every single week
+  and count finished work as deleted scope. `classify()` compares only weeks
+  present in *both* snapshots, and derives the window from the data rather than
+  from a constant — the file is maintained four to six weeks out.
+- **A colour the legend does not know is never guessed.** `applyLegend()` puts
+  it in an `unknown` bucket for somebody to map. The legend is stable in
+  practice, and relying on that would still be wrong: one stray shade from
+  Excel's recent-colours picker would misclassify a shift with nothing on
+  screen to show it happened, and the result lands in evidence. Colour resolves
+  through all three notations (literal, theme+tint via HLS, legacy indexed) to
+  one hex, so the legend is keyed on the colour rather than on how it was
+  written — a literal `FFFF00` and an `indexed="13"` are one legend entry.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
 - **The filter's text box holds a list, not a phrase.** `textTerms()` in
@@ -389,13 +446,16 @@ subscribes. That is what keeps the graph acyclic.
 ```bash
 npm run build                        # must succeed — it also lints the module graph
 npm test                             # all four browser suites plus the SQL one, must exit 0
-npm run test:rust                    #  19 checks — the plan and lock rules, in Rust
+npm run test:rust                    #  32 checks — the plan, lock and intake rules, in Rust
 
+node tools/test_lookahead.js         #  45 checks — the look-ahead parser, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
+node tools/smoke_calendar.js         #  45 checks — the resource calendar, and the
+                                     #              assertion that plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               #  78 checks — the permission model
+node tools/test_sql.js               # 140 checks — both permission models
 node tools/smoke.js --shot out.png   # …and eyeball the result
 ```
 
@@ -443,6 +503,13 @@ Two traps worth knowing, both of which have caused real bugs:
   change a click normally makes. The canvas carries `tabindex="-1"` and is
   focused explicitly on mousedown, otherwise keyboard focus stays in whatever
   toolbar dropdown was last used and every shortcut silently stops working.
+- **A `.xlsx` row cannot be matched with `<row[\s\S]*?(?:\/>|<\/row>)`.** The
+  lazy match stops at the first `/>`, which is *inside* the row whenever a cell
+  is formatted but empty (`<c r="D2" s="1"/>`) — truncating it and dropping
+  every cell after. A sheet full of values never hits it, because those cells
+  close with `</c>`; a sheet full of colours hits it on nearly every row. Both
+  readers now use an explicit alternation. This shipped undetected for the same
+  reason it was hard to see: the spreadsheets people import are full of values.
 - **A wrapped label is several `.ob-line` spans**, so an object's
   `textContent` has no spaces in it. The whole string lives on the object node
   as `aria-label` and `data-label`; use those to find or announce an object,
