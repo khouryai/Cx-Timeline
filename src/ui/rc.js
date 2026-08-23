@@ -136,7 +136,12 @@ function renderHead() {
 
   if (rc.isSignedIn() && rc.me()) {
     const tabs = el('div', { class: 'rc-tabs' });
-    for (const tab of TABS) {
+    // Look-ahead and Reports are administrators-only in the database and
+    // already say so. Showing them to a viewer offers a door that opens onto a
+    // wall, so they come out of the row entirely.
+    const visible = rc.isAdmin() ? TABS : TABS.filter((t) => t.id !== 'lookahead' && t.id !== 'reports');
+    if (!visible.some((t) => t.id === active)) active = visible[0].id;
+    for (const tab of visible) {
       tabs.appendChild(el('button', {
         class: 'rc-tab',
         type: 'button',
@@ -154,6 +159,15 @@ function renderHead() {
       text: `${pending} unsynced`,
       title: 'Entered while offline. They will go up on their own when the connection returns.',
     }));
+
+    if (rc.isViewer()) {
+      headEl.appendChild(el('span', {
+        class: 'rc-queue',
+        style: 'background:var(--info-light);border-color:var(--info-border);color:var(--info)',
+        text: 'Read only',
+        title: 'You can see the schedule and what happened. Changing it is restricted in the database, not just here.',
+      }));
+    }
 
     headEl.appendChild(el('button', {
       class: 'cx-btn mini ghost',

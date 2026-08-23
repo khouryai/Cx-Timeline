@@ -39,11 +39,15 @@ insert into public.rc_people (user_id, name, email, title, subsystem, role) valu
   (:'bob',   'Deputy','bob@example.com',   'Deputy Manager',        'IXL',  'admin'),
   (:'carol', 'Carol', 'carol@example.com', 'Test Engineer',         'SCADA','member');
 insert into public.rc_people (name, title, subsystem) values ('Dan', 'Field Technician', 'Wayside');
+-- Read-only: on the team, signs in, and writes nothing at all.
+insert into public.rc_people (user_id, name, email, title, subsystem, role) values
+  (:'dave', 'Dave', 'dave@example.com', 'Signalling Technician', 'IXL', 'viewer');
 insert into public.rc_people (name, active) values ('Erin', false);
 
 select id as p_alice from public.rc_people where name = 'Alex'  \gset
 select id as p_carol from public.rc_people where name = 'Carol' \gset
 select id as p_dan   from public.rc_people where name = 'Dan'   \gset
+select id as p_dave  from public.rc_people where name = 'Dave'  \gset
 
 insert into public.rc_locations (name, code) values ('TPSS 12', 'T12'), ('Station 6 Platform', 'S6P');
 select id as loc12 from public.rc_locations where name = 'TPSS 12' \gset
@@ -68,9 +72,20 @@ select assert(public.rc_me() = :'p_carol', 'rc_me works for a member too');
 select assert(public.rc_can_act_for(:'p_carol'), 'a member may act for themselves');
 select assert(not public.rc_can_act_for(:'p_dan'), 'but not for somebody else');
 
--- Somebody with an account but no person row is nobody here.
 select act_as(:'dave');
+select assert(public.rc_my_role() = 'viewer', 'a viewer knows their own role');
+select assert(not public.rc_is_admin(), 'and is certainly not an administrator');
+-- The distinction that makes read-only real. A viewer *has* a person row, so
+-- comparing ids alone would let them write their own outcomes.
+select assert(not public.rc_can_act_for(public.rc_me()),
+  'a viewer may not even act for themselves');
+
+-- Somebody with an account but no person row at all. A real answer rather than
+-- an error: they can sign in and the application tells them they are not on
+-- this team.
+select act_as(gen_random_uuid());
 select assert(public.rc_me() is null, 'an account with no person row resolves to nobody');
+select assert(public.rc_my_role() is null, 'and has no role');
 select assert(not public.rc_is_admin(), 'and is certainly not an administrator');
 
 -- ══════════════════════════════════════════════════════════════════════════
@@ -83,7 +98,7 @@ select assert(
   'a member can read the locations'
 );
 select assert(
-  (select count(*) from public.rc_people where active) = 4,
+  (select count(*) from public.rc_people where active) = 5,
   'and the roster — the schedule is not a secret from the people in it'
 );
 
@@ -415,6 +430,87 @@ select assert(
   (select count(*) from public.rc_change_events
     where kind in ('window_advanced', 'window_retired')) = 2,
   'the window moving is recorded, and recorded separately');
+
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'A viewer reads the schedule and writes nothing'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+select act_as(:'dave');
+
+-- What the team is for: who is where, and what happened.
+select assert((select count(*) from public.rc_people where active) > 0,
+  'a viewer can read the roster');
+select assert((select count(*) from public.rc_locations) > 0,
+  'and the locations');
+select assert((select count(*) from public.rc_leave) = 1,
+  'and who is on leave');
+select assert((select count(*) from public.rc_plan_current) = 1,
+  'and the current plan');
+select assert((select count(*) from public.rc_actuals) = 6,
+  'and what actually happened');
+
+-- Everything a read-only account must not be able to do. Note the second one:
+-- refusing to let somebody record *their own* outcome is the entire difference
+-- between a viewer and a member.
+select refuses(:'dave',
+  format('select public.rc_record_actual(%L, %L, %L, %L)',
+         gen_random_uuid(), :'p_dan', '2026-09-08', 'completed'),
+  'a viewer recording somebody else''s outcome');
+select refuses(:'dave',
+  format('select public.rc_record_actual(%L, %L, %L, %L)',
+         gen_random_uuid(), :'p_dave', '2026-09-08', 'completed'),
+  'a viewer recording their own outcome');
+select refuses(:'dave',
+  format('insert into public.rc_actuals (client_uuid, person_id, work_date, status)
+          values (%L, %L, %L, ''completed'')', gen_random_uuid(), :'p_dave', '2026-09-08'),
+  'a viewer inserting an outcome straight into the table');
+select refuses(:'dave',
+  format('insert into public.rc_plan_entries (person_id, work_date, task) values (%L, %L, %L)',
+         :'p_dave', '2026-09-08', 'Something'),
+  'a viewer writing the plan');
+select refuses(:'dave',
+  format('insert into public.rc_leave (person_id, start_date, end_date) values (%L, %L, %L)',
+         :'p_dave', '2026-09-14', '2026-09-15'),
+  'a viewer booking their own leave');
+select refuses(:'dave',
+  format('insert into public.rc_locations (name) values (%L)', 'Invented'),
+  'a viewer adding reference data');
+
+-- The KPIs and the claim evidence stay with the two administrators, enforced
+-- by the policy rather than by hiding a tab.
+select assert((select count(*) from public.rc_effort) = 0,
+  'a viewer sees no KPI history');
+select assert((select count(*) from public.rc_lookahead_snapshots) = 0,
+  'nor the look-ahead register');
+select assert((select count(*) from public.rc_change_annotations) = 0,
+  'nor anybody''s judgement about who caused what');
+
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'Promoting a viewer is one UPDATE'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+-- The upgrade path: letting somebody fill in their own outcomes later needs no
+-- migration and no redeploy.
+select act_as(:'alice');
+update public.rc_people set role = 'member' where id = :'p_dave';
+
+select act_as(:'dave');
+select assert(public.rc_my_role() = 'member', 'they are a member now');
+select assert(public.rc_can_act_for(:'p_dave'), 'and may record their own outcome');
+select public.rc_record_actual(
+  '55555555-5555-5555-5555-555555555555'::uuid, :'p_dave', date '2026-09-08', 'completed');
+select assert((select count(*) from public.rc_actuals) = 7, 'which goes through');
+
+-- But only their own, and still not the plan: setting next week's tasks stays
+-- with an administrator, because the supersede chain assumes one author.
+select refuses(:'dave',
+  format('select public.rc_record_actual(%L, %L, %L, %L)',
+         gen_random_uuid(), :'p_dan', '2026-09-08', 'completed'),
+  'a member recording for somebody else');
+select refuses(:'dave',
+  format('insert into public.rc_plan_entries (person_id, work_date, task) values (%L, %L, %L)',
+         :'p_dave', '2026-09-09', 'Next week'),
+  'a member writing their own plan');
 
 reset role;
 do $$ begin raise notice ''; raise notice 'All resource calendar checks passed.'; end $$;

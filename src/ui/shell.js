@@ -108,7 +108,16 @@ function buildSidenav() {
   // The workspace switch. Two whole interfaces over two different stores, so
   // it sits above the pane list rather than in it: choosing "Calendar" is not
   // choosing a pane, it is leaving the timeline.
-  if (rcClient.isConfigured()) dom.sidenav.appendChild(workspaceSwitch());
+  //
+  // Hidden from a read-only account, and for a reason that is presentation
+  // rather than protection: the plan lives in a folder only its owner has
+  // granted, so a viewer could never load it. What they *would* see is
+  // `makeStarterProject()` — the built-in sample, with plausible-looking
+  // releases and campaigns — and mistaking fabricated demo content for a real
+  // programme is its own small problem.
+  if (rcClient.isConfigured() && !rcClient.isViewer()) {
+    dom.sidenav.appendChild(workspaceSwitch());
+  }
 
   dom.navLinks = el('div', { class: 'sidenav-links' });
   for (const group of NAV) {
@@ -556,6 +565,12 @@ function wireEvents() {
   on(EV.AUTH_CHANGED, () => {
     buildSidenav();
     refreshStatus();
+  });
+  // Whether the switch is drawn at all depends on the calendar's account, which
+  // is signed in long after the sidebar was first built.
+  on(EV.RC_AUTH_CHANGED, () => {
+    buildSidenav();
+    if (rcClient.isViewer()) workspace.show('calendar');
   });
   on(EV.ACCESS_CHANGED, refresh);
   // The switch is two buttons; repainting the sidebar to move a highlight

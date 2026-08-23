@@ -16,10 +16,14 @@
 -- by person, category or location, and two people have to edit concurrently.
 -- A document blob guarded by a single revision counter can do neither.
 --
--- Two roles:
+-- Three roles:
 --
 --   admin    Alex and the deputy — everything, including the KPI history
 --   member   a field-team account: their own actuals, and no KPI reads
+--   viewer   read-only: the schedule and what happened, and no writes at all
+--
+-- Viewer and member differ by one thing — whether they may record their own
+-- outcomes — so promoting somebody is a single UPDATE rather than a migration.
 --
 -- Enforcement is row-level security, never the UI. Three rules run through the
 -- whole file and each one is load-bearing:
@@ -49,7 +53,10 @@ create table if not exists public.rc_people (
   email             text,
   title             text,
   subsystem         text,
-  role              text not null default 'member' check (role in ('admin', 'member')),
+  -- admin  — plans, sees the KPIs and the look-ahead register
+  -- member — records their own daily outcomes, nothing else
+  -- viewer — reads the schedule and writes nothing at all
+  role              text not null default 'member' check (role in ('admin', 'member', 'viewer')),
   -- Never delete a leaver: their history has to stay for the reports while
   -- they drop out of every assignment picker.
   active            boolean not null default true,
@@ -404,7 +411,12 @@ as $$
 $$;
 
 -- True when the caller may act for this person: an administrator may act for
--- anyone, a member only for themselves.
+-- anyone, a member only for themselves, a viewer for nobody.
+--
+-- The viewer case is why this checks the role rather than just comparing ids.
+-- A viewer *has* a person row and `rc_me()` finds it, so `p_person = rc_me()`
+-- alone would let them record their own outcomes — which is exactly the
+-- difference between read-only and not.
 create or replace function public.rc_can_act_for(p_person uuid)
 returns boolean
 language sql
@@ -412,7 +424,27 @@ stable
 security definer
 set search_path = ''
 as $$
-  select public.rc_is_admin() or p_person = public.rc_me();
+  select public.rc_is_admin()
+      or (p_person = public.rc_me()
+          and exists (
+            select 1 from public.rc_people
+             where user_id = auth.uid() and role = 'member' and active
+          ));
+$$;
+
+-- The caller's own role, for the interface to explain itself with.
+--
+-- Every rule is a policy; this exists so the screen can say *why* a button is
+-- missing rather than deciding whether it should be.
+create or replace function public.rc_my_role()
+returns text
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select role from public.rc_people
+   where user_id = auth.uid() and active limit 1;
 $$;
 
 -- ══════════════════════════════════════════════════════════════════════════
@@ -734,6 +766,7 @@ $$;
 revoke all on function public.rc_me()                                   from public, anon;
 revoke all on function public.rc_is_admin()                             from public, anon;
 revoke all on function public.rc_can_act_for(uuid)                      from public, anon;
+revoke all on function public.rc_my_role()                               from public, anon;
 revoke all on function public.rc_resolve_location(text)                 from public, anon;
 revoke all on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) from public, anon;
 revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text) from public, anon;
@@ -741,6 +774,7 @@ revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uui
 grant execute on function public.rc_me()                                to authenticated;
 grant execute on function public.rc_is_admin()                          to authenticated;
 grant execute on function public.rc_can_act_for(uuid)                   to authenticated;
+grant execute on function public.rc_my_role()                            to authenticated;
 grant execute on function public.rc_resolve_location(text)              to authenticated;
 grant execute on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) to authenticated;
 grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text) to authenticated;

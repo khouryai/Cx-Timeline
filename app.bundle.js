@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-08-23T20:11:00.086Z
+ * Modules: 53   Built: 2026-08-23T22:25:12.135Z
  */
 (function () {
   'use strict';
@@ -12930,6 +12930,12 @@ __mods["core/rc.js"] = function (__x, __req) {
     });
 
     ready = true;
+
+    // Restoring a session is a change of identity as much as signing in is, and
+    // the shell has already drawn itself by now — what it shows depends on the
+    // role, which only exists after this point. Without the event a returning
+    // viewer would keep whichever chrome the anonymous boot decided on.
+    if (user) emit(EV.RC_AUTH_CHANGED, { user, event: 'RESTORED' });
     return user;
   }
 
@@ -12966,6 +12972,27 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   function isAdmin() {
     return person?.role === 'admin';
+  }
+
+  /** 'admin' | 'member' | 'viewer', or null for somebody not on the team. */
+  function role() {
+    return person?.role || null;
+  }
+
+  /**
+   * True when this account may write anything at all.
+   *
+   * A viewer has a person row and `me()` finds it, so an id comparison alone
+   * would let them record their own outcomes — which is the whole difference
+   * between read-only and not. `rc_can_act_for()` makes the same distinction in
+   * the database, and that is the control; this decides what to draw.
+   */
+  function canWrite() {
+    return person?.role === 'admin' || person?.role === 'member';
+  }
+
+  function isViewer() {
+    return person?.role === 'viewer';
   }
 
   function accountLabel() {
@@ -13303,6 +13330,9 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "isSignedIn", { get: () => isSignedIn, enumerable: true });
   Object.defineProperty(__x, "me", { get: () => me, enumerable: true });
   Object.defineProperty(__x, "isAdmin", { get: () => isAdmin, enumerable: true });
+  Object.defineProperty(__x, "role", { get: () => role, enumerable: true });
+  Object.defineProperty(__x, "canWrite", { get: () => canWrite, enumerable: true });
+  Object.defineProperty(__x, "isViewer", { get: () => isViewer, enumerable: true });
   Object.defineProperty(__x, "accountLabel", { get: () => accountLabel, enumerable: true });
   Object.defineProperty(__x, "signIn", { get: () => signIn, enumerable: true });
   Object.defineProperty(__x, "signOut", { get: () => signOut, enumerable: true });
@@ -24007,7 +24037,16 @@ __mods["ui/shell.js"] = function (__x, __req) {
     // The workspace switch. Two whole interfaces over two different stores, so
     // it sits above the pane list rather than in it: choosing "Calendar" is not
     // choosing a pane, it is leaving the timeline.
-    if (rcClient.isConfigured()) dom.sidenav.appendChild(workspaceSwitch());
+    //
+    // Hidden from a read-only account, and for a reason that is presentation
+    // rather than protection: the plan lives in a folder only its owner has
+    // granted, so a viewer could never load it. What they *would* see is
+    // `makeStarterProject()` — the built-in sample, with plausible-looking
+    // releases and campaigns — and mistaking fabricated demo content for a real
+    // programme is its own small problem.
+    if (rcClient.isConfigured() && !rcClient.isViewer()) {
+      dom.sidenav.appendChild(workspaceSwitch());
+    }
 
     dom.navLinks = el('div', { class: 'sidenav-links' });
     for (const group of NAV) {
@@ -24455,6 +24494,12 @@ __mods["ui/shell.js"] = function (__x, __req) {
     on(EV.AUTH_CHANGED, () => {
       buildSidenav();
       refreshStatus();
+    });
+    // Whether the switch is drawn at all depends on the calendar's account, which
+    // is signed in long after the sidebar was first built.
+    on(EV.RC_AUTH_CHANGED, () => {
+      buildSidenav();
+      if (rcClient.isViewer()) workspace.show('calendar');
     });
     on(EV.ACCESS_CHANGED, refresh);
     // The switch is two buttons; repainting the sidebar to move a highlight
@@ -27594,7 +27639,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const actual = actualByPerson.get(person.id) || null;
     const tomorrow = planFor(person.id, plan);
     const admin = rc.isAdmin();
-    const mine = person.id === rc.me()?.id;
+    // A viewer has a person row, so "is this my row" is true for them too. Asking
+    // whether they may write at all is the difference between read-only and not,
+    // and it is the same question `rc_can_act_for()` answers in the database.
+    const mine = person.id === rc.me()?.id && rc.canWrite();
 
     /* Name, and why they are not being asked for a goal. */
     row.appendChild(el('td', {}, [
@@ -29519,7 +29567,12 @@ __mods["ui/rc.js"] = function (__x, __req) {
 
     if (rc.isSignedIn() && rc.me()) {
       const tabs = el('div', { class: 'rc-tabs' });
-      for (const tab of TABS) {
+      // Look-ahead and Reports are administrators-only in the database and
+      // already say so. Showing them to a viewer offers a door that opens onto a
+      // wall, so they come out of the row entirely.
+      const visible = rc.isAdmin() ? TABS : TABS.filter((t) => t.id !== 'lookahead' && t.id !== 'reports');
+      if (!visible.some((t) => t.id === active)) active = visible[0].id;
+      for (const tab of visible) {
         tabs.appendChild(el('button', {
           class: 'rc-tab',
           type: 'button',
@@ -29537,6 +29590,15 @@ __mods["ui/rc.js"] = function (__x, __req) {
         text: `${pending} unsynced`,
         title: 'Entered while offline. They will go up on their own when the connection returns.',
       }));
+
+      if (rc.isViewer()) {
+        headEl.appendChild(el('span', {
+          class: 'rc-queue',
+          style: 'background:var(--info-light);border-color:var(--info-border);color:var(--info)',
+          text: 'Read only',
+          title: 'You can see the schedule and what happened. Changing it is restricted in the database, not just here.',
+        }));
+      }
 
       headEl.appendChild(el('button', {
         class: 'cx-btn mini ghost',
@@ -29689,6 +29751,7 @@ __mods["main.js"] = function (__x, __req) {
   const { installShortcuts } = __req("ui/shortcuts.js");
   const workspace = __req("ui/workspace.js");
   const rcUi = __req("ui/rc.js");
+  const rcClient = __req("core/rc.js");
   const cmd = __req("ui/commands.js");
   const { toast, showTooltip, hideTooltip, confirmDialog } = __req("ui/components.js");
   const { renderNote, notePreview } = __req("ui/notes.js");
@@ -29807,6 +29870,20 @@ __mods["main.js"] = function (__x, __req) {
     // its backend would otherwise look exactly like a broken update and get
     // rolled back.
     workspace.registerCalendar(() => rcUi.build());
+
+    // Resolve the calendar account, if there is a backend for one. This is the
+    // only thing here that touches a network, and it deliberately sits after the
+    // gate above so an unreachable backend can never look like a broken update.
+    //
+    // It is not awaited: the timeline is already usable, and whether somebody is
+    // a read-only viewer only changes what chrome to draw. When it settles it
+    // emits, the shell rebuilds, and a viewer lands on the calendar — which is
+    // the one case that cannot wait for a switch, because a viewer has no switch.
+    if (rcClient.isConfigured()) {
+      rcClient.init().catch((err) => {
+        console.warn('[cx-timeline] the resource calendar could not be reached:', err.message);
+      });
+    }
 
     console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
 

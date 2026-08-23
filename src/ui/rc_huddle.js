@@ -274,7 +274,10 @@ function personRow(ctx) {
   const actual = actualByPerson.get(person.id) || null;
   const tomorrow = planFor(person.id, plan);
   const admin = rc.isAdmin();
-  const mine = person.id === rc.me()?.id;
+  // A viewer has a person row, so "is this my row" is true for them too. Asking
+  // whether they may write at all is the difference between read-only and not,
+  // and it is the same question `rc_can_act_for()` answers in the database.
+  const mine = person.id === rc.me()?.id && rc.canWrite();
 
   /* Name, and why they are not being asked for a goal. */
   row.appendChild(el('td', {}, [

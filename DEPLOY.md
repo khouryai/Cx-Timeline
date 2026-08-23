@@ -356,6 +356,126 @@ hand once, on the real thing:
 
 ---
 
+# The third deployment: a folder plan, a hosted calendar
+
+This is the shape to publish when the **team needs to read the resource
+calendar in a browser** and the **plan must stay in your folder**. It is not a
+compromise between the other two — it is the two halves of the application
+having different answers, which is the design.
+
+| | Plan (timeline) | Resource calendar |
+|---|---|---|
+| Where it lives | Your OneDrive folder | Its own Supabase project |
+| Account needed | None | Yes |
+| Reachable from a browser | No | Yes |
+
+Your team can never read the plan through the site. A browser only reads a
+folder the person at it grants by clicking, and that grant is per browser
+profile — so the control is OneDrive's sharing, not the application's. The
+Timeline workspace is hidden from read-only accounts anyway, because what they
+would otherwise see is the built-in sample plan, and fabricated demo content
+mistaken for a real programme is its own small problem.
+
+## 1. A second Supabase project
+
+Create a **new, separate** project — not the timeline's, if you have one. In
+its SQL editor run, in order:
+
+1. `supabase/schema.sql` — this shape only needs the `auth` plumbing from it.
+2. `supabase/rc_schema.sql` — the calendar itself.
+
+Then Settings → API, and copy **Project URL** and the **anon / public** key.
+The anon key is designed to be public: it identifies the project and grants
+nothing. Every rule is a row-level security policy tied to the signed-in
+account.
+
+## 2. Tell the repository which shape this is
+
+```jsonc
+// package.json
+"cxTimeline": { "deployment": "calendar" }
+```
+
+The answer lives in the repository so it travels with a merge, rather than in a
+CI dashboard where getting it wrong produces a site that looks fine.
+
+## 3. Cloudflare — the build variables
+
+Workers → your project → Settings → **Variables and Secrets**, added to the
+**build** (not runtime) environment:
+
+| Name | Value |
+|---|---|
+| `RC_SUPABASE_URL` | `https://<your-project>.supabase.co` |
+| `RC_SUPABASE_ANON_KEY` | the anon / public key |
+
+Deliberately **not** `SUPABASE_URL`. That name belongs to the plan and must
+stay unset here — two names that cannot be mistaken for one another, because a
+plan that quietly acquired a backend is the one failure nobody would notice.
+The build refuses to publish if `RC_SUPABASE_URL` is missing, rather than
+shipping a site nobody can sign in to.
+
+Build command stays `npm run build:dist`; deploy stays `npx wrangler deploy`.
+
+Locally, the same thing:
+
+```bash
+RC_SUPABASE_URL=https://xxxx.supabase.co RC_SUPABASE_ANON_KEY=eyJ... npm run build:calendar
+```
+
+## 4. Password-protect the site with Cloudflare Access
+
+Zero Trust → Access → Applications → Add a self-hosted application over your
+site's hostname. Free for up to 50 users. Add each team member's email; they
+authenticate with a one-time PIN, or your identity provider if one is
+connected.
+
+**Add a Bypass policy on the path `/desktop/*`, ordered above the Allow
+policy.** The installed desktop application fetches `/desktop/version.json`
+with no browser session, so Access would answer it with a login page and the
+exe would **stop updating silently and permanently** — the loader correctly
+rejects the login page rather than storing it, so nothing breaks loudly enough
+to notice. Nothing on that path is secret: it is the same bundle already served
+to every browser.
+
+Access controls who can load the page. It does **not** protect the Supabase
+API, which is a different origin — row-level security does that. Both are
+needed and neither substitutes for the other.
+
+Verify:
+
+```bash
+curl -sI https://<your-site>/ | head -1              # should redirect to Access
+curl -s  https://<your-site>/desktop/version.json    # must still be JSON
+```
+
+If the second one returns HTML, the bypass is missing or ordered below the
+Allow policy, and every installed copy has quietly stopped updating.
+
+## 5. Accounts, and what each role sees
+
+Invite each person from Supabase → Authentication → Users → Invite. Then link
+that account to their roster row, and set the role.
+
+| Role | Sees | Writes |
+|---|---|---|
+| `admin` | Everything, including the KPIs and the look-ahead register | Everything |
+| `member` | The schedule and what happened | Their own daily outcomes |
+| `viewer` | The schedule and what happened | Nothing |
+
+For a read-only team, `viewer`. Promoting somebody later is one statement — no
+migration, no redeploy:
+
+```sql
+update rc_people set role = 'member' where name = 'Dan';
+```
+
+That lets them record **their own outcomes**. It does not let them set next
+week's tasks: the plan is admin-insert-only, because a plan that changed the
+evening before is delay evidence and the supersede chain assumes one author.
+
+---
+
 # The desktop application
 
 The same file mode, as a Windows application instead of a browser tab. Nothing

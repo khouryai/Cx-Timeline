@@ -66,7 +66,7 @@ function fakeSdk() {
 
   S.rows = {
     rc_people: [
-      { id: 'p1', user_id: 'user-rc-1', name: 'Alex', email: 'alex@example.com', title: 'Commissioning Manager', subsystem: 'ATS', role: 'admin', active: true, working_days: [1, 2, 3, 4, 5] },
+      { id: 'p1', user_id: 'user-rc-1', name: 'Alex', email: 'alex@example.com', title: 'Commissioning Manager', subsystem: 'ATS', role: S.role, active: true, working_days: [1, 2, 3, 4, 5] },
       { id: 'p2', user_id: null, name: 'Dan', title: 'Field Technician', subsystem: 'Wayside', role: 'member', active: true, working_days: [1, 2, 3, 4] },
       { id: 'p3', user_id: null, name: 'Priya', title: 'Test Engineer', subsystem: 'IXL', role: 'member', active: true, working_days: [1, 2, 3, 4, 5] },
       { id: 'p4', user_id: null, name: 'Sam', title: 'SCADA Engineer', subsystem: 'SCADA', role: 'member', active: true, working_days: [1, 2, 3, 4, 5] },
@@ -224,19 +224,27 @@ async function main() {
   page.on('pageerror', (e) => consoleErrors.push(String(e)));
 
   /* A calendar backend and *no* plan backend. That combination is the whole
-     deployment shape: the plan in a folder, the calendar in Postgres. */
-  await page.route('**/config.js', (route) =>
-    route.fulfill({
-      contentType: 'application/javascript',
-      body: `window.CX_CONFIG = {
-        supabaseUrl: '', supabaseAnonKey: '', requireAuth: false,
-        rcSupabaseUrl: 'https://rc-stub.supabase.co', rcSupabaseAnonKey: 'rc-stub-key',
-      };`,
-    })
-  );
-  await page.route('**/vendor/supabase.js', (route) =>
-    route.fulfill({ contentType: 'application/javascript', body: '/* stubbed for tests */' })
-  );
+     deployment shape: the plan in a folder, the calendar in Postgres.
+
+     Routing is per *page* in Playwright, not per context, so every page this
+     suite opens has to be given the same treatment — a second page left on the
+     committed config.js would quietly boot with no calendar at all and look
+     like a bug in the application. */
+  const serveStubbedConfig = (pg) => Promise.all([
+    pg.route('**/config.js', (route) =>
+      route.fulfill({
+        contentType: 'application/javascript',
+        body: `window.CX_CONFIG = {
+          supabaseUrl: '', supabaseAnonKey: '', requireAuth: false,
+          rcSupabaseUrl: 'https://rc-stub.supabase.co', rcSupabaseAnonKey: 'rc-stub-key',
+        };`,
+      })
+    ),
+    pg.route('**/vendor/supabase.js', (route) =>
+      route.fulfill({ contentType: 'application/javascript', body: '/* stubbed for tests */' })
+    ),
+  ]);
+  await serveStubbedConfig(page);
 
   // Anything the page tries to send over the wire is recorded, whether or not
   // it goes through the stub. A leak that bypassed the client entirely would
@@ -475,6 +483,64 @@ async function main() {
     await page.evaluate(() => !window.CX_CONFIG.supabaseUrl));
   check('while the calendar has its own',
     await page.evaluate(() => Boolean(window.CX_CONFIG.rcSupabaseUrl)));
+
+  /* ══════════════════════════════════════════════════════════════════════
+     A read-only account
+     ═══════════════════════════════════════════════════════════════════ */
+  console.log('\nA viewer reads the schedule and writes nothing');
+
+  const viewer = await context.newPage();
+  viewer.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+  viewer.on('pageerror', (e) => consoleErrors.push(String(e)));
+  // Both scripts, in this order and on *this* page: addInitScript is per-page,
+  // not per-context, and fakeSdk reads `__rc.role` when it builds the roster.
+  await serveStubbedConfig(viewer);
+  await viewer.addInitScript(() => { window.__rc = { role: 'viewer', signedIn: true }; });
+  await viewer.addInitScript(fakeSdk);
+  await viewer.goto(url_, { waitUntil: 'load' });
+  // Attached rather than visible: a viewer lands on the calendar, so the canvas
+  // is hidden by the time it has objects on it. That it still built them is the
+  // point — the timeline is hidden, never torn down.
+  await viewer.waitForSelector('.tl-obj', { state: 'attached', timeout: 20000 });
+  await viewer.waitForTimeout(800);
+  check('the timeline is still built behind the calendar, just hidden',
+    (await viewer.locator('.tl-obj').count()) > 8);
+
+  // The plan lives in a folder only its owner granted, so a viewer could never
+  // load it — what they would see is the built-in sample, and mistaking that
+  // for a real programme is the reason the switch goes away.
+  check('a viewer gets no Timeline switch', (await viewer.locator('.ws-switch').count()) === 0);
+  check('and lands on the calendar',
+    await viewer.evaluate(() => document.body.dataset.workspace === 'calendar'));
+
+  await viewer.waitForSelector('#rc-frame .rc-tabs', { timeout: 10000 });
+  const vTabs = await viewer.locator('#rc-frame .rc-tab').allInnerTexts();
+  check('the huddle and week plan are there', vTabs.includes('Daily huddle') && vTabs.includes('Week plan'));
+  // Both already answer "administrators only", so removing them takes away a
+  // door that opens onto a wall.
+  check('the Look-ahead tab is gone', !vTabs.includes('Look-ahead'), vTabs.join(', '));
+  check('the Reports tab is gone', !vTabs.includes('Reports'));
+  check('and the state is named on screen',
+    /Read only/.test(await viewer.locator('#rc-frame .rc-head').innerText()));
+
+  // The one that matters: a viewer has a person row, so "is this my row" is
+  // true for them too. Only asking whether they may write at all stops this.
+  await viewer.waitForSelector('#rc-frame .rc-table');
+  check('no status button anywhere, including on their own row',
+    (await viewer.locator('#rc-frame tbody button', { hasText: 'Completed' }).count()) === 0);
+  check('nor a way to set a goal',
+    (await viewer.locator('#rc-frame tbody button', { hasText: 'Set goal' }).count()) === 0);
+  check('but the schedule still renders',
+    (await viewer.locator('#rc-frame tbody tr').count()) >= 4);
+
+  await viewer.locator('#rc-frame .rc-tab', { hasText: 'Organisation' }).click();
+  await viewer.waitForSelector('#rc-frame .rc-table');
+  const vOrg = await viewer.locator('#rc-frame').innerText();
+  check('the roster is readable', /Alex/.test(vOrg) && /Dan/.test(vOrg));
+  check('and carries no edit controls',
+    (await viewer.locator('#rc-frame button', { hasText: 'Add person' }).count()) === 0);
+
+  await viewer.close();
 
   /* ── Console ──────────────────────────────────────────────────────────── */
   console.log('\nConsole');

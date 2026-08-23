@@ -40,6 +40,7 @@ import { installP6Drops } from './ui/p6.js';
 import { installShortcuts } from './ui/shortcuts.js';
 import * as workspace from './ui/workspace.js';
 import * as rcUi from './ui/rc.js';
+import * as rcClient from './core/rc.js';
 import * as cmd from './ui/commands.js';
 import { toast, showTooltip, hideTooltip, confirmDialog } from './ui/components.js';
 import { renderNote, notePreview } from './ui/notes.js';
@@ -158,6 +159,20 @@ async function boot() {
   // its backend would otherwise look exactly like a broken update and get
   // rolled back.
   workspace.registerCalendar(() => rcUi.build());
+
+  // Resolve the calendar account, if there is a backend for one. This is the
+  // only thing here that touches a network, and it deliberately sits after the
+  // gate above so an unreachable backend can never look like a broken update.
+  //
+  // It is not awaited: the timeline is already usable, and whether somebody is
+  // a read-only viewer only changes what chrome to draw. When it settles it
+  // emits, the shell rebuilds, and a viewer lands on the calendar — which is
+  // the one case that cannot wait for a switch, because a viewer has no switch.
+  if (rcClient.isConfigured()) {
+    rcClient.init().catch((err) => {
+      console.warn('[cx-timeline] the resource calendar could not be reached:', err.message);
+    });
+  }
 
   console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
 

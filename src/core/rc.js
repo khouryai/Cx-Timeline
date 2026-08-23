@@ -111,6 +111,12 @@ export async function init() {
   });
 
   ready = true;
+
+  // Restoring a session is a change of identity as much as signing in is, and
+  // the shell has already drawn itself by now — what it shows depends on the
+  // role, which only exists after this point. Without the event a returning
+  // viewer would keep whichever chrome the anonymous boot decided on.
+  if (user) emit(EV.RC_AUTH_CHANGED, { user, event: 'RESTORED' });
   return user;
 }
 
@@ -147,6 +153,27 @@ export function me() {
  */
 export function isAdmin() {
   return person?.role === 'admin';
+}
+
+/** 'admin' | 'member' | 'viewer', or null for somebody not on the team. */
+export function role() {
+  return person?.role || null;
+}
+
+/**
+ * True when this account may write anything at all.
+ *
+ * A viewer has a person row and `me()` finds it, so an id comparison alone
+ * would let them record their own outcomes — which is the whole difference
+ * between read-only and not. `rc_can_act_for()` makes the same distinction in
+ * the database, and that is the control; this decides what to draw.
+ */
+export function canWrite() {
+  return person?.role === 'admin' || person?.role === 'member';
+}
+
+export function isViewer() {
+  return person?.role === 'viewer';
 }
 
 export function accountLabel() {
