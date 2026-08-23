@@ -287,6 +287,28 @@ const candidates = cls.relinkCandidates(eventsL);
 check('but the pair is offered for relinking', candidates.length === 1);
 check('with a reason a person can check', /same resources/.test(candidates[0].because));
 
+/* ══════════════════════════════════════════════════════════════════════════
+   The general .xlsx reader
+   ═══════════════════════════════════════════════════════════════════════ */
+
+console.log('\nThe importer reads the same workbook without losing cells');
+
+// `readXlsx()` predates the look-ahead and is used by the CSV/Excel import.
+// It shared the truncating row regex, which never showed up there because the
+// spreadsheets people import are full of values — cells that close with
+// `</c>`. A sheet of formatted-but-empty cells is what exposes it.
+const { readXlsx } = await import(path.join(ROOT, 'src/io/importers.js'));
+const imported = await readXlsx(buffer);
+
+check('it returns rows', imported.length > 0, `${imported.length} rows`);
+// Row 2 of the fixture is A2 plus four fill-only cells. With the lazy regex
+// the row stopped at the first `/>` and only A2 and B2 survived.
+const wide = imported.find((row) => row[0] === 'TPSS 12');
+check('a row of style-only cells is not truncated', wide && wide.length >= 6,
+  wide ? `${wide.length} columns` : 'row not found');
+check('and the cell after the empty ones is still there',
+  wide && wide[5] === 'EIC', wide ? String(wide[5]) : '—');
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

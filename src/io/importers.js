@@ -538,6 +538,21 @@ async function importXlsxFile(file) {
  * Read the first worksheet of an xlsx workbook into a matrix.
  * Handles shared strings, inline strings, numbers and dates.
  */
+/**
+ * Rows and cells: either a self-closing tag, or an open tag through its close.
+ *
+ * The obvious `/<row[\s\S]*?(?:\/>|<\/row>)/` is wrong, and wrong in a way that
+ * hides. A cell carrying a style but no value is written `<c r="D2" s="1"/>`,
+ * and a lazy match stops at that first `/>` — truncating the row and silently
+ * dropping every cell after it. A sheet whose cells all hold values never hits
+ * it, because those close with `</c>`, which is why this survived: the
+ * spreadsheets people import are full of values. A sheet where cells are
+ * formatted but empty hits it on nearly every row, and the four-week look-ahead
+ * is exactly that shape.
+ */
+const ROW_RE = /<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g;
+const CELL_RE = /<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g;
+
 export async function readXlsx(arrayBuffer) {
   const files = await readZip(arrayBuffer);
 
@@ -574,9 +589,9 @@ export async function readXlsx(arrayBuffer) {
   const dateStyles = readDateStyles(zipText(files, 'xl/styles.xml'));
 
   const rows = [];
-  for (const rowXml of sheetXml.match(/<row[\s\S]*?(?:\/>|<\/row>)/g) || []) {
+  for (const rowXml of sheetXml.match(ROW_RE) || []) {
     const cells = [];
-    for (const cellXml of rowXml.match(/<c[\s\S]*?(?:\/>|<\/c>)/g) || []) {
+    for (const cellXml of rowXml.match(CELL_RE) || []) {
       const ref = /r="([A-Z]+)\d+"/.exec(cellXml);
       const column = ref ? columnIndex(ref[1]) : cells.length;
       const type = /t="([^"]+)"/.exec(cellXml)?.[1];

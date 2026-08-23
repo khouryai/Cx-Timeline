@@ -250,9 +250,21 @@ const SHEET_DATA = `<?xml version="1.0" encoding="UTF-8"?>
 <mergeCells count="1"><mergeCell ref="C8:E8"/></mergeCells>
 </worksheet>`;
 
+/**
+ * The first sheet, and deliberately not just a title.
+ *
+ * Row 2 is a value cell followed by three *fill-only* cells and then another
+ * value. Cells with no value are self-closing (`<c r="C2" s="1"/>`), which is
+ * what breaks a lazy `<row …>` match — it stops at the first `/>` and drops
+ * everything after it. `readXlsx()` reads whichever sheet is first, so the case
+ * has to be here for that reader to be exercised at all.
+ */
 const SHEET_COVER = `<?xml version="1.0" encoding="UTF-8"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-<sheetData><row r="1">${sc('A1', 'Cover sheet')}</row></sheetData>
+<sheetData>
+<row r="1">${sc('A1', 'Cover sheet')}</row>
+<row r="2">${sc('A2', 'TPSS 12')}${fc('B2', 1)}${fc('C2', 1)}${fc('D2', 2)}${fc('E2', 3)}${sc('F2', 'EIC')}</row>
+</sheetData>
 </worksheet>`;
 
 const SHEET_HIDDEN = `<?xml version="1.0" encoding="UTF-8"?>
