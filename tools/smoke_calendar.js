@@ -62,6 +62,7 @@ function fakeSdk() {
   S.offline = S.offline || false;
 
   const USER = { id: 'user-rc-1', email: 'alex@example.com' };
+  const iso = (offset) => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
 
   S.rows = {
     rc_people: [
@@ -85,8 +86,17 @@ function fakeSdk() {
     rc_plan_entries: [],
     rc_plan_current: [],
     rc_actuals: [],
-    rc_carry_chains: [],
-    rc_effort: [],
+    // A few days of history, so the reports have something to aggregate. Dates
+    // are relative to today, or a fixed range would fall out of every window.
+    rc_carry_chains: [
+      { carry_chain_id: 'chain-1', person_id: 'p2', first_seen: iso(-6), last_seen: iso(-1), carries: 4, age_days: 5 },
+    ],
+    rc_effort: [
+      { id: 'e1', person_id: 'p1', person_name: 'Alex', subsystem: 'ATS', work_date: iso(-2), status: 'completed', signal: 'performance', category_id: 'c1', location_id: 'l1' },
+      { id: 'e2', person_id: 'p3', person_name: 'Priya', subsystem: 'IXL', work_date: iso(-3), status: 'partial', signal: 'performance', category_id: 'c2', location_id: 'l2' },
+      { id: 'e3', person_id: 'p2', person_name: 'Dan', subsystem: 'Wayside', work_date: iso(-4), status: 'blocked', signal: 'health', category_id: 'c1', location_id: 'l1', blocked_party_id: 'party1' },
+      { id: 'e4', person_id: 'p4', person_name: 'Sam', subsystem: 'SCADA', work_date: iso(-5), status: 'reassigned', signal: 'health', category_id: 'c2', location_id: 'l2' },
+    ],
     rc_lookahead_snapshots: [],
     rc_lookahead_rows: [],
     rc_change_events: [],
@@ -381,6 +391,41 @@ async function main() {
   check('the week is people down and days across', /Available/.test(weekText));
   check('and says how many can actually be staffed each day',
     /\d+ of 4/.test(weekText));
+
+  /* ── The look-ahead and the SARs ──────────────────────────────────────── */
+  console.log('\nThe look-ahead register');
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Look-ahead' }).click();
+  await page.waitForTimeout(400);
+  const laText = await page.locator('#rc-frame').innerText();
+  // Coverage before content: ingestion only runs when somebody has the app
+  // open, so a silent fortnight must not read as a quiet one.
+  check('it says when the look-ahead was last read',
+    /never been read|Last read/.test(laText), laText.split('\n').slice(0, 6).join(' / '));
+
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Site access' }).click();
+  await page.waitForTimeout(300);
+  const sarText = await page.locator('#rc-frame').innerText();
+  check('site access explains that matching is by date and location, never text',
+    /never by activity text/.test(sarText));
+
+  /* ── Reports ──────────────────────────────────────────────────────────── */
+  console.log('\nReports');
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Reports' }).click();
+  await page.waitForTimeout(400);
+  // innerText is the *rendered* text, and the chip labels are uppercased by
+  // CSS — so this reads them case-insensitively rather than as authored.
+  const repText = await page.locator('#rc-frame').innerText();
+  check('an arbitrary range can be chosen, not fixed buckets',
+    /Last year/.test(repText) && /Custom/.test(repText));
+  check('performance and programme health are reported apart',
+    /blocked/i.test(repText) && /completed/i.test(repText) && /reassigned/i.test(repText));
+  // The rate is over the performance family only. Counting a day somebody was
+  // blocked as a day they failed to complete would make a team look worse for
+  // a possession that somebody else lost.
+  check('the completion rate excludes blocked and reassigned days',
+    /50%/.test(repText), 'two performance rows, one completed');
+  check('and it says why they are never averaged together',
+    /flatter or damn the wrong party/.test(repText));
 
   /* ══════════════════════════════════════════════════════════════════════
      The boundary

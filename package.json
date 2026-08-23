@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node tools/build.js",
     "watch": "node tools/build.js --watch",
-    "test": "node tools/smoke.js && node tools/smoke_folder.js && node tools/smoke_desktop.js && node tools/smoke_hosted.js && node tools/smoke_calendar.js && node tools/test_sql.js",
+    "test": "node tools/test_lookahead.js && node tools/smoke.js && node tools/smoke_folder.js && node tools/smoke_desktop.js && node tools/smoke_hosted.js && node tools/smoke_calendar.js && node tools/test_sql.js",
     "serve": "node tools/serve.js",
     "test:sql": "node tools/test_sql.js",
     "test:smoke": "node tools/smoke.js",
@@ -20,7 +20,8 @@
     "build:desktop": "node tools/build.js && node tools/desktop.js",
     "desktop": "npm run build:desktop && cd src-tauri && cargo tauri dev",
     "desktop:installer": "npm run build:desktop && cd src-tauri && cargo tauri build",
-    "test:calendar": "node tools/smoke_calendar.js"
+    "test:calendar": "node tools/smoke_calendar.js",
+    "test:lookahead": "node tools/test_lookahead.js"
   },
   "cxTimeline": {
     "_comment": "deployment: 'hosted' saves to Supabase and requires a backend at build time; 'folder' publishes with no backend at all and keeps the plan in a folder the user picks. tools/dist.js reads this, so the shape of a deployment is decided here, in the repository, rather than in a CI setting nobody can see. updateChannel: the deployment an installed desktop copy follows for updates \u2014 blank means an installed copy never updates itself.",

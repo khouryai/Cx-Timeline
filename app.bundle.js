@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 49   Built: 2026-08-23T19:32:31.642Z
+ * Modules: 53   Built: 2026-08-23T19:47:58.288Z
  */
 (function () {
   'use strict';
@@ -5169,6 +5169,59 @@ __mods["core/desktop.js"] = function (__x, __req) {
     return { count, bytes };
   }
 
+  /* ── The intake folders ────────────────────────────────────────────────── */
+
+  /**
+   * Subfolders of the plan's folder, where the look-ahead workbook and the SAR
+   * PDFs arrive by hand.
+   *
+   * Every path is checked component by component on the Rust side, because these
+   * names come off a dropped file or a spreadsheet cell rather than from the
+   * application. Nothing here sanitises: an unsafe name comes back as
+   * `err.kind === 'refused'` and stays refused, since quietly writing
+   * `SAR12345` when asked for `SAR/12345` would file evidence somewhere nobody
+   * would ever look for it.
+   */
+  function intakeList(folder, path) {
+    return call('intake_list', { folder, path });
+  }
+
+  async function intakeRead(folder, path) {
+    const bytes = await call('intake_read', { folder, path });
+    return new Uint8Array(bytes).buffer;
+  }
+
+  /**
+   * Size and modified time, without reading the file — what the look-ahead
+   * watcher polls.
+   *
+   * The modified time on a synced folder is when OneDrive *delivered* the file,
+   * not when it was edited, so it is evidence of arrival rather than authorship.
+   * A snapshot records it and its own observation time as two separate facts.
+   */
+  function intakeStat(folder, path) {
+    return call('intake_stat', { folder, path });
+  }
+
+  async function intakeWrite(folder, path, data) {
+    const buffer = data instanceof Blob ? await data.arrayBuffer() : data;
+    return call('intake_write', { folder, path, bytes: Array.from(new Uint8Array(buffer)) });
+  }
+
+  /** File something from the inbox. Idempotent, and never overwrites. */
+  function intakeMove(folder, from, to) {
+    return call('intake_move', { folder, from, to });
+  }
+
+  function intakeDelete(folder, path) {
+    return call('intake_delete', { folder, path });
+  }
+
+  /** SHA-256 of a file, for deduping snapshots and identifying an archived one. */
+  function intakeHash(folder, path) {
+    return call('intake_hash', { folder, path });
+  }
+
   /* ── Window ────────────────────────────────────────────────────────────── */
 
   /**
@@ -5200,6 +5253,13 @@ __mods["core/desktop.js"] = function (__x, __req) {
   Object.defineProperty(__x, "readAttachment", { get: () => readAttachment, enumerable: true });
   Object.defineProperty(__x, "deleteAttachment", { get: () => deleteAttachment, enumerable: true });
   Object.defineProperty(__x, "attachmentUsage", { get: () => attachmentUsage, enumerable: true });
+  Object.defineProperty(__x, "intakeList", { get: () => intakeList, enumerable: true });
+  Object.defineProperty(__x, "intakeRead", { get: () => intakeRead, enumerable: true });
+  Object.defineProperty(__x, "intakeStat", { get: () => intakeStat, enumerable: true });
+  Object.defineProperty(__x, "intakeWrite", { get: () => intakeWrite, enumerable: true });
+  Object.defineProperty(__x, "intakeMove", { get: () => intakeMove, enumerable: true });
+  Object.defineProperty(__x, "intakeDelete", { get: () => intakeDelete, enumerable: true });
+  Object.defineProperty(__x, "intakeHash", { get: () => intakeHash, enumerable: true });
   Object.defineProperty(__x, "setWindowTitle", { get: () => setWindowTitle, enumerable: true });
 };
 
@@ -6426,6 +6486,153 @@ __mods["core/filestore.js"] = function (__x, __req) {
      Attachments
      ═══════════════════════════════════════════════════════════════════════ */
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     The intake folders
+
+     The look-ahead workbook and the SAR PDFs live in subfolders of the same
+     folder as the plan, and arrive by hand rather than through the application.
+     They belong here because this module owns the folder handle — nothing else
+     should ever hold one — but they are otherwise unrelated to the plan: no pen,
+     no write guard, no locking. Nobody edits these through CX Timeline; it reads
+     them, and files what somebody dropped in.
+
+     Both backends again: a path on the desktop, a directory handle in a browser.
+     The desktop side checks every path component in Rust, because these names
+     come off a dropped file rather than from the application.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Walk a relative path to its directory handle. `create` makes it on the way. */
+  async function webFolder(rel, { create = false } = {}) {
+    let dir = folderRef;
+    const parts = rel.split('/').filter(Boolean);
+    for (const part of parts) {
+      dir = await dir.getDirectoryHandle(part, { create });
+    }
+    return dir;
+  }
+
+  /**
+   * What is in an intake folder.
+   *
+   * A conflict copy is reported rather than skipped: two versions of the
+   * look-ahead means OneDrive could not merge somebody's edits, and quietly
+   * ingesting one of them would snapshot the same week twice and manufacture a
+   * change that never happened.
+   */
+  async function intakeList(rel) {
+    if (!folderRef) return [];
+    if (onDesktop()) return desktop.intakeList(folderRef, rel);
+
+    try {
+      const dir = await webFolder(rel);
+      const out = [];
+      for await (const [name, handle] of dir.entries()) {
+        if (handle.kind !== 'file') continue;
+        // Excel's sidecar while a workbook is open is never a file to read.
+        if (name.startsWith('~$')) continue;
+        const file = await handle.getFile();
+        out.push({ name, size: file.size, modified: file.lastModified, conflict: isConflictCopy(name) });
+      }
+      return out.sort((a, b) => b.modified - a.modified);
+    } catch {
+      // A folder nobody has created yet is empty, not broken.
+      return [];
+    }
+  }
+
+  /**
+   * A OneDrive conflict copy, for any extension — the same rule
+   * `isLockFile()` applies to locks, widened to the intake folders.
+   *
+   * Conservative on purpose: it wants a machine-name or copy-number tail, so an
+   * ordinary hyphenated name like `Four-Week Look-Ahead.xlsx` is not caught.
+   * `plan.rs::is_conflict_copy` is the same rule in Rust, and the two have to
+   * agree or the desktop and the browser would ingest different files.
+   */
+  function isConflictCopy(name) {
+    const stem = String(name).replace(/\.[^.]*$/, '');
+    const at = stem.lastIndexOf('-');
+    if (at < 0) return false;
+    const tail = stem.slice(at + 1);
+    if (!tail) return false;
+    if (/^\d{1,3}$/.test(tail)) return true;
+    return tail.length >= 8 && /^[A-Z0-9]+$/.test(tail) && /\d/.test(tail);
+  }
+
+  /** Read an intake file as an ArrayBuffer. */
+  async function intakeRead(rel) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeRead(folderRef, rel);
+    const parts = rel.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'));
+    const file = await (await dir.getFileHandle(name)).getFile();
+    return file.arrayBuffer();
+  }
+
+  /**
+   * Size and modified time, without reading it — what the watcher polls.
+   *
+   * On a synced folder the modified time is when OneDrive *delivered* the file,
+   * not when somebody edited it. A snapshot therefore records this and its own
+   * observation time as two separate facts, because for evidence the difference
+   * between "changed at" and "seen at" matters.
+   */
+  async function intakeStat(rel) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeStat(folderRef, rel);
+    const parts = rel.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'));
+    const file = await (await dir.getFileHandle(name)).getFile();
+    return { size: file.size, modified: file.lastModified };
+  }
+
+  /** Write bytes into an intake folder, creating it if needed. */
+  async function intakeWrite(rel, data) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeWrite(folderRef, rel, data);
+    const parts = rel.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'), { create: true });
+    const handle = await dir.getFileHandle(name, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(data);
+    await writable.close();
+    const file = await handle.getFile();
+    return { size: file.size, modified: file.lastModified };
+  }
+
+  /**
+   * File something out of the inbox.
+   *
+   * Copy, verify, then delete — never a bare rename. An interruption then leaves
+   * the file in the inbox to be re-filed, which is a duplicate rather than a
+   * loss. Idempotent: a destination already holding identical bytes just
+   * consumes the source, so re-running an ingest is always safe.
+   */
+  async function intakeMove(from, to) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeMove(folderRef, from, to);
+
+    const bytes = await intakeRead(from);
+    const stamp = await intakeWrite(to, bytes);
+    const parts = from.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'));
+    await dir.removeEntry(name);
+    return stamp;
+  }
+
+  /** SHA-256 of an intake file, for deduping snapshots. */
+  async function intakeHash(rel) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeHash(folderRef, rel);
+    const bytes = await intakeRead(rel);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
   async function putBlob(id, file) {
     if (!folderRef) throw new Error('No folder is connected.');
     return ioPutBlob(folderRef, id, file);
@@ -6469,6 +6676,13 @@ __mods["core/filestore.js"] = function (__x, __req) {
   Object.defineProperty(__x, "yieldPen", { get: () => yieldPen, enumerable: true });
   Object.defineProperty(__x, "checkLock", { get: () => checkLock, enumerable: true });
   Object.defineProperty(__x, "handleUnload", { get: () => handleUnload, enumerable: true });
+  Object.defineProperty(__x, "intakeList", { get: () => intakeList, enumerable: true });
+  Object.defineProperty(__x, "isConflictCopy", { get: () => isConflictCopy, enumerable: true });
+  Object.defineProperty(__x, "intakeRead", { get: () => intakeRead, enumerable: true });
+  Object.defineProperty(__x, "intakeStat", { get: () => intakeStat, enumerable: true });
+  Object.defineProperty(__x, "intakeWrite", { get: () => intakeWrite, enumerable: true });
+  Object.defineProperty(__x, "intakeMove", { get: () => intakeMove, enumerable: true });
+  Object.defineProperty(__x, "intakeHash", { get: () => intakeHash, enumerable: true });
   Object.defineProperty(__x, "putBlob", { get: () => putBlob, enumerable: true });
   Object.defineProperty(__x, "getBlob", { get: () => getBlob, enumerable: true });
   Object.defineProperty(__x, "deleteBlob", { get: () => deleteBlob, enumerable: true });
@@ -21044,6 +21258,10 @@ __mods["io/exporters.js"] = function (__x, __req) {
    *
    * The Blob is built once and handed to both jobs, so measuring it costs
    * nothing on top of writing it.
+   *
+   * Exported so the resource calendar's exports announce themselves the same
+   * way. A second download path that stayed quiet would be exactly the bug this
+   * function exists to prevent.
    */
   function saveFile(filename, data, mime, what) {
     const blob = data instanceof Blob ? data : new Blob([data], { type: mime });
@@ -21419,6 +21637,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
   /** Page-size options offered by the export dialog. */
   const PDF_PAGE_SIZES = Object.entries(PAGE_SIZES).map(([id, s]) => ({ value: id, label: s.label }));
 
+  Object.defineProperty(__x, "saveFile", { get: () => saveFile, enumerable: true });
   Object.defineProperty(__x, "exportJson", { get: () => exportJson, enumerable: true });
   Object.defineProperty(__x, "exportCsv", { get: () => exportCsv, enumerable: true });
   Object.defineProperty(__x, "exportLinksCsv", { get: () => exportLinksCsv, enumerable: true });
@@ -27659,6 +27878,1488 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// io/lookahead.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["io/lookahead.js"] = function (__x, __req) {
+  /**
+   * Reading the four-week look-ahead.
+   *
+   * The look-ahead is an Excel workbook the deputy edits in place, and it encodes
+   * shift access in **cell fill colour** against a fixed legend. So this is not
+   * an importer in the usual sense: the values matter far less than the colours,
+   * and almost everything that can go wrong is invisible in a spreadsheet you
+   * open by hand.
+   *
+   * Four rules, each of which exists because of a specific way it breaks:
+   *
+   * **One sheet, chosen by name.** The workbook is large and the four-week grid
+   * is one tab among several. `readXlsx()` in `io/importers.js` takes whichever
+   * sheet is first, which would silently read a cover page. A missing sheet is an
+   * error here, never a fall back to sheet one.
+   *
+   * **Visible rows and columns only.** Rows are hidden by hand and by autofilter,
+   * both as `hidden="1"`. A hidden *column* matters more than a hidden row: with
+   * one column per day, dropping one removes a day from the week and nothing
+   * about the result looks wrong.
+   *
+   * **The real row number travels with the row.** Blank and absent rows mean the
+   * nth row in the file is not row n, so an array index is not an identity. Row
+   * identity is what change classification rests on.
+   *
+   * **A colour that is not in the legend is never guessed.** It goes to an
+   * unknown bucket for somebody to map. The legend is stable in practice, and
+   * relying on that would still be wrong, because the failure is silent and lands
+   * in evidence.
+   *
+   * Imports: inflate, dates (leaves).
+   */
+
+  const { inflateRaw } = __req("io/inflate.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     ZIP
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Read the container into `name -> Uint8Array`, via the central directory. */
+  function readZip(buffer) {
+    const view = new DataView(buffer);
+    const bytes = new Uint8Array(buffer);
+
+    let eocd = -1;
+    for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66000); i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) throw new Error('That file is not a .xlsx (no ZIP directory found).');
+
+    const count = view.getUint16(eocd + 10, true);
+    let at = view.getUint32(eocd + 16, true);
+
+    const out = new Map();
+    for (let i = 0; i < count; i++) {
+      if (view.getUint32(at, true) !== 0x02014b50) break;
+      const method = view.getUint16(at + 10, true);
+      const compressed = view.getUint32(at + 20, true);
+      const nameLen = view.getUint16(at + 28, true);
+      const extraLen = view.getUint16(at + 30, true);
+      const commentLen = view.getUint16(at + 32, true);
+      const localAt = view.getUint32(at + 42, true);
+      const name = new TextDecoder().decode(bytes.subarray(at + 46, at + 46 + nameLen));
+
+      // The local header repeats the name and carries its own extra field, whose
+      // length routinely differs from the one in the directory.
+      const localNameLen = view.getUint16(localAt + 26, true);
+      const localExtraLen = view.getUint16(localAt + 28, true);
+      const start = localAt + 30 + localNameLen + localExtraLen;
+      const raw = bytes.subarray(start, start + compressed);
+      out.set(name, method === 0 ? raw : inflateRaw(raw));
+
+      at += 46 + nameLen + extraLen + commentLen;
+    }
+    return out;
+  }
+
+  function partText(files, name) {
+    const part = files.get(name);
+    return part ? new TextDecoder().decode(part) : '';
+  }
+
+  function decodeXml(s) {
+    return String(s)
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+      .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d))
+      .replace(/&amp;/g, '&');
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Colour
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The legacy 56-entry palette an `indexed="n"` fill refers to.
+   *
+   * Excel still writes these for anything inherited from an older workbook, so a
+   * parser that only understands `rgb=` sees nothing at all on exactly those
+   * cells — and a blank cell reads as "no shift booked", which is a different
+   * fact entirely.
+   */
+  const INDEXED = [
+    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
+    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
+    '800000', '008000', '000080', '808000', '800080', '008080', 'C0C0C0', '808080',
+    '9999FF', '993366', 'FFFFCC', 'CCFFFF', '660066', 'FF8080', '0066CC', 'CCCCFF',
+    '000080', 'FF00FF', 'FFFF00', '00FFFF', '800080', '800000', '008080', '0000FF',
+    '00CCFF', 'CCFFFF', 'CCFFCC', 'FFFF99', '99CCFF', 'FF99CC', 'CC99FF', 'FFCC99',
+    '3366FF', '33CCCC', '99CC00', 'FFCC00', 'FF9900', 'FF6600', '666699', '969696',
+    '003366', '339966', '003300', '333300', '993300', '993366', '333399', '333333',
+  ];
+
+  /** `theme="n"` indexes the scheme with the dark/light pairs swapped. */
+  const THEME_ORDER = ['lt1', 'dk1', 'lt2', 'dk2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hlink', 'folHlink'];
+
+  function readTheme(xml) {
+    const scheme = /<a:clrScheme[^>]*>([\s\S]*?)<\/a:clrScheme>/.exec(xml)?.[1] || '';
+    const colors = {};
+    for (const m of scheme.matchAll(/<a:(\w+)>([\s\S]*?)<\/a:\1>/g)) {
+      const [, key, body] = m;
+      const srgb = /<a:srgbClr val="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
+      const sys = /<a:sysClr[^>]*lastClr="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
+      if (srgb || sys) colors[key] = (srgb || sys).toUpperCase();
+    }
+    return THEME_ORDER.map((key) => colors[key] || null);
+  }
+
+  /**
+   * Apply an OOXML tint, in HLS as the specification requires.
+   *
+   * Doing it in RGB gives a near miss, and a near miss against a legend keyed on
+   * exact colours is a lookup that fails. Accent 1 at -0.25 has to come out
+   * #2F5597 — what Excel calls "Blue, Accent 1, Darker 25%".
+   */
+  function applyTint(hex, tint) {
+    if (!tint) return hex;
+    const r = parseInt(hex.slice(0, 2), 16) / 255;
+    const g = parseInt(hex.slice(2, 4), 16) / 255;
+    const b = parseInt(hex.slice(4, 6), 16) / 255;
+
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    let lum = (max + min) / 2;
+    let hue = 0;
+    let sat = 0;
+    if (max !== min) {
+      const d = max - min;
+      sat = lum > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) hue = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+      else if (max === g) hue = ((b - r) / d + 2) / 6;
+      else hue = ((r - g) / d + 4) / 6;
+    }
+
+    lum = tint < 0 ? lum * (1 + tint) : lum * (1 - tint) + tint;
+    lum = Math.min(1, Math.max(0, lum));
+
+    const toRgb = (p, q, t) => {
+      let u = t;
+      if (u < 0) u += 1;
+      if (u > 1) u -= 1;
+      if (u < 1 / 6) return p + (q - p) * 6 * u;
+      if (u < 1 / 2) return q;
+      if (u < 2 / 3) return p + (q - p) * (2 / 3 - u) * 6;
+      return p;
+    };
+
+    let out;
+    if (sat === 0) out = [lum, lum, lum];
+    else {
+      const q = lum < 0.5 ? lum * (1 + sat) : lum + sat - lum * sat;
+      const p = 2 * lum - q;
+      out = [toRgb(p, q, hue + 1 / 3), toRgb(p, q, hue), toRgb(p, q, hue - 1 / 3)];
+    }
+    return out.map((v) => Math.round(v * 255).toString(16).padStart(2, '0').toUpperCase()).join('');
+  }
+
+  /**
+   * `styleIndex -> { hex, source }` for every cell format in the workbook.
+   *
+   * The chain is `cellXfs[s].fillId -> fills[id].patternFill.fgColor`, and the
+   * colour at the end arrives in one of three notations. Resolving all three to
+   * one hex is what lets the legend be keyed on the colour rather than on how it
+   * happened to be written.
+   */
+  function readFills(stylesXml, theme) {
+    const fillsBlock = /<fills[^>]*>([\s\S]*?)<\/fills>/.exec(stylesXml)?.[1] || '';
+    const fills = (fillsBlock.match(/<fill>[\s\S]*?<\/fill>/g) || []).map((fill) => {
+      const pattern = /patternType="(\w+)"/.exec(fill)?.[1] || 'none';
+      if (pattern === 'none') return { hex: null, source: 'none' };
+
+      const fg = /<fgColor([^>]*)\/>/.exec(fill)?.[1] || '';
+      const tint = parseFloat(/tint="(-?[\d.]+)"/.exec(fg)?.[1] || '0') || 0;
+
+      const rgb = /rgb="([0-9A-Fa-f]{6,8})"/.exec(fg)?.[1];
+      if (rgb) {
+        const base = (rgb.length === 8 ? rgb.slice(2) : rgb).toUpperCase();
+        return { hex: applyTint(base, tint), source: 'rgb' };
+      }
+
+      const themed = /theme="(\d+)"/.exec(fg)?.[1];
+      if (themed != null) {
+        const base = theme[parseInt(themed, 10)] || null;
+        return { hex: base ? applyTint(base, tint) : null, source: `theme:${themed}` };
+      }
+
+      const indexed = /indexed="(\d+)"/.exec(fg)?.[1];
+      if (indexed != null) {
+        const base = INDEXED[parseInt(indexed, 10)] || null;
+        return { hex: base ? applyTint(base, tint) : null, source: `indexed:${indexed}` };
+      }
+
+      return { hex: null, source: 'unresolved' };
+    });
+
+    const xfsBlock = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] || '';
+    const xfs = xfsBlock.match(/<xf[\s\S]*?(?:\/>|<\/xf>)/g) || [];
+    return xfs.map((xf) => {
+      const fillId = parseInt(/fillId="(\d+)"/.exec(xf)?.[1] ?? '0', 10);
+      return fills[fillId] || { hex: null, source: 'none' };
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The sheet
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Rows and cells, matched as either a self-closing tag or an open/close pair.
+   *
+   * The obvious `/<row[\s\S]*?(?:\/>|<\/row>)/` is wrong here, and wrong in a way
+   * that only shows up on a sheet like this one. A cell carrying a fill but no
+   * value is written `<c r="D2" s="1"/>`, and a lazy match stops at that first
+   * `/>` — truncating the row and dropping every cell after it. A workbook full
+   * of *values* never hits it, because those cells close with `</c>`. A workbook
+   * full of *colours* hits it on nearly every row.
+   */
+  const ROW_RE = /<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g;
+  const CELL_RE = /<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g;
+
+  /** 'A' -> 1, 'AA' -> 27. One-based, matching how a spreadsheet talks. */
+  function colNumber(letters) {
+    let n = 0;
+    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n;
+  }
+
+  function colLetters(n) {
+    let out = '';
+    let v = n;
+    while (v > 0) {
+      const rem = (v - 1) % 26;
+      out = String.fromCharCode(65 + rem) + out;
+      v = Math.floor((v - 1) / 26);
+    }
+    return out;
+  }
+
+  /** Every sheet in the workbook, with its hidden state and its part path. */
+  function readSheets(files) {
+    const workbook = partText(files, 'xl/workbook.xml');
+    const rels = partText(files, 'xl/_rels/workbook.xml.rels');
+    const sheets = [];
+
+    for (const m of workbook.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+      const attrs = m[1];
+      const rid = /r:id="([^"]+)"/.exec(attrs)?.[1] || '';
+      let zipPath = '';
+      if (rid) {
+        const rel = new RegExp(`<Relationship[^>]*Id="${rid}"[^>]*Target="([^"]+)"`).exec(rels);
+        if (rel) {
+          const target = rel[1].replace(/^\/?xl\//, '').replace(/^\//, '');
+          if (files.has(`xl/${target}`)) zipPath = `xl/${target}`;
+        }
+      }
+      sheets.push({
+        name: decodeXml(/name="([^"]*)"/.exec(attrs)?.[1] || ''),
+        state: /state="(\w+)"/.exec(attrs)?.[1] || 'visible',
+        zipPath,
+      });
+    }
+    return sheets;
+  }
+
+  /**
+   * Parse one named sheet into a grid of visible cells.
+   *
+   * Returns `{ sheet, rows, hiddenRows, hiddenColumns, merges, conditional }`.
+   * Each row is `{ row, cells: [{ col, ref, value, hex, source }] }` where `row`
+   * is the **spreadsheet** row number.
+   */
+  function parseSheet(buffer, sheetName) {
+    const files = readZip(buffer);
+    const sheets = readSheets(files);
+
+    const chosen = sheets.find((s) => s.name === sheetName);
+    if (!chosen) {
+      // Never fall back to the first sheet. Reading a cover page and reporting a
+      // week of no work would be worse than reporting nothing at all.
+      throw new Error(
+        `The workbook has no sheet called "${sheetName}". It has: ${sheets.map((s) => s.name).join(', ')}.`
+      );
+    }
+    if (!chosen.zipPath) throw new Error(`"${sheetName}" has no readable worksheet part.`);
+    if (chosen.state !== 'visible') {
+      // A hidden sheet under the configured name almost always means the name is
+      // stale and the live grid has moved to another tab.
+      throw new Error(`"${sheetName}" is hidden in the workbook — check which tab the look-ahead is on now.`);
+    }
+
+    const sharedStrings = [];
+    for (const si of partText(files, 'xl/sharedStrings.xml').match(/<si>[\s\S]*?<\/si>/g) || []) {
+      const parts = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
+      sharedStrings.push(parts.map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join(''));
+    }
+
+    const theme = readTheme(partText(files, 'xl/theme/theme1.xml'));
+    const styleFills = readFills(partText(files, 'xl/styles.xml'), theme);
+    const xml = new TextDecoder().decode(files.get(chosen.zipPath));
+
+    /* Hidden columns. One column per day, so a hidden one silently removes a day
+       from the week — and unlike a missing row, nothing about the result looks
+       wrong. */
+    const hiddenColumns = new Set();
+    const colsBlock = /<cols[^>]*>([\s\S]*?)<\/cols>/.exec(xml)?.[1] || '';
+    for (const m of colsBlock.matchAll(/<col\b([^>]*)\/?>/g)) {
+      if (!/hidden="1"/.test(m[1])) continue;
+      const min = parseInt(/min="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
+      const max = parseInt(/max="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
+      for (let c = min; c <= max; c++) hiddenColumns.add(c);
+    }
+
+    const merges = [];
+    const mergeBlock = /<mergeCells[^>]*>([\s\S]*?)<\/mergeCells>/.exec(xml)?.[1] || '';
+    for (const m of mergeBlock.matchAll(/<mergeCell[^>]*ref="([^"]+)"/g)) merges.push(m[1]);
+
+    /* Conditional formatting is reported, not evaluated. A colour that comes
+       from a rule is not in the cell's style at all, so if the grid is painted
+       that way this parser would see an empty sheet — and saying so is the only
+       honest thing to do about it. */
+    const conditional = [];
+    for (const m of xml.matchAll(/<conditionalFormatting[^>]*sqref="([^"]+)"/g)) conditional.push(m[1]);
+
+    const rows = [];
+    let hiddenRows = 0;
+
+    for (const rowXml of xml.match(ROW_RE) || []) {
+      const head = /<row\b([^>]*)>/.exec(rowXml)?.[1] || rowXml;
+      if (/hidden="1"/.test(head)) {
+        hiddenRows++;
+        continue;
+      }
+      const rowNumber = parseInt(/\br="(\d+)"/.exec(head)?.[1] ?? '0', 10);
+
+      const cells = [];
+      for (const cellXml of rowXml.match(CELL_RE) || []) {
+        const ref = /\br="([A-Z]+)(\d+)"/.exec(cellXml);
+        if (!ref) continue;
+        const col = colNumber(ref[1]);
+        if (hiddenColumns.has(col)) continue;
+
+        const styleIndex = parseInt(/\bs="(\d+)"/.exec(cellXml)?.[1] ?? '-1', 10);
+        const fill = styleIndex >= 0 ? styleFills[styleIndex] : null;
+        const type = /\bt="([^"]+)"/.exec(cellXml)?.[1];
+
+        let value = '';
+        if (type === 'inlineStr') {
+          value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [])
+            .map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join('');
+        } else {
+          const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
+          if (raw != null) value = type === 's' ? (sharedStrings[parseInt(raw, 10)] ?? '') : decodeXml(raw);
+        }
+
+        cells.push({
+          col,
+          ref: `${ref[1]}${ref[2]}`,
+          value,
+          hex: fill?.hex || null,
+          source: fill?.source || 'none',
+        });
+      }
+
+      // A row with no visible cells at all is not a row of the grid.
+      if (cells.length) rows.push({ row: rowNumber, cells });
+    }
+
+    return {
+      sheet: chosen.name,
+      sheets: sheets.map((s) => ({ name: s.name, state: s.state })),
+      rows,
+      hiddenRows,
+      hiddenColumns: [...hiddenColumns],
+      merges,
+      conditional,
+    };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The legend
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Turn a parsed grid into shifts, against the legend.
+   *
+   * `legend` is `[{ argb, meaning }]`. A colour that is not in it is collected in
+   * `unknown` rather than defaulted to anything — the legend is stable in
+   * practice and relying on that would still be wrong, because one stray shade
+   * from Excel's recent-colours picker would misclassify a shift with nothing on
+   * screen to show it happened, and the result lands in evidence.
+   */
+  function applyLegend(grid, legend) {
+    const byColour = new Map((legend || []).map((l) => [String(l.argb).toUpperCase(), l.meaning]));
+    const unknown = new Map();
+
+    const rows = grid.rows.map((row) => ({
+      row: row.row,
+      cells: row.cells.map((cell) => {
+        if (!cell.hex) return { ...cell, meaning: null };
+        const meaning = byColour.get(cell.hex) || null;
+        if (!meaning) {
+          const seen = unknown.get(cell.hex) || { hex: cell.hex, count: 0, samples: [] };
+          seen.count++;
+          if (seen.samples.length < 4) seen.samples.push(cell.ref);
+          unknown.set(cell.hex, seen);
+        }
+        return { ...cell, meaning };
+      }),
+    }));
+
+    return { ...grid, rows, unknown: [...unknown.values()].sort((a, b) => b.count - a.count) };
+  }
+
+  Object.defineProperty(__x, "readZip", { get: () => readZip, enumerable: true });
+  Object.defineProperty(__x, "readTheme", { get: () => readTheme, enumerable: true });
+  Object.defineProperty(__x, "applyTint", { get: () => applyTint, enumerable: true });
+  Object.defineProperty(__x, "readFills", { get: () => readFills, enumerable: true });
+  Object.defineProperty(__x, "colNumber", { get: () => colNumber, enumerable: true });
+  Object.defineProperty(__x, "colLetters", { get: () => colLetters, enumerable: true });
+  Object.defineProperty(__x, "readSheets", { get: () => readSheets, enumerable: true });
+  Object.defineProperty(__x, "parseSheet", { get: () => parseSheet, enumerable: true });
+  Object.defineProperty(__x, "applyLegend", { get: () => applyLegend, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// core/lookahead.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/lookahead.js"] = function (__x, __req) {
+  /**
+   * Comparing two look-ahead snapshots.
+   *
+   * The look-ahead is the contractual source of truth and the resource calendar
+   * is the execution record; the difference between two snapshots is what a
+   * delay claim is eventually built from. So the rules here are about being
+   * *honest* rather than clever — the system logs what it can see and asks a
+   * person about what it cannot.
+   *
+   * Two rules do most of the work, and both exist because the obvious version
+   * produces numbers that flatter or damn the wrong party.
+   *
+   * **Only weeks in both snapshots are compared.** A four-week window rolls
+   * forward, so a week appearing at the far edge is not scope being added and a
+   * week dropping off the back is not scope being removed. Counting them as such
+   * would book a batch of phantom additions every single week, and would count
+   * finished work as deleted scope — inflating exactly the number you would most
+   * want to defend.
+   *
+   * **A crew moving site is not inferred.** When work finishes early and a team
+   * moves, one row disappears and another appears with the same resources. The
+   * activity text is not reliable enough to match on — the spec says so and it is
+   * right — so it is logged honestly as a removal and an addition, and a person
+   * can relink the pair afterwards. Guessing would be the one failure mode
+   * nobody could audit.
+   *
+   * Imports: nothing (leaf).
+   */
+
+  /* ── Row identity ──────────────────────────────────────────────────────── */
+
+  /**
+   * A key for a row that survives the file being edited.
+   *
+   * The look-ahead has no activity IDs — no P6 numbers, nothing stable — and its
+   * descriptions are not matchable. Location, week and subsystem are what remain,
+   * plus an ordinal to separate two rows that share all three.
+   *
+   * The ordinal is the weak part, and knowingly so: inserting a row in the middle
+   * of a group shifts everything below it and produces a false removed/added
+   * pair. That is tolerable only because the manual relink exists to fix it, and
+   * because the alternative — matching on text — would produce *wrong* answers
+   * rather than noisy ones.
+   */
+  function rowKey({ weekStart, location, subsystem = '', ordinal = 0 }) {
+    return [weekStart, String(location || '').trim(), String(subsystem || '').trim(), ordinal].join('|');
+  }
+
+  /** Assign ordinals within each (week, location, subsystem) group. */
+  function keyRows(rows) {
+    const seen = new Map();
+    return rows.map((row) => {
+      const group = [row.weekStart, row.location, row.subsystem || ''].join('|');
+      const ordinal = seen.get(group) || 0;
+      seen.set(group, ordinal + 1);
+      return { ...row, rowKey: rowKey({ ...row, ordinal }) };
+    });
+  }
+
+  /* ── The window ────────────────────────────────────────────────────────── */
+
+  /**
+   * The weeks a snapshot actually covers, read from the snapshot itself.
+   *
+   * Deliberately not a constant. The spec calls it a four-week look-ahead and
+   * says it is maintained four to six weeks out, so a hard-coded 4 would
+   * misclassify the sixth week every time it appeared.
+   */
+  function windowOf(rows) {
+    const weeks = [...new Set(rows.map((r) => r.weekStart))].sort();
+    return { weeks, first: weeks[0] || null, last: weeks[weeks.length - 1] || null };
+  }
+
+  /* ── Comparing ─────────────────────────────────────────────────────────── */
+
+  /**
+   * Classify the difference between two keyed snapshots.
+   *
+   * `before` and `after` are arrays of `{ rowKey, weekStart, location, subsystem,
+   * label, cells, marks }`, where `cells` maps a date to a shift meaning and
+   * `marks` holds BART's own resource requests.
+   *
+   * Returns a list of `{ kind, weekStart, rowKey, before, after }`.
+   */
+  function classify(before, after, { cancelledMeaning = 'cancelled' } = {}) {
+    const beforeWindow = windowOf(before);
+    const afterWindow = windowOf(after);
+
+    // Only weeks present on both sides can be compared at all. Everything else
+    // is the window moving, which is recorded and kept out of the KPIs.
+    const shared = new Set(beforeWindow.weeks.filter((w) => afterWindow.weeks.includes(w)));
+
+    const events = [];
+    const beforeByKey = new Map(before.map((r) => [r.rowKey, r]));
+    const afterByKey = new Map(after.map((r) => [r.rowKey, r]));
+
+    /* Weeks entering and leaving the window. Not scope, and named so. */
+    for (const week of afterWindow.weeks) {
+      if (!beforeWindow.weeks.includes(week)) {
+        events.push({ kind: 'window_advanced', weekStart: week, rowKey: null, before: null, after: null });
+      }
+    }
+    for (const week of beforeWindow.weeks) {
+      if (!afterWindow.weeks.includes(week)) {
+        events.push({ kind: 'window_retired', weekStart: week, rowKey: null, before: null, after: null });
+      }
+    }
+
+    /* Rows added to, and removed from, a week that was already in view. */
+    for (const row of after) {
+      if (!shared.has(row.weekStart)) continue;
+      if (!beforeByKey.has(row.rowKey)) {
+        events.push({ kind: 'scope_added', weekStart: row.weekStart, rowKey: row.rowKey, before: null, after: row });
+      }
+    }
+    for (const row of before) {
+      if (!shared.has(row.weekStart)) continue;
+      if (!afterByKey.has(row.rowKey)) {
+        events.push({ kind: 'scope_removed', weekStart: row.weekStart, rowKey: row.rowKey, before: row, after: null });
+      }
+    }
+
+    /* Rows present on both sides: what changed inside them. */
+    for (const row of after) {
+      const prior = beforeByKey.get(row.rowKey);
+      if (!prior || !shared.has(row.weekStart)) continue;
+
+      const dates = [...new Set([...Object.keys(prior.cells || {}), ...Object.keys(row.cells || {})])].sort();
+      for (const date of dates) {
+        const was = (prior.cells || {})[date] || null;
+        const now = (row.cells || {})[date] || null;
+        if (was === now) continue;
+
+        // A shift turning red is a cancellation, and the colour alone cannot say
+        // whose. Whoever reviews it is asked; nothing is assumed.
+        const kind = now === cancelledMeaning && was && was !== cancelledMeaning
+          ? 'cancellation'
+          : 'shift_changed';
+
+        events.push({
+          kind,
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          date,
+          before: was,
+          after: now,
+          needsResponsibility: kind === 'cancellation',
+        });
+      }
+
+      // BART's own resource marks — an EIC added to an otherwise unchanged
+      // shift. The shift did not move, and the request still changed, so it is
+      // logged rather than folded into the row above.
+      const marksBefore = JSON.stringify(prior.marks || {});
+      const marksAfter = JSON.stringify(row.marks || {});
+      if (marksBefore !== marksAfter) {
+        events.push({
+          kind: 'resource_changed',
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          before: prior.marks || {},
+          after: row.marks || {},
+        });
+      }
+    }
+
+    return events;
+  }
+
+  /**
+   * Removals and additions in the same week that could be one crew moving site.
+   *
+   * Only ever a *suggestion*, surfaced for somebody to confirm. Work finishing
+   * early at one location and starting at another is not a cancellation, but the
+   * only evidence is that the same BART resources appear on both — and the
+   * activity text, which cannot be trusted. So the pairing is a human judgement
+   * by design, and the system's job is to make it easy rather than to guess.
+   */
+  function relinkCandidates(events) {
+    const removed = events.filter((e) => e.kind === 'scope_removed');
+    const added = events.filter((e) => e.kind === 'scope_added');
+    const out = [];
+
+    for (const gone of removed) {
+      for (const arrived of added) {
+        if (gone.weekStart !== arrived.weekStart) continue;
+        const a = JSON.stringify(gone.before?.marks || {});
+        const b = JSON.stringify(arrived.after?.marks || {});
+        if (a !== '{}' && a === b) {
+          out.push({ removed: gone, added: arrived, because: 'the same resources were requested' });
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Which events count toward the change KPIs.
+   *
+   * The window moving is real and recorded, and it is not a change of scope.
+   * Keeping the two apart is what stops the scope-added figure being meaningless
+   * within a month.
+   */
+  const KPI_KINDS = ['scope_added', 'scope_removed', 'cancellation', 'resource_changed', 'shift_changed'];
+
+  function countable(events) {
+    return events.filter((e) => KPI_KINDS.includes(e.kind));
+  }
+
+  /** A short, plain description of an event, for the change log. */
+  function describe(event) {
+    switch (event.kind) {
+      case 'scope_added': return `Added: ${event.after?.label || event.rowKey}`;
+      case 'scope_removed': return `Removed: ${event.before?.label || event.rowKey}`;
+      case 'cancellation': return `Cancelled on ${event.date}: was ${event.before}`;
+      case 'shift_changed': return `${event.date}: ${event.before || 'nothing'} → ${event.after || 'nothing'}`;
+      case 'resource_changed': return 'BART resource request changed';
+      case 'window_advanced': return `Week ${event.weekStart} came into the window`;
+      case 'window_retired': return `Week ${event.weekStart} left the window`;
+      case 'location_shift': return 'Relinked as one crew moving site';
+      default: return event.kind;
+    }
+  }
+
+  Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
+  Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
+  Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
+  Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
+  Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
+  Object.defineProperty(__x, "KPI_KINDS", { get: () => KPI_KINDS, enumerable: true });
+  Object.defineProperty(__x, "countable", { get: () => countable, enumerable: true });
+  Object.defineProperty(__x, "describe", { get: () => describe, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/rc_lookahead.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/rc_lookahead.js"] = function (__x, __req) {
+  /**
+   * The four-week look-ahead, and the SARs against it.
+   *
+   * The look-ahead is the contractual source of truth; the resource calendar is
+   * the execution record. This tab is where the two meet: it reads the workbook
+   * out of the OneDrive folder, snapshots it, works out what changed since last
+   * time, and lets somebody annotate the judgements the system cannot make.
+   *
+   * Ingestion is desktop-only in practice, and the reason is worth stating: a
+   * browser cannot watch a file in a synced folder. It can be granted one, but it
+   * cannot poll for changes in the background. So coverage has gaps whenever
+   * nobody has the application open — and a gap that is not recorded looks
+   * exactly like a week in which nothing changed. Every attempt therefore writes
+   * an `rc_ingest_runs` row, and the change log renders the gaps rather than
+   * showing a smooth history that is not true.
+   *
+   * Imports: util, events, dates, rc, filestore, io/lookahead, core/lookahead,
+   *          icons, components, rc_util.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const filestore = __req("core/filestore.js");
+  const { parseSheet, applyLegend } = __req("io/lookahead.js");
+  const { keyRows, classify, relinkCandidates, countable, describe } = __req("core/lookahead.js");
+  const { icon } = __req("ui/icons.js");
+  const { selectInput, textInput, toast, badge, emptyState } = __req("ui/components.js");
+  const { notifyChanged, byId, dayLabel, todayISO, formModal } = __req("ui/rc_util.js");
+
+  /** Where the workbook lives, relative to the folder the plan is in. */
+  const LOOKAHEAD_DIR = 'lookahead';
+  const SAR_INBOX = 'sars/inbox';
+
+  const SECTIONS = ['changes', 'snapshots', 'sars'];
+  let section = 'changes';
+
+  async function render(root) {
+    if (!rc.isAdmin()) {
+      root.appendChild(emptyState({
+        iconName: 'lock',
+        title: 'Administrators only',
+        message: 'The look-ahead register is the evidence base for delay claims, and it is '
+          + 'restricted in the database rather than by hiding this tab.',
+      }));
+      return;
+    }
+
+    const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
+    for (const id of SECTIONS) {
+      nav.appendChild(el('button', {
+        class: 'rc-tab',
+        type: 'button',
+        text: { changes: 'Changes', snapshots: 'Snapshots', sars: 'Site access' }[id],
+        'aria-pressed': String(id === section),
+        onClick: () => { section = id; clear(root); render(root); },
+      }));
+    }
+    root.appendChild(nav);
+
+    const host = el('div');
+    root.appendChild(host);
+
+    if (section === 'changes') await renderChanges(host);
+    else if (section === 'snapshots') await renderSnapshots(host);
+    else await renderSars(host);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Ingest
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Read the workbook, snapshot it if it has moved, and classify the difference.
+   *
+   * Deduped by content hash rather than by modified time, because OneDrive
+   * re-stamps a file when it syncs whether or not anybody edited it — so
+   * timestamps alone would manufacture a snapshot, and therefore a change event,
+   * out of a sync.
+   */
+  async function ingest({ sheetName, legend, silent = false } = {}) {
+    const run = { ran_at: new Date().toISOString(), outcome: 'error', note: null, file_hash: null, file_mtime: null };
+
+    let file = null;
+    try {
+      const files = await filestore.intakeList(LOOKAHEAD_DIR);
+      const workbooks = files.filter((f) => /\.xlsx$/i.test(f.name));
+
+      // Two versions of the look-ahead means somebody's edits are about to be
+      // lost. Ingesting one of them silently would be the worst possible answer.
+      const conflicted = workbooks.filter((f) => f.conflict);
+      if (conflicted.length) {
+        run.outcome = 'conflict';
+        run.note = `OneDrive kept a second copy: ${conflicted[0].name}`;
+        await rc.addIngestRun(run).catch(() => {});
+        throw new Error(
+          `${conflicted[0].name} is a OneDrive conflict copy — two people edited the look-ahead `
+          + 'and one set of changes is about to be lost. Sort that out in the folder first.'
+        );
+      }
+
+      const legacy = files.filter((f) => /\.xls$|\.xlsb$/i.test(f.name));
+      if (!workbooks.length && legacy.length) {
+        throw new Error(`${legacy[0].name} is not a .xlsx — open it in Excel and Save As → Excel Workbook.`);
+      }
+      file = workbooks[0];
+      if (!file) {
+        run.outcome = 'missing';
+        run.note = `Nothing in ${LOOKAHEAD_DIR}/`;
+        await rc.addIngestRun(run).catch(() => {});
+        throw new Error(`No workbook in ${LOOKAHEAD_DIR}/. Absence is recorded, not treated as "no change".`);
+      }
+
+      const rel = `${LOOKAHEAD_DIR}/${file.name}`;
+      const hash = await filestore.intakeHash(rel);
+      run.file_hash = hash;
+      run.file_mtime = new Date(file.modified).toISOString();
+
+      const snapshots = await rc.listSnapshots({ limit: 1 });
+      if (snapshots[0] && snapshots[0].file_hash === hash) {
+        run.outcome = 'unchanged';
+        await rc.addIngestRun(run);
+        if (!silent) toast({ message: 'The look-ahead has not changed since the last snapshot.' });
+        return { changed: false, events: [] };
+      }
+
+      const buffer = await filestore.intakeRead(rel);
+      const grid = applyLegend(parseSheet(buffer, sheetName), legend);
+
+      if (grid.conditional.length && !grid.rows.some((r) => r.cells.some((c) => c.hex))) {
+        throw new Error(
+          'That sheet has conditional formatting and no readable cell fills, so the shift '
+          + 'colours are coming from rules rather than from the cells. They cannot be read '
+          + 'from the style table — the ingestion design needs revisiting before this can work.'
+        );
+      }
+
+      const snapshot = await rc.addSnapshot({
+        file_hash: hash,
+        file_mtime: run.file_mtime,
+        sheet_name: grid.sheet,
+        grid: { rows: grid.rows, merges: grid.merges, hiddenColumns: grid.hiddenColumns, unknown: grid.unknown },
+      });
+
+      run.outcome = 'snapshot';
+      run.note = grid.unknown.length ? `${grid.unknown.length} colour(s) not in the legend` : null;
+      await rc.addIngestRun(run);
+
+      if (!silent && grid.unknown.length) {
+        toast({
+          tone: 'warn',
+          message: `${grid.unknown.length} colour(s) are not in the legend and were left unmapped — `
+            + 'nothing was guessed.',
+        });
+      }
+
+      notifyChanged('lookahead');
+      return { changed: true, snapshot, grid };
+    } catch (err) {
+      if (run.outcome === 'error') {
+        run.note = err.message;
+        await rc.addIngestRun(run).catch(() => {});
+      }
+      throw err;
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Changes
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function renderChanges(host) {
+    const today = todayISO();
+    const from = `${Number(today.slice(0, 4)) - 1}-01-01`;
+    const [events, runs, parties] = await Promise.all([
+      rc.listChangeEvents(from, `${today}T23:59:59Z`),
+      rc.listIngestRuns({ limit: 60 }),
+      rc.listParties(),
+    ]);
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'What the look-ahead did' }),
+      el('button', {
+        class: 'cx-btn mini primary',
+        html: icon('refresh', { size: 12 }) + '<span>Check now</span>',
+        onClick: async () => {
+          try {
+            await ingest({ sheetName: '4WLA', legend: [] });
+          } catch (err) {
+            toast({ tone: 'error', message: err.message });
+          }
+        },
+      }),
+    ]));
+
+    /* Coverage before content. Ingestion only happens when somebody has the
+       application open, so the history has holes — and a hole that is not drawn
+       reads as a quiet week. */
+    host.appendChild(coverageNote(runs));
+
+    if (!events.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text: 'No changes recorded yet.' }));
+      return;
+    }
+
+    const partyById = byId(parties);
+    const counted = countable(events);
+    host.appendChild(el('p', { class: 'rc-hint' }, [
+      el('span', { text: `${counted.length} change(s) that count, ` }),
+      el('span', { text: `${events.length - counted.length} window movement(s) that do not.` }),
+    ]));
+
+    const rows = events.map((e) => el('tr', {}, [
+      el('td', { text: e.week_start || '—' }),
+      el('td', {}, [badge(kindLabel(e.kind), kindTone(e.kind))]),
+      el('td', { text: describe({ ...e, weekStart: e.week_start, rowKey: e.row_key }) }),
+      el('td', { class: 'rc-hint', text: e.detected_at ? dayLabel(e.detected_at.slice(0, 10)) : '' }),
+      el('td', {}, e.kind === 'cancellation' ? [
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: 'Whose?',
+          title: 'Red says a shift was cancelled. It cannot say by whom.',
+          onClick: () => attribute(e, parties),
+        }),
+      ] : []),
+    ]));
+
+    host.appendChild(table(['Week', 'Kind', 'What', 'Seen', ''], rows));
+
+    const pairs = relinkCandidates(events.map((e) => ({
+      kind: e.kind, weekStart: e.week_start, rowKey: e.row_key, before: e.before, after: e.after,
+    })));
+    if (pairs.length) {
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: `${pairs.length} removal/addition pair(s) share the same requested resources, which `
+          + 'usually means a crew finished early and moved rather than anything being cancelled. '
+          + 'That cannot be told apart automatically — the activity text is not reliable enough to '
+          + 'match on — so it is offered rather than assumed.',
+      }));
+    }
+  }
+
+  /**
+   * Say where the history has holes.
+   *
+   * This is the honest half of "ingestion runs when the application is open".
+   * Without it the change log would look continuous and somebody would read a
+   * silent fortnight as a fortnight in which nothing moved.
+   */
+  function coverageNote(runs) {
+    if (!runs.length) {
+      return el('p', { class: 'rc-hint', text: 'The look-ahead has never been read on this account.' });
+    }
+    const last = runs[0];
+    const age = Math.floor((Date.now() - new Date(last.ran_at).getTime()) / 86400000);
+    const stale = age >= 7;
+
+    return el('p', {
+      class: stale ? 'rc-error' : 'rc-hint',
+      text: stale
+        ? `The look-ahead has not been read for ${age} days. Anything that changed and changed `
+          + 'back in that time is not in the log below — the gap is real, not a quiet spell.'
+        : `Last read ${age === 0 ? 'today' : `${age} day(s) ago`} — ${last.outcome}.`,
+    });
+  }
+
+  function attribute(event, parties) {
+    const party = selectInput({
+      value: parties[0]?.id,
+      options: parties.map((p) => ({ value: p.id, label: p.name })),
+    });
+    const note = textInput({ placeholder: 'What happened' });
+
+    formModal({
+      title: 'Who was this down to?',
+      body: el('div', { class: 'cx-form' }, [
+        el('p', {
+          class: 'rc-hint',
+          text: 'This is the record a claim gets challenged on, so it is attributed and dated, '
+            + 'and it cannot be edited afterwards — a correction is a new entry that supersedes '
+            + 'this one.',
+        }),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Down to' }), party]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Note' }), note]),
+      ]),
+      confirmLabel: 'Record',
+      onConfirm: async () => {
+        await rc.addAnnotation({
+          change_event_id: event.id,
+          kind: 'responsibility',
+          party_id: party.value,
+          note: note.value.trim() || null,
+        });
+        notifyChanged('annotations');
+      },
+    });
+  }
+
+  const KIND_LABELS = {
+    scope_added: 'Scope added', scope_removed: 'Scope removed', cancellation: 'Cancelled',
+    shift_changed: 'Shift changed', resource_changed: 'Resources', location_shift: 'Moved site',
+    window_advanced: 'Window advanced', window_retired: 'Window retired',
+  };
+  const kindLabel = (k) => KIND_LABELS[k] || k;
+  const kindTone = (k) => ({
+    cancellation: 'bad', scope_removed: 'warn', scope_added: 'info',
+    window_advanced: 'muted', window_retired: 'muted',
+  }[k] || 'neutral');
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Snapshots
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function renderSnapshots(host) {
+    const snapshots = await rc.listSnapshots({ limit: 40 });
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Snapshots' })]));
+
+    if (!snapshots.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text: 'Nothing captured yet.' }));
+      return;
+    }
+
+    host.appendChild(table(
+      ['Seen', 'File changed', 'Sheet', 'Rows', 'Unmapped colours'],
+      snapshots.map((s) => el('tr', {}, [
+        el('td', { text: s.taken_at ? s.taken_at.slice(0, 16).replace('T', ' ') : '—' }),
+        el('td', { text: s.file_mtime ? s.file_mtime.slice(0, 16).replace('T', ' ') : '—' }),
+        el('td', { text: s.sheet_name }),
+        el('td', { class: 'rc-num', text: String(s.grid?.rows?.length ?? 0) }),
+        el('td', { class: 'rc-num', text: String(s.grid?.unknown?.length ?? 0) }),
+      ]))
+    ));
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Two times, deliberately. "File changed" is what OneDrive stamped, which is when it '
+        + 'synced rather than when anybody edited it; "seen" is when this application read it. '
+        + 'For evidence the difference matters, so neither stands in for the other.',
+    }));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'The parsed grid is stored, not the workbook. A .xlsx carries every other tab, hidden '
+        + 'row and forgotten pasted sheet along with the part that was wanted — the original bytes '
+        + 'stay in the folder archive instead.',
+    }));
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Site access
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function renderSars(host) {
+    const [sars, locations, without, unlinked] = await Promise.all([
+      rc.listSars(),
+      rc.listLocations(),
+      rc.listRowsWithoutSar(),
+      rc.listSarsWithoutRows(),
+    ]);
+    const locs = byId(locations);
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'Site access requests' }),
+      el('button', {
+        class: 'cx-btn mini primary',
+        html: icon('plus', { size: 12 }) + '<span>Record a SAR</span>',
+        onClick: () => recordSar(locations),
+      }),
+    ]));
+
+    /* The alert the spec did not ask for and that nothing else surfaces: work
+       planned into a week with no access confirmed against it. */
+    if (without.length) {
+      host.appendChild(el('p', { class: 'rc-error' }, [
+        el('strong', { text: `${without.length} look-ahead row(s) have no SAR. ` }),
+        el('span', { text: 'That is work planned without confirmed access.' }),
+      ]));
+    }
+    if (unlinked.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text:
+        `${unlinked.length} SAR(s) match no look-ahead row — access booked for work that has gone.` }));
+    }
+
+    if (!sars.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text: 'No SARs recorded.' }));
+    } else {
+      host.appendChild(table(
+        ['SAR', 'Rev', 'Location', 'Week', 'Hours'],
+        sars.map((s) => el('tr', {}, [
+          el('td', { text: s.sar_number }),
+          el('td', { class: 'rc-num', text: String(s.revision) }),
+          el('td', { text: locs.get(s.location_id)?.name || s.raw_location || '—' }),
+          el('td', { text: s.week_start || '—' }),
+          el('td', { class: 'rc-num', text: s.authorized_hours ?? '—' }),
+        ]))
+      ));
+    }
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: `Drop a SAR PDF into ${SAR_INBOX}/ and record it here; it is then filed under its week. `
+        + 'Matching to look-ahead rows is by date and location only — never by activity text, which '
+        + 'is worded differently on the two sides and is not reliable enough to carry evidence. '
+        + 'One SAR covering several rows at a location is expected, not an ambiguity.',
+    }));
+  }
+
+  function recordSar(locations) {
+    const number = textInput({ placeholder: 'SAR-12345' });
+    const location = selectInput({
+      value: locations[0]?.id,
+      options: locations.map((l) => ({ value: l.id, label: l.name })),
+    });
+    const week = el('input', { type: 'date', class: 'cx-input' });
+    const hours = el('input', { type: 'number', class: 'cx-input', step: '0.5', min: '0' });
+
+    formModal({
+      title: 'Record a SAR',
+      body: el('div', { class: 'cx-form' }, [
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Number' }), number]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Location' }), location]),
+        el('div', { class: 'cx-field' }, [
+          el('label', { class: 'cx-label', text: 'Week beginning' }), week,
+          el('div', { class: 'cx-hint', text: 'The Monday, matching how the look-ahead is keyed.' }),
+        ]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Authorised hours' }), hours]),
+      ]),
+      confirmLabel: 'Record',
+      onConfirm: async () => {
+        if (!number.value.trim()) throw new Error('A SAR number is needed.');
+        await rc.addSar({
+          sar_number: number.value.trim(),
+          location_id: location.value || null,
+          week_start: week.value || null,
+          authorized_hours: hours.value ? Number(hours.value) : null,
+        });
+        notifyChanged('sars');
+      },
+    });
+  }
+
+  /* ── Shared ────────────────────────────────────────────────────────────── */
+
+  function table(headers, rows) {
+    return el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [el('tr', {}, headers.map((h) => el('th', { text: h })))]),
+        el('tbody', {}, rows),
+      ]),
+    ]);
+  }
+
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+  Object.defineProperty(__x, "ingest", { get: () => ingest, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/rc_reports.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/rc_reports.js"] = function (__x, __req) {
+  /**
+   * Reports.
+   *
+   * Every record carries its own date, person, category and location, so a report
+   * is a filter and an aggregation and nothing more. Arbitrary date ranges rather
+   * than fixed monthly buckets — "back one year from today" has to be as easy as
+   * "this month", which is what the relational store bought.
+   *
+   * Two things are deliberate and neither is a detail.
+   *
+   * **Nothing here is stored.** No efficiency column, no cached rollup. Every
+   * number is computed on the way out, so refining a definition never means a
+   * migration and no figure can go stale against the rows it came from.
+   *
+   * **Performance and programme health are never averaged together.** Completed,
+   * partial and carried are what somebody did; blocked and reassigned are what
+   * was done to them. A possession released late is not underperformance, and
+   * folding it in would make the number worse than useless — people would simply
+   * stop saying they were blocked.
+   *
+   * Imports: util, rc, icons, components, rc_util.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const { icon } = __req("ui/icons.js");
+  const { toast, badge, chipStat, emptyState, selectInput } = __req("ui/components.js");
+  const { byId, dayLabel, todayISO, isoToMs, STATUS_BY_ID } = __req("ui/rc_util.js");
+  const { saveFile } = __req("io/exporters.js");
+
+  /** Ranges people actually ask for, plus the one that matters most: any. */
+  const RANGES = [
+    { id: '7', label: 'Last 7 days', days: 7 },
+    { id: '30', label: 'Last 30 days', days: 30 },
+    { id: '90', label: 'Last quarter', days: 90 },
+    { id: '365', label: 'Last year', days: 365 },
+    { id: 'custom', label: 'Custom…', days: 0 },
+  ];
+
+  let range = '30';
+  let customFrom = '';
+  let customTo = '';
+  let groupBy = 'person';
+
+  function window_() {
+    const to = customTo || todayISO();
+    if (range === 'custom' && customFrom) return { from: customFrom, to };
+    const days = RANGES.find((r) => r.id === range)?.days || 30;
+    const fromMs = isoToMs(todayISO()) - days * 86400000;
+    return { from: new Date(fromMs).toISOString().slice(0, 10), to };
+  }
+
+  async function render(root) {
+    if (!rc.isAdmin()) {
+      // Not a hidden menu item: the view itself returns nothing to a member,
+      // enforced by the policy. This only explains why.
+      root.appendChild(emptyState({
+        iconName: 'lock',
+        title: 'Administrators only',
+        message: 'Reports are restricted in the database. A member reading the view directly '
+          + 'gets nothing back, so this is an explanation rather than the control.',
+      }));
+      return;
+    }
+
+    const { from, to } = window_();
+    const [effort, people, categories, locations, chains, events] = await Promise.all([
+      rc.listEffort(from, to),
+      rc.listPeople({ includeInactive: true }),
+      rc.listCategories({ includeInactive: true }),
+      rc.listLocations({ includeInactive: true }),
+      rc.listCarryChains(),
+      rc.listChangeEvents(`${from}T00:00:00Z`, `${to}T23:59:59Z`),
+    ]);
+
+    root.appendChild(controls(root, from, to));
+
+    if (!effort.length) {
+      root.appendChild(el('p', { class: 'rc-hint', text: 'Nothing recorded in that range.' }));
+    } else {
+      root.appendChild(summary(effort));
+      root.appendChild(breakdown(effort, people, categories, locations));
+    }
+
+    root.appendChild(carryOver(chains, people));
+    root.appendChild(lookaheadNumbers(events));
+
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'The two families are reported apart on purpose. Completed, partial and carried are '
+        + 'what somebody did; blocked and reassigned are what was done to them. Averaging them '
+        + 'together would flatter or damn the wrong party — and would teach people not to say '
+        + 'when they were blocked.',
+    }));
+  }
+
+  function controls(root, from, to) {
+    const picker = selectInput({
+      value: range,
+      options: RANGES.map((r) => ({ value: r.id, label: r.label })),
+      onChange: (v) => { range = v; clear(root); render(root); },
+    });
+
+    const grouping = selectInput({
+      value: groupBy,
+      options: [
+        { value: 'person', label: 'By person' },
+        { value: 'category', label: 'By category' },
+        { value: 'location', label: 'By location' },
+        { value: 'subsystem', label: 'By subsystem' },
+      ],
+      onChange: (v) => { groupBy = v; clear(root); render(root); },
+    });
+
+    const head = el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: `${dayLabel(from)} – ${dayLabel(to)}` }),
+      picker,
+      grouping,
+      el('button', {
+        class: 'cx-btn mini ghost',
+        html: icon('download', { size: 12 }) + '<span>CSV</span>',
+        onClick: () => exportCsv(from, to),
+      }),
+    ]);
+
+    if (range === 'custom') {
+      const fromEl = el('input', { type: 'date', class: 'cx-input mini', value: customFrom || from });
+      const toEl = el('input', { type: 'date', class: 'cx-input mini', value: customTo || to });
+      const apply = () => {
+        customFrom = fromEl.value;
+        customTo = toEl.value;
+        clear(root);
+        render(root);
+      };
+      fromEl.addEventListener('change', apply);
+      toEl.addEventListener('change', apply);
+      head.append(fromEl, toEl);
+    }
+    return head;
+  }
+
+  /* ── The numbers ───────────────────────────────────────────────────────── */
+
+  function summary(effort) {
+    const performance = effort.filter((e) => e.signal === 'performance');
+    const health = effort.filter((e) => e.signal === 'health');
+    const done = performance.filter((e) => e.status === 'completed').length;
+
+    // A rate over the performance family only. Including blocked days would make
+    // a team look worse for a possession somebody else lost.
+    const rate = performance.length ? Math.round((done / performance.length) * 100) : 0;
+
+    return el('div', { class: 'rc-section', style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
+      chipStat('Completed', `${rate}%`, rate >= 70 ? 'good' : rate >= 40 ? 'warn' : 'bad'),
+      chipStat('Days recorded', performance.length, 'muted'),
+      chipStat('Blocked', health.filter((e) => e.status === 'blocked').length, 'bad'),
+      chipStat('Reassigned', health.filter((e) => e.status === 'reassigned').length, 'info'),
+    ]);
+  }
+
+  function breakdown(effort, people, categories, locations) {
+    const peopleById = byId(people);
+    const catsById = byId(categories);
+    const locsById = byId(locations);
+
+    const keyOf = (row) => {
+      if (groupBy === 'person') return peopleById.get(row.person_id)?.name || row.person_name || '—';
+      if (groupBy === 'category') return catsById.get(row.category_id)?.name || 'Uncategorised';
+      if (groupBy === 'location') return locsById.get(row.location_id)?.name || 'No location';
+      return row.subsystem || '—';
+    };
+
+    const groups = new Map();
+    for (const row of effort) {
+      const key = keyOf(row);
+      const g = groups.get(key) || { key, completed: 0, partial: 0, carried: 0, blocked: 0, reassigned: 0, total: 0 };
+      if (g[row.status] !== undefined) g[row.status]++;
+      if (row.signal === 'performance') g.total++;
+      groups.set(key, g);
+    }
+
+    const rows = [...groups.values()]
+      .sort((a, b) => b.total - a.total)
+      .map((g) => el('tr', {}, [
+        el('td', { text: g.key }),
+        el('td', { class: 'rc-num', text: String(g.completed) }),
+        el('td', { class: 'rc-num', text: String(g.partial) }),
+        el('td', { class: 'rc-num', text: String(g.carried) }),
+        el('td', { class: 'rc-num', text: g.total ? `${Math.round((g.completed / g.total) * 100)}%` : '—' }),
+        el('td', { class: 'rc-num', text: String(g.blocked) }),
+        el('td', { class: 'rc-num', text: String(g.reassigned) }),
+      ]));
+
+    return el('div', { class: 'rc-section' }, [
+      el('div', { class: 'rc-scroll' }, [
+        el('table', { class: 'rc-table' }, [
+          el('thead', {}, [
+            el('tr', {}, [
+              el('th', { text: groupBy[0].toUpperCase() + groupBy.slice(1) }),
+              el('th', { text: 'Done' }), el('th', { text: 'Partial' }), el('th', { text: 'Carried' }),
+              el('th', { text: 'Rate' }),
+              el('th', { text: 'Blocked' }), el('th', { text: 'Reassigned' }),
+            ]),
+          ]),
+          el('tbody', {}, rows),
+        ]),
+      ]),
+    ]);
+  }
+
+  /**
+   * Carried tasks, oldest first.
+   *
+   * The count is not the story — the *age* is. A chain counts once however many
+   * days it ran, so one stuck job cannot produce five marks against one person,
+   * and a task on its fifth day is the most informative line in the report.
+   */
+  function carryOver(chains, people) {
+    const peopleById = byId(people);
+    const section = el('div', { class: 'rc-section' }, [
+      el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Still carrying' })]),
+    ]);
+
+    if (!chains.length) {
+      section.appendChild(el('p', { class: 'rc-hint', text: 'Nothing carried over.' }));
+      return section;
+    }
+
+    section.appendChild(el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [el('tr', {}, [
+          el('th', { text: 'Person' }), el('th', { text: 'First seen' }),
+          el('th', { text: 'Days old' }), el('th', { text: 'Times carried' }),
+        ])]),
+        el('tbody', {}, chains.map((c) => el('tr', {}, [
+          el('td', { text: peopleById.get(c.person_id)?.name || '—' }),
+          el('td', { text: c.first_seen ? dayLabel(c.first_seen) : '—' }),
+          el('td', {}, [badge(String(c.age_days), c.age_days >= 5 ? 'bad' : c.age_days >= 3 ? 'warn' : 'muted')]),
+          el('td', { class: 'rc-num', text: String(c.carries) }),
+        ]))),
+      ]),
+    ]));
+    section.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'One chain per stuck task, however many days it ran — five days of the same job is one '
+        + 'problem, not five failures. Ranked by age, which is the number worth acting on.',
+    }));
+    return section;
+  }
+
+  /**
+   * The look-ahead's own numbers, kept apart from the team's.
+   *
+   * One measures BART's behaviour and one measures this team's. Reporting them
+   * in one figure would attribute somebody else's cancellations to the people
+   * who turned up for them.
+   */
+  function lookaheadNumbers(events) {
+    const count = (kind) => events.filter((e) => e.kind === kind).length;
+    return el('div', { class: 'rc-section' }, [
+      el('div', { class: 'rc-section-head' }, [el('h3', { text: 'The look-ahead, same range' })]),
+      el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
+        chipStat('Scope added', count('scope_added'), 'info'),
+        chipStat('Scope removed', count('scope_removed'), 'warn'),
+        chipStat('Cancelled', count('cancellation'), 'bad'),
+        chipStat('Resources changed', count('resource_changed'), 'muted'),
+      ]),
+      el('p', {
+        class: 'rc-hint',
+        text: 'Weeks entering and leaving the four-week window are excluded — they are the window '
+          + 'rolling forward, not scope moving, and counting them would add a batch of phantom '
+          + 'changes every single week.',
+      }),
+    ]);
+  }
+
+  /* ── Export ────────────────────────────────────────────────────────────── */
+
+  /**
+   * The range, as CSV.
+   *
+   * Through `saveFile()` like every other export in the application, so the
+   * download announces itself — a file that lands somewhere the page cannot see
+   * is the one action with no visible result.
+   */
+  async function exportCsv(from, to) {
+    try {
+      const [effort, people, categories, locations] = await Promise.all([
+        rc.listEffort(from, to),
+        rc.listPeople({ includeInactive: true }),
+        rc.listCategories({ includeInactive: true }),
+        rc.listLocations({ includeInactive: true }),
+      ]);
+      const peopleById = byId(people);
+      const catsById = byId(categories);
+      const locsById = byId(locations);
+
+      const esc = (v) => {
+        const s = String(v ?? '');
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const header = ['Date', 'Person', 'Subsystem', 'Status', 'Signal', 'Category', 'Location'];
+      const lines = [header.join(',')];
+      for (const row of effort) {
+        lines.push([
+          row.work_date,
+          peopleById.get(row.person_id)?.name || row.person_name || '',
+          row.subsystem || '',
+          STATUS_BY_ID.get(row.status)?.label || row.status,
+          row.signal,
+          catsById.get(row.category_id)?.name || '',
+          locsById.get(row.location_id)?.name || '',
+        ].map(esc).join(','));
+      }
+
+      saveFile(
+        `resource-calendar-${from}-to-${to}.csv`,
+        lines.join('\n'),
+        'text/csv;charset=utf-8',
+        `${effort.length} record(s)`
+      );
+    } catch (err) {
+      toast({ tone: 'error', message: err.message });
+    }
+  }
+
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/rc.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/rc.js"] = function (__x, __req) {
@@ -27675,7 +29376,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
    * this module does. So signing in is something that happens when you arrive at
    * the calendar, not something that happens before the application starts.
    *
-   * Imports: util, events, rc, icons, components, rc_roster, rc_huddle.
+   * Imports: util, events, rc, icons, components, and the tab modules.
    */
 
   const { el, clear } = __req("core/util.js");
@@ -27685,17 +29386,26 @@ __mods["ui/rc.js"] = function (__x, __req) {
   const { textInput, toast, emptyState } = __req("ui/components.js");
   const roster = __req("ui/rc_roster.js");
   const huddle = __req("ui/rc_huddle.js");
+  const lookahead = __req("ui/rc_lookahead.js");
+  const reports = __req("ui/rc_reports.js");
 
-  /** The tabs, in the order they are used: plan the week, then run the day. */
+  /**
+   * The tabs, in the order the work actually happens: run today's meeting, plan
+   * the week, see what the look-ahead did to it, then the numbers.
+   */
   const TABS = [
     { id: 'huddle', label: 'Daily huddle' },
     { id: 'week', label: 'Week plan' },
+    { id: 'lookahead', label: 'Look-ahead' },
+    { id: 'reports', label: 'Reports' },
     { id: 'org', label: 'Organisation' },
   ];
 
   const RENDERERS = {
     huddle: huddle.render,
     week: huddle.renderWeek,
+    lookahead: lookahead.render,
+    reports: reports.render,
     org: roster.render,
   };
 

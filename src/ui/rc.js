@@ -11,7 +11,7 @@
  * this module does. So signing in is something that happens when you arrive at
  * the calendar, not something that happens before the application starts.
  *
- * Imports: util, events, rc, icons, components, rc_roster, rc_huddle.
+ * Imports: util, events, rc, icons, components, and the tab modules.
  */
 
 import { el, clear } from '../core/util.js';
@@ -21,17 +21,26 @@ import { icon } from './icons.js';
 import { textInput, toast, emptyState } from './components.js';
 import * as roster from './rc_roster.js';
 import * as huddle from './rc_huddle.js';
+import * as lookahead from './rc_lookahead.js';
+import * as reports from './rc_reports.js';
 
-/** The tabs, in the order they are used: plan the week, then run the day. */
+/**
+ * The tabs, in the order the work actually happens: run today's meeting, plan
+ * the week, see what the look-ahead did to it, then the numbers.
+ */
 const TABS = [
   { id: 'huddle', label: 'Daily huddle' },
   { id: 'week', label: 'Week plan' },
+  { id: 'lookahead', label: 'Look-ahead' },
+  { id: 'reports', label: 'Reports' },
   { id: 'org', label: 'Organisation' },
 ];
 
 const RENDERERS = {
   huddle: huddle.render,
   week: huddle.renderWeek,
+  lookahead: lookahead.render,
+  reports: reports.render,
   org: roster.render,
 };
 

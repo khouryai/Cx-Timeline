@@ -297,6 +297,48 @@ fn attachment_usage(folder: String) -> Reply<(u64, u64)> {
     plan::attachment_usage(Path::new(&folder)).map_err(Failure::from)
 }
 
+/* ── The intake folders ────────────────────────────────────────────────── */
+
+/// These reach into subfolders of the plan's folder, where the look-ahead
+/// workbook and the SAR PDFs arrive by hand. Unlike the plan commands, the
+/// names they take came off a dropped file or a spreadsheet cell, so `plan.rs`
+/// checks every path component itself — the front end is not the boundary.
+
+#[tauri::command]
+fn intake_list(folder: String, path: String) -> Reply<Vec<plan::FileInfo>> {
+    plan::list_files(Path::new(&folder), &path).map_err(Failure::from)
+}
+
+#[tauri::command]
+fn intake_read(folder: String, path: String) -> Reply<Vec<u8>> {
+    plan::read_file(Path::new(&folder), &path).map_err(Failure::from)
+}
+
+#[tauri::command]
+fn intake_stat(folder: String, path: String) -> Reply<plan::Stamp> {
+    plan::stat_file(Path::new(&folder), &path).map_err(Failure::from)
+}
+
+#[tauri::command]
+fn intake_write(folder: String, path: String, bytes: Vec<u8>) -> Reply<plan::Stamp> {
+    plan::write_file(Path::new(&folder), &path, &bytes).map_err(Failure::from)
+}
+
+#[tauri::command]
+fn intake_move(folder: String, from: String, to: String) -> Reply<plan::Stamp> {
+    plan::move_file(Path::new(&folder), &from, &to).map_err(Failure::from)
+}
+
+#[tauri::command]
+fn intake_delete(folder: String, path: String) -> Reply<bool> {
+    plan::delete_file(Path::new(&folder), &path).map_err(Failure::from)
+}
+
+#[tauri::command]
+fn intake_hash(folder: String, path: String) -> Reply<String> {
+    plan::hash_file(Path::new(&folder), &path).map_err(Failure::from)
+}
+
 /// Put the plan and the pen in the window title, so the state is legible from
 /// the taskbar without bringing the window forward.
 #[tauri::command]
@@ -327,6 +369,13 @@ fn main() {
             attachment_read,
             attachment_delete,
             attachment_usage,
+            intake_list,
+            intake_read,
+            intake_stat,
+            intake_write,
+            intake_move,
+            intake_delete,
+            intake_hash,
             set_window_title,
         ])
         .run(tauri::generate_context!())

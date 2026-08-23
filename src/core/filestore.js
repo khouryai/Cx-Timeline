@@ -1217,6 +1217,153 @@ function emitState() {
    Attachments
    ═══════════════════════════════════════════════════════════════════════ */
 
+/* ══════════════════════════════════════════════════════════════════════════
+   The intake folders
+
+   The look-ahead workbook and the SAR PDFs live in subfolders of the same
+   folder as the plan, and arrive by hand rather than through the application.
+   They belong here because this module owns the folder handle — nothing else
+   should ever hold one — but they are otherwise unrelated to the plan: no pen,
+   no write guard, no locking. Nobody edits these through CX Timeline; it reads
+   them, and files what somebody dropped in.
+
+   Both backends again: a path on the desktop, a directory handle in a browser.
+   The desktop side checks every path component in Rust, because these names
+   come off a dropped file rather than from the application.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Walk a relative path to its directory handle. `create` makes it on the way. */
+async function webFolder(rel, { create = false } = {}) {
+  let dir = folderRef;
+  const parts = rel.split('/').filter(Boolean);
+  for (const part of parts) {
+    dir = await dir.getDirectoryHandle(part, { create });
+  }
+  return dir;
+}
+
+/**
+ * What is in an intake folder.
+ *
+ * A conflict copy is reported rather than skipped: two versions of the
+ * look-ahead means OneDrive could not merge somebody's edits, and quietly
+ * ingesting one of them would snapshot the same week twice and manufacture a
+ * change that never happened.
+ */
+export async function intakeList(rel) {
+  if (!folderRef) return [];
+  if (onDesktop()) return desktop.intakeList(folderRef, rel);
+
+  try {
+    const dir = await webFolder(rel);
+    const out = [];
+    for await (const [name, handle] of dir.entries()) {
+      if (handle.kind !== 'file') continue;
+      // Excel's sidecar while a workbook is open is never a file to read.
+      if (name.startsWith('~$')) continue;
+      const file = await handle.getFile();
+      out.push({ name, size: file.size, modified: file.lastModified, conflict: isConflictCopy(name) });
+    }
+    return out.sort((a, b) => b.modified - a.modified);
+  } catch {
+    // A folder nobody has created yet is empty, not broken.
+    return [];
+  }
+}
+
+/**
+ * A OneDrive conflict copy, for any extension — the same rule
+ * `isLockFile()` applies to locks, widened to the intake folders.
+ *
+ * Conservative on purpose: it wants a machine-name or copy-number tail, so an
+ * ordinary hyphenated name like `Four-Week Look-Ahead.xlsx` is not caught.
+ * `plan.rs::is_conflict_copy` is the same rule in Rust, and the two have to
+ * agree or the desktop and the browser would ingest different files.
+ */
+export function isConflictCopy(name) {
+  const stem = String(name).replace(/\.[^.]*$/, '');
+  const at = stem.lastIndexOf('-');
+  if (at < 0) return false;
+  const tail = stem.slice(at + 1);
+  if (!tail) return false;
+  if (/^\d{1,3}$/.test(tail)) return true;
+  return tail.length >= 8 && /^[A-Z0-9]+$/.test(tail) && /\d/.test(tail);
+}
+
+/** Read an intake file as an ArrayBuffer. */
+export async function intakeRead(rel) {
+  if (!folderRef) throw new Error('No folder is connected.');
+  if (onDesktop()) return desktop.intakeRead(folderRef, rel);
+  const parts = rel.split('/');
+  const name = parts.pop();
+  const dir = await webFolder(parts.join('/'));
+  const file = await (await dir.getFileHandle(name)).getFile();
+  return file.arrayBuffer();
+}
+
+/**
+ * Size and modified time, without reading it — what the watcher polls.
+ *
+ * On a synced folder the modified time is when OneDrive *delivered* the file,
+ * not when somebody edited it. A snapshot therefore records this and its own
+ * observation time as two separate facts, because for evidence the difference
+ * between "changed at" and "seen at" matters.
+ */
+export async function intakeStat(rel) {
+  if (!folderRef) throw new Error('No folder is connected.');
+  if (onDesktop()) return desktop.intakeStat(folderRef, rel);
+  const parts = rel.split('/');
+  const name = parts.pop();
+  const dir = await webFolder(parts.join('/'));
+  const file = await (await dir.getFileHandle(name)).getFile();
+  return { size: file.size, modified: file.lastModified };
+}
+
+/** Write bytes into an intake folder, creating it if needed. */
+export async function intakeWrite(rel, data) {
+  if (!folderRef) throw new Error('No folder is connected.');
+  if (onDesktop()) return desktop.intakeWrite(folderRef, rel, data);
+  const parts = rel.split('/');
+  const name = parts.pop();
+  const dir = await webFolder(parts.join('/'), { create: true });
+  const handle = await dir.getFileHandle(name, { create: true });
+  const writable = await handle.createWritable();
+  await writable.write(data);
+  await writable.close();
+  const file = await handle.getFile();
+  return { size: file.size, modified: file.lastModified };
+}
+
+/**
+ * File something out of the inbox.
+ *
+ * Copy, verify, then delete — never a bare rename. An interruption then leaves
+ * the file in the inbox to be re-filed, which is a duplicate rather than a
+ * loss. Idempotent: a destination already holding identical bytes just
+ * consumes the source, so re-running an ingest is always safe.
+ */
+export async function intakeMove(from, to) {
+  if (!folderRef) throw new Error('No folder is connected.');
+  if (onDesktop()) return desktop.intakeMove(folderRef, from, to);
+
+  const bytes = await intakeRead(from);
+  const stamp = await intakeWrite(to, bytes);
+  const parts = from.split('/');
+  const name = parts.pop();
+  const dir = await webFolder(parts.join('/'));
+  await dir.removeEntry(name);
+  return stamp;
+}
+
+/** SHA-256 of an intake file, for deduping snapshots. */
+export async function intakeHash(rel) {
+  if (!folderRef) throw new Error('No folder is connected.');
+  if (onDesktop()) return desktop.intakeHash(folderRef, rel);
+  const bytes = await intakeRead(rel);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 export async function putBlob(id, file) {
   if (!folderRef) throw new Error('No folder is connected.');
   return ioPutBlob(folderRef, id, file);
