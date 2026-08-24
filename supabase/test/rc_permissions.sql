@@ -512,5 +512,181 @@ select refuses(:'dave',
          :'p_dave', '2026-09-09', 'Next week'),
   'a member writing their own plan');
 
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice E'\nAccounts, invitations and roles'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+-- Sign-up goes through GoTrue rather than PostgREST, so the interface has no
+-- say in it: anybody holding the public key can POST to /auth/v1/signup. These
+-- checks insert into `auth.users` directly, which is the closest thing to that
+-- request, and confirm the trigger is what refuses it.
+--
+-- Both registers exist in this database — the timeline's `invitations` and the
+-- calendar's `rc_invitations` — because a calendar deployment applies both
+-- files. That is precisely the case `rc_enforce_invitation()` was written for,
+-- and the checks below are what prove one gate serves both.
+
+select id as p_bob  from public.rc_people where name = 'Deputy' \gset
+select id as p_erin from public.rc_people where name = 'Erin'   \gset
+
+-- ── Only administrators invite ────────────────────────────────────────────
+select act_as(:'carol');
+select refuses(:'carol',
+  format('select public.rc_invite(%L)', 'friend@example.com'),
+  'a member inviting somebody');
+select assert((select count(*) from public.rc_list_invitations()) = 0,
+  'a member reads an empty invitation list rather than everybody''s address');
+select refuses(:'carol',
+  format('select public.rc_revoke_invitation(%L)', 'friend@example.com'),
+  'a member revoking an invitation');
+select refuses(:'carol',
+  format('select public.rc_link_account(%L, %L)', :'p_dan', 'carol@example.com'),
+  'a member attaching an account to a roster row');
+select refuses(:'carol',
+  format('select public.rc_set_role(%L, %L)', :'p_carol', 'admin'),
+  'a member promoting themselves');
+-- And not around the function either: the role lives on a table with a policy.
+select refuses(:'carol',
+  format('update public.rc_people set role = ''admin'' where id = %L', :'p_carol'),
+  'a member writing the role straight onto the row');
+
+-- ── Inviting ──────────────────────────────────────────────────────────────
+select act_as(:'alice');
+select public.rc_invite('newtech@example.com', 'viewer', :'p_dan', 'Field technician');
+select assert((select count(*) from public.rc_list_invitations()) = 1,
+  'an administrator can invite');
+select refuses(:'alice',
+  format('select public.rc_invite(%L)', 'not-an-email'),
+  'inviting something that is not an email address');
+select refuses(:'alice',
+  format('select public.rc_invite(%L)', 'carol@example.com'),
+  'inviting somebody who already has an account');
+select refuses(:'alice',
+  format('select public.rc_invite(%L, %L)', 'spare@example.com', 'superuser'),
+  'inviting somebody to a role that does not exist');
+
+-- ── The invited can join, and land where they were invited to ─────────────
+-- This is the whole point of carrying the role and the person on the
+-- invitation: somebody joins and is on the team, with the right permissions,
+-- without an administrator opening the SQL editor.
+reset role;
+insert into auth.users (email) values ('newtech@example.com');
+select id as u_newtech from auth.users where email = 'newtech@example.com' \gset
+
+select assert((select user_id from public.rc_people where id = :'p_dan') = :'u_newtech',
+  'an invited account attaches to the roster row it was invited for');
+select assert((select role from public.rc_people where id = :'p_dan') = 'viewer',
+  'with the role the invitation named');
+select assert((select email from public.rc_people where id = :'p_dan') = 'newtech@example.com',
+  'and the address it was sent to');
+select assert(
+  (select accepted_at is not null from public.rc_invitations where email = 'newtech@example.com'),
+  'and the invitation is marked used');
+select assert((select count(*) from public.rc_list_invitations()) = 0,
+  'so it leaves the pending list');
+
+-- An invitation that names nobody still puts them on the team. Somebody who
+-- can sign in but is on nobody's roster sees an explanation and nothing else,
+-- which is a worse first day than simply being on it.
+set role authenticated;
+select act_as(:'alice');
+select public.rc_invite('graduate@example.com', 'member');
+reset role;
+insert into auth.users (email) values ('graduate@example.com');
+select assert(
+  exists (select 1 from public.rc_people
+           where email = 'graduate@example.com' and role = 'member' and user_id is not null),
+  'an invitation naming no roster row creates one');
+
+-- ── The uninvited are refused, whatever they know ─────────────────────────
+select refuses(:'alice',
+  format('insert into auth.users (email) values (%L)', 'stranger2@example.com'),
+  'signing up for the calendar without an invitation');
+select assert(not exists (select 1 from auth.users where email = 'stranger2@example.com'),
+  'and no account is left behind');
+
+-- A used invitation is not a reusable key.
+delete from auth.users where email = 'graduate@example.com';
+select refuses(:'alice',
+  format('insert into auth.users (email) values (%L)', 'graduate@example.com'),
+  'reusing an invitation that has already been accepted');
+
+-- Nor is a lapsed one.
+set role authenticated;
+select act_as(:'alice');
+select public.rc_invite('late2@example.com');
+reset role;
+update public.rc_invitations set expires_at = now() - interval '1 day'
+ where email = 'late2@example.com';
+select refuses(:'alice',
+  format('insert into auth.users (email) values (%L)', 'late2@example.com'),
+  'accepting a calendar invitation that has expired');
+
+-- Re-inviting reopens it, which is what an administrator will actually do when
+-- somebody says the link stopped working.
+set role authenticated;
+select act_as(:'alice');
+select public.rc_invite('late2@example.com', 'viewer');
+select assert(
+  (select count(*) from public.rc_list_invitations() where pending_email = 'late2@example.com') = 1,
+  'and re-inviting them reopens it');
+reset role;
+insert into auth.users (email) values ('late2@example.com');
+select assert(exists (select 1 from public.rc_people where email = 'late2@example.com'),
+  'so the second attempt goes through');
+
+-- ── Revoking ──────────────────────────────────────────────────────────────
+set role authenticated;
+select act_as(:'alice');
+select public.rc_invite('changed-my-mind2@example.com');
+select public.rc_revoke_invitation('changed-my-mind2@example.com');
+reset role;
+select refuses(:'alice',
+  format('insert into auth.users (email) values (%L)', 'changed-my-mind2@example.com'),
+  'signing up after the calendar invitation was revoked');
+
+-- ── Linking an account that already exists ────────────────────────────────
+-- Somebody who signed up before their roster row did. Without this the only
+-- way to attach the two is the SQL editor, every time somebody joins.
+update public.rc_people set user_id = null where id = :'p_dan';
+set role authenticated;
+select act_as(:'alice');
+select refuses(:'alice',
+  format('select public.rc_link_account(%L, %L)', :'p_erin', 'nobody@example.com'),
+  'linking an address that has no account');
+select refuses(:'alice',
+  format('select public.rc_link_account(%L, %L)', :'p_erin', 'carol@example.com'),
+  'linking an account that already belongs to somebody else');
+select refuses(:'alice',
+  format('select public.rc_link_account(%L, %L)', gen_random_uuid(), 'newtech@example.com'),
+  'linking an account to nobody');
+select assert(public.rc_link_account(:'p_dan', 'NewTech@Example.com ') = :'u_newtech',
+  'an administrator can attach an existing account to a roster row');
+select assert((select user_id from public.rc_people where id = :'p_dan') = :'u_newtech',
+  'and the link is on the row');
+
+-- ── Changing a role ───────────────────────────────────────────────────────
+select public.rc_set_role(:'p_dave', 'viewer');
+select assert((select role from public.rc_people where id = :'p_dave') = 'viewer',
+  'an administrator can change a role');
+select refuses(:'alice',
+  format('select public.rc_set_role(%L, %L)', :'p_dave', 'superuser'),
+  'setting a role that does not exist');
+select refuses(:'alice',
+  format('select public.rc_set_role(%L, %L)', gen_random_uuid(), 'member'),
+  'changing the role of nobody');
+
+-- The guard that matters. A refused UPDATE matches nothing and reports
+-- success, so an administrator who demoted the last administrator by accident
+-- would be told it worked — and nobody could put it back.
+select public.rc_set_role(:'p_bob', 'member');
+select refuses(:'alice',
+  format('select public.rc_set_role(%L, %L)', :'p_alice', 'member'),
+  'demoting the only administrator left');
+select assert((select role from public.rc_people where id = :'p_alice') = 'admin',
+  'so there is still somebody who can administer it');
+select public.rc_set_role(:'p_bob', 'admin');
+select act_as(:'bob');
+select assert(public.rc_is_admin(), 'and a promoted person is an administrator again');
+
 reset role;
 do $$ begin raise notice ''; raise notice 'All resource calendar checks passed.'; end $$;

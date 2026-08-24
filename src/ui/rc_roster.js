@@ -21,12 +21,35 @@ import {
 } from './components.js';
 import { notifyChanged, byId, dayLabel, todayISO, formModal } from './rc_util.js';
 
-const SECTIONS = ['people', 'locations', 'categories', 'leave'];
+const SECTIONS = ['people', 'locations', 'categories', 'leave', 'accounts'];
 let section = 'people';
 
+/**
+ * The three roles, in one place, worded as the consequence rather than the
+ * name. Somebody choosing between them is deciding what a colleague can do,
+ * not picking a label, and "viewer" on its own does not say that a viewer
+ * cannot even record their own day.
+ */
+const ROLES = [
+  { value: 'viewer', label: 'Viewer — reads the schedule, writes nothing' },
+  { value: 'member', label: 'Member — records their own daily outcomes' },
+  { value: 'admin', label: 'Administrator — plans, and sees the KPIs' },
+];
+
+// Only the administrator badge is coloured. A member and a viewer are both
+// ordinary states, and the word is the information — tinting one of them would
+// read as a warning about somebody who is simply on the team.
+const ROLE_TONE = { admin: 'info', member: 'neutral', viewer: 'neutral' };
+
 export async function render(root) {
+  // Accounts is administrators-only in the database — `rc_list_invitations()`
+  // returns nothing to anybody else — so a viewer is offered a tab that opens
+  // onto a wall. It comes out of the row rather than explaining itself.
+  const visible = rc.isAdmin() ? SECTIONS : SECTIONS.filter((id) => id !== 'accounts');
+  if (!visible.includes(section)) section = visible[0];
+
   const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
-  for (const id of SECTIONS) {
+  for (const id of visible) {
     nav.appendChild(el('button', {
       class: 'rc-tab',
       type: 'button',
@@ -47,6 +70,7 @@ export async function render(root) {
   if (section === 'people') await renderPeople(host);
   else if (section === 'locations') await renderLocations(host);
   else if (section === 'categories') await renderCategories(host);
+  else if (section === 'accounts') await renderAccounts(host);
   else await renderLeave(host);
 }
 
@@ -73,9 +97,7 @@ async function renderPeople(host) {
     ].filter(Boolean)),
     el('td', { text: p.title || '—' }),
     el('td', { text: p.subsystem || '—' }),
-    el('td', {}, [
-      p.role === 'admin' ? badge('Admin', 'info') : badge('Member', 'muted'),
-    ]),
+    el('td', {}, [roleBadge(p.role)]),
     // A four-day contract is a fact the scheduler needs, and showing it here is
     // what stops somebody being planned onto a Friday they never work.
     el('td', { class: 'rc-num', text: (p.working_days || []).length + '/wk' }),
@@ -110,13 +132,7 @@ function editPerson(person) {
   const email = textInput({ value: person?.email || '', placeholder: 'you@example.com', type: 'email' });
   const title = textInput({ value: person?.title || '', placeholder: 'Test Engineer' });
   const subsystem = textInput({ value: person?.subsystem || '', placeholder: 'ATS / IXL / SCADA' });
-  const role = selectInput({
-    value: person?.role || 'member',
-    options: [
-      { value: 'member', label: 'Member — records their own outcomes' },
-      { value: 'admin', label: 'Administrator — plans, and sees the KPIs' },
-    ],
-  });
+  const role = selectInput({ value: person?.role || 'member', options: ROLES });
 
   // Which days they work at all. Scheduling somebody onto a day they do not
   // work is the same class of mistake as scheduling them while on leave, and
@@ -138,7 +154,8 @@ function editPerson(person) {
       field('Email', email, 'Only needed if they will sign in. Scheduling somebody never requires an account.'),
       field('Title', title),
       field('Subsystem', subsystem),
-      field('Role', role),
+      field('Role', role, 'What they may do once they have an account. It changes nothing '
+        + 'until one exists — scheduling somebody never requires a login.'),
       field('Working days', daysWrap),
     ]),
     confirmLabel: person ? 'Save' : 'Add',
@@ -149,12 +166,20 @@ function editPerson(person) {
         email: email.value.trim() || null,
         title: title.value.trim() || null,
         subsystem: subsystem.value.trim() || null,
-        role: role.value,
         working_days: working,
       };
       if (!patch.name) throw new Error('A name is needed.');
-      if (person) await rc.updatePerson(person.id, patch);
-      else await rc.addPerson(patch);
+      if (person) {
+        await rc.updatePerson(person.id, patch);
+        // The role goes through `rc_set_role()` rather than in the patch, so
+        // the last-administrator guard applies. A plain UPDATE that a policy
+        // refuses matches nothing and reports success — the demotion that
+        // leaves nobody able to administer anything is exactly the one that
+        // must not be reported as having worked.
+        if (role.value !== person.role) await changeRole(person, role.value);
+      } else {
+        await rc.addPerson({ ...patch, role: role.value });
+      }
       notifyChanged('people');
       toast({ message: person ? `${patch.name} updated.` : `${patch.name} added.` });
     },
@@ -378,6 +403,217 @@ function bookLeave(people, kinds) {
       toast({ message: 'Leave booked.' });
     },
   });
+}
+
+/* ── Accounts ──────────────────────────────────────────────────────────── */
+
+/**
+ * Who may sign in, and what they may do once they have.
+ *
+ * The whole point of this section is that adding somebody to the team never
+ * needs the SQL editor. An administrator invites an address, the person signs
+ * up, and the trigger attaches the new account to the roster row the
+ * invitation named with the role it carried — so by the time they first open
+ * the calendar they are already on the team with the right permissions.
+ *
+ * Supabase Auth still holds the password, and that is deliberate rather than a
+ * gap: `auth.uid()` is what every policy in the schema keys on, so the
+ * permission model *is* the authentication. What is managed from here is the
+ * part that is genuinely ours — who is allowed an account at all, which person
+ * it belongs to, and what that person may do.
+ */
+async function renderAccounts(host) {
+  const [people, invitations] = await Promise.all([
+    rc.listPeople({ includeInactive: true }),
+    rc.listInvitations(),
+  ]);
+
+  host.appendChild(sectionHead('Accounts', {
+    label: 'Invite somebody',
+    onClick: () => invitePerson(people),
+  }));
+
+  const withAccount = people.filter((p) => p.user_id);
+  const without = people.filter((p) => !p.user_id && p.active);
+
+  host.appendChild(table(
+    ['Person', 'Signs in as', 'Role', ''],
+    people.filter((p) => p.active || p.user_id).map((p) => el('tr', {
+      class: p.active ? '' : 'rc-inactive',
+    }, [
+      el('td', { text: p.name }),
+      el('td', {}, p.user_id
+        ? [el('span', { text: p.email || 'account linked' })]
+        : [el('span', { class: 'rc-hint', text: 'no account — scheduled only' })]),
+      el('td', {}, [
+        // The role is live rather than behind a dialog: this is the table
+        // somebody opens *because* they want to change one.
+        selectInput({
+          value: p.role,
+          options: ROLES,
+          mini: true,
+          onChange: async (value) => {
+            try {
+              await changeRole(p, value);
+              notifyChanged('people');
+              toast({ message: `${p.name} is now ${roleWord(value)}.` });
+            } catch (err) {
+              toast({ message: err.message, tone: 'bad' });
+              notifyChanged('people');
+            }
+          },
+        }),
+      ]),
+      el('td', {}, p.user_id ? [] : [
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: 'Link account',
+          title: 'For somebody who already signed up before their team record existed.',
+          onClick: () => linkAccount(p),
+        }),
+      ]),
+    ]))
+  ));
+
+  host.appendChild(el('p', {
+    class: 'rc-hint',
+    text: `${withAccount.length} of ${withAccount.length + without.length} people can sign in. `
+      + 'The rest are scheduled without an account, which is the normal case for the '
+      + 'field team — being on the roster must never require a login.',
+  }));
+
+  /* ── Pending ─────────────────────────────────────────────────────────── */
+
+  host.appendChild(el('div', { style: 'height:24px' }));
+  host.appendChild(sectionHead('Pending invitations', null));
+
+  if (!invitations.length) {
+    host.appendChild(el('p', { class: 'rc-hint', text: 'Nobody is waiting to join.' }));
+  } else {
+    const peopleById = byId(people);
+    host.appendChild(table(
+      ['Address', 'Role', 'For', 'Sent', 'Expires', ''],
+      invitations.map((inv) => el('tr', {}, [
+        el('td', { text: inv.pending_email }),
+        el('td', {}, [roleBadge(inv.pending_role)]),
+        el('td', {
+          text: peopleById.get(inv.pending_person)?.name || 'a new team record',
+        }),
+        el('td', { text: dayLabel(inv.pending_created.slice(0, 10)) }),
+        el('td', {}, [
+          inv.pending_expired
+            ? badge('Expired', 'bad')
+            : el('span', { text: dayLabel(inv.pending_expires.slice(0, 10)) }),
+        ]),
+        el('td', {}, [
+          el('button', {
+            class: 'cx-btn mini ghost',
+            text: inv.pending_expired ? 'Send again' : 'Revoke',
+            onClick: async () => {
+              if (inv.pending_expired) {
+                await rc.invite(inv.pending_email, inv.pending_role, inv.pending_person, inv.pending_note);
+                toast({ message: `${inv.pending_email} invited again.` });
+              } else {
+                const ok = await confirmDialog({
+                  title: `Revoke the invitation to ${inv.pending_email}?`,
+                  message: 'They will not be able to create an account until they are invited again.',
+                  confirmLabel: 'Revoke',
+                  danger: true,
+                });
+                if (!ok) return;
+                await rc.revokeInvitation(inv.pending_email);
+                toast({ message: 'Invitation revoked.' });
+              }
+              notifyChanged('invitations');
+            },
+          }),
+        ]),
+      ]))
+    ));
+  }
+
+  host.appendChild(el('p', {
+    class: 'rc-hint',
+    text: 'Sign-up is closed: an address that was never invited is refused by the '
+      + 'database, not by hiding a form. Invitations lapse after thirty days, and '
+      + 'inviting somebody again reopens the one that lapsed.',
+  }));
+}
+
+function invitePerson(people) {
+  const email = textInput({ placeholder: 'them@example.com', type: 'email' });
+  const role = selectInput({ value: 'viewer', options: ROLES });
+  const free = people.filter((p) => !p.user_id && p.active);
+  const person = selectInput({
+    value: '',
+    options: [
+      { value: '', label: 'Create a new team record for them' },
+      ...free.map((p) => ({ value: p.id, label: p.name })),
+    ],
+  });
+  const note = textInput({ placeholder: 'Optional — what they do' });
+
+  formModal({
+    title: 'Invite somebody',
+    body: el('div', { class: 'cx-form' }, [
+      field('Email', email, 'The address they will sign in with. Nothing is sent from here — '
+        + 'send the invitation from Supabase, or just tell them to sign up.'),
+      field('Role', role),
+      field('Team record', person, 'Attach the account to somebody already on the roster, '
+        + 'so their history and their login are the same person.'),
+      field('Note', note),
+    ]),
+    confirmLabel: 'Invite',
+    onConfirm: async () => {
+      const address = email.value.trim();
+      if (!address) throw new Error('An email address is needed.');
+      await rc.invite(address, role.value, person.value || null, note.value.trim() || null);
+      notifyChanged('invitations');
+      toast({ message: `${address} may now create an account.` });
+    },
+  });
+}
+
+function linkAccount(person) {
+  const email = textInput({ value: person.email || '', placeholder: 'them@example.com', type: 'email' });
+  formModal({
+    title: `Link an account to ${person.name}`,
+    body: el('div', { class: 'cx-form' }, [
+      field('Email', email, 'The address of an account that already exists. If they have '
+        + 'not signed up yet, invite them instead.'),
+    ]),
+    confirmLabel: 'Link',
+    onConfirm: async () => {
+      const address = email.value.trim();
+      if (!address) throw new Error('An email address is needed.');
+      await rc.linkAccount(person.id, address);
+      notifyChanged('people');
+      toast({ message: `${address} now signs in as ${person.name}.` });
+    },
+  });
+}
+
+/**
+ * Change somebody's role, through the function rather than the table.
+ *
+ * `rc_set_role()` refuses the demotion that would leave nobody able to
+ * administer anything — and refuses it by raising, because a plain UPDATE that
+ * a policy excludes matches no rows and reports success. Changing your own
+ * role then re-reads it, so the interface stops offering what the database has
+ * already started refusing.
+ */
+async function changeRole(person, role) {
+  await rc.setRole(person.id, role);
+  if (person.id === rc.me()?.id) await rc.refreshMe();
+}
+
+function roleWord(role) {
+  return role === 'admin' ? 'an administrator' : `a ${role}`;
+}
+
+function roleBadge(role) {
+  const label = role ? role[0].toUpperCase() + role.slice(1) : '—';
+  return badge(label === 'Admin' ? 'Administrator' : label, ROLE_TONE[role] || 'muted');
 }
 
 /* ── Shared bits ───────────────────────────────────────────────────────── */

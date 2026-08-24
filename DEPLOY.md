@@ -454,8 +454,9 @@ Allow policy, and every installed copy has quietly stopped updating.
 
 ## 5. Accounts, and what each role sees
 
-Invite each person from Supabase → Authentication → Users → Invite. Then link
-that account to their roster row, and set the role.
+Everything here is done from **Organisation → Accounts**, inside the
+application. The SQL editor is needed once, to create the first administrator,
+and never again.
 
 | Role | Sees | Writes |
 |---|---|---|
@@ -463,16 +464,61 @@ that account to their roster row, and set the role.
 | `member` | The schedule and what happened | Their own daily outcomes |
 | `viewer` | The schedule and what happened | Nothing |
 
-For a read-only team, `viewer`. Promoting somebody later is one statement — no
-migration, no redeploy:
+For a read-only team, `viewer`. Promoting somebody later is a dropdown on their
+row — no migration, no redeploy. That lets them record **their own outcomes**.
+It does not let them set next week's tasks: the plan is admin-insert-only,
+because a plan that changed the evening before is delay evidence and the
+supersede chain assumes one author.
+
+### The first administrator
+
+Sign-up is closed: a trigger on `auth.users` refuses any address nobody
+invited. That leaves the usual chicken and egg, and the same answer as the
+timeline's — **the first account in an empty project is let through**, and the
+roster row it lands on is the one to make an administrator:
 
 ```sql
-update rc_people set role = 'member' where name = 'Dan';
+-- after signing up once, in the SQL editor
+update public.rc_people set role = 'admin' where email = 'you@example.com';
 ```
 
-That lets them record **their own outcomes**. It does not let them set next
-week's tasks: the plan is admin-insert-only, because a plan that changed the
-evening before is delay evidence and the supersede chain assumes one author.
+Supabase's own **Authentication → Sign In / Providers → Allow new users to sign
+up** must stay **on**. Turning it off rejects invited people too, before the
+trigger ever runs.
+
+### Adding everybody else
+
+**Organisation → Accounts → Invite somebody.** Give the address, the role, and
+optionally the roster row it belongs to. Nothing is emailed from here — send
+them the sign-up link yourself, or invite the same address from Supabase →
+Authentication → Users → Invite if you would rather it came from there. Either
+way the invitation row is what decides whether the sign-up is allowed, so both
+routes end in the same place.
+
+When they sign up, the account attaches to the roster row the invitation named,
+with the role it carried. They are on the team before they first open the page.
+
+Three things worth knowing:
+
+- **An invitation lapses after thirty days.** An expired one shows as expired
+  with a **Send again** button, which reopens it.
+- **Somebody who signed up before their roster row existed** is joined up with
+  **Link account** on their row.
+- **The last administrator cannot be demoted.** The role dropdown refuses it
+  out loud, because a refused UPDATE matches nothing and reports success — and
+  a demotion that left nobody able to administer anything would be a trip back
+  to the SQL editor.
+
+### If you also run the timeline in this project
+
+`schema.sql` and `rc_schema.sql` each install a sign-up gate, and they claim
+the same trigger. Applying them **in the order above** leaves the calendar's
+version installed, which accepts an invitation from *either* register — so
+timeline invitations and calendar invitations both work.
+
+Re-running `schema.sql` afterwards puts the timeline-only gate back, and every
+address invited from Organisation → Accounts would then be refused. If you ever
+re-run it, re-run `rc_schema.sql` after it.
 
 ---
 

@@ -560,6 +560,340 @@ create policy rc_actuals_insert on public.rc_actuals
   with check (public.rc_can_act_for(person_id) and created_by = auth.uid());
 
 -- ══════════════════════════════════════════════════════════════════════════
+-- Accounts
+--
+-- Sign-up is closed: an account exists only because an administrator invited
+-- that address, and a trigger on `auth.users` refuses anything else. That is
+-- the same rule the timeline uses, ported rather than reinvented, including
+-- the two traps it already paid for.
+--
+-- **The gate must be BEFORE and the acceptance AFTER.** `accepted_user_id`
+-- references `auth.users`, and in a BEFORE trigger the row being inserted does
+-- not exist yet, so the foreign key would reject every real sign-up. Splitting
+-- them also means an insert that fails later does not burn the invitation.
+--
+-- **A `returns table` column name shadows a real column inside plpgsql.** A
+-- bare `email` in the body of a function declared `returns table (email text)`
+-- resolves to the OUT parameter, so `on conflict (email)` fails at runtime and
+-- not at creation. Every output below is prefixed for that reason.
+--
+-- Supabase Auth still holds the passwords, and that is deliberate: `auth.uid()`
+-- is what every policy in this file keys on, so the permission model *is* the
+-- authentication. What is built here is who may have an account and what they
+-- may do with it — never the credential itself.
+-- ══════════════════════════════════════════════════════════════════════════
+
+create table if not exists public.rc_invitations (
+  email            text primary key,
+  -- The role the person lands on. A read-only team is the common case, so the
+  -- default is the least they could usefully be given.
+  role_hint        text not null default 'viewer'
+                     check (role_hint in ('admin', 'member', 'viewer')),
+  -- Which roster row to attach the account to once it exists. Optional: an
+  -- invitation can precede the person, and the link can be made afterwards.
+  person_id        uuid references public.rc_people(id) on delete set null,
+  note             text,
+  invited_by       uuid references auth.users(id) on delete set null,
+  created_at       timestamptz not null default now(),
+  expires_at       timestamptz not null default now() + interval '30 days',
+  accepted_at      timestamptz,
+  accepted_user_id uuid references auth.users(id) on delete set null
+);
+
+create index if not exists rc_invitations_pending_idx
+  on public.rc_invitations (created_at desc) where accepted_at is null;
+
+-- ── The gate ──────────────────────────────────────────────────────────────
+
+/*
+ * Refuse a sign-up that nobody invited.
+ *
+ * This deliberately accepts an invitation from *either* register. A calendar
+ * deployment applies `schema.sql` for its auth plumbing and then this file, so
+ * both tables exist in one project and both would otherwise claim the same
+ * trigger — with the timeline's version refusing everybody the calendar
+ * invited. `to_regclass` is what lets one function serve a project that has
+ * only one of them.
+ *
+ * Re-running `schema.sql` after this file restores the timeline-only trigger
+ * and would lock calendar invitees out. Apply this one second, as DEPLOY.md
+ * says, and re-apply it if the other is ever re-run.
+ */
+create or replace function public.rc_enforce_invitation()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  invited boolean := false;
+  bootstrap boolean;
+begin
+  -- Somebody has to be able to get in before there is anyone to invite them.
+  select not exists (select 1 from public.rc_people where user_id is not null)
+    into bootstrap;
+  if bootstrap and to_regclass('public.profiles') is null then
+    return new;
+  end if;
+  if bootstrap and not exists (select 1 from public.profiles) then
+    return new;
+  end if;
+
+  select exists (
+    select 1 from public.rc_invitations
+     where lower(email) = lower(new.email)
+       and accepted_at is null
+       and expires_at > now()
+  ) into invited;
+
+  if not invited and to_regclass('public.invitations') is not null then
+    select exists (
+      select 1 from public.invitations
+       where lower(email) = lower(new.email)
+         and accepted_at is null
+         and expires_at > now()
+    ) into invited;
+  end if;
+
+  if not invited then
+    raise exception
+      'This application is invitation only. Ask an administrator to invite %.', new.email
+      using errcode = '42501';
+  end if;
+
+  return new;
+end;
+$$;
+
+/*
+ * Mark the invitation used, and attach the account to its roster row.
+ *
+ * AFTER insert, so `accepted_user_id` has something to point at. This is also
+ * where an invited person becomes a member of the team without anybody opening
+ * the SQL editor: the invitation carried the role and the person, and this
+ * applies both the moment the account exists.
+ */
+create or replace function public.rc_accept_invitation()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  pending public.rc_invitations%rowtype;
+begin
+  select * into pending
+  from public.rc_invitations
+  where lower(email) = lower(new.email) and accepted_at is null;
+
+  if pending.email is null then
+    return new;
+  end if;
+
+  update public.rc_invitations
+     set accepted_at = now(), accepted_user_id = new.id
+   where email = pending.email;
+
+  if pending.person_id is not null then
+    update public.rc_people
+       set user_id = new.id,
+           role    = pending.role_hint,
+           email   = coalesce(email, new.email)
+     where id = pending.person_id;
+  else
+    -- No roster row was named, so make one. Somebody who can sign in but is on
+    -- nobody's team sees an explanation and nothing else, which is a worse
+    -- first experience than simply being on it.
+    insert into public.rc_people (user_id, name, email, role)
+    values (new.id, split_part(new.email, '@', 1), new.email, pending.role_hint);
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_invited on auth.users;
+create trigger on_auth_user_invited
+  before insert on auth.users
+  for each row execute function public.rc_enforce_invitation();
+
+drop trigger if exists rc_on_auth_user_accepted on auth.users;
+create trigger rc_on_auth_user_accepted
+  after insert on auth.users
+  for each row execute function public.rc_accept_invitation();
+
+-- ── Managing them ─────────────────────────────────────────────────────────
+
+create or replace function public.rc_invite(
+  p_email  text,
+  p_role   text default 'viewer',
+  p_person uuid default null,
+  p_note   text default null
+)
+-- Prefixed, for the shadowing reason in the header above.
+returns table (invited_email text, invitation_expires timestamptz)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  clean text := lower(trim(p_email));
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator can invite people' using errcode = '42501';
+  end if;
+  if clean !~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$' then
+    raise exception '% does not look like an email address', p_email using errcode = '22023';
+  end if;
+  if exists (select 1 from auth.users u where lower(u.email) = clean) then
+    raise exception '% already has an account', clean using errcode = '22023';
+  end if;
+  if coalesce(p_role, 'viewer') not in ('admin', 'member', 'viewer') then
+    raise exception '% is not a role', p_role using errcode = '22023';
+  end if;
+
+  insert into public.rc_invitations (email, role_hint, person_id, note, invited_by)
+  values (clean, coalesce(p_role, 'viewer'), p_person, p_note, auth.uid())
+  on conflict (email) do update
+    set role_hint  = excluded.role_hint,
+        person_id  = excluded.person_id,
+        note       = excluded.note,
+        invited_by = excluded.invited_by,
+        created_at = now(),
+        expires_at = now() + interval '30 days',
+        -- Re-inviting somebody whose invitation lapsed reopens it.
+        accepted_at = null,
+        accepted_user_id = null;
+
+  return query
+    select i.email, i.expires_at from public.rc_invitations i where i.email = clean;
+end;
+$$;
+
+create or replace function public.rc_revoke_invitation(p_email text)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator can revoke an invitation' using errcode = '42501';
+  end if;
+  delete from public.rc_invitations
+   where lower(email) = lower(trim(p_email)) and accepted_at is null;
+end;
+$$;
+
+create or replace function public.rc_list_invitations()
+returns table (
+  pending_email   text,
+  pending_role    text,
+  pending_person  uuid,
+  pending_note    text,
+  pending_created timestamptz,
+  pending_expires timestamptz,
+  pending_expired boolean
+)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select i.email, i.role_hint, i.person_id, i.note,
+         i.created_at, i.expires_at, i.expires_at <= now()
+    from public.rc_invitations i
+   where public.rc_is_admin() and i.accepted_at is null
+   order by i.created_at desc;
+$$;
+
+/*
+ * Attach an existing account to a roster row.
+ *
+ * For somebody who signed up before their person record existed, or whose
+ * record was created separately. Without it this is the one thing that still
+ * needs the SQL editor every time somebody joins.
+ */
+create or replace function public.rc_link_account(p_person uuid, p_email text)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  target uuid;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator can link an account' using errcode = '42501';
+  end if;
+
+  select u.id into target from auth.users u where lower(u.email) = lower(trim(p_email));
+  if target is null then
+    raise exception 'no account exists for % — invite them first', p_email
+      using errcode = 'P0002';
+  end if;
+  if exists (select 1 from public.rc_people where user_id = target and id <> p_person) then
+    raise exception '% is already linked to somebody else on the team', p_email
+      using errcode = '23505';
+  end if;
+
+  update public.rc_people set user_id = target, email = coalesce(email, lower(trim(p_email)))
+   where id = p_person;
+  if not found then
+    raise exception 'no such person' using errcode = 'P0002';
+  end if;
+
+  return target;
+end;
+$$;
+
+/*
+ * Change somebody's role.
+ *
+ * A function rather than a plain UPDATE for the reason the whole schema is
+ * built on: a refused UPDATE matches nothing and reports success, so an
+ * administrator demoting themselves by accident would be told it worked. This
+ * raises instead — and refuses the demotion that would leave nobody able to
+ * administer anything.
+ */
+create or replace function public.rc_set_role(p_person uuid, p_role text)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  was text;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator can change a role' using errcode = '42501';
+  end if;
+  if p_role not in ('admin', 'member', 'viewer') then
+    raise exception '% is not a role', p_role using errcode = '22023';
+  end if;
+
+  select role into was from public.rc_people where id = p_person;
+  if was is null then
+    raise exception 'no such person' using errcode = 'P0002';
+  end if;
+
+  if was = 'admin' and p_role <> 'admin'
+     and (select count(*) from public.rc_people where role = 'admin' and active) <= 1 then
+    raise exception 'that is the only administrator left' using errcode = '23514';
+  end if;
+
+  update public.rc_people set role = p_role where id = p_person;
+end;
+$$;
+
+alter table public.rc_invitations enable row level security;
+
+drop policy if exists rc_invitations_admin on public.rc_invitations;
+create policy rc_invitations_admin on public.rc_invitations
+  for all to authenticated
+  using (public.rc_is_admin()) with check (public.rc_is_admin());
+
+-- ══════════════════════════════════════════════════════════════════════════
 -- Reporting
 --
 -- Every number is derived on the way out. Nothing here is stored, so nothing
@@ -767,6 +1101,11 @@ revoke all on function public.rc_me()                                   from pub
 revoke all on function public.rc_is_admin()                             from public, anon;
 revoke all on function public.rc_can_act_for(uuid)                      from public, anon;
 revoke all on function public.rc_my_role()                               from public, anon;
+revoke all on function public.rc_invite(text, text, uuid, text)         from public, anon;
+revoke all on function public.rc_revoke_invitation(text)                from public, anon;
+revoke all on function public.rc_list_invitations()                     from public, anon;
+revoke all on function public.rc_link_account(uuid, text)               from public, anon;
+revoke all on function public.rc_set_role(uuid, text)                   from public, anon;
 revoke all on function public.rc_resolve_location(text)                 from public, anon;
 revoke all on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) from public, anon;
 revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text) from public, anon;
@@ -775,6 +1114,11 @@ grant execute on function public.rc_me()                                to authe
 grant execute on function public.rc_is_admin()                          to authenticated;
 grant execute on function public.rc_can_act_for(uuid)                   to authenticated;
 grant execute on function public.rc_my_role()                            to authenticated;
+grant execute on function public.rc_invite(text, text, uuid, text)      to authenticated;
+grant execute on function public.rc_revoke_invitation(text)             to authenticated;
+grant execute on function public.rc_list_invitations()                  to authenticated;
+grant execute on function public.rc_link_account(uuid, text)            to authenticated;
+grant execute on function public.rc_set_role(uuid, text)                to authenticated;
 grant execute on function public.rc_resolve_location(text)              to authenticated;
 grant execute on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) to authenticated;
 grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text) to authenticated;
@@ -784,6 +1128,7 @@ declare t text;
 begin
   foreach t in array array['rc_people', 'rc_locations', 'rc_location_alias', 'rc_categories',
                            'rc_parties', 'rc_leave_kinds', 'rc_legend', 'rc_leave',
+                           'rc_invitations',
                            'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
                            'rc_change_events', 'rc_sars', 'rc_sar_links']
   loop

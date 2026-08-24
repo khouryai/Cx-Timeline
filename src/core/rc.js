@@ -476,6 +476,54 @@ export const addSarLinks = (rows) => insert('rc_sar_links', rows);
  */
 export const addAnnotation = (row) => insert('rc_change_annotations', [row]).then((r) => r[0]);
 
+/* ── Accounts ──────────────────────────────────────────────────────────── */
+
+/**
+ * Who may have an account, and what they may do with it.
+ *
+ * Supabase Auth still holds the password — `auth.uid()` is what every policy
+ * in `rc_schema.sql` keys on, so the permission model *is* the authentication
+ * and replacing it would mean rewriting all of it. What is managed from here
+ * is the part that is genuinely ours: who is allowed to create an account at
+ * all, which roster row it lands on, and what role it carries.
+ *
+ * Every one of these is a `security definer` function rather than a table
+ * write, for the reason this whole schema is built on: a refused UPDATE
+ * matches nothing and reports success, so an administrator demoting the last
+ * administrator by accident would be told it worked.
+ */
+export const invite = (email, role = 'viewer', personId = null, note = null) =>
+  rpc('rc_invite', {
+    p_email: email,
+    p_role: role,
+    p_person: personId || null,
+    p_note: note || null,
+  }).then((rows) => (Array.isArray(rows) ? rows[0] : rows));
+
+export const revokeInvitation = (email) => rpc('rc_revoke_invitation', { p_email: email });
+
+export const listInvitations = () => rpc('rc_list_invitations').then((rows) => rows || []);
+
+export const linkAccount = (personId, email) =>
+  rpc('rc_link_account', { p_person: personId, p_email: email });
+
+export const setRole = (personId, role) =>
+  rpc('rc_set_role', { p_person: personId, p_role: role });
+
+/**
+ * Re-read your own team record.
+ *
+ * Changing a role changes what the interface may draw, and an administrator
+ * who demotes themselves must see that immediately rather than at the next
+ * sign-in — otherwise the page keeps offering actions the database has already
+ * started refusing.
+ */
+export async function refreshMe() {
+  await refreshPerson();
+  emit(EV.RC_AUTH_CHANGED, { user, event: 'ROLE_CHANGED' });
+  return person;
+}
+
 /* ── Storage ───────────────────────────────────────────────────────────── */
 
 /**

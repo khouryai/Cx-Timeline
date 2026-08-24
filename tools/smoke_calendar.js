@@ -106,6 +106,7 @@ function fakeSdk() {
     rc_ingest_runs: [],
     rc_rows_without_sar: [],
     rc_sars_without_rows: [],
+    rc_invitations: [],
   };
 
   /* A filter chain thin enough to be obviously right, and no thinner. */
@@ -195,6 +196,54 @@ function fakeSdk() {
             };
             S.rows.rc_actuals.push(row);
             return Promise.resolve({ data: row.id, error: null });
+          }
+          /* The account functions. Every one of them is `security definer` on
+             the real side, so the stub answers as the function does — with a
+             raised error rather than an empty result. A refusal that came back
+             as "no rows" is precisely the shape this project keeps getting
+             bitten by, and a stub that returned it would hide the bug. */
+          if (name === 'rc_invite') {
+            const address = String(args.p_email || '').trim().toLowerCase();
+            if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address)) {
+              return Promise.resolve({ data: null, error: { message: `${args.p_email} does not look like an email address` } });
+            }
+            const row = {
+              pending_email: address,
+              pending_role: args.p_role || 'viewer',
+              pending_person: args.p_person || null,
+              pending_note: args.p_note || null,
+              pending_created: new Date().toISOString(),
+              pending_expires: new Date(Date.now() + 30 * 86400000).toISOString(),
+              pending_expired: false,
+            };
+            S.rows.rc_invitations = S.rows.rc_invitations.filter((i) => i.pending_email !== address);
+            S.rows.rc_invitations.push(row);
+            return Promise.resolve({ data: [row], error: null });
+          }
+          if (name === 'rc_list_invitations') {
+            return Promise.resolve({ data: S.rows.rc_invitations.slice(), error: null });
+          }
+          if (name === 'rc_revoke_invitation') {
+            const address = String(args.p_email || '').trim().toLowerCase();
+            S.rows.rc_invitations = S.rows.rc_invitations.filter((i) => i.pending_email !== address);
+            return Promise.resolve({ data: null, error: null });
+          }
+          if (name === 'rc_link_account') {
+            const person = S.rows.rc_people.find((r) => r.id === args.p_person);
+            if (!person) return Promise.resolve({ data: null, error: { message: 'no such person' } });
+            person.user_id = `user-${String(args.p_email).trim().toLowerCase()}`;
+            person.email = person.email || String(args.p_email).trim().toLowerCase();
+            return Promise.resolve({ data: person.user_id, error: null });
+          }
+          if (name === 'rc_set_role') {
+            const person = S.rows.rc_people.find((r) => r.id === args.p_person);
+            if (!person) return Promise.resolve({ data: null, error: { message: 'no such person' } });
+            const admins = S.rows.rc_people.filter((r) => r.role === 'admin' && r.active).length;
+            if (person.role === 'admin' && args.p_role !== 'admin' && admins <= 1) {
+              return Promise.resolve({ data: null, error: { message: 'that is the only administrator left' } });
+            }
+            person.role = args.p_role;
+            return Promise.resolve({ data: null, error: null });
           }
           if (name === 'rc_resolve_location') {
             const fold = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -323,6 +372,83 @@ async function main() {
   await page.waitForTimeout(200);
   const locText = await page.locator('#rc-frame').innerText();
   check('locations carry their other spellings', /Traction Power 12/.test(locText));
+
+  /* ── Accounts ─────────────────────────────────────────────────────────── */
+  /* Adding somebody to the team must never need the SQL editor. Everything
+     below is the path an administrator actually walks when somebody joins:
+     invite the address, or attach an account that already exists, and set what
+     they may do. */
+  console.log('\nAccounts');
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Accounts' }).click();
+  await page.waitForSelector('#rc-frame .rc-table');
+
+  const acctText = await page.locator('#rc-frame').innerText();
+  check('who can sign in is stated per person',
+    /no account/i.test(acctText) && /alex@example\.com/.test(acctText));
+  check('and nobody is waiting to join yet', /Nobody is waiting/i.test(acctText));
+
+  // Inviting. Nothing is emailed from here — the invitation is a row that says
+  // this address may create an account, with the role and person it lands on.
+  await page.locator('#rc-frame button', { hasText: 'Invite somebody' }).click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal input[type="email"]').fill('newtech@example.com');
+  await page.locator('.cx-modal select').first().selectOption('member');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Invite' }).click();
+  await page.waitForTimeout(400);
+
+  const invited = await page.evaluate(() =>
+    window.__rc.calls.filter((c) => c.table === 'rc_invite').map((c) => c.payload));
+  check('inviting goes through the function, not a table write',
+    invited.length === 1 && invited[0].p_email === 'newtech@example.com');
+  check('carrying the role they will land on', invited[0] && invited[0].p_role === 'member');
+
+  await page.waitForSelector('#rc-frame .rc-table');
+  const pendingText = await page.locator('#rc-frame').innerText();
+  check('and the invitation appears as pending', /newtech@example\.com/.test(pendingText));
+
+  // Revoking. `confirmDialog` first, because this is somebody being told no.
+  await page.locator('#rc-frame button', { hasText: 'Revoke' }).click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Revoke' }).click();
+  await page.waitForTimeout(400);
+  check('revoking removes it from the pending list',
+    !/newtech@example\.com/.test(await page.locator('#rc-frame').innerText()));
+
+  // Linking an account that already exists — somebody who signed up before
+  // their roster row did. This is the one step that would otherwise need SQL.
+  await page.locator('#rc-frame button', { hasText: 'Link account' }).first().click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal input[type="email"]').fill('dan@example.com');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Link' }).click();
+  await page.waitForTimeout(400);
+  const linked = await page.evaluate(() =>
+    window.__rc.calls.filter((c) => c.table === 'rc_link_account').map((c) => c.payload));
+  check('an existing account can be attached to a roster row',
+    linked.length === 1 && linked[0].p_email === 'dan@example.com');
+
+  // Changing a role, straight from the row.
+  await page.waitForSelector('#rc-frame .rc-table');
+  const roleSelects = page.locator('#rc-frame tbody select');
+  await roleSelects.nth(2).selectOption('viewer');
+  await page.waitForTimeout(400);
+  const roleCalls = await page.evaluate(() =>
+    window.__rc.calls.filter((c) => c.table === 'rc_set_role').map((c) => c.payload));
+  check('a role change goes through rc_set_role', roleCalls.length === 1);
+  check('and it takes',
+    await page.evaluate(() => window.__rc.rows.rc_people.find((p) => p.id === 'p3').role === 'viewer'));
+
+  // The one that has to raise rather than quietly match no rows. Alex is the
+  // only administrator, so demoting them would leave nobody able to put it
+  // back — and a refused UPDATE reports success, which is why this is a
+  // function at all.
+  await roleSelects.nth(0).selectOption('member');
+  await page.waitForTimeout(500);
+  check('the last administrator cannot be demoted',
+    await page.evaluate(() => window.__rc.rows.rc_people.find((p) => p.id === 'p1').role === 'admin'));
+  check('and the refusal is said out loud',
+    /only administrator left/i.test(await page.locator('.cx-toast').last().innerText()));
+  check('the dropdown goes back to what the database actually holds',
+    await page.locator('#rc-frame tbody select').first().inputValue() === 'admin');
 
   /* ── The huddle ───────────────────────────────────────────────────────── */
   console.log('\nThe daily huddle');
@@ -539,6 +665,10 @@ async function main() {
   check('the roster is readable', /Alex/.test(vOrg) && /Dan/.test(vOrg));
   check('and carries no edit controls',
     (await viewer.locator('#rc-frame button', { hasText: 'Add person' }).count()) === 0);
+  // Managing accounts is administrators-only in the database — the invitation
+  // list is a list of everybody's email address — so the section is not there
+  // to be opened at all.
+  check('and no Accounts section', !/Accounts/.test(vOrg));
 
   await viewer.close();
 

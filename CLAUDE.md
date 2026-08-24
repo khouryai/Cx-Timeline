@@ -44,6 +44,14 @@ form is presentation, not the control. Supabase's own "Allow new users to sign
 up" must stay **on** — turning it off rejects invited people too, before the
 trigger runs. The first account ever created bootstraps as administrator.
 
+**There are two gates, and they claim the same trigger.** `rc_schema.sql`
+installs its own `on_auth_user_invited`, because a calendar deployment applies
+both files into one project and the timeline's version would refuse everybody
+the calendar invited. `rc_enforce_invitation()` accepts an invitation from
+*either* register, guarded by `to_regclass` so it works in a project that has
+only one of them. Apply `rc_schema.sql` **second**; re-running `schema.sql`
+afterwards puts the timeline-only gate back and locks calendar invitees out.
+
 Three things about Postgres here that have already caused bugs:
 
 - **A refused UPDATE or DELETE is not an error.** The row is excluded, the
@@ -326,6 +334,18 @@ subscribes. That is what keeps the graph acyclic.
   `CX_SHELL.confirmHealthy()`**: a module that needs a network in front of the
   desktop trial gate would make an unreachable backend look exactly like a
   broken update and get itself rolled back.
+- **Adding somebody to the calendar never needs the SQL editor.** Invitations,
+  linking an account to a roster row and changing a role are all
+  `security definer` functions — `rc_invite`, `rc_revoke_invitation`,
+  `rc_list_invitations`, `rc_link_account`, `rc_set_role` — driven from
+  Organisation → Accounts. They are functions rather than table writes for the
+  reason the whole schema is built on: a refused UPDATE matches nothing and
+  reports success, so `rc_set_role` raises instead, and refuses the demotion
+  that would leave nobody able to administer anything. Supabase Auth still
+  holds the password, and that is deliberate — `auth.uid()` is what every
+  policy keys on, so the permission model *is* the authentication and replacing
+  it would mean rewriting all of it. What is managed in the application is who
+  may have an account and what they may do with it, never the credential.
 - **Plan data must never reach Supabase, and that is enforced rather than
   intended.** It used to be structural — the desktop build has no backend at
   all, so it could not have sent anything — and putting a client back in the
@@ -445,17 +465,19 @@ subscribes. That is what keeps the graph acyclic.
 
 ```bash
 npm run build                        # must succeed — it also lints the module graph
-npm test                             # all four browser suites plus the SQL one, must exit 0
+npm test                             # all five browser suites plus the SQL one, must exit 0
 npm run test:rust                    #  32 checks — the plan, lock and intake rules, in Rust
 
+node tools/test_dist.js              #  21 checks — every deployment shape, and that the
+                                     #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  45 checks — the look-ahead parser, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         #  45 checks — the resource calendar, and the
-                                     #              assertion that plan data never leaves
+node tools/smoke_calendar.js         #  70 checks — the resource calendar, accounts, and
+                                     #              the assertion that plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 140 checks — both permission models
+node tools/test_sql.js               # 197 checks — both permission models
 node tools/smoke.js --shot out.png   # …and eyeball the result
 ```
 
@@ -487,8 +509,12 @@ Rust side is `npm run test:rust`, which needs no webview and no display.
 `smoke_hosted.js` boots it with a configured backend and a stubbed client, so
 the gate, invitations, sharing and read-only mode are covered without a
 network or an account. `test_sql.js` stands up a throwaway PostgreSQL, applies
-the real `schema.sql` against a stub of what Supabase provides, and becomes
-each user in turn; it never touches a real project.
+the real `schema.sql` and `rc_schema.sql` against a stub of what Supabase
+provides, and becomes each user in turn; it never touches a real project. The
+calendar's half of it also *signs people up* — inserting into `auth.users` is
+the closest thing to the request GoTrue would serve — because sign-up never
+goes through PostgREST and so the interface has no say in who gets an
+account.
 
 Two traps worth knowing, both of which have caused real bugs:
 
