@@ -172,6 +172,15 @@ function fakeSdk() {
               mark(todayIdx + 2, 'X.TCE', '00B0F0'),
               mark(todayIdx + 4, 'X', '3399FF'),
             ] },
+            /* Worked, but in the week that has already gone. This is the row
+               that stayed on screen when the flag was worked out once across
+               the whole sheet instead of against the weeks being drawn — a
+               four-week window showing a row with nothing in it. */
+            { row: 12, label: '', cells: [
+              { col: 3, ref: 'C12', value: 'REI Fiber Re-termination — finished', hex: null },
+              mark(1, 'X', 'FFFF00'),
+              mark(2, 'X', 'FFFF00'),
+            ] },
             /* Carried in the workbook for reference, with nothing scheduled:
                the shading is the only paint on it. Most of the sheet looks
                like this, and it is what the calendar hides by default. */
@@ -679,12 +688,21 @@ async function main() {
     check(`${label} narrows the axis to ${days} days`, (await dayHeadCount()) === days,
       `${await dayHeadCount()}`);
   }
+  /* A row is judged against the weeks on screen, not against the workbook.
+     Worked out once across the whole sheet — which is how it was — a row
+     painted in a week that has gone stays on a four-week window with nothing
+     in it. This file has thirty-eight of those. */
+  check('a row worked only in a week that has gone is not drawn',
+    !/finished/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
+
   await page.locator('#rc-frame .rc-tab', { hasText: 'Everything' }).click();
   await page.waitForTimeout(200);
   check('and everything brings the finished weeks back',
     (await dayHeadCount()) === axis.days
       && /X\.PAST/.test(await page.locator('#rc-frame .la-grid tbody').innerText()),
     `${await dayHeadCount()} of ${axis.days}`);
+  check('along with the rows that were worked in them',
+    /finished/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
   await page.locator('#rc-frame .rc-tab', { hasText: '4 weeks' }).click();
   await page.waitForTimeout(200);
 

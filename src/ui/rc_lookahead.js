@@ -380,17 +380,20 @@ async function renderCalendar(host) {
   host.appendChild(body);
   draw();
 
-  const scheduled = view.activities.filter((a) => a.highlighted).length;
+  const inWindow = windowed(view, today);
+  const scheduled = inWindow.activities.filter((a) => a.highlighted).length;
   const headings = view.activities.filter((a) => a.heading).length;
   host.appendChild(el('p', {
     class: 'rc-hint',
-    text: `${scheduled} of ${view.activities.length} activities have something scheduled, across `
-      + `${view.days.length} days in the workbook, from the snapshot taken `
+    text: `${scheduled} of ${view.activities.length} activities have something scheduled in the `
+      + `weeks on screen. The workbook holds `
+      + `${view.days.length} days, from the snapshot taken `
       + `${snapshot.taken_at ? snapshot.taken_at.slice(0, 16).replace('T', ' ') : 'earlier'}`
       + `${headings ? `, under ${headings} section heading(s)` : ''}. `
-      + 'The rest are carried in the workbook for reference with no shift against them, and are '
-      + 'hidden unless you ask for them. Only the rows and columns that were visible in the '
-      + 'workbook are here at all — a hidden row is not work anybody was being asked to look at.',
+      + 'The rest are either carried for reference with no shift against them, or were worked in '
+      + 'weeks that have already gone; both are hidden unless you ask for them. Only the rows and '
+      + 'columns that were visible in the workbook are here at all — a hidden row is not work '
+      + 'anybody was being asked to look at.',
   }));
   host.appendChild(el('p', {
     class: 'rc-hint',
@@ -406,9 +409,11 @@ async function renderCalendar(host) {
   }));
   host.appendChild(el('p', {
     class: 'rc-hint',
-    text: 'A row counts as scheduled when a day carries paint the legend does not call shading. '
-      + 'A colour nobody has mapped counts too: until somebody says what it is, it might be '
-      + 'work, and hiding it would bury exactly the rows that need looking at.',
+    text: 'A row counts as scheduled when one of the days on screen carries paint the legend does '
+      + 'not call shading — so narrowing to four weeks drops the rows whose work was in the '
+      + 'weeks before it. A colour nobody has mapped counts too: until somebody says what it is, '
+      + 'it might be work, and hiding it would bury exactly the rows that need looking at. '
+      + 'Weekends are counted like any other day: possession work lands on them.',
   }));
 }
 
@@ -426,16 +431,30 @@ async function renderCalendar(host) {
  * showing nothing is not an answer.
  */
 function windowed(view, today) {
-  if (!calendarWeeks || !view.days.some((d) => d.date)) return view;
+  const narrowed = (() => {
+    if (!calendarWeeks || !view.days.some((d) => d.date)) return view.days;
+    const ms = new Date(`${today}T00:00:00Z`).getTime();
+    const monday = ms - ((new Date(ms).getUTCDay() + 6) % 7) * 86400000;
+    const from = new Date(monday).toISOString().slice(0, 10);
+    const to = new Date(monday + (calendarWeeks * 7 - 1) * 86400000).toISOString().slice(0, 10);
+    const days = view.days.filter((d) => !d.date || (d.date >= from && d.date <= to));
+    // A window with nothing in it is not an answer; fall back to the sheet.
+    return days.length ? days : view.days;
+  })();
 
-  const ms = new Date(`${today}T00:00:00Z`).getTime();
-  const monday = ms - ((new Date(ms).getUTCDay() + 6) % 7) * 86400000;
-  const from = new Date(monday).toISOString().slice(0, 10);
-  const to = new Date(monday + (calendarWeeks * 7 - 1) * 86400000).toISOString().slice(0, 10);
+  /* Whether a row has anything scheduled is a question about *the weeks on
+     screen*, not about the workbook.
+     This is what was wrong: the flag was worked out once across the whole
+     sheet, so a row painted in June survived into a four-week window showing
+     nothing at all — and this file has thirty-eight of those. A row earns its
+     place by carrying work in the days actually being drawn. */
+  const shown = new Set(narrowed.map((d) => d.col));
+  const activities = view.activities.map((a) => ({
+    ...a,
+    highlighted: a.marks.some((m) => m.hex && m.role !== 'ignore' && shown.has(m.col)),
+  }));
 
-  const days = view.days.filter((d) => !d.date || (d.date >= from && d.date <= to));
-  if (!days.length) return view;
-  return { ...view, days };
+  return { ...view, days: narrowed, activities };
 }
 
 /** The grid itself. Split out so the filter can redraw it without the header. */

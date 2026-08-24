@@ -438,7 +438,12 @@ subscribes. That is what keeps the graph acyclic.
   scheduled are hidden by default and a switch brings them back; only headings
   left *trailing* with nothing under them are dropped, because the workbook
   nests its sections and a heading followed by another heading is usually a
-  parent, not an orphan.
+  parent, not an orphan. **Whether a row has anything scheduled is a question
+  about the weeks on screen**, so `windowed()` re-derives it after narrowing
+  the axis — computing it once across the whole sheet leaves a row painted two
+  months ago sitting in a four-week window with nothing in it, which is thirty
+  eight rows in this file. Weekends count like any other day: possession work
+  lands on them, and two rows here are scheduled on nothing else.
 - **The calendar draws the snapshot, not the file.** That is what lets it
   render on a machine that was never granted the folder, which is most of them.
   The legend is re-applied to the stored grid at paint time rather than read
@@ -533,7 +538,7 @@ node tools/test_dist.js              #  21 checks — every deployment shape, an
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  45 checks — the look-ahead parser, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         # 100 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 102 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
