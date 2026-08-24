@@ -429,7 +429,10 @@ subscribes. That is what keeps the graph acyclic.
   no wording of the meaning fixes it ("not scheduled" is still a meaning). An
   **unmapped** colour counts as a shift on purpose: it might be one, and
   treating the unexplained as ignorable would hide the rows that most need
-  looking at.
+  looking at. The cost of that is real — with this file's layout grey
+  unmapped, a four-week window shows 145 rows instead of 29 — so saying so is
+  one click ("Just shading") from the list of unmapped colours, and the strip
+  above the grid shows the swatches rather than only a count.
 - **A section heading is found structurally, not by its colour.** The shading
   runs along the day columns of every row, so a heading is the row whose
   *activity* cells are painted — `readGrid()` tests that and nothing else. It
@@ -538,7 +541,7 @@ node tools/test_dist.js              #  21 checks — every deployment shape, an
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  45 checks — the look-ahead parser, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         # 102 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 107 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser

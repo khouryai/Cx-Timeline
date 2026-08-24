@@ -401,3 +401,13 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   white-space: nowrap;
 }
 .la-grid thead th.la-num { font-size: 11px; color: var(--text-main); }
+
+/* An unexplained colour, in the strip above the grid. Hatched like the cells
+   it paints, so the two read as the same thing. */
+.la-unknown { display: inline-flex; align-items: center; gap: 4px; }
+.la-swatch-unmapped {
+  background-image: repeating-linear-gradient(
+    45deg, transparent 0 3px, rgba(0, 0, 0, 0.45) 3px 5px);
+  box-shadow: inset 0 0 0 2px var(--warn);
+  margin-right: 0;
+}

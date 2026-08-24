@@ -199,10 +199,12 @@ function fakeSdk() {
       { id: 'lg1', argb: 'FFFF00', meaning: 'Day Shift', role: 'shift', valid_from: '2026-01-01', active: true },
       { id: 'lg2', argb: '00B0F0', meaning: 'Third Shift', role: 'shift', valid_from: '2026-01-01', active: true },
       { id: 'lg3', argb: 'FF0000', meaning: 'Cancellation', role: 'shift', valid_from: '2026-01-01', active: true },
-      // Structure, not work. Without the role, forty rows of shading read as
-      // forty rows of somebody being on site every day.
-      { id: 'lg4', argb: '7F7F7F', meaning: 'Not scheduled', role: 'ignore', valid_from: '2026-01-01', active: true },
       { id: 'lg5', argb: 'D9D9D9', meaning: 'Section divider', role: 'divider', valid_from: '2026-01-01', active: true },
+      /* 7F7F7F is deliberately absent. It is the grey the spreadsheet shades
+         its layout with, it starts unmapped like any other colour, and an
+         unmapped colour counts as work — so every shaded row is on screen
+         until somebody says otherwise. Getting from there to a usable
+         calendar in one click is what the checks below are about. */
     ],
     rc_settings: [{ key: 'lookahead_sheet', value: '4WLA' }],
     rc_lookahead_rows: [],
@@ -260,7 +262,12 @@ function fakeSdk() {
               return { select: () => Promise.resolve({ data: null, error: { message: 'Failed to fetch' } }) };
             }
             const list = S.rows[table] || (S.rows[table] = []);
-            const made = [].concat(rows).map((r, i) => ({ id: `${table}-${list.length + i + 1}`, ...r }));
+            /* Column defaults. Postgres fills `active` in; a stub that did not
+               would make a freshly inserted row invisible to every read that
+               filters on it — which looks exactly like the write failing. */
+            const defaults = list.some((r) => 'active' in r) ? { active: true } : {};
+            const made = [].concat(rows).map((r, i) => (
+              { id: `${table}-${list.length + i + 1}`, ...defaults, ...r }));
             list.push(...made);
             if (table === 'rc_plan_entries') S.rows.rc_plan_current.push(...made);
             return { select: () => Promise.resolve({ data: made, error: null }) };
@@ -715,6 +722,33 @@ async function main() {
     await page.locator('#rc-frame .la-grid .la-month-label').first()
       .evaluate((n) => getComputedStyle(n).position === 'sticky'));
 
+  /* ── The grey the spreadsheet shades its layout with ───────────────────
+     It arrives unmapped like every other colour, and an unmapped colour
+     counts as work — deliberately, because the unexplained might be. The
+     consequence is that every shaded row is on screen until somebody says
+     otherwise, which against the real file is 145 rows instead of 29. So the
+     saying-so has to be one click, from where the problem is visible. */
+  check('an unexplained colour keeps its rows on screen',
+    /no dates yet/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
+  check('and the strip shows which colours are unexplained, not just how many',
+    (await page.locator('#rc-frame .la-swatch-unmapped').count()) >= 2);
+
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Legend' }).click();
+  await page.waitForSelector('#rc-frame .rc-table');
+  await page.locator('#rc-frame tr', { hasText: '7F7F7F' })
+    .locator('button', { hasText: 'Just shading' }).click();
+  await page.waitForTimeout(400);
+  check('one click says a colour is shading rather than work',
+    await page.evaluate(() => window.__rc.rows.rc_legend
+      .some((l) => l.argb === '7F7F7F' && l.role === 'ignore')));
+
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Calendar' }).click();
+  await page.waitForSelector('#rc-frame .la-grid');
+  check('and every row whose only paint was that grey drops out',
+    !/no dates yet/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
+  check('while a row with a real shift over the same grey stays',
+    /IXL Regression Testing/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
+
   const gridText = await page.locator('#rc-frame .la-grid tbody').innerText();
   check('activities are listed down the side',
     /IXL Regression Testing/.test(gridText) && /Operational Readiness/.test(gridText));
@@ -744,7 +778,7 @@ async function main() {
      scheduled against them. They are hidden by default, and the switch is what
      stops that being a rule with no way back. */
   check('a row with nothing scheduled is hidden',
-    !/no dates yet/.test(gridText), gridText.replace(/\n/g, ' / ').slice(0, 120));
+    !/no dates yet/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
   const quietBox = page.locator('#rc-frame .cx-check input');
   await quietBox.check();
   await page.waitForTimeout(250);

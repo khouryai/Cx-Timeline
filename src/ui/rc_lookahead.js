@@ -599,12 +599,24 @@ function legendStrip(legend, unknown) {
     ]));
   }
   if (unknown?.length) {
-    strip.append(el('button', {
-      class: 'cx-btn mini ghost',
-      text: `${unknown.length} colour(s) unmapped`,
-      title: 'Nothing was guessed. They are drawn with a hatch until somebody says what they mean.',
-      onClick: () => { section = 'legend'; notifyChanged('legend'); },
-    }));
+    /* Show the swatches, not just a count. A colour nobody has explained keeps
+       its rows on screen — an unmapped colour counts as work, deliberately —
+       so "five unmapped" and "these five, and one of them is the grey your
+       spreadsheet shades everything with" are very different messages. */
+    strip.append(el('span', { class: 'la-unknown' }, [
+      ...unknown.slice(0, 6).map((u) => el('span', {
+        class: 'la-swatch la-swatch-unmapped',
+        style: `background:#${u.hex}`,
+        title: `#${u.hex} — ${u.count} cell(s), nobody has said what it means`,
+      })),
+      el('button', {
+        class: 'cx-btn mini ghost',
+        text: `${unknown.length} colour(s) unmapped — say what they mean`,
+        title: 'Nothing is guessed. Until somebody says, they count as work and keep their rows '
+          + 'on screen.',
+        onClick: () => { section = 'legend'; notifyChanged('legend'); },
+      }),
+    ]));
   }
   return strip;
 }
@@ -742,6 +754,25 @@ async function renderLegend(host) {
         el('td', { class: 'rc-num', text: String(u.count) }),
         el('td', { text: (u.samples || []).join(', ') }),
         el('td', {}, [
+          /* One click, no dialog. The common case by a wide margin is a grey
+             the spreadsheet shades its layout with, and making somebody name
+             it before they can dismiss it is why forty rows of shading sat on
+             screen counting as work. */
+          el('button', {
+            class: 'cx-btn mini',
+            text: 'Just shading',
+            title: 'Structure in the spreadsheet, not somebody on site. Rows whose only paint is '
+              + 'this will drop out of the calendar.',
+            onClick: async () => {
+              try {
+                await rc.addLegend([{ argb: u.hex, meaning: 'Shading', role: 'ignore' }]);
+                notifyChanged('legend');
+                toast({ tone: 'good', message: `#${u.hex} is shading — rows painted only with it are out.` });
+              } catch (err) {
+                toast({ tone: 'bad', message: err.message });
+              }
+            },
+          }),
           el('button', {
             class: 'cx-btn mini primary',
             text: 'Say what it means',
@@ -752,10 +783,12 @@ async function renderLegend(host) {
     ));
     host.appendChild(el('p', {
       class: 'rc-hint',
-      text: 'Nothing here was guessed, and that is deliberate. Two of these are usually near '
-        + 'misses — a blue a shade off the legend blue, picked from Excel’s recent colours — '
-        + 'and guessing would classify a shift wrongly with nothing on screen to show it '
-        + 'happened. On the calendar they are drawn with a hatch until somebody says.',
+      text: 'Nothing here was guessed, and that is deliberate — guessing would classify a shift '
+        + 'wrongly with nothing on screen to show it happened. Until somebody says, a colour '
+        + 'counts as work and keeps its rows on the calendar, drawn with a hatch. Most of these '
+        + 'are one of two things: a grey the spreadsheet shades its layout with, which is what '
+        + '"Just shading" is for, or a near miss of a legend colour picked out of Excel’s recent '
+        + 'colours, which wants naming properly.',
     }));
   }
 }
