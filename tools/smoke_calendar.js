@@ -97,64 +97,95 @@ function fakeSdk() {
       { id: 'e3', person_id: 'p2', person_name: 'Dan', subsystem: 'Wayside', work_date: iso(-4), status: 'blocked', signal: 'health', category_id: 'c1', location_id: 'l1', blocked_party_id: 'party1' },
       { id: 'e4', person_id: 'p4', person_name: 'Sam', subsystem: 'SCADA', work_date: iso(-5), status: 'reassigned', signal: 'health', category_id: 'c2', location_id: 'l2' },
     ],
-    /* A snapshot shaped like the real workbook: a month band, day numbers, a
-       row of weekday letters that is how the date axis gets found at all, and
-       activities whose marks are painted. One colour is deliberately absent
-       from the legend — a near miss of the legend blue, which is exactly what
-       Excel's recent-colours picker produces — because "nothing is guessed"
-       is the rule this whole pipeline is built on and it needs a case. */
-    rc_lookahead_snapshots: [{
-      id: 'snap1',
-      taken_at: new Date().toISOString(),
-      file_mtime: new Date().toISOString(),
-      file_hash: 'stub-hash',
-      sheet_name: '4WLA',
-      grid: {
-        merges: [], hiddenColumns: [], unknown: [],
-        rows: [
-          { row: 4, label: '', cells: [{ col: 8, ref: 'H4', value: 'JULY', hex: null }] },
-          { row: 5, label: '', cells: [1, 2, 3, 4, 5, 6, 7].map((d, i) => (
-            { col: 8 + i, ref: `X5`, value: String(d), hex: null })) },
-          { row: 6, label: '', cells: ['M', 'Tu', 'W', 'Th', 'F', 'Sa', 'Su'].map((d, i) => (
-            { col: 8 + i, ref: `X6`, value: d, hex: null })) },
-          /* A section heading. What makes it one is that its *activity* cells
-             are painted — the shading along the day columns is on every row. */
-          { row: 7, label: '', cells: [
-            { col: 2, ref: 'B7', value: 'HTT — Testing and Commissioning', hex: 'D9D9D9' },
-            { col: 3, ref: 'C7', value: '', hex: 'D9D9D9' },
-            { col: 4, ref: 'D7', value: '', hex: 'D9D9D9' },
-            ...[0, 1, 2, 3, 4, 5, 6].map((i) => (
-              { col: 8 + i, ref: 'X7', value: '', hex: '7F7F7F' })),
-          ] },
-          { row: 9, label: '', cells: [
-            { col: 2, ref: 'B9', value: 'CDRL 9.04.29', hex: null },
-            { col: 3, ref: 'C9', value: 'IXL Regression Testing', hex: null },
-            { col: 4, ref: 'D9', value: 'TPSS 12', hex: null },
-            { col: 8, ref: 'H9', value: 'X', hex: 'FFFF00' },
-            { col: 9, ref: 'I9', value: 'X.WIT', hex: 'FFFF00' },
-            { col: 11, ref: 'K9', value: 'X', hex: 'FF0000' },
-          ] },
-          { row: 10, label: '', cells: [
-            { col: 2, ref: 'B10', value: 'Operational Readiness', hex: null },
-            { col: 3, ref: 'C10', value: 'ATS Site Test', hex: null },
-            { col: 4, ref: 'D10', value: 'Station 6 Platform', hex: null },
-            { col: 10, ref: 'J10', value: 'X.TCE', hex: '00B0F0' },
-            { col: 12, ref: 'L10', value: 'X', hex: '3399FF' },
-          ] },
-          /* Carried in the workbook for reference, with nothing scheduled: the
-             shading is the only paint on it. Most of the sheet looks like
-             this, and it is what the calendar hides by default. */
-          { row: 11, label: '', cells: [
-            { col: 3, ref: 'C11', value: 'DCS Internal testing — no dates yet', hex: null },
-            ...[0, 1, 2, 3, 4, 5, 6].map((i) => (
-              { col: 8 + i, ref: 'X11', value: '', hex: '7F7F7F' })),
-          ] },
-          // The workbook's own key, in the shape readLegend() looks for.
-          { row: 20, label: 'Highlight in Yellow for Day Shift',
-            cells: [2, 3].map((c) => ({ col: c, ref: `X20`, value: '', hex: 'FFFF00' })) },
-        ],
-      },
-    }],
+    /* A snapshot shaped like the real workbook, on a real date axis.
+       The axis is built from today rather than pinned to fixed dates, because
+       everything that matters here — the today line, the week filters, hiding
+       the past — is relative to when the suite runs. It starts a week back and
+       runs five weeks, so "4 weeks" has both a past week to drop and a future
+       week to keep. The weekday letters are the workbook's own, and they are
+       what `datePlease()` checks the resolved year against. */
+    rc_lookahead_snapshots: (() => {
+      const LETTERS = ['Su', 'M', 'Tu', 'W', 'Th', 'F', 'Sa'];
+      const NAMES = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY',
+        'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+      const now = new Date();
+      const todayMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+      const monday = todayMs - ((new Date(todayMs).getUTCDay() + 6) % 7) * 86400000;
+      const first = monday - 7 * 86400000;
+      const axis = [];
+      for (let i = 0; i < 35; i++) axis.push(new Date(first + i * 86400000));
+      const todayIdx = Math.round((todayMs - first) / 86400000);
+      S.axis = {
+        days: axis.length,
+        todayIdx,
+        today: new Date(todayMs).toISOString().slice(0, 10),
+        past: axis[1].getUTCDate(),
+      };
+
+      const col = (i) => 8 + i;
+      const monthRow = { row: 4, label: '', cells: [] };
+      axis.forEach((d, i) => {
+        if (i === 0 || d.getUTCDate() === 1) {
+          monthRow.cells.push({ col: col(i), ref: `M${i}`, value: NAMES[d.getUTCMonth()], hex: null });
+        }
+      });
+
+      const mark = (i, value, hex) => ({ col: col(i), ref: `X${i}`, value, hex });
+      const shade = () => axis.map((_, i) => mark(i, '', '7F7F7F'));
+
+      return [{
+        id: 'snap1',
+        taken_at: new Date().toISOString(),
+        file_mtime: new Date().toISOString(),
+        file_hash: 'stub-hash',
+        sheet_name: '4WLA',
+        grid: {
+          merges: [], hiddenColumns: [], unknown: [],
+          rows: [
+            monthRow,
+            { row: 5, label: '', cells: axis.map((d, i) => mark(i, String(d.getUTCDate()), null)) },
+            { row: 6, label: '', cells: axis.map((d, i) => mark(i, LETTERS[d.getUTCDay()], null)) },
+            /* A section heading. What makes it one is that its *activity*
+               cells are painted — the shading along the day columns is on
+               every row. */
+            { row: 7, label: '', cells: [
+              { col: 2, ref: 'B7', value: 'HTT — Testing and Commissioning', hex: 'D9D9D9' },
+              { col: 3, ref: 'C7', value: '', hex: 'D9D9D9' },
+              { col: 4, ref: 'D7', value: '', hex: 'D9D9D9' },
+              ...shade(),
+            ] },
+            { row: 9, label: '', cells: [
+              { col: 2, ref: 'B9', value: 'CDRL 9.04.29', hex: null },
+              { col: 3, ref: 'C9', value: 'IXL Regression Testing', hex: null },
+              { col: 4, ref: 'D9', value: 'TPSS 12', hex: null },
+              mark(todayIdx, 'X', 'FFFF00'),
+              mark(todayIdx + 1, 'X.WIT', 'FFFF00'),
+              mark(todayIdx + 3, 'X', 'FF0000'),
+            ] },
+            /* One mark in the week that has already gone and one still ahead,
+               so narrowing the window drops a column without dropping a row. */
+            { row: 10, label: '', cells: [
+              { col: 2, ref: 'B10', value: 'Operational Readiness', hex: null },
+              { col: 3, ref: 'C10', value: 'ATS Site Test', hex: null },
+              { col: 4, ref: 'D10', value: 'Station 6 Platform', hex: null },
+              mark(1, 'X.PAST', '00B0F0'),
+              mark(todayIdx + 2, 'X.TCE', '00B0F0'),
+              mark(todayIdx + 4, 'X', '3399FF'),
+            ] },
+            /* Carried in the workbook for reference, with nothing scheduled:
+               the shading is the only paint on it. Most of the sheet looks
+               like this, and it is what the calendar hides by default. */
+            { row: 11, label: '', cells: [
+              { col: 3, ref: 'C11', value: 'DCS Internal testing — no dates yet', hex: null },
+              ...shade(),
+            ] },
+            // The workbook's own key, in the shape readLegend() looks for.
+            { row: 20, label: 'Highlight in Yellow for Day Shift',
+              cells: [2, 3].map((c) => ({ col: c, ref: 'X20', value: '', hex: 'FFFF00' })) },
+          ],
+        },
+      }];
+    })(),
     rc_legend: [
       { id: 'lg1', argb: 'FFFF00', meaning: 'Day Shift', role: 'shift', valid_from: '2026-01-01', active: true },
       { id: 'lg2', argb: '00B0F0', meaning: 'Third Shift', role: 'shift', valid_from: '2026-01-01', active: true },
@@ -612,12 +643,59 @@ async function main() {
      colours it was painted. It draws the snapshot rather than the file,
      which is what lets it render on a machine that has never been given
      the folder — including this one. */
-  const dayHeads = await page.locator('#rc-frame .la-grid thead tr').nth(1).locator('th').count();
-  check('the date axis is found from the weekday row', dayHeads === 8, `${dayHeads} heads`);
-  check('the month band is drawn',
-    /JULY/.test(await page.locator('#rc-frame .la-grid thead').innerText()));
+  const dayHeadCount = async () =>
+    (await page.locator('#rc-frame .la-grid thead tr').nth(1).locator('th').count()) - 1;
+
+  /* The sheet carries months and day numbers and no year at all, so the axis
+     is dated from the snapshot's timestamp and then *checked* against the
+     workbook's own weekday letters — only one candidate year makes M, Tu and W
+     land where the file says they do. Everything below depends on that having
+     worked. */
+  const axis = await page.evaluate(() => window.__rc.axis);
+  check('the date axis is found from the weekday row', (await dayHeadCount()) > 7);
   check('the weekend is marked apart',
-    (await page.locator('#rc-frame .la-grid thead .la-weekend').count()) >= 2);
+    (await page.locator('#rc-frame .la-grid thead .la-weekend').count()) >= 4);
+  check('the year is resolved and said out loud',
+    new RegExp(axis.today).test(await page.locator('#rc-frame').innerText()));
+
+  // Today is a line down the grid, not a tint: a fill would be one more colour
+  // competing with the workbook's own.
+  check('today is marked on the grid',
+    (await page.locator('#rc-frame .la-grid td.la-today').count()) >= 1);
+  check('and on the axis above it',
+    (await page.locator('#rc-frame .la-grid thead th.la-today').count()) >= 1);
+
+  /* The window opens on four weeks from this Monday. The past is dropped
+     rather than scrolled past — this workbook carries a quarter of finished
+     weeks to the left of today. */
+  check('it opens on four weeks, not the whole sheet',
+    (await dayHeadCount()) === 28, `${await dayHeadCount()} days`);
+  check('and the week that has already gone is not drawn',
+    !/X\.PAST/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
+
+  for (const [label, days] of [['2 weeks', 14], ['3 weeks', 21], ['4 weeks', 28]]) {
+    await page.locator('#rc-frame .rc-tab', { hasText: label }).click();
+    await page.waitForTimeout(200);
+    check(`${label} narrows the axis to ${days} days`, (await dayHeadCount()) === days,
+      `${await dayHeadCount()}`);
+  }
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Everything' }).click();
+  await page.waitForTimeout(200);
+  check('and everything brings the finished weeks back',
+    (await dayHeadCount()) === axis.days
+      && /X\.PAST/.test(await page.locator('#rc-frame .la-grid tbody').innerText()),
+    `${await dayHeadCount()} of ${axis.days}`);
+  await page.locator('#rc-frame .rc-tab', { hasText: '4 weeks' }).click();
+  await page.waitForTimeout(200);
+
+  /* A month spans thirty columns, so a label written into the band scrolls out
+     of sight long before the month does. It is a sticky span pinned past the
+     frozen columns instead. */
+  check('the month band carries a sticky label',
+    (await page.locator('#rc-frame .la-grid .la-month-label').count()) >= 1);
+  check('and it is pinned rather than scrolling away',
+    await page.locator('#rc-frame .la-grid .la-month-label').first()
+      .evaluate((n) => getComputedStyle(n).position === 'sticky'));
 
   const gridText = await page.locator('#rc-frame .la-grid tbody').innerText();
   check('activities are listed down the side',

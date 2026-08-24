@@ -61,6 +61,115 @@ export function keyRows(rows) {
 
 const WEEKDAYS = ['M', 'TU', 'W', 'TH', 'F', 'SA', 'SU'];
 
+const MONTH_NAMES = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
+  'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+
+/**
+ * The one month a label names, or -1.
+ *
+ * A week straddling a boundary is labelled "August/September" in this
+ * workbook, and a label naming two months anchors nothing — it is skipped
+ * rather than resolved to the first of them.
+ */
+function oneMonth(label) {
+  const text = String(label || '').toUpperCase();
+  const hits = new Set();
+  MONTH_NAMES.forEach((name, i) => {
+    if (text.includes(name) || new RegExp(`\\b${name.slice(0, 3)}\\b`).test(text)) hits.add(i);
+  });
+  return hits.size === 1 ? [...hits][0] : -1;
+}
+
+/**
+ * Give every day column a real date, or none of them one.
+ *
+ * The sheet carries months and day numbers and no year at all, so a year has
+ * to come from somewhere else. Two things supply it, and the second is what
+ * makes this safe to rely on rather than a guess:
+ *
+ * **The snapshot's own timestamp** says roughly when the window was current.
+ * The look-ahead is maintained four to six weeks out, so the window brackets
+ * the day it was read; that narrows the year to one of three candidates.
+ *
+ * **The weekday letters check the answer.** The sheet writes M, Tu, W beside
+ * every day, and only one of the candidate years makes those letters come out
+ * right — the same date is a different weekday in adjacent years. So the year
+ * is not inferred and hoped for, it is *verified* against something the file
+ * already says, and where the letters do not agree no dates are claimed at
+ * all and everything that depends on them stands down.
+ *
+ * Mutates `days`, adding `date` (an ISO string) where it can.
+ */
+function datePlease(days, anchorISO) {
+  if (!days.length) return false;
+
+  /* Day numbers first: they are always present, and a drop from 30 to 1 is a
+     month boundary whether or not anybody labelled it. That matters because
+     the visible window often starts mid-month, with the label for that month
+     sitting in a column the workbook has hidden. */
+  const nums = [];
+  for (let i = 0; i < days.length; i++) {
+    const n = parseInt(String(days[i].day).replace(/\D/g, ''), 10);
+    nums.push(Number.isFinite(n) && n >= 1 && n <= 31 ? n : (nums[i - 1] || 0) + 1);
+  }
+
+  let anchorAt = -1;
+  let anchorMonth = -1;
+  for (let i = 0; i < days.length; i++) {
+    const m = oneMonth(days[i].label);
+    if (m >= 0) { anchorAt = i; anchorMonth = m; break; }
+  }
+  if (anchorAt < 0) return false;
+
+  const months = new Array(days.length).fill(-1);
+  months[anchorAt] = anchorMonth;
+  for (let i = anchorAt + 1; i < days.length; i++) {
+    months[i] = nums[i] < nums[i - 1] ? (months[i - 1] + 1) % 12 : months[i - 1];
+  }
+  for (let i = anchorAt - 1; i >= 0; i--) {
+    months[i] = nums[i] > nums[i + 1] ? (months[i + 1] + 11) % 12 : months[i + 1];
+  }
+
+  // Relative years: the axis only ever runs forwards, so a month going
+  // backwards is the turn of a year.
+  const rel = [0];
+  for (let i = 1; i < days.length; i++) rel.push(rel[i - 1] + (months[i] < months[i - 1] ? 1 : 0));
+
+  const anchorMs = Date.parse(`${String(anchorISO || '').slice(0, 10)}T00:00:00Z`);
+  const base = Number.isFinite(anchorMs)
+    ? new Date(anchorMs).getUTCFullYear()
+    : new Date().getUTCFullYear();
+
+  const LETTERS = ['SU', 'M', 'TU', 'W', 'TH', 'F', 'SA'];
+  let bestYear = null;
+  let bestScore = -1;
+  for (const year of [base - 1, base, base + 1]) {
+    let agree = 0;
+    for (let i = 0; i < days.length; i++) {
+      const ms = Date.UTC(year + rel[i], months[i], nums[i]);
+      if (LETTERS[new Date(ms).getUTCDay()] === String(days[i].weekday).trim().toUpperCase()) agree++;
+    }
+    // Closeness to the snapshot breaks a tie; the letters decide otherwise.
+    const mid = Date.UTC(year + rel[rel.length >> 1], months[days.length >> 1], nums[days.length >> 1]);
+    const near = Number.isFinite(anchorMs) ? 1 - Math.min(1, Math.abs(mid - anchorMs) / 3.2e10) : 0;
+    const score = agree + near;
+    if (score > bestScore) { bestScore = score; bestYear = year; }
+  }
+
+  // Below this the letters are not agreeing and the reading is wrong. Saying
+  // nothing is the only honest answer: a today line on the wrong column is
+  // worse than no today line.
+  const agreement = Math.floor(bestScore) / days.length;
+  if (agreement < 0.9) return false;
+
+  for (let i = 0; i < days.length; i++) {
+    days[i].date = new Date(Date.UTC(bestYear + rel[i], months[i], nums[i]))
+      .toISOString().slice(0, 10);
+    days[i].month = `${MONTH_NAMES[months[i]].slice(0, 3)} ${bestYear + rel[i]}`;
+  }
+  return true;
+}
+
 /**
  * Turn a parsed sheet into something that can be drawn: days across the top,
  * activities down the side.
@@ -82,7 +191,7 @@ const WEEKDAYS = ['M', 'TU', 'W', 'TH', 'F', 'SA', 'SU'];
  * something to infer from a month name — the axis is drawn as the workbook
  * writes it.
  */
-export function readGrid(grid) {
+export function readGrid(grid, { anchorISO = null } = {}) {
   const rows = (grid?.rows || []).slice().sort((a, b) => a.row - b.row);
   const empty = { days: [], meta: [], activities: [], header: null };
   if (!rows.length) return empty;
@@ -120,11 +229,16 @@ export function readGrid(grid) {
     return {
       col,
       month,
+      // What the sheet actually wrote here, as opposed to what was carried
+      // across the merge. Only a real label can anchor the calendar.
+      label,
       day: String(at(numbers, col)?.value ?? '').trim(),
       weekday: String(at(header, col)?.value ?? '').trim(),
       weekend: ['SA', 'SU'].includes(String(at(header, col)?.value ?? '').trim().toUpperCase()),
     };
   });
+
+  datePlease(days, anchorISO);
 
   /* The activity columns are whatever is used to the left of the calendar.
      Their headings are not reliably on any one row — this file labels some and

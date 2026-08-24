@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-08-24T11:12:56.478Z
+ * Modules: 53   Built: 2026-08-24T15:27:42.965Z
  */
 (function () {
   'use strict';
@@ -28882,6 +28882,115 @@ __mods["core/lookahead.js"] = function (__x, __req) {
 
   const WEEKDAYS = ['M', 'TU', 'W', 'TH', 'F', 'SA', 'SU'];
 
+  const MONTH_NAMES = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
+    'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+
+  /**
+   * The one month a label names, or -1.
+   *
+   * A week straddling a boundary is labelled "August/September" in this
+   * workbook, and a label naming two months anchors nothing — it is skipped
+   * rather than resolved to the first of them.
+   */
+  function oneMonth(label) {
+    const text = String(label || '').toUpperCase();
+    const hits = new Set();
+    MONTH_NAMES.forEach((name, i) => {
+      if (text.includes(name) || new RegExp(`\\b${name.slice(0, 3)}\\b`).test(text)) hits.add(i);
+    });
+    return hits.size === 1 ? [...hits][0] : -1;
+  }
+
+  /**
+   * Give every day column a real date, or none of them one.
+   *
+   * The sheet carries months and day numbers and no year at all, so a year has
+   * to come from somewhere else. Two things supply it, and the second is what
+   * makes this safe to rely on rather than a guess:
+   *
+   * **The snapshot's own timestamp** says roughly when the window was current.
+   * The look-ahead is maintained four to six weeks out, so the window brackets
+   * the day it was read; that narrows the year to one of three candidates.
+   *
+   * **The weekday letters check the answer.** The sheet writes M, Tu, W beside
+   * every day, and only one of the candidate years makes those letters come out
+   * right — the same date is a different weekday in adjacent years. So the year
+   * is not inferred and hoped for, it is *verified* against something the file
+   * already says, and where the letters do not agree no dates are claimed at
+   * all and everything that depends on them stands down.
+   *
+   * Mutates `days`, adding `date` (an ISO string) where it can.
+   */
+  function datePlease(days, anchorISO) {
+    if (!days.length) return false;
+
+    /* Day numbers first: they are always present, and a drop from 30 to 1 is a
+       month boundary whether or not anybody labelled it. That matters because
+       the visible window often starts mid-month, with the label for that month
+       sitting in a column the workbook has hidden. */
+    const nums = [];
+    for (let i = 0; i < days.length; i++) {
+      const n = parseInt(String(days[i].day).replace(/\D/g, ''), 10);
+      nums.push(Number.isFinite(n) && n >= 1 && n <= 31 ? n : (nums[i - 1] || 0) + 1);
+    }
+
+    let anchorAt = -1;
+    let anchorMonth = -1;
+    for (let i = 0; i < days.length; i++) {
+      const m = oneMonth(days[i].label);
+      if (m >= 0) { anchorAt = i; anchorMonth = m; break; }
+    }
+    if (anchorAt < 0) return false;
+
+    const months = new Array(days.length).fill(-1);
+    months[anchorAt] = anchorMonth;
+    for (let i = anchorAt + 1; i < days.length; i++) {
+      months[i] = nums[i] < nums[i - 1] ? (months[i - 1] + 1) % 12 : months[i - 1];
+    }
+    for (let i = anchorAt - 1; i >= 0; i--) {
+      months[i] = nums[i] > nums[i + 1] ? (months[i + 1] + 11) % 12 : months[i + 1];
+    }
+
+    // Relative years: the axis only ever runs forwards, so a month going
+    // backwards is the turn of a year.
+    const rel = [0];
+    for (let i = 1; i < days.length; i++) rel.push(rel[i - 1] + (months[i] < months[i - 1] ? 1 : 0));
+
+    const anchorMs = Date.parse(`${String(anchorISO || '').slice(0, 10)}T00:00:00Z`);
+    const base = Number.isFinite(anchorMs)
+      ? new Date(anchorMs).getUTCFullYear()
+      : new Date().getUTCFullYear();
+
+    const LETTERS = ['SU', 'M', 'TU', 'W', 'TH', 'F', 'SA'];
+    let bestYear = null;
+    let bestScore = -1;
+    for (const year of [base - 1, base, base + 1]) {
+      let agree = 0;
+      for (let i = 0; i < days.length; i++) {
+        const ms = Date.UTC(year + rel[i], months[i], nums[i]);
+        if (LETTERS[new Date(ms).getUTCDay()] === String(days[i].weekday).trim().toUpperCase()) agree++;
+      }
+      // Closeness to the snapshot breaks a tie; the letters decide otherwise.
+      const mid = Date.UTC(year + rel[rel.length >> 1], months[days.length >> 1], nums[days.length >> 1]);
+      const near = Number.isFinite(anchorMs) ? 1 - Math.min(1, Math.abs(mid - anchorMs) / 3.2e10) : 0;
+      const score = agree + near;
+      if (score > bestScore) { bestScore = score; bestYear = year; }
+    }
+
+    // Below this the letters are not agreeing and the reading is wrong. Saying
+    // nothing is the only honest answer: a today line on the wrong column is
+    // worse than no today line.
+    const agreement = Math.floor(bestScore) / days.length;
+    if (agreement < 0.9) return false;
+
+    for (let i = 0; i < days.length; i++) {
+      days[i].date = new Date(Date.UTC(bestYear + rel[i], months[i], nums[i]))
+        .toISOString().slice(0, 10);
+      days[i].month = `${MONTH_NAMES[months[i]].slice(0, 3)} ${bestYear + rel[i]}`;
+    }
+    return true;
+  }
+
   /**
    * Turn a parsed sheet into something that can be drawn: days across the top,
    * activities down the side.
@@ -28903,7 +29012,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    * something to infer from a month name — the axis is drawn as the workbook
    * writes it.
    */
-  function readGrid(grid) {
+  function readGrid(grid, { anchorISO = null } = {}) {
     const rows = (grid?.rows || []).slice().sort((a, b) => a.row - b.row);
     const empty = { days: [], meta: [], activities: [], header: null };
     if (!rows.length) return empty;
@@ -28941,11 +29050,16 @@ __mods["core/lookahead.js"] = function (__x, __req) {
       return {
         col,
         month,
+        // What the sheet actually wrote here, as opposed to what was carried
+        // across the merge. Only a real label can anchor the calendar.
+        label,
         day: String(at(numbers, col)?.value ?? '').trim(),
         weekday: String(at(header, col)?.value ?? '').trim(),
         weekend: ['SA', 'SU'].includes(String(at(header, col)?.value ?? '').trim().toUpperCase()),
       };
     });
+
+    datePlease(days, anchorISO);
 
     /* The activity columns are whatever is used to the left of the calendar.
        Their headings are not reliably on any one row — this file labels some and
@@ -29219,6 +29333,20 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * with no way to get it back is its own kind of wrong.
    */
   let showQuietRows = false;
+  /**
+   * How much of the calendar to show, in weeks from the start of this one.
+   *
+   * Four by default, because that is what a four-week look-ahead is for. Zero
+   * means the whole sheet — this file carries a quarter of history to the left
+   * of today, which is worth being able to reach and not worth opening on.
+   */
+  let calendarWeeks = 4;
+  const WEEK_CHOICES = [
+    { weeks: 2, label: '2 weeks' },
+    { weeks: 3, label: '3 weeks' },
+    { weeks: 4, label: '4 weeks' },
+    { weeks: 0, label: 'Everything' },
+  ];
 
   async function render(root) {
     if (!rc.isAdmin()) {
@@ -29474,7 +29602,9 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     // from the shading the workbook greys most of its calendar with.
     const legend = legendRows.map((r) => ({ argb: r.argb, meaning: r.meaning, role: r.role || 'shift' }));
     const grid = applyLegend(snapshot.grid, legend);
-    const view = readGrid(grid);
+    // The snapshot's own timestamp is what pins the axis to a year — see
+    // `datePlease()`. The weekday letters on the sheet then check the answer.
+    const view = readGrid(grid, { anchorISO: snapshot.taken_at });
 
     if (!view.days.length) {
       host.appendChild(emptyState({
@@ -29502,10 +29632,27 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       onChange: (on) => { showQuietRows = on; draw(); },
     });
 
+    const dated = view.days.some((d) => d.date);
+    const today = todayISO();
+    const range = el('div', { class: 'rc-tabs', style: 'margin:0' });
+    const drawRange = () => {
+      clear(range);
+      for (const choice of WEEK_CHOICES) {
+        range.appendChild(el('button', {
+          class: 'rc-tab',
+          type: 'button',
+          text: choice.label,
+          'aria-pressed': String(choice.weeks === calendarWeeks),
+          onClick: () => { calendarWeeks = choice.weeks; drawRange(); draw(); },
+        }));
+      }
+    };
+    drawRange();
+
     const body = el('div');
     const draw = () => {
       clear(body);
-      body.appendChild(grid_(view, calendarFilter, showQuietRows));
+      body.appendChild(grid_(windowed(view, today), calendarFilter, showQuietRows, today));
     };
     // Redraw the rows only, never the input: rebuilding the field under the
     // caret is the trap this project has already been bitten by three times.
@@ -29513,7 +29660,11 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
     host.appendChild(el('div', {
       style: 'display:flex;align-items:center;gap:16px;margin-bottom:10px;flex-wrap:wrap',
-    }, [el('div', { style: 'flex:1;min-width:240px;max-width:420px' }, [search]), quiet]));
+    }, [
+      el('div', { style: 'flex:1;min-width:240px;max-width:340px' }, [search]),
+      dated ? range : null,
+      quiet,
+    ].filter(Boolean)));
     host.appendChild(body);
     draw();
 
@@ -29522,12 +29673,24 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     host.appendChild(el('p', {
       class: 'rc-hint',
       text: `${scheduled} of ${view.activities.length} activities have something scheduled, across `
-        + `${view.days.length} days, from the snapshot taken `
+        + `${view.days.length} days in the workbook, from the snapshot taken `
         + `${snapshot.taken_at ? snapshot.taken_at.slice(0, 16).replace('T', ' ') : 'earlier'}`
         + `${headings ? `, under ${headings} section heading(s)` : ''}. `
         + 'The rest are carried in the workbook for reference with no shift against them, and are '
         + 'hidden unless you ask for them. Only the rows and columns that were visible in the '
         + 'workbook are here at all — a hidden row is not work anybody was being asked to look at.',
+    }));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: dated
+        ? `The sheet carries months and day numbers but no year, so the axis is dated from the `
+          + `snapshot's own timestamp and then checked against the workbook's weekday letters — `
+          + `only one candidate year makes M, Tu and W land where the file says they do. It reads `
+          + `as ${view.days[0].date} to ${view.days[view.days.length - 1].date}. `
+          + `Today is ${today}.`
+        : 'No year could be resolved from this sheet — the weekday letters did not agree with any '
+          + 'candidate, so no today line is drawn and the week filters stand down. A today line on '
+          + 'the wrong column would be worse than none.',
     }));
     host.appendChild(el('p', {
       class: 'rc-hint',
@@ -29537,8 +29700,34 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     }));
   }
 
+  /**
+   * Narrow the axis to the weeks worth looking at.
+   *
+   * The past is dropped rather than scrolled past: this sheet carries a quarter
+   * of finished weeks to the left of today, and a look-ahead that opens on
+   * March is not a look-ahead. "Everything" is one click away for the times the
+   * question really is what happened.
+   *
+   * If the dates could not be resolved — the weekday letters did not agree —
+   * nothing is narrowed, because narrowing on a reading that might be a year out
+   * would hide real work. Same if the window turns out to be empty: a calendar
+   * showing nothing is not an answer.
+   */
+  function windowed(view, today) {
+    if (!calendarWeeks || !view.days.some((d) => d.date)) return view;
+
+    const ms = new Date(`${today}T00:00:00Z`).getTime();
+    const monday = ms - ((new Date(ms).getUTCDay() + 6) % 7) * 86400000;
+    const from = new Date(monday).toISOString().slice(0, 10);
+    const to = new Date(monday + (calendarWeeks * 7 - 1) * 86400000).toISOString().slice(0, 10);
+
+    const days = view.days.filter((d) => !d.date || (d.date >= from && d.date <= to));
+    if (!days.length) return view;
+    return { ...view, days };
+  }
+
   /** The grid itself. Split out so the filter can redraw it without the header. */
-  function grid_(view, filter, showQuiet) {
+  function grid_(view, filter, showQuiet, today) {
     const terms = String(filter || '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean);
     let rows = view.activities;
 
@@ -29570,24 +29759,30 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       else months.push({ month: day.month, span: 1 });
     }
 
+    const dayClass = (d, extra = '') => [
+      extra,
+      d.weekend ? 'la-weekend' : '',
+      d.date && d.date === today ? 'la-today' : '',
+    ].filter(Boolean).join(' ');
+
     const head = el('thead', {}, [
       el('tr', {}, [
         el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: '' }),
-        ...months.map((m) => el('th', { class: 'la-month', colSpan: m.span, text: m.month || '' })),
+        /* The label is a sticky span inside the band rather than text in it.
+           A month spans thirty columns, so once you scroll past its first day
+           the label itself has scrolled away and the band above you is
+           anonymous — which is exactly when you want to know what month it is. */
+        ...months.map((m) => el('th', { class: 'la-month', colSpan: m.span }, [
+          el('span', { class: 'la-month-label', text: m.month || '' }),
+        ])),
       ]),
       el('tr', {}, [
         el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: 'Activity' }),
-        ...view.days.map((d) => el('th', {
-          class: d.weekend ? 'la-weekend' : '',
-          text: d.day,
-        })),
+        ...view.days.map((d) => el('th', { class: dayClass(d, 'la-num'), text: d.day })),
       ]),
       el('tr', {}, [
         el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: '' }),
-        ...view.days.map((d) => el('th', {
-          class: d.weekend ? 'la-weekend' : '',
-          text: d.weekday,
-        })),
+        ...view.days.map((d) => el('th', { class: dayClass(d), text: d.weekday })),
       ]),
     ]);
 
@@ -29609,6 +29804,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
           const mark = marks.get(d.col);
           const classes = ['la-day'];
           if (d.weekend) classes.push('la-weekend');
+          if (d.date && d.date === today) classes.push('la-today');
           if (mark?.hex) {
             classes.push('la-painted');
             if (isDark(mark.hex)) classes.push('la-dark');
@@ -29618,7 +29814,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
             class: classes.join(' '),
             style: mark?.hex ? `background:#${mark.hex}` : '',
             text: mark?.value || '',
-            title: [a.meta.filter(Boolean)[0], `${d.month} ${d.day} ${d.weekday}`.trim(),
+            title: [a.meta.filter(Boolean)[0], d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
               mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value]
               .filter(Boolean).join(' · '),
           });
@@ -29644,6 +29840,9 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         left += width;
       });
       for (const th of table_.querySelectorAll('thead .la-meta')) th.style.left = '0px';
+      // The month label pins just past the frozen columns; only the browser
+      // knows how wide the content made them.
+      table_.style.setProperty('--la-meta-w', `${left}px`);
     });
 
     if (!rows.length) {

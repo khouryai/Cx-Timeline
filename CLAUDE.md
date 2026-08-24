@@ -408,7 +408,16 @@ subscribes. That is what keeps the graph acyclic.
   letter would be wrong the first time somebody inserted one, and wrong
   silently — the grid would still draw, against the wrong days. No year is
   invented either: the sheet does not carry one, and a date is not something to
-  infer from a month name.
+  infer from a month name — it is *resolved and then checked*. `datePlease()`
+  dates the axis from the snapshot's own timestamp, which narrows the year to
+  three candidates, and then picks between them on the workbook's weekday
+  letters: the same date is a different weekday in adjacent years, so only one
+  candidate makes M, Tu and W land where the file says they do. Below 90%
+  agreement no dates are claimed at all and everything that depends on them —
+  the today line, the week filters — stands down, because a today line on the
+  wrong column is worse than none. Month boundaries come from the day numbers
+  rather than the labels (a drop from 30 to 1), which is what recovers a month
+  whose label sits in a hidden column.
 - **White is not a highlight, and shading is not work.** An explicit white fill
   and no fill at all look identical to anybody reading the sheet, so
   `readFills()` resolves white to no fill — otherwise hundreds of cells land in
@@ -524,7 +533,7 @@ node tools/test_dist.js              #  21 checks — every deployment shape, an
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  45 checks — the look-ahead parser, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         #  90 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 100 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser

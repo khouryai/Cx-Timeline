@@ -364,3 +364,40 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   border-top: 2px solid var(--border-strong);
 }
 .la-grid tr.la-head-row .la-day { border-top: 2px solid var(--border-strong); }
+
+/* ── Today, and the month band ──────────────────────────────────────────── */
+
+/* Today is a line down the grid rather than a tinted cell: a fill would be one
+   more colour competing with the workbook's own, and the whole point of this
+   view is that the colours are BART's. */
+.la-grid .la-today {
+  border-left: 2px solid var(--accent, #e60012);
+  position: relative;
+}
+.la-grid thead th.la-today { color: var(--accent, #e60012); }
+
+/* The month band is its own row with its own weight, and the label inside it
+   is sticky: a month spans thirty columns, so the label scrolls away long
+   before the month does. Pinned just past the frozen activity columns, it
+   stays legible the whole way across. */
+.la-grid thead th.la-month {
+  background: var(--surface-3, var(--surface-2));
+  border-bottom: 1px solid var(--border-strong);
+  overflow: visible;
+  padding: 6px;
+}
+.la-month-label {
+  position: sticky;
+  left: var(--la-meta-w, 0px);
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--surface-3, var(--surface-2));
+  font-family: var(--f-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--text-main);
+  white-space: nowrap;
+}
+.la-grid thead th.la-num { font-size: 11px; color: var(--text-main); }
