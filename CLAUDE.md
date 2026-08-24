@@ -384,7 +384,38 @@ subscribes. That is what keeps the graph acyclic.
   screen to show it happened, and the result lands in evidence. Colour resolves
   through all three notations (literal, theme+tint via HLS, legacy indexed) to
   one hex, so the legend is keyed on the colour rather than on how it was
-  written — a literal `FFFF00` and an `indexed="13"` are one legend entry.
+  written — a literal `FFFF00` and an `indexed="13"` are one legend entry. It is
+  drawn as unmapped too, not only counted: `.la-day.la-unmapped` hatches the
+  cell on the calendar, so a colour nobody has explained is visible on the grid
+  rather than in a number at the top of it.
+- **The workbook's own key is read once, into an empty register.** BART's
+  look-ahead carries a block of rows painted one colour each with a label
+  beside them — "Highlight in Orange for Swing Shift" — and `readLegend()` in
+  `io/lookahead.js` reads it. That is not the guessing the bullet above
+  forbids: it is the authors' sentence off the page, and the swatch, not the
+  colour word in the sentence, is what the entry is keyed on. It is adopted
+  only when `rc_legend` is **empty**; after that the register is the authority
+  and an edit to the spreadsheet cannot silently reinterpret a colour somebody
+  mapped by hand. The label lives in a *hidden* column, which is why
+  `parseSheet()` keeps hidden-column text as `row.label` — the one thing it
+  keeps from a hidden cell, and never a cell of the grid.
+- **The date axis is found, never configured.** `readGrid()` in
+  `core/lookahead.js` locates the calendar by looking for the row of weekday
+  letters, which is the one row on that sheet whose content cannot be mistaken
+  for anything else; the day numbers are the row above it and the month band
+  the row above that, carried forward across the merge. Everything left of the
+  first day column is what the activity *is*. A layout pinned to a column
+  letter would be wrong the first time somebody inserted one, and wrong
+  silently — the grid would still draw, against the wrong days. No year is
+  invented either: the sheet does not carry one, and a date is not something to
+  infer from a month name.
+- **The calendar draws the snapshot, not the file.** That is what lets it
+  render on a machine that was never granted the folder, which is most of them.
+  The legend is re-applied to the stored grid at paint time rather than read
+  out of it, so mapping a colour changes the screen at once instead of at the
+  next ingest — and `sheet_name` and the legend both come from the database
+  (`rc_settings`, `rc_legend`), because a renamed tab must mean a field
+  somebody edits, not a redeploy.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
 - **The filter's text box holds a list, not a phrase.** `textTerms()` in
@@ -472,12 +503,13 @@ node tools/test_dist.js              #  21 checks — every deployment shape, an
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  45 checks — the look-ahead parser, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         #  70 checks — the resource calendar, accounts, and
-                                     #              the assertion that plan data never leaves
+node tools/smoke_calendar.js         #  85 checks — the resource calendar, accounts, the
+                                     #              look-ahead grid, and the assertion that
+                                     #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 197 checks — both permission models
+node tools/test_sql.js               # 206 checks — both permission models
 node tools/smoke.js --shot out.png   # …and eyeball the result
 ```
 

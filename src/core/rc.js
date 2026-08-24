@@ -275,6 +275,22 @@ export function listParties() {
   return select('rc_parties', (q) => q.eq('active', true).order('name'));
 }
 
+/**
+ * The legend the look-ahead's colours are read against.
+ *
+ * Versioned by `valid_from`, because a legend that changes must not silently
+ * reinterpret every snapshot taken before it did. Newest first, so a caller
+ * taking the first entry for a colour gets the one in force.
+ */
+export function listLegend({ includeInactive = false } = {}) {
+  return select('rc_legend', (q) =>
+    (includeInactive ? q : q.eq('active', true)).order('valid_from', { ascending: false }));
+}
+
+export function listSettings() {
+  return select('rc_settings');
+}
+
 export function listLeaveKinds() {
   return select('rc_leave_kinds', (q) => q.eq('active', true).order('name'));
 }
@@ -408,6 +424,30 @@ export const addLocationAlias = (locationId, alias) =>
 export const addCategory = (row) => insert('rc_categories', [row]).then((r) => r[0]);
 export const updateCategory = (id, patch) => update('rc_categories', id, patch);
 export const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r[0]);
+export const addLegend = (rows) => insert('rc_legend', rows);
+export const updateLegend = (id, patch) => update('rc_legend', id, patch);
+
+/**
+ * Write a setting.
+ *
+ * An upsert rather than an update, because the first time anybody names the
+ * sheet there is no row to update — and an UPDATE matching nothing would
+ * report success and change nothing, which is the failure this whole schema is
+ * arranged to avoid.
+ */
+export async function setSetting(key, value) {
+  requireClient();
+  const { data, error } = await client
+    .from('rc_settings')
+    .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+    .select();
+  if (error) throw new Error(`rc_settings: ${error.message}`);
+  if (!data || !data.length) {
+    throw new Error('rc_settings: that change was refused — only an administrator may set this.');
+  }
+  return data[0];
+}
+
 export const addLeave = (row) => insert('rc_leave', [row]).then((r) => r[0]);
 export const updateLeave = (id, patch) => update('rc_leave', id, patch);
 

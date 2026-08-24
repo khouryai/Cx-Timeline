@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-08-24T03:49:13.883Z
+ * Modules: 53   Built: 2026-08-24T04:23:21.592Z
  */
 (function () {
   'use strict';
@@ -13107,6 +13107,22 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_parties', (q) => q.eq('active', true).order('name'));
   }
 
+  /**
+   * The legend the look-ahead's colours are read against.
+   *
+   * Versioned by `valid_from`, because a legend that changes must not silently
+   * reinterpret every snapshot taken before it did. Newest first, so a caller
+   * taking the first entry for a colour gets the one in force.
+   */
+  function listLegend({ includeInactive = false } = {}) {
+    return select('rc_legend', (q) =>
+      (includeInactive ? q : q.eq('active', true)).order('valid_from', { ascending: false }));
+  }
+
+  function listSettings() {
+    return select('rc_settings');
+  }
+
   function listLeaveKinds() {
     return select('rc_leave_kinds', (q) => q.eq('active', true).order('name'));
   }
@@ -13240,6 +13256,30 @@ __mods["core/rc.js"] = function (__x, __req) {
   const addCategory = (row) => insert('rc_categories', [row]).then((r) => r[0]);
   const updateCategory = (id, patch) => update('rc_categories', id, patch);
   const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r[0]);
+  const addLegend = (rows) => insert('rc_legend', rows);
+  const updateLegend = (id, patch) => update('rc_legend', id, patch);
+
+  /**
+   * Write a setting.
+   *
+   * An upsert rather than an update, because the first time anybody names the
+   * sheet there is no row to update — and an UPDATE matching nothing would
+   * report success and change nothing, which is the failure this whole schema is
+   * arranged to avoid.
+   */
+  async function setSetting(key, value) {
+    requireClient();
+    const { data, error } = await client
+      .from('rc_settings')
+      .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+      .select();
+    if (error) throw new Error(`rc_settings: ${error.message}`);
+    if (!data || !data.length) {
+      throw new Error('rc_settings: that change was refused — only an administrator may set this.');
+    }
+    return data[0];
+  }
+
   const addLeave = (row) => insert('rc_leave', [row]).then((r) => r[0]);
   const updateLeave = (id, patch) => update('rc_leave', id, patch);
 
@@ -13402,6 +13442,8 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listLocationAliases", { get: () => listLocationAliases, enumerable: true });
   Object.defineProperty(__x, "listCategories", { get: () => listCategories, enumerable: true });
   Object.defineProperty(__x, "listParties", { get: () => listParties, enumerable: true });
+  Object.defineProperty(__x, "listLegend", { get: () => listLegend, enumerable: true });
+  Object.defineProperty(__x, "listSettings", { get: () => listSettings, enumerable: true });
   Object.defineProperty(__x, "listLeaveKinds", { get: () => listLeaveKinds, enumerable: true });
   Object.defineProperty(__x, "listLeave", { get: () => listLeave, enumerable: true });
   Object.defineProperty(__x, "listPlan", { get: () => listPlan, enumerable: true });
@@ -13426,6 +13468,9 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "addCategory", { get: () => addCategory, enumerable: true });
   Object.defineProperty(__x, "updateCategory", { get: () => updateCategory, enumerable: true });
   Object.defineProperty(__x, "addParty", { get: () => addParty, enumerable: true });
+  Object.defineProperty(__x, "addLegend", { get: () => addLegend, enumerable: true });
+  Object.defineProperty(__x, "updateLegend", { get: () => updateLegend, enumerable: true });
+  Object.defineProperty(__x, "setSetting", { get: () => setSetting, enumerable: true });
   Object.defineProperty(__x, "addLeave", { get: () => addLeave, enumerable: true });
   Object.defineProperty(__x, "updateLeave", { get: () => updateLeave, enumerable: true });
   Object.defineProperty(__x, "addPlanEntries", { get: () => addPlanEntries, enumerable: true });
@@ -28608,16 +28653,19 @@ __mods["io/lookahead.js"] = function (__x, __req) {
       const rowNumber = parseInt(/\br="(\d+)"/.exec(head)?.[1] ?? '0', 10);
 
       const cells = [];
+      /* Text from *hidden* columns is kept for one narrow purpose and no other:
+         the legend key is written in a hidden column beside a row of coloured
+         swatches, so dropping it the way every other hidden cell is dropped
+         would throw away the one thing that says what the colours mean. It never
+         becomes a cell of the grid — only this label. */
+      let label = '';
+
       for (const cellXml of rowXml.match(CELL_RE) || []) {
         const ref = /\br="([A-Z]+)(\d+)"/.exec(cellXml);
         if (!ref) continue;
         const col = colNumber(ref[1]);
-        if (hiddenColumns.has(col)) continue;
 
-        const styleIndex = parseInt(/\bs="(\d+)"/.exec(cellXml)?.[1] ?? '-1', 10);
-        const fill = styleIndex >= 0 ? styleFills[styleIndex] : null;
         const type = /\bt="([^"]+)"/.exec(cellXml)?.[1];
-
         let value = '';
         if (type === 'inlineStr') {
           value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [])
@@ -28626,6 +28674,14 @@ __mods["io/lookahead.js"] = function (__x, __req) {
           const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
           if (raw != null) value = type === 's' ? (sharedStrings[parseInt(raw, 10)] ?? '') : decodeXml(raw);
         }
+
+        if (hiddenColumns.has(col)) {
+          if (!label && String(value).trim()) label = String(value).trim();
+          continue;
+        }
+
+        const styleIndex = parseInt(/\bs="(\d+)"/.exec(cellXml)?.[1] ?? '-1', 10);
+        const fill = styleIndex >= 0 ? styleFills[styleIndex] : null;
 
         cells.push({
           col,
@@ -28637,7 +28693,7 @@ __mods["io/lookahead.js"] = function (__x, __req) {
       }
 
       // A row with no visible cells at all is not a row of the grid.
-      if (cells.length) rows.push({ row: rowNumber, cells });
+      if (cells.length) rows.push({ row: rowNumber, cells, label });
     }
 
     return {
@@ -28654,6 +28710,53 @@ __mods["io/lookahead.js"] = function (__x, __req) {
   /* ══════════════════════════════════════════════════════════════════════════
      The legend
      ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The legend the workbook writes down about itself.
+   *
+   * BART's look-ahead carries its own key: a short block of rows near the bottom
+   * where the whole row is painted one colour and a label beside it reads
+   * "Highlight in Orange for Swing Shift". That is the authors' own statement of
+   * what the colours mean, so reading it is not guessing — it is the one place
+   * in this pipeline where a meaning can be taken from the file rather than
+   * typed by somebody.
+   *
+   * It stays deliberately strict. A row qualifies only when every visible cell
+   * on it carries the *same* fill and none of them holds a value: a swatch, in
+   * other words, and not a row of work that happens to be highlighted. Anything
+   * that does not match that shape is simply not returned, and the colours it
+   * used go on to the `unknown` bucket to be mapped by hand — which is the same
+   * answer this module gives everywhere else it cannot be certain.
+   */
+  function readLegend(grid) {
+    const out = [];
+    const seen = new Set();
+
+    for (const row of grid.rows || []) {
+      const cells = row.cells || [];
+      if (cells.length < 2) continue;
+      if (cells.some((c) => String(c.value ?? '').trim())) continue;
+      if (cells.some((c) => !c.hex)) continue;
+      if (new Set(cells.map((c) => c.hex)).size !== 1) continue;
+
+      const label = String(row.label || '').trim();
+      if (!label) continue;
+
+      // "Highlight in Orange for Swing Shift" → "Swing Shift". The colour word
+      // in the sentence is thrown away on purpose: the swatch is the colour, and
+      // where the two disagree the swatch is the one that was painted.
+      const phrased = /^\s*highlight\s+in\s+\S+\s+for\s+(.+?)\s*$/i.exec(label);
+      const meaning = (phrased ? phrased[1] : label).trim();
+      if (!meaning) continue;
+
+      const argb = cells[0].hex;
+      if (seen.has(argb)) continue;
+      seen.add(argb);
+      out.push({ argb, meaning, row: row.row });
+    }
+
+    return out;
+  }
 
   /**
    * Turn a parsed grid into shifts, against the legend.
@@ -28694,6 +28797,7 @@ __mods["io/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "colLetters", { get: () => colLetters, enumerable: true });
   Object.defineProperty(__x, "readSheets", { get: () => readSheets, enumerable: true });
   Object.defineProperty(__x, "parseSheet", { get: () => parseSheet, enumerable: true });
+  Object.defineProperty(__x, "readLegend", { get: () => readLegend, enumerable: true });
   Object.defineProperty(__x, "applyLegend", { get: () => applyLegend, enumerable: true });
 };
 
@@ -28758,6 +28862,104 @@ __mods["core/lookahead.js"] = function (__x, __req) {
       seen.set(group, ordinal + 1);
       return { ...row, rowKey: rowKey({ ...row, ordinal }) };
     });
+  }
+
+  /* ── Reading the grid as a calendar ────────────────────────────────────── */
+
+  const WEEKDAYS = ['M', 'TU', 'W', 'TH', 'F', 'SA', 'SU'];
+
+  /**
+   * Turn a parsed sheet into something that can be drawn: days across the top,
+   * activities down the side.
+   *
+   * Everything here is *found* rather than configured, and that is the point.
+   * The look-ahead is a spreadsheet somebody maintains by hand: rows get
+   * inserted, the window scrolls, columns are hidden and unhidden as the weeks
+   * move. A layout pinned to "dates start at column H" would be wrong the first
+   * time anybody inserted a column, and wrong silently — the grid would still
+   * draw, against the wrong days.
+   *
+   * So the date axis is located by looking for the row of weekday letters, which
+   * is the one row on the sheet whose content cannot be mistaken for anything
+   * else. The day numbers sit directly above it and the month labels above
+   * those; the columns it occupies are the calendar, and everything to the left
+   * of them is what the activity *is*.
+   *
+   * No year is invented. The sheet does not carry one, and a date is not
+   * something to infer from a month name — the axis is drawn as the workbook
+   * writes it.
+   */
+  function readGrid(grid) {
+    const rows = (grid?.rows || []).slice().sort((a, b) => a.row - b.row);
+    const empty = { days: [], meta: [], activities: [], header: null };
+    if (!rows.length) return empty;
+
+    // The weekday row: the one where most values are M/Tu/W/Th/F/Sa/Su.
+    let header = null;
+    let best = 0;
+    for (const row of rows) {
+      const hits = row.cells.filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()));
+      if (hits.length > best && hits.length >= 7) {
+        best = hits.length;
+        header = row;
+      }
+    }
+    if (!header) return empty;
+
+    const dayCols = header.cells
+      .filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()))
+      .map((c) => c.col)
+      .sort((a, b) => a - b);
+    const dayCol = new Set(dayCols);
+    const firstDay = dayCols[0];
+
+    const at = (row, col) => row?.cells.find((c) => c.col === col);
+    const above = (n) => rows.filter((r) => r.row < header.row).slice(-n)[0] || null;
+    const numbers = above(1);
+    const months = above(2);
+
+    /* The month label is a merged cell, so only the leftmost column of each
+       block carries it. Carrying the last one forward is what merged means. */
+    let month = '';
+    const days = dayCols.map((col) => {
+      const label = String(at(months, col)?.value ?? '').trim();
+      if (label) month = label;
+      return {
+        col,
+        month,
+        day: String(at(numbers, col)?.value ?? '').trim(),
+        weekday: String(at(header, col)?.value ?? '').trim(),
+        weekend: ['SA', 'SU'].includes(String(at(header, col)?.value ?? '').trim().toUpperCase()),
+      };
+    });
+
+    /* The activity columns are whatever is used to the left of the calendar.
+       Their headings are not reliably on any one row — this file labels some and
+       not others — so they are numbered by position and named where a heading
+       happens to exist above the first activity. */
+    const body = rows.filter((r) => r.row > header.row);
+    const metaCols = [...new Set(
+      body.flatMap((r) => r.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim()).map((c) => c.col))
+    )].sort((a, b) => a - b);
+
+    const activities = [];
+    for (const row of body) {
+      const meta = metaCols.map((col) => String(at(row, col)?.value ?? '').trim());
+      const marks = row.cells
+        .filter((c) => dayCol.has(c.col) && (String(c.value ?? '').trim() || c.hex))
+        .map((c) => ({
+          col: c.col,
+          value: String(c.value ?? '').trim(),
+          hex: c.hex || null,
+          meaning: c.meaning || null,
+        }));
+
+      // A row with neither a description nor a mark is spacing, not work.
+      if (!meta.some(Boolean) && !marks.some((m) => m.value)) continue;
+      activities.push({ row: row.row, meta, marks });
+    }
+
+    return { days, meta: metaCols, activities, header: header.row };
   }
 
   /* ── The window ────────────────────────────────────────────────────────── */
@@ -28927,6 +29129,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
   Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
+  Object.defineProperty(__x, "readGrid", { get: () => readGrid, enumerable: true });
   Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
   Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
   Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
@@ -28962,18 +29165,21 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { el, clear } = __req("core/util.js");
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
-  const { parseSheet, applyLegend } = __req("io/lookahead.js");
-  const { keyRows, classify, relinkCandidates, countable, describe } = __req("core/lookahead.js");
+  const { parseSheet, applyLegend, readLegend } = __req("io/lookahead.js");
+  const { keyRows, classify, relinkCandidates, countable, describe, readGrid } = __req("core/lookahead.js");
   const { icon } = __req("ui/icons.js");
-  const { selectInput, textInput, toast, badge, emptyState } = __req("ui/components.js");
+  const { selectInput, textInput, toast, badge, emptyState, field } = __req("ui/components.js");
   const { notifyChanged, byId, dayLabel, todayISO, formModal } = __req("ui/rc_util.js");
 
   /** Where the workbook lives, relative to the folder the plan is in. */
   const LOOKAHEAD_DIR = 'lookahead';
   const SAR_INBOX = 'sars/inbox';
 
-  const SECTIONS = ['changes', 'snapshots', 'sars'];
-  let section = 'changes';
+  const SECTIONS = ['calendar', 'changes', 'snapshots', 'legend', 'sars'];
+  let section = 'calendar';
+
+  /** Free text filter on the calendar, kept across a redraw of the section. */
+  let calendarFilter = '';
 
   async function render(root) {
     if (!rc.isAdmin()) {
@@ -28991,7 +29197,10 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       nav.appendChild(el('button', {
         class: 'rc-tab',
         type: 'button',
-        text: { changes: 'Changes', snapshots: 'Snapshots', sars: 'Site access' }[id],
+        text: {
+          calendar: 'Calendar', changes: 'Changes', snapshots: 'Snapshots',
+          legend: 'Legend', sars: 'Site access',
+        }[id],
         'aria-pressed': String(id === section),
         onClick: () => { section = id; clear(root); render(root); },
       }));
@@ -29001,8 +29210,10 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     const host = el('div');
     root.appendChild(host);
 
-    if (section === 'changes') await renderChanges(host);
+    if (section === 'calendar') await renderCalendar(host);
+    else if (section === 'changes') await renderChanges(host);
     else if (section === 'snapshots') await renderSnapshots(host);
+    else if (section === 'legend') await renderLegend(host);
     else await renderSars(host);
   }
 
@@ -29019,6 +29230,18 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * out of a sync.
    */
   async function ingest({ sheetName, legend, silent = false } = {}) {
+    /* Neither of these is a constant any more. The tab gets renamed by whoever
+       maintains the workbook, and the legend is BART's to change — a redeploy is
+       the wrong answer to either. Both are read from the database, and the
+       arguments survive only so a test can pin them. */
+    if (sheetName === undefined) {
+      const settings = await rc.listSettings().catch(() => []);
+      sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
+    }
+    if (legend === undefined) {
+      legend = (await rc.listLegend().catch(() => [])).map((r) => ({ argb: r.argb, meaning: r.meaning }));
+    }
+
     const run = { ran_at: new Date().toISOString(), outcome: 'error', note: null, file_hash: null, file_mtime: null };
 
     let file = null;
@@ -29099,7 +29322,28 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       }
 
       const buffer = await filestore.intakeRead(rel);
-      const grid = applyLegend(parseSheet(buffer, sheetName), legend);
+      const parsed = parseSheet(buffer, sheetName);
+
+      /* The workbook writes down what its own colours mean. Adopting that the
+         first time is not the same as guessing one: it is the authors' sentence,
+         read off the page. It is only ever adopted into an *empty* register —
+         once somebody has mapped a colour by hand the file does not get to
+         overrule them, and a disagreement is surfaced instead. */
+      const declared = readLegend(parsed);
+      if (declared.length && !legend.length) {
+        await rc.addLegend(declared.map((d) => ({ argb: d.argb, meaning: d.meaning })));
+        legend = declared;
+        if (!silent) {
+          toast({
+            tone: 'good',
+            message: `Read ${declared.length} colours from the workbook's own key: `
+              + `${declared.map((d) => d.meaning).join(', ')}.`,
+            timeout: 9000,
+          });
+        }
+      }
+
+      const grid = applyLegend(parsed, legend);
 
       if (grid.conditional.length && !grid.rows.some((r) => r.cells.some((c) => c.hex))) {
         throw new Error(
@@ -29113,7 +29357,17 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         file_hash: hash,
         file_mtime: run.file_mtime,
         sheet_name: grid.sheet,
-        grid: { rows: grid.rows, merges: grid.merges, hiddenColumns: grid.hiddenColumns, unknown: grid.unknown },
+        grid: {
+          rows: grid.rows,
+          merges: grid.merges,
+          hiddenColumns: grid.hiddenColumns,
+          unknown: grid.unknown,
+          // What the file said about itself, kept beside what it was read
+          // against — so a legend that changed under a snapshot is visible
+          // rather than something somebody has to remember.
+          declared,
+          legend,
+        },
       });
 
       run.outcome = 'snapshot';
@@ -29140,6 +29394,399 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
+     The calendar
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The look-ahead as it looks: activities down, days across, cells in the
+   * colours the workbook painted them.
+   *
+   * This draws the *snapshot*, not the file — the file is in a folder the
+   * browser may not have, and the whole point of snapshotting was that the
+   * record has to survive without it. The legend is re-applied here rather than
+   * being read from the snapshot, so mapping a colour changes what is on screen
+   * straight away instead of at the next ingest.
+   */
+  async function renderCalendar(host) {
+    const [snapshots, legendRows] = await Promise.all([
+      rc.listSnapshots({ limit: 1 }),
+      rc.listLegend(),
+    ]);
+    const snapshot = snapshots[0];
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'The look-ahead' }),
+      checkNowButton(),
+    ]));
+
+    if (!snapshot?.grid?.rows?.length) {
+      host.appendChild(emptyState({
+        iconName: 'calendar',
+        title: 'Nothing read yet',
+        message: 'Put the workbook in the lookahead folder beside your plan and press Check now. '
+          + 'This draws the snapshot rather than the file, so once it has been read once it stays '
+          + 'readable on any machine — including the ones that have never been given the folder.',
+      }));
+      return;
+    }
+
+    const legend = legendRows.map((r) => ({ argb: r.argb, meaning: r.meaning }));
+    const grid = applyLegend(snapshot.grid, legend);
+    const view = readGrid(grid);
+
+    if (!view.days.length) {
+      host.appendChild(emptyState({
+        iconName: 'warning',
+        title: 'No date axis found on that sheet',
+        message: 'The calendar is located by finding the row of weekday letters — M, Tu, W and '
+          + 'the rest — and this sheet has none that are visible. Check the sheet name in Legend, '
+          + 'and that the week columns are not hidden.',
+      }));
+      return;
+    }
+
+    host.appendChild(legendStrip(legend, grid.unknown));
+
+    /* A filter, because a hundred and forty rows is a spreadsheet and the reason
+       to look at it here is usually one subsystem or one location. */
+    const search = textInput({
+      value: calendarFilter,
+      placeholder: 'Filter activities — description, location, party…',
+      mini: true,
+    });
+    const body = el('div');
+    const draw = () => {
+      clear(body);
+      body.appendChild(grid_(view, calendarFilter));
+    };
+    // Redraw the rows only, never the input: rebuilding the field under the
+    // caret is the trap this project has already been bitten by three times.
+    search.addEventListener('input', () => { calendarFilter = search.value; draw(); });
+
+    host.appendChild(el('div', { style: 'margin-bottom:10px;max-width:420px' }, [search]));
+    host.appendChild(body);
+    draw();
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: `${view.activities.length} activities across ${view.days.length} days, from the `
+        + `snapshot taken ${snapshot.taken_at ? snapshot.taken_at.slice(0, 16).replace('T', ' ') : 'earlier'}. `
+        + 'Only the rows and columns that were visible in the workbook are here — a hidden row is '
+        + 'not work anybody was being asked to look at, and reading them all would bury the window '
+        + 'in a year of history.',
+    }));
+  }
+
+  /** The grid itself. Split out so the filter can redraw it without the header. */
+  function grid_(view, filter) {
+    const terms = String(filter || '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean);
+    const rows = terms.length
+      ? view.activities.filter((a) => {
+        const hay = a.meta.join(' ').toLowerCase();
+        return terms.some((t) => hay.includes(t));
+      })
+      : view.activities;
+
+    /* The month band. Each label spans its own run of days, which is what the
+       merged cell in the workbook meant. */
+    const months = [];
+    for (const day of view.days) {
+      const last = months[months.length - 1];
+      if (last && last.month === day.month) last.span++;
+      else months.push({ month: day.month, span: 1 });
+    }
+
+    const head = el('thead', {}, [
+      el('tr', {}, [
+        el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: '' }),
+        ...months.map((m) => el('th', { class: 'la-month', colSpan: m.span, text: m.month || '' })),
+      ]),
+      el('tr', {}, [
+        el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: 'Activity' }),
+        ...view.days.map((d) => el('th', {
+          class: d.weekend ? 'la-weekend' : '',
+          text: d.day,
+        })),
+      ]),
+      el('tr', {}, [
+        el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: '' }),
+        ...view.days.map((d) => el('th', {
+          class: d.weekend ? 'la-weekend' : '',
+          text: d.weekday,
+        })),
+      ]),
+    ]);
+
+    const byCol = (marks) => {
+      const map = new Map();
+      for (const m of marks) map.set(m.col, m);
+      return map;
+    };
+
+    const tbody = el('tbody', {}, rows.map((a) => {
+      const marks = byCol(a.marks);
+      return el('tr', {}, [
+        ...a.meta.map((value, i) => el('td', {
+          class: 'la-meta' + (i === a.meta.length - 1 ? ' la-last' : ''),
+          text: value,
+          title: value,
+        })),
+        ...view.days.map((d) => {
+          const mark = marks.get(d.col);
+          const classes = ['la-day'];
+          if (d.weekend) classes.push('la-weekend');
+          if (mark?.hex) {
+            classes.push('la-painted');
+            if (isDark(mark.hex)) classes.push('la-dark');
+            if (!mark.meaning) classes.push('la-unmapped');
+          }
+          return el('td', {
+            class: classes.join(' '),
+            style: mark?.hex ? `background:#${mark.hex}` : '',
+            text: mark?.value || '',
+            title: [a.meta.filter(Boolean)[0], `${d.month} ${d.day} ${d.weekday}`.trim(),
+              mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value]
+              .filter(Boolean).join(' · '),
+          });
+        }),
+      ]);
+    }));
+
+    const table_ = el('table', { class: 'rc-table la-grid' }, [head, tbody]);
+    const wrap = el('div', { class: 'rc-scroll', style: 'max-height:60vh' }, [table_]);
+
+    /* The frozen columns have to be told where they start, and only the browser
+       knows how wide the content made them. Measured once the table is in the
+       document, on the next frame. */
+    requestAnimationFrame(() => {
+      const firstRow = table_.querySelector('tbody tr');
+      if (!firstRow) return;
+      let left = 0;
+      const widths = [...firstRow.querySelectorAll('.la-meta')].map((td) => td.getBoundingClientRect().width);
+      widths.forEach((width, i) => {
+        for (const cell of table_.querySelectorAll(`.la-meta:nth-child(${i + 1})`)) {
+          if (cell.tagName === 'TD') cell.style.left = `${left}px`;
+        }
+        left += width;
+      });
+      for (const th of table_.querySelectorAll('thead .la-meta')) th.style.left = '0px';
+    });
+
+    if (!rows.length) {
+      return el('p', { class: 'rc-hint', text: 'Nothing matches that filter.' });
+    }
+    return wrap;
+  }
+
+  /** Perceived lightness, so text on a painted cell stays readable. */
+  function isDark(hex) {
+    const n = parseInt(String(hex).slice(-6), 16);
+    if (Number.isNaN(n)) return false;
+    const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    return (0.299 * r + 0.587 * g + 0.114 * b) < 140;
+  }
+
+  function legendStrip(legend, unknown) {
+    const strip = el('div', { class: 'la-legend' });
+    for (const entry of legend) {
+      strip.append(el('span', {}, [
+        el('span', { class: 'la-swatch', style: `background:#${entry.argb}` }),
+        el('span', { text: entry.meaning }),
+      ]));
+    }
+    if (unknown?.length) {
+      strip.append(el('button', {
+        class: 'cx-btn mini ghost',
+        text: `${unknown.length} colour(s) unmapped`,
+        title: 'Nothing was guessed. They are drawn with a hatch until somebody says what they mean.',
+        onClick: () => { section = 'legend'; notifyChanged('legend'); },
+      }));
+    }
+    return strip;
+  }
+
+  function checkNowButton() {
+    return el('button', {
+      class: 'cx-btn mini primary',
+      html: icon('refresh', { size: 12 }) + '<span>Check now</span>',
+      onClick: async () => {
+        try {
+          await ingest();
+        } catch (err) {
+          // 'bad' — not 'error', which is not a tone and fell back to the
+          // neutral info styling, so a refusal looked like a notification.
+          // These messages say what to go and do, so they get longer than the
+          // default three and a half seconds to be read.
+          toast({ tone: 'bad', message: err.message, timeout: 12000 });
+        }
+      },
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The legend
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * What the colours mean, and which sheet to read.
+   *
+   * The register is the authority, not the workbook: the file's own key is
+   * adopted once into an empty register and never again, so a colour somebody
+   * has mapped by hand cannot be silently reinterpreted by an edit to the
+   * spreadsheet. Where the two disagree, both are shown and the person decides.
+   */
+  async function renderLegend(host) {
+    const [legend, snapshots, settings] = await Promise.all([
+      rc.listLegend({ includeInactive: true }),
+      rc.listSnapshots({ limit: 1 }),
+      rc.listSettings().catch(() => []),
+    ]);
+    const snapshot = snapshots[0];
+    const sheet = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
+
+    /* ── Which sheet ─────────────────────────────────────────────────────── */
+    host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Which sheet' })]));
+    const sheetField = textInput({ value: sheet, placeholder: '4WLA' });
+    host.appendChild(el('div', { style: 'display:flex;gap:8px;max-width:420px' }, [
+      sheetField,
+      el('button', {
+        class: 'cx-btn mini',
+        text: 'Save',
+        onClick: async () => {
+          try {
+            await rc.setSetting('lookahead_sheet', sheetField.value.trim());
+            toast({ tone: 'good', message: `The look-ahead will be read from "${sheetField.value.trim()}".` });
+          } catch (err) {
+            toast({ tone: 'bad', message: err.message });
+          }
+        },
+      }),
+    ]));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'The tab the grid is on. It is never guessed: if no sheet by this name is visible, the '
+        + 'read stops and says so, because falling back to the first sheet would report a cover '
+        + 'page as a week of no work.',
+    }));
+
+    /* ── The register ────────────────────────────────────────────────────── */
+    host.appendChild(el('div', { style: 'height:24px' }));
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'What the colours mean' }),
+      el('button', {
+        class: 'cx-btn mini primary',
+        html: icon('plus', { size: 12 }) + '<span>Add colour</span>',
+        onClick: () => editLegend(null),
+      }),
+    ]));
+
+    if (!legend.length) {
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: 'Nothing mapped yet. The first read adopts the key the workbook writes down about '
+          + 'itself, if it has one — a block of rows painted one colour each with a label beside '
+          + 'them. After that the register is the authority and the file cannot overrule it.',
+      }));
+    } else {
+      host.appendChild(table(
+        ['', 'Colour', 'Means', 'In force from', ''],
+        legend.map((entry) => el('tr', { class: entry.active ? '' : 'rc-inactive' }, [
+          el('td', {}, [el('span', { class: 'la-swatch', style: `background:#${entry.argb}` })]),
+          el('td', { class: 'rc-num', text: `#${entry.argb}` }),
+          el('td', { text: entry.meaning }),
+          el('td', { text: entry.valid_from || '—' }),
+          el('td', {}, [
+            el('button', { class: 'cx-btn mini ghost', text: 'Edit', onClick: () => editLegend(entry) }),
+            el('button', {
+              class: 'cx-btn mini ghost',
+              text: entry.active ? 'Retire' : 'Restore',
+              title: 'Retiring keeps it against every snapshot already read with it.',
+              onClick: async () => {
+                await rc.updateLegend(entry.id, { active: !entry.active });
+                notifyChanged('legend');
+              },
+            }),
+          ]),
+        ]))
+      ));
+    }
+
+    /* ── What is not mapped ──────────────────────────────────────────────── */
+    const grid = snapshot?.grid ? applyLegend(snapshot.grid, legend.filter((l) => l.active)) : null;
+    const unknown = grid?.unknown || [];
+
+    host.appendChild(el('div', { style: 'height:24px' }));
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'Seen in the workbook, not in the legend' }),
+    ]));
+
+    if (!unknown.length) {
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: snapshot ? 'Every colour on the last snapshot is accounted for.' : 'Nothing read yet.',
+      }));
+    } else {
+      host.appendChild(table(
+        ['', 'Colour', 'Cells', 'For example', ''],
+        unknown.map((u) => el('tr', {}, [
+          el('td', {}, [el('span', { class: 'la-swatch', style: `background:#${u.hex}` })]),
+          el('td', { class: 'rc-num', text: `#${u.hex}` }),
+          el('td', { class: 'rc-num', text: String(u.count) }),
+          el('td', { text: (u.samples || []).join(', ') }),
+          el('td', {}, [
+            el('button', {
+              class: 'cx-btn mini primary',
+              text: 'Say what it means',
+              onClick: () => editLegend({ argb: u.hex }),
+            }),
+          ]),
+        ]))
+      ));
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: 'Nothing here was guessed, and that is deliberate. Two of these are usually near '
+          + 'misses — a blue a shade off the legend blue, picked from Excel’s recent colours — '
+          + 'and guessing would classify a shift wrongly with nothing on screen to show it '
+          + 'happened. On the calendar they are drawn with a hatch until somebody says.',
+      }));
+    }
+  }
+
+  function editLegend(entry) {
+    const argb = textInput({
+      value: entry?.argb || '',
+      placeholder: 'FFFF00',
+    });
+    const meaning = textInput({ value: entry?.meaning || '', placeholder: 'Day Shift' });
+    const swatch = el('span', { class: 'la-swatch', style: `background:#${entry?.argb || 'ffffff'}` });
+    argb.addEventListener('input', () => {
+      swatch.style.background = `#${argb.value.replace(/[^0-9a-f]/gi, '')}`;
+    });
+
+    formModal({
+      title: entry?.id ? 'Edit what this colour means' : 'Map a colour',
+      body: el('div', { class: 'cx-form' }, [
+        field('Colour', el('div', { style: 'display:flex;align-items:center;gap:8px' }, [swatch, argb]),
+          'The six hex digits, as the workbook painted it. Every notation Excel uses — a literal '
+          + 'value, a theme colour with a tint, the legacy palette — is resolved to this one form '
+          + 'before it is looked up, so the legend is keyed on the colour rather than on how it '
+          + 'happened to be written.'),
+        field('Means', meaning, 'In the words the look-ahead uses: Day Shift, Cancellation, Blanket.'),
+      ]),
+      confirmLabel: entry?.id ? 'Save' : 'Map it',
+      onConfirm: async () => {
+        const hex = argb.value.replace(/[^0-9a-f]/gi, '').toUpperCase();
+        if (hex.length !== 6) throw new Error('Six hex digits, like FFFF00.');
+        if (!meaning.value.trim()) throw new Error('Say what it means.');
+        if (entry?.id) await rc.updateLegend(entry.id, { argb: hex, meaning: meaning.value.trim() });
+        else await rc.addLegend([{ argb: hex, meaning: meaning.value.trim() }]);
+        notifyChanged('legend');
+        toast({ tone: 'good', message: `#${hex} means "${meaning.value.trim()}".` });
+      },
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
      Changes
      ═══════════════════════════════════════════════════════════════════════ */
 
@@ -29154,21 +29801,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
     host.appendChild(el('div', { class: 'rc-section-head' }, [
       el('h3', { text: 'What the look-ahead did' }),
-      el('button', {
-        class: 'cx-btn mini primary',
-        html: icon('refresh', { size: 12 }) + '<span>Check now</span>',
-        onClick: async () => {
-          try {
-            await ingest({ sheetName: '4WLA', legend: [] });
-          } catch (err) {
-            // 'bad' — not 'error', which is not a tone and fell back to the
-            // neutral info styling, so a refusal looked like a notification.
-            // These messages say what to go and do, so they get longer than the
-            // default three and a half seconds to be read.
-            toast({ tone: 'bad', message: err.message, timeout: 12000 });
-          }
-        },
-      }),
+      checkNowButton(),
     ]));
 
     /* Coverage before content. Ingestion only happens when somebody has the

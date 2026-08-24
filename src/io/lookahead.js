@@ -356,16 +356,19 @@ export function parseSheet(buffer, sheetName) {
     const rowNumber = parseInt(/\br="(\d+)"/.exec(head)?.[1] ?? '0', 10);
 
     const cells = [];
+    /* Text from *hidden* columns is kept for one narrow purpose and no other:
+       the legend key is written in a hidden column beside a row of coloured
+       swatches, so dropping it the way every other hidden cell is dropped
+       would throw away the one thing that says what the colours mean. It never
+       becomes a cell of the grid — only this label. */
+    let label = '';
+
     for (const cellXml of rowXml.match(CELL_RE) || []) {
       const ref = /\br="([A-Z]+)(\d+)"/.exec(cellXml);
       if (!ref) continue;
       const col = colNumber(ref[1]);
-      if (hiddenColumns.has(col)) continue;
 
-      const styleIndex = parseInt(/\bs="(\d+)"/.exec(cellXml)?.[1] ?? '-1', 10);
-      const fill = styleIndex >= 0 ? styleFills[styleIndex] : null;
       const type = /\bt="([^"]+)"/.exec(cellXml)?.[1];
-
       let value = '';
       if (type === 'inlineStr') {
         value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [])
@@ -374,6 +377,14 @@ export function parseSheet(buffer, sheetName) {
         const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
         if (raw != null) value = type === 's' ? (sharedStrings[parseInt(raw, 10)] ?? '') : decodeXml(raw);
       }
+
+      if (hiddenColumns.has(col)) {
+        if (!label && String(value).trim()) label = String(value).trim();
+        continue;
+      }
+
+      const styleIndex = parseInt(/\bs="(\d+)"/.exec(cellXml)?.[1] ?? '-1', 10);
+      const fill = styleIndex >= 0 ? styleFills[styleIndex] : null;
 
       cells.push({
         col,
@@ -385,7 +396,7 @@ export function parseSheet(buffer, sheetName) {
     }
 
     // A row with no visible cells at all is not a row of the grid.
-    if (cells.length) rows.push({ row: rowNumber, cells });
+    if (cells.length) rows.push({ row: rowNumber, cells, label });
   }
 
   return {
@@ -402,6 +413,53 @@ export function parseSheet(buffer, sheetName) {
 /* ══════════════════════════════════════════════════════════════════════════
    The legend
    ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The legend the workbook writes down about itself.
+ *
+ * BART's look-ahead carries its own key: a short block of rows near the bottom
+ * where the whole row is painted one colour and a label beside it reads
+ * "Highlight in Orange for Swing Shift". That is the authors' own statement of
+ * what the colours mean, so reading it is not guessing — it is the one place
+ * in this pipeline where a meaning can be taken from the file rather than
+ * typed by somebody.
+ *
+ * It stays deliberately strict. A row qualifies only when every visible cell
+ * on it carries the *same* fill and none of them holds a value: a swatch, in
+ * other words, and not a row of work that happens to be highlighted. Anything
+ * that does not match that shape is simply not returned, and the colours it
+ * used go on to the `unknown` bucket to be mapped by hand — which is the same
+ * answer this module gives everywhere else it cannot be certain.
+ */
+export function readLegend(grid) {
+  const out = [];
+  const seen = new Set();
+
+  for (const row of grid.rows || []) {
+    const cells = row.cells || [];
+    if (cells.length < 2) continue;
+    if (cells.some((c) => String(c.value ?? '').trim())) continue;
+    if (cells.some((c) => !c.hex)) continue;
+    if (new Set(cells.map((c) => c.hex)).size !== 1) continue;
+
+    const label = String(row.label || '').trim();
+    if (!label) continue;
+
+    // "Highlight in Orange for Swing Shift" → "Swing Shift". The colour word
+    // in the sentence is thrown away on purpose: the swatch is the colour, and
+    // where the two disagree the swatch is the one that was painted.
+    const phrased = /^\s*highlight\s+in\s+\S+\s+for\s+(.+?)\s*$/i.exec(label);
+    const meaning = (phrased ? phrased[1] : label).trim();
+    if (!meaning) continue;
+
+    const argb = cells[0].hex;
+    if (seen.has(argb)) continue;
+    seen.add(argb);
+    out.push({ argb, meaning, row: row.row });
+  }
+
+  return out;
+}
 
 /**
  * Turn a parsed grid into shifts, against the legend.

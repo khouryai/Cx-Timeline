@@ -97,7 +97,53 @@ function fakeSdk() {
       { id: 'e3', person_id: 'p2', person_name: 'Dan', subsystem: 'Wayside', work_date: iso(-4), status: 'blocked', signal: 'health', category_id: 'c1', location_id: 'l1', blocked_party_id: 'party1' },
       { id: 'e4', person_id: 'p4', person_name: 'Sam', subsystem: 'SCADA', work_date: iso(-5), status: 'reassigned', signal: 'health', category_id: 'c2', location_id: 'l2' },
     ],
-    rc_lookahead_snapshots: [],
+    /* A snapshot shaped like the real workbook: a month band, day numbers, a
+       row of weekday letters that is how the date axis gets found at all, and
+       activities whose marks are painted. One colour is deliberately absent
+       from the legend — a near miss of the legend blue, which is exactly what
+       Excel's recent-colours picker produces — because "nothing is guessed"
+       is the rule this whole pipeline is built on and it needs a case. */
+    rc_lookahead_snapshots: [{
+      id: 'snap1',
+      taken_at: new Date().toISOString(),
+      file_mtime: new Date().toISOString(),
+      file_hash: 'stub-hash',
+      sheet_name: '4WLA',
+      grid: {
+        merges: [], hiddenColumns: [], unknown: [],
+        rows: [
+          { row: 4, label: '', cells: [{ col: 8, ref: 'H4', value: 'JULY', hex: null }] },
+          { row: 5, label: '', cells: [1, 2, 3, 4, 5, 6, 7].map((d, i) => (
+            { col: 8 + i, ref: `X5`, value: String(d), hex: null })) },
+          { row: 6, label: '', cells: ['M', 'Tu', 'W', 'Th', 'F', 'Sa', 'Su'].map((d, i) => (
+            { col: 8 + i, ref: `X6`, value: d, hex: null })) },
+          { row: 7, label: '', cells: [
+            { col: 2, ref: 'B7', value: 'CDRL 9.04.29', hex: null },
+            { col: 3, ref: 'C7', value: 'IXL Regression Testing', hex: null },
+            { col: 4, ref: 'D7', value: 'TPSS 12', hex: null },
+            { col: 8, ref: 'H7', value: 'X', hex: 'FFFF00' },
+            { col: 9, ref: 'I7', value: 'X.WIT', hex: 'FFFF00' },
+            { col: 11, ref: 'K7', value: 'X', hex: 'FF0000' },
+          ] },
+          { row: 8, label: '', cells: [
+            { col: 2, ref: 'B8', value: 'Operational Readiness', hex: null },
+            { col: 3, ref: 'C8', value: 'ATS Site Test', hex: null },
+            { col: 4, ref: 'D8', value: 'Station 6 Platform', hex: null },
+            { col: 10, ref: 'J8', value: 'X.TCE', hex: '00B0F0' },
+            { col: 12, ref: 'L8', value: 'X', hex: '3399FF' },
+          ] },
+          // The workbook's own key, in the shape readLegend() looks for.
+          { row: 20, label: 'Highlight in Yellow for Day Shift',
+            cells: [2, 3].map((c) => ({ col: c, ref: `X20`, value: '', hex: 'FFFF00' })) },
+        ],
+      },
+    }],
+    rc_legend: [
+      { id: 'lg1', argb: 'FFFF00', meaning: 'Day Shift', valid_from: '2026-01-01', active: true },
+      { id: 'lg2', argb: '00B0F0', meaning: 'Third Shift', valid_from: '2026-01-01', active: true },
+      { id: 'lg3', argb: 'FF0000', meaning: 'Cancellation', valid_from: '2026-01-01', active: true },
+    ],
+    rc_settings: [{ key: 'lookahead_sheet', value: '4WLA' }],
     rc_lookahead_rows: [],
     rc_change_events: [],
     rc_change_annotations: [],
@@ -157,6 +203,15 @@ function fakeSdk() {
             list.push(...made);
             if (table === 'rc_plan_entries') S.rows.rc_plan_current.push(...made);
             return { select: () => Promise.resolve({ data: made, error: null }) };
+          };
+          api.upsert = (row, opts) => {
+            S.calls.push({ kind: 'upsert', table, payload: row });
+            const list = S.rows[table] || (S.rows[table] = []);
+            const key = opts?.onConflict || 'id';
+            const hit = list.find((r) => r[key] === row[key]);
+            if (hit) Object.assign(hit, row);
+            else list.push({ ...row });
+            return { select: () => Promise.resolve({ data: [hit || row], error: null }) };
           };
           api.update = (patch) => {
             S.calls.push({ kind: 'update', table, payload: patch });
@@ -529,6 +584,80 @@ async function main() {
   /* ── The look-ahead and the SARs ──────────────────────────────────────── */
   console.log('\nThe look-ahead register');
   await page.locator('#rc-frame .rc-tab', { hasText: 'Look-ahead' }).click();
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
+
+  /* ── The calendar ─────────────────────────────────────────────────────
+     The workbook drawn as it looks: activities down, days across, in the
+     colours it was painted. It draws the snapshot rather than the file,
+     which is what lets it render on a machine that has never been given
+     the folder — including this one. */
+  const dayHeads = await page.locator('#rc-frame .la-grid thead tr').nth(1).locator('th').count();
+  check('the date axis is found from the weekday row', dayHeads === 8, `${dayHeads} heads`);
+  check('the month band is drawn',
+    /JULY/.test(await page.locator('#rc-frame .la-grid thead').innerText()));
+  check('the weekend is marked apart',
+    (await page.locator('#rc-frame .la-grid thead .la-weekend').count()) >= 2);
+
+  const gridText = await page.locator('#rc-frame .la-grid tbody').innerText();
+  check('activities are listed down the side',
+    /IXL Regression Testing/.test(gridText) && /Operational Readiness/.test(gridText));
+  check('and their marks are on the days they fall',
+    /X\.WIT/.test(gridText) && /X\.TCE/.test(gridText));
+
+  // The cell keeps the workbook's own colour rather than a token of ours —
+  // the person reading this has the spreadsheet open beside it.
+  const painted = page.locator('#rc-frame .la-grid td.la-painted').first();
+  check('a mark is drawn in the colour the workbook painted it',
+    (await painted.evaluate((n) => n.style.background || n.style.backgroundColor)).includes('255, 255, 0'));
+  check('and says what that colour means',
+    /Day Shift/.test(await painted.getAttribute('title')));
+
+  /* The rule the whole pipeline rests on: a colour the legend does not know
+     is never guessed. 3399FF is a near miss of the legend's blue, which is
+     exactly what Excel's recent-colours picker produces. */
+  check('an unmapped colour is drawn as unmapped, not as its nearest match',
+    (await page.locator('#rc-frame .la-grid td.la-unmapped').count()) === 1);
+  check('and it says so rather than naming a meaning',
+    /unmapped colour/.test(
+      await page.locator('#rc-frame .la-grid td.la-unmapped').first().getAttribute('title')));
+
+  // Filtering redraws the rows and leaves the field alone — rebuilding an
+  // input under the caret is the trap this project has hit three times.
+  const laFilter = page.locator('#rc-frame input[placeholder^="Filter activities"]');
+  await laFilter.fill('Operational');
+  await page.waitForTimeout(250);
+  const filtered = await page.locator('#rc-frame .la-grid tbody').innerText();
+  check('the filter narrows the activities',
+    /Operational Readiness/.test(filtered) && !/IXL Regression/.test(filtered));
+  check('and the caret stays in the box',
+    await page.evaluate(() => document.activeElement?.placeholder?.startsWith('Filter activities')));
+  await laFilter.fill('');
+  await page.waitForTimeout(200);
+
+  /* ── The legend ───────────────────────────────────────────────────────── */
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Legend' }).click();
+  await page.waitForSelector('#rc-frame .rc-table');
+  const legendText = await page.locator('#rc-frame').innerText();
+  check('the legend lists what each colour means',
+    /Day Shift/.test(legendText) && /Cancellation/.test(legendText) && /Third Shift/.test(legendText));
+  check('and lists the colour nobody has mapped, with a count',
+    /3399FF/i.test(legendText), legendText.split('\n').filter((l) => /3399/i.test(l)).join(' '));
+
+  // The sheet is a setting, not a constant: a renamed tab must not mean a
+  // redeploy.
+  const sheetBox = page.locator('#rc-frame input[placeholder="4WLA"]');
+  check('the sheet the grid is read from is editable', await sheetBox.inputValue() === '4WLA');
+  await sheetBox.fill('4WLA v2');
+  await page.locator('#rc-frame button', { hasText: 'Save' }).first().click();
+  await page.waitForTimeout(300);
+  check('and saving it goes to the settings table, not the source',
+    await page.evaluate(() => window.__rc.rows.rc_settings
+      .some((r) => r.key === 'lookahead_sheet' && r.value === '4WLA v2')));
+  await sheetBox.fill('4WLA');
+  await page.locator('#rc-frame button', { hasText: 'Save' }).first().click();
+  await page.waitForTimeout(300);
+
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Changes' }).click();
   await page.waitForTimeout(400);
   const laText = await page.locator('#rc-frame').innerText();
   // Coverage before content: ingestion only runs when somebody has the app
@@ -678,9 +807,17 @@ async function main() {
   check('no console errors', real.length === 0, real.slice(0, 3).join(' | '));
 
   const shot = process.argv.includes('--shot') ? process.argv[process.argv.indexOf('--shot') + 1] : null;
+  const shotTab = process.argv.includes('--shot-tab')
+    ? process.argv[process.argv.indexOf('--shot-tab') + 1] : null;
   if (shot) {
     await page.locator('.ws-btn', { hasText: 'Calendar' }).click();
     await page.waitForTimeout(400);
+    // Comma-separated, outermost first: the tab row and the section row inside
+    // it are both `.rc-tab`, and the section a test left behind is sticky.
+    for (const name of (shotTab || '').split(',').map((t) => t.trim()).filter(Boolean)) {
+      await page.locator('#rc-frame .rc-tab', { hasText: name }).first().click();
+      await page.waitForTimeout(500);
+    }
     await page.screenshot({ path: shot, fullPage: false });
     console.log(`\nscreenshot → ${shot}`);
   }

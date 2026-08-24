@@ -513,6 +513,44 @@ select refuses(:'dave',
   'a member writing their own plan');
 
 -- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice E'\nThe legend, and which sheet to read'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+-- Both are reference data with one sharp edge: they decide how every future
+-- snapshot is *interpreted*. A member who could edit either could change what
+-- a colour means under a claim that has already been made.
+
+select act_as(:'alice');
+insert into public.rc_legend (argb, meaning) values
+  ('FFFF00', 'Day Shift'), ('FF0000', 'Cancellation'), ('000000', 'Blanket Shift');
+select assert((select count(*) from public.rc_legend) = 3, 'an administrator maps the colours');
+select assert((select value from public.rc_settings where key = 'lookahead_sheet') = '4WLA',
+  'and the sheet to read has a default rather than a constant in the source');
+
+select act_as(:'carol');
+select assert((select count(*) from public.rc_legend) = 3,
+  'a member can read the legend — their own row is drawn against it');
+select assert((select count(*) from public.rc_settings) = 1, 'and the settings');
+select refuses(:'carol',
+  format('insert into public.rc_legend (argb, meaning) values (%L, %L)', '3399FF', 'Day Shift'),
+  'a member mapping a colour');
+select refuses(:'carol',
+  'update public.rc_legend set meaning = ''Night Shift'' where argb = ''FFFF00''',
+  'a member changing what a colour already means');
+select refuses(:'carol',
+  'update public.rc_settings set value = ''Sheet1'' where key = ''lookahead_sheet''',
+  'a member pointing the read at a different sheet');
+
+-- Retiring rather than deleting, for the same reason as everywhere else here:
+-- every snapshot already read against that colour still has to mean what it
+-- meant at the time.
+select act_as(:'alice');
+update public.rc_legend set active = false where argb = '000000';
+select assert((select count(*) from public.rc_legend where active) = 2,
+  'a retired colour leaves the active legend');
+select assert((select count(*) from public.rc_legend) = 3,
+  'but stays on the record, because snapshots were read against it');
+
+-- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice E'\nAccounts, invitations and roles'; end $$;
 -- ══════════════════════════════════════════════════════════════════════════
 -- Sign-up goes through GoTrue rather than PostgREST, so the interface has no

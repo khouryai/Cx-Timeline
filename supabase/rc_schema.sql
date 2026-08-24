@@ -132,6 +132,21 @@ create table if not exists public.rc_legend (
   unique (valid_from, argb)
 );
 
+-- How the look-ahead is read: which sheet the grid is on, and where the
+-- workbook lives. A table rather than a constant in the source, because the
+-- tab gets renamed by whoever maintains the file and a renamed tab must not
+-- mean a redeploy — it must mean a field somebody edits.
+create table if not exists public.rc_settings (
+  key        text primary key,
+  value      text,
+  updated_at timestamptz not null default now(),
+  updated_by uuid references auth.users(id) on delete set null
+);
+
+insert into public.rc_settings (key, value) values
+  ('lookahead_sheet', '4WLA')
+on conflict (key) do nothing;
+
 -- ══════════════════════════════════════════════════════════════════════════
 -- Leave
 -- ══════════════════════════════════════════════════════════════════════════
@@ -458,6 +473,7 @@ alter table public.rc_categories         enable row level security;
 alter table public.rc_parties            enable row level security;
 alter table public.rc_leave_kinds        enable row level security;
 alter table public.rc_legend             enable row level security;
+alter table public.rc_settings           enable row level security;
 alter table public.rc_leave              enable row level security;
 alter table public.rc_ingest_runs        enable row level security;
 alter table public.rc_lookahead_snapshots enable row level security;
@@ -477,7 +493,8 @@ do $$
 declare t text;
 begin
   foreach t in array array['rc_people', 'rc_locations', 'rc_location_alias',
-                           'rc_categories', 'rc_parties', 'rc_leave_kinds', 'rc_legend']
+                           'rc_categories', 'rc_parties', 'rc_leave_kinds', 'rc_legend',
+                           'rc_settings']
   loop
     execute format('drop policy if exists %1$s_read on public.%1$s', t);
     execute format(
@@ -1127,7 +1144,8 @@ do $$
 declare t text;
 begin
   foreach t in array array['rc_people', 'rc_locations', 'rc_location_alias', 'rc_categories',
-                           'rc_parties', 'rc_leave_kinds', 'rc_legend', 'rc_leave',
+                           'rc_parties', 'rc_leave_kinds', 'rc_legend', 'rc_settings',
+                           'rc_leave',
                            'rc_invitations',
                            'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
                            'rc_change_events', 'rc_sars', 'rc_sar_links']

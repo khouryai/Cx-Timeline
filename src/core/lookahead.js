@@ -57,6 +57,104 @@ export function keyRows(rows) {
   });
 }
 
+/* ── Reading the grid as a calendar ────────────────────────────────────── */
+
+const WEEKDAYS = ['M', 'TU', 'W', 'TH', 'F', 'SA', 'SU'];
+
+/**
+ * Turn a parsed sheet into something that can be drawn: days across the top,
+ * activities down the side.
+ *
+ * Everything here is *found* rather than configured, and that is the point.
+ * The look-ahead is a spreadsheet somebody maintains by hand: rows get
+ * inserted, the window scrolls, columns are hidden and unhidden as the weeks
+ * move. A layout pinned to "dates start at column H" would be wrong the first
+ * time anybody inserted a column, and wrong silently — the grid would still
+ * draw, against the wrong days.
+ *
+ * So the date axis is located by looking for the row of weekday letters, which
+ * is the one row on the sheet whose content cannot be mistaken for anything
+ * else. The day numbers sit directly above it and the month labels above
+ * those; the columns it occupies are the calendar, and everything to the left
+ * of them is what the activity *is*.
+ *
+ * No year is invented. The sheet does not carry one, and a date is not
+ * something to infer from a month name — the axis is drawn as the workbook
+ * writes it.
+ */
+export function readGrid(grid) {
+  const rows = (grid?.rows || []).slice().sort((a, b) => a.row - b.row);
+  const empty = { days: [], meta: [], activities: [], header: null };
+  if (!rows.length) return empty;
+
+  // The weekday row: the one where most values are M/Tu/W/Th/F/Sa/Su.
+  let header = null;
+  let best = 0;
+  for (const row of rows) {
+    const hits = row.cells.filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()));
+    if (hits.length > best && hits.length >= 7) {
+      best = hits.length;
+      header = row;
+    }
+  }
+  if (!header) return empty;
+
+  const dayCols = header.cells
+    .filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()))
+    .map((c) => c.col)
+    .sort((a, b) => a - b);
+  const dayCol = new Set(dayCols);
+  const firstDay = dayCols[0];
+
+  const at = (row, col) => row?.cells.find((c) => c.col === col);
+  const above = (n) => rows.filter((r) => r.row < header.row).slice(-n)[0] || null;
+  const numbers = above(1);
+  const months = above(2);
+
+  /* The month label is a merged cell, so only the leftmost column of each
+     block carries it. Carrying the last one forward is what merged means. */
+  let month = '';
+  const days = dayCols.map((col) => {
+    const label = String(at(months, col)?.value ?? '').trim();
+    if (label) month = label;
+    return {
+      col,
+      month,
+      day: String(at(numbers, col)?.value ?? '').trim(),
+      weekday: String(at(header, col)?.value ?? '').trim(),
+      weekend: ['SA', 'SU'].includes(String(at(header, col)?.value ?? '').trim().toUpperCase()),
+    };
+  });
+
+  /* The activity columns are whatever is used to the left of the calendar.
+     Their headings are not reliably on any one row — this file labels some and
+     not others — so they are numbered by position and named where a heading
+     happens to exist above the first activity. */
+  const body = rows.filter((r) => r.row > header.row);
+  const metaCols = [...new Set(
+    body.flatMap((r) => r.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim()).map((c) => c.col))
+  )].sort((a, b) => a - b);
+
+  const activities = [];
+  for (const row of body) {
+    const meta = metaCols.map((col) => String(at(row, col)?.value ?? '').trim());
+    const marks = row.cells
+      .filter((c) => dayCol.has(c.col) && (String(c.value ?? '').trim() || c.hex))
+      .map((c) => ({
+        col: c.col,
+        value: String(c.value ?? '').trim(),
+        hex: c.hex || null,
+        meaning: c.meaning || null,
+      }));
+
+    // A row with neither a description nor a mark is spacing, not work.
+    if (!meta.some(Boolean) && !marks.some((m) => m.value)) continue;
+    activities.push({ row: row.row, meta, marks });
+  }
+
+  return { days, meta: metaCols, activities, header: header.row };
+}
+
 /* ── The window ────────────────────────────────────────────────────────── */
 
 /**
