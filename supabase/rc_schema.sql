@@ -132,6 +132,25 @@ create table if not exists public.rc_legend (
   unique (valid_from, argb)
 );
 
+-- What a colour *does*, as distinct from what it is called.
+--
+--   shift    a real highlight — somebody is working that day
+--   ignore   shading the workbook uses for structure, not for work. The
+--            look-ahead greys most of the calendar this way, and counting it
+--            as work would mean every row looked busy on every day.
+--   divider  a section band. Kept as a role for the legend to state, though
+--            the calendar recognises a heading structurally — by the activity
+--            cells being painted — because several near-identical greys are in
+--            use and nobody should have to tell them apart to get a heading.
+--
+-- Added rather than declared in the table above, so a project created before
+-- this existed picks it up when the file is re-applied.
+alter table public.rc_legend
+  add column if not exists role text not null default 'shift';
+alter table public.rc_legend drop constraint if exists rc_legend_role_check;
+alter table public.rc_legend
+  add constraint rc_legend_role_check check (role in ('shift', 'divider', 'ignore'));
+
 -- How the look-ahead is read: which sheet the grid is on, and where the
 -- workbook lives. A table rather than a constant in the source, because the
 -- tab gets renamed by whoever maintains the file and a renamed tab must not

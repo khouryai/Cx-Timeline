@@ -523,11 +523,25 @@ select act_as(:'alice');
 insert into public.rc_legend (argb, meaning) values
   ('FFFF00', 'Day Shift'), ('FF0000', 'Cancellation'), ('000000', 'Blanket Shift');
 select assert((select count(*) from public.rc_legend) = 3, 'an administrator maps the colours');
+select assert((select bool_and(role = 'shift') from public.rc_legend),
+  'and a colour is work unless somebody says otherwise');
+
+-- What a colour *does*, separately from what it is called. The look-ahead
+-- greys most of its calendar for structure, and no wording of the meaning
+-- fixes that — "not scheduled" is still a meaning.
+insert into public.rc_legend (argb, meaning, role) values
+  ('7F7F7F', 'Not scheduled', 'ignore'), ('D9D9D9', 'Section divider', 'divider');
+select assert((select count(*) from public.rc_legend where role <> 'shift') = 2,
+  'shading and section bands are marked as what they are');
+select refuses(:'alice',
+  format('insert into public.rc_legend (argb, meaning, role) values (%L, %L, %L)',
+         'ABCDEF', 'Something', 'whatever'),
+  'a role the calendar would not know what to do with');
 select assert((select value from public.rc_settings where key = 'lookahead_sheet') = '4WLA',
   'and the sheet to read has a default rather than a constant in the source');
 
 select act_as(:'carol');
-select assert((select count(*) from public.rc_legend) = 3,
+select assert((select count(*) from public.rc_legend) = 5,
   'a member can read the legend — their own row is drawn against it');
 select assert((select count(*) from public.rc_settings) = 1, 'and the settings');
 select refuses(:'carol',
@@ -545,9 +559,9 @@ select refuses(:'carol',
 -- meant at the time.
 select act_as(:'alice');
 update public.rc_legend set active = false where argb = '000000';
-select assert((select count(*) from public.rc_legend where active) = 2,
+select assert((select count(*) from public.rc_legend where active) = 4,
   'a retired colour leaves the active legend');
-select assert((select count(*) from public.rc_legend) = 3,
+select assert((select count(*) from public.rc_legend) = 5,
   'but stays on the record, because snapshots were read against it');
 
 -- ══════════════════════════════════════════════════════════════════════════

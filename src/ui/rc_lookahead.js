@@ -24,7 +24,7 @@ import * as filestore from '../core/filestore.js';
 import { parseSheet, applyLegend, readLegend } from '../io/lookahead.js';
 import { keyRows, classify, relinkCandidates, countable, describe, readGrid } from '../core/lookahead.js';
 import { icon } from './icons.js';
-import { selectInput, textInput, toast, badge, emptyState, field } from './components.js';
+import { selectInput, textInput, toast, badge, emptyState, field, checkbox } from './components.js';
 import { notifyChanged, byId, dayLabel, todayISO, formModal } from './rc_util.js';
 
 /** Where the workbook lives, relative to the folder the plan is in. */
@@ -36,6 +36,15 @@ let section = 'calendar';
 
 /** Free text filter on the calendar, kept across a redraw of the section. */
 let calendarFilter = '';
+/**
+ * Whether rows nobody highlighted are drawn.
+ *
+ * Off by default: most of the sheet is activities carried for reference with
+ * nothing scheduled against them, and the reason to open this is to see what
+ * *is* happening. It is a switch rather than a rule because a row vanishing
+ * with no way to get it back is its own kind of wrong.
+ */
+let showQuietRows = false;
 
 export async function render(root) {
   if (!rc.isAdmin()) {
@@ -95,7 +104,8 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
     sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
   }
   if (legend === undefined) {
-    legend = (await rc.listLegend().catch(() => [])).map((r) => ({ argb: r.argb, meaning: r.meaning }));
+    legend = (await rc.listLegend().catch(() => []))
+      .map((r) => ({ argb: r.argb, meaning: r.meaning, role: r.role || 'shift' }));
   }
 
   const run = { ran_at: new Date().toISOString(), outcome: 'error', note: null, file_hash: null, file_mtime: null };
@@ -286,7 +296,9 @@ async function renderCalendar(host) {
     return;
   }
 
-  const legend = legendRows.map((r) => ({ argb: r.argb, meaning: r.meaning }));
+  // `role` matters as much as the meaning here: it is what separates a shift
+  // from the shading the workbook greys most of its calendar with.
+  const legend = legendRows.map((r) => ({ argb: r.argb, meaning: r.meaning, role: r.role || 'shift' }));
   const grid = applyLegend(snapshot.grid, legend);
   const view = readGrid(grid);
 
@@ -310,38 +322,70 @@ async function renderCalendar(host) {
     placeholder: 'Filter activities — description, location, party…',
     mini: true,
   });
+  const quiet = checkbox({
+    label: 'Show rows with nothing scheduled',
+    checked: showQuietRows,
+    onChange: (on) => { showQuietRows = on; draw(); },
+  });
+
   const body = el('div');
   const draw = () => {
     clear(body);
-    body.appendChild(grid_(view, calendarFilter));
+    body.appendChild(grid_(view, calendarFilter, showQuietRows));
   };
   // Redraw the rows only, never the input: rebuilding the field under the
   // caret is the trap this project has already been bitten by three times.
   search.addEventListener('input', () => { calendarFilter = search.value; draw(); });
 
-  host.appendChild(el('div', { style: 'margin-bottom:10px;max-width:420px' }, [search]));
+  host.appendChild(el('div', {
+    style: 'display:flex;align-items:center;gap:16px;margin-bottom:10px;flex-wrap:wrap',
+  }, [el('div', { style: 'flex:1;min-width:240px;max-width:420px' }, [search]), quiet]));
   host.appendChild(body);
   draw();
 
+  const scheduled = view.activities.filter((a) => a.highlighted).length;
+  const headings = view.activities.filter((a) => a.heading).length;
   host.appendChild(el('p', {
     class: 'rc-hint',
-    text: `${view.activities.length} activities across ${view.days.length} days, from the `
-      + `snapshot taken ${snapshot.taken_at ? snapshot.taken_at.slice(0, 16).replace('T', ' ') : 'earlier'}. `
-      + 'Only the rows and columns that were visible in the workbook are here — a hidden row is '
-      + 'not work anybody was being asked to look at, and reading them all would bury the window '
-      + 'in a year of history.',
+    text: `${scheduled} of ${view.activities.length} activities have something scheduled, across `
+      + `${view.days.length} days, from the snapshot taken `
+      + `${snapshot.taken_at ? snapshot.taken_at.slice(0, 16).replace('T', ' ') : 'earlier'}`
+      + `${headings ? `, under ${headings} section heading(s)` : ''}. `
+      + 'The rest are carried in the workbook for reference with no shift against them, and are '
+      + 'hidden unless you ask for them. Only the rows and columns that were visible in the '
+      + 'workbook are here at all — a hidden row is not work anybody was being asked to look at.',
+  }));
+  host.appendChild(el('p', {
+    class: 'rc-hint',
+    text: 'A row counts as scheduled when a day carries paint the legend does not call shading. '
+      + 'A colour nobody has mapped counts too: until somebody says what it is, it might be '
+      + 'work, and hiding it would bury exactly the rows that need looking at.',
   }));
 }
 
 /** The grid itself. Split out so the filter can redraw it without the header. */
-function grid_(view, filter) {
+function grid_(view, filter, showQuiet) {
   const terms = String(filter || '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean);
-  const rows = terms.length
-    ? view.activities.filter((a) => {
+  let rows = view.activities;
+
+  /* Quiet rows go, and then any headings left dangling at the end with nothing
+     under them at all.
+     Deliberately only the trailing ones: the workbook nests its sections —
+     "PHASE 2" sits above "W40 — Testing and Commissioning", which sits above
+     the work — so dropping a heading merely because another heading follows it
+     would throw away the outer level of a section that does have rows. */
+  if (!showQuiet) {
+    const kept = rows.filter((a) => a.highlighted || a.heading);
+    let last = kept.length;
+    while (last > 0 && kept[last - 1].heading) last--;
+    rows = kept.slice(0, last);
+  }
+  if (terms.length) {
+    rows = rows.filter((a) => {
       const hay = a.meta.join(' ').toLowerCase();
       return terms.some((t) => hay.includes(t));
-    })
-    : view.activities;
+    });
+  }
 
   /* The month band. Each label spans its own run of days, which is what the
      merged cell in the workbook meant. */
@@ -381,7 +425,7 @@ function grid_(view, filter) {
 
   const tbody = el('tbody', {}, rows.map((a) => {
     const marks = byCol(a.marks);
-    return el('tr', {}, [
+    return el('tr', { class: a.heading ? 'la-head-row' : '' }, [
       ...a.meta.map((value, i) => el('td', {
         class: 'la-meta' + (i === a.meta.length - 1 ? ' la-last' : ''),
         text: value,
@@ -545,11 +589,12 @@ async function renderLegend(host) {
     }));
   } else {
     host.appendChild(table(
-      ['', 'Colour', 'Means', 'In force from', ''],
+      ['', 'Colour', 'Means', 'Counts as', 'In force from', ''],
       legend.map((entry) => el('tr', { class: entry.active ? '' : 'rc-inactive' }, [
         el('td', {}, [el('span', { class: 'la-swatch', style: `background:#${entry.argb}` })]),
         el('td', { class: 'rc-num', text: `#${entry.argb}` }),
         el('td', { text: entry.meaning }),
+        el('td', {}, [roleBadge(entry.role || 'shift')]),
         el('td', { text: entry.valid_from || '—' }),
         el('td', {}, [
           el('button', { class: 'cx-btn mini ghost', text: 'Edit', onClick: () => editLegend(entry) }),
@@ -568,7 +613,10 @@ async function renderLegend(host) {
   }
 
   /* ── What is not mapped ──────────────────────────────────────────────── */
-  const grid = snapshot?.grid ? applyLegend(snapshot.grid, legend.filter((l) => l.active)) : null;
+  const grid = snapshot?.grid
+    ? applyLegend(snapshot.grid, legend.filter((l) => l.active)
+      .map((l) => ({ argb: l.argb, meaning: l.meaning, role: l.role || 'shift' })))
+    : null;
   const unknown = grid?.unknown || [];
 
   host.appendChild(el('div', { style: 'height:24px' }));
@@ -608,12 +656,34 @@ async function renderLegend(host) {
   }
 }
 
+/**
+ * What a colour *does*, as opposed to what it is called.
+ *
+ * The distinction exists because this workbook greys most of its calendar for
+ * structure: forty-odd rows are shaded right across the window with no work in
+ * them at all. Reading that as a shift made every row look busy every day, and
+ * no wording of the meaning would have fixed it — "not scheduled" is still a
+ * meaning. So the register says what to *do* with the colour, separately.
+ */
+const LEGEND_ROLES = [
+  { value: 'shift', label: 'Work — somebody is on site that day' },
+  { value: 'ignore', label: 'Shading — structure, not work' },
+  { value: 'divider', label: 'Section band' },
+];
+
+function roleBadge(role) {
+  if (role === 'ignore') return badge('Shading', 'neutral');
+  if (role === 'divider') return badge('Section', 'neutral');
+  return badge('Work', 'info');
+}
+
 function editLegend(entry) {
   const argb = textInput({
     value: entry?.argb || '',
     placeholder: 'FFFF00',
   });
   const meaning = textInput({ value: entry?.meaning || '', placeholder: 'Day Shift' });
+  const role = selectInput({ value: entry?.role || 'shift', options: LEGEND_ROLES });
   const swatch = el('span', { class: 'la-swatch', style: `background:#${entry?.argb || 'ffffff'}` });
   argb.addEventListener('input', () => {
     swatch.style.background = `#${argb.value.replace(/[^0-9a-f]/gi, '')}`;
@@ -628,14 +698,18 @@ function editLegend(entry) {
         + 'before it is looked up, so the legend is keyed on the colour rather than on how it '
         + 'happened to be written.'),
       field('Means', meaning, 'In the words the look-ahead uses: Day Shift, Cancellation, Blanket.'),
+      field('Counts as', role, 'Whether a day painted this colour is work. The look-ahead greys '
+        + 'most of its calendar for structure rather than for shifts, and counting that as work '
+        + 'would make every row look busy on every day.'),
     ]),
     confirmLabel: entry?.id ? 'Save' : 'Map it',
     onConfirm: async () => {
       const hex = argb.value.replace(/[^0-9a-f]/gi, '').toUpperCase();
       if (hex.length !== 6) throw new Error('Six hex digits, like FFFF00.');
       if (!meaning.value.trim()) throw new Error('Say what it means.');
-      if (entry?.id) await rc.updateLegend(entry.id, { argb: hex, meaning: meaning.value.trim() });
-      else await rc.addLegend([{ argb: hex, meaning: meaning.value.trim() }]);
+      const patch = { argb: hex, meaning: meaning.value.trim(), role: role.value };
+      if (entry?.id) await rc.updateLegend(entry.id, patch);
+      else await rc.addLegend([patch]);
       notifyChanged('legend');
       toast({ tone: 'good', message: `#${hex} means "${meaning.value.trim()}".` });
     },

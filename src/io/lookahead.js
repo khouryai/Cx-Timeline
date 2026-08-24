@@ -216,11 +216,19 @@ export function readFills(stylesXml, theme) {
     return { hex: null, source: 'unresolved' };
   });
 
+  /* White is not a highlight.
+     An explicit white fill and no fill at all are the same thing to anybody
+     looking at the sheet — a highlight nobody can see is not one — and Excel
+     writes white fills into all sorts of default styling. Reading them as
+     colours put hundreds of cells into the unmapped bucket and asked somebody
+     to explain the absence of a highlight. */
+  const plain = fills.map((f) => (f.hex === 'FFFFFF' ? { hex: null, source: 'none' } : f));
+
   const xfsBlock = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] || '';
   const xfs = xfsBlock.match(/<xf[\s\S]*?(?:\/>|<\/xf>)/g) || [];
   return xfs.map((xf) => {
     const fillId = parseInt(/fillId="(\d+)"/.exec(xf)?.[1] ?? '0', 10);
-    return fills[fillId] || { hex: null, source: 'none' };
+    return plain[fillId] || { hex: null, source: 'none' };
   });
 }
 
@@ -471,21 +479,27 @@ export function readLegend(grid) {
  * screen to show it happened, and the result lands in evidence.
  */
 export function applyLegend(grid, legend) {
-  const byColour = new Map((legend || []).map((l) => [String(l.argb).toUpperCase(), l.meaning]));
+  const byColour = new Map(
+    (legend || []).map((l) => [String(l.argb).toUpperCase(), { meaning: l.meaning, role: l.role || 'shift' }]));
   const unknown = new Map();
 
   const rows = grid.rows.map((row) => ({
     row: row.row,
+    label: row.label || '',
     cells: row.cells.map((cell) => {
-      if (!cell.hex) return { ...cell, meaning: null };
-      const meaning = byColour.get(cell.hex) || null;
+      if (!cell.hex) return { ...cell, meaning: null, role: null };
+      const entry = byColour.get(cell.hex);
+      const meaning = entry?.meaning || null;
       if (!meaning) {
         const seen = unknown.get(cell.hex) || { hex: cell.hex, count: 0, samples: [] };
         seen.count++;
         if (seen.samples.length < 4) seen.samples.push(cell.ref);
         unknown.set(cell.hex, seen);
       }
-      return { ...cell, meaning };
+      // An unmapped colour is left as a shift on purpose: it may well be one,
+      // and treating the unexplained as ignorable would hide the rows that
+      // most need somebody to look at them.
+      return { ...cell, meaning, role: entry?.role || 'shift' };
     }),
   }));
 

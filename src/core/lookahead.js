@@ -145,11 +145,27 @@ export function readGrid(grid) {
         value: String(c.value ?? '').trim(),
         hex: c.hex || null,
         meaning: c.meaning || null,
+        role: c.role || (c.hex ? 'shift' : null),
       }));
 
     // A row with neither a description nor a mark is spacing, not work.
     if (!meta.some(Boolean) && !marks.some((m) => m.value)) continue;
-    activities.push({ row: row.row, meta, marks });
+
+    /* A heading is a row whose *activity* cells are painted.
+       That is a structural fact rather than a reading of the colour, and it is
+       what makes it reliable: the shading that runs along the day columns of
+       every row paints only the calendar, never the description beside it. So
+       a section title is recognised without anybody having to tell the legend
+       which of several near-identical greys means "divider". */
+    const heading = row.cells.some((c) => !dayCol.has(c.col) && c.hex);
+
+    /* "Highlighted" means at least one day carries paint that is not shading.
+       An unmapped colour counts: until somebody says what it is, the honest
+       assumption is that it might be work, and hiding it would bury the rows
+       that most need attention. */
+    const highlighted = marks.some((m) => m.hex && m.role !== 'ignore');
+
+    activities.push({ row: row.row, meta, marks, heading, highlighted });
   }
 
   return { days, meta: metaCols, activities, header: header.row };

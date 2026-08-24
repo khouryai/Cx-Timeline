@@ -352,3 +352,15 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   font-size: var(--fs-tiny);
   color: var(--text-muted);
 }
+
+/* A section heading in the workbook: the row whose activity cells are painted.
+   It titles the rows under it, so it reads as a title rather than as work. */
+.la-grid tr.la-head-row .la-meta {
+  font-size: var(--fs-small);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--text-main);
+  background: var(--surface-3, var(--surface-2));
+  border-top: 2px solid var(--border-strong);
+}
+.la-grid tr.la-head-row .la-day { border-top: 2px solid var(--border-strong); }

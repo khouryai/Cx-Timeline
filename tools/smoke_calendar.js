@@ -117,20 +117,37 @@ function fakeSdk() {
             { col: 8 + i, ref: `X5`, value: String(d), hex: null })) },
           { row: 6, label: '', cells: ['M', 'Tu', 'W', 'Th', 'F', 'Sa', 'Su'].map((d, i) => (
             { col: 8 + i, ref: `X6`, value: d, hex: null })) },
+          /* A section heading. What makes it one is that its *activity* cells
+             are painted — the shading along the day columns is on every row. */
           { row: 7, label: '', cells: [
-            { col: 2, ref: 'B7', value: 'CDRL 9.04.29', hex: null },
-            { col: 3, ref: 'C7', value: 'IXL Regression Testing', hex: null },
-            { col: 4, ref: 'D7', value: 'TPSS 12', hex: null },
-            { col: 8, ref: 'H7', value: 'X', hex: 'FFFF00' },
-            { col: 9, ref: 'I7', value: 'X.WIT', hex: 'FFFF00' },
-            { col: 11, ref: 'K7', value: 'X', hex: 'FF0000' },
+            { col: 2, ref: 'B7', value: 'HTT — Testing and Commissioning', hex: 'D9D9D9' },
+            { col: 3, ref: 'C7', value: '', hex: 'D9D9D9' },
+            { col: 4, ref: 'D7', value: '', hex: 'D9D9D9' },
+            ...[0, 1, 2, 3, 4, 5, 6].map((i) => (
+              { col: 8 + i, ref: 'X7', value: '', hex: '7F7F7F' })),
           ] },
-          { row: 8, label: '', cells: [
-            { col: 2, ref: 'B8', value: 'Operational Readiness', hex: null },
-            { col: 3, ref: 'C8', value: 'ATS Site Test', hex: null },
-            { col: 4, ref: 'D8', value: 'Station 6 Platform', hex: null },
-            { col: 10, ref: 'J8', value: 'X.TCE', hex: '00B0F0' },
-            { col: 12, ref: 'L8', value: 'X', hex: '3399FF' },
+          { row: 9, label: '', cells: [
+            { col: 2, ref: 'B9', value: 'CDRL 9.04.29', hex: null },
+            { col: 3, ref: 'C9', value: 'IXL Regression Testing', hex: null },
+            { col: 4, ref: 'D9', value: 'TPSS 12', hex: null },
+            { col: 8, ref: 'H9', value: 'X', hex: 'FFFF00' },
+            { col: 9, ref: 'I9', value: 'X.WIT', hex: 'FFFF00' },
+            { col: 11, ref: 'K9', value: 'X', hex: 'FF0000' },
+          ] },
+          { row: 10, label: '', cells: [
+            { col: 2, ref: 'B10', value: 'Operational Readiness', hex: null },
+            { col: 3, ref: 'C10', value: 'ATS Site Test', hex: null },
+            { col: 4, ref: 'D10', value: 'Station 6 Platform', hex: null },
+            { col: 10, ref: 'J10', value: 'X.TCE', hex: '00B0F0' },
+            { col: 12, ref: 'L10', value: 'X', hex: '3399FF' },
+          ] },
+          /* Carried in the workbook for reference, with nothing scheduled: the
+             shading is the only paint on it. Most of the sheet looks like
+             this, and it is what the calendar hides by default. */
+          { row: 11, label: '', cells: [
+            { col: 3, ref: 'C11', value: 'DCS Internal testing — no dates yet', hex: null },
+            ...[0, 1, 2, 3, 4, 5, 6].map((i) => (
+              { col: 8 + i, ref: 'X11', value: '', hex: '7F7F7F' })),
           ] },
           // The workbook's own key, in the shape readLegend() looks for.
           { row: 20, label: 'Highlight in Yellow for Day Shift',
@@ -139,9 +156,13 @@ function fakeSdk() {
       },
     }],
     rc_legend: [
-      { id: 'lg1', argb: 'FFFF00', meaning: 'Day Shift', valid_from: '2026-01-01', active: true },
-      { id: 'lg2', argb: '00B0F0', meaning: 'Third Shift', valid_from: '2026-01-01', active: true },
-      { id: 'lg3', argb: 'FF0000', meaning: 'Cancellation', valid_from: '2026-01-01', active: true },
+      { id: 'lg1', argb: 'FFFF00', meaning: 'Day Shift', role: 'shift', valid_from: '2026-01-01', active: true },
+      { id: 'lg2', argb: '00B0F0', meaning: 'Third Shift', role: 'shift', valid_from: '2026-01-01', active: true },
+      { id: 'lg3', argb: 'FF0000', meaning: 'Cancellation', role: 'shift', valid_from: '2026-01-01', active: true },
+      // Structure, not work. Without the role, forty rows of shading read as
+      // forty rows of somebody being on site every day.
+      { id: 'lg4', argb: '7F7F7F', meaning: 'Not scheduled', role: 'ignore', valid_from: '2026-01-01', active: true },
+      { id: 'lg5', argb: 'D9D9D9', meaning: 'Section divider', role: 'divider', valid_from: '2026-01-01', active: true },
     ],
     rc_settings: [{ key: 'lookahead_sheet', value: '4WLA' }],
     rc_lookahead_rows: [],
@@ -606,7 +627,9 @@ async function main() {
 
   // The cell keeps the workbook's own colour rather than a token of ours —
   // the person reading this has the spreadsheet open beside it.
-  const painted = page.locator('#rc-frame .la-grid td.la-painted').first();
+  // Named by its mark rather than by position: the first painted cell on the
+  // grid is now the shading on the section heading.
+  const painted = page.locator('#rc-frame .la-grid td.la-painted', { hasText: 'X.WIT' }).first();
   check('a mark is drawn in the colour the workbook painted it',
     (await painted.evaluate((n) => n.style.background || n.style.backgroundColor)).includes('255, 255, 0'));
   check('and says what that colour means',
@@ -620,6 +643,30 @@ async function main() {
   check('and it says so rather than naming a meaning',
     /unmapped colour/.test(
       await page.locator('#rc-frame .la-grid td.la-unmapped').first().getAttribute('title')));
+
+  /* Most of the sheet is activities carried for reference with nothing
+     scheduled against them. They are hidden by default, and the switch is what
+     stops that being a rule with no way back. */
+  check('a row with nothing scheduled is hidden',
+    !/no dates yet/.test(gridText), gridText.replace(/\n/g, ' / ').slice(0, 120));
+  const quietBox = page.locator('#rc-frame .cx-check input');
+  await quietBox.check();
+  await page.waitForTimeout(250);
+  check('and comes back when asked for',
+    /no dates yet/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
+  await quietBox.uncheck();
+  await page.waitForTimeout(250);
+
+  /* A heading is the row whose *activity* cells are painted. The shading runs
+     along the day columns of every row, so reading the colour alone would make
+     every row a heading. */
+  check('a section heading is recognised and set apart',
+    (await page.locator('#rc-frame .la-grid tr.la-head-row').count()) === 1);
+  check('and it is the row the workbook painted on the activity side',
+    /HTT — Testing and Commissioning/.test(
+      await page.locator('#rc-frame .la-grid tr.la-head-row').innerText()));
+  check('shading does not count as somebody being on site',
+    (await page.locator('#rc-frame .la-grid tbody tr').count()) === 3);
 
   // Filtering redraws the rows and leaves the field alone — rebuilding an
   // input under the caret is the trap this project has hit three times.

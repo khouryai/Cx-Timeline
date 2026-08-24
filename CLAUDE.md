@@ -409,6 +409,27 @@ subscribes. That is what keeps the graph acyclic.
   silently — the grid would still draw, against the wrong days. No year is
   invented either: the sheet does not carry one, and a date is not something to
   infer from a month name.
+- **White is not a highlight, and shading is not work.** An explicit white fill
+  and no fill at all look identical to anybody reading the sheet, so
+  `readFills()` resolves white to no fill — otherwise hundreds of cells land in
+  the unmapped bucket asking somebody to explain the absence of a highlight.
+  Grey is the harder case and cannot be settled structurally: this look-ahead
+  greys most of its calendar for layout, and reading that as work made every
+  row look busy on every day. So `rc_legend.role` says what a colour *does* —
+  `shift`, `ignore` or `divider` — separately from what it is called, because
+  no wording of the meaning fixes it ("not scheduled" is still a meaning). An
+  **unmapped** colour counts as a shift on purpose: it might be one, and
+  treating the unexplained as ignorable would hide the rows that most need
+  looking at.
+- **A section heading is found structurally, not by its colour.** The shading
+  runs along the day columns of every row, so a heading is the row whose
+  *activity* cells are painted — `readGrid()` tests that and nothing else. It
+  is what lets a title be recognised without anybody having to tell the legend
+  which of several near-identical greys is the divider. Rows with nothing
+  scheduled are hidden by default and a switch brings them back; only headings
+  left *trailing* with nothing under them are dropped, because the workbook
+  nests its sections and a heading followed by another heading is usually a
+  parent, not an orphan.
 - **The calendar draws the snapshot, not the file.** That is what lets it
   render on a machine that was never granted the folder, which is most of them.
   The legend is re-applied to the stored grid at paint time rather than read
@@ -503,13 +524,13 @@ node tools/test_dist.js              #  21 checks — every deployment shape, an
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  45 checks — the look-ahead parser, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         #  85 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         #  90 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 206 checks — both permission models
+node tools/test_sql.js               # 209 checks — both permission models
 node tools/smoke.js --shot out.png   # …and eyeball the result
 ```
 
