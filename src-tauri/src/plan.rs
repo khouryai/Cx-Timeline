@@ -624,7 +624,18 @@ pub struct FileInfo {
 /// List a subfolder. Missing is empty, not an error — the folder is created
 /// by whoever first drops something in it.
 pub fn list_files(dir: &Path, rel: &str) -> Result<Vec<FileInfo>> {
-    let folder = safe_join(dir, rel)?;
+    // An empty path means the plan's own folder. Listing it is how the
+    // application can answer "you dropped the workbook next to the plan
+    // instead of into lookahead/" — the one mistake that otherwise looks
+    // exactly like having no workbook at all. It stays refused everywhere
+    // else: an empty path to read, write, move or delete is a bug, not a
+    // folder, which is why `safe_join` rejects it rather than this relaxing it
+    // for everybody.
+    let folder = if rel.split('/').all(|part| part.is_empty()) {
+        dir.to_path_buf()
+    } else {
+        safe_join(dir, rel)?
+    };
     if !folder.exists() {
         return Ok(Vec::new());
     }
@@ -1154,6 +1165,25 @@ mod tests {
     }
 
     /* ── The intake folders ────────────────────────────────────────────── */
+
+    #[test]
+    fn the_folder_itself_can_be_listed_but_not_written() {
+        let dir = Scratch::new("root-list");
+        write_file(dir.path(), "stray.xlsx", b"x").unwrap();
+        write_file(dir.path(), "lookahead/real.xlsx", b"x").unwrap();
+
+        // Listing the root is what lets the look-ahead say the workbook is in
+        // the wrong place rather than reporting nothing at all.
+        let root = list_files(dir.path(), "").unwrap();
+        assert!(root.iter().any(|f| f.name == "stray.xlsx"));
+        assert!(!root.iter().any(|f| f.name == "real.xlsx"), "not recursive");
+        assert_eq!(list_files(dir.path(), "/").unwrap().len(), root.len());
+
+        // The relaxation is for listing only. Everything that touches bytes
+        // still refuses an empty path.
+        assert_eq!(write_file(dir.path(), "", b"x").unwrap_err().kind(), "refused");
+        assert_eq!(read_file(dir.path(), "").unwrap_err().kind(), "refused");
+    }
 
     #[test]
     fn a_path_that_escapes_the_folder_is_refused() {

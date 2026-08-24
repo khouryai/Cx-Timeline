@@ -535,6 +535,18 @@ export function isConnected() {
   return !!(folderRef && planName);
 }
 
+/**
+ * True when a folder has been granted at all, whether or not a plan is open.
+ *
+ * The intake folders live beside the plan but do not need one, and the
+ * difference matters to the message somebody reads: "no workbook in
+ * lookahead/" and "this browser was never given the folder" are the same
+ * outcome and completely different problems.
+ */
+export function hasFolder() {
+  return !!folderRef;
+}
+
 /** True when someone else holds the pen, so this session must not write. */
 export function isViewer() {
   return isConnected() && role === 'viewer';

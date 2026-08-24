@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-08-24T02:21:23.535Z
+ * Modules: 53   Built: 2026-08-24T03:49:13.883Z
  */
 (function () {
   'use strict';
@@ -5804,6 +5804,18 @@ __mods["core/filestore.js"] = function (__x, __req) {
     return !!(folderRef && planName);
   }
 
+  /**
+   * True when a folder has been granted at all, whether or not a plan is open.
+   *
+   * The intake folders live beside the plan but do not need one, and the
+   * difference matters to the message somebody reads: "no workbook in
+   * lookahead/" and "this browser was never given the folder" are the same
+   * outcome and completely different problems.
+   */
+  function hasFolder() {
+    return !!folderRef;
+  }
+
   /** True when someone else holds the pen, so this session must not write. */
   function isViewer() {
     return isConnected() && role === 'viewer';
@@ -6656,6 +6668,7 @@ __mods["core/filestore.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "isSupported", { get: () => isSupported, enumerable: true });
   Object.defineProperty(__x, "isConnected", { get: () => isConnected, enumerable: true });
+  Object.defineProperty(__x, "hasFolder", { get: () => hasFolder, enumerable: true });
   Object.defineProperty(__x, "isViewer", { get: () => isViewer, enumerable: true });
   Object.defineProperty(__x, "state", { get: () => state, enumerable: true });
   Object.defineProperty(__x, "setDisplayName", { get: () => setDisplayName, enumerable: true });
@@ -29010,6 +29023,22 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
     let file = null;
     try {
+      /* No folder at all is a different problem from an empty one, and until
+         they were told apart both said "no workbook in lookahead/" — which sent
+         somebody looking in the folder for a file that was already there, on a
+         machine that had never been given the folder. */
+      if (!filestore.hasFolder()) {
+        run.outcome = 'missing';
+        run.note = 'No folder is connected on this device.';
+        await rc.addIngestRun(run).catch(() => {});
+        throw new Error(
+          'No folder is connected on this device, so there is nowhere to read the look-ahead '
+          + 'from. Open the plan folder first. A browser has to be given the folder by hand '
+          + 'and cannot watch it in the background, which is why ingestion belongs in the '
+          + 'desktop application.'
+        );
+      }
+
       const files = await filestore.intakeList(LOOKAHEAD_DIR);
       const workbooks = files.filter((f) => /\.xlsx$/i.test(f.name));
 
@@ -29032,10 +29061,28 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       }
       file = workbooks[0];
       if (!file) {
+        /* By far the most common way to get here is dropping the workbook beside
+           the plan rather than into the subfolder, so look there before saying
+           there is nothing: naming the file somebody can see is the difference
+           between an answer and a denial. */
+        const stray = (await filestore.intakeList('').catch(() => []))
+          .filter((f) => /\.xlsx$/i.test(f.name));
+
         run.outcome = 'missing';
-        run.note = `Nothing in ${LOOKAHEAD_DIR}/`;
+        run.note = stray.length
+          ? `Nothing in ${LOOKAHEAD_DIR}/, but ${stray.length} workbook(s) beside the plan`
+          : `Nothing in ${LOOKAHEAD_DIR}/`;
         await rc.addIngestRun(run).catch(() => {});
-        throw new Error(`No workbook in ${LOOKAHEAD_DIR}/. Absence is recorded, not treated as "no change".`);
+
+        throw new Error(
+          stray.length
+            ? `No workbook in ${LOOKAHEAD_DIR}/, but ${stray.map((f) => f.name).join(', ')} `
+              + `${stray.length === 1 ? 'is' : 'are'} sitting beside the plan. Move it into a `
+              + `subfolder called "${LOOKAHEAD_DIR}" — the look-ahead is only ever read from there, `
+              + 'so that nothing else in your folder can be snapshotted by accident.'
+            : `No workbook in ${LOOKAHEAD_DIR}/ — create that subfolder beside the plan and put `
+              + 'the .xlsx in it. Absence is recorded, not treated as "no change".'
+        );
       }
 
       const rel = `${LOOKAHEAD_DIR}/${file.name}`;
@@ -29114,7 +29161,11 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
           try {
             await ingest({ sheetName: '4WLA', legend: [] });
           } catch (err) {
-            toast({ tone: 'error', message: err.message });
+            // 'bad' — not 'error', which is not a tone and fell back to the
+            // neutral info styling, so a refusal looked like a notification.
+            // These messages say what to go and do, so they get longer than the
+            // default three and a half seconds to be read.
+            toast({ tone: 'bad', message: err.message, timeout: 12000 });
           }
         },
       }),

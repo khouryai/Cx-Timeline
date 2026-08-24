@@ -82,6 +82,22 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
 
   let file = null;
   try {
+    /* No folder at all is a different problem from an empty one, and until
+       they were told apart both said "no workbook in lookahead/" — which sent
+       somebody looking in the folder for a file that was already there, on a
+       machine that had never been given the folder. */
+    if (!filestore.hasFolder()) {
+      run.outcome = 'missing';
+      run.note = 'No folder is connected on this device.';
+      await rc.addIngestRun(run).catch(() => {});
+      throw new Error(
+        'No folder is connected on this device, so there is nowhere to read the look-ahead '
+        + 'from. Open the plan folder first. A browser has to be given the folder by hand '
+        + 'and cannot watch it in the background, which is why ingestion belongs in the '
+        + 'desktop application.'
+      );
+    }
+
     const files = await filestore.intakeList(LOOKAHEAD_DIR);
     const workbooks = files.filter((f) => /\.xlsx$/i.test(f.name));
 
@@ -104,10 +120,28 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
     }
     file = workbooks[0];
     if (!file) {
+      /* By far the most common way to get here is dropping the workbook beside
+         the plan rather than into the subfolder, so look there before saying
+         there is nothing: naming the file somebody can see is the difference
+         between an answer and a denial. */
+      const stray = (await filestore.intakeList('').catch(() => []))
+        .filter((f) => /\.xlsx$/i.test(f.name));
+
       run.outcome = 'missing';
-      run.note = `Nothing in ${LOOKAHEAD_DIR}/`;
+      run.note = stray.length
+        ? `Nothing in ${LOOKAHEAD_DIR}/, but ${stray.length} workbook(s) beside the plan`
+        : `Nothing in ${LOOKAHEAD_DIR}/`;
       await rc.addIngestRun(run).catch(() => {});
-      throw new Error(`No workbook in ${LOOKAHEAD_DIR}/. Absence is recorded, not treated as "no change".`);
+
+      throw new Error(
+        stray.length
+          ? `No workbook in ${LOOKAHEAD_DIR}/, but ${stray.map((f) => f.name).join(', ')} `
+            + `${stray.length === 1 ? 'is' : 'are'} sitting beside the plan. Move it into a `
+            + `subfolder called "${LOOKAHEAD_DIR}" — the look-ahead is only ever read from there, `
+            + 'so that nothing else in your folder can be snapshotted by accident.'
+          : `No workbook in ${LOOKAHEAD_DIR}/ — create that subfolder beside the plan and put `
+            + 'the .xlsx in it. Absence is recorded, not treated as "no change".'
+      );
     }
 
     const rel = `${LOOKAHEAD_DIR}/${file.name}`;
@@ -186,7 +220,11 @@ async function renderChanges(host) {
         try {
           await ingest({ sheetName: '4WLA', legend: [] });
         } catch (err) {
-          toast({ tone: 'error', message: err.message });
+          // 'bad' — not 'error', which is not a tone and fell back to the
+          // neutral info styling, so a refusal looked like a notification.
+          // These messages say what to go and do, so they get longer than the
+          // default three and a half seconds to be read.
+          toast({ tone: 'bad', message: err.message, timeout: 12000 });
         }
       },
     }),
