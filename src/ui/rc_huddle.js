@@ -166,14 +166,25 @@ export async function render(root) {
   const review = reviewDate(date, people);
   const plan = planDate(date, people);
 
-  const [categories, locations, parties, leave, planRows, actuals] = await Promise.all([
-    rc.listCategories(),
-    rc.listLocations(),
-    rc.listParties(),
-    rc.listLeave(review, plan),
-    rc.listPlan(review, plan),
-    rc.listActuals(review, review),
-  ]);
+  const [categories, locations, parties, leave, planRows, actuals, chains, laRows] =
+    await Promise.all([
+      rc.listCategories(),
+      rc.listLocations(),
+      rc.listParties(),
+      rc.listLeave(review, plan),
+      rc.listPlan(review, plan),
+      rc.listActuals(review, review),
+      // "This is the fourth day running" is the sentence that changes the
+      // conversation, and it was only ever in a report the field team cannot
+      // open. It is derived from outcomes everybody can already read.
+      rc.listCarryChains().catch(() => []),
+      // Only an administrator can read these; a member simply gets none and
+      // the block dialog offers nothing to link, which is correct.
+      rc.lookaheadForWeek(toISO(weekStart(isoToMs(review)))).catch(() => []),
+    ]);
+
+  const chainByeId = new Map();
+  for (const c of chains) chainByeId.set(c.carry_chain_id, c);
 
   const cats = byId(categories);
   const locs = byId(locations);
@@ -194,7 +205,7 @@ export async function render(root) {
   for (const person of people) {
     body.appendChild(personRow({
       person, review, plan, planFor, actualByPerson, cats, locs,
-      categories, locations, parties, leave, root,
+      categories, locations, parties, leave, root, chainByeId, laRows,
     }));
   }
 
@@ -217,6 +228,12 @@ export async function render(root) {
     text: 'Nothing is written until you leave a field or press Enter, and saving redraws '
       + 'one row rather than the screen — otherwise the meeting would keep losing the box '
       + 'you were typing into. Entries made with no connection queue and go up on their own.',
+  }));
+  root.appendChild(el('p', {
+    class: 'rc-hint',
+    text: 'Click a row and the meeting runs from the keyboard: ↑ ↓ down the team, then '
+      + STATUSES.filter((st) => st.id !== 'absent').map((st) => `${st.key} ${st.label.toLowerCase()}`).join(', ')
+      + '. Away is answered from the leave record rather than asked for.',
   }));
 }
 
@@ -261,9 +278,38 @@ function dateBar(date, review, plan, root) {
  * exactly alone.
  */
 function personRow(ctx) {
-  const { person, review, plan, planFor, actualByPerson, cats, locs, leave, root } = ctx;
+  const { person, review, plan, planFor, actualByPerson, cats, locs, leave, root, chainByeId } = ctx;
 
-  const row = el('tr');
+  // Focusable, so the whole meeting can be run from the keyboard: down the
+  // roster with the arrows, one letter per outcome. Fifteen people at a fixed
+  // time is a lot of clicking otherwise.
+  const row = el('tr', { tabindex: '-1', class: 'rc-huddle-row' });
+
+  /* One letter per outcome, on the row that has focus. The keys are the ones
+     already published beside each button (`c`, `p`, `x`, `b`, `r`), so the
+     shortcut is the label rather than a second thing to learn. Arrows walk the
+     roster. A field that is being typed into keeps its keystrokes. */
+  row.addEventListener('keydown', (event) => {
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    const inField = /^(input|textarea|select)$/i.test(event.target?.tagName || '');
+    if (inField) return;
+
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      const next = event.key === 'ArrowDown' ? row.nextElementSibling : row.previousElementSibling;
+      if (next) {
+        event.preventDefault();
+        next.focus();
+      }
+      return;
+    }
+
+    const status = STATUSES.find((st) => st.key === event.key.toLowerCase() && st.id !== 'absent');
+    if (!status) return;
+    const button = [...row.querySelectorAll('button')].find((b) => b.textContent === status.label);
+    if (!button) return;
+    event.preventDefault();
+    button.click();
+  });
   const redraw = () => {
     const next = personRow(ctx);
     row.replaceWith(next);
@@ -285,13 +331,24 @@ function personRow(ctx) {
     el('div', { class: 'rc-hint', text: person.subsystem || person.title || '' }),
   ]));
 
-  /* What they were supposed to be doing. */
+  /* What they were supposed to be doing — the promise the outcome answers.
+     The chain age rides with it: a task on its fourth day is a different
+     conversation from one on its first, and that was only visible in a report
+     the field team cannot open. */
+  const chain = wasPlanned ? chainByeId?.get(carryChainFor(wasPlanned)) : null;
   row.appendChild(el('td', {}, [
     wasPlanned
       ? el('div', {}, [
         el('div', { text: wasPlanned.task || '—' }),
-        el('div', { class: 'rc-hint', text: locs.get(wasPlanned.location_id)?.name || '' }),
-      ])
+        el('div', { class: 'rc-hint' }, [
+          el('span', { text: [locs.get(wasPlanned.location_id)?.name,
+            cats.get(wasPlanned.category_id)?.name,
+            wasPlanned.shift !== 'day' ? wasPlanned.shift : null].filter(Boolean).join(' · ') }),
+        ]),
+        chain && chain.carries >= 2
+          ? badge(`${ordinal(chain.carries + 1)} day`, chain.carries >= 4 ? 'bad' : 'warn')
+          : null,
+      ].filter(Boolean))
       : el('span', { class: 'rc-hint', text: 'nothing planned' }),
   ]));
 
@@ -324,13 +381,30 @@ function personRow(ctx) {
       ? el('div', {}, [
         el('div', { text: tomorrow.task || '—' }),
         el('div', { class: 'rc-hint', text: locs.get(tomorrow.location_id)?.name || '' }),
-      ])
+        tomorrow.carry_chain_id ? badge('Carried over', 'warn') : null,
+      ].filter(Boolean))
       : admin
-        ? el('button', {
-          class: 'cx-btn mini ghost',
-          text: 'Set goal',
-          onClick: () => setGoal(ctx, person, plan, root),
-        })
+        ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap' }, [
+          el('button', {
+            class: 'cx-btn mini ghost',
+            text: 'Set goal',
+            onClick: () => setGoal(ctx, person, plan, root),
+          }),
+          /* Most days most people are on the same task at the same place. One
+             button beats four fields, and it is the difference between a
+             fifteen-minute meeting and a forty-minute one. */
+          wasPlanned ? el('button', {
+            class: 'cx-btn mini ghost',
+            text: 'Same again',
+            title: `Repeat "${wasPlanned.task || 'yesterday\u2019s task'}" tomorrow.`,
+            onClick: async () => {
+              await rollForward(wasPlanned, person, plan, null);
+              notifyChanged('plan');
+              clear(root);
+              render(root);
+            },
+          }) : null,
+        ].filter(Boolean))
         : el('span', { class: 'rc-hint', text: '—' }),
   ]));
 
@@ -352,14 +426,16 @@ function statusButtons(ctx, person, date, plannedEntry, redraw) {
     wrap.appendChild(el('button', {
       class: 'cx-btn mini ghost',
       text: status.label,
-      title: status.family === 'health'
+      title: (status.family === 'health'
         ? 'Programme health — never counted against the individual'
-        : 'Counts toward individual efficiency',
+        : 'Counts toward individual efficiency')
+        + `  ·  press ${status.key} with this row selected`,
       onClick: async () => {
         if (status.id === 'blocked') {
           blockedDialog(ctx, person, date, plannedEntry, redraw);
           return;
         }
+        const chainId = status.id === 'carried' ? carryChainFor(plannedEntry) : null;
         const entry = {
           clientUuid: newUuid(),
           personId: person.id,
@@ -368,10 +444,26 @@ function statusButtons(ctx, person, date, plannedEntry, redraw) {
           categoryId: plannedEntry?.category_id || null,
           locationId: plannedEntry?.location_id || null,
           planEntryId: plannedEntry?.id || null,
-          carryChainId: status.id === 'carried' ? carryChainFor(plannedEntry) : null,
+          carryChainId: chainId,
         };
         const { sent, error } = await record(entry);
         if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
+
+        /* A carried task is going to be done tomorrow, and re-typing it is
+           both slow and how the chain used to get broken. Rolling it forward
+           here is the only place that knows both the outcome and the entry it
+           came from. */
+        if (chainId && plannedEntry && !ctx.planFor(person.id, ctx.plan)) {
+          try {
+            await rollForward(plannedEntry, person, ctx.plan, chainId);
+            notifyChanged('plan');
+            clear(ctx.root);
+            render(ctx.root);
+            return;
+          } catch (err) {
+            toast({ tone: 'warn', message: `Recorded, but tomorrow was not set — ${err.message}` });
+          }
+        }
         notifyChanged('actuals');
         redraw();
       },
@@ -389,7 +481,38 @@ function statusButtons(ctx, person, date, plannedEntry, redraw) {
  */
 function carryChainFor(plannedEntry) {
   if (!plannedEntry) return null;
-  return plannedEntry.id;
+  // The chain the entry already belongs to, or a new one starting here. Taking
+  // the id blindly is what made a five-day stuck job read as five separate
+  // failures: rolling it forward makes a new entry, and the next carry would
+  // have started over.
+  return plannedEntry.carry_chain_id || plannedEntry.id;
+}
+
+/**
+ * Put a task on tomorrow.
+ *
+ * `chainId` carries a carry chain across the roll — that is the whole reason
+ * this is one function rather than two: repeating a task and carrying one over
+ * write the same row, and only the chain tells them apart afterwards.
+ */
+async function rollForward(from, person, date, chainId) {
+  await rc.addPlanEntries([{
+    person_id: person.id,
+    work_date: date,
+    shift: from?.shift || 'day',
+    location_id: from?.location_id || null,
+    task: from?.task || null,
+    category_id: from?.category_id || null,
+    lookahead_row_id: from?.lookahead_row_id || null,
+    carry_chain_id: chainId,
+  }]);
+}
+
+/** 1st, 2nd, 3rd, 4th — for "the fourth day running". */
+function ordinal(n) {
+  const rest = n % 100;
+  if (rest >= 11 && rest <= 13) return `${n}th`;
+  return `${n}${['th', 'st', 'nd', 'rd'][n % 10] || 'th'}`;
 }
 
 function blockedDialog(ctx, person, date, plannedEntry, redraw) {
@@ -398,6 +521,26 @@ function blockedDialog(ctx, person, date, plannedEntry, redraw) {
     value: ctx.parties[0]?.id,
     options: ctx.parties.map((p) => ({ value: p.id, label: p.name })),
   });
+
+  /* Which look-ahead row this was blocked against.
+     Optional, and offered rather than chosen: "blocked by BART" is an
+     assertion, and "blocked on the row BART themselves scheduled for that
+     location that week" is a document. The list is narrowed to the location
+     already on the plan where there is one — matching on date and location,
+     never on the activity text, which is the rule everywhere in this module. */
+  const candidates = (ctx.laRows || []).filter((r) => (
+    !plannedEntry?.location_id || !r.location_id || r.location_id === plannedEntry.location_id
+  ));
+  const laRow = candidates.length
+    ? selectInput({
+      value: plannedEntry?.lookahead_row_id || '',
+      placeholder: '— not against a look-ahead row —',
+      options: candidates.map((r) => ({
+        value: r.id,
+        label: [r.raw_location, r.raw_label].filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
+      })),
+    })
+    : null;
 
   formModal({
     title: `${person.name} — blocked`,
@@ -409,7 +552,18 @@ function blockedDialog(ctx, person, date, plannedEntry, redraw) {
       }),
       el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Reason' }), reason]),
       el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Down to' }), party]),
-    ]),
+      laRow
+        ? el('div', { class: 'cx-field' }, [
+          el('label', { class: 'cx-label', text: 'Against which look-ahead row' }),
+          laRow,
+          el('div', {
+            class: 'cx-hint',
+            text: 'Optional, and never guessed. Naming it is what turns a note in a meeting '
+              + 'into evidence somebody can stand behind a year later.',
+          }),
+        ])
+        : null,
+    ].filter(Boolean)),
     confirmLabel: 'Record',
     onConfirm: async () => {
       if (!reason.value.trim()) throw new Error('A reason is needed.');
@@ -423,6 +577,7 @@ function blockedDialog(ctx, person, date, plannedEntry, redraw) {
         planEntryId: plannedEntry?.id || null,
         blockedReason: reason.value.trim(),
         blockedPartyId: party.value,
+        lookaheadRowId: laRow?.value || null,
       };
       const { sent, error } = await record(entry);
       if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
@@ -503,13 +658,21 @@ export async function renderWeek(root) {
   const from = days[0];
   const to = days[days.length - 1];
 
-  const [people, locations, leave, planRows] = await Promise.all([
+  const [people, locations, leave, planRows, laRows, categories] = await Promise.all([
     rc.listPeople({ scheduledOnly: true }),
     rc.listLocations(),
-    rc.listLeave(from, to),
+    // Three weeks out, not one: you find out somebody is off when you try to
+    // staff the day, which is a fortnight too late to do anything about it.
+    rc.listLeave(from, toISO(addDays(startMs, 20))),
     rc.listPlan(from, to),
+    // What BART has asked for this week. Administrators only, so a member sees
+    // the plan without the demand behind it, which is correct.
+    rc.lookaheadForWeek(from).catch(() => []),
+    rc.listCategories(),
   ]);
   const locs = byId(locations);
+  const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
+  const soon = leave.filter((l) => l.start_date > to);
 
   root.appendChild(el('div', { class: 'rc-section-head' }, [
     el('button', {
@@ -530,20 +693,33 @@ export async function renderWeek(root) {
   /* How many people are actually available each day. This is the number that
      stops work being promised that cannot be staffed. */
   const coverage = days.map((iso) =>
-    people.filter((p) => availability(p, iso, leave).state === 'available').length);
+    people.filter((p) => availability(p, iso, thisWeek).state === 'available').length);
 
   const body = el('tbody');
   for (const person of people) {
     const cells = days.map((iso) => {
-      const state = availability(person, iso, leave);
+      const state = availability(person, iso, thisWeek);
       const entry = planRows.find((p) => p.person_id === person.id && p.work_date === iso);
       if (state.state === 'leave') return el('td', {}, [badge('Leave', 'muted')]);
       if (state.state === 'non-working') return el('td', { class: 'rc-inactive' }, [el('span', { text: '·' })]);
-      if (!entry) return el('td', {}, [el('span', { class: 'rc-hint', text: '—' })]);
+      if (!entry) {
+        return el('td', {}, [rc.isAdmin() && laRows.length
+          ? el('button', {
+            class: 'cx-btn mini ghost',
+            text: '+',
+            'aria-label': `Plan ${person.name} for ${dayLabel(iso)}`,
+            title: 'Plan this day from what the look-ahead asks for.',
+            onClick: () => planFromLookahead({
+              person, iso, laRows, locations, categories, locs, root,
+            }),
+          })
+          : el('span', { class: 'rc-hint', text: '—' })]);
+      }
       return el('td', {}, [
         el('div', { text: entry.task || '—' }),
         el('div', { class: 'rc-hint', text: locs.get(entry.location_id)?.name || '' }),
-      ]);
+        entry.lookahead_row_id ? badge('From look-ahead', 'info') : null,
+      ].filter(Boolean));
     });
     body.appendChild(el('tr', {}, [el('td', { text: person.name }), ...cells]));
   }
@@ -564,10 +740,120 @@ export async function renderWeek(root) {
     ]),
   ]));
 
+  if (soon.length) {
+    const byPerson = byId(people);
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Coming up: ' + soon
+        .sort((a, b) => a.start_date.localeCompare(b.start_date))
+        .slice(0, 6)
+        .map((l) => `${byPerson.get(l.person_id)?.name || 'somebody'} from ${dayLabel(l.start_date)}`)
+        .join(', ')
+        + '. Two weeks past the end of this one, because finding out when you try to staff '
+        + 'the day is a fortnight too late to do anything about it.',
+    }));
+  }
+
+  root.appendChild(el('p', {
+    class: 'rc-hint',
+    text: laRows.length
+      ? `The look-ahead asks for ${laRows.length} row(s) this week. The + on an empty day plans `
+        + 'against one of them, and the plan then carries the link — which is what lets a block '
+        + 'later be recorded against the row BART themselves scheduled.'
+      : 'Nothing read from the look-ahead for this week yet. Read it in Look-ahead → Check now '
+        + 'and the empty days here will offer what it asks for.',
+  }));
+
   root.appendChild(el('p', {
     class: 'rc-hint',
     text: 'Leave sits in the grid rather than in a calendar of its own, so a clash is '
       + 'visible rather than merely flagged. The bottom row is what stops work being '
       + 'promised for a day it cannot be staffed.',
   }));
+}
+
+/**
+ * Plan a day from what the look-ahead asks for.
+ *
+ * The look-ahead says what is wanted and where; it never says who, because it
+ * does not know the team. So it proposes and a person assigns — which is also
+ * the only honest shape, given a plan entry has to name somebody and inventing
+ * that would be the guess this module refuses everywhere else.
+ *
+ * The chosen row rides along on the entry, so a block recorded against it later
+ * points at the row BART themselves scheduled rather than at a description
+ * somebody typed.
+ */
+function planFromLookahead({ person, iso, laRows, locations, categories, locs, root }) {
+  const wanted = laRows.filter((r) => !r.cells || !Object.keys(r.cells).length || r.cells[iso]);
+  const rows = wanted.length ? wanted : laRows;
+
+  const pick = selectInput({
+    value: '',
+    placeholder: '— nothing from the look-ahead —',
+    options: rows.map((r) => ({
+      value: r.id,
+      label: [r.raw_location || locs.get(r.location_id)?.name, r.raw_label]
+        .filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
+    })),
+  });
+  const task = textInput({ placeholder: 'What they will do' });
+  const location = selectInput({
+    value: '',
+    placeholder: '— location —',
+    options: locations.map((l) => ({ value: l.id, label: l.name })),
+  });
+  const category = selectInput({
+    value: '',
+    placeholder: '— category —',
+    options: categories.map((c) => ({ value: c.id, label: c.name })),
+  });
+  const shift = selectInput({ value: 'day', options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })) });
+
+  // Choosing a row fills the rest in. It is a starting point, not a lock —
+  // what the look-ahead calls an activity and what you would tell somebody to
+  // do are rarely the same sentence.
+  pick.addEventListener('change', () => {
+    const row = rows.find((r) => r.id === pick.value);
+    if (!row) return;
+    if (!task.value.trim()) task.value = row.raw_label || '';
+    if (row.location_id) location.value = row.location_id;
+    const meaning = String(row.cells?.[iso] || '').toLowerCase();
+    if (/night/.test(meaning)) shift.value = 'night';
+    else if (/possession|blanket/.test(meaning)) shift.value = 'possession';
+  });
+
+  formModal({
+    title: `${person.name} — ${dayLabel(iso, 'medium')}`,
+    body: el('div', { class: 'cx-form' }, [
+      el('div', { class: 'cx-field' }, [
+        el('label', { class: 'cx-label', text: 'From the look-ahead' }), pick,
+        el('div', {
+          class: 'cx-hint',
+          text: 'What BART asked for on this day. Choosing one fills the rest in and keeps the '
+            + 'link; the plan still says who, because the look-ahead has no idea who is on your team.',
+        }),
+      ]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Task' }), task]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Location' }), location]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Category' }), category]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Shift' }), shift]),
+    ]),
+    confirmLabel: 'Plan it',
+    onConfirm: async () => {
+      if (!task.value.trim()) throw new Error('A task is needed.');
+      await rc.addPlanEntries([{
+        person_id: person.id,
+        work_date: iso,
+        shift: shift.value,
+        location_id: location.value || null,
+        task: task.value.trim(),
+        category_id: category.value || null,
+        lookahead_row_id: pick.value || null,
+      }]);
+      notifyChanged('plan');
+      clear(root);
+      renderWeek(root);
+    },
+  });
 }

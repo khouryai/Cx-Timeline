@@ -60,6 +60,19 @@ alter table public.rc_legend drop constraint if exists rc_legend_role_check;
 alter table public.rc_legend
   add constraint rc_legend_role_check check (role in ('shift', 'divider', 'ignore'));
 
+-- ── A carry chain has to survive being rolled forward ─────────────────────
+-- The chain is keyed on the plan entry a carry came from, so rolling a stuck
+-- task into tomorrow made a new entry and the next carry started a new chain:
+-- five days of one stuck job read as five separate failures by one person,
+-- which is the exact opposite of what the chain is for.
+alter table public.rc_plan_entries
+  add column if not exists carry_chain_id uuid;
+
+-- ── A block can name the look-ahead row it belongs to ─────────────────────
+alter table public.rc_actuals
+  add column if not exists lookahead_row_id uuid
+  references public.rc_lookahead_rows(id) on delete set null;
+
 -- ── Which sheet to read ───────────────────────────────────────────────────
 -- A table rather than a constant in the source: the tab gets renamed by
 -- whoever maintains the workbook, and a renamed tab must mean a field somebody
@@ -119,6 +132,10 @@ grant select, insert, update, delete on public.rc_invitations to authenticated;
  * "cannot change return type of existing function" into a clean apply.
  */
 drop function if exists public.rc_invite(text, text, uuid, text);
+-- And the one whose parameter list grew: recording an outcome can now name the
+-- look-ahead row it was blocked against.
+drop function if exists public.rc_record_actual(
+  uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text);
 drop function if exists public.rc_list_invitations();
 drop function if exists public.rc_revoke_invitation(text);
 drop function if exists public.rc_link_account(uuid, text);
@@ -154,6 +171,20 @@ union all
 select 'viewer role allowed',
        case when pg_get_constraintdef(oid) like '%viewer%' then 'ok' else 'MISSING' end
   from pg_constraint where conname = 'rc_people_role_check'
+union all
+select 'rc_plan_entries.carry_chain_id',
+       case when exists (
+         select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'rc_plan_entries'
+            and column_name = 'carry_chain_id'
+       ) then 'ok' else 'MISSING' end
+union all
+select 'rc_actuals.lookahead_row_id',
+       case when exists (
+         select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'rc_actuals'
+            and column_name = 'lookahead_row_id'
+       ) then 'ok' else 'MISSING' end
 union all
 select 'managers stood down',
        coalesce((select count(*)::text || ' not scheduled' from public.rc_people where not scheduled), '0');

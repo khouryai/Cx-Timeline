@@ -334,6 +334,24 @@ subscribes. That is what keeps the graph acyclic.
   `CX_SHELL.confirmHealthy()`**: a module that needs a network in front of the
   desktop trial gate would make an unreachable backend look exactly like a
   broken update and get itself rolled back.
+- **A carry chain has to survive being rolled forward.** The chain is keyed on
+  the plan entry a carry came from, and carrying a task into tomorrow makes a
+  *new* entry — so without `rc_plan_entries.carry_chain_id` the next carry
+  starts a fresh chain and a five-day stuck job reads as five separate failures
+  by one person, which is the opposite of what the chain is for. Read it with
+  `carryChainFor()`, which answers the entry's existing chain or starts one,
+  and `rollForward()` is the single place that writes tomorrow's row — repeating
+  a task and carrying one over write the same row, and only the chain tells
+  them apart afterwards.
+- **The look-ahead proposes; a person assigns.** It says what is wanted and
+  where, and never who — it has no idea who is on the team — so the week plan
+  offers its rows on an empty day and the plan entry still names somebody.
+  Inventing that would be the guess this module refuses everywhere else. The
+  chosen row rides along on `lookahead_row_id`, which is what later lets a
+  block be recorded against the row BART themselves scheduled rather than
+  against a description somebody typed. `ingest()` writes `rc_lookahead_rows`
+  for that join — one row per activity per *week*, with the location resolved
+  through the alias register and never parsed out of the description.
 - **Being scheduled is a different fact from what somebody may do.**
   `rc_people.scheduled` is what the huddle and the week plan filter on
   (`listPeople({ scheduledOnly: true })`), never the role. A manager
@@ -559,13 +577,15 @@ node tools/test_dist.js              #  21 checks — every deployment shape, an
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  45 checks — the look-ahead parser, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         # 109 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 120 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 213 checks — both permission models
+node tools/test_sql.js               # 218 checks — both permission models, and that
+                                     #              supabase/migrate.sql upgrades a project
+                                     #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result
 ```
 

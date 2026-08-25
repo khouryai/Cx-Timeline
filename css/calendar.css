@@ -411,3 +411,9 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   box-shadow: inset 0 0 0 2px var(--warn);
   margin-right: 0;
 }
+
+/* The huddle runs from the keyboard, so the row that has focus has to be
+   obvious — you are looking at the team, not at the cursor. */
+.rc-huddle-row:focus { outline: none; }
+.rc-huddle-row:focus-visible,
+.rc-huddle-row:focus { box-shadow: inset 3px 0 0 var(--accent, #e60012); background: var(--surface-2); }

@@ -129,9 +129,13 @@ function main() {
       + (case when to_regclass('public.rc_settings')    is null then 0 else 1 end)
       + (case when to_regclass('public.rc_invitations') is null then 0 else 1 end)
       + (select count(*) from pg_constraint
-          where conname='rc_people_role_check' and pg_get_constraintdef(oid) like '%viewer%')`]).trim();
-    if (upgraded !== '5') {
-      throw new Error(`migrate.sql left an old project incomplete (${upgraded}/5 pieces)`);
+          where conname='rc_people_role_check' and pg_get_constraintdef(oid) like '%viewer%')
+      + (select count(*) from information_schema.columns
+          where table_schema='public' and table_name='rc_plan_entries' and column_name='carry_chain_id')
+      + (select count(*) from information_schema.columns
+          where table_schema='public' and table_name='rc_actuals' and column_name='lookahead_row_id')`]).trim();
+    if (upgraded !== '7') {
+      throw new Error(`migrate.sql left an old project incomplete (${upgraded}/7 pieces)`);
     }
     console.log('✓ migrate.sql upgrades a project built before any of this, and is safe twice\n');
 

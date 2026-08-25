@@ -503,6 +503,11 @@ export const updateLeave = (id, patch) => update('rc_leave', id, patch);
 
 export const addPlanEntries = (rows) => insert('rc_plan_entries', rows);
 
+/** Every look-ahead row for a week, so the plan can be proposed from it. */
+export function lookaheadForWeek(weekStartISO) {
+  return select('rc_lookahead_rows', (q) => q.eq('week_start', weekStartISO).order('sheet_row'));
+}
+
 /**
  * Revise a day. Returns the id of the new entry.
  *
@@ -531,6 +536,7 @@ export const recordActual = ({
   categoryId = null, locationId = null, note = null,
   blockedReason = null, blockedPartyId = null,
   carryChainId = null, planEntryId = null, shift = 'day',
+  lookaheadRowId = null,
 }) =>
   rpc('rc_record_actual', {
     p_client_uuid: clientUuid,
@@ -545,6 +551,7 @@ export const recordActual = ({
     p_carry_chain: carryChainId,
     p_plan_entry: planEntryId,
     p_shift: shift,
+    p_lookahead_row: lookaheadRowId,
   });
 
 export const resolveLocation = (raw) => rpc('rc_resolve_location', { p_raw: raw });

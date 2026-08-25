@@ -21,11 +21,16 @@
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
+import { toISO } from '../core/dates.js';
 import { parseSheet, applyLegend, readLegend } from '../io/lookahead.js';
-import { keyRows, classify, relinkCandidates, countable, describe, readGrid } from '../core/lookahead.js';
+import {
+  keyRows, classify, relinkCandidates, countable, describe, readGrid, rowKey,
+} from '../core/lookahead.js';
 import { icon } from './icons.js';
 import { selectInput, textInput, toast, badge, emptyState, field, checkbox } from './components.js';
-import { notifyChanged, byId, dayLabel, todayISO, formModal } from './rc_util.js';
+import {
+  notifyChanged, byId, dayLabel, todayISO, formModal, weekStart, isoToMs,
+} from './rc_util.js';
 
 /** Where the workbook lives, relative to the folder the plan is in. */
 const LOOKAHEAD_DIR = 'lookahead';
@@ -250,6 +255,21 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
       },
     });
 
+    /* Write the rows, not just the grid.
+       The snapshot holds the whole sheet as it was read, which is what the
+       calendar draws; the rows are the same thing keyed by week and location,
+       which is what the plan and the change log can *join* to. Until now only
+       the grid was written, so `rc_lookahead_rows` was a well-designed table
+       with nothing in it and nothing downstream could reference a row. */
+    try {
+      const rows = await lookaheadRows(snapshot.id, grid);
+      if (rows.length) await rc.addSnapshotRows(rows);
+    } catch (err) {
+      // The snapshot is the record; the rows are a convenience over it and can
+      // be rebuilt from it. Losing them must not lose the read.
+      console.warn('[cx-timeline] look-ahead rows not written:', err.message);
+    }
+
     run.outcome = 'snapshot';
     run.note = grid.unknown.length ? `${grid.unknown.length} colour(s) not in the legend` : null;
     await rc.addIngestRun(run);
@@ -271,6 +291,87 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
     }
     throw err;
   }
+}
+
+/**
+ * The snapshot, as rows something else can point at.
+ *
+ * One row per activity per *week*, because that is the grain the look-ahead is
+ * maintained at and the grain a plan is made at. Everything else here follows
+ * two rules that hold across this whole module:
+ *
+ * **The location is resolved, never parsed.** Each activity cell is offered to
+ * `rc_resolve_location()`, which folds case and punctuation and goes through
+ * the alias register; the first that resolves is the location. Nothing is
+ * matched on the description — the wording differs on the two sides and is not
+ * reliable enough to carry evidence, which is why "Add spelling" exists.
+ *
+ * **A row with nothing scheduled that week is not a row.** The sheet carries
+ * activities for reference with no shift against them, and writing those would
+ * make the register mostly noise.
+ */
+async function lookaheadRows(snapshotId, grid) {
+  const view = readGrid(grid);
+  if (!view.days.length) return [];
+
+  const dayByCol = new Map(view.days.map((d) => [d.col, d]));
+  const resolved = new Map();
+  const locate = async (text) => {
+    const key = String(text || '').trim();
+    if (!key) return null;
+    if (!resolved.has(key)) {
+      resolved.set(key, await rc.resolveLocation(key).catch(() => null));
+    }
+    return resolved.get(key);
+  };
+
+  const out = [];
+  const ordinals = new Map();
+
+  for (const activity of view.activities) {
+    if (activity.heading) continue;
+
+    // Group this activity's marks by the week they fall in.
+    const weeks = new Map();
+    for (const mark of activity.marks) {
+      if (!mark.hex || mark.role === 'ignore') continue;
+      const day = dayByCol.get(mark.col);
+      if (!day?.date) continue;
+      const week = toISO(weekStart(isoToMs(day.date)));
+      if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {} });
+      const bucket = weeks.get(week);
+      bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
+      if (mark.value) bucket.marks[day.date] = mark.value;
+    }
+    if (!weeks.size) continue;
+
+    let locationId = null;
+    let rawLocation = null;
+    for (const value of activity.meta) {
+      const hit = await locate(value);
+      if (hit) { locationId = hit; rawLocation = value; break; }
+    }
+    const label = activity.meta.filter(Boolean).join(' · ');
+
+    for (const [week, bucket] of weeks) {
+      const groupKey = [week, rawLocation || '', ''].join('|');
+      const ordinal = ordinals.get(groupKey) || 0;
+      ordinals.set(groupKey, ordinal + 1);
+      out.push({
+        snapshot_id: snapshotId,
+        week_start: week,
+        sheet_row: activity.row,
+        row_key: rowKey({ weekStart: week, location: rawLocation || '', subsystem: '', ordinal }),
+        location_id: locationId,
+        raw_location: rawLocation,
+        raw_label: label,
+        cells: bucket.cells,
+        bart_marks: bucket.marks,
+      });
+    }
+  }
+
+  return out;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

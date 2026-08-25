@@ -39,6 +39,17 @@
 
 create extension if not exists pgcrypto;
 
+/*
+ * The one signature that has changed since this file first shipped.
+ *
+ * `create or replace function` will not add a parameter — it reports "cannot
+ * change name of input parameter" or refuses the new return type outright — so
+ * the previous shape is dropped before it is recreated below. Harmless on a
+ * project that never had it.
+ */
+drop function if exists public.rc_record_actual(
+  uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text);
+
 -- ══════════════════════════════════════════════════════════════════════════
 -- Who
 -- ══════════════════════════════════════════════════════════════════════════
@@ -376,6 +387,17 @@ create table if not exists public.rc_plan_entries (
   task             text,
   category_id      uuid references public.rc_categories(id),
   lookahead_row_id uuid references public.rc_lookahead_rows(id) on delete set null,
+  /*
+   * The chain a rolled-forward task belongs to.
+   *
+   * Without it a five-day stuck job is five chains of one. The chain is keyed
+   * on the plan entry a carry came from, so rolling the task into tomorrow
+   * makes a *new* entry and the next carry would start again — five separate
+   * failures charged to one person, which is precisely what the chain exists
+   * to prevent. Carrying this across the roll-forward is what keeps it one
+   * stuck item with an age.
+   */
+  carry_chain_id   uuid,
   supersedes_id    uuid references public.rc_plan_entries(id),
   created_by       uuid not null default auth.uid() references auth.users(id),
   created_at       timestamptz not null default now()
@@ -419,6 +441,16 @@ create table if not exists public.rc_actuals (
   note           text,
   blocked_reason text,
   blocked_party_id uuid references public.rc_parties(id),
+  /*
+   * Which look-ahead row this was blocked against.
+   *
+   * Optional, and only ever set by hand. It is what turns a note in a meeting
+   * into evidence: "blocked by BART" is an assertion, "blocked by BART on the
+   * row they themselves scheduled for that location that week" is a document.
+   * Never inferred — matching on activity text is forbidden here for the same
+   * reason it is everywhere else in this module.
+   */
+  lookahead_row_id uuid references public.rc_lookahead_rows(id) on delete set null,
   -- A task carried five days is one stuck item, not five failures by one
   -- person. The chain groups them so the reports count it once, and rank it
   -- by age — which is the more useful number anyway.
@@ -1094,7 +1126,8 @@ create or replace function public.rc_record_actual(
   p_blocked_party  uuid default null,
   p_carry_chain uuid default null,
   p_plan_entry  uuid default null,
-  p_shift       text default 'day'
+  p_shift       text default 'day',
+  p_lookahead_row uuid default null
 )
 returns uuid
 language plpgsql
@@ -1123,10 +1156,12 @@ begin
 
   insert into public.rc_actuals
     (client_uuid, plan_entry_id, person_id, work_date, shift, status, category_id,
-     location_id, note, blocked_reason, blocked_party_id, carry_chain_id, created_by)
+     location_id, note, blocked_reason, blocked_party_id, carry_chain_id,
+     lookahead_row_id, created_by)
   values
     (p_client_uuid, p_plan_entry, p_person, p_date, p_shift, p_status, p_category,
-     p_location, p_note, p_blocked_reason, p_blocked_party, p_carry_chain, auth.uid())
+     p_location, p_note, p_blocked_reason, p_blocked_party, p_carry_chain,
+     p_lookahead_row, auth.uid())
   returning id into new_id;
 
   return new_id;
@@ -1169,7 +1204,7 @@ revoke all on function public.rc_link_account(uuid, text)               from pub
 revoke all on function public.rc_set_role(uuid, text)                   from public, anon;
 revoke all on function public.rc_resolve_location(text)                 from public, anon;
 revoke all on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) from public, anon;
-revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text) from public, anon;
+revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid) from public, anon;
 
 grant execute on function public.rc_me()                                to authenticated;
 grant execute on function public.rc_is_admin()                          to authenticated;
@@ -1182,7 +1217,7 @@ grant execute on function public.rc_link_account(uuid, text)            to authe
 grant execute on function public.rc_set_role(uuid, text)                to authenticated;
 grant execute on function public.rc_resolve_location(text)              to authenticated;
 grant execute on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) to authenticated;
-grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text) to authenticated;
+grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid) to authenticated;
 
 do $$
 declare t text;

@@ -15,3 +15,14 @@ drop table if exists public.rc_invitations cascade;
 alter table public.rc_people drop constraint if exists rc_people_role_check;
 alter table public.rc_people
   add constraint rc_people_role_check check (role in ('admin', 'member'));
+
+-- The views select `*`, so a column cannot be dropped underneath them.
+-- `rc_schema.sql` recreates both.
+drop view if exists public.rc_plan_current cascade;
+drop view if exists public.rc_carry_chains cascade;
+drop view if exists public.rc_effort cascade;
+
+alter table public.rc_plan_entries drop column if exists carry_chain_id;
+alter table public.rc_actuals      drop column if exists lookahead_row_id;
+drop function if exists public.rc_record_actual(
+  uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid);

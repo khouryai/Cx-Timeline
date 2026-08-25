@@ -86,6 +86,10 @@ function fakeSdk() {
           return [1, 2, 3, 4, 5].filter((d) => d !== review);
         })() },
       { id: 'p5', user_id: null, name: 'Rosa', title: 'Test Technician', subsystem: 'IXL', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
+      // Enough of a team that each check below has a row of its own to work on
+      // — the meeting is fifteen people in practice, not three.
+      { id: 'p6', user_id: null, name: 'Tom', title: 'Signalling Technician', subsystem: 'IXL', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
+      { id: 'p7', user_id: null, name: 'Uma', title: 'Comms Engineer', subsystem: 'SCADA', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
     ],
     rc_locations: [
       { id: 'l1', name: 'TPSS 12', code: 'T12', active: true },
@@ -98,9 +102,29 @@ function fakeSdk() {
     ],
     rc_parties: [{ id: 'party1', name: 'BART', active: true }, { id: 'party2', name: 'Hitachi', active: true }],
     rc_leave_kinds: [{ id: 'k1', name: 'Annual leave', active: true }],
-    rc_leave: [],
-    rc_plan_entries: [],
-    rc_plan_current: [],
+    // Booked past the end of this week. Finding out somebody is off when you
+    // try to staff the day is a fortnight too late to do anything about it.
+    rc_leave: [{
+      id: 'lv1', person_id: 'p7', kind_id: 'k1', status: 'approved',
+      start_date: iso(12), end_date: iso(16),
+    }],
+    /* A task planned for the day the huddle will review, so a carry has
+       something to roll forward and a chain to keep. Dated the same way the
+       app derives the review day: the previous weekday. */
+    rc_plan_entries: (() => {
+      const now = new Date();
+      const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+      const dow = new Date(t).getUTCDay() || 7;
+      const back = dow === 1 ? 3 : 1;
+      const review = new Date(t - back * 86400000).toISOString().slice(0, 10);
+      S.reviewDay = review;
+      return [{
+        id: 'plan1', person_id: 'p2', work_date: review, shift: 'day',
+        location_id: 'l1', task: 'Cable pull at TPSS 12', category_id: 'c1',
+        carry_chain_id: null, lookahead_row_id: null,
+      }];
+    })(),
+    get rc_plan_current() { return this.rc_plan_entries; },
     rc_actuals: [],
     // A few days of history, so the reports have something to aggregate. Dates
     // are relative to today, or a fixed range would fall out of every window.
@@ -223,7 +247,22 @@ function fakeSdk() {
          calendar in one click is what the checks below are about. */
     ],
     rc_settings: [{ key: 'lookahead_sheet', value: '4WLA' }],
-    rc_lookahead_rows: [],
+    rc_lookahead_rows: [{
+      id: 'lar1',
+      snapshot_id: 'snap1',
+      week_start: (() => {
+        const now = new Date();
+        const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+        return new Date(t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000).toISOString().slice(0, 10);
+      })(),
+      sheet_row: 9,
+      row_key: 'k1',
+      location_id: 'l1',
+      raw_location: 'TPSS 12',
+      raw_label: 'IXL Regression Testing',
+      cells: {},
+      bart_marks: {},
+    }],
     rc_change_events: [],
     rc_change_annotations: [],
     rc_sars: [],
@@ -303,7 +342,10 @@ function fakeSdk() {
             const made = [].concat(rows).map((r, i) => (
               { id: `${table}-${list.length + i + 1}`, ...defaults, ...r }));
             list.push(...made);
-            if (table === 'rc_plan_entries') S.rows.rc_plan_current.push(...made);
+            // rc_plan_current is a *view* over the entries, and the stub makes
+            // it an alias rather than a copy — so pushing again here would
+            // double every plan row.
+
             return { select: () => Promise.resolve({ data: made, error: null }) };
           };
           api.upsert = (row, opts) => {
@@ -350,6 +392,7 @@ function fakeSdk() {
               blocked_reason: args.p_blocked_reason,
               blocked_party_id: args.p_blocked_party,
               carry_chain_id: args.p_carry_chain,
+              lookahead_row_id: args.p_lookahead_row || null,
             };
             S.rows.rc_actuals.push(row);
             return Promise.resolve({ data: row.id, error: null });
@@ -644,14 +687,50 @@ async function main() {
   // fact from a miss, or it gets distributed across the performance statuses.
   check('somebody who does not work that day is not asked',
     /not a working day/.test(huddleText));
+  /* ── Running the meeting ──────────────────────────────────────────────
+     A carried task is going to be done tomorrow. Re-typing it was slow, and
+     it was also how the chain got broken: rolling it forward makes a new
+     entry, so the next carry started a new chain and five days of one stuck
+     job read as five separate failures by one person. */
+  console.log('\nCarrying a task over');
+  const carryRow = page.locator('#rc-frame tbody tr', { hasText: 'Cable pull at TPSS 12' });
+  await carryRow.locator('button', { hasText: 'Carried over' }).click();
+  await page.waitForTimeout(600);
+
+  const carried = await page.evaluate(() => ({
+    actual: window.__rc.rows.rc_actuals.find((a) => a.status === 'carried') || null,
+    rolled: window.__rc.rows.rc_plan_entries.filter((p) => p.task === 'Cable pull at TPSS 12'),
+  }));
+  check('a carry is recorded against a chain',
+    Boolean(carried.actual && carried.actual.carry_chain_id));
+  check('and the task is put on tomorrow rather than re-typed',
+    carried.rolled.length === 2, `${carried.rolled.length} entries`);
+  check('with the same chain, so five days of one stuck job is one chain',
+    carried.rolled.some((p) => p.carry_chain_id === carried.actual?.carry_chain_id));
+  check('and the location and category come with it',
+    carried.rolled.every((p) => p.location_id === 'l1' && p.category_id === 'c1'));
+
+  // The whole meeting from the keyboard: arrows down the team, one letter per
+  // outcome. Fifteen people at a fixed time is a lot of clicking otherwise.
+  console.log('\nRunning it from the keyboard');
+  const before2 = await page.evaluate(() => window.__rc.rows.rc_actuals.length);
+  await page.locator('#rc-frame tbody tr', { hasText: 'Priya' }).first().focus();
+  await page.keyboard.press('c');
+  await page.waitForTimeout(500);
+  check('a letter records the outcome on the row that has focus',
+    await page.evaluate((n) => window.__rc.rows.rc_actuals.length === n + 1, before2));
+  check('and it is the person whose row it was',
+    await page.evaluate(() => window.__rc.rows.rc_actuals.at(-1).person_id === 'p3'));
+
   check('each status is one click, not a dropdown',
     (await page.locator('#rc-frame tbody button', { hasText: 'Completed' }).count()) >= 1);
 
   // A whole row per status button means a status is one press per person.
+  const recorded = await page.evaluate(() => window.__rc.rows.rc_actuals.length);
   await page.locator('#rc-frame tbody button', { hasText: 'Completed' }).first().click();
   await page.waitForTimeout(400);
   check('an outcome is recorded',
-    await page.evaluate(() => window.__rc.rows.rc_actuals.length === 1));
+    await page.evaluate((n) => window.__rc.rows.rc_actuals.length === n + 1, recorded));
   check('and the row redraws to show it, not the whole screen',
     /Completed/.test(await page.locator('#rc-frame tbody').innerText()));
 
@@ -665,12 +744,20 @@ async function main() {
     await page.locator('.cx-modal .rc-error').isVisible());
 
   await page.locator('.cx-modal input').first().fill('Possession released late');
+  const against = page.locator('.cx-modal select').nth(1);
+  if (await against.count()) await against.selectOption('lar1');
   await page.locator('.cx-modal button', { hasText: 'Record' }).click();
   await page.waitForTimeout(400);
   check('with a reason and a party it goes through',
     await page.evaluate(() => window.__rc.rows.rc_actuals.some((a) => a.status === 'blocked')));
   check('and the party is carried with it',
     await page.evaluate(() => window.__rc.rows.rc_actuals.some((a) => a.blocked_party_id)));
+  /* "Blocked by BART" is an assertion; "blocked on the row BART themselves
+     scheduled for that location that week" is a document. Offered, never
+     guessed — matching on the activity text is forbidden here. */
+  check('and it can be recorded against the look-ahead row it belongs to',
+    await page.evaluate(() => window.__rc.rows.rc_actuals.some((a) => a.lookahead_row_id === 'lar1')),
+    'lookahead_row_id');
 
   /* ── The meeting happens whether or not the network does ──────────────── */
   console.log('\nThe offline queue');
@@ -707,8 +794,30 @@ async function main() {
   check('the week is people down and days across', /Available/.test(weekText));
   // Four people can be staffed with, and the manager is not one of them — they
   // run the meeting rather than taking work from it.
+  /* The look-ahead says what is wanted and where; it never says who, because
+     it does not know the team. So it proposes and a person assigns — and the
+     plan carries the link, which is what lets a block later point at the row
+     BART themselves scheduled. */
+  const emptyCell = page.locator('#rc-frame tbody button', { hasText: /^\+$/ }).first();
+  check('an empty day offers to plan from the look-ahead',
+    (await emptyCell.count()) >= 1);
+  await emptyCell.click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal select').first().selectOption('lar1');
+  await page.waitForTimeout(200);
+  check('choosing a row fills the task in from what was asked for',
+    (await page.locator('.cx-modal input').first().inputValue()) === 'IXL Regression Testing');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Plan it' }).click();
+  await page.waitForTimeout(500);
+  check('and the plan keeps the link back to it',
+    await page.evaluate(() => window.__rc.rows.rc_plan_entries.some((p) => p.lookahead_row_id === 'lar1')));
+
+  const weekText2 = await page.locator('#rc-frame').innerText();
+  check('leave booked beyond this week is named before you hit it',
+    /Coming up: Uma/.test(weekText2), weekText2.split('\n').find((l) => /Coming up/.test(l)) || '');
+
   check('and says how many can actually be staffed each day',
-    /\d+ of 4/.test(weekText), weekText.split('\n').find((l) => / of \d/.test(l)) || '');
+    /\d+ of 6/.test(weekText), weekText.split('\n').find((l) => / of \d/.test(l)) || '');
 
   /* ── The look-ahead and the SARs ──────────────────────────────────────── */
   console.log('\nThe look-ahead register');

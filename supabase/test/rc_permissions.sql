@@ -531,6 +531,74 @@ select refuses(:'dave',
   'a member writing their own plan');
 
 -- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice E'\nA stuck job is one chain, not five failures'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+-- The chain is keyed on the plan entry a carry came from. Rolling the task
+-- into tomorrow makes a *new* entry, so without carrying the chain across the
+-- roll the next carry starts again — and a five-day stuck job reads as five
+-- separate failures charged to one person, which is the exact opposite of what
+-- the chain exists to do.
+
+select act_as(:'alice');
+insert into public.rc_plan_entries (person_id, work_date, task, location_id, category_id)
+values (:'p_carol', '2026-09-14', 'Cable pull', :'loc12', :'cat_field');
+select id as chain_day1 from public.rc_plan_current
+ where task = 'Cable pull' and work_date = '2026-09-14' \gset
+
+select public.rc_record_actual(
+  '66666666-6666-6666-6666-666666666666'::uuid, :'p_carol', date '2026-09-14',
+  'carried', null, null, null, null, null, :'chain_day1', :'chain_day1');
+
+-- Rolled forward, carrying the chain with it.
+insert into public.rc_plan_entries (person_id, work_date, task, location_id, carry_chain_id)
+values (:'p_carol', '2026-09-15', 'Cable pull', :'loc12', :'chain_day1');
+select id as chain_day2 from public.rc_plan_current
+ where task = 'Cable pull' and work_date = '2026-09-15' \gset
+
+select public.rc_record_actual(
+  '77777777-7777-7777-7777-777777777777'::uuid, :'p_carol', date '2026-09-15',
+  'carried', null, null, null, null, null, :'chain_day1', :'chain_day2');
+
+select assert(
+  (select count(*) from public.rc_carry_chains where carry_chain_id = :'chain_day1') = 1,
+  'two days of one stuck job are one chain');
+select assert(
+  (select carries from public.rc_carry_chains where carry_chain_id = :'chain_day1') = 2,
+  'and the chain knows it has been carried twice');
+select assert(
+  (select age_days from public.rc_carry_chains where carry_chain_id = :'chain_day1') = 1,
+  'and how long it has been running, which is the number worth ranking on');
+
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice E'\nA block can name the row it was blocked against'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+-- "Blocked by BART" is an assertion. "Blocked on the row BART themselves
+-- scheduled for that location that week" is a document. Optional, and only
+-- ever set by hand — matching on activity text is forbidden here.
+
+insert into public.rc_lookahead_snapshots (file_hash, sheet_name, grid)
+values ('hash-block', '4WLA', '{}'::jsonb);
+select id as snap_b from public.rc_lookahead_snapshots where file_hash = 'hash-block' \gset
+insert into public.rc_lookahead_rows (snapshot_id, week_start, sheet_row, row_key, location_id, raw_label)
+values (:'snap_b', '2026-09-14', 42, 'k-block', :'loc12', 'IXL Regression Testing');
+select id as la_row from public.rc_lookahead_rows where row_key = 'k-block' \gset
+
+select public.rc_record_actual(
+  '88888888-8888-8888-8888-888888888888'::uuid, :'p_carol', date '2026-09-16',
+  'blocked', null, :'loc12', null, 'Possession released late', :'party_bart',
+  null, null, 'day', :'la_row');
+
+select assert(
+  (select lookahead_row_id from public.rc_actuals
+    where client_uuid = '88888888-8888-8888-8888-888888888888') = :'la_row',
+  'a block points at the look-ahead row it was blocked against');
+
+select act_as(:'carol');
+select assert((select count(*) from public.rc_lookahead_rows) = 0,
+  'though a member cannot read the register it points into');
+select act_as(:'alice');
+
+-- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice E'\nThe legend, and which sheet to read'; end $$;
 -- ══════════════════════════════════════════════════════════════════════════
 -- Both are reference data with one sharp edge: they decide how every future
