@@ -210,39 +210,89 @@ function notConfigured() {
  * the timeline uses, because the timeline uses nothing.
  */
 function signInForm() {
-  const email = textInput({ placeholder: 'you@example.com', type: 'email' });
+  /* An invitation link carries the address it was sent to, so somebody
+     following one does not have to remember which of their addresses was
+     invited — and lands on the right half of the form. */
+  const invited = joiningAs();
+  let joining = Boolean(invited);
+
+  const email = textInput({ placeholder: 'you@example.com', type: 'email', value: invited || '' });
   const password = textInput({ placeholder: 'Password', type: 'password' });
   const error = el('div', { class: 'rc-error', hidden: true });
-  const button = el('button', { class: 'cx-btn primary', text: 'Sign in' });
+  const note = el('div', { class: 'rc-hint', hidden: true });
+  const button = el('button', { class: 'cx-btn primary' });
+  const swap = el('button', { class: 'cx-btn ghost mini' });
+  const title = el('h2');
+  const blurb = el('p');
+
+  const paint = () => {
+    title.textContent = joining ? 'Create your account' : 'Sign in to the resource calendar';
+    blurb.textContent = joining
+      ? 'Only an address an administrator has invited can create an account — the database '
+        + 'refuses the rest, so there is nothing to guess at here.'
+      : 'The timeline needs no account and is already open behind this. Only the calendar does.';
+    button.textContent = joining ? 'Create account' : 'Sign in';
+    password.placeholder = joining ? 'Choose a password' : 'Password';
+    swap.textContent = joining ? 'I already have an account' : 'I was invited — create my account';
+  };
 
   const submit = async () => {
     error.hidden = true;
+    note.hidden = true;
     button.disabled = true;
-    button.textContent = 'Signing in…';
+    button.textContent = joining ? 'Creating…' : 'Signing in…';
     try {
-      await rc.signIn(email.value, password.value);
+      if (joining) {
+        const { live } = await rc.signUp(email.value, password.value);
+        if (!live) {
+          // The project has email confirmation on, so the account exists but
+          // the session does not. Saying so beats a form that looks stuck.
+          note.textContent = 'Account created. Confirm your address from the email just sent, '
+            + 'then sign in.';
+          note.hidden = false;
+          joining = false;
+          paint();
+          button.disabled = false;
+          return;
+        }
+      } else {
+        await rc.signIn(email.value, password.value);
+      }
       render();
     } catch (err) {
       error.textContent = err.message;
       error.hidden = false;
       button.disabled = false;
-      button.textContent = 'Sign in';
+      paint();
     }
   };
 
   button.addEventListener('click', submit);
+  swap.addEventListener('click', () => { joining = !joining; error.hidden = true; paint(); });
   for (const field of [email, password]) {
     field.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') submit();
     });
   }
+  paint();
 
   return el('div', { class: 'rc-state' }, [
     el('div', { class: 'rc-state-icon', html: icon('users', { size: 32 }) }),
-    el('h2', { text: 'Sign in to the resource calendar' }),
-    el('p', { text: 'The timeline needs no account and is already open behind this. Only the calendar does.' }),
-    el('div', { class: 'rc-signin' }, [email, password, error, button]),
+    title,
+    blurb,
+    el('div', { class: 'rc-signin' }, [email, password, error, note, button, swap]),
   ]);
+}
+
+/** The address an invitation link was sent to, from `#join=…`. */
+function joiningAs() {
+  const match = /[#&?]join=([^&]+)/.exec(window.location.hash + window.location.search);
+  if (!match) return '';
+  try {
+    return decodeURIComponent(match[1]).trim();
+  } catch {
+    return '';
+  }
 }
 
 /** An account that is not on the team. A real answer, not a failure. */

@@ -162,7 +162,7 @@ export async function render(root) {
   // The roster decides which days count, so it is read before the window that
   // depends on it. One extra round trip, and it is what keeps a Monday meeting
   // pointed at Friday.
-  const people = await rc.listPeople();
+  const people = await rc.listPeople({ scheduledOnly: true });
   const review = reviewDate(date, people);
   const plan = planDate(date, people);
 
@@ -504,7 +504,7 @@ export async function renderWeek(root) {
   const to = days[days.length - 1];
 
   const [people, locations, leave, planRows] = await Promise.all([
-    rc.listPeople(),
+    rc.listPeople({ scheduledOnly: true }),
     rc.listLocations(),
     rc.listLeave(from, to),
     rc.listPlan(from, to),

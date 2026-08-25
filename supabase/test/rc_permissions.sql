@@ -44,6 +44,24 @@ insert into public.rc_people (user_id, name, email, title, subsystem, role) valu
   (:'dave', 'Dave', 'dave@example.com', 'Signalling Technician', 'IXL', 'viewer');
 insert into public.rc_people (name, active) values ('Erin', false);
 
+-- Scheduling is a different fact from permission, and the column says so: it
+-- defaults to true for everybody, whatever they may do. The file stands down
+-- the administrators that already exist when it is applied — a one-time step
+-- for a project that has been running — but nothing derives one from the other
+-- afterwards, so an administrator who does take shifts stays in the meeting.
+select assert((select bool_and(scheduled) from public.rc_people),
+  'everybody is scheduled unless somebody says otherwise');
+
+select act_as(:'alice');
+update public.rc_people set scheduled = false where role = 'admin';
+select assert((select count(*) from public.rc_people where scheduled) = 4,
+  'and standing the managers down leaves the people who take shifts');
+select assert((select count(*) from public.rc_people where role = 'admin' and not scheduled) = 2,
+  'without touching a single permission');
+select assert(public.rc_is_admin(), 'they administer it exactly as before');
+reset role;
+set role authenticated;
+
 select id as p_alice from public.rc_people where name = 'Alex'  \gset
 select id as p_carol from public.rc_people where name = 'Carol' \gset
 select id as p_dan   from public.rc_people where name = 'Dan'   \gset

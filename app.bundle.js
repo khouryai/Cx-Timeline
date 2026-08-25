@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-08-24T18:06:23.999Z
+ * Modules: 53   Built: 2026-08-25T05:36:13.763Z
  */
 (function () {
   'use strict';
@@ -13046,6 +13046,33 @@ __mods["core/rc.js"] = function (__x, __req) {
     return user;
   }
 
+  /**
+   * Create an account.
+   *
+   * The gate is `rc_enforce_invitation()` on `auth.users`, not this function:
+   * sign-up goes through GoTrue rather than PostgREST, so anybody holding the
+   * public key can POST to /auth/v1/signup and the interface has no say in it.
+   * An address nobody invited is refused by the database, and what comes back
+   * here is that refusal.
+   *
+   * Whether they are signed in afterwards depends on the project's "Confirm
+   * email" setting, so the caller is told which happened rather than guessing.
+   */
+  async function signUp(email, password) {
+    requireClient();
+    const { data, error } = await client.auth.signUp({
+      email: String(email || '').trim(),
+      password,
+    });
+    if (error) throw friendlier(error);
+    user = data.user || null;
+    if (data.session) {
+      await refreshPerson();
+      emit(EV.RC_AUTH_CHANGED, { user, event: 'SIGNED_IN' });
+    }
+    return { user, live: Boolean(data.session) };
+  }
+
   async function signOut() {
     if (!client) return;
     await client.auth.signOut();
@@ -13061,6 +13088,16 @@ __mods["core/rc.js"] = function (__x, __req) {
   /** Supabase's wording is for developers; these messages are for people. */
   function friendlier(error) {
     const message = String(error?.message || 'Something went wrong.');
+    if (/invitation only/i.test(message)) {
+      return new Error('That address has not been invited. Ask an administrator to invite you, '
+        + 'then use the link they send.');
+    }
+    if (/already registered|user already exists/i.test(message)) {
+      return new Error('That address already has an account — sign in instead.');
+    }
+    if (/password/i.test(message) && /least|short|weak/i.test(message)) {
+      return new Error('That password is too short — six characters at least.');
+    }
     if (/invalid login credentials/i.test(message)) return new Error('That email and password do not match an account.');
     if (/email not confirmed/i.test(message)) return new Error('Confirm your email address first — check your inbox.');
     if (/failed to fetch|networkerror/i.test(message)) {
@@ -13087,8 +13124,21 @@ __mods["core/rc.js"] = function (__x, __req) {
     return data || [];
   }
 
-  function listPeople({ includeInactive = false } = {}) {
-    return select('rc_people', (q) => (includeInactive ? q : q.eq('active', true)).order('name'));
+  /**
+   * The team.
+   *
+   * `scheduledOnly` is what the huddle and the week plan ask for: the people who
+   * actually take shifts. It is a separate question from what somebody may do —
+   * a manager administers the calendar and is never assigned to a location, and
+   * an administrator who *does* take shifts must not disappear from the meeting
+   * because of their permissions.
+   */
+  function listPeople({ includeInactive = false, scheduledOnly = false } = {}) {
+    return select('rc_people', (q) => {
+      let out = includeInactive ? q : q.eq('active', true);
+      if (scheduledOnly) out = out.eq('scheduled', true);
+      return out.order('name');
+    });
   }
 
   function listLocations({ includeInactive = false } = {}) {
@@ -13436,6 +13486,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "isViewer", { get: () => isViewer, enumerable: true });
   Object.defineProperty(__x, "accountLabel", { get: () => accountLabel, enumerable: true });
   Object.defineProperty(__x, "signIn", { get: () => signIn, enumerable: true });
+  Object.defineProperty(__x, "signUp", { get: () => signUp, enumerable: true });
   Object.defineProperty(__x, "signOut", { get: () => signOut, enumerable: true });
   Object.defineProperty(__x, "listPeople", { get: () => listPeople, enumerable: true });
   Object.defineProperty(__x, "listLocations", { get: () => listLocations, enumerable: true });
@@ -27080,7 +27131,7 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
   const { el, clear } = __req("core/util.js");
   const rc = __req("core/rc.js");
   const { icon } = __req("ui/icons.js");
-  const { textInput, selectInput, toast, confirmDialog, promptDialog, field, badge } = __req("ui/components.js");
+  const { textInput, selectInput, toast, confirmDialog, promptDialog, field, badge, checkbox } = __req("ui/components.js");
 
 
   const { notifyChanged, byId, dayLabel, todayISO, formModal } = __req("ui/rc_util.js");
@@ -27162,6 +27213,7 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
       el('td', { text: p.title || '—' }),
       el('td', { text: p.subsystem || '—' }),
       el('td', {}, [roleBadge(p.role)]),
+      el('td', {}, [p.scheduled === false ? badge('Not scheduled', 'neutral') : badge('Scheduled', 'good')]),
       // A four-day contract is a fact the scheduler needs, and showing it here is
       // what stops somebody being planned onto a Friday they never work.
       el('td', { class: 'rc-num', text: (p.working_days || []).length + '/wk' }),
@@ -27183,11 +27235,13 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
       ] : []),
     ]));
 
-    host.appendChild(table(['Name', 'Title', 'Subsystem', 'Role', 'Days', ''], rows));
+    host.appendChild(table(['Name', 'Title', 'Subsystem', 'Role', 'In the huddle', 'Days', ''], rows));
     host.appendChild(el('p', {
       class: 'rc-hint',
-      text: 'Retiring somebody keeps every outcome they ever recorded. Nobody is deleted, '
-        + 'because the reports would lose their history with them.',
+      text: 'Retiring somebody keeps every outcome they ever recorded. Nobody is deleted, because '
+        + 'the reports would lose their history with them. "In the huddle" is a separate question '
+        + 'from what somebody may do: a manager administers the calendar without being assigned to '
+        + 'a location, and an administrator who does take shifts stays in the meeting.',
     }));
   }
 
@@ -27197,6 +27251,22 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
     const title = textInput({ value: person?.title || '', placeholder: 'Test Engineer' });
     const subsystem = textInput({ value: person?.subsystem || '', placeholder: 'ATS / IXL / SCADA' });
     const role = selectInput({ value: person?.role || 'member', options: ROLES });
+    /* Whether they are scheduled, kept apart from what they may do. A manager
+       administers the calendar and is never assigned to a location; an
+       administrator who does take shifts must not drop out of the meeting
+       because of their permissions. */
+    const scheduled = checkbox({
+      label: 'Takes shifts — appears in the daily huddle and the week plan',
+      checked: person ? person.scheduled !== false : true,
+    });
+    if (!person) {
+      /* A suggestion for somebody new, not a rule: an administrator is usually
+         the person running the meeting. It stays a switch, because the two facts
+         are separate and somebody has to be able to say so. */
+      role.addEventListener('change', () => {
+        scheduled.querySelector('input').checked = role.value !== 'admin';
+      });
+    }
 
     // Which days they work at all. Scheduling somebody onto a day they do not
     // work is the same class of mistake as scheduling them while on leave, and
@@ -27220,6 +27290,8 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
         field('Subsystem', subsystem),
         field('Role', role, 'What they may do once they have an account. It changes nothing '
           + 'until one exists — scheduling somebody never requires a login.'),
+        field('Scheduling', scheduled, 'Turn this off for somebody who runs the meeting rather '
+          + 'than taking work from it. They keep every permission they had.'),
         field('Working days', daysWrap),
       ]),
       confirmLabel: person ? 'Save' : 'Add',
@@ -27230,6 +27302,7 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
           email: email.value.trim() || null,
           title: title.value.trim() || null,
           subsystem: subsystem.value.trim() || null,
+          scheduled: scheduled.querySelector('input').checked,
           working_days: working,
         };
         if (!patch.name) throw new Error('A name is needed.');
@@ -27472,6 +27545,42 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
   /* ── Accounts ──────────────────────────────────────────────────────────── */
 
   /**
+   * The link to send somebody.
+   *
+   * Nothing is emailed from here, and that is a limitation rather than a choice:
+   * the application has no server of its own and a browser cannot send mail. So
+   * it produces the link and you send it however you already talk to people —
+   * which in practice beats an email that a corporate scanner opens before they
+   * do, burning the token on the way past.
+   *
+   * The address rides along so somebody following it lands on the create-account
+   * form with the right one of their addresses already in it. It is not a
+   * credential: the database still refuses anybody who was not invited, so a
+   * forwarded link gets a stranger precisely nowhere.
+   */
+  function joinLink(email) {
+    const base = window.location.origin + window.location.pathname;
+    return `${base}#join=${encodeURIComponent(String(email || '').trim())}`;
+  }
+
+  async function copyJoinLink(email) {
+    const link = joinLink(email);
+    try {
+      await navigator.clipboard.writeText(link);
+      toast({ tone: 'good', message: `Link for ${email} copied — send it however you like.` });
+    } catch {
+      // A denied clipboard is not a failure to produce the link. Show it so it
+      // can be copied by hand rather than reporting nothing happened.
+      await promptDialog({
+        title: `Invitation link for ${email}`,
+        label: 'Copy this and send it to them',
+        value: link,
+        confirmLabel: 'Done',
+      });
+    }
+  }
+
+  /**
    * Who may sign in, and what they may do once they have.
    *
    * The whole point of this section is that adding somebody to the team never
@@ -27571,6 +27680,12 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
           ]),
           el('td', {}, [
             el('button', {
+              class: 'cx-btn mini',
+              text: 'Copy link',
+              title: 'The link that takes them to the create-account form with their address in it.',
+              onClick: () => copyJoinLink(inv.pending_email),
+            }),
+            el('button', {
               class: 'cx-btn mini ghost',
               text: inv.pending_expired ? 'Send again' : 'Revoke',
               onClick: async () => {
@@ -27598,9 +27713,13 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
 
     host.appendChild(el('p', {
       class: 'rc-hint',
-      text: 'Sign-up is closed: an address that was never invited is refused by the '
-        + 'database, not by hiding a form. Invitations lapse after thirty days, and '
-        + 'inviting somebody again reopens the one that lapsed.',
+      text: 'Sign-up is closed: an address that was never invited is refused by the database, not '
+        + 'by hiding a form — so the link is a convenience, not a key, and forwarding it gets a '
+        + 'stranger nowhere. Nothing is emailed from here; the application has no server of its '
+        + 'own. Send the link however you already talk to people, which also sidesteps the '
+        + 'corporate mail scanner that opens a confirmation link before the person does. '
+        + 'Invitations lapse after thirty days, and inviting somebody again reopens the one that '
+        + 'lapsed.',
     }));
   }
 
@@ -27633,7 +27752,7 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
         if (!address) throw new Error('An email address is needed.');
         await rc.invite(address, role.value, person.value || null, note.value.trim() || null);
         notifyChanged('invitations');
-        toast({ message: `${address} may now create an account.` });
+        await copyJoinLink(address);
       },
     });
   }
@@ -27875,7 +27994,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     // The roster decides which days count, so it is read before the window that
     // depends on it. One extra round trip, and it is what keeps a Monday meeting
     // pointed at Friday.
-    const people = await rc.listPeople();
+    const people = await rc.listPeople({ scheduledOnly: true });
     const review = reviewDate(date, people);
     const plan = planDate(date, people);
 
@@ -28217,7 +28336,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const to = days[days.length - 1];
 
     const [people, locations, leave, planRows] = await Promise.all([
-      rc.listPeople(),
+      rc.listPeople({ scheduledOnly: true }),
       rc.listLocations(),
       rc.listLeave(from, to),
       rc.listPlan(from, to),
@@ -30970,39 +31089,89 @@ __mods["ui/rc.js"] = function (__x, __req) {
    * the timeline uses, because the timeline uses nothing.
    */
   function signInForm() {
-    const email = textInput({ placeholder: 'you@example.com', type: 'email' });
+    /* An invitation link carries the address it was sent to, so somebody
+       following one does not have to remember which of their addresses was
+       invited — and lands on the right half of the form. */
+    const invited = joiningAs();
+    let joining = Boolean(invited);
+
+    const email = textInput({ placeholder: 'you@example.com', type: 'email', value: invited || '' });
     const password = textInput({ placeholder: 'Password', type: 'password' });
     const error = el('div', { class: 'rc-error', hidden: true });
-    const button = el('button', { class: 'cx-btn primary', text: 'Sign in' });
+    const note = el('div', { class: 'rc-hint', hidden: true });
+    const button = el('button', { class: 'cx-btn primary' });
+    const swap = el('button', { class: 'cx-btn ghost mini' });
+    const title = el('h2');
+    const blurb = el('p');
+
+    const paint = () => {
+      title.textContent = joining ? 'Create your account' : 'Sign in to the resource calendar';
+      blurb.textContent = joining
+        ? 'Only an address an administrator has invited can create an account — the database '
+          + 'refuses the rest, so there is nothing to guess at here.'
+        : 'The timeline needs no account and is already open behind this. Only the calendar does.';
+      button.textContent = joining ? 'Create account' : 'Sign in';
+      password.placeholder = joining ? 'Choose a password' : 'Password';
+      swap.textContent = joining ? 'I already have an account' : 'I was invited — create my account';
+    };
 
     const submit = async () => {
       error.hidden = true;
+      note.hidden = true;
       button.disabled = true;
-      button.textContent = 'Signing in…';
+      button.textContent = joining ? 'Creating…' : 'Signing in…';
       try {
-        await rc.signIn(email.value, password.value);
+        if (joining) {
+          const { live } = await rc.signUp(email.value, password.value);
+          if (!live) {
+            // The project has email confirmation on, so the account exists but
+            // the session does not. Saying so beats a form that looks stuck.
+            note.textContent = 'Account created. Confirm your address from the email just sent, '
+              + 'then sign in.';
+            note.hidden = false;
+            joining = false;
+            paint();
+            button.disabled = false;
+            return;
+          }
+        } else {
+          await rc.signIn(email.value, password.value);
+        }
         render();
       } catch (err) {
         error.textContent = err.message;
         error.hidden = false;
         button.disabled = false;
-        button.textContent = 'Sign in';
+        paint();
       }
     };
 
     button.addEventListener('click', submit);
+    swap.addEventListener('click', () => { joining = !joining; error.hidden = true; paint(); });
     for (const field of [email, password]) {
       field.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') submit();
       });
     }
+    paint();
 
     return el('div', { class: 'rc-state' }, [
       el('div', { class: 'rc-state-icon', html: icon('users', { size: 32 }) }),
-      el('h2', { text: 'Sign in to the resource calendar' }),
-      el('p', { text: 'The timeline needs no account and is already open behind this. Only the calendar does.' }),
-      el('div', { class: 'rc-signin' }, [email, password, error, button]),
+      title,
+      blurb,
+      el('div', { class: 'rc-signin' }, [email, password, error, note, button, swap]),
     ]);
+  }
+
+  /** The address an invitation link was sent to, from `#join=…`. */
+  function joiningAs() {
+    const match = /[#&?]join=([^&]+)/.exec(window.location.hash + window.location.search);
+    if (!match) return '';
+    try {
+      return decodeURIComponent(match[1]).trim();
+    } catch {
+      return '';
+    }
   }
 
   /** An account that is not on the team. A real answer, not a failure. */

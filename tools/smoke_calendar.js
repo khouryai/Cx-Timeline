@@ -66,10 +66,26 @@ function fakeSdk() {
 
   S.rows = {
     rc_people: [
-      { id: 'p1', user_id: 'user-rc-1', name: 'Alex', email: 'alex@example.com', title: 'Commissioning Manager', subsystem: 'ATS', role: S.role, active: true, working_days: [1, 2, 3, 4, 5] },
-      { id: 'p2', user_id: null, name: 'Dan', title: 'Field Technician', subsystem: 'Wayside', role: 'member', active: true, working_days: [1, 2, 3, 4] },
-      { id: 'p3', user_id: null, name: 'Priya', title: 'Test Engineer', subsystem: 'IXL', role: 'member', active: true, working_days: [1, 2, 3, 4, 5] },
-      { id: 'p4', user_id: null, name: 'Sam', title: 'SCADA Engineer', subsystem: 'SCADA', role: 'member', active: true, working_days: [1, 2, 3, 4, 5] },
+      /* Alex administers the calendar and is not scheduled — a manager runs the
+         meeting rather than taking work from it. `scheduled` is its own fact,
+         not a reading of the role, so an administrator who did take shifts
+         would still be in the huddle. */
+      { id: 'p1', user_id: 'user-rc-1', name: 'Alex', email: 'alex@example.com', title: 'Commissioning Manager', subsystem: 'ATS', role: S.role, active: true, scheduled: S.role !== 'admin', working_days: [1, 2, 3, 4, 5] },
+      { id: 'p2', user_id: null, name: 'Dan', title: 'Field Technician', subsystem: 'Wayside', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4] },
+      { id: 'p3', user_id: null, name: 'Priya', title: 'Test Engineer', subsystem: 'IXL', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
+      /* Sam is off on whichever day the huddle will review.
+         The review day is "the previous day somebody works", so it moves with
+         the day the suite happens to run — and an assertion that a non-working
+         day is handled properly only means something if somebody is actually
+         off then. Pinning it here is what makes the check hold on a Tuesday as
+         well as a Monday; it used to pass only on Mondays. */
+      { id: 'p4', user_id: null, name: 'Sam', title: 'SCADA Engineer', subsystem: 'SCADA', role: 'member', active: true, scheduled: true,
+        working_days: (() => {
+          const dow = new Date().getUTCDay() || 7;      // ISO: Monday 1 … Sunday 7
+          const review = dow === 1 ? 5 : Math.max(1, Math.min(5, dow - 1));
+          return [1, 2, 3, 4, 5].filter((d) => d !== review);
+        })() },
+      { id: 'p5', user_id: null, name: 'Rosa', title: 'Test Technician', subsystem: 'IXL', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
     ],
     rc_locations: [
       { id: 'l1', name: 'TPSS 12', code: 'T12', active: true },
@@ -251,6 +267,24 @@ function fakeSdk() {
             S.signedIn = true;
             return Promise.resolve({ data: { user: USER }, error: null });
           },
+          /* Sign-up goes through GoTrue, never PostgREST, so the gate is the
+             trigger on auth.users rather than anything the interface does.
+             The stub answers as that trigger does. */
+          signUp: ({ email }) => {
+            const address = String(email || '').trim().toLowerCase();
+            const invited = (S.rows.rc_invitations || [])
+              .some((i) => i.pending_email === address);
+            if (!invited) {
+              return Promise.resolve({
+                data: null,
+                error: { message: 'This application is invitation only. Ask an administrator to invite ' + address },
+              });
+            }
+            S.signedIn = true;
+            S.rows.rc_invitations = S.rows.rc_invitations.filter((i) => i.pending_email !== address);
+            const made = { id: `user-${address}`, email: address };
+            return Promise.resolve({ data: { user: made, session: { user: made } }, error: null });
+          },
           signOut: () => { S.signedIn = false; return Promise.resolve({ error: null }); },
           onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
         },
@@ -427,6 +461,15 @@ async function main() {
     route.fulfill({ contentType: 'application/json', body: '[]' });
   });
 
+  // The clipboard is not grantable in a file:// page, so it is recorded
+  // instead — what matters is the link the application produced.
+  const captureClipboard = (pg) => pg.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: (text) => { window.__clip = text; return Promise.resolve(); } },
+    });
+  });
+  await captureClipboard(page);
   await page.addInitScript(fakeSdk);
   const url_ = 'file://' + path.join(ROOT, 'index.html');
 
@@ -472,13 +515,13 @@ async function main() {
   const inputs = page.locator('#rc-frame .rc-signin input');
   await inputs.nth(0).fill('not-an-email');
   await inputs.nth(1).fill('secret');
-  await page.locator('#rc-frame .rc-signin button').click();
+  await page.locator('#rc-frame .rc-signin button.primary').click();
   await page.waitForTimeout(300);
   check('a bad sign-in is reported rather than swallowed',
     await page.locator('#rc-frame .rc-error').isVisible());
 
   await inputs.nth(0).fill('alex@example.com');
-  await page.locator('#rc-frame .rc-signin button').click();
+  await page.locator('#rc-frame .rc-signin button.primary').click();
   await page.waitForSelector('#rc-frame .rc-tabs', { timeout: 10000 });
   check('signing in reveals the calendar', (await page.locator('#rc-frame .rc-tab').count()) >= 3);
 
@@ -521,6 +564,13 @@ async function main() {
 
   const invited = await page.evaluate(() =>
     window.__rc.calls.filter((c) => c.table === 'rc_invite').map((c) => c.payload));
+  /* Nothing is emailed from here — the application has no server of its own —
+     so inviting hands over a link to send however you already talk to people.
+     It is a convenience and not a key: the database still refuses anybody who
+     was not invited, so a forwarded link gets a stranger nowhere. */
+  const copied = await page.evaluate(() => window.__clip || '');
+  check('inviting hands over a link to send',
+    /#join=newtech%40example\.com/.test(copied), copied.slice(0, 90));
   check('inviting goes through the function, not a table write',
     invited.length === 1 && invited[0].p_email === 'newtech@example.com');
   check('carrying the role they will land on', invited[0] && invited[0].p_role === 'member');
@@ -579,10 +629,19 @@ async function main() {
   await page.waitForSelector('#rc-frame .rc-table');
 
   const huddleText = await page.locator('#rc-frame').innerText();
-  check('everyone is on one screen, side by side',
-    /Alex/.test(huddleText) && /Dan/.test(huddleText) && /Priya/.test(huddleText) && /Sam/.test(huddleText));
-  // Dan is on a four-day contract, so a Friday review does not ask him for an
-  // outcome he could not have. Absence has to be a different fact from a miss.
+  check('everyone who takes shifts is on one screen, side by side',
+    /Dan/.test(huddleText) && /Priya/.test(huddleText) && /Sam/.test(huddleText)
+      && /Rosa/.test(huddleText));
+  /* The manager runs the meeting rather than taking work from it, and asking
+     them every morning what they finished is noise in the one meeting that has
+     to stay quick. `scheduled` is its own fact, not a reading of the role — an
+     administrator who did take shifts would still be here. */
+  check('but the manager running it is not asked for an outcome',
+    !/Alex/.test(await page.locator('#rc-frame tbody').innerText()),
+    (await page.locator('#rc-frame tbody').innerText()).split('\n')[0]);
+  // Sam is off on whatever day the review lands on, so the meeting does not ask
+  // him for an outcome he could not have had. Absence has to be a different
+  // fact from a miss, or it gets distributed across the performance statuses.
   check('somebody who does not work that day is not asked',
     /not a working day/.test(huddleText));
   check('each status is one click, not a dropdown',
@@ -646,8 +705,10 @@ async function main() {
   await page.waitForSelector('#rc-frame .rc-table');
   const weekText = await page.locator('#rc-frame').innerText();
   check('the week is people down and days across', /Available/.test(weekText));
+  // Four people can be staffed with, and the manager is not one of them — they
+  // run the meeting rather than taking work from it.
   check('and says how many can actually be staffed each day',
-    /\d+ of 4/.test(weekText));
+    /\d+ of 4/.test(weekText), weekText.split('\n').find((l) => / of \d/.test(l)) || '');
 
   /* ── The look-ahead and the SARs ──────────────────────────────────────── */
   console.log('\nThe look-ahead register');

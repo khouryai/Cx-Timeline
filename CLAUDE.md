@@ -334,6 +334,24 @@ subscribes. That is what keeps the graph acyclic.
   `CX_SHELL.confirmHealthy()`**: a module that needs a network in front of the
   desktop trial gate would make an unreachable backend look exactly like a
   broken update and get itself rolled back.
+- **Being scheduled is a different fact from what somebody may do.**
+  `rc_people.scheduled` is what the huddle and the week plan filter on
+  (`listPeople({ scheduledOnly: true })`), never the role. A manager
+  administers the calendar and is never assigned to a location, but deriving
+  that from `role = 'admin'` would drop an administrator who *does* take shifts
+  out of the meeting the moment they were promoted, with no way back short of
+  demoting them. The column defaults to true for everybody; `rc_schema.sql`
+  stands down the administrators that already exist when it is applied, once,
+  and the Add-person dialog merely *suggests* the same for a new one.
+- **Nothing is emailed from the application, and that is structural.** There is
+  no server of its own and a browser cannot send mail, so inviting somebody
+  produces a link (`#join=<address>`) to send however you already talk to
+  people — which also sidesteps the corporate mail scanner that opens a
+  confirmation link before the person does. The link is a convenience, not a
+  key: `rc_enforce_invitation()` still refuses an address nobody invited, so a
+  forwarded link gets a stranger nowhere. Sign-up itself goes through GoTrue
+  rather than PostgREST, which is why the gate is a trigger on `auth.users` and
+  not anything `ui/rc.js` does.
 - **Adding somebody to the calendar never needs the SQL editor.** Invitations,
   linking an account to a roster row and changing a role are all
   `security definer` functions — `rc_invite`, `rc_revoke_invitation`,
@@ -541,13 +559,13 @@ node tools/test_dist.js              #  21 checks — every deployment shape, an
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  45 checks — the look-ahead parser, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         # 107 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 109 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 209 checks — both permission models
+node tools/test_sql.js               # 213 checks — both permission models
 node tools/smoke.js --shot out.png   # …and eyeball the result
 ```
 

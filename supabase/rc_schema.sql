@@ -69,6 +69,31 @@ create table if not exists public.rc_people (
 
 create index if not exists rc_people_active_idx on public.rc_people (active);
 
+/*
+ * Whether somebody is scheduled, as distinct from what they may do.
+ *
+ * A commissioning manager administers the calendar and is never assigned to a
+ * location; asking them every morning what they finished yesterday is noise in
+ * the one meeting that has to stay quick. But "administers" and "is scheduled"
+ * are two different facts and folding them together would be a trap: an
+ * administrator who does take shifts would vanish from the huddle the moment
+ * they were promoted, with no way back short of demoting them.
+ *
+ * So it is its own column, defaulting to true, and the existing administrators
+ * are stood down once — the only place this file assumes anything about who
+ * somebody is.
+ */
+alter table public.rc_people
+  add column if not exists scheduled boolean not null default true;
+
+do $$
+begin
+  if not exists (select 1 from public.rc_people where not scheduled) then
+    update public.rc_people set scheduled = false where role = 'admin';
+  end if;
+end
+$$;
+
 -- ══════════════════════════════════════════════════════════════════════════
 -- Vocabularies
 --

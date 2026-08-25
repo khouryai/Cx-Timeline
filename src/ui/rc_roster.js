@@ -17,7 +17,7 @@ import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import { icon } from './icons.js';
 import {
-  textInput, selectInput, toast, confirmDialog, promptDialog, field, badge,
+  textInput, selectInput, toast, confirmDialog, promptDialog, field, badge, checkbox,
 } from './components.js';
 import { notifyChanged, byId, dayLabel, todayISO, formModal } from './rc_util.js';
 
@@ -98,6 +98,7 @@ async function renderPeople(host) {
     el('td', { text: p.title || '—' }),
     el('td', { text: p.subsystem || '—' }),
     el('td', {}, [roleBadge(p.role)]),
+    el('td', {}, [p.scheduled === false ? badge('Not scheduled', 'neutral') : badge('Scheduled', 'good')]),
     // A four-day contract is a fact the scheduler needs, and showing it here is
     // what stops somebody being planned onto a Friday they never work.
     el('td', { class: 'rc-num', text: (p.working_days || []).length + '/wk' }),
@@ -119,11 +120,13 @@ async function renderPeople(host) {
     ] : []),
   ]));
 
-  host.appendChild(table(['Name', 'Title', 'Subsystem', 'Role', 'Days', ''], rows));
+  host.appendChild(table(['Name', 'Title', 'Subsystem', 'Role', 'In the huddle', 'Days', ''], rows));
   host.appendChild(el('p', {
     class: 'rc-hint',
-    text: 'Retiring somebody keeps every outcome they ever recorded. Nobody is deleted, '
-      + 'because the reports would lose their history with them.',
+    text: 'Retiring somebody keeps every outcome they ever recorded. Nobody is deleted, because '
+      + 'the reports would lose their history with them. "In the huddle" is a separate question '
+      + 'from what somebody may do: a manager administers the calendar without being assigned to '
+      + 'a location, and an administrator who does take shifts stays in the meeting.',
   }));
 }
 
@@ -133,6 +136,22 @@ function editPerson(person) {
   const title = textInput({ value: person?.title || '', placeholder: 'Test Engineer' });
   const subsystem = textInput({ value: person?.subsystem || '', placeholder: 'ATS / IXL / SCADA' });
   const role = selectInput({ value: person?.role || 'member', options: ROLES });
+  /* Whether they are scheduled, kept apart from what they may do. A manager
+     administers the calendar and is never assigned to a location; an
+     administrator who does take shifts must not drop out of the meeting
+     because of their permissions. */
+  const scheduled = checkbox({
+    label: 'Takes shifts — appears in the daily huddle and the week plan',
+    checked: person ? person.scheduled !== false : true,
+  });
+  if (!person) {
+    /* A suggestion for somebody new, not a rule: an administrator is usually
+       the person running the meeting. It stays a switch, because the two facts
+       are separate and somebody has to be able to say so. */
+    role.addEventListener('change', () => {
+      scheduled.querySelector('input').checked = role.value !== 'admin';
+    });
+  }
 
   // Which days they work at all. Scheduling somebody onto a day they do not
   // work is the same class of mistake as scheduling them while on leave, and
@@ -156,6 +175,8 @@ function editPerson(person) {
       field('Subsystem', subsystem),
       field('Role', role, 'What they may do once they have an account. It changes nothing '
         + 'until one exists — scheduling somebody never requires a login.'),
+      field('Scheduling', scheduled, 'Turn this off for somebody who runs the meeting rather '
+        + 'than taking work from it. They keep every permission they had.'),
       field('Working days', daysWrap),
     ]),
     confirmLabel: person ? 'Save' : 'Add',
@@ -166,6 +187,7 @@ function editPerson(person) {
         email: email.value.trim() || null,
         title: title.value.trim() || null,
         subsystem: subsystem.value.trim() || null,
+        scheduled: scheduled.querySelector('input').checked,
         working_days: working,
       };
       if (!patch.name) throw new Error('A name is needed.');
@@ -408,6 +430,42 @@ function bookLeave(people, kinds) {
 /* ── Accounts ──────────────────────────────────────────────────────────── */
 
 /**
+ * The link to send somebody.
+ *
+ * Nothing is emailed from here, and that is a limitation rather than a choice:
+ * the application has no server of its own and a browser cannot send mail. So
+ * it produces the link and you send it however you already talk to people —
+ * which in practice beats an email that a corporate scanner opens before they
+ * do, burning the token on the way past.
+ *
+ * The address rides along so somebody following it lands on the create-account
+ * form with the right one of their addresses already in it. It is not a
+ * credential: the database still refuses anybody who was not invited, so a
+ * forwarded link gets a stranger precisely nowhere.
+ */
+function joinLink(email) {
+  const base = window.location.origin + window.location.pathname;
+  return `${base}#join=${encodeURIComponent(String(email || '').trim())}`;
+}
+
+async function copyJoinLink(email) {
+  const link = joinLink(email);
+  try {
+    await navigator.clipboard.writeText(link);
+    toast({ tone: 'good', message: `Link for ${email} copied — send it however you like.` });
+  } catch {
+    // A denied clipboard is not a failure to produce the link. Show it so it
+    // can be copied by hand rather than reporting nothing happened.
+    await promptDialog({
+      title: `Invitation link for ${email}`,
+      label: 'Copy this and send it to them',
+      value: link,
+      confirmLabel: 'Done',
+    });
+  }
+}
+
+/**
  * Who may sign in, and what they may do once they have.
  *
  * The whole point of this section is that adding somebody to the team never
@@ -507,6 +565,12 @@ async function renderAccounts(host) {
         ]),
         el('td', {}, [
           el('button', {
+            class: 'cx-btn mini',
+            text: 'Copy link',
+            title: 'The link that takes them to the create-account form with their address in it.',
+            onClick: () => copyJoinLink(inv.pending_email),
+          }),
+          el('button', {
             class: 'cx-btn mini ghost',
             text: inv.pending_expired ? 'Send again' : 'Revoke',
             onClick: async () => {
@@ -534,9 +598,13 @@ async function renderAccounts(host) {
 
   host.appendChild(el('p', {
     class: 'rc-hint',
-    text: 'Sign-up is closed: an address that was never invited is refused by the '
-      + 'database, not by hiding a form. Invitations lapse after thirty days, and '
-      + 'inviting somebody again reopens the one that lapsed.',
+    text: 'Sign-up is closed: an address that was never invited is refused by the database, not '
+      + 'by hiding a form — so the link is a convenience, not a key, and forwarding it gets a '
+      + 'stranger nowhere. Nothing is emailed from here; the application has no server of its '
+      + 'own. Send the link however you already talk to people, which also sidesteps the '
+      + 'corporate mail scanner that opens a confirmation link before the person does. '
+      + 'Invitations lapse after thirty days, and inviting somebody again reopens the one that '
+      + 'lapsed.',
   }));
 }
 
@@ -569,7 +637,7 @@ function invitePerson(people) {
       if (!address) throw new Error('An email address is needed.');
       await rc.invite(address, role.value, person.value || null, note.value.trim() || null);
       notifyChanged('invitations');
-      toast({ message: `${address} may now create an account.` });
+      await copyJoinLink(address);
     },
   });
 }

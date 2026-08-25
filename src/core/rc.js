@@ -214,6 +214,33 @@ export async function signIn(email, password) {
   return user;
 }
 
+/**
+ * Create an account.
+ *
+ * The gate is `rc_enforce_invitation()` on `auth.users`, not this function:
+ * sign-up goes through GoTrue rather than PostgREST, so anybody holding the
+ * public key can POST to /auth/v1/signup and the interface has no say in it.
+ * An address nobody invited is refused by the database, and what comes back
+ * here is that refusal.
+ *
+ * Whether they are signed in afterwards depends on the project's "Confirm
+ * email" setting, so the caller is told which happened rather than guessing.
+ */
+export async function signUp(email, password) {
+  requireClient();
+  const { data, error } = await client.auth.signUp({
+    email: String(email || '').trim(),
+    password,
+  });
+  if (error) throw friendlier(error);
+  user = data.user || null;
+  if (data.session) {
+    await refreshPerson();
+    emit(EV.RC_AUTH_CHANGED, { user, event: 'SIGNED_IN' });
+  }
+  return { user, live: Boolean(data.session) };
+}
+
 export async function signOut() {
   if (!client) return;
   await client.auth.signOut();
@@ -229,6 +256,16 @@ function requireClient() {
 /** Supabase's wording is for developers; these messages are for people. */
 function friendlier(error) {
   const message = String(error?.message || 'Something went wrong.');
+  if (/invitation only/i.test(message)) {
+    return new Error('That address has not been invited. Ask an administrator to invite you, '
+      + 'then use the link they send.');
+  }
+  if (/already registered|user already exists/i.test(message)) {
+    return new Error('That address already has an account — sign in instead.');
+  }
+  if (/password/i.test(message) && /least|short|weak/i.test(message)) {
+    return new Error('That password is too short — six characters at least.');
+  }
   if (/invalid login credentials/i.test(message)) return new Error('That email and password do not match an account.');
   if (/email not confirmed/i.test(message)) return new Error('Confirm your email address first — check your inbox.');
   if (/failed to fetch|networkerror/i.test(message)) {
@@ -255,8 +292,21 @@ async function select(table, build) {
   return data || [];
 }
 
-export function listPeople({ includeInactive = false } = {}) {
-  return select('rc_people', (q) => (includeInactive ? q : q.eq('active', true)).order('name'));
+/**
+ * The team.
+ *
+ * `scheduledOnly` is what the huddle and the week plan ask for: the people who
+ * actually take shifts. It is a separate question from what somebody may do —
+ * a manager administers the calendar and is never assigned to a location, and
+ * an administrator who *does* take shifts must not disappear from the meeting
+ * because of their permissions.
+ */
+export function listPeople({ includeInactive = false, scheduledOnly = false } = {}) {
+  return select('rc_people', (q) => {
+    let out = includeInactive ? q : q.eq('active', true);
+    if (scheduledOnly) out = out.eq('scheduled', true);
+    return out.order('name');
+  });
 }
 
 export function listLocations({ includeInactive = false } = {}) {
