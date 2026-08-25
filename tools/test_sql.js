@@ -106,7 +106,34 @@ function main() {
     // own two roles. It is applied second because it assumes `auth.users`,
     // which the timeline's schema is what sets up in the stub.
     load('supabase/rc_schema.sql');
-    console.log('✓ rc_schema.sql applies cleanly\n');
+    console.log('✓ rc_schema.sql applies cleanly');
+
+    /* The upgrade path, tested against the thing it is for.
+       A project created earlier in this application's life is missing every
+       column added since — `create table if not exists` does nothing to a
+       table that exists — and that is what "could not update the legend" is:
+       the interface sends `role` and the register has no such column. So the
+       schema is put back to that shape and then upgraded, which is the only
+       way to know the file does its job. */
+    load('supabase/test/downgrade.sql');
+    load('supabase/migrate.sql');
+    load('supabase/migrate.sql');   // and again: it must never undo itself
+    load('supabase/rc_schema.sql');
+
+    const upgraded = psql(['-d', 'cxt', '-tAc', `
+      select
+        (select count(*) from information_schema.columns
+          where table_schema='public' and table_name='rc_legend' and column_name='role')
+      + (select count(*) from information_schema.columns
+          where table_schema='public' and table_name='rc_people' and column_name='scheduled')
+      + (case when to_regclass('public.rc_settings')    is null then 0 else 1 end)
+      + (case when to_regclass('public.rc_invitations') is null then 0 else 1 end)
+      + (select count(*) from pg_constraint
+          where conname='rc_people_role_check' and pg_get_constraintdef(oid) like '%viewer%')`]).trim();
+    if (upgraded !== '5') {
+      throw new Error(`migrate.sql left an old project incomplete (${upgraded}/5 pieces)`);
+    }
+    console.log('✓ migrate.sql upgrades a project built before any of this, and is safe twice\n');
 
     // Every check reports through RAISE NOTICE, which psql writes to stderr;
     // stdout is only the empty result row of each `select assert(...)`. Run it
