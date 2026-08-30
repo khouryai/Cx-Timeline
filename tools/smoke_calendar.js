@@ -26,11 +26,11 @@
  */
 
 import { chromium } from 'playwright';
+import { launchOptions } from './lib/chrome.js';
 import path from 'node:path';
 import url from 'node:url';
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
-const CHROME = '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 
 let passed = 0;
 const failures = [];
@@ -64,6 +64,21 @@ function fakeSdk() {
   const USER = { id: 'user-rc-1', email: 'alex@example.com' };
   const iso = (offset) => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
 
+  /* The day the huddle will review, worked out the way the application does:
+     step back until you reach a day somebody works. A naive "yesterday, or
+     Friday if today is Monday" is wrong on a Sunday — it lands on Saturday,
+     which nobody works — and a fixture that disagrees with the thing it is
+     testing fails on two days in seven and passes on the rest, which is worse
+     than failing outright. Everything that depends on the review day derives
+     from this one value. */
+  const REVIEW = (() => {
+    const now = new Date();
+    let ms = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    do { ms -= 86400000; } while ((new Date(ms).getUTCDay() || 7) > 5);
+    return { iso: new Date(ms).toISOString().slice(0, 10), dow: new Date(ms).getUTCDay() || 7 };
+  })();
+  S.reviewDay = REVIEW.iso;
+
   S.rows = {
     rc_people: [
       /* Alex administers the calendar and is not scheduled — a manager runs the
@@ -71,7 +86,13 @@ function fakeSdk() {
          not a reading of the role, so an administrator who did take shifts
          would still be in the huddle. */
       { id: 'p1', user_id: 'user-rc-1', name: 'Alex', email: 'alex@example.com', title: 'Commissioning Manager', subsystem: 'ATS', role: S.role, active: true, scheduled: S.role !== 'admin', working_days: [1, 2, 3, 4, 5] },
-      { id: 'p2', user_id: null, name: 'Dan', title: 'Field Technician', subsystem: 'Wayside', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4] },
+      /* A four-day contract, and deliberately not four days that could include
+         the review day: Dan is the row the carry checks work on, so a week
+         where his day off happened to be the day under review left him with no
+         buttons at all. The day he is off is the first weekday that is not the
+         one being reviewed. */
+      { id: 'p2', user_id: null, name: 'Dan', title: 'Field Technician', subsystem: 'Wayside', role: 'member', active: true, scheduled: true,
+        working_days: [1, 2, 3, 4, 5].filter((d) => d !== [1, 2, 3, 4, 5].find((x) => x !== REVIEW.dow)) },
       { id: 'p3', user_id: null, name: 'Priya', title: 'Test Engineer', subsystem: 'IXL', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
       /* Sam is off on whichever day the huddle will review.
          The review day is "the previous day somebody works", so it moves with
@@ -80,11 +101,7 @@ function fakeSdk() {
          off then. Pinning it here is what makes the check hold on a Tuesday as
          well as a Monday; it used to pass only on Mondays. */
       { id: 'p4', user_id: null, name: 'Sam', title: 'SCADA Engineer', subsystem: 'SCADA', role: 'member', active: true, scheduled: true,
-        working_days: (() => {
-          const dow = new Date().getUTCDay() || 7;      // ISO: Monday 1 … Sunday 7
-          const review = dow === 1 ? 5 : Math.max(1, Math.min(5, dow - 1));
-          return [1, 2, 3, 4, 5].filter((d) => d !== review);
-        })() },
+        working_days: [1, 2, 3, 4, 5].filter((d) => d !== REVIEW.dow) },
       { id: 'p5', user_id: null, name: 'Rosa', title: 'Test Technician', subsystem: 'IXL', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
       // Enough of a team that each check below has a row of its own to work on
       // — the meeting is fifteen people in practice, not three.
@@ -111,19 +128,11 @@ function fakeSdk() {
     /* A task planned for the day the huddle will review, so a carry has
        something to roll forward and a chain to keep. Dated the same way the
        app derives the review day: the previous weekday. */
-    rc_plan_entries: (() => {
-      const now = new Date();
-      const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-      const dow = new Date(t).getUTCDay() || 7;
-      const back = dow === 1 ? 3 : 1;
-      const review = new Date(t - back * 86400000).toISOString().slice(0, 10);
-      S.reviewDay = review;
-      return [{
-        id: 'plan1', person_id: 'p2', work_date: review, shift: 'day',
-        location_id: 'l1', task: 'Cable pull at TPSS 12', category_id: 'c1',
-        carry_chain_id: null, lookahead_row_id: null,
-      }];
-    })(),
+    rc_plan_entries: [{
+      id: 'plan1', person_id: 'p2', work_date: REVIEW.iso, shift: 'day',
+      location_id: 'l1', task: 'Cable pull at TPSS 12', category_id: 'c1',
+      carry_chain_id: null, lookahead_row_id: null,
+    }],
     get rc_plan_current() { return this.rc_plan_entries; },
     rc_actuals: [],
     // A few days of history, so the reports have something to aggregate. Dates
@@ -464,7 +473,7 @@ function fakeSdk() {
 const PLAN_WORDS = ['Signalling', 'Commissioning', 'ATS Integration', 'IXL Static', 'REL-', 'objects', 'lanes', 'baselines'];
 
 async function main() {
-  const browser = await chromium.launch({ executablePath: CHROME });
+  const browser = await chromium.launch(launchOptions());
   const context = await browser.newContext({ viewport: { width: 1500, height: 920 } });
   const page = await context.newPage();
 

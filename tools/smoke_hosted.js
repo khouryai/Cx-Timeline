@@ -18,12 +18,12 @@
  */
 
 import { chromium } from 'playwright';
+import { launchOptions } from './lib/chrome.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
-const CHROME = '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 
 let passed = 0;
 const failures = [];
@@ -198,7 +198,7 @@ function fakeSdk() {
 }
 
 async function main() {
-  const browser = await chromium.launch({ executablePath: CHROME });
+  const browser = await chromium.launch(launchOptions());
   const context = await browser.newContext({ viewport: { width: 1500, height: 920 } });
   const page = await context.newPage();
 

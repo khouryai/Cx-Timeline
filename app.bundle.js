@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-08-25T06:00:33.643Z
+ * Modules: 53   Built: 2026-08-30T19:34:30.013Z
  */
 (function () {
   'use strict';

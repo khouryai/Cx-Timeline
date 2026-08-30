@@ -12,6 +12,7 @@
  */
 
 import { chromium } from 'playwright';
+import { launchOptions } from './lib/chrome.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -57,10 +58,7 @@ function check(name, ok, detail = '') {
 
 async function main() {
   const server = await serve();
-  // The pre-installed browser may not match this Playwright build's expected
-  // revision, so point at it explicitly when it is present.
-  const preinstalled = ['/opt/pw-browsers/chromium/chrome-linux/chrome', '/opt/pw-browsers/chromium-1194/chrome-linux/chrome'].find((p) => fs.existsSync(p));
-  const browser = await chromium.launch(preinstalled ? { executablePath: preinstalled } : {});
+  const browser = await chromium.launch(launchOptions());
   const context = await browser.newContext({ viewport: { width: 1600, height: 950 } });
   const page = await context.newPage();
 

@@ -30,6 +30,7 @@
  */
 
 import { chromium } from 'playwright';
+import { launchOptions } from './lib/chrome.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -38,7 +39,6 @@ import { execFileSync } from 'node:child_process';
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const SHELL = path.join(ROOT, 'dist-desktop');
-const PREINSTALLED = ['/opt/pw-browsers/chromium/chrome-linux/chrome', '/opt/pw-browsers/chromium-1194/chrome-linux/chrome'];
 
 /** The channel baked into the generated loader — what the update test answers. */
 const CHANNEL = (() => {
@@ -288,8 +288,7 @@ async function main() {
   execFileSync('node', [path.join(ROOT, 'tools', 'desktop.js')], { cwd: ROOT, stdio: 'inherit' });
 
   const { server, origin } = await serve(SHELL);
-  const executablePath = PREINSTALLED.find((p) => fs.existsSync(p));
-  const browser = await chromium.launch(executablePath ? { executablePath } : {});
+  const browser = await chromium.launch(launchOptions());
 
   const consoleErrors = [];
   let context = null;

@@ -1,0 +1,113 @@
+# Run the whole suite on every push.
+#
+# There were 840-odd checks in this repository and nothing ran them unless
+# somebody remembered to — which, on a project deployed straight from a branch
+# push, means a broken build reaches the site before anyone knows. Cloudflare
+# builds from the same push this workflow runs on, so a red tick here is the
+# signal to roll back rather than the thing that prevents the deploy.
+#
+# Three jobs rather than one, because they need different machines and fail for
+# different reasons: a browser suite failing tells you about the application, a
+# SQL failure tells you about the permission model, and the bundle check tells
+# you somebody edited `src/` and forgot to build.
+
+name: Checks
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The rule that bites, as a check. `index.html` loads `app.bundle.js`, not
+  # `src/`, so a change to the source that is not rebuilt ships a site that
+  # disagrees with its own repository. The build is deterministic apart from
+  # the timestamp in its header, which is why that one line is excluded.
+  bundle:
+    name: The bundle matches the source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Rebuild
+        run: node tools/build.js
+      - name: Compare against what is committed
+        run: |
+          # `grep -a`, not plain grep: the bundle carries bytes grep reads as
+          # binary, and it then prints "binary file matches" instead of the
+          # lines — which makes the comparison always succeed and the check
+          # worthless in exactly the case it exists for.
+          strip() { grep -av '^ \* Modules:' "$1"; }
+          git show HEAD:app.bundle.js > /tmp/committed.js
+          if ! diff <(strip /tmp/committed.js) <(strip app.bundle.js) > /dev/null; then
+            echo "::error::app.bundle.js is out of date — run 'npm run build' and commit it"
+            diff <(strip /tmp/committed.js) <(strip app.bundle.js) | head -40
+            exit 1
+          fi
+          echo "the committed bundle is the source, built"
+
+  browser:
+    name: Browser and deployment suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      # Playwright resolves its own browser when nothing is pinned — see
+      # tools/lib/chrome.js. Only Chromium is used, so only Chromium is fetched.
+      - run: npx playwright install --with-deps chromium
+
+      - run: node tools/test_dist.js
+      - run: node tools/test_lookahead.js
+      - run: node tools/smoke.js
+      - run: node tools/smoke_folder.js
+      - run: node tools/smoke_desktop.js
+      - run: node tools/smoke_hosted.js
+      - run: node tools/smoke_calendar.js
+
+      # A picture of the failure is worth more than the log when a layout
+      # check goes red.
+      - name: Screenshot on failure
+        if: failure()
+        run: node tools/smoke.js --shot failure.png || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: failure-screenshot
+          path: failure.png
+          if-no-files-found: ignore
+
+  sql:
+    name: Permission model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # `test_sql.js` stands up its own throwaway instance with initdb rather
+      # than talking to a service container, so all it needs is the binaries.
+      - name: Install PostgreSQL
+        run: sudo apt-get update && sudo apt-get install -y postgresql
+      - run: node tools/test_sql.js
+
+  rust:
+    name: Plan and lock rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No webview and no display: plan.rs is a Tauri-free library on purpose,
+      # which is what makes the rules that protect somebody's afternoon
+      # checkable in seconds.
+      - name: Test the library
+        working-directory: src-tauri
+        run: cargo test --lib --no-default-features
