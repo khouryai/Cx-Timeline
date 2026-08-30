@@ -114,6 +114,59 @@ check('the desktop update channel is still published', exists('desktop/version.j
    Hosted — unchanged
    ═══════════════════════════════════════════════════════════════════════ */
 
+/* ══════════════════════════════════════════════════════════════════════════
+   Nothing is downloaded twice
+   ═══════════════════════════════════════════════════════════════════════ */
+console.log('\nAssets are named after their contents, so a repeat visit is free');
+
+// Built above by the calendar shape, which is the one the team actually loads.
+const markup = read('index.html');
+const hashedBundle = (/src="(app\.[0-9a-f]{10}\.js)"/.exec(markup) || [])[1];
+
+check('the bundle is published under a name derived from its bytes',
+  Boolean(hashedBundle), hashedBundle || markup.match(/src="app[^"]*"/)?.[0]);
+check('and the unhashed name is not there to be served uncached',
+  !exists('app.bundle.js'));
+check('every stylesheet too',
+  (markup.match(/href="css\/[a-z]+\.[0-9a-f]{10}\.css"/g) || []).length >= 6);
+check('and index.html points at what was actually written',
+  (markup.match(/(?:src|href)="((?:app|css\/)[^"]+)"/g) || [])
+    .map((m) => m.replace(/^[a-z]+="|"$/g, ''))
+    .every((rel) => exists(rel)));
+
+const policy = read('_headers');
+check('they are cached forever, because the name changes when the bytes do',
+  /\/app\.\*\.js\n\s*Cache-Control: public, max-age=31536000, immutable/.test(policy));
+check('and the rule that made the bundle uncacheable is gone',
+  !/\/app\.bundle\.js/.test(policy));
+
+/* The name has to be a function of the contents and nothing else: stable when
+   they are, different when they are not. A timestamp would defeat the whole
+   point by changing on every deploy. */
+const first = hashedBundle;
+build(['--calendar'], { RC_SUPABASE_URL: RC, RC_SUPABASE_ANON_KEY: 'rc-anon-key' });
+check('rebuilding the same source publishes the same name',
+  (/src="(app\.[0-9a-f]{10}\.js)"/.exec(read('index.html')) || [])[1] === first);
+
+const bundlePath = path.join(ROOT, 'app.bundle.js');
+const original = fs.readFileSync(bundlePath);
+try {
+  fs.writeFileSync(bundlePath, Buffer.concat([original, Buffer.from('\n// changed\n')]));
+  build(['--calendar'], { RC_SUPABASE_URL: RC, RC_SUPABASE_ANON_KEY: 'rc-anon-key' });
+  check('and a changed bundle publishes a different one',
+    (/src="(app\.[0-9a-f]{10}\.js)"/.exec(read('index.html')) || [])[1] !== first);
+} finally {
+  fs.writeFileSync(bundlePath, original);
+}
+
+// Renaming the published copy must not touch what the installed application
+// follows: the payload is built from the repository, not from `dist/`.
+build(['--no-backend']);
+const payload = JSON.parse(read('desktop/payload.json') || '{}');
+check('the desktop payload still carries the bundle, whatever the site calls it',
+  typeof payload.bundle === 'string' && payload.bundle.length > 100000,
+  `${Math.round((payload.bundle || '').length / 1024)} kB`);
+
 console.log('\nA hosted deployment still refuses to publish without a backend');
 const hosted = build(['--hosted'], { SUPABASE_URL: '', SUPABASE_ANON_KEY: '' });
 check('a hosted build with no backend fails', !hosted.ok);

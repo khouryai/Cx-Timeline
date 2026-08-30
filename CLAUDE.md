@@ -312,6 +312,17 @@ subscribes. That is what keeps the graph acyclic.
   back. Publishing the site is the whole release: `tools/dist.js` writes
   `dist/desktop/{version,payload}.json` alongside it. Rebuild the installer only
   when the Rust side changes.
+- **The published assets are named after their contents; the repository's are
+  not.** `fingerprint()` in `tools/dist.js` renames `app.bundle.js` and each
+  stylesheet to `app.<hash>.js` at publish time, rewrites `index.html`, and
+  marks them `immutable` — so a repeat visit downloads `index.html` and
+  `config.js` and nothing else, where it used to pay 328 kB for the bundle
+  every time because the name never changed and the policy therefore had to say
+  `no-cache`. It happens only in `dist/`: the committed `index.html` still says
+  `app.bundle.js`, which is what makes double-clicking it work with no server
+  and what the desktop shell falls back to from its own folder. The desktop
+  payload is built from the repository rather than from `dist/`, so renaming
+  the published copy cannot reach it.
 - **A download is the one action with no visible result, so it says so.** The
   file lands somewhere the page cannot see, and exporting the same drawing
   twice looks exactly like exporting it never. Every export goes through
@@ -573,7 +584,7 @@ npm run build                        # must succeed — it also lints the module
 npm test                             # all five browser suites plus the SQL one, must exit 0
 npm run test:rust                    #  32 checks — the plan, lock and intake rules, in Rust
 
-node tools/test_dist.js              #  21 checks — every deployment shape, and that the
+node tools/test_dist.js              #  30 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  45 checks — the look-ahead parser, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
