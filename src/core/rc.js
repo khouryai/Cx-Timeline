@@ -561,6 +561,10 @@ export const addSnapshot = (row) => insert('rc_lookahead_snapshots', [row]).then
 export const addSnapshotRows = (rows) => insert('rc_lookahead_rows', rows);
 export const addChangeEvents = (rows) => insert('rc_change_events', rows);
 export const addSar = (row) => insert('rc_sars', [row]).then((r) => r[0]);
+/* Only ever to attach the storage path once the PDF is up. A SAR's terms are
+   never edited — an amended one is a new revision that supersedes it, which is
+   what `superseded_by` is for. */
+export const updateSar = (id, patch) => update('rc_sars', id, patch);
 export const addSarLinks = (rows) => insert('rc_sar_links', rows);
 
 /**

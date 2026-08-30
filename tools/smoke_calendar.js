@@ -479,10 +479,96 @@ function fakeSdk() {
           }
           return Promise.resolve({ data: null, error: null });
         },
-        storage: { from: () => ({ upload: () => Promise.resolve({ error: null }) }) },
+        storage: {
+          from: (bucket) => ({
+            upload: (path_, blob) => {
+              S.calls.push({ kind: 'upload', table: bucket, payload: { path: path_, size: blob?.size || 0 } });
+              (S.uploads = S.uploads || []).push(path_);
+              return Promise.resolve({ error: null });
+            },
+            createSignedUrl: (path_) =>
+              Promise.resolve({ data: { signedUrl: `https://rc-stub.supabase.co/${bucket}/${path_}` }, error: null }),
+          }),
+        },
       };
     },
   };
+}
+
+/**
+ * A folder, in memory, for the intake paths only.
+ *
+ * Deliberately smaller than the one in `smoke_folder.js` and not shared with
+ * it: that one models a plan file, its lock and the write guard, and none of
+ * that applies here. All the SAR path needs is `intakeList`, `intakeRead` and
+ * `intakeMove`, which between them use `getDirectoryHandle`, `entries`,
+ * `getFileHandle` and `removeEntry`. Modelling more of the File System Access
+ * API than is used would be modelling it wrong in more places.
+ */
+function fakeFolder() {
+  window.__files = {
+    // A plan, so connecting the folder does not stop to ask what to call one —
+    // this suite is about the SAR inbox beside it, not about creating plans.
+    'bart.json': JSON.stringify({ schemaVersion: 99, objects: [], lanes: [], links: [] }),
+    'sars/inbox/SAR-90210 W36.pdf': 'PDF-BYTES',
+  };
+
+  const fileHandle = (key) => ({
+    kind: 'file',
+    name: key.split('/').pop(),
+    async getFile() {
+      const text = window.__files[key];
+      if (text === undefined) throw Object.assign(new Error('not found'), { name: 'NotFoundError' });
+      return {
+        size: text.length,
+        lastModified: Date.now(),
+        arrayBuffer: async () => new TextEncoder().encode(text).buffer,
+      };
+    },
+    async createWritable() {
+      let buffer = '';
+      return {
+        async write(chunk) {
+          buffer += typeof chunk === 'string' ? chunk
+            : new TextDecoder().decode(chunk instanceof ArrayBuffer ? chunk : chunk.buffer || chunk);
+        },
+        async close() { window.__files[key] = buffer; },
+      };
+    },
+  });
+
+  const dirHandle = (prefix) => ({
+    kind: 'directory',
+    name: prefix.replace(/\/$/, '').split('/').pop() || 'folder',
+    async queryPermission() { return 'granted'; },
+    async requestPermission() { return 'granted'; },
+    async getDirectoryHandle(child, opts = {}) {
+      const next = `${prefix}${child}/`;
+      if (!opts.create && !Object.keys(window.__files).some((k) => k.startsWith(next))) {
+        throw Object.assign(new Error('not found'), { name: 'NotFoundError' });
+      }
+      return dirHandle(next);
+    },
+    async getFileHandle(child, opts = {}) {
+      const key = prefix + child;
+      if (window.__files[key] === undefined) {
+        if (!opts.create) throw Object.assign(new Error('not found'), { name: 'NotFoundError' });
+        window.__files[key] = '';
+      }
+      return fileHandle(key);
+    },
+    async removeEntry(child) { delete window.__files[prefix + child]; },
+    async *entries() {
+      for (const key of Object.keys(window.__files)) {
+        if (!key.startsWith(prefix)) continue;
+        const rest = key.slice(prefix.length);
+        if (rest.includes('/')) continue;
+        yield [rest, fileHandle(key)];
+      }
+    },
+  });
+
+  window.showDirectoryPicker = async () => dirHandle('');
 }
 
 /** Words that only ever appear in the timeline's document. */
@@ -538,6 +624,7 @@ async function main() {
     });
   });
   await captureClipboard(page);
+  await page.addInitScript(fakeFolder);
   await page.addInitScript(fakeSdk);
   const url_ = 'file://' + path.join(ROOT, 'index.html');
 
@@ -1055,11 +1142,60 @@ async function main() {
     /1 cancellation\(s\) have nobody against them/.test(laText),
     laText.split('\n').find((l) => /nobody against/.test(l)) || '');
 
+  /* ── Site access ──────────────────────────────────────────────────────
+     The half of the module that says whether the work planned actually had
+     access. Everything below it was written and unreachable: nothing read the
+     inbox, nothing uploaded, nothing linked a SAR to a row — so
+     `rc_rows_without_sar` reported every row as having no access, for ever,
+     which is worse than not reporting it. */
+  await page.locator('.ws-btn', { hasText: 'Timeline' }).click();
+  await page.locator('#sidenav .nav-link[data-pane="io"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1200);
+  await page.locator('.ws-btn', { hasText: 'Calendar' }).click();
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Look-ahead' }).click();
   await page.locator('#rc-frame .rc-tab', { hasText: 'Site access' }).click();
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(500);
+
   const sarText = await page.locator('#rc-frame').innerText();
   check('site access explains that matching is by date and location, never text',
     /never by activity text/.test(sarText));
+  check('a PDF dropped in the inbox is offered to be recorded',
+    /SAR-90210 W36\.pdf/.test(sarText), sarText.split('\n').slice(0, 4).join(' / '));
+
+  await page.locator('#rc-frame button', { hasText: 'Record it' }).click();
+  await page.waitForSelector('.cx-modal');
+  // The number is read off the filename as a suggestion, not a match.
+  check('the number is suggested from the filename',
+    (await page.locator('.cx-modal input').first().inputValue()) === 'SAR-90210');
+  await page.locator('.cx-modal input[type="date"]').fill(
+    await page.evaluate(() => window.__rc.rows.rc_lookahead_rows[0].week_start));
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Record' }).click();
+  await page.waitForTimeout(900);
+
+  check('the SAR is recorded',
+    await page.evaluate(() => window.__rc.rows.rc_sars.some((x) => x.sar_number === 'SAR-90210')));
+  check('the PDF goes up so it can be opened by whoever is asked about it later',
+    await page.evaluate(() => (window.__rc.uploads || []).length === 1),
+    JSON.stringify(await page.evaluate(() => window.__rc.uploads || [])));
+  check('and it is filed out of the inbox, under the week it authorised',
+    await page.evaluate(() => {
+      const keys = Object.keys(window.__files);
+      return !keys.some((k) => k.startsWith('sars/inbox/'))
+        && keys.some((k) => /^sars\/\d{4}-\d{2}-\d{2}\//.test(k));
+    }), JSON.stringify(await page.evaluate(() => Object.keys(window.__files))));
+
+  // Straight on to the question a SAR exists to answer: what it covers.
+  await page.waitForSelector('.cx-modal');
+  const coverText = await page.locator('.cx-modal').innerText();
+  check('and it asks which look-ahead rows the access is for',
+    /what it covers/i.test(coverText) && /IXL Regression Testing/.test(coverText), coverText.slice(0, 120));
+  await page.locator('.cx-modal input[type="checkbox"]').first().check();
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Confirm' }).click();
+  await page.waitForTimeout(700);
+  check('confirming links it to the row, so the missing-access alert stops crying wolf',
+    await page.evaluate(() => window.__rc.rows.rc_sar_links.length === 1));
 
   /* ── Reports ──────────────────────────────────────────────────────────── */
   console.log('\nReports');
@@ -1106,10 +1242,19 @@ async function main() {
     await page.evaluate(() => window.__cxStoreEdits === undefined
       ? document.querySelectorAll('.tl-obj').length > 8 : true));
 
-  const planTables = calls.filter((c) => !/^rc_/.test(c.table));
+  /* Storage is not a table, and the SAR bucket is the calendar's. Folding the
+     two together made the isolation check fail on a legitimate upload — which
+     is the right instinct wrongly applied: what must never happen is plan
+     content leaving, and an upload to `sars` is checked by name here and by
+     content on the wire below. */
+  const planTables = calls.filter((c) => c.kind !== 'upload' && !/^rc_/.test(c.table));
   check('nothing was written to a table outside the calendar',
     planTables.length === 0,
     planTables.map((c) => c.table).join(', ') || 'none');
+
+  const buckets = [...new Set(calls.filter((c) => c.kind === 'upload').map((c) => c.table))];
+  check('and the only thing uploaded went to the calendar\'s own bucket',
+    buckets.every((b) => b === 'sars'), buckets.join(', ') || 'nothing uploaded');
 
   const leaked = calls.filter((c) => PLAN_WORDS.some((w) => (c.payload || '').includes(w)));
   check('no call carried anything out of the plan',

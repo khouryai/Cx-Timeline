@@ -517,6 +517,15 @@ subscribes. That is what keeps the graph acyclic.
   next ingest — and `sheet_name` and the legend both come from the database
   (`rc_settings`, `rc_legend`), because a renamed tab must mean a field
   somebody edits, not a redeploy.
+- **A SAR is recorded, filed and linked in that order, and each step can fail
+  alone.** The row first, then the upload, then the move out of `sars/inbox/`:
+  a PDF uploaded but not moved is a duplicate somebody can see, while a PDF
+  moved before its row existed is a file nobody can find. What a SAR *covers*
+  is confirmed by hand from the rows at that location in that week — one SAR
+  covering several rows is expected, not an ambiguity — and never matched on
+  activity text, which is worded differently on the two sides. Until this was
+  wired, `rc_rows_without_sar` reported every row as having no access for ever,
+  which is worse than not reporting it at all.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
 - **The filter's text box holds a list, not a phrase.** `textTerms()` in
@@ -605,7 +614,7 @@ node tools/test_dist.js              #  30 checks — every deployment shape, an
 node tools/test_lookahead.js         #  57 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         # 125 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 133 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
