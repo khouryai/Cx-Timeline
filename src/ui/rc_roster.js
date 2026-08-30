@@ -241,6 +241,33 @@ async function renderLocations(host) {
     el('td', {}, admin ? [
       el('button', {
         class: 'cx-btn mini ghost',
+        text: 'Rename',
+        title: 'Every alias, SAR and look-ahead row stays pointed at it — only the name changes.',
+        onClick: async () => {
+          const name = await promptDialog({
+            title: `Rename ${l.name}`,
+            label: 'Name',
+            value: l.name,
+            confirmLabel: 'Rename',
+          });
+          if (!name || name.trim() === l.name) return;
+          await rc.updateLocation(l.id, { name: name.trim() });
+          notifyChanged('locations');
+        },
+      }),
+      el('button', {
+        class: 'cx-btn mini ghost',
+        text: l.active ? 'Retire' : 'Restore',
+        title: l.active
+          ? 'Drops it from every picker. Everything already recorded against it stays.'
+          : 'Puts it back in the pickers.',
+        onClick: async () => {
+          await rc.updateLocation(l.id, { active: !l.active });
+          notifyChanged('locations');
+        },
+      }),
+      el('button', {
+        class: 'cx-btn mini ghost',
         text: 'Add spelling',
         title: 'Another way this place is written in the look-ahead or on a SAR.',
         onClick: async () => {

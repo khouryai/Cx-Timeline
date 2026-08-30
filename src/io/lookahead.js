@@ -256,16 +256,6 @@ export function colNumber(letters) {
   return n;
 }
 
-export function colLetters(n) {
-  let out = '';
-  let v = n;
-  while (v > 0) {
-    const rem = (v - 1) % 26;
-    out = String.fromCharCode(65 + rem) + out;
-    v = Math.floor((v - 1) / 26);
-  }
-  return out;
-}
 
 /** Every sheet in the workbook, with its hidden state and its part path. */
 export function readSheets(files) {

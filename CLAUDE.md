@@ -639,7 +639,7 @@ node tools/test_dist.js              #  30 checks — every deployment shape, an
 node tools/test_lookahead.js         #  57 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         # 141 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 142 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser

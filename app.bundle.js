@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-08-30T20:21:18.849Z
+ * Modules: 53   Built: 2026-08-30T20:28:32.578Z
  */
 (function () {
   'use strict';
@@ -27413,6 +27413,33 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
       el('td', {}, admin ? [
         el('button', {
           class: 'cx-btn mini ghost',
+          text: 'Rename',
+          title: 'Every alias, SAR and look-ahead row stays pointed at it — only the name changes.',
+          onClick: async () => {
+            const name = await promptDialog({
+              title: `Rename ${l.name}`,
+              label: 'Name',
+              value: l.name,
+              confirmLabel: 'Rename',
+            });
+            if (!name || name.trim() === l.name) return;
+            await rc.updateLocation(l.id, { name: name.trim() });
+            notifyChanged('locations');
+          },
+        }),
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: l.active ? 'Retire' : 'Restore',
+          title: l.active
+            ? 'Drops it from every picker. Everything already recorded against it stays.'
+            : 'Puts it back in the pickers.',
+          onClick: async () => {
+            await rc.updateLocation(l.id, { active: !l.active });
+            notifyChanged('locations');
+          },
+        }),
+        el('button', {
+          class: 'cx-btn mini ghost',
           text: 'Add spelling',
           title: 'Another way this place is written in the look-ahead or on a SAR.',
           onClick: async () => {
@@ -29097,16 +29124,6 @@ __mods["io/lookahead.js"] = function (__x, __req) {
     return n;
   }
 
-  function colLetters(n) {
-    let out = '';
-    let v = n;
-    while (v > 0) {
-      const rem = (v - 1) % 26;
-      out = String.fromCharCode(65 + rem) + out;
-      v = Math.floor((v - 1) / 26);
-    }
-    return out;
-  }
 
   /** Every sheet in the workbook, with its hidden state and its part path. */
   function readSheets(files) {
@@ -29352,7 +29369,6 @@ __mods["io/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "applyTint", { get: () => applyTint, enumerable: true });
   Object.defineProperty(__x, "readFills", { get: () => readFills, enumerable: true });
   Object.defineProperty(__x, "colNumber", { get: () => colNumber, enumerable: true });
-  Object.defineProperty(__x, "colLetters", { get: () => colLetters, enumerable: true });
   Object.defineProperty(__x, "readSheets", { get: () => readSheets, enumerable: true });
   Object.defineProperty(__x, "parseSheet", { get: () => parseSheet, enumerable: true });
   Object.defineProperty(__x, "readLegend", { get: () => readLegend, enumerable: true });

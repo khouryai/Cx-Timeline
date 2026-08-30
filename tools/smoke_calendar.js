@@ -714,6 +714,11 @@ async function main() {
   await page.waitForTimeout(200);
   const locText = await page.locator('#rc-frame').innerText();
   check('locations carry their other spellings', /Traction Power 12/.test(locText));
+  /* A name typed wrong was permanent, and every alias, SAR and look-ahead row
+     hangs off the record rather than the string — so renaming is safe and not
+     being able to was the odd part. */
+  check('and a location can be renamed without losing what points at it',
+    (await page.locator('#rc-frame button', { hasText: 'Rename' }).count()) >= 1);
 
   /* ── Accounts ─────────────────────────────────────────────────────────── */
   /* Adding somebody to the team must never need the SQL editor. Everything
