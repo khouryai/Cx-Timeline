@@ -1163,6 +1163,40 @@ async function main() {
     /1 cancellation\(s\) have nobody against them/.test(laText),
     laText.split('\n').find((l) => /nobody against/.test(l)) || '');
 
+  /* ── On a tablet ──────────────────────────────────────────────────────
+     The huddle is run at a fixed time with the team in front of you, and the
+     device in your hand is as likely to be a tablet as a laptop. */
+  console.log('\nThe meeting, on a tablet');
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Daily huddle' }).click();
+  await page.waitForSelector('#rc-frame tbody tr');
+  await page.setViewportSize({ width: 560, height: 900 });
+  await page.waitForTimeout(400);
+
+  check('the page never scrolls sideways',
+    await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),
+    await page.evaluate(() => `${document.documentElement.scrollWidth} vs ${window.innerWidth}`));
+  // Four columns of prose do not fit, so each person becomes a card — the same
+  // information, in the order it is asked for.
+  check('the huddle stacks into a card per person',
+    await page.evaluate(() =>
+      getComputedStyle(document.querySelector('#rc-frame .rc-huddle tbody tr')).display === 'block'));
+  check('and each answer keeps the heading the table row lost',
+    await page.evaluate(() => {
+      const td = [...document.querySelectorAll('#rc-frame .rc-huddle td')]
+        .find((n) => n.dataset.label === 'What happened');
+      return Boolean(td) && getComputedStyle(td, '::before').content.includes('What happened');
+    }));
+  // A 20px button is a miss when the tablet is in your other hand, and the
+  // huddle is one button per person.
+  check('the status buttons are big enough to hit',
+    await page.evaluate(() => {
+      const b = document.querySelector('#rc-frame .rc-huddle .cx-btn.mini');
+      return !b || b.getBoundingClientRect().height >= 30;
+    }));
+
+  await page.setViewportSize({ width: 1500, height: 920 });
+  await page.waitForTimeout(300);
+
   /* ── Site access ──────────────────────────────────────────────────────
      The half of the module that says whether the work planned actually had
      access. Everything below it was written and unreachable: nothing read the

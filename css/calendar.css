@@ -421,3 +421,83 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 /* A planned day can be revised, so it has to look like it can be. */
 .rc-table td.rc-clickable { cursor: pointer; }
 .rc-table td.rc-clickable:hover { background: var(--surface-3, var(--surface-2)); }
+
+/* ── On a tablet, standing up ───────────────────────────────────────────────
+   The huddle is run at a fixed time with the team in front of you, and the
+   device in your hand is as likely to be a tablet as a laptop. Nothing here
+   changes what the calendar *is* — the tables still say the same things — it
+   is the chrome that has to stop assuming a wide screen.
+
+   No layout below is invented for a phone. The week plan is seven columns of
+   assignments and the look-ahead is a hundred days wide; both scroll inside
+   their own frame already, and pretending they fit a 380px screen would be a
+   worse answer than letting them scroll. */
+
+@media (max-width: 900px) {
+  /* The tab row stops fighting the eyebrow for the same line. */
+  .rc-head {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+  }
+  .rc-tabs {
+    margin-left: 0;
+    width: 100%;
+    overflow-x: auto;
+    /* A row of tabs that scrolls has to look like it does. */
+    scrollbar-width: thin;
+    padding-bottom: 2px;
+  }
+  .rc-tab { flex: 0 0 auto; }
+
+  .rc-body { padding: var(--space-3); }
+
+  /* Touch targets. A 20px button is a miss when somebody is holding the
+     tablet in the other hand, and the huddle is one button per person. */
+  .rc-table .cx-btn.mini {
+    min-height: 34px;
+    padding-inline: 12px;
+  }
+  .rc-table td, .rc-table th { padding: 10px 8px; }
+
+  /* The section heads stack rather than squeezing the action off the edge. */
+  .rc-section-head { flex-wrap: wrap; }
+  .rc-section-head .cx-btn { margin-left: 0; }
+}
+
+@media (max-width: 620px) {
+  /* The huddle is the one screen worth reshaping: four columns of prose do
+     not fit, and the meeting still has to be run. Each person becomes a card
+     — their name, what was planned, and the buttons — which is the same
+     information in the order it is asked for. */
+  .rc-table.rc-huddle { display: block; }
+  .rc-table.rc-huddle thead { display: none; }
+  .rc-table.rc-huddle tbody,
+  .rc-table.rc-huddle tr { display: block; }
+  .rc-table.rc-huddle tr {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-3);
+    padding: var(--space-2);
+    background: var(--surface);
+  }
+  .rc-table.rc-huddle td {
+    display: block;
+    border: 0;
+    padding: 4px 2px;
+  }
+  /* The label the header row would have carried, on the cell itself. */
+  .rc-table.rc-huddle td::before {
+    content: attr(data-label);
+    display: block;
+    font-family: var(--f-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin-bottom: 2px;
+  }
+  .rc-table.rc-huddle td:first-child::before { content: none; }
+  .rc-table.rc-huddle td:first-child { font-weight: 700; font-size: var(--fs-small); }
+}

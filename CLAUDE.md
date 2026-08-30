@@ -542,6 +542,15 @@ subscribes. That is what keeps the graph acyclic.
   activity text, which is worded differently on the two sides. Until this was
   wired, `rc_rows_without_sar` reported every row as having no access for ever,
   which is worse than not reporting it at all.
+- **The calendar is used standing up, so it stops assuming a wide screen.**
+  Below 900px the chrome gives way — the tab row wraps and scrolls, controls
+  reach a 34px touch target — and below 620px the huddle stacks into a card per
+  person, with `data-label` on each cell carrying the heading the table row
+  lost. Nothing else is reshaped: the week plan is seven columns of assignments
+  and the look-ahead is a hundred days wide, both already scroll inside their
+  own frame, and pretending they fit a phone would be a worse answer than
+  letting them scroll. The page itself must never scroll sideways, and there is
+  a check for exactly that.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
 - **The filter's text box holds a list, not a phrase.** `textTerms()` in
@@ -630,7 +639,7 @@ node tools/test_dist.js              #  30 checks — every deployment shape, an
 node tools/test_lookahead.js         #  57 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         # 137 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 141 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser

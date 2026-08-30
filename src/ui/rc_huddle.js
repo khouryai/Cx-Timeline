@@ -210,7 +210,7 @@ export async function render(root) {
   }
 
   root.appendChild(el('div', { class: 'rc-scroll' }, [
-    el('table', { class: 'rc-table' }, [
+    el('table', { class: 'rc-table rc-huddle' }, [
       el('thead', {}, [
         el('tr', {}, [
           el('th', { text: 'Person' }),
@@ -325,7 +325,9 @@ function personRow(ctx) {
   // and it is the same question `rc_can_act_for()` answers in the database.
   const mine = person.id === rc.me()?.id && rc.canWrite();
 
-  /* Name, and why they are not being asked for a goal. */
+  /* Name, and why they are not being asked for a goal.
+     `data-label` is what the header row becomes on a narrow screen, where the
+     table is stacked into a card per person — see the 620px rule. */
   row.appendChild(el('td', {}, [
     el('div', { text: person.name }),
     el('div', { class: 'rc-hint', text: person.subsystem || person.title || '' }),
@@ -336,7 +338,7 @@ function personRow(ctx) {
      conversation from one on its first, and that was only visible in a report
      the field team cannot open. */
   const chain = wasPlanned ? chainByeId?.get(carryChainFor(wasPlanned)) : null;
-  row.appendChild(el('td', {}, [
+  row.appendChild(el('td', { 'data-label': 'Was planned' }, [
     wasPlanned
       ? el('div', {}, [
         el('div', { text: wasPlanned.task || '—' }),
@@ -356,13 +358,14 @@ function personRow(ctx) {
      asked for — somebody on leave did not carry anything over, and letting
      that fall into a performance status is exactly what the five-way split
      exists to prevent. */
+  const outcome = { 'data-label': 'What happened' };
   if (away.state === 'leave') {
-    row.appendChild(el('td', {}, [badge('On leave', 'muted')]));
+    row.appendChild(el('td', outcome, [badge('On leave', 'muted')]));
   } else if (away.state === 'non-working') {
-    row.appendChild(el('td', {}, [el('span', { class: 'rc-hint', text: 'not a working day' })]));
+    row.appendChild(el('td', outcome, [el('span', { class: 'rc-hint', text: 'not a working day' })]));
   } else if (actual) {
     const status = STATUS_BY_ID.get(actual.status);
-    row.appendChild(el('td', {}, [
+    row.appendChild(el('td', outcome, [
       badge(status?.label || actual.status, status?.tone || 'muted'),
       actual.blocked_reason
         ? el('div', { class: 'rc-hint', text: actual.blocked_reason })
@@ -370,13 +373,13 @@ function personRow(ctx) {
       actual.note ? el('div', { class: 'rc-hint', text: actual.note }) : null,
     ].filter(Boolean)));
   } else if (admin || mine) {
-    row.appendChild(el('td', {}, [statusButtons(ctx, person, review, wasPlanned, redraw)]));
+    row.appendChild(el('td', outcome, [statusButtons(ctx, person, review, wasPlanned, redraw)]));
   } else {
-    row.appendChild(el('td', {}, [el('span', { class: 'rc-hint', text: '—' })]));
+    row.appendChild(el('td', outcome, [el('span', { class: 'rc-hint', text: '—' })]));
   }
 
   /* Tomorrow. */
-  row.appendChild(el('td', {}, [
+  row.appendChild(el('td', { 'data-label': 'Tomorrow' }, [
     tomorrow
       ? el('div', {}, [
         el('div', { text: tomorrow.task || '—' }),
