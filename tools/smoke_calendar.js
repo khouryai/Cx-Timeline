@@ -617,12 +617,33 @@ async function main() {
 
   // The clipboard is not grantable in a file:// page, so it is recorded
   // instead — what matters is the link the application produced.
+  // A download lands somewhere the page cannot see, so the suite records what
+  // was handed to the browser instead.
+  const captureDownloads = (pg) => pg.addInitScript(() => {
+    const create = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = (blob) => {
+      blob.text().then((text) => {
+        try {
+          const parsed = JSON.parse(text);
+          window.__saved = { ...(window.__saved || {}), tables: Object.keys(parsed.tables || {}) };
+        } catch { /* not our JSON */ }
+      });
+      return create(blob);
+    };
+    const click = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function patched() {
+      if (this.download) window.__saved = { ...(window.__saved || {}), name: this.download };
+      else click.call(this);
+    };
+  });
+
   const captureClipboard = (pg) => pg.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText: (text) => { window.__clip = text; return Promise.resolve(); } },
     });
   });
+  await captureDownloads(page);
   await captureClipboard(page);
   await page.addInitScript(fakeFolder);
   await page.addInitScript(fakeSdk);
@@ -1213,6 +1234,38 @@ async function main() {
   // a possession that somebody else lost.
   check('the completion rate excludes blocked and reassigned days',
     /50%/.test(repText), 'two performance rows, one completed');
+  /* The plan is append-only, and until now there was no way to exercise that
+     from the interface at all: `rc_supersede_plan` existed and nothing called
+     it, so a wrong entry stayed wrong. */
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Week plan' }).click();
+  await page.waitForSelector('#rc-frame .rc-table');
+  const planned = page.locator('#rc-frame td.rc-clickable', { hasText: 'IXL Regression Testing' }).first();
+  check('a planned day offers to be revised', (await planned.count()) === 1);
+  await planned.click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal input').first().fill('IXL Regression Testing — night');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Revise' }).click();
+  await page.waitForTimeout(700);
+  const revised = await page.evaluate(() =>
+    window.__rc.calls.filter((c) => c.table === 'rc_supersede_plan').map((c) => c.payload));
+  check('revising goes through the function that refuses a second revision',
+    revised.length === 1 && /night/.test(revised[0].p_task || ''), JSON.stringify(revised[0] || null));
+
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Reports' }).click();
+  await page.waitForSelector('#rc-frame .rc-table');
+
+  /* The calendar's value is being the record a year from now, and there was no
+     way to get it out — a project deleted by accident left the provider's
+     point-in-time recovery and nothing else. */
+  await page.locator('#rc-frame button', { hasText: 'Back it up' }).click();
+  await page.waitForTimeout(800);
+  const backup = await page.evaluate(() => window.__saved || null);
+  check('everything can be taken out as one file',
+    Boolean(backup) && /resource-calendar-\d{4}-\d{2}-\d{2}\.json/.test(backup.name), backup?.name || 'nothing saved');
+  check('and it carries the tables rather than a summary of them',
+    Boolean(backup) && backup.tables.includes('rc_actuals') && backup.tables.includes('rc_plan_entries'),
+    (backup?.tables || []).slice(0, 4).join(', '));
+
   check('and it says why they are never averaged together',
     /flatter or damn the wrong party/.test(repText));
 

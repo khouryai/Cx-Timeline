@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-08-30T20:04:08.743Z
+ * Modules: 53   Built: 2026-08-30T20:13:36.302Z
  */
 (function () {
   'use strict';
@@ -13169,6 +13169,49 @@ __mods["core/rc.js"] = function (__x, __req) {
       (includeInactive ? q : q.eq('active', true)).order('valid_from', { ascending: false }));
   }
 
+  /**
+   * Everything, as one object.
+   *
+   * The calendar's whole value is being the record a year from now, and until
+   * this existed there was no way to get it out — a bad migration or a project
+   * deleted by accident left the provider's point-in-time recovery and nothing
+   * else. Read straight through the policies rather than around them, so what
+   * comes back is what the person asking is allowed to see: an administrator
+   * gets the evidence tables, a member gets the schedule.
+   *
+   * Tables only. The SAR PDFs are in Storage and are not folded in — they are
+   * the one thing here that is already a file, and a hundred megabytes of base64
+   * in a JSON document is not a backup anybody would successfully restore.
+   */
+  async function exportEverything() {
+    requireClient();
+    const tables = [
+      'rc_people', 'rc_locations', 'rc_location_alias', 'rc_categories', 'rc_parties',
+      'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries',
+      'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
+      'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
+    ];
+
+    const out = {
+      exported_at: new Date().toISOString(),
+      exported_by: person?.name || user?.email || null,
+      note: 'Every rc_* table this account may read. SAR PDFs live in Storage and are not '
+        + 'included; their storage_path is.',
+      tables: {},
+    };
+    for (const table of tables) {
+      // One at a time, and a table that refuses is recorded as refused rather
+      // than silently absent — "empty" and "not allowed" must not look alike in
+      // something somebody may restore from.
+      try {
+        out.tables[table] = await select(table);
+      } catch (err) {
+        out.tables[table] = { error: err.message };
+      }
+    }
+    return out;
+  }
+
   function listSettings() {
     return select('rc_settings');
   }
@@ -13505,6 +13548,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listCategories", { get: () => listCategories, enumerable: true });
   Object.defineProperty(__x, "listParties", { get: () => listParties, enumerable: true });
   Object.defineProperty(__x, "listLegend", { get: () => listLegend, enumerable: true });
+  Object.defineProperty(__x, "exportEverything", { get: () => exportEverything, enumerable: true });
   Object.defineProperty(__x, "listSettings", { get: () => listSettings, enumerable: true });
   Object.defineProperty(__x, "listLeaveKinds", { get: () => listLeaveKinds, enumerable: true });
   Object.defineProperty(__x, "listLeave", { get: () => listLeave, enumerable: true });
@@ -28560,10 +28604,17 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
             })
             : el('span', { class: 'rc-hint', text: '—' })]);
         }
-        return el('td', {}, [
+        return el('td', {
+          class: rc.isAdmin() ? 'rc-clickable' : '',
+          title: rc.isAdmin() ? 'Revise this — the outgoing version stays on the record.' : '',
+          onClick: rc.isAdmin()
+            ? () => revisePlan(entry, person, { locations, categories, locs, root })
+            : null,
+        }, [
           el('div', { text: entry.task || '—' }),
           el('div', { class: 'rc-hint', text: locs.get(entry.location_id)?.name || '' }),
           entry.lookahead_row_id ? badge('From look-ahead', 'info') : null,
+          entry.supersedes_id ? badge('Revised', 'warn') : null,
         ].filter(Boolean));
       });
       body.appendChild(el('tr', {}, [el('td', { text: person.name }), ...cells]));
@@ -28615,6 +28666,78 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
         + 'visible rather than merely flagged. The bottom row is what stops work being '
         + 'promised for a day it cannot be staffed.',
     }));
+  }
+
+  /**
+   * Change a day that is already planned.
+   *
+   * Never an update. The outgoing row stays and the new one points at it, so
+   * "the plan changed the evening before the shift" is a thing the record can
+   * still say a year later — which is the whole reason the table is append-only.
+   * `rc_supersede_plan()` refuses to revise an entry that has already been
+   * revised, so two people editing the same day get a refusal rather than one of
+   * them silently winning.
+   *
+   * The history is shown because it is the point: a revision nobody can see is
+   * an edit with extra steps.
+   */
+  async function revisePlan(entry, person, { locations, categories, locs, root }) {
+    const history = await rc.planHistory(person.id, entry.work_date).catch(() => []);
+
+    const task = textInput({ value: entry.task || '', placeholder: 'What they will do' });
+    const location = selectInput({
+      value: entry.location_id || '',
+      placeholder: '— location —',
+      options: locations.map((l) => ({ value: l.id, label: l.name })),
+    });
+    const category = selectInput({
+      value: entry.category_id || '',
+      placeholder: '— category —',
+      options: categories.map((c) => ({ value: c.id, label: c.name })),
+    });
+    const shift = selectInput({
+      value: entry.shift || 'day',
+      options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })),
+    });
+
+    formModal({
+      title: `${person.name} — ${dayLabel(entry.work_date, 'medium')}`,
+      body: el('div', { class: 'cx-form' }, [
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Task' }), task]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Location' }), location]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Category' }), category]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Shift' }), shift]),
+        history.length > 1
+          ? el('div', { class: 'cx-field' }, [
+            el('label', { class: 'cx-label', text: `Already revised ${history.length - 1} time(s)` }),
+            el('div', { class: 'rc-hint' }, history.map((h) => el('div', {
+              text: `${(h.created_at || '').slice(0, 16).replace('T', ' ')} — ${h.task || '—'}`
+                + `${locs.get(h.location_id)?.name ? ` · ${locs.get(h.location_id).name}` : ''}`,
+            }))),
+          ])
+          : null,
+        el('p', {
+          class: 'rc-hint',
+          text: 'The version you are replacing stays on the record. A plan that changed the '
+            + 'evening before a shift is itself delay evidence, so nothing here overwrites '
+            + 'anything — and an entry somebody else has already revised is refused rather than '
+            + 'quietly losing one of the two changes.',
+        }),
+      ].filter(Boolean)),
+      confirmLabel: 'Revise',
+      onConfirm: async () => {
+        if (!task.value.trim()) throw new Error('A task is needed.');
+        await rc.supersedePlan(entry.id, {
+          locationId: location.value || null,
+          task: task.value.trim(),
+          categoryId: category.value || null,
+          shift: shift.value,
+        });
+        notifyChanged('plan');
+        clear(root);
+        renderWeek(root);
+      },
+    });
   }
 
   /**
@@ -31418,7 +31541,13 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
         html: icon('download', { size: 12 }) + '<span>CSV</span>',
         onClick: () => exportCsv(from, to),
       }),
-    ]);
+      rc.isAdmin() ? el('button', {
+        class: 'cx-btn mini ghost',
+        text: 'Back it up',
+        title: 'Every table this account may read, as one JSON file.',
+        onClick: () => backItUp(),
+      }) : null,
+    ].filter(Boolean));
 
     if (range === 'custom') {
       const fromEl = el('input', { type: 'date', class: 'cx-input mini', value: customFrom || from });
@@ -31580,6 +31709,31 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
    * download announces itself — a file that lands somewhere the page cannot see
    * is the one action with no visible result.
    */
+  /**
+   * Every table this account may read, as one file.
+   *
+   * The calendar's value is being the record a year from now, and there was no
+   * way to get it out — a project deleted by accident left the provider's
+   * point-in-time recovery and nothing else. Through `saveFile()` like every
+   * other export here, so the download announces itself: a file that lands
+   * somewhere the page cannot see is the one action with no visible result.
+   */
+  async function backItUp() {
+    try {
+      const data = await rc.exportEverything();
+      const rows = Object.values(data.tables).reduce(
+        (n, t) => n + (Array.isArray(t) ? t.length : 0), 0);
+      saveFile(
+        `resource-calendar-${new Date().toISOString().slice(0, 10)}.json`,
+        JSON.stringify(data, null, 2),
+        'application/json',
+        `${rows} rows across ${Object.keys(data.tables).length} tables`
+      );
+    } catch (err) {
+      toast({ tone: 'bad', message: err.message });
+    }
+  }
+
   async function exportCsv(from, to) {
     try {
       const [effort, people, categories, locations] = await Promise.all([

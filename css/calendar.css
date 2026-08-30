@@ -417,3 +417,7 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 .rc-huddle-row:focus { outline: none; }
 .rc-huddle-row:focus-visible,
 .rc-huddle-row:focus { box-shadow: inset 3px 0 0 var(--accent, #e60012); background: var(--surface-2); }
+
+/* A planned day can be revised, so it has to look like it can be. */
+.rc-table td.rc-clickable { cursor: pointer; }
+.rc-table td.rc-clickable:hover { background: var(--surface-3, var(--surface-2)); }

@@ -1100,12 +1100,17 @@ begin
     raise exception 'plan entry % has already been revised', p_entry using errcode = '40001';
   end if;
 
+  /* `carry_chain_id` comes across with everything else. A revision is the same
+     stuck job under a different description, so losing the chain here would
+     restart the count — the same failure that carrying a task into tomorrow
+     used to cause. */
   insert into public.rc_plan_entries
     (person_id, work_date, shift, location_id, task, category_id,
-     lookahead_row_id, supersedes_id, created_by)
+     lookahead_row_id, carry_chain_id, supersedes_id, created_by)
   values
     (old_row.person_id, old_row.work_date, coalesce(p_shift, old_row.shift),
-     p_location, p_task, p_category, old_row.lookahead_row_id, p_entry, auth.uid())
+     p_location, p_task, p_category, old_row.lookahead_row_id, old_row.carry_chain_id,
+     p_entry, auth.uid())
   returning id into new_id;
 
   return new_id;

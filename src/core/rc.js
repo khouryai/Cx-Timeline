@@ -337,6 +337,49 @@ export function listLegend({ includeInactive = false } = {}) {
     (includeInactive ? q : q.eq('active', true)).order('valid_from', { ascending: false }));
 }
 
+/**
+ * Everything, as one object.
+ *
+ * The calendar's whole value is being the record a year from now, and until
+ * this existed there was no way to get it out — a bad migration or a project
+ * deleted by accident left the provider's point-in-time recovery and nothing
+ * else. Read straight through the policies rather than around them, so what
+ * comes back is what the person asking is allowed to see: an administrator
+ * gets the evidence tables, a member gets the schedule.
+ *
+ * Tables only. The SAR PDFs are in Storage and are not folded in — they are
+ * the one thing here that is already a file, and a hundred megabytes of base64
+ * in a JSON document is not a backup anybody would successfully restore.
+ */
+export async function exportEverything() {
+  requireClient();
+  const tables = [
+    'rc_people', 'rc_locations', 'rc_location_alias', 'rc_categories', 'rc_parties',
+    'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries',
+    'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
+    'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
+  ];
+
+  const out = {
+    exported_at: new Date().toISOString(),
+    exported_by: person?.name || user?.email || null,
+    note: 'Every rc_* table this account may read. SAR PDFs live in Storage and are not '
+      + 'included; their storage_path is.',
+    tables: {},
+  };
+  for (const table of tables) {
+    // One at a time, and a table that refuses is recorded as refused rather
+    // than silently absent — "empty" and "not allowed" must not look alike in
+    // something somebody may restore from.
+    try {
+      out.tables[table] = await select(table);
+    } catch (err) {
+      out.tables[table] = { error: err.message };
+    }
+  }
+  return out;
+}
+
 export function listSettings() {
   return select('rc_settings');
 }

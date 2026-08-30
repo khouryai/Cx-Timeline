@@ -715,10 +715,17 @@ export async function renderWeek(root) {
           })
           : el('span', { class: 'rc-hint', text: '—' })]);
       }
-      return el('td', {}, [
+      return el('td', {
+        class: rc.isAdmin() ? 'rc-clickable' : '',
+        title: rc.isAdmin() ? 'Revise this — the outgoing version stays on the record.' : '',
+        onClick: rc.isAdmin()
+          ? () => revisePlan(entry, person, { locations, categories, locs, root })
+          : null,
+      }, [
         el('div', { text: entry.task || '—' }),
         el('div', { class: 'rc-hint', text: locs.get(entry.location_id)?.name || '' }),
         entry.lookahead_row_id ? badge('From look-ahead', 'info') : null,
+        entry.supersedes_id ? badge('Revised', 'warn') : null,
       ].filter(Boolean));
     });
     body.appendChild(el('tr', {}, [el('td', { text: person.name }), ...cells]));
@@ -770,6 +777,78 @@ export async function renderWeek(root) {
       + 'visible rather than merely flagged. The bottom row is what stops work being '
       + 'promised for a day it cannot be staffed.',
   }));
+}
+
+/**
+ * Change a day that is already planned.
+ *
+ * Never an update. The outgoing row stays and the new one points at it, so
+ * "the plan changed the evening before the shift" is a thing the record can
+ * still say a year later — which is the whole reason the table is append-only.
+ * `rc_supersede_plan()` refuses to revise an entry that has already been
+ * revised, so two people editing the same day get a refusal rather than one of
+ * them silently winning.
+ *
+ * The history is shown because it is the point: a revision nobody can see is
+ * an edit with extra steps.
+ */
+async function revisePlan(entry, person, { locations, categories, locs, root }) {
+  const history = await rc.planHistory(person.id, entry.work_date).catch(() => []);
+
+  const task = textInput({ value: entry.task || '', placeholder: 'What they will do' });
+  const location = selectInput({
+    value: entry.location_id || '',
+    placeholder: '— location —',
+    options: locations.map((l) => ({ value: l.id, label: l.name })),
+  });
+  const category = selectInput({
+    value: entry.category_id || '',
+    placeholder: '— category —',
+    options: categories.map((c) => ({ value: c.id, label: c.name })),
+  });
+  const shift = selectInput({
+    value: entry.shift || 'day',
+    options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })),
+  });
+
+  formModal({
+    title: `${person.name} — ${dayLabel(entry.work_date, 'medium')}`,
+    body: el('div', { class: 'cx-form' }, [
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Task' }), task]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Location' }), location]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Category' }), category]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Shift' }), shift]),
+      history.length > 1
+        ? el('div', { class: 'cx-field' }, [
+          el('label', { class: 'cx-label', text: `Already revised ${history.length - 1} time(s)` }),
+          el('div', { class: 'rc-hint' }, history.map((h) => el('div', {
+            text: `${(h.created_at || '').slice(0, 16).replace('T', ' ')} — ${h.task || '—'}`
+              + `${locs.get(h.location_id)?.name ? ` · ${locs.get(h.location_id).name}` : ''}`,
+          }))),
+        ])
+        : null,
+      el('p', {
+        class: 'rc-hint',
+        text: 'The version you are replacing stays on the record. A plan that changed the '
+          + 'evening before a shift is itself delay evidence, so nothing here overwrites '
+          + 'anything — and an entry somebody else has already revised is refused rather than '
+          + 'quietly losing one of the two changes.',
+      }),
+    ].filter(Boolean)),
+    confirmLabel: 'Revise',
+    onConfirm: async () => {
+      if (!task.value.trim()) throw new Error('A task is needed.');
+      await rc.supersedePlan(entry.id, {
+        locationId: location.value || null,
+        task: task.value.trim(),
+        categoryId: category.value || null,
+        shift: shift.value,
+      });
+      notifyChanged('plan');
+      clear(root);
+      renderWeek(root);
+    },
+  });
 }
 
 /**

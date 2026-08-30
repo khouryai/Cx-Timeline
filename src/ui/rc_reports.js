@@ -121,7 +121,13 @@ function controls(root, from, to) {
       html: icon('download', { size: 12 }) + '<span>CSV</span>',
       onClick: () => exportCsv(from, to),
     }),
-  ]);
+    rc.isAdmin() ? el('button', {
+      class: 'cx-btn mini ghost',
+      text: 'Back it up',
+      title: 'Every table this account may read, as one JSON file.',
+      onClick: () => backItUp(),
+    }) : null,
+  ].filter(Boolean));
 
   if (range === 'custom') {
     const fromEl = el('input', { type: 'date', class: 'cx-input mini', value: customFrom || from });
@@ -283,6 +289,31 @@ function lookaheadNumbers(events) {
  * download announces itself — a file that lands somewhere the page cannot see
  * is the one action with no visible result.
  */
+/**
+ * Every table this account may read, as one file.
+ *
+ * The calendar's value is being the record a year from now, and there was no
+ * way to get it out — a project deleted by accident left the provider's
+ * point-in-time recovery and nothing else. Through `saveFile()` like every
+ * other export here, so the download announces itself: a file that lands
+ * somewhere the page cannot see is the one action with no visible result.
+ */
+async function backItUp() {
+  try {
+    const data = await rc.exportEverything();
+    const rows = Object.values(data.tables).reduce(
+      (n, t) => n + (Array.isArray(t) ? t.length : 0), 0);
+    saveFile(
+      `resource-calendar-${new Date().toISOString().slice(0, 10)}.json`,
+      JSON.stringify(data, null, 2),
+      'application/json',
+      `${rows} rows across ${Object.keys(data.tables).length} tables`
+    );
+  } catch (err) {
+    toast({ tone: 'bad', message: err.message });
+  }
+}
+
 async function exportCsv(from, to) {
   try {
     const [effort, people, categories, locations] = await Promise.all([

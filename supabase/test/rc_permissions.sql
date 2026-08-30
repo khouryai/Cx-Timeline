@@ -599,6 +599,47 @@ select assert((select count(*) from public.rc_lookahead_rows) = 0,
 select act_as(:'alice');
 
 -- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice E'\nA revised plan keeps what it was'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+-- Never an update: the outgoing row stays and the new one points at it, so
+-- "the plan changed the evening before the shift" is something the record can
+-- still say. The chain comes across with it, or a revision would restart the
+-- count on a stuck job the same way rolling one forward used to.
+
+select act_as(:'alice');
+insert into public.rc_plan_entries (person_id, work_date, task, location_id, carry_chain_id)
+values (:'p_carol', '2026-09-21', 'Cable pull', :'loc12', :'chain_day1');
+select id as rev_first from public.rc_plan_current
+ where work_date = '2026-09-21' and task = 'Cable pull' \gset
+
+select public.rc_supersede_plan(:'rev_first', :'loc12', 'Cable pull — night shift', null, 'night')
+  as rev_second \gset
+
+select assert((select count(*) from public.rc_plan_entries where work_date = '2026-09-21') = 2,
+  'both versions are on the record');
+select assert((select count(*) from public.rc_plan_current where work_date = '2026-09-21') = 1,
+  'but only the live one is the plan');
+select assert(
+  (select task from public.rc_plan_current where work_date = '2026-09-21') = 'Cable pull — night shift',
+  'and it is the revision');
+select assert(
+  (select carry_chain_id from public.rc_plan_current where work_date = '2026-09-21') = :'chain_day1',
+  'the carry chain comes across, so a stuck job does not restart its count');
+
+-- Two people revising the same entry: one of them has to be told, not
+-- silently lose. A refused UPDATE would have matched nothing and reported
+-- success, which is why this is a function.
+select refuses(:'alice',
+  format('select public.rc_supersede_plan(%L, null, %L, null)', :'rev_first', 'Third opinion'),
+  'revising an entry somebody has already revised');
+
+select act_as(:'carol');
+select refuses(:'carol',
+  format('select public.rc_supersede_plan(%L, null, %L, null)', :'rev_second', 'A member rewriting the plan'),
+  'a member revising the plan at all');
+select act_as(:'alice');
+
+-- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice E'\nThe legend, and which sheet to read'; end $$;
 -- ══════════════════════════════════════════════════════════════════════════
 -- Both are reference data with one sharp edge: they decide how every future

@@ -517,6 +517,22 @@ subscribes. That is what keeps the graph acyclic.
   next ingest — and `sheet_name` and the legend both come from the database
   (`rc_settings`, `rc_legend`), because a renamed tab must mean a field
   somebody edits, not a redeploy.
+- **A plan is revised, never edited.** `rc_supersede_plan()` writes a new row
+  pointing at the old one, and `rc_plan_current` is what everything reads — the
+  table underneath keeps every version, because "the plan changed the evening
+  before the shift" is itself delay evidence. It refuses an entry that has
+  already been revised, so two people editing one day get a refusal rather than
+  one of them silently winning, and it carries `carry_chain_id` across for the
+  same reason rolling a task forward does. A clickable cell in the week plan is
+  the only way in, and it shows the history: a revision nobody can see is an
+  edit with extra steps.
+- **The calendar's data can be taken out whole.** `exportEverything()` reads
+  every `rc_*` table *through* the policies rather than around them, so a
+  member gets the schedule and an administrator gets the evidence; a table that
+  refuses is recorded as refused rather than omitted, because "empty" and "not
+  allowed" must not look alike in something somebody may restore from. SAR PDFs
+  stay in Storage — they are already files, and a hundred megabytes of base64
+  is not a backup anybody would successfully restore.
 - **A SAR is recorded, filed and linked in that order, and each step can fail
   alone.** The row first, then the upload, then the move out of `sars/inbox/`:
   a PDF uploaded but not moved is a duplicate somebody can see, while a PDF
@@ -614,13 +630,13 @@ node tools/test_dist.js              #  30 checks — every deployment shape, an
 node tools/test_lookahead.js         #  57 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         # 133 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 137 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 218 checks — both permission models, and that
+node tools/test_sql.js               # 224 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result
