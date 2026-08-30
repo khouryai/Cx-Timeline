@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-08-30T19:34:30.013Z
+ * Modules: 53   Built: 2026-08-30T19:56:10.317Z
  */
 (function () {
   'use strict';
@@ -29519,6 +29519,84 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     return { days, meta: metaCols, activities, header: header.row };
   }
 
+  /**
+   * A read grid, as rows something else can point at.
+   *
+   * One row per activity per *week*, because that is the grain the look-ahead is
+   * maintained at and the grain a plan is made at. Two rules, both of which hold
+   * everywhere else in this module:
+   *
+   * **The location is resolved, never parsed.** Each activity cell is offered to
+   * `locate` — the alias register, injected so this stays testable without a
+   * network — and the first that resolves is the location. Nothing is matched on
+   * the description: the wording differs on the two sides and is not reliable
+   * enough to carry evidence, which is what the alias list exists for.
+   *
+   * **A row with nothing scheduled that week is not a row.** The sheet carries
+   * activities for reference with no shift against them, and writing those would
+   * make the register mostly noise — and, worse, make every one of them look
+   * like scope the first time it *did* get a shift.
+   */
+  async function rowsFrom(view, { snapshotId = null, locate = async () => null } = {}) {
+    if (!view?.days?.length) return [];
+
+    const dayByCol = new Map(view.days.map((d) => [d.col, d]));
+    const out = [];
+    const ordinals = new Map();
+
+    for (const activity of view.activities) {
+      if (activity.heading) continue;
+
+      // Group this activity's marks by the week they fall in.
+      const weeks = new Map();
+      for (const mark of activity.marks) {
+        if (!mark.hex || mark.role === 'ignore') continue;
+        const day = dayByCol.get(mark.col);
+        if (!day?.date) continue;
+        const week = mondayOf(day.date);
+        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {} });
+        const bucket = weeks.get(week);
+        bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
+        if (mark.value) bucket.marks[day.date] = mark.value;
+      }
+      if (!weeks.size) continue;
+
+      let locationId = null;
+      let rawLocation = null;
+      for (const value of activity.meta) {
+        const hit = await locate(value);
+        if (hit) { locationId = hit; rawLocation = value; break; }
+      }
+      const label = activity.meta.filter(Boolean).join(' · ');
+
+      for (const [week, bucket] of weeks) {
+        const groupKey = [week, rawLocation || '', ''].join('|');
+        const ordinal = ordinals.get(groupKey) || 0;
+        ordinals.set(groupKey, ordinal + 1);
+        out.push({
+          snapshot_id: snapshotId,
+          week_start: week,
+          sheet_row: activity.row,
+          row_key: rowKey({ weekStart: week, location: rawLocation || '', subsystem: '', ordinal }),
+          location_id: locationId,
+          raw_location: rawLocation,
+          raw_label: label,
+          cells: bucket.cells,
+          bart_marks: bucket.marks,
+        });
+      }
+    }
+
+    return out;
+  }
+
+  /** The Monday of an ISO date's week, in UTC. A calendar date must not shift. */
+  function mondayOf(iso) {
+    const ms = Date.parse(`${iso}T00:00:00Z`);
+    const back = (new Date(ms).getUTCDay() + 6) % 7;
+    return new Date(ms - back * 86400000).toISOString().slice(0, 10);
+  }
+
   /* ── The window ────────────────────────────────────────────────────────── */
 
   /**
@@ -29670,12 +29748,23 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   }
 
   /** A short, plain description of an event, for the change log. */
+  /**
+   * One line saying what an event was.
+   *
+   * Reads the *stored* shape: `before` and `after` are jsonb, because the table
+   * has no column for a date and a row-level change needs one. `sideOf()` in
+   * `ui/rc_lookahead.js` is what writes them, and the two have to agree — a
+   * mismatch here shows up as "undefined → undefined" on the one screen somebody
+   * reads a year later.
+   */
   function describe(event) {
+    const day = event.date || event.after?.date || event.before?.date || 'a day';
     switch (event.kind) {
       case 'scope_added': return `Added: ${event.after?.label || event.rowKey}`;
       case 'scope_removed': return `Removed: ${event.before?.label || event.rowKey}`;
-      case 'cancellation': return `Cancelled on ${event.date}: was ${event.before}`;
-      case 'shift_changed': return `${event.date}: ${event.before || 'nothing'} → ${event.after || 'nothing'}`;
+      case 'cancellation': return `Cancelled on ${day}: was ${event.before?.value ?? event.before}`;
+      case 'shift_changed':
+        return `${day}: ${event.before?.value || 'nothing'} → ${event.after?.value || 'nothing'}`;
       case 'resource_changed': return 'BART resource request changed';
       case 'window_advanced': return `Week ${event.weekStart} came into the window`;
       case 'window_retired': return `Week ${event.weekStart} left the window`;
@@ -29687,6 +29776,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
   Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
   Object.defineProperty(__x, "readGrid", { get: () => readGrid, enumerable: true });
+  Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
   Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
   Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
   Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
@@ -29722,14 +29812,13 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { el, clear } = __req("core/util.js");
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
-  const { toISO } = __req("core/dates.js");
   const { parseSheet, applyLegend, readLegend } = __req("io/lookahead.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowKey } = __req("core/lookahead.js");
+  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom } = __req("core/lookahead.js");
 
 
   const { icon } = __req("ui/icons.js");
   const { selectInput, textInput, toast, badge, emptyState, field, checkbox } = __req("ui/components.js");
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, weekStart, isoToMs } = __req("ui/rc_util.js");
+  const { notifyChanged, byId, dayLabel, todayISO, formModal } = __req("ui/rc_util.js");
 
 
 
@@ -29900,6 +29989,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       run.file_mtime = new Date(file.modified).toISOString();
 
       const snapshots = await rc.listSnapshots({ limit: 1 });
+      const previous = snapshots[0] || null;
       if (snapshots[0] && snapshots[0].file_hash === hash) {
         run.outcome = 'unchanged';
         await rc.addIngestRun(run);
@@ -29962,17 +30052,36 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
          which is what the plan and the change log can *join* to. Until now only
          the grid was written, so `rc_lookahead_rows` was a well-designed table
          with nothing in it and nothing downstream could reference a row. */
+      let written = [];
       try {
         const rows = await lookaheadRows(snapshot.id, grid);
-        if (rows.length) await rc.addSnapshotRows(rows);
+        if (rows.length) written = await rc.addSnapshotRows(rows);
       } catch (err) {
         // The snapshot is the record; the rows are a convenience over it and can
         // be rebuilt from it. Losing them must not lose the read.
         console.warn('[cx-timeline] look-ahead rows not written:', err.message);
       }
 
+      /* And then say what changed.
+         This is the point of snapshotting at all — the difference between two
+         reads is what a delay claim is eventually built from — and until now
+         nothing produced it: `classify()` was written, tested and never called,
+         so `rc_change_events` stayed empty and the Changes tab had nothing to
+         draw. */
+      let events = [];
+      try {
+        events = await recordChanges(previous, snapshot, written, legend);
+      } catch (err) {
+        // Same reasoning as the rows: both are derived from snapshots that are
+        // safely stored, so a failure here costs a re-derivation and not a read.
+        console.warn('[cx-timeline] change events not written:', err.message);
+      }
+
       run.outcome = 'snapshot';
-      run.note = grid.unknown.length ? `${grid.unknown.length} colour(s) not in the legend` : null;
+      run.note = [
+        grid.unknown.length ? `${grid.unknown.length} colour(s) not in the legend` : null,
+        events.length ? `${countable(events).length} change(s) that count` : null,
+      ].filter(Boolean).join('; ') || null;
       await rc.addIngestRun(run);
 
       if (!silent && grid.unknown.length) {
@@ -29983,8 +30092,19 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         });
       }
 
+      if (!silent && events.length) {
+        const counted = countable(events).length;
+        toast({
+          tone: counted ? 'warn' : 'info',
+          message: counted
+            ? `${counted} change(s) since the last read — see Changes.`
+            : 'Read. The only difference was the window rolling forward.',
+          timeout: 8000,
+        });
+      }
+
       notifyChanged('lookahead');
-      return { changed: true, snapshot, grid };
+      return { changed: true, snapshot, grid, events };
     } catch (err) {
       if (run.outcome === 'error') {
         run.note = err.message;
@@ -29997,82 +30117,106 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   /**
    * The snapshot, as rows something else can point at.
    *
-   * One row per activity per *week*, because that is the grain the look-ahead is
-   * maintained at and the grain a plan is made at. Everything else here follows
-   * two rules that hold across this whole module:
-   *
-   * **The location is resolved, never parsed.** Each activity cell is offered to
-   * `rc_resolve_location()`, which folds case and punctuation and goes through
-   * the alias register; the first that resolves is the location. Nothing is
-   * matched on the description — the wording differs on the two sides and is not
-   * reliable enough to carry evidence, which is why "Add spelling" exists.
-   *
-   * **A row with nothing scheduled that week is not a row.** The sheet carries
-   * activities for reference with no shift against them, and writing those would
-   * make the register mostly noise.
+   * The derivation lives in `core/lookahead.js`, which knows nothing about
+   * Supabase and can therefore be tested without a browser; this is the part
+   * that needs the network — resolving a spelling through the alias register.
    */
   async function lookaheadRows(snapshotId, grid) {
-    const view = readGrid(grid);
-    if (!view.days.length) return [];
-
-    const dayByCol = new Map(view.days.map((d) => [d.col, d]));
     const resolved = new Map();
-    const locate = async (text) => {
-      const key = String(text || '').trim();
-      if (!key) return null;
-      if (!resolved.has(key)) {
-        resolved.set(key, await rc.resolveLocation(key).catch(() => null));
-      }
-      return resolved.get(key);
-    };
+    return rowsFrom(readGrid(grid), {
+      snapshotId,
+      // Cached, because a hundred and forty rows share a handful of spellings
+      // and each miss is a round trip.
+      locate: async (text) => {
+        const key = String(text || '').trim();
+        if (!key) return null;
+        if (!resolved.has(key)) resolved.set(key, await rc.resolveLocation(key).catch(() => null));
+        return resolved.get(key);
+      },
+    });
+  }
 
-    const out = [];
-    const ordinals = new Map();
+  /**
+   * What changed between two reads, written down.
+   *
+   * The rows of both snapshots are put in the shape `classify()` expects and the
+   * difference is stored. Three things about it are load-bearing and all three
+   * are in `core/lookahead.js` rather than here — this function's only job is to
+   * feed it honestly:
+   *
+   *   * only weeks in *both* snapshots are compared, so the window rolling
+   *     forward is recorded as itself rather than as a batch of scope additions
+   *     every Monday and a pile of deletions every Friday;
+   *   * a crew moving site is logged as a removal and an addition, never
+   *     inferred, because the activity text is not reliable enough to match on;
+   *   * a shift turning the cancellation colour is flagged as needing somebody
+   *     to say whose cancellation it was. Nothing is assumed.
+   *
+   * Returns the events, so the caller can say how many of them count.
+   */
+  async function recordChanges(previous, snapshot, rows, legend) {
+    if (!previous || !rows.length) return [];
 
-    for (const activity of view.activities) {
-      if (activity.heading) continue;
+    const priorRows = await rc.listSnapshotRows(previous.id).catch(() => []);
+    if (!priorRows.length) return [];
 
-      // Group this activity's marks by the week they fall in.
-      const weeks = new Map();
-      for (const mark of activity.marks) {
-        if (!mark.hex || mark.role === 'ignore') continue;
-        const day = dayByCol.get(mark.col);
-        if (!day?.date) continue;
-        const week = toISO(weekStart(isoToMs(day.date)));
-        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {} });
-        const bucket = weeks.get(week);
-        bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
-        if (mark.value) bucket.marks[day.date] = mark.value;
-      }
-      if (!weeks.size) continue;
+    // `classify()` keys on the row key and reads `cells` and `marks`; the
+    // database columns are named for what they are on disk.
+    const shape = (r) => ({
+      rowKey: r.row_key,
+      weekStart: r.week_start,
+      location: r.raw_location || '',
+      subsystem: r.subsystem || '',
+      label: r.raw_label || '',
+      cells: r.cells || {},
+      marks: r.bart_marks || {},
+      locationId: r.location_id || null,
+    });
 
-      let locationId = null;
-      let rawLocation = null;
-      for (const value of activity.meta) {
-        const hit = await locate(value);
-        if (hit) { locationId = hit; rawLocation = value; break; }
-      }
-      const label = activity.meta.filter(Boolean).join(' · ');
+    /* Which meaning counts as a cancellation is the legend's to say, not this
+       module's. A deployment that words it differently — "Cancelled", "Cancel" —
+       should not silently stop producing cancellation events, so the register is
+       asked and only an exact match counts. */
+    const cancelled = legend.find((l) => /cancel/i.test(l.meaning))?.meaning || 'cancelled';
 
-      for (const [week, bucket] of weeks) {
-        const groupKey = [week, rawLocation || '', ''].join('|');
-        const ordinal = ordinals.get(groupKey) || 0;
-        ordinals.set(groupKey, ordinal + 1);
-        out.push({
-          snapshot_id: snapshotId,
-          week_start: week,
-          sheet_row: activity.row,
-          row_key: rowKey({ weekStart: week, location: rawLocation || '', subsystem: '', ordinal }),
-          location_id: locationId,
-          raw_location: rawLocation,
-          raw_label: label,
-          cells: bucket.cells,
-          bart_marks: bucket.marks,
-        });
-      }
+    const events = classify(priorRows.map(shape), rows.map(shape), { cancelledMeaning: cancelled });
+    if (!events.length) return [];
+
+    const byKey = new Map(rows.map((r) => [r.row_key, r]));
+    await rc.addChangeEvents(events.map((e) => ({
+      from_snapshot: previous.id,
+      to_snapshot: snapshot.id,
+      kind: e.kind,
+      week_start: e.weekStart || null,
+      row_key: e.rowKey || null,
+      location_id: byKey.get(e.rowKey)?.location_id || null,
+      before: sideOf(e, 'before'),
+      after: sideOf(e, 'after'),
+    })));
+
+    return events;
+  }
+
+  /**
+   * One side of a change, in the shape the table stores and `describe()` reads.
+   *
+   * The two have to agree, and there is no column for a date — the table keys on
+   * the week — so a change to one day carries its own. What a reviewer needs a
+   * year later is what it said before and what it says now, so both sides are
+   * kept whole rather than summarised into a sentence that cannot be re-read.
+   */
+  function sideOf(event, which) {
+    const value = event[which];
+    if (value === null || value === undefined) return null;
+
+    // A whole row arrived or left: what it was is the useful part.
+    if (event.kind === 'scope_added' || event.kind === 'scope_removed') {
+      return { label: value.label || null, location: value.location || null, week: value.weekStart || null };
     }
+    // BART's own resource marks, as a map of date to what they asked for.
+    if (event.kind === 'resource_changed') return { marks: value };
 
-    return out;
+    return { date: event.date || null, value };
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -30668,6 +30812,20 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       rc.listParties(),
     ]);
 
+    /* The judgements somebody has already made. These were being written and
+       never read: an attribution recorded in a meeting was invisible the moment
+       the dialog closed, so the same cancellation got asked about every week and
+       the record it was creating could not be checked. Superseded rather than
+       edited, so the newest row for an event is the answer and the ones under it
+       are the history. */
+    const annotations = events.length
+      ? await rc.listAnnotations(events.map((e) => e.id)).catch(() => [])
+      : [];
+    const saidOf = new Map();
+    for (const a of [...annotations].sort((x, y) => String(x.created_at).localeCompare(y.created_at))) {
+      saidOf.set(a.change_event_id, a);
+    }
+
     host.appendChild(el('div', { class: 'rc-section-head' }, [
       el('h3', { text: 'What the look-ahead did' }),
       checkNowButton(),
@@ -30695,17 +30853,42 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       el('td', {}, [badge(kindLabel(e.kind), kindTone(e.kind))]),
       el('td', { text: describe({ ...e, weekStart: e.week_start, rowKey: e.row_key }) }),
       el('td', { class: 'rc-hint', text: e.detected_at ? dayLabel(e.detected_at.slice(0, 10)) : '' }),
-      el('td', {}, e.kind === 'cancellation' ? [
-        el('button', {
-          class: 'cx-btn mini ghost',
-          text: 'Whose?',
-          title: 'Red says a shift was cancelled. It cannot say by whom.',
-          onClick: () => attribute(e, parties),
-        }),
-      ] : []),
+      el('td', {}, [(() => {
+        const said = saidOf.get(e.id);
+        if (said) {
+          return el('div', {}, [
+            el('div', { text: partyById.get(said.party_id)?.name || said.note || 'Recorded' }),
+            said.note && said.party_id ? el('div', { class: 'rc-hint', text: said.note }) : null,
+            el('button', {
+              class: 'cx-btn mini ghost',
+              text: 'Correct it',
+              title: 'A correction is a new row that supersedes this one. Nothing is edited away.',
+              onClick: () => attribute(e, parties),
+            }),
+          ].filter(Boolean));
+        }
+        return e.kind === 'cancellation'
+          ? el('button', {
+            class: 'cx-btn mini ghost',
+            text: 'Whose?',
+            title: 'Red says a shift was cancelled. It cannot say by whom.',
+            onClick: () => attribute(e, parties),
+          })
+          : el('span', { class: 'rc-hint', text: '' });
+      })()]),
     ]));
 
-    host.appendChild(table(['Week', 'Kind', 'What', 'Seen', ''], rows));
+    host.appendChild(table(['Week', 'Kind', 'What', 'Seen', 'Down to'], rows));
+
+    const unanswered = events.filter((e) => e.kind === 'cancellation' && !saidOf.has(e.id)).length;
+    if (unanswered) {
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: `${unanswered} cancellation(s) have nobody against them yet. Red says a shift was `
+          + 'cancelled and cannot say by whom — and a cancellation with no party is the one row '
+          + 'in here that cannot be used for anything later.',
+      }));
+    }
 
     const pairs = relinkCandidates(events.map((e) => ({
       kind: e.kind, weekStart: e.week_start, rowKey: e.row_key, before: e.before, after: e.after,

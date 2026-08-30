@@ -272,8 +272,24 @@ function fakeSdk() {
       cells: {},
       bart_marks: {},
     }],
-    rc_change_events: [],
-    rc_change_annotations: [],
+    rc_change_events: [
+      { id: 'ev1', kind: 'cancellation', week_start: iso(-3), row_key: 'k1',
+        before: { date: iso(-2), value: 'Day Shift' }, after: { date: iso(-2), value: 'Cancelled' },
+        detected_at: new Date().toISOString(), from_snapshot: null, to_snapshot: 'snap1' },
+      { id: 'ev2', kind: 'scope_added', week_start: iso(-3), row_key: 'k2',
+        before: null, after: { label: 'NMS testing · C156' },
+        detected_at: new Date().toISOString(), from_snapshot: null, to_snapshot: 'snap1' },
+      // Not scope, and it has to say so rather than being counted.
+      { id: 'ev3', kind: 'window_advanced', week_start: iso(4), row_key: null,
+        before: null, after: null, detected_at: new Date().toISOString() },
+    ],
+    /* A judgement already recorded. These were written and never read back, so
+       an attribution made in a meeting vanished the moment the dialog closed
+       and the same cancellation got asked about every week. */
+    rc_change_annotations: [
+      { id: 'an1', change_event_id: 'ev2', party_id: 'party1', note: 'BART added it late',
+        created_at: new Date().toISOString() },
+    ],
     rc_sars: [],
     rc_sar_links: [],
     rc_ingest_runs: [],
@@ -1020,6 +1036,24 @@ async function main() {
   // open, so a silent fortnight must not read as a quiet one.
   check('it says when the look-ahead was last read',
     /never been read|Last read/.test(laText), laText.split('\n').slice(0, 6).join(' / '));
+
+  /* The change log is the reason for snapshotting at all — the difference
+     between two reads is what a claim gets built from. It was empty by
+     construction: `classify()` was written, tested and never called. */
+  check('a cancellation says what it was before it turned red',
+    /was Day Shift/.test(laText), laText.split('\n').find((l) => /Cancelled on/.test(l)) || '');
+  check('and a row arriving in a week already in view is named',
+    /NMS testing/.test(laText));
+  check('the window moving is counted apart from real scope movement',
+    /2 change\(s\) that count, 1 window movement/.test(laText),
+    laText.split('\n').find((l) => /that count/.test(l)) || '');
+  // Written and never read back: an attribution recorded in a meeting was
+  // invisible the moment the dialog closed.
+  check('a judgement already recorded is shown against its event',
+    /BART added it late/.test(laText));
+  check('and one nobody has answered still asks',
+    /1 cancellation\(s\) have nobody against them/.test(laText),
+    laText.split('\n').find((l) => /nobody against/.test(l)) || '');
 
   await page.locator('#rc-frame .rc-tab', { hasText: 'Site access' }).click();
   await page.waitForTimeout(300);

@@ -354,6 +354,22 @@ subscribes. That is what keeps the graph acyclic.
   and `rollForward()` is the single place that writes tomorrow's row — repeating
   a task and carrying one over write the same row, and only the chain tells
   them apart afterwards.
+- **A read is only worth taking if the next one is compared to it.**
+  `ingest()` writes the snapshot, then `rowsFrom()` turns it into rows keyed by
+  week and location, then `classify()` says what moved and the events are
+  stored. All three have to happen or the last one is empty by construction —
+  which it was: `classify()` was written, tested against hand-made rows, and
+  never given any. The derivation lives in `core/lookahead.js` with the alias
+  lookup *injected*, so the whole pipeline is testable without a browser or a
+  network, and `tools/test_lookahead.js` walks it end to end. What counts as a
+  cancellation comes from the legend rather than a constant, so a deployment
+  that words it differently does not silently stop producing them.
+- **`before` and `after` are jsonb, and two places have to agree on the shape.**
+  `sideOf()` writes them and `describe()` reads them; the table has no column
+  for a date, so a change to one day carries its own inside the blob. A
+  mismatch does not throw — it prints "undefined → undefined" on the one screen
+  somebody reads a year later, which is why there is a check that no event
+  describes itself with an `undefined` in it.
 - **The look-ahead proposes; a person assigns.** It says what is wanted and
   where, and never who — it has no idea who is on the team — so the week plan
   offers its rows on an empty day and the plan entry still names somebody.
@@ -586,9 +602,10 @@ npm run test:rust                    #  32 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  30 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         #  45 checks — the look-ahead parser, no browser
+node tools/test_lookahead.js         #  57 checks — the parser, the rows it derives and
+                                     #              the change events, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         # 120 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 125 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser

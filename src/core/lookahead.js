@@ -285,6 +285,84 @@ export function readGrid(grid, { anchorISO = null } = {}) {
   return { days, meta: metaCols, activities, header: header.row };
 }
 
+/**
+ * A read grid, as rows something else can point at.
+ *
+ * One row per activity per *week*, because that is the grain the look-ahead is
+ * maintained at and the grain a plan is made at. Two rules, both of which hold
+ * everywhere else in this module:
+ *
+ * **The location is resolved, never parsed.** Each activity cell is offered to
+ * `locate` — the alias register, injected so this stays testable without a
+ * network — and the first that resolves is the location. Nothing is matched on
+ * the description: the wording differs on the two sides and is not reliable
+ * enough to carry evidence, which is what the alias list exists for.
+ *
+ * **A row with nothing scheduled that week is not a row.** The sheet carries
+ * activities for reference with no shift against them, and writing those would
+ * make the register mostly noise — and, worse, make every one of them look
+ * like scope the first time it *did* get a shift.
+ */
+export async function rowsFrom(view, { snapshotId = null, locate = async () => null } = {}) {
+  if (!view?.days?.length) return [];
+
+  const dayByCol = new Map(view.days.map((d) => [d.col, d]));
+  const out = [];
+  const ordinals = new Map();
+
+  for (const activity of view.activities) {
+    if (activity.heading) continue;
+
+    // Group this activity's marks by the week they fall in.
+    const weeks = new Map();
+    for (const mark of activity.marks) {
+      if (!mark.hex || mark.role === 'ignore') continue;
+      const day = dayByCol.get(mark.col);
+      if (!day?.date) continue;
+      const week = mondayOf(day.date);
+      if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {} });
+      const bucket = weeks.get(week);
+      bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
+      if (mark.value) bucket.marks[day.date] = mark.value;
+    }
+    if (!weeks.size) continue;
+
+    let locationId = null;
+    let rawLocation = null;
+    for (const value of activity.meta) {
+      const hit = await locate(value);
+      if (hit) { locationId = hit; rawLocation = value; break; }
+    }
+    const label = activity.meta.filter(Boolean).join(' · ');
+
+    for (const [week, bucket] of weeks) {
+      const groupKey = [week, rawLocation || '', ''].join('|');
+      const ordinal = ordinals.get(groupKey) || 0;
+      ordinals.set(groupKey, ordinal + 1);
+      out.push({
+        snapshot_id: snapshotId,
+        week_start: week,
+        sheet_row: activity.row,
+        row_key: rowKey({ weekStart: week, location: rawLocation || '', subsystem: '', ordinal }),
+        location_id: locationId,
+        raw_location: rawLocation,
+        raw_label: label,
+        cells: bucket.cells,
+        bart_marks: bucket.marks,
+      });
+    }
+  }
+
+  return out;
+}
+
+/** The Monday of an ISO date's week, in UTC. A calendar date must not shift. */
+function mondayOf(iso) {
+  const ms = Date.parse(`${iso}T00:00:00Z`);
+  const back = (new Date(ms).getUTCDay() + 6) % 7;
+  return new Date(ms - back * 86400000).toISOString().slice(0, 10);
+}
+
 /* ── The window ────────────────────────────────────────────────────────── */
 
 /**
@@ -436,12 +514,23 @@ export function countable(events) {
 }
 
 /** A short, plain description of an event, for the change log. */
+/**
+ * One line saying what an event was.
+ *
+ * Reads the *stored* shape: `before` and `after` are jsonb, because the table
+ * has no column for a date and a row-level change needs one. `sideOf()` in
+ * `ui/rc_lookahead.js` is what writes them, and the two have to agree — a
+ * mismatch here shows up as "undefined → undefined" on the one screen somebody
+ * reads a year later.
+ */
 export function describe(event) {
+  const day = event.date || event.after?.date || event.before?.date || 'a day';
   switch (event.kind) {
     case 'scope_added': return `Added: ${event.after?.label || event.rowKey}`;
     case 'scope_removed': return `Removed: ${event.before?.label || event.rowKey}`;
-    case 'cancellation': return `Cancelled on ${event.date}: was ${event.before}`;
-    case 'shift_changed': return `${event.date}: ${event.before || 'nothing'} → ${event.after || 'nothing'}`;
+    case 'cancellation': return `Cancelled on ${day}: was ${event.before?.value ?? event.before}`;
+    case 'shift_changed':
+      return `${day}: ${event.before?.value || 'nothing'} → ${event.after?.value || 'nothing'}`;
     case 'resource_changed': return 'BART resource request changed';
     case 'window_advanced': return `Week ${event.weekStart} came into the window`;
     case 'window_retired': return `Week ${event.weekStart} left the window`;
