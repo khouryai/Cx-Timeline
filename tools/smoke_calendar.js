@@ -1223,12 +1223,70 @@ async function main() {
     /1 cancellation\(s\) have nobody against them/.test(laText),
     laText.split('\n').find((l) => /nobody against/.test(l)) || '');
 
+  /* ── Running the meeting ──────────────────────────────────────────────
+     The table is a form for whoever holds the keyboard. This is the same data
+     drawn for the room: one person, the question asked the way somebody would
+     say it, and the context the *listeners* need rather than the detail the
+     person answering already knows. */
+  console.log('\nRunning the meeting rather than filling it in');
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Daily huddle' }).click();
+  await page.waitForSelector('#rc-frame .rc-huddle');
+  await page.locator('#rc-frame button', { hasText: 'Run the meeting' }).click();
+  await page.waitForSelector('#rc-frame .rc-present');
+
+  const first = await page.locator('#rc-frame .rc-present').innerText();
+  check('one person is in focus, not fifteen rows',
+    (await page.locator('#rc-frame .rc-present-who').count()) === 1);
+  check('and the question is asked the way somebody would say it',
+    /how did it go\?|what did you end up doing\?/.test(first),
+    first.split('\n').find((l) => /\?/.test(l)) || '');
+  // The eyebrow is uppercased by the stylesheet, so `innerText` reads "1 OF 3".
+  check('with a counter, so the room knows how long is left',
+    /\d+ of \d+/i.test(first), first.split('\n')[0]);
+  // Space walks the room and the arrows come back, because fifteen people at
+  // a fixed time is a lot of clicking otherwise.
+  const who = await page.locator('#rc-frame .rc-present-who').innerText();
+  await page.locator('#rc-frame .rc-present').press('Space');
+  await page.waitForTimeout(400);
+  check('space moves to the next person',
+    (await page.locator('#rc-frame .rc-present-who').innerText()) !== who);
+  await page.locator('#rc-frame .rc-present').press('ArrowLeft');
+  await page.waitForTimeout(400);
+  check('and the arrows go back',
+    (await page.locator('#rc-frame .rc-present-who').innerText()) === who);
+
+  /* By now every available person has an outcome for that day, so step the
+     meeting on to one nobody has filled in. Two things are being checked at
+     once and both matter in a room: it opens on the first person still to
+     answer rather than at the top of the roster, and the status letters write
+     from here through exactly the path the table uses. */
+  await page.locator('#rc-frame .rc-present').press('Escape');
+  await page.waitForTimeout(300);
+  await page.locator('#rc-frame button[aria-label="Next day"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('#rc-frame button', { hasText: 'Run the meeting' }).click();
+  await page.waitForSelector('#rc-frame .rc-present');
+  check('and it opens on somebody who still has to answer',
+    (await page.locator('#rc-frame .rc-present button', { hasText: 'Completed' }).count()) === 1,
+    (await page.locator('#rc-frame .rc-present-who').innerText()));
+
+  const before3 = await page.evaluate(() => window.__rc.rows.rc_actuals.length);
+  await page.locator('#rc-frame .rc-present').press('c');
+  await page.waitForTimeout(600);
+  check('a status letter records it here too, through the same path',
+    await page.evaluate((n) => window.__rc.rows.rc_actuals.length === n + 1, before3));
+
+  await page.locator('#rc-frame .rc-present').press('Escape');
+  await page.waitForTimeout(400);
+  check('escape puts the table back',
+    (await page.locator('#rc-frame .rc-present').count()) === 0
+      && (await page.locator('#rc-frame .rc-huddle').count()) === 1);
+
   /* ── What is still in the way ─────────────────────────────────────────
      A blocked outcome said a day was lost and stopped there. These stay above
      the meeting until somebody closes one, which is the whole mechanism: a
      list that only grows is one nobody reads. */
   console.log('\nBlockers that stay until somebody clears them');
-  await page.locator('#rc-frame .rc-tab', { hasText: 'Daily huddle' }).click();
   await page.waitForSelector('#rc-frame .rc-blockers');
   const strip = await page.locator('#rc-frame .rc-blockers').innerText();
   check('the block raised in the meeting is standing above it',

@@ -116,6 +116,23 @@ export async function flushQueue() {
 
 /** Which day is being reviewed. Defaults to today; the arrows move it. */
 let onDate = null;
+/**
+ * Whether the meeting is being *run* rather than filled in.
+ *
+ * The table is a form for the person holding the keyboard; presenter mode is
+ * the same data drawn for the room — one person at a time, large enough to
+ * read across a table, with the question asked the way somebody would say it.
+ * Both write to exactly the same place.
+ */
+let presenting = false;
+
+/*
+ * Who is in front of the room. `null` means "nobody chosen yet", which is not
+ * the same as the first person: a meeting resumed after somebody stepped out
+ * should open on the first person who has *not* answered, and starting at zero
+ * makes the facilitator page past everybody already done to find them.
+ */
+let atPerson = null;
 
 function currentDate() {
   return onDate || todayISO();
@@ -220,6 +237,17 @@ export async function render(root) {
   }
 
   root.appendChild(openBlockers(blockers, { people: everybody, locs, parties, root }));
+
+  /* Running the meeting rather than filling it in. Same data, same writes —
+     one person at a time, big enough to read from across the table, with the
+     question asked the way somebody would ask it out loud. */
+  if (presenting) {
+    root.appendChild(presenter({
+      people, review, plan, planFor, actualByPerson, cats, locs,
+      categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
+    }));
+    return;
+  }
 
   root.appendChild(el('div', { class: 'rc-scroll' }, [
     el('table', { class: 'rc-table rc-huddle' }, [
@@ -355,6 +383,174 @@ function updateBlocker(blocker, ctx) {
   });
 }
 
+/**
+ * The meeting, run rather than filled in.
+ *
+ * One person, in focus, large enough to read from the other side of a table.
+ * The room is the second audience and it needs different things from the
+ * person answering: not the detail of the task but where it sits — which
+ * look-ahead row it feeds, how many days it has been running, whether access
+ * is confirmed. All of that is already recorded and none of it was ever in the
+ * meeting.
+ *
+ * The question is asked the way somebody would say it out loud, because the
+ * plan text is right there and using it as the question rather than as a
+ * column is what makes this an interview instead of a form.
+ *
+ * Every write goes through exactly the same path as the table. This is a view,
+ * not a second way of recording things.
+ */
+/**
+ * The question, in the words somebody would actually use.
+ *
+ * The plan text is usually written with the place in it — "Cable pull at TPSS
+ * 12" — so appending the location unconditionally reads back as "at TPSS 12 at
+ * TPSS 12". Say it only when the sentence does not already.
+ */
+function askFor(planned, locs) {
+  if (!planned) return 'Nothing was planned for you — what did you end up doing?';
+  const task = planned.task || 'this';
+  const where = locs.get(planned.location_id)?.name || '';
+  const said = where && task.toLowerCase().includes(where.toLowerCase());
+  return `Yesterday you were on ${task}${where && !said ? ` at ${where}` : ''} — how did it go?`;
+}
+
+function presenter(ctx) {
+  const { people, review, plan, planFor, actualByPerson, locs, cats, leave, root } = ctx;
+  const wrap = el('div', { class: 'rc-present', tabindex: '0' });
+
+  const asked = people.filter((p) => availability(p, review, leave).state === 'available');
+  const queue = asked.length ? asked : people;
+  if (atPerson === null) {
+    const waiting = queue.findIndex((p) => !actualByPerson.get(p.id));
+    atPerson = waiting < 0 ? 0 : waiting;
+  }
+  atPerson = Math.max(0, Math.min(atPerson, queue.length - 1));
+  const person = queue[atPerson];
+
+  const move = (by) => {
+    atPerson = Math.max(0, Math.min(atPerson + by, queue.length - 1));
+    clear(root);
+    render(root);
+  };
+  const leaveMode = () => {
+    presenting = false;
+    clear(root);
+    render(root);
+  };
+
+  /* Space and the arrows walk the room; Escape puts the table back. The keys
+     are the ones a hand already on the table would reach for, and the status
+     letters stay exactly what they are in the table. */
+  wrap.addEventListener('keydown', (event) => {
+    if (/^(input|textarea|select)$/i.test(event.target?.tagName || '')) return;
+    if (event.key === ' ' || event.key === 'ArrowRight' || event.key === 'Enter') {
+      event.preventDefault();
+      move(1);
+    } else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      move(-1);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      leaveMode();
+    } else {
+      const status = STATUSES.find((st) => st.key === event.key.toLowerCase() && st.id !== 'absent');
+      const button = status && [...wrap.querySelectorAll('button')].find((b) => b.textContent === status.label);
+      if (button) {
+        event.preventDefault();
+        button.click();
+      }
+    }
+  });
+  setTimeout(() => wrap.focus(), 0);
+
+  if (!person) {
+    wrap.appendChild(el('p', { class: 'rc-hint', text: 'Nobody is working that day.' }));
+    return wrap;
+  }
+
+  const wasPlanned = planFor(person.id, review);
+  const actual = actualByPerson.get(person.id) || null;
+  const tomorrow = planFor(person.id, plan);
+  const chain = wasPlanned ? ctx.chainByeId?.get(carryChainFor(wasPlanned)) : null;
+  const laRow = wasPlanned?.lookahead_row_id
+    ? (ctx.laRows || []).find((r) => r.id === wasPlanned.lookahead_row_id)
+    : null;
+  const theirs = (ctx.blockers || []).filter((b) => b.person_id === person.id);
+
+  wrap.appendChild(el('div', { class: 'rc-present-top' }, [
+    el('span', { class: 'rc-eyebrow', text: `${atPerson + 1} of ${queue.length}` }),
+    el('button', { class: 'cx-btn mini ghost', text: 'Back to the table', onClick: leaveMode }),
+  ]));
+
+  wrap.appendChild(el('h2', { class: 'rc-present-who', text: person.name }));
+  wrap.appendChild(el('div', { class: 'rc-hint', text: [person.title, person.subsystem].filter(Boolean).join(' · ') }));
+
+  /* The question, in the words somebody would use. */
+  wrap.appendChild(el('p', { class: 'rc-present-ask', text: askFor(wasPlanned, locs) }));
+
+  /* What the room needs, which is not what the person needs. */
+  const context = el('div', { class: 'rc-present-context' });
+  if (laRow) {
+    context.appendChild(badge(`BART: ${(laRow.raw_label || '').slice(0, 40)}`, 'info'));
+  }
+  if (chain && chain.carries >= 1) {
+    context.appendChild(badge(`${ordinal(chain.carries + 1)} day on it`,
+      chain.carries >= 4 ? 'bad' : 'warn'));
+  }
+  if (wasPlanned && !laRow) {
+    context.appendChild(badge('not against a look-ahead row', 'muted'));
+  }
+  for (const b of theirs) {
+    context.appendChild(badge(`blocked: ${b.summary.slice(0, 36)}`, 'bad'));
+  }
+  if (cats.get(wasPlanned?.category_id)?.name) {
+    context.appendChild(badge(cats.get(wasPlanned.category_id).name, 'muted'));
+  }
+  if (context.children.length) wrap.appendChild(context);
+
+  /* The answer. */
+  const answer = el('div', { class: 'rc-present-answer' });
+  const away = availability(person, review, leave);
+  if (away.state === 'leave') {
+    answer.appendChild(badge('On leave', 'muted'));
+  } else if (actual) {
+    const status = STATUS_BY_ID.get(actual.status);
+    answer.appendChild(badge(status?.label || actual.status, status?.tone || 'muted'));
+    if (actual.note) answer.appendChild(el('div', { class: 'rc-hint', text: actual.note }));
+  } else {
+    answer.appendChild(statusButtons(ctx, person, review, wasPlanned, () => {
+      clear(root);
+      render(root);
+    }));
+  }
+  wrap.appendChild(answer);
+
+  wrap.appendChild(el('div', { class: 'rc-present-next' }, [
+    el('span', { class: 'rc-eyebrow', text: `Tomorrow — ${dayLabel(plan)}` }),
+    tomorrow
+      ? el('div', { text: tomorrow.task || '—' })
+      : el('div', { class: 'rc-hint', text: 'nothing set yet' }),
+  ]));
+
+  wrap.appendChild(el('div', { class: 'rc-present-move' }, [
+    el('button', { class: 'cx-btn ghost', text: '← Back', onClick: () => move(-1), disabled: atPerson === 0 }),
+    el('button', {
+      class: 'cx-btn primary',
+      text: atPerson === queue.length - 1 ? 'Done' : 'Next →',
+      onClick: () => (atPerson === queue.length - 1 ? leaveMode() : move(1)),
+    }),
+  ]));
+
+  wrap.appendChild(el('p', {
+    class: 'rc-hint',
+    text: 'Space or → for the next person, ← to go back, Escape for the table. The status '
+      + 'letters work here too.',
+  }));
+
+  return wrap;
+}
+
 function dateBar(date, review, plan, root) {
   const move = (days) => {
     onDate = toISO(addDays(isoToMs(date), days));
@@ -375,6 +571,17 @@ function dateBar(date, review, plan, root) {
       'aria-label': 'Next day',
       html: icon('chevron-right', { size: 13 }),
       onClick: () => move(1),
+    }),
+    el('button', {
+      class: 'cx-btn mini',
+      text: 'Run the meeting',
+      title: 'One person at a time, large enough for the room. Space or → for the next.',
+      onClick: () => {
+        presenting = true;
+        atPerson = null;
+        clear(root);
+        render(root);
+      },
     }),
     date === todayISO() ? null : el('button', {
       class: 'cx-btn mini ghost',

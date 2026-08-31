@@ -525,3 +525,68 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   .rc-blocker { flex-wrap: wrap; }
   .rc-blocker-main { flex-basis: 100%; }
 }
+
+/* ── The meeting, run rather than filled in ──────────────────────────────
+   One person, in focus, readable from the other side of a table. Everything
+   here is sized for the room rather than for the person holding the keyboard —
+   the table is still there for that, one Escape away. */
+.rc-present {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-3) var(--space-5);
+  outline: none;
+}
+.rc-present-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-4);
+}
+.rc-present-who {
+  font-family: var(--f-display);
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-main);
+  margin: 0;
+}
+/* The question, in the words somebody would actually say. */
+.rc-present-ask {
+  font-size: 19px;
+  line-height: 1.45;
+  color: var(--text-main);
+  margin: var(--space-4) 0 var(--space-3);
+}
+/* What the room needs, which is not what the person answering needs. */
+.rc-present-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: var(--space-4);
+}
+.rc-present-answer {
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+/* A status is one press per person, so it has to be a target you cannot miss
+   from standing. */
+.rc-present-answer .cx-btn {
+  min-height: 44px;
+  padding-inline: 18px;
+  font-size: var(--fs-small);
+}
+.rc-present-next { margin: var(--space-4) 0; }
+.rc-present-move {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+.rc-present-move .cx-btn { min-height: 40px; padding-inline: 20px; }
+
+@media (max-width: 620px) {
+  .rc-present-who { font-size: 26px; }
+  .rc-present-ask { font-size: 17px; }
+  .rc-present-move { justify-content: stretch; }
+  .rc-present-move .cx-btn { flex: 1; }
+}
