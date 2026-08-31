@@ -73,6 +73,10 @@ alter table public.rc_actuals
   add column if not exists lookahead_row_id uuid
   references public.rc_lookahead_rows(id) on delete set null;
 
+-- ── A blocked day now has an owner, a date and an end ─────────────────────
+-- Created by `rc_schema.sql`; nothing to alter here, since both tables are new.
+-- Listed so the verification below can say whether they arrived.
+
 -- ── Which sheet to read ───────────────────────────────────────────────────
 -- A table rather than a constant in the source: the tab gets renamed by
 -- whoever maintains the workbook, and a renamed tab must mean a field somebody
@@ -185,6 +189,9 @@ select 'rc_actuals.lookahead_row_id',
           where table_schema = 'public' and table_name = 'rc_actuals'
             and column_name = 'lookahead_row_id'
        ) then 'ok' else 'MISSING' end
+union all
+select 'rc_blockers',
+       case when to_regclass('public.rc_blockers') is not null then 'ok' else 'MISSING' end
 union all
 select 'managers stood down',
        coalesce((select count(*)::text || ' not scheduled' from public.rc_people where not scheduled), '0');

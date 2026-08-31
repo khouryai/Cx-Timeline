@@ -987,6 +987,119 @@ create policy rc_invitations_admin on public.rc_invitations
   using (public.rc_is_admin()) with check (public.rc_is_admin());
 
 -- ══════════════════════════════════════════════════════════════════════════
+-- Blockers
+--
+-- A blocked outcome says a day was lost. It does not say who is chasing it, by
+-- when, or whether it is still true tomorrow — so a huddle that records blocks
+-- produces a growing list of grievances rather than a shrinking list of
+-- obstacles. That is the difference between a meeting that reports and one
+-- that delivers.
+--
+-- Two tables rather than one, for the same reason plans and annotations are
+-- append-only: a blocker's history *is* the evidence. "We told BART on the
+-- 4th, chased on the 9th, still not released on the 14th" is the sentence a
+-- claim is built from, and an UPDATE would erase every word of it.
+-- ══════════════════════════════════════════════════════════════════════════
+
+-- Raised once, never edited: what was in the way, and where.
+create table if not exists public.rc_blockers (
+  id               uuid primary key default gen_random_uuid(),
+  -- The outcome that raised it, when there was one. Null for a blocker somebody
+  -- raises outside the meeting.
+  raised_actual_id uuid references public.rc_actuals(id) on delete set null,
+  person_id        uuid not null references public.rc_people(id) on delete cascade,
+  location_id      uuid references public.rc_locations(id),
+  lookahead_row_id uuid references public.rc_lookahead_rows(id) on delete set null,
+  summary          text not null,
+  party_id         uuid references public.rc_parties(id),
+  raised_on        date not null default current_date,
+  created_by       uuid not null default auth.uid() references auth.users(id),
+  created_at       timestamptz not null default now()
+);
+
+create index if not exists rc_blockers_person_idx on public.rc_blockers (person_id);
+
+-- Everything that happened to it afterwards. Append-only: taking ownership,
+-- moving the date, chasing it, closing it — each is a row, and the latest one
+-- is the state.
+create table if not exists public.rc_blocker_updates (
+  id         uuid primary key default gen_random_uuid(),
+  blocker_id uuid not null references public.rc_blockers(id) on delete cascade,
+  state      text not null default 'open' check (state in ('open', 'resolved')),
+  -- Who is chasing it. The single most useful field here, and the one a
+  -- blocked outcome has never carried.
+  owner_id   uuid references public.rc_people(id),
+  due_date   date,
+  note       text,
+  created_by uuid not null default auth.uid() references auth.users(id),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists rc_blocker_updates_idx
+  on public.rc_blocker_updates (blocker_id, created_at desc);
+
+-- What is true now. `rc_blockers_current` is what the huddle reads; the tables
+-- underneath keep how it got that way.
+create or replace view public.rc_blockers_current with (security_invoker = true) as
+  select b.id, b.raised_actual_id, b.person_id, b.location_id, b.lookahead_row_id,
+         b.summary, b.party_id, b.raised_on, b.created_at,
+         coalesce(u.state, 'open')          as state,
+         u.owner_id,
+         u.due_date,
+         u.note                             as last_note,
+         u.created_at                       as last_update,
+         current_date - b.raised_on         as age_days
+    from public.rc_blockers b
+    left join lateral (
+      select * from public.rc_blocker_updates x
+       where x.blocker_id = b.id
+       order by x.created_at desc, x.id desc
+       limit 1
+    ) u on true;
+
+alter table public.rc_blockers        enable row level security;
+alter table public.rc_blocker_updates enable row level security;
+
+-- Everybody signed in reads them: a blocker nobody can see is one nobody
+-- chases, and the whole point is that the room knows.
+drop policy if exists rc_blockers_read on public.rc_blockers;
+create policy rc_blockers_read on public.rc_blockers
+  for select to authenticated using (true);
+drop policy if exists rc_blockers_insert on public.rc_blockers;
+create policy rc_blockers_insert on public.rc_blockers
+  for insert to authenticated
+  with check (public.rc_can_act_for(person_id) and created_by = auth.uid());
+
+drop policy if exists rc_blocker_updates_read on public.rc_blocker_updates;
+create policy rc_blocker_updates_read on public.rc_blocker_updates
+  for select to authenticated using (true);
+
+-- An administrator may act on any blocker; the person blocked may act on their
+-- own, because they are usually the first to know it cleared.
+drop policy if exists rc_blocker_updates_insert on public.rc_blocker_updates;
+create policy rc_blocker_updates_insert on public.rc_blocker_updates
+  for insert to authenticated
+  with check (
+    created_by = auth.uid()
+    and exists (
+      select 1 from public.rc_blockers b
+       where b.id = blocker_id
+         and (public.rc_is_admin() or public.rc_can_act_for(b.person_id))
+    )
+  );
+
+/* Insert-only, at the privilege level and not merely by policy. With UPDATE
+   still granted, RLS would exclude the row instead: the statement matches
+   nothing, the driver reports success, and somebody rewriting the history of a
+   blocker would be told it worked. `authenticated` has to be named. */
+revoke all on public.rc_blockers        from public, anon, authenticated;
+revoke all on public.rc_blocker_updates from public, anon, authenticated;
+grant select, insert on public.rc_blockers        to authenticated;
+grant select, insert on public.rc_blocker_updates to authenticated;
+revoke all on public.rc_blockers_current from public, anon;
+grant select on public.rc_blockers_current to authenticated;
+
+-- ══════════════════════════════════════════════════════════════════════════
 -- Reporting
 --
 -- Every number is derived on the way out. Nothing here is stored, so nothing

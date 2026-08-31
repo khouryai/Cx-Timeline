@@ -26,7 +26,7 @@ import { emit, EV } from '../core/events.js';
 import { toISO, addDays, todayMs } from '../core/dates.js';
 import * as rc from '../core/rc.js';
 import { icon } from './icons.js';
-import { selectInput, textInput, toast, badge } from './components.js';
+import { selectInput, textInput, toast, badge, checkbox } from './components.js';
 import {
   STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs,
   dayLabel, byId, availability, notifyChanged, formModal,
@@ -166,7 +166,7 @@ export async function render(root) {
   const review = reviewDate(date, people);
   const plan = planDate(date, people);
 
-  const [categories, locations, parties, leave, planRows, actuals, chains, laRows] =
+  const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, laRows] =
     await Promise.all([
       rc.listCategories(),
       rc.listLocations(),
@@ -178,6 +178,15 @@ export async function render(root) {
       // conversation, and it was only ever in a report the field team cannot
       // open. It is derived from outcomes everybody can already read.
       rc.listCarryChains().catch(() => []),
+      /* Everybody, not just the people taking shifts. Whoever chases a
+         released possession is usually the manager — who is stood down from
+         the huddle precisely because they do not take work from it — so
+         filtering this list the way the roster is filtered would leave the
+         most likely owner unselectable. */
+      rc.listPeople().catch(() => []),
+      // Every blocker still open, whoever raised it and whenever. This is the
+      // standing item the meeting keeps returning to until somebody clears it.
+      rc.listBlockers().catch(() => []),
       // Only an administrator can read these; a member simply gets none and
       // the block dialog offers nothing to link, which is correct.
       rc.lookaheadForWeek(toISO(weekStart(isoToMs(review)))).catch(() => []),
@@ -205,9 +214,12 @@ export async function render(root) {
   for (const person of people) {
     body.appendChild(personRow({
       person, review, plan, planFor, actualByPerson, cats, locs,
-      categories, locations, parties, leave, root, chainByeId, laRows,
+      categories, locations, parties, leave, root, chainByeId, laRows, people, blockers,
+      everybody,
     }));
   }
+
+  root.appendChild(openBlockers(blockers, { people: everybody, locs, parties, root }));
 
   root.appendChild(el('div', { class: 'rc-scroll' }, [
     el('table', { class: 'rc-table rc-huddle' }, [
@@ -235,6 +247,112 @@ export async function render(root) {
       + STATUSES.filter((st) => st.id !== 'absent').map((st) => `${st.key} ${st.label.toLowerCase()}`).join(', ')
       + '. Away is answered from the leave record rather than asked for.',
   }));
+}
+
+/**
+ * What is still in the way, standing above the meeting.
+ *
+ * A blocked outcome says a day was lost; it never said who was chasing it, by
+ * when, or whether it was still true this morning. So the list only ever grew,
+ * and a list that only grows is one nobody reads. These stay on screen until
+ * somebody closes them, which is the entire mechanism.
+ *
+ * Ordered by age, worst first: a blocker on its ninth day is a different
+ * conversation from one raised yesterday, and the meeting should open on it.
+ */
+function openBlockers(blockers, ctx) {
+  const wrap = el('div', { class: 'rc-blockers' });
+  if (!blockers.length) {
+    wrap.appendChild(el('p', { class: 'rc-hint', text: 'Nothing outstanding. Nobody is waiting on anybody.' }));
+    return wrap;
+  }
+
+  const people = byId(ctx.people);
+  const sorted = [...blockers].sort((a, b) => (b.age_days || 0) - (a.age_days || 0));
+
+  wrap.appendChild(el('div', { class: 'rc-section-head' }, [
+    el('h3', { text: `${sorted.length} still in the way` }),
+  ]));
+
+  for (const b of sorted) {
+    const overdue = b.due_date && b.due_date < todayISO();
+    wrap.appendChild(el('div', { class: 'rc-blocker' + (overdue ? ' overdue' : '') }, [
+      el('div', { class: 'rc-blocker-main' }, [
+        el('div', { class: 'rc-blocker-what', text: b.summary }),
+        el('div', { class: 'rc-hint', text: [
+          people.get(b.person_id)?.name,
+          ctx.locs.get(b.location_id)?.name,
+          byId(ctx.parties).get(b.party_id)?.name ? `down to ${byId(ctx.parties).get(b.party_id).name}` : null,
+          b.last_note,
+        ].filter(Boolean).join(' · ') }),
+      ]),
+      el('div', { class: 'rc-blocker-state' }, [
+        // The two facts that turn a grievance into an obstacle.
+        b.owner_id
+          ? badge(`${people.get(b.owner_id)?.name || 'somebody'} chasing`, 'info')
+          : badge('nobody chasing', 'bad'),
+        b.due_date
+          ? badge(overdue ? `overdue since ${dayLabel(b.due_date)}` : `by ${dayLabel(b.due_date)}`,
+            overdue ? 'bad' : 'muted')
+          : null,
+        badge(`day ${Number(b.age_days || 0) + 1}`, Number(b.age_days || 0) >= 4 ? 'bad' : 'warn'),
+      ].filter(Boolean)),
+      rc.isAdmin() || rc.canWrite()
+        ? el('button', {
+          class: 'cx-btn mini',
+          text: 'Update',
+          onClick: () => updateBlocker(b, ctx),
+        })
+        : null,
+    ].filter(Boolean)));
+  }
+
+  wrap.appendChild(el('p', {
+    class: 'rc-hint',
+    text: 'These stay here until somebody closes them. Nothing is edited — taking one on, '
+      + 'moving the date and closing it are each a row, because "we told them on the 4th and '
+      + 'chased on the 9th" is the sentence a claim is built from.',
+  }));
+  return wrap;
+}
+
+/** Take one on, move it, chase it, or close it. Always by appending. */
+function updateBlocker(blocker, ctx) {
+  const owner = selectInput({
+    value: blocker.owner_id || '',
+    placeholder: '— nobody yet —',
+    options: ctx.people.map((p) => ({ value: p.id, label: p.name })),
+  });
+  const due = el('input', { type: 'date', class: 'cx-input', value: blocker.due_date || '' });
+  const note = textInput({ placeholder: 'What has happened since' });
+  const done = checkbox({ label: 'Cleared — take it off the list', checked: false });
+
+  formModal({
+    title: blocker.summary,
+    body: el('div', { class: 'cx-form' }, [
+      el('div', { class: 'cx-field' }, [
+        el('label', { class: 'cx-label', text: 'Who is chasing it' }), owner,
+        el('div', { class: 'cx-hint', text: 'The field a blocked day has never carried, and the '
+          + 'one that decides whether anything happens about it.' }),
+      ]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Expected by' }), due]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Update' }), note]),
+      el('div', { class: 'cx-field' }, [done]),
+    ]),
+    confirmLabel: 'Add it',
+    onConfirm: async () => {
+      await rc.updateBlocker({
+        blocker_id: blocker.id,
+        state: done.querySelector('input').checked ? 'resolved' : 'open',
+        owner_id: owner.value || null,
+        due_date: due.value || null,
+        note: note.value.trim() || null,
+      });
+      notifyChanged('blockers');
+      clear(ctx.root);
+      render(ctx.root);
+    },
+  });
 }
 
 function dateBar(date, review, plan, root) {
@@ -520,6 +638,12 @@ function ordinal(n) {
 
 function blockedDialog(ctx, person, date, plannedEntry, redraw) {
   const reason = textInput({ placeholder: 'What stopped it' });
+  const owner = selectInput({
+    value: rc.me()?.id || '',
+    placeholder: '— nobody yet —',
+    options: (ctx.everybody || ctx.people || []).map((p) => ({ value: p.id, label: p.name })),
+  });
+  const due = el('input', { type: 'date', class: 'cx-input' });
   const party = selectInput({
     value: ctx.parties[0]?.id,
     options: ctx.parties.map((p) => ({ value: p.id, label: p.name })),
@@ -555,6 +679,15 @@ function blockedDialog(ctx, person, date, plannedEntry, redraw) {
       }),
       el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Reason' }), reason]),
       el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Down to' }), party]),
+      /* The two fields that decide whether anything happens about it. Asked
+         here because this is the only moment somebody is definitely thinking
+         about it — a blocker raised without an owner is a grievance, and the
+         list of those only ever grows. */
+      el('div', { class: 'cx-field' }, [
+        el('label', { class: 'cx-label', text: 'Who will chase it' }), owner,
+        el('div', { class: 'cx-hint', text: 'It stays on the huddle until somebody closes it.' }),
+      ]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Expected by' }), due]),
       laRow
         ? el('div', { class: 'cx-field' }, [
           el('label', { class: 'cx-label', text: 'Against which look-ahead row' }),
@@ -584,6 +717,38 @@ function blockedDialog(ctx, person, date, plannedEntry, redraw) {
       };
       const { sent, error } = await record(entry);
       if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
+
+      /* The outcome says a day was lost; the blocker is the thing somebody has
+         to do about it. Raised separately and after, so a failure here leaves
+         the outcome standing rather than losing both — the meeting has moved
+         on by the time anything is retried. */
+      if (sent) {
+        try {
+          const raised = await rc.raiseBlocker({
+            person_id: person.id,
+            location_id: plannedEntry?.location_id || null,
+            lookahead_row_id: laRow?.value || null,
+            summary: reason.value.trim(),
+            party_id: party.value || null,
+            raised_on: date,
+          });
+          if (owner.value || due.value) {
+            await rc.updateBlocker({
+              blocker_id: raised.id,
+              state: 'open',
+              owner_id: owner.value || null,
+              due_date: due.value || null,
+            });
+          }
+        } catch (err) {
+          toast({
+            tone: 'warn',
+            message: `Recorded, but it is not on the blocker list — ${err.message}`,
+            timeout: 10000,
+          });
+        }
+      }
+
       notifyChanged('actuals');
       redraw();
     },

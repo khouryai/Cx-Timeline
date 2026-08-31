@@ -256,16 +256,57 @@ function fakeSdk() {
          calendar in one click is what the checks below are about. */
     ],
     rc_settings: [{ key: 'lookahead_sheet', value: '4WLA' }],
+    rc_blockers: [],
+    rc_blocker_updates: [],
+    /* The view is what is true now; the tables keep how it got that way. The
+       stub joins them the same way the lateral does. */
+    get rc_blockers_current() {
+      return this.rc_blockers.map((b) => {
+        const latest = this.rc_blocker_updates
+          .filter((u) => u.blocker_id === b.id)
+          .slice(-1)[0] || {};
+        return {
+          ...b,
+          state: latest.state || 'open',
+          owner_id: latest.owner_id || null,
+          due_date: latest.due_date || null,
+          last_note: latest.note || null,
+          age_days: 3,
+        };
+      });
+    },
     rc_lookahead_rows: [{
       id: 'lar1',
+      snapshot_id: 'snap1',
+      /* The week of the day the huddle *reviews*, not of today. On a Monday
+         those are different weeks — the meeting looks back at Friday — and a
+         fixture pinned to today made the look-ahead invisible to the block
+         dialog one day in seven. */
+      week_start: (() => {
+        const ms = Date.parse(`${REVIEW.iso}T00:00:00Z`);
+        return new Date(ms - ((new Date(ms).getUTCDay() + 6) % 7) * 86400000)
+          .toISOString().slice(0, 10);
+      })(),
+      sheet_row: 9,
+      row_key: 'k1',
+      location_id: 'l1',
+      raw_location: 'TPSS 12',
+      raw_label: 'IXL Regression Testing',
+      cells: {},
+      bart_marks: {},
+    }, {
+      /* And one in the week the *plan* is being made for. A real four-week
+         look-ahead covers both; keeping only the reviewed week made the week
+         plan's proposal invisible on a Monday. */
+      id: 'lar2',
       snapshot_id: 'snap1',
       week_start: (() => {
         const now = new Date();
         const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
         return new Date(t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000).toISOString().slice(0, 10);
       })(),
-      sheet_row: 9,
-      row_key: 'k1',
+      sheet_row: 11,
+      row_key: 'k2',
       location_id: 'l1',
       raw_location: 'TPSS 12',
       raw_label: 'IXL Regression Testing',
@@ -882,10 +923,15 @@ async function main() {
     await page.locator('.cx-modal .rc-error').isVisible());
 
   await page.locator('.cx-modal input').first().fill('Possession released late');
-  const against = page.locator('.cx-modal select').nth(1);
+  // Found by what it contains rather than where it sits: the dialog gained
+  // fields and a positional selector quietly started driving the wrong one.
+  const against = page.locator('.cx-modal select', { has: page.locator('option[value="lar1"]') });
   if (await against.count()) await against.selectOption('lar1');
+  const chaser = page.locator('.cx-modal select', { has: page.locator('option[value="p1"]') });
+  if (await chaser.count()) await chaser.selectOption('p1');
+  await page.locator('.cx-modal input[type="date"]').fill('2026-12-01');
   await page.locator('.cx-modal button', { hasText: 'Record' }).click();
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(600);
   check('with a reason and a party it goes through',
     await page.evaluate(() => window.__rc.rows.rc_actuals.some((a) => a.status === 'blocked')));
   check('and the party is carried with it',
@@ -893,6 +939,15 @@ async function main() {
   /* "Blocked by BART" is an assertion; "blocked on the row BART themselves
      scheduled for that location that week" is a document. Offered, never
      guessed — matching on the activity text is forbidden here. */
+  /* The outcome says a day was lost. The blocker is the thing somebody has to
+     do about it, and until now nothing carried who or by when — so the list
+     only ever grew, and a list that only grows is one nobody reads. */
+  check('and a blocked day raises something somebody has to chase',
+    await page.evaluate(() => window.__rc.rows.rc_blockers.length === 1));
+  check('with a name against it, asked at the one moment somebody is thinking about it',
+    await page.evaluate(() => window.__rc.rows.rc_blocker_updates
+      .some((u) => u.owner_id === 'p1' && u.due_date === '2026-12-01')));
+
   check('and it can be recorded against the look-ahead row it belongs to',
     await page.evaluate(() => window.__rc.rows.rc_actuals.some((a) => a.lookahead_row_id === 'lar1')),
     'lookahead_row_id');
@@ -941,14 +996,14 @@ async function main() {
     (await emptyCell.count()) >= 1);
   await emptyCell.click();
   await page.waitForSelector('.cx-modal');
-  await page.locator('.cx-modal select').first().selectOption('lar1');
+  await page.locator('.cx-modal select').first().selectOption('lar2');
   await page.waitForTimeout(200);
   check('choosing a row fills the task in from what was asked for',
     (await page.locator('.cx-modal input').first().inputValue()) === 'IXL Regression Testing');
   await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Plan it' }).click();
   await page.waitForTimeout(500);
   check('and the plan keeps the link back to it',
-    await page.evaluate(() => window.__rc.rows.rc_plan_entries.some((p) => p.lookahead_row_id === 'lar1')));
+    await page.evaluate(() => window.__rc.rows.rc_plan_entries.some((p) => p.lookahead_row_id === 'lar2')));
 
   const weekText2 = await page.locator('#rc-frame').innerText();
   check('leave booked beyond this week is named before you hit it',
@@ -1167,6 +1222,37 @@ async function main() {
   check('and one nobody has answered still asks',
     /1 cancellation\(s\) have nobody against them/.test(laText),
     laText.split('\n').find((l) => /nobody against/.test(l)) || '');
+
+  /* ── What is still in the way ─────────────────────────────────────────
+     A blocked outcome said a day was lost and stopped there. These stay above
+     the meeting until somebody closes one, which is the whole mechanism: a
+     list that only grows is one nobody reads. */
+  console.log('\nBlockers that stay until somebody clears them');
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Daily huddle' }).click();
+  await page.waitForSelector('#rc-frame .rc-blockers');
+  const strip = await page.locator('#rc-frame .rc-blockers').innerText();
+  check('the block raised in the meeting is standing above it',
+    /Possession released late/.test(strip), strip.split('\n').slice(0, 3).join(' / '));
+  check('and it says who is chasing it, which is the field it never had',
+    /Alex chasing/.test(strip), strip.replace(/\n/g, ' / ').slice(0, 150));
+
+  await page.locator('#rc-frame .rc-blocker button', { hasText: 'Update' }).first().click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal input[type="text"]').first().fill('BART confirmed for Friday');
+  await page.locator('.cx-modal input[type="checkbox"]').first().check();
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Add it' }).click();
+  await page.waitForTimeout(700);
+
+  // Closing it is a row, not an edit: "we told them on the 4th and chased on
+  // the 9th" is the sentence a claim is built from.
+  check('closing one is another row rather than an edit',
+    await page.evaluate(() => window.__rc.rows.rc_blocker_updates.length === 2
+      && window.__rc.rows.rc_blocker_updates.at(-1).state === 'resolved'),
+    JSON.stringify(await page.evaluate(() => window.__rc.rows.rc_blocker_updates.map((u) => u.state))));
+  check('and it comes off the meeting',
+    !/Possession released late/.test(await page.locator('#rc-frame .rc-blockers').innerText()));
+  check('leaving the room told that nobody is waiting on anybody',
+    /Nothing outstanding/.test(await page.locator('#rc-frame .rc-blockers').innerText()));
 
   /* ── On a tablet ──────────────────────────────────────────────────────
      The huddle is run at a fixed time with the team in front of you, and the

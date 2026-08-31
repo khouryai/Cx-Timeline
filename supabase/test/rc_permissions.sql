@@ -599,6 +599,68 @@ select assert((select count(*) from public.rc_lookahead_rows) = 0,
 select act_as(:'alice');
 
 -- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice E'\nA blocker has an owner, a date and an end'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+-- A blocked outcome says a day was lost. Who is chasing it, by when, and
+-- whether it is still true is what turns a list of grievances into a list of
+-- obstacles — and the history of that chase is the sentence a claim is built
+-- from, so it is appended to and never edited.
+
+select act_as(:'alice');
+insert into public.rc_blockers (person_id, location_id, summary, party_id, raised_on)
+values (:'p_carol', :'loc12', 'Possession released two hours late', :'party_bart', '2026-09-14');
+select id as blk from public.rc_blockers where summary like 'Possession released%' \gset
+
+select assert((select state from public.rc_blockers_current where id = :'blk') = 'open',
+  'a blocker with nothing said about it yet is open');
+select assert((select owner_id from public.rc_blockers_current where id = :'blk') is null,
+  'and nobody is chasing it, which is the point of asking');
+
+insert into public.rc_blocker_updates (blocker_id, owner_id, due_date, note)
+values (:'blk', :'p_alice', '2026-09-18', 'Raised with BART ops');
+select assert((select owner_id from public.rc_blockers_current where id = :'blk') = :'p_alice',
+  'somebody takes it on');
+select assert((select due_date from public.rc_blockers_current where id = :'blk') = '2026-09-18',
+  'with a date it is expected by');
+
+insert into public.rc_blocker_updates (blocker_id, state, note)
+values (:'blk', 'resolved', 'Possession confirmed for the 19th');
+select assert((select state from public.rc_blockers_current where id = :'blk') = 'resolved',
+  'and closing it is another row, not an edit');
+select assert((select count(*) from public.rc_blocker_updates where blocker_id = :'blk') = 2,
+  'every step of the chase is still on the record');
+select assert((select owner_id from public.rc_blockers_current where id = :'blk') is null,
+  'the latest row is the state, including what it does not say');
+
+-- The history is the evidence, so it cannot be rewritten. A refused UPDATE
+-- would match nothing and report success, which is why the privilege is gone
+-- rather than merely the policy.
+select refuses(:'alice',
+  format('update public.rc_blocker_updates set note = %L where blocker_id = %L',
+         'Actually it was our fault', :'blk'),
+  'an administrator rewriting the history of a blocker');
+select refuses(:'alice',
+  format('delete from public.rc_blockers where id = %L', :'blk'),
+  'and deleting the blocker outright');
+
+-- The person blocked is usually the first to know it cleared, so they may act
+-- on their own; somebody else's is not theirs to close.
+select act_as(:'carol');
+insert into public.rc_blocker_updates (blocker_id, state, note)
+values (:'blk', 'open', 'Still not released');
+select assert((select state from public.rc_blockers_current where id = :'blk') = 'open',
+  'the person blocked can reopen their own');
+select assert((select count(*) from public.rc_blocker_updates where blocker_id = :'blk') = 3,
+  'and reopening is a third row rather than undoing the second');
+select refuses(:'carol',
+  format('insert into public.rc_blockers (person_id, summary) values (%L, %L)',
+         :'p_dan', 'Speaking for somebody else'),
+  'a member raising a blocker against somebody else');
+select assert((select count(*) from public.rc_blockers_current) = 1,
+  'and everybody can see the ones that are open — a blocker nobody sees is one nobody chases');
+select act_as(:'alice');
+
+-- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice E'\nA revised plan keeps what it was'; end $$;
 -- ══════════════════════════════════════════════════════════════════════════
 -- Never an update: the outgoing row stays and the new one points at it, so

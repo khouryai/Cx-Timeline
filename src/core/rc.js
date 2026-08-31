@@ -417,6 +417,29 @@ export function listActuals(fromISO, toISO) {
 }
 
 /** Carried tasks, oldest first — a chain on its fifth day is the headline. */
+/**
+ * Blockers, as they stand.
+ *
+ * The view, never the tables: the tables keep every step of the chase and the
+ * view is what is true now. Readable by everybody signed in, because a blocker
+ * nobody can see is one nobody chases.
+ */
+export function listBlockers({ openOnly = true } = {}) {
+  return select('rc_blockers_current', (q) =>
+    (openOnly ? q.eq('state', 'open') : q).order('raised_on'));
+}
+
+/** Every step of one blocker's history, oldest first. */
+export function blockerHistory(blockerId) {
+  return select('rc_blocker_updates', (q) =>
+    q.eq('blocker_id', blockerId).order('created_at'));
+}
+
+export const raiseBlocker = (row) => insert('rc_blockers', [row]).then((r) => r[0]);
+/* Append, never edit. Taking it on, moving the date, chasing it and closing it
+   are each a row — the history is the evidence a claim is built from. */
+export const updateBlocker = (row) => insert('rc_blocker_updates', [row]).then((r) => r[0]);
+
 export function listCarryChains() {
   return select('rc_carry_chains', (q) => q.order('age_days', { ascending: false }));
 }

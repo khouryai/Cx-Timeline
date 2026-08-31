@@ -419,6 +419,18 @@ subscribes. That is what keeps the graph acyclic.
   carrying plan content ever left — through the client *or* over the wire. That
   last check is the one that fails if somebody reaches across; every other
   check would still pass.
+- **A blocked day is not an obstacle until somebody owns it.** `rc_actuals`
+  says a day was lost and stops there — no owner, no date, no way to ask
+  whether it is still true — so the huddle produced a list that only grew, and
+  a list that only grows is one nobody reads. `rc_blockers` is raised once and
+  never edited; `rc_blocker_updates` is append-only and its latest row is the
+  state, read through `rc_blockers_current`. Taking one on, moving the date,
+  chasing it and closing it are each a row, because "we told BART on the 4th
+  and chased on the 9th" is the sentence a claim is built from and an UPDATE
+  would erase every word of it. The owner is picked from **everybody**, not the
+  scheduled roster: whoever chases a released possession is usually the manager,
+  who is stood down from the meeting precisely because they take no work from
+  it.
 - **Two families of status, never averaged.** Completed / partial / carried are
   what somebody did; blocked / reassigned are what was done to them. A
   possession released late is not underperformance, and folding it in would
@@ -639,13 +651,13 @@ node tools/test_dist.js              #  30 checks — every deployment shape, an
 node tools/test_lookahead.js         #  57 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         # 142 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 149 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 224 checks — both permission models, and that
+node tools/test_sql.js               # 237 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result
