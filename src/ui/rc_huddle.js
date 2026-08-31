@@ -27,6 +27,10 @@ import { toISO, addDays, todayMs } from '../core/dates.js';
 import * as rc from '../core/rc.js';
 import { icon } from './icons.js';
 import { selectInput, textInput, toast, badge, checkbox } from './components.js';
+/* The digest is a download like every other export in the application, so it
+   announces itself the same way — a file that lands somewhere the page cannot
+   see is the one action with no visible result. */
+import { saveFile } from '../io/exporters.js';
 import {
   STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs,
   dayLabel, byId, availability, notifyChanged, formModal,
@@ -220,7 +224,15 @@ export async function render(root) {
   const planFor = (personId, iso) =>
     planRows.find((p) => p.person_id === personId && p.work_date === iso) || null;
 
-  root.appendChild(dateBar(date, review, plan, root));
+  /* One context, handed to the table, the meeting and the digest alike. They
+     are three readings of one day and the moment they are given different
+     data they start disagreeing on screen, in front of the room. */
+  const ctx = {
+    people, review, plan, planFor, actualByPerson, cats, locs,
+    categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
+  };
+
+  root.appendChild(dateBar(date, review, plan, root, ctx));
 
   if (!people.length) {
     root.appendChild(el('p', { class: 'rc-hint', text: 'Add people in Organisation first.' }));
@@ -229,11 +241,7 @@ export async function render(root) {
 
   const body = el('tbody');
   for (const person of people) {
-    body.appendChild(personRow({
-      person, review, plan, planFor, actualByPerson, cats, locs,
-      categories, locations, parties, leave, root, chainByeId, laRows, people, blockers,
-      everybody,
-    }));
+    body.appendChild(personRow({ ...ctx, person }));
   }
 
   root.appendChild(openBlockers(blockers, { people: everybody, locs, parties, root }));
@@ -242,10 +250,7 @@ export async function render(root) {
      one person at a time, big enough to read from across the table, with the
      question asked the way somebody would ask it out loud. */
   if (presenting) {
-    root.appendChild(presenter({
-      people, review, plan, planFor, actualByPerson, cats, locs,
-      categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
-    }));
+    root.appendChild(presenter(ctx));
     return;
   }
 
@@ -517,7 +522,7 @@ function presenter(ctx) {
   } else if (actual) {
     const status = STATUS_BY_ID.get(actual.status);
     answer.appendChild(badge(status?.label || actual.status, status?.tone || 'muted'));
-    if (actual.note) answer.appendChild(el('div', { class: 'rc-hint', text: actual.note }));
+    for (const node of outcomeDetail(actual, ctx, person)) answer.appendChild(node);
   } else {
     answer.appendChild(statusButtons(ctx, person, review, wasPlanned, () => {
       clear(root);
@@ -551,7 +556,138 @@ function presenter(ctx) {
   return wrap;
 }
 
-function dateBar(date, review, plan, root) {
+/**
+ * The meeting, written down.
+ *
+ * A huddle answers three questions and then evaporates: what happened, what is
+ * next, and what is still in the way. The answers are all in the database
+ * afterwards, which is not the same as anybody having read them — the people
+ * who most need them are the ones who were not in the room.
+ *
+ * So the same three questions, as text somebody can paste into whatever their
+ * project actually talks in. Plain text on purpose: a PDF nobody opens is
+ * worse than four lines in a message, and this has to survive being forwarded.
+ *
+ * It carries no KPI and no rate. Those are a different audience and a
+ * different permission, and the moment a digest carries a percentage against
+ * somebody's name it stops being a summary and starts being a review.
+ */
+function digestText(ctx) {
+  const { people, review, plan, planFor, actualByPerson, locs, leave, blockers, chainByeId } = ctx;
+  const lines = [];
+  const bullet = { completed: '✓', partial: '~', carried: '→', blocked: '!', reassigned: '↔' };
+
+  lines.push(`Huddle — ${dayLabel(plan, 'medium')}`);
+  lines.push('');
+  lines.push(`What happened — ${dayLabel(review, 'medium')}`);
+
+  const silent = [];
+  for (const person of people) {
+    const away = availability(person, review, leave);
+    if (away.state === 'leave') {
+      lines.push(`  · ${person.name} — on leave`);
+      continue;
+    }
+    if (away.state === 'non-working') continue;
+
+    const actual = actualByPerson.get(person.id);
+    if (!actual) {
+      silent.push(person.name);
+      continue;
+    }
+    const status = STATUS_BY_ID.get(actual.status);
+    const said = [actual.blocked_reason, actual.note].filter(Boolean).join(' — ');
+    const where = locs.get(actual.location_id)?.name;
+    lines.push(`  ${bullet[actual.status] || '·'} ${person.name} — ${status?.label || actual.status}`
+      + `${where ? ` at ${where}` : ''}${said ? `: ${said}` : ''}`);
+  }
+  // Named rather than silently missing. "Nobody said" is a fact about the
+  // meeting, and leaving it out is how a gap becomes a claim that everything
+  // went fine.
+  if (silent.length) lines.push(`  · nothing recorded for ${silent.join(', ')}`);
+
+  lines.push('');
+  lines.push(`What is next — ${dayLabel(plan, 'medium')}`);
+  const unset = [];
+  for (const person of people) {
+    if (availability(person, plan, leave).state !== 'available') continue;
+    const next = planFor(person.id, plan);
+    if (!next) {
+      unset.push(person.name);
+      continue;
+    }
+    const chain = next.carry_chain_id ? chainByeId?.get(next.carry_chain_id) : null;
+    const where = locs.get(next.location_id)?.name;
+    lines.push(`  ${person.name} — ${next.task || '—'}${where ? ` at ${where}` : ''}`
+      + `${chain && chain.carries >= 1 ? ` (${ordinal(chain.carries + 1)} day on it)` : ''}`);
+  }
+  if (unset.length) lines.push(`  · nothing set yet for ${unset.join(', ')}`);
+
+  const open = (blockers || []).filter((b) => b.state !== 'resolved');
+  lines.push('');
+  lines.push(open.length ? `What is in the way — ${open.length}` : 'What is in the way — nothing');
+  for (const b of open) {
+    const who = (ctx.everybody || people).find((p) => p.id === b.owner_id)?.name;
+    lines.push(`  ${b.summary} — ${(people.find((p) => p.id === b.person_id) || {}).name || 'the team'}`
+      + `${who ? ` · ${who} chasing` : ' · nobody chasing it'}`
+      + `${b.due_date ? ` · expected by ${dayLabel(b.due_date)}` : ''}`
+      + ` · day ${Math.max(1, Number(b.age_days) || 1)}`);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Show it before it is sent.
+ *
+ * Copy *and* save, because the two go to different places — a message to the
+ * team, and a file beside the week's evidence — and neither is a good default
+ * for the other. The text is editable in the box: somebody about to send this
+ * to a client knows something the database does not.
+ */
+function openDigest(ctx) {
+  const text = digestText(ctx);
+  const box = el('textarea', { class: 'cx-textarea', rows: 18, spellcheck: 'false' });
+  box.value = text;
+
+  const copy = el('button', {
+    class: 'cx-btn mini',
+    text: 'Copy it',
+    onClick: async () => {
+      try {
+        await navigator.clipboard.writeText(box.value);
+        toast({ tone: 'good', message: 'Copied — paste it wherever the team talks.' });
+      } catch {
+        // A denied clipboard is not a failure to produce the digest. It is
+        // already on screen and selectable, so say that rather than nothing.
+        box.select();
+        toast({ tone: 'warn', message: 'The clipboard was refused — it is selected, copy it by hand.' });
+      }
+    },
+  });
+  const save = el('button', {
+    class: 'cx-btn mini ghost',
+    text: 'Save it',
+    onClick: () => saveFile(`huddle-${ctx.plan}.txt`, box.value, 'text/plain'),
+  });
+
+  formModal({
+    title: 'The meeting, written down',
+    body: el('div', { class: 'cx-form' }, [
+      el('p', {
+        class: 'rc-hint',
+        text: 'What happened, what is next, and what is still in the way — for the people who '
+          + 'were not in the room. No rates and no scores: those are a different audience.',
+      }),
+      box,
+      el('div', { style: 'display:flex;gap:6px' }, [copy, save]),
+    ]),
+    confirmLabel: 'Done',
+    onConfirm: () => {},
+  });
+}
+
+function dateBar(date, review, plan, root, ctx) {
   const move = (days) => {
     onDate = toISO(addDays(isoToMs(date), days));
     clear(root);
@@ -582,6 +718,12 @@ function dateBar(date, review, plan, root) {
         clear(root);
         render(root);
       },
+    }),
+    el('button', {
+      class: 'cx-btn mini ghost',
+      text: 'Digest',
+      title: 'What happened, what is next and what is in the way — as text to paste.',
+      onClick: () => openDigest(ctx),
     }),
     date === todayISO() ? null : el('button', {
       class: 'cx-btn mini ghost',
@@ -692,11 +834,8 @@ function personRow(ctx) {
     const status = STATUS_BY_ID.get(actual.status);
     row.appendChild(el('td', outcome, [
       badge(status?.label || actual.status, status?.tone || 'muted'),
-      actual.blocked_reason
-        ? el('div', { class: 'rc-hint', text: actual.blocked_reason })
-        : null,
-      actual.note ? el('div', { class: 'rc-hint', text: actual.note }) : null,
-    ].filter(Boolean)));
+      ...outcomeDetail(actual, ctx, person),
+    ]));
   } else if (admin || mine) {
     row.appendChild(el('td', outcome, [statusButtons(ctx, person, review, wasPlanned, redraw)]));
   } else {
@@ -740,6 +879,49 @@ function personRow(ctx) {
 }
 
 /**
+ * Everything an outcome says, once it has been recorded.
+ *
+ * One function because the table and the meeting must never read differently —
+ * the room is looking at one of them while somebody types into the other.
+ *
+ * Two of these are new and both answer questions that used to be asked out
+ * loud. **Who recorded it** matters because most days somebody speaks and
+ * somebody else types, and an outcome attributed to the person who entered it
+ * is how a record stops being trusted; it is shown only when the two differ,
+ * which is the only case anybody wonders about. And **the photograph** is the
+ * whole reason evidence was worth attaching in the first place — a link that
+ * is signed when it is clicked rather than when the page is drawn, so a huddle
+ * left open all morning does not accumulate expiring URLs.
+ */
+function outcomeDetail(actual, ctx, person) {
+  const out = [];
+  if (actual.blocked_reason) out.push(el('div', { class: 'rc-hint', text: actual.blocked_reason }));
+  if (actual.note) out.push(el('div', { class: 'rc-hint', text: actual.note }));
+
+  if (actual.evidence_path) {
+    out.push(el('button', {
+      class: 'cx-btn mini ghost rc-evidence',
+      html: `${icon('paperclip', { size: 11 })}<span>Photo</span>`,
+      title: 'Open the photograph taken with this outcome',
+      onClick: async (event) => {
+        event.stopPropagation();
+        try {
+          window.open(await rc.evidenceUrl(actual.evidence_path), '_blank', 'noopener');
+        } catch (err) {
+          toast({ tone: 'bad', message: `That photograph could not be opened — ${err.message}` });
+        }
+      },
+    }));
+  }
+
+  const by = (ctx.everybody || ctx.people || []).find((p) => p.user_id && p.user_id === actual.created_by);
+  if (by && by.id !== person?.id) {
+    out.push(el('div', { class: 'rc-hint', text: `recorded by ${by.name}` }));
+  }
+  return out;
+}
+
+/**
  * One button per status, so a whole team can be gone through at speed.
  *
  * A dropdown would be two clicks and a read; this is one click. Blocked opens a
@@ -758,46 +940,152 @@ function statusButtons(ctx, person, date, plannedEntry, redraw) {
         ? 'Programme health — never counted against the individual'
         : 'Counts toward individual efficiency')
         + `  ·  press ${status.key} with this row selected`,
-      onClick: async () => {
+      onClick: () => {
         if (status.id === 'blocked') {
           blockedDialog(ctx, person, date, plannedEntry, redraw);
           return;
         }
-        const chainId = status.id === 'carried' ? carryChainFor(plannedEntry) : null;
-        const entry = {
-          clientUuid: newUuid(),
-          personId: person.id,
-          date,
-          status: status.id,
-          categoryId: plannedEntry?.category_id || null,
-          locationId: plannedEntry?.location_id || null,
-          planEntryId: plannedEntry?.id || null,
-          carryChainId: chainId,
-        };
-        const { sent, error } = await record(entry);
-        if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
-
-        /* A carried task is going to be done tomorrow, and re-typing it is
-           both slow and how the chain used to get broken. Rolling it forward
-           here is the only place that knows both the outcome and the entry it
-           came from. */
-        if (chainId && plannedEntry && !ctx.planFor(person.id, ctx.plan)) {
-          try {
-            await rollForward(plannedEntry, person, ctx.plan, chainId);
-            notifyChanged('plan');
-            clear(ctx.root);
-            render(ctx.root);
-            return;
-          } catch (err) {
-            toast({ tone: 'warn', message: `Recorded, but tomorrow was not set — ${err.message}` });
-          }
+        /* A finished task has nothing left to say about it, so it stays one
+           click. Anything else does — "partial" with no note is a number
+           nobody can act on in the morning — so the buttons give way to a
+           line asking for it, pre-filled with the plan so it is an edit
+           rather than a retype. */
+        if (status.id === 'completed') {
+          commitOutcome({ ctx, person, date, plannedEntry, status, redraw });
+          return;
         }
-        notifyChanged('actuals');
-        redraw();
+        clear(wrap);
+        wrap.appendChild(sayMore({ ctx, person, date, plannedEntry, status, redraw, host: wrap }));
       },
     }));
   }
   return wrap;
+}
+
+/**
+ * The line between pressing a status and it being recorded.
+ *
+ * Two things go on it: what is left of the task, pre-filled with the plan
+ * text, and a photograph. Neither is required and neither can lose the
+ * outcome — pressing the status *was* the record, so every way out of here
+ * writes it, including Escape and walking away to the next person. What
+ * changes is only whether anything was said with it.
+ *
+ * That is the opposite of a dialog, deliberately. A dialog somebody dismisses
+ * loses the answer, and the one thing this meeting cannot afford is an outcome
+ * that looks recorded and is not.
+ */
+function sayMore({ ctx, person, date, plannedEntry, status, redraw, host }) {
+  const strip = el('div', { class: 'rc-saymore' });
+  let done = false;
+
+  const note = textInput({
+    value: status.id === 'carried' || status.id === 'partial' ? (plannedEntry?.task || '') : '',
+    placeholder: status.id === 'reassigned' ? 'What they did instead' : 'What is left',
+  });
+  const photo = el('input', {
+    type: 'file',
+    accept: 'image/*',
+    // Opens the camera on a phone rather than the file browser, which is the
+    // device this meeting is actually run from.
+    capture: 'environment',
+    class: 'rc-saymore-photo',
+    'aria-label': 'Attach a photograph',
+  });
+
+  const commit = () => {
+    if (done) return;
+    done = true;
+    commitOutcome({
+      ctx, person, date, plannedEntry, status, redraw,
+      note: note.value.trim() || null,
+      file: photo.files?.[0] || null,
+    });
+  };
+
+  strip.appendChild(el('span', { class: 'rc-eyebrow', text: status.label }));
+  strip.appendChild(note);
+  strip.appendChild(el('label', { class: 'cx-btn mini ghost rc-saymore-clip', title: 'Attach a photograph' }, [
+    el('span', { html: icon('paperclip', { size: 12 }) }),
+    photo,
+  ]));
+  strip.appendChild(el('button', { class: 'cx-btn mini primary', text: 'Record', onClick: commit }));
+
+  strip.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === 'Escape') note.value = '';
+      commit();
+    }
+  });
+  // Moving on records it. Somebody who presses "partial" and goes straight to
+  // the next person has answered the question; the note was the optional part.
+  strip.addEventListener('focusout', (event) => {
+    if (!strip.contains(event.relatedTarget)) commit();
+  });
+
+  setTimeout(() => {
+    note.focus();
+    note.setSelectionRange(note.value.length, note.value.length);
+  }, 0);
+  if (host) host.classList.add('rc-saymore-host');
+  return strip;
+}
+
+/**
+ * Write one outcome, and the photograph that goes with it.
+ *
+ * The picture goes up *first*, under the uuid the row is about to carry:
+ * `rc_actuals` has no UPDATE grant, so a path attached afterwards would need a
+ * second row superseding the first. An upload that fails is said out loud and
+ * the outcome is still recorded — losing what somebody said because a
+ * photograph did not upload would be the wrong way round.
+ */
+async function commitOutcome({ ctx, person, date, plannedEntry, status, redraw, note = null, file = null }) {
+  const clientUuid = newUuid();
+  const chainId = status.id === 'carried' ? carryChainFor(plannedEntry) : null;
+
+  let evidencePath = null;
+  if (file) {
+    const ext = (file.name.match(/\.([a-z0-9]+)$/i)?.[1] || 'jpg').toLowerCase();
+    try {
+      evidencePath = await rc.uploadEvidence(`${clientUuid}.${ext}`, file);
+    } catch (err) {
+      toast({ tone: 'warn', message: `The outcome is recorded; the photograph is not — ${err.message}` });
+    }
+  }
+
+  const { sent, error } = await record({
+    clientUuid,
+    personId: person.id,
+    date,
+    status: status.id,
+    note,
+    categoryId: plannedEntry?.category_id || null,
+    locationId: plannedEntry?.location_id || null,
+    planEntryId: plannedEntry?.id || null,
+    carryChainId: chainId,
+    evidencePath,
+  });
+  if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
+
+  /* A carried task is going to be done tomorrow, and re-typing it is both slow
+     and how the chain used to get broken. Rolling it forward here is the only
+     place that knows both the outcome and the entry it came from. */
+  if (chainId && plannedEntry && !ctx.planFor(person.id, ctx.plan)) {
+    try {
+      await rollForward(plannedEntry, person, ctx.plan, chainId);
+      notifyChanged('plan');
+      clear(ctx.root);
+      render(ctx.root);
+      return;
+    } catch (err) {
+      toast({ tone: 'warn', message: `Recorded, but tomorrow was not set — ${err.message}` });
+    }
+  }
+  notifyChanged('actuals');
+  redraw();
 }
 
 /**
@@ -876,6 +1164,13 @@ function blockedDialog(ctx, person, date, plannedEntry, redraw) {
     })
     : null;
 
+  /* A photograph of what stopped it. The single most useful thing in the file
+     a year later, and the moment it can be taken is now — the same upload path
+     an outcome uses, so there is one bucket and one rule. */
+  const photo = el('input', {
+    type: 'file', accept: 'image/*', capture: 'environment', class: 'cx-input',
+  });
+
   formModal({
     title: `${person.name} — blocked`,
     body: el('div', { class: 'cx-form' }, [
@@ -895,6 +1190,10 @@ function blockedDialog(ctx, person, date, plannedEntry, redraw) {
         el('div', { class: 'cx-hint', text: 'It stays on the huddle until somebody closes it.' }),
       ]),
       el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Expected by' }), due]),
+      el('div', { class: 'cx-field' }, [
+        el('label', { class: 'cx-label', text: 'Photograph' }), photo,
+        el('div', { class: 'cx-hint', text: 'Optional. It is what the reason will rest on later.' }),
+      ]),
       laRow
         ? el('div', { class: 'cx-field' }, [
           el('label', { class: 'cx-label', text: 'Against which look-ahead row' }),
@@ -910,8 +1209,23 @@ function blockedDialog(ctx, person, date, plannedEntry, redraw) {
     confirmLabel: 'Record',
     onConfirm: async () => {
       if (!reason.value.trim()) throw new Error('A reason is needed.');
+      const clientUuid = newUuid();
+
+      // Before the row, under the uuid it is about to carry: the table has no
+      // UPDATE grant, so a path attached afterwards would need a second row.
+      let evidencePath = null;
+      const file = photo.files?.[0] || null;
+      if (file) {
+        const ext = (file.name.match(/\.([a-z0-9]+)$/i)?.[1] || 'jpg').toLowerCase();
+        try {
+          evidencePath = await rc.uploadEvidence(`${clientUuid}.${ext}`, file);
+        } catch (err) {
+          toast({ tone: 'warn', message: `The block is recorded; the photograph is not — ${err.message}` });
+        }
+      }
+
       const entry = {
-        clientUuid: newUuid(),
+        clientUuid,
         personId: person.id,
         date,
         status: 'blocked',
@@ -921,6 +1235,7 @@ function blockedDialog(ctx, person, date, plannedEntry, redraw) {
         blockedReason: reason.value.trim(),
         blockedPartyId: party.value,
         lookaheadRowId: laRow?.value || null,
+        evidencePath,
       };
       const { sent, error } = await record(entry);
       if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });

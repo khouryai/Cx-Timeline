@@ -24,5 +24,9 @@ drop view if exists public.rc_effort cascade;
 
 alter table public.rc_plan_entries drop column if exists carry_chain_id;
 alter table public.rc_actuals      drop column if exists lookahead_row_id;
+alter table public.rc_actuals      drop column if exists evidence_path;
+drop table if exists public.rc_blockers cascade;
 drop function if exists public.rc_record_actual(
   uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid);
+drop function if exists public.rc_record_actual(
+  uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text);

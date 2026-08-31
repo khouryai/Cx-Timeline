@@ -73,6 +73,13 @@ alter table public.rc_actuals
   add column if not exists lookahead_row_id uuid
   references public.rc_lookahead_rows(id) on delete set null;
 
+-- ── A photograph of what was said ─────────────────────────────────────────
+-- Keyed on the client uuid rather than the row's own id: this table has no
+-- UPDATE grant, so the picture goes up first under a name generated on the
+-- client and the row is written knowing where it is.
+alter table public.rc_actuals
+  add column if not exists evidence_path text;
+
 -- ── A blocked day now has an owner, a date and an end ─────────────────────
 -- Created by `rc_schema.sql`; nothing to alter here, since both tables are new.
 -- Listed so the verification below can say whether they arrived.
@@ -140,6 +147,12 @@ drop function if exists public.rc_invite(text, text, uuid, text);
 -- look-ahead row it was blocked against.
 drop function if exists public.rc_record_actual(
   uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text);
+-- …and again for the signature in between, which named the look-ahead row but
+-- not the photograph. Every version has to be listed: `drop function` matches
+-- on the argument list, so missing one leaves an overload behind and PostgREST
+-- then cannot tell which of them a call meant.
+drop function if exists public.rc_record_actual(
+  uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid);
 drop function if exists public.rc_list_invitations();
 drop function if exists public.rc_revoke_invitation(text);
 drop function if exists public.rc_link_account(uuid, text);
@@ -188,6 +201,13 @@ select 'rc_actuals.lookahead_row_id',
          select 1 from information_schema.columns
           where table_schema = 'public' and table_name = 'rc_actuals'
             and column_name = 'lookahead_row_id'
+       ) then 'ok' else 'MISSING' end
+union all
+select 'rc_actuals.evidence_path',
+       case when exists (
+         select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'rc_actuals'
+            and column_name = 'evidence_path'
        ) then 'ok' else 'MISSING' end
 union all
 select 'rc_blockers',

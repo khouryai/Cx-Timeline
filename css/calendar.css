@@ -526,6 +526,42 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   .rc-blocker-main { flex-basis: 100%; }
 }
 
+/* ── Saying what is left, on the way to recording it ─────────────────────
+   The strip that replaces the status buttons for anything but a completed
+   task. It has to fit where the buttons were — a table cell in one place and
+   a presenter panel in the other — so it wraps rather than fixing a width. */
+.rc-saymore {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.rc-saymore .cx-input { min-width: 140px; flex: 1 1 160px; }
+.rc-saymore-clip {
+  position: relative;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+/* The real control, kept where a click and a screen reader both find it and
+   the eye does not. `display: none` would take it out of the tab order. */
+.rc-saymore-photo {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.rc-saymore-clip:has(.rc-saymore-photo:focus-visible) { outline: 2px solid var(--accent); }
+
+/* A photograph that was attached, on the outcome it belongs to. */
+.rc-evidence {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 3px;
+}
+
 /* ── The meeting, run rather than filled in ──────────────────────────────
    One person, in focus, readable from the other side of a table. Everything
    here is sized for the room rather than for the person holding the keyboard —

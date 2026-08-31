@@ -451,6 +451,16 @@ create table if not exists public.rc_actuals (
    * reason it is everywhere else in this module.
    */
   lookahead_row_id uuid references public.rc_lookahead_rows(id) on delete set null,
+  /*
+   * A photograph of what was said, in the `evidence` bucket.
+   *
+   * Keyed on `client_uuid` rather than on the row's own id, because the row
+   * has no id until it is inserted and this table has no UPDATE grant — so the
+   * picture goes up *first*, under a name generated on the client, and the row
+   * is written knowing where it is. An upload that fails simply leaves this
+   * null; the outcome is still recorded, which is the right way round.
+   */
+  evidence_path  text,
   -- A task carried five days is one stuck item, not five failures by one
   -- person. The chain groups them so the reports count it once, and rank it
   -- by age — which is the more useful number anyway.
@@ -1245,7 +1255,8 @@ create or replace function public.rc_record_actual(
   p_carry_chain uuid default null,
   p_plan_entry  uuid default null,
   p_shift       text default 'day',
-  p_lookahead_row uuid default null
+  p_lookahead_row uuid default null,
+  p_evidence    text default null
 )
 returns uuid
 language plpgsql
@@ -1275,11 +1286,11 @@ begin
   insert into public.rc_actuals
     (client_uuid, plan_entry_id, person_id, work_date, shift, status, category_id,
      location_id, note, blocked_reason, blocked_party_id, carry_chain_id,
-     lookahead_row_id, created_by)
+     lookahead_row_id, evidence_path, created_by)
   values
     (p_client_uuid, p_plan_entry, p_person, p_date, p_shift, p_status, p_category,
      p_location, p_note, p_blocked_reason, p_blocked_party, p_carry_chain,
-     p_lookahead_row, auth.uid())
+     p_lookahead_row, p_evidence, auth.uid())
   returning id into new_id;
 
   return new_id;
@@ -1322,7 +1333,7 @@ revoke all on function public.rc_link_account(uuid, text)               from pub
 revoke all on function public.rc_set_role(uuid, text)                   from public, anon;
 revoke all on function public.rc_resolve_location(text)                 from public, anon;
 revoke all on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) from public, anon;
-revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid) from public, anon;
+revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text) from public, anon;
 
 grant execute on function public.rc_me()                                to authenticated;
 grant execute on function public.rc_is_admin()                          to authenticated;
@@ -1335,7 +1346,7 @@ grant execute on function public.rc_link_account(uuid, text)            to authe
 grant execute on function public.rc_set_role(uuid, text)                to authenticated;
 grant execute on function public.rc_resolve_location(text)              to authenticated;
 grant execute on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) to authenticated;
-grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid) to authenticated;
+grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text) to authenticated;
 
 do $$
 declare t text;
@@ -1374,6 +1385,55 @@ revoke all on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
               public.rc_rows_without_sar, public.rc_sars_without_rows from public, anon;
 grant select on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
                 public.rc_rows_without_sar, public.rc_sars_without_rows to authenticated;
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- Storage: the two things that are files
+--
+-- A SAR is a PDF somebody else wrote and a piece of evidence is a photograph;
+-- neither is data this schema could hold, and both have to open in a browser a
+-- year later. Everything else stays in tables.
+--
+-- Both buckets are private. The `sars` one was reached by the application
+-- before this block existed, which meant a new project worked until the first
+-- upload and then failed with "bucket not found" — creating it by hand is the
+-- kind of step that is remembered once.
+--
+-- `evidence` is readable by anybody signed in and writable by anybody signed
+-- in, and that is deliberate rather than lax: a photograph is attached to an
+-- outcome, the outcome row is what the permission model guards, and a picture
+-- nobody but its author can see is not evidence. There is no delete policy at
+-- all, for the same reason `rc_actuals` has no DELETE grant.
+-- ══════════════════════════════════════════════════════════════════════════
+
+insert into storage.buckets (id, name, public)
+values ('sars', 'sars', false), ('evidence', 'evidence', false)
+on conflict (id) do nothing;
+
+drop policy if exists rc_sars_files_read on storage.objects;
+create policy rc_sars_files_read on storage.objects
+  for select to authenticated
+  using (bucket_id = 'sars' and public.rc_is_admin());
+
+drop policy if exists rc_sars_files_write on storage.objects;
+create policy rc_sars_files_write on storage.objects
+  for insert to authenticated
+  with check (bucket_id = 'sars' and public.rc_is_admin());
+
+drop policy if exists rc_sars_files_move on storage.objects;
+create policy rc_sars_files_move on storage.objects
+  for update to authenticated
+  using (bucket_id = 'sars' and public.rc_is_admin())
+  with check (bucket_id = 'sars' and public.rc_is_admin());
+
+drop policy if exists rc_evidence_read on storage.objects;
+create policy rc_evidence_read on storage.objects
+  for select to authenticated
+  using (bucket_id = 'evidence');
+
+drop policy if exists rc_evidence_write on storage.objects;
+create policy rc_evidence_write on storage.objects
+  for insert to authenticated
+  with check (bucket_id = 'evidence' and coalesce(public.rc_my_role(), '') <> 'viewer');
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Seed vocabularies

@@ -455,10 +455,16 @@ function fakeSdk() {
               status: args.p_status,
               category_id: args.p_category,
               location_id: args.p_location,
+              note: args.p_note || null,
               blocked_reason: args.p_blocked_reason,
               blocked_party_id: args.p_blocked_party,
               carry_chain_id: args.p_carry_chain,
+              plan_entry_id: args.p_plan_entry || null,
               lookahead_row_id: args.p_lookahead_row || null,
+              evidence_path: args.p_evidence || null,
+              // The function fills this from `auth.uid()`, and who typed an
+              // outcome in is a different fact from whose outcome it is.
+              created_by: S.signedIn ? USER.id : null,
             };
             S.rows.rc_actuals.push(row);
             return Promise.resolve({ data: row.id, error: null });
@@ -524,7 +530,9 @@ function fakeSdk() {
           from: (bucket) => ({
             upload: (path_, blob) => {
               S.calls.push({ kind: 'upload', table: bucket, payload: { path: path_, size: blob?.size || 0 } });
-              (S.uploads = S.uploads || []).push(path_);
+              // Bucket and path, because two buckets are written to now and
+              // "one upload happened" stopped being a useful thing to know.
+              (S.uploads = S.uploads || []).push(`${bucket}/${path_}`);
               return Promise.resolve({ error: null });
             },
             createSignedUrl: (path_) =>
@@ -874,6 +882,16 @@ async function main() {
   console.log('\nCarrying a task over');
   const carryRow = page.locator('#rc-frame tbody tr', { hasText: 'Cable pull at TPSS 12' });
   await carryRow.locator('button', { hasText: 'Carried over' }).click();
+  await page.waitForTimeout(400);
+
+  /* Anything but a completed task asks what is left of it, pre-filled with the
+     plan so it is an edit rather than a retype. "Partial" with nothing said is
+     a number nobody can act on the next morning. */
+  const said = carryRow.locator('.rc-saymore input[type="text"]');
+  check('it asks what is left, pre-filled with the plan rather than blank',
+    (await said.inputValue()) === 'Cable pull at TPSS 12', await said.inputValue());
+  await said.fill('Cable pull at TPSS 12 — north end still to pull');
+  await said.press('Enter');
   await page.waitForTimeout(600);
 
   const carried = await page.evaluate(() => ({
@@ -888,6 +906,15 @@ async function main() {
     carried.rolled.some((p) => p.carry_chain_id === carried.actual?.carry_chain_id));
   check('and the location and category come with it',
     carried.rolled.every((p) => p.location_id === 'l1' && p.category_id === 'c1'));
+  /* Most days somebody speaks and somebody else types. An outcome attributed
+     to whoever entered it is how a record stops being trusted, so the two are
+     shown apart — and only where they differ, which is the only case anybody
+     wonders about. */
+  check('and it says who typed it in, since that is rarely who said it',
+    /recorded by Alex/.test(await page.locator('#rc-frame tbody').innerText()),
+    (await page.locator('#rc-frame tbody').innerText()).split('\n').find((l) => /recorded by/.test(l)) || '(nobody)');
+  check('and what is left of it is on the outcome, in the words it was said in',
+    /north end still to pull/.test(carried.actual?.note || ''), carried.actual?.note || '(none)');
 
   // The whole meeting from the keyboard: arrows down the team, one letter per
   // outcome. Fifteen people at a fixed time is a lot of clicking otherwise.
@@ -930,6 +957,13 @@ async function main() {
   const chaser = page.locator('.cx-modal select', { has: page.locator('option[value="p1"]') });
   if (await chaser.count()) await chaser.selectOption('p1');
   await page.locator('.cx-modal input[type="date"]').fill('2026-12-01');
+  /* A photograph of what stopped it — the single most useful thing in the file
+     a year later, and this is the one moment it can be taken. It goes up
+     *before* the row, under the uuid the row is about to carry, because the
+     table has no UPDATE grant. */
+  await page.locator('.cx-modal input[type="file"]').setInputFiles({
+    name: 'possession.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('not really a jpeg'),
+  });
   await page.locator('.cx-modal button', { hasText: 'Record' }).click();
   await page.waitForTimeout(600);
   check('with a reason and a party it goes through',
@@ -948,6 +982,17 @@ async function main() {
     await page.evaluate(() => window.__rc.rows.rc_blocker_updates
       .some((u) => u.owner_id === 'p1' && u.due_date === '2026-12-01')));
 
+  const blocked = await page.evaluate(() =>
+    window.__rc.rows.rc_actuals.find((a) => a.status === 'blocked') || {});
+  check('and the photograph taken with it is on the outcome',
+    /^[0-9a-f-]{36}\.jpg$/.test(blocked.evidence_path || ''), blocked.evidence_path || '(none)');
+  check('under the uuid the row itself carries, because the row cannot be edited later',
+    (blocked.evidence_path || '').startsWith(blocked.client_uuid || 'x'));
+  check('and it went to the evidence bucket, not to the SAR one',
+    await page.evaluate(() => window.__rc.calls.some((c) => c.kind === 'upload' && c.table === 'evidence')));
+  check('the meeting offers it back rather than mentioning it',
+    (await page.locator('#rc-frame .rc-evidence').count()) >= 1);
+
   check('and it can be recorded against the look-ahead row it belongs to',
     await page.evaluate(() => window.__rc.rows.rc_actuals.some((a) => a.lookahead_row_id === 'lar1')),
     'lookahead_row_id');
@@ -957,6 +1002,12 @@ async function main() {
   await page.evaluate(() => { window.__rc.offline = true; });
   const before = await page.evaluate(() => window.__rc.rows.rc_actuals.length);
   await page.locator('#rc-frame tbody button', { hasText: 'Partial' }).first().click();
+  await page.waitForTimeout(300);
+  // Through the strip, because that is now the way a partial day is recorded —
+  // and the queue has to hold what was said, not just that something happened.
+  await page.locator('#rc-frame .rc-saymore input[type="text"]').first()
+    .fill('Half the loops proved');
+  await page.locator('#rc-frame .rc-saymore input[type="text"]').first().press('Enter');
   await page.waitForTimeout(400);
 
   check('an outcome entered with no connection is not lost',
@@ -978,6 +1029,59 @@ async function main() {
     await page.evaluate(() => JSON.parse(localStorage.getItem('cxrc.queue') || '[]').length === 0));
   check('and the entry arrives exactly once', await page.evaluate(
     (n) => window.__rc.rows.rc_actuals.length === n + 1, before));
+  check('carrying what was said with it, rather than only that something happened',
+    await page.evaluate(() =>
+      window.__rc.rows.rc_actuals.some((a) => a.note === 'Half the loops proved')));
+
+  /* ── The meeting, written down ────────────────────────────────────────
+     A huddle answers three questions and then evaporates. The people who most
+     need the answers are the ones who were not in the room. */
+  console.log('\nWhat the room decided, for the people who were not in it');
+  await page.locator('#rc-frame button', { hasText: 'Digest' }).click();
+  await page.waitForSelector('.cx-modal textarea');
+  const digest = await page.locator('.cx-modal textarea').inputValue();
+
+  check('it answers the three questions the meeting asks',
+    /What happened/.test(digest) && /What is next/.test(digest) && /What is in the way/.test(digest),
+    digest.split('\n').filter((l) => /^What/.test(l)).join(' / '));
+  check('with what people actually said, not just that they said something',
+    /north end still to pull/.test(digest),
+    digest.split('\n').find((l) => /north end/.test(l)) || '(nothing)');
+  check('the blocker is on it, with who is chasing it',
+    /Possession released late/.test(digest) && /Alex chasing/.test(digest));
+  /* It carries no rate and no score. The moment a digest puts a percentage
+     against somebody's name it stops being a summary and becomes a review —
+     and it is pasted into a channel the whole project reads. */
+  check('and no rate or score against anybody, because this gets forwarded',
+    !/%|efficiency|completion rate/i.test(digest));
+
+  await page.locator('.cx-modal button', { hasText: 'Copy it' }).click();
+  await page.waitForTimeout(300);
+  check('it copies as text somebody can paste wherever the team talks',
+    await page.evaluate(() => /What is in the way/.test(window.__clip || '')));
+  await page.locator('.cx-modal button', { hasText: 'Save it' }).click();
+  await page.waitForTimeout(300);
+  check('and saves beside the week\'s evidence, announcing itself like every other export',
+    await page.evaluate(() => /^huddle-\d{4}-\d{2}-\d{2}\.txt$/.test(window.__saved?.name || '')),
+    await page.evaluate(() => window.__saved?.name || '(nothing saved)'));
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Done' }).click();
+  await page.waitForTimeout(300);
+
+  /* A day nobody has filled in yet. Somebody missing from a digest reads as
+     somebody who had a quiet day, which is how a gap in the record becomes a
+     claim that everything went fine — so silence is named. */
+  await page.locator('#rc-frame button[aria-label="Next day"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('#rc-frame button', { hasText: 'Digest' }).click();
+  await page.waitForSelector('.cx-modal textarea');
+  const quiet = await page.locator('.cx-modal textarea').inputValue();
+  check('and names whoever nothing was recorded for, rather than leaving a gap',
+    /nothing recorded for/.test(quiet),
+    quiet.split('\n').find((l) => /nothing recorded/.test(l)) || '(nobody)');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Done' }).click();
+  await page.waitForTimeout(200);
+  await page.locator('#rc-frame button', { hasText: 'Today' }).click();
+  await page.waitForTimeout(400);
 
   /* ── The week plan ────────────────────────────────────────────────────── */
   console.log('\nThe week plan');
@@ -1381,7 +1485,8 @@ async function main() {
   check('the SAR is recorded',
     await page.evaluate(() => window.__rc.rows.rc_sars.some((x) => x.sar_number === 'SAR-90210')));
   check('the PDF goes up so it can be opened by whoever is asked about it later',
-    await page.evaluate(() => (window.__rc.uploads || []).length === 1),
+    await page.evaluate(() =>
+      (window.__rc.uploads || []).filter((u) => u.startsWith('sars/')).length === 1),
     JSON.stringify(await page.evaluate(() => window.__rc.uploads || [])));
   check('and it is filed out of the inbox, under the week it authorised',
     await page.evaluate(() => {
@@ -1489,8 +1594,9 @@ async function main() {
     planTables.map((c) => c.table).join(', ') || 'none');
 
   const buckets = [...new Set(calls.filter((c) => c.kind === 'upload').map((c) => c.table))];
-  check('and the only thing uploaded went to the calendar\'s own bucket',
-    buckets.every((b) => b === 'sars'), buckets.join(', ') || 'nothing uploaded');
+  check('and the only things uploaded went to the calendar\'s own buckets',
+    buckets.every((b) => b === 'sars' || b === 'evidence'),
+    buckets.join(', ') || 'nothing uploaded');
 
   const leaked = calls.filter((c) => PLAN_WORDS.some((w) => (c.payload || '').includes(w)));
   check('no call carried anything out of the plan',

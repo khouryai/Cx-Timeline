@@ -292,6 +292,50 @@ select assert(
   'a properly attributed block is accepted');
 
 -- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'A photograph of what was said'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+-- The picture goes up before the row, under a name generated on the client,
+-- because this table has no UPDATE grant and so the path cannot be attached
+-- afterwards.
+select act_as(:'carol');
+insert into storage.objects (bucket_id, name)
+  values ('evidence', '44444444-4444-4444-4444-444444444444.jpg');
+select public.rc_record_actual(
+  '44444444-4444-4444-4444-444444444444'::uuid, :'p_carol', date '2026-09-08',
+  'partial', :'cat_field', :'loc12', 'North end left to pull', null, null,
+  null, null, 'day', null, 'evidence/44444444-4444-4444-4444-444444444444.jpg') as act_ev \gset
+select assert(
+  (select evidence_path from public.rc_actuals where id = :'act_ev')
+    = 'evidence/44444444-4444-4444-4444-444444444444.jpg',
+  'an outcome can carry the photograph taken with it');
+select assert(
+  (select note from public.rc_actuals where id = :'act_ev') = 'North end left to pull',
+  'and what is left of the task, in the words somebody said it in');
+
+-- Anybody signed in can see it: a picture only its author can open is not
+-- evidence of anything.
+select act_as(:'dave');
+select assert(
+  (select count(*) from storage.objects where bucket_id = 'evidence') = 1,
+  'a viewer can open the evidence attached to an outcome');
+select refuses(:'dave',
+  $q$insert into storage.objects (bucket_id, name) values ('evidence', 'forged.jpg')$q$,
+  'a viewer uploading evidence of their own');
+
+-- And the SAR bucket stays what it was: the deputy's, not the team's.
+select refuses(:'carol',
+  $q$insert into storage.objects (bucket_id, name) values ('sars', 'SAR-1.pdf')$q$,
+  'a member uploading a SAR');
+select act_as(:'alice');
+insert into storage.objects (bucket_id, name) values ('sars', 'inbox/SAR-1.pdf');
+select assert((select count(*) from storage.objects where bucket_id = 'sars') = 1,
+  'an administrator files one');
+select act_as(:'carol');
+select assert((select count(*) from storage.objects where bucket_id = 'sars') = 0,
+  'and a member cannot read it');
+
+-- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice 'One stuck task is one event, not five'; end $$;
 -- ══════════════════════════════════════════════════════════════════════════
 
@@ -320,7 +364,7 @@ do $$ begin raise notice 'KPI history is administrators only'; end $$;
 -- ══════════════════════════════════════════════════════════════════════════
 
 select act_as(:'alice');
-select assert((select count(*) from public.rc_effort) = 6,
+select assert((select count(*) from public.rc_effort) = 7,
   'an administrator sees the effort history');
 select assert(
   (select signal from public.rc_effort where id = :'act3') = 'health',
@@ -334,7 +378,7 @@ select assert(
 select act_as(:'carol');
 select assert((select count(*) from public.rc_effort) = 0,
   'a member sees none of it, even reading the view directly');
-select assert((select count(*) from public.rc_actuals) = 6,
+select assert((select count(*) from public.rc_actuals) = 7,
   'though the raw outcomes are open — the huddle happens in front of everyone');
 
 -- ══════════════════════════════════════════════════════════════════════════
@@ -464,7 +508,7 @@ select assert((select count(*) from public.rc_leave) = 1,
   'and who is on leave');
 select assert((select count(*) from public.rc_plan_current) = 1,
   'and the current plan');
-select assert((select count(*) from public.rc_actuals) = 6,
+select assert((select count(*) from public.rc_actuals) = 7,
   'and what actually happened');
 
 -- Everything a read-only account must not be able to do. Note the second one:
@@ -517,7 +561,7 @@ select assert(public.rc_my_role() = 'member', 'they are a member now');
 select assert(public.rc_can_act_for(:'p_dave'), 'and may record their own outcome');
 select public.rc_record_actual(
   '55555555-5555-5555-5555-555555555555'::uuid, :'p_dave', date '2026-09-08', 'completed');
-select assert((select count(*) from public.rc_actuals) = 7, 'which goes through');
+select assert((select count(*) from public.rc_actuals) = 8, 'which goes through');
 
 -- But only their own, and still not the plan: setting next week's tasks stays
 -- with an administrator, because the supersede chain assumes one author.

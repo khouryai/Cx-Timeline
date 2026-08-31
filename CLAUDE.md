@@ -345,6 +345,43 @@ subscribes. That is what keeps the graph acyclic.
   `CX_SHELL.confirmHealthy()`**: a module that needs a network in front of the
   desktop trial gate would make an unreachable backend look exactly like a
   broken update and get itself rolled back.
+- **The meeting can be run rather than filled in, and both are one path.**
+  The table is a form for whoever holds the keyboard; presenter mode
+  (`presenter()` in `ui/rc_huddle.js`) is the same day drawn for the room — one
+  person, the question asked in the words somebody would use, a context strip
+  of what the room needs rather than what the person needs. It opens on the
+  first person still to answer, and every write goes through `statusButtons()`,
+  so there is one recording path and not two that can disagree on screen. The
+  table, the meeting and the digest are handed *one* `ctx` for the same reason.
+- **Pressing a status is the record; the line that follows is the detail.**
+  A completed task stays one click — there is nothing left to say about it —
+  and everything else gives way to `sayMore()`: what is left, pre-filled with
+  the plan text so it is an edit rather than a retype, and a photograph. Every
+  way out of that strip writes the outcome, Escape and walking away to the next
+  person included. That is the opposite of a dialog, deliberately: the one
+  thing a huddle cannot afford is an outcome that looks recorded and is not.
+- **A photograph goes up before the row, never after.** `rc_actuals` has no
+  UPDATE grant, so a path attached afterwards would need a second row
+  superseding the first. The picture is uploaded under the `client_uuid` the
+  row is about to carry — which is generated on the client precisely so it
+  exists before the insert — and an upload that fails is said out loud while
+  the outcome is still recorded. Losing what somebody said because a photograph
+  did not upload would be the wrong way round. `evidence` is its own bucket,
+  readable by anybody signed in: a picture only its author can open is not
+  evidence of anything.
+- **Who said it and who typed it are different facts.** Most days somebody
+  speaks and somebody else enters it, and an outcome attributed to whoever
+  typed it is how a record stops being trusted. `outcomeDetail()` shows
+  `created_by` only where it differs from the person the outcome is about,
+  which is the only case anybody wonders about — and it is one function because
+  the table and the meeting must never read differently.
+- **The digest carries no rate and no score.** `digestText()` answers the three
+  questions a huddle asks — what happened, what is next, what is still in the
+  way — as plain text somebody pastes into whatever the project talks in, and
+  it names the people nothing was recorded for rather than leaving a gap. KPIs
+  are a different audience and a different permission; the moment a digest puts
+  a percentage against a name it stops being a summary and becomes a review, in
+  a channel the whole project reads.
 - **A carry chain has to survive being rolled forward.** The chain is keyed on
   the plan entry a carry came from, and carrying a task into tomorrow makes a
   *new* entry — so without `rc_plan_entries.carry_chain_id` the next carry
@@ -644,20 +681,20 @@ subscribes. That is what keeps the graph acyclic.
 ```bash
 npm run build                        # must succeed — it also lints the module graph
 npm test                             # all five browser suites plus the SQL one, must exit 0
-npm run test:rust                    #  32 checks — the plan, lock and intake rules, in Rust
+npm run test:rust                    #  33 checks — the plan, lock and intake rules, in Rust
 
 node tools/test_dist.js              #  30 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  57 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
-node tools/smoke_calendar.js         # 149 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 172 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 237 checks — both permission models, and that
+node tools/test_sql.js               # 244 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result

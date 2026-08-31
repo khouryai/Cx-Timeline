@@ -602,7 +602,7 @@ export const recordActual = ({
   categoryId = null, locationId = null, note = null,
   blockedReason = null, blockedPartyId = null,
   carryChainId = null, planEntryId = null, shift = 'day',
-  lookaheadRowId = null,
+  lookaheadRowId = null, evidencePath = null,
 }) =>
   rpc('rc_record_actual', {
     p_client_uuid: clientUuid,
@@ -618,6 +618,7 @@ export const recordActual = ({
     p_plan_entry: planEntryId,
     p_shift: shift,
     p_lookahead_row: lookaheadRowId,
+    p_evidence: evidencePath,
   });
 
 export const resolveLocation = (raw) => rpc('rc_resolve_location', { p_raw: raw });
@@ -710,6 +711,35 @@ export async function uploadSar(path, blob) {
   });
   if (error) throw new Error(`upload: ${error.message}`);
   return path;
+}
+
+/**
+ * Upload the photograph taken with an outcome.
+ *
+ * Before the row, never after: `rc_actuals` has no UPDATE grant, so a path
+ * attached afterwards would need a second row superseding the first. The name
+ * is the client uuid the outcome is about to be written with, which is
+ * generated on the client precisely so it exists before the insert does.
+ *
+ * A failure here is not a failure of the meeting. The caller records the
+ * outcome either way and says the picture did not go up — losing what somebody
+ * said because a photograph did not upload would be the wrong way round.
+ */
+export async function uploadEvidence(path, blob) {
+  requireClient();
+  const { error } = await client.storage.from('evidence').upload(path, blob, {
+    upsert: false,
+    contentType: blob?.type || 'image/jpeg',
+  });
+  if (error) throw new Error(`upload: ${error.message}`);
+  return path;
+}
+
+export async function evidenceUrl(path, seconds = 3600) {
+  requireClient();
+  const { data, error } = await client.storage.from('evidence').createSignedUrl(path, seconds);
+  if (error) throw new Error(`link: ${error.message}`);
+  return data.signedUrl;
 }
 
 export async function sarUrl(path, seconds = 3600) {
