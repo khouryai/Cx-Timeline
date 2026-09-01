@@ -35,9 +35,17 @@
  * a synced folder is not a database: the lock takes as long to arrive as the
  * sync does, so two people opening within the same few seconds can both believe
  * they hold it. The lock is therefore *courtesy*, and the guard that actually
- * protects the work is `savePlan()` — the file's size and modified time are
- * checked against what we last saw, and a mismatch refuses the write. You may
- * be told to reload; you can never silently overwrite someone.
+ * protects the work is `savePlan()` — a mismatch between the plan on disk and
+ * the one we last saw refuses the write. You may be told to reload; you can
+ * never silently overwrite someone.
+ *
+ * What that guard compares is the point. The file's size and modified time say
+ * whether the *file* moved, which a sync client does routinely without any
+ * human touching the plan; the digest below says whether the *document* moved,
+ * which is the only thing worth refusing a save or interrupting somebody over.
+ * See "What `changed` means" further down: everything noisy about working
+ * alongside a colleague came from answering the first question and reporting it
+ * as the second.
  *
  * Imports: events, desktop.
  */
@@ -45,10 +53,20 @@
 import { emit, EV } from './events.js';
 import * as desktop from './desktop.js';
 
-/** How often the holder re-stamps the lock, in ms. */
-const HEARTBEAT_MS = 20000;
-/** A claim older than this is treated as abandoned — a crash, or a closed lid. */
-const STALE_MS = 75000;
+/** How often a session restates its claim, in ms. */
+const HEARTBEAT_MS = 30000;
+/**
+ * A claim older than this is treated as abandoned — a crash, or a closed lid.
+ *
+ * Four minutes, not the seventy-five seconds this started at, and the reason is
+ * the folder rather than the people: OneDrive routinely takes a minute or more
+ * to carry a small file between two machines, and a window narrower than the
+ * sync latency makes each side see the other's claim *lapse* and come back. The
+ * pen then bounces — read-only, editable, read-only — while nothing at all is
+ * wrong. Eight heartbeats of margin costs a crashed session four minutes of
+ * somebody else's patience, and `takeOver()` is there for anyone with less.
+ */
+const STALE_MS = 240000;
 /**
  * A claim file this old is deleted rather than merely ignored.
  *
@@ -57,6 +75,18 @@ const STALE_MS = 75000;
  * that went to sleep for an hour should find its turn still there.
  */
 const ABANDONED_CLAIM_MS = 6 * 3600000;
+/**
+ * How long our *own* device's claim may go unbeaten before it is our own ghost.
+ *
+ * Deliberately far shorter than `STALE_MS`, and the reason is whose file it is:
+ * a colleague's claim reaches us through OneDrive and may be minutes behind,
+ * but a claim written by this machine is read straight off this machine's disk,
+ * so a beat that is two heartbeats old means that window is gone rather than
+ * slow. Two live windows of one install then recognise each other — which is
+ * the whole point — and a crashed one still hands the plan back in about a
+ * minute rather than in four.
+ */
+const OWN_WINDOW_STALE_MS = HEARTBEAT_MS * 2 + 5000;
 /**
  * An editor who has saved nothing for this long hands the pen back.
  *
@@ -67,6 +97,15 @@ const ABANDONED_CLAIM_MS = 6 * 3600000;
 const IDLE_RELEASE_MS = 3600000;
 /** How often we look for someone else's save landing in the folder. */
 const POLL_MS = 12000;
+/**
+ * How many polls apart the claims are re-read.
+ *
+ * Settling the pen lists the folder and reads every claim in it, which is real
+ * I/O against a synced drive; doing it every twelve seconds was most of this
+ * module's traffic and bought nothing — a claim only matters within `STALE_MS`,
+ * and that is now eight times this interval.
+ */
+const SETTLE_EVERY = 2;
 /** Where a browser remembers its folder handle. Desktop uses its own settings. */
 const DB_NAME = 'cx-timeline-folder';
 const DB_STORE = 'handles';
@@ -79,8 +118,34 @@ let folderRef = null;
 /** What to call the folder in the interface. */
 let folderName = '';
 let planName = '';
-/** Size and modified time of the plan as we last saw it — the write guard. */
+/**
+ * The plan as we last saw it: size, modified time *and* a digest of the
+ * document itself — the write guard's evidence, and the answer to "has this
+ * actually changed".
+ */
 let stamp = null;
+/**
+ * A newer version sitting in the folder, `{ hash, at }`, or null.
+ *
+ * Held rather than acted on: reloading under somebody mid-sentence is worse
+ * than telling them and letting them choose.
+ */
+let behind = null;
+/** The digest of the version we have already announced, so we say it once. */
+let announced = '';
+/** True while a save is in flight, so the poll cannot read a half-written file. */
+let saving = false;
+/**
+ * Set when another window of *this* install is the one holding the pen.
+ *
+ * Two tabs on one machine share a claim file — it is keyed on the device — so
+ * each read back a claim it recognised as its own and both concluded they were
+ * editing. They then took turns being refused by the write guard, which is
+ * exactly the stream of alerts this module is supposed to prevent. The second
+ * window now defers instead, and stops writing the claim so the first window's
+ * statement of it stands.
+ */
+let deferring = false;
 /** 'editor' when we hold the lock, 'viewer' when someone else does. */
 let role = null;
 /** Who holds the lock, when it is not us. */
@@ -187,6 +252,33 @@ async function ioReadPlan(ref, name) {
   const handle = await ref.getFileHandle(name);
   const file = await handle.getFile();
   return { text: await file.text(), stamp: { size: file.size, modified: file.lastModified } };
+}
+
+/**
+ * Size and modified time, without reading the file.
+ *
+ * The poll asks this every twelve seconds and reads the plan only when the
+ * answer has moved, which on a folder of any size is the difference between
+ * watching it and dragging it. Null when the file cannot be stat'd at all —
+ * absent, or mid-sync — which the caller treats as "ask again next time".
+ *
+ * The desktop falls back to a full read if the shell is old enough not to have
+ * the stat command: slower, never wrong.
+ */
+async function ioStatPlan(ref, name) {
+  try {
+    if (onDesktop()) {
+      try {
+        return await desktop.intakeStat(ref, name);
+      } catch {
+        return (await desktop.readPlan(ref, name)).stamp;
+      }
+    }
+    const file = await (await ref.getFileHandle(name)).getFile();
+    return { size: file.size, modified: file.lastModified };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -563,6 +655,11 @@ export function state() {
     role: role || null,
     holder,
     savedAt: stamp ? stamp.modified : null,
+    /* A newer version is sitting in the folder. Said once out loud and then
+       kept here, so the status bar can go on showing it without anybody being
+       asked twice. */
+    behind: !!behind,
+    behindAt: behind ? behind.at : null,
   };
 }
 
@@ -711,6 +808,9 @@ export async function disconnect() {
   folderName = '';
   planName = '';
   stamp = null;
+  behind = null;
+  announced = '';
+  deferring = false;
   role = null;
   holder = '';
   await ioForget();
@@ -750,7 +850,11 @@ export async function openPlan(name) {
   }
 
   planName = name;
-  stamp = read.stamp;
+  stamp = { ...read.stamp, hash: fingerprint(read.text) };
+  behind = null;
+  announced = '';
+  saving = false;
+  deferring = false;
   await ioRemember(folderRef, name);
 
   // State the claim first, then read every claim including our own and see who
@@ -761,6 +865,10 @@ export async function openPlan(name) {
   takeoverAt = 0;
   role = null;
   holder = '';
+  /* Ask before writing. The claim file is keyed on the device, so writing ours
+     is precisely what would erase another window's statement of it — and then
+     neither window could see the other at all. */
+  deferring = (await readClaims()).some(otherWindow);
   await writeClaim();
   await settlePen();
   await stampLegacyLock();
@@ -777,7 +885,10 @@ export async function createPlan(name, doc) {
   if (!folderRef) throw new Error('No folder is connected.');
   const safe = name.toLowerCase().endsWith('.json') ? name : `${name}.json`;
 
-  stamp = await ioWritePlan(folderRef, safe, serialise(doc), null);
+  const fresh = serialise(doc);
+  stamp = { ...(await ioWritePlan(folderRef, safe, fresh, null)), hash: fingerprint(fresh) };
+  behind = null;
+  announced = '';
   planName = safe;
   role = 'editor';
   holder = '';
@@ -793,23 +904,119 @@ export async function createPlan(name, doc) {
   return safe;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   What "changed" means
+
+   Size and modified time are how the filesystem answers "did this file move",
+   and for a long time this module treated that as the same question as "did the
+   plan change". On a synced folder it is not, and the difference is most of
+   what made two people working together unpleasant:
+
+     · OneDrive rewrites a file it has just uploaded or brought down. Same
+       bytes, new modified time — and the author of the save was told a
+       colleague had changed their plan underneath them.
+     · The same touch made the *next* save fail the write guard, so a legitimate
+       save was refused over a file nobody had edited.
+     · A file caught mid-sync is short and unparseable. Metadata says it moved,
+       so it was announced as a version to catch up with; it was not a version
+       at all.
+
+   So the stamp carries a digest of the *document* as well. The metadata check
+   stays — it is free, and it is what decides whether to read the file at all —
+   but nothing is announced, and no save is refused, until the content itself
+   turns out to differ. The `exported` block is left out of the digest because
+   it carries the time of the save: including it would make every re-save of an
+   identical plan look like a change, which is the very thing this is for.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * A digest of the plan in `text`, or null if it is not a readable plan.
+ *
+ * Null is a real answer and the callers depend on it: a half-written file is
+ * not a version to announce, not a conflict to refuse over, and not something
+ * to overwrite the stamp with. It means "ask again next time".
+ */
+function fingerprint(text) {
+  if (typeof text !== 'string' || !text) return null;
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!doc || typeof doc !== 'object') return null;
+  delete doc.exported;
+  return hash64(JSON.stringify(doc));
+}
+
+/**
+ * Sixty-four bits of FNV-1a, in two lanes.
+ *
+ * Not a cryptographic digest and it does not need to be: the question is
+ * whether a file we wrote is still the file on disk, and nobody is trying to
+ * forge one. `crypto.subtle` would be the stronger answer and is asynchronous
+ * and unavailable outside a secure context — the plan opens from `file://` with
+ * no server, which is a shape of this application that has to keep working.
+ */
+function hash64(text) {
+  let a = 0x811c9dc5;
+  let b = 0xcbf29ce4;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ (c + i), 0x85ebca6b);
+  }
+  return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0');
+}
+
+/** Just the two fields the write guard compares — the backends expect no more. */
+function metaOf(st) {
+  return st ? { size: st.size, modified: st.modified } : null;
+}
+
 /**
  * Write the document back, but never over someone else's work.
  *
  * The guard is the whole safety property of this mode: the file's size and
  * modified time are checked against what we last saw, and a mismatch refuses the
  * write. The caller is told to reload rather than being allowed to clobber.
+ *
+ * A refusal is now checked before it is believed. A sync client touching the
+ * file moves its metadata without changing a word of the plan, and refusing
+ * that save protected nothing while making the application look broken to the
+ * only person editing.
  */
 export async function savePlan(doc) {
   if (!isConnected()) return { ok: false, reason: 'not-connected' };
   if (role === 'viewer') return { ok: false, reason: 'read-only' };
 
+  saving = true;
   try {
-    stamp = await ioWritePlan(folderRef, planName, serialise(doc), stamp);
+    return await writeGuarded(serialise(doc));
+  } finally {
+    saving = false;
+  }
+}
+
+async function writeGuarded(text, retried = false) {
+  try {
+    const written = await ioWritePlan(folderRef, planName, text, metaOf(stamp));
+    stamp = { ...written, hash: fingerprint(text) };
+    // Whatever we were behind, we are not behind it now: this document is the
+    // one on disk, and it is ours.
+    behind = null;
+    announced = '';
     lastSaveAt = Date.now();
     return { ok: true, at: stamp.modified };
   } catch (err) {
     if (err && err.kind === 'conflict') {
+      // The file moved. Whether the *plan* moved is a different question, and
+      // it is the one worth refusing over.
+      const verdict = await reconcile();
+      if (verdict === 'same' && !retried) return writeGuarded(text, true);
+      // The caller raises its own notice about this refusal, so the poll must
+      // not repeat it a few seconds later in different words.
+      if (behind) announced = behind.hash;
       emit(EV.FILE_CONFLICT, { plan: planName });
       return { ok: false, reason: 'conflict', conflict: true };
     }
@@ -820,13 +1027,55 @@ export async function savePlan(doc) {
   }
 }
 
+/**
+ * What the file on disk actually is, compared with the one we last saw.
+ *
+ *   'same'     the metadata moved and the document did not — a sync client
+ *              rewriting our own bytes. The new metadata is adopted so the
+ *              write guard stops refusing over it.
+ *   'newer'    a genuine version we have not got. Recorded in `behind`, and
+ *              *not* announced — saying so is the caller's decision, which is
+ *              what stops a refused save and the next poll from reporting the
+ *              same fact twice.
+ *   'unknown'  unreadable — mid-sync, or gone. Not evidence of anything, so
+ *              nothing is adopted and nothing is claimed.
+ */
+async function reconcile() {
+  if (!stamp) return 'unknown';
+  let read;
+  try {
+    read = await ioReadPlan(folderRef, planName);
+  } catch {
+    return 'unknown';
+  }
+  const hash = fingerprint(read.text);
+  if (!hash) return 'unknown';
+
+  if (hash === stamp.hash) {
+    stamp = { ...read.stamp, hash };
+    if (behind) {
+      behind = null;
+      emitState();
+    }
+    return 'same';
+  }
+
+  behind = { hash, at: read.stamp.modified };
+  emitState();
+  return 'newer';
+}
+
 /** Re-read the plan from the folder — the "they saved, catch up" path. */
 export async function refreshFromDisk() {
   if (!isConnected()) return null;
   const read = await ioReadPlan(folderRef, planName);
-  stamp = read.stamp;
   try {
-    return JSON.parse(read.text);
+    const doc = JSON.parse(read.text);
+    stamp = { ...read.stamp, hash: fingerprint(read.text) };
+    behind = null;
+    announced = '';
+    emitState();
+    return doc;
   } catch (err) {
     throw new Error(`${planName} could not be read: ${err.message}`);
   }
@@ -939,6 +1188,11 @@ function penHolder(claims) {
  */
 async function writeClaim() {
   if (!folderRef || !planName) return;
+  /* The claim file is keyed on the device, so writing ours would overwrite the
+     window that is actually holding it — and the two would then take turns
+     claiming to be each other. One window per install states it; this one is
+     already represented by that statement. */
+  if (deferring) return;
   if (!claimedAt) claimedAt = Date.now();
   try {
     await ioWriteClaim(
@@ -972,9 +1226,23 @@ async function writeClaim() {
  * opening a plan, polling and taking over. Announces itself only on a change.
  */
 async function settlePen() {
-  const winner = penHolder(await readClaims());
-  const nextRole = !winner || isOurs(winner) ? 'editor' : 'viewer';
-  const nextHolder = nextRole === 'editor' ? '' : winner.holder || 'Someone';
+  const claims = await readClaims();
+  const winner = penHolder(claims);
+
+  /* Is another window of this install already standing in for this machine?
+     That is a question about our own claim file rather than about who won: it
+     is keyed on the device, so both windows write to one file, and whichever
+     wrote last would otherwise read it back, recognise the device as its own
+     and conclude it was the editor. Both did, all afternoon, taking turns
+     being refused by the write guard. */
+  deferring = claims.some(otherWindow);
+
+  const nextRole = (!winner || ours(winner)) && !deferring ? 'editor' : 'viewer';
+  const nextHolder = nextRole === 'editor'
+    ? ''
+    : !winner || ours(winner)
+      ? 'another window of yours'
+      : winner.holder || 'Someone';
 
   if (nextRole === role && nextHolder === holder) return { role, holder, changed: false };
 
@@ -1060,6 +1328,12 @@ async function releaseLock() {
   if (!folderRef || !planName) return;
   claimedAt = 0;
   takeoverAt = 0;
+  // While deferring, the claim on disk belongs to another window of this
+  // install. Withdrawing "ours" would withdraw theirs.
+  if (deferring) {
+    deferring = false;
+    return;
+  }
   try {
     await ioRemoveClaim(folderRef, planName, deviceId());
     // The compatibility stamp is ours to clear only while it is ours.
@@ -1073,19 +1347,39 @@ async function releaseLock() {
 }
 
 /**
- * Is this lock ours to take?
+ * Is this claim ours to take?
  *
  * Same window is obviously ours. Same *machine* counts too, and deliberately:
- * it is either our own abandoned lock — the case that used to lock people out —
- * or another window of the same install, and the person sitting in front of both
- * should not have to negotiate with themselves. The other window finds out
- * through `checkLock()` and drops to read-only, which is the same handling a
- * colleague's takeover already gets.
+ * it is either our own abandoned claim — the case that used to lock people out
+ * of their own plan after a crash — or another window of the same install, and
+ * the person sitting in front of both should not have to negotiate with
+ * themselves about which machine may edit.
+ *
+ * Which of those two it is, is `otherWindow()`'s question, and it decides
+ * something different: not whether this machine may edit, but which of its
+ * windows does.
  */
 function isOurs(lock) {
   if (!lock) return false;
   if (lock.id === sessionId) return true;
   return !!lock.device && lock.device === deviceId();
+}
+
+/** Kept for readability at the call site: "is the holder us". */
+const ours = isOurs;
+
+/**
+ * A claim from this machine, written by a window that is still running.
+ *
+ * The beat is what tells the two apart, and it can be read strictly because the
+ * file is ours: no sync carried it here, so a stale beat means gone rather than
+ * delayed. `id` alone would not do — a claim we wrote ourselves a moment ago
+ * carries our own id and must never make us defer to ourselves.
+ */
+function otherWindow(claim) {
+  if (!claim || claim.id === sessionId) return false;
+  if (!claim.device || claim.device !== deviceId()) return false;
+  return Date.now() - (claim.beat || 0) <= OWN_WINDOW_STALE_MS;
 }
 
 function isStale(lock) {
@@ -1108,6 +1402,9 @@ export async function takeOver() {
   // reading, on their next poll, and drop to read-only the same way we would.
   takeoverAt = Date.now();
   lastSaveAt = Date.now();
+  // Including from another window of this install: "take over" means it, and
+  // deferring is a courtesy rather than a lock.
+  deferring = false;
   await writeClaim();
   role = 'editor';
   holder = '';
@@ -1186,26 +1483,67 @@ function startTimers() {
     stampLegacyLock();
   }, HEARTBEAT_MS);
 
-  let polls = 0;
-  pollTimer = setInterval(async () => {
-    if (!isConnected()) return;
-    // A sync client can mint a conflict copy at any point during a session, so
-    // one sweep at open is not enough — but they are litter, not a problem, so
-    // this rides the poll every twenty-fifth turn (about five minutes) rather
-    // than listing the folder every twelve seconds.
-    if (++polls % 25 === 0) sweepLockLitter();
-    try {
-      await checkLock();
-      const read = await ioReadPlan(folderRef, planName);
-      if (stamp && (read.stamp.size !== stamp.size || read.stamp.modified !== stamp.modified)) {
-        // Do not update the stamp — the write guard needs to keep refusing until
-        // the document has actually been reloaded.
-        emit(EV.FILE_EXTERNAL_CHANGE, { plan: planName, at: read.stamp.modified });
-      }
-    } catch {
-      /* the folder went away — the next save will report it properly */
-    }
-  }, POLL_MS);
+  pollTimer = setInterval(() => { pollOnce(); }, POLL_MS);
+
+  /* A window nobody is looking at does not need to know, and a stack of
+     answers waiting for somebody who has come back from a meeting is exactly
+     the noise this module is meant not to make. Look once on the way in
+     instead. */
+  if (typeof document !== 'undefined' && !visibilityBound) {
+    visibilityBound = true;
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') pollOnce();
+    });
+  }
+}
+
+/**
+ * One turn of watching the folder.
+ *
+ * Three things, in order of what they cost: settle the pen (a folder listing,
+ * so not every turn), check the plan's metadata (one stat), and only if that
+ * moved, read the file and ask whether the *document* is different.
+ */
+let polls = 0;
+let visibilityBound = false;
+async function pollOnce() {
+  if (!isConnected()) return;
+  // Mid-save, the file on disk is ours and may be half-written. Reading it here
+  // would compare our own work against itself and, in a browser, against a
+  // truncated copy of it.
+  if (saving) return;
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+
+  // A sync client can mint a conflict copy at any point during a session, so
+  // one sweep at open is not enough — but they are litter, not a problem, so
+  // this rides the poll every twenty-fifth turn (about five minutes) rather
+  // than listing the folder every twelve seconds.
+  polls++;
+  if (polls % 25 === 0) sweepLockLitter();
+
+  try {
+    if (polls % SETTLE_EVERY === 0) await checkLock();
+    if (!stamp) return;
+
+    // The cheap question first: has the file moved at all? Almost every turn
+    // ends here, which is what makes polling a synced folder every twelve
+    // seconds reasonable.
+    const now = await ioStatPlan(folderRef, planName);
+    if (!now || (now.size === stamp.size && now.modified === stamp.modified)) return;
+
+    // It moved. Whether the plan moved is what `reconcile()` answers — and it
+    // leaves the stamp alone unless the answer is "not really", so the write
+    // guard goes on refusing until the document has actually been reloaded.
+    if ((await reconcile()) !== 'newer') return;
+
+    // Once per version. Repeating it every twelve seconds is how a useful
+    // sentence turns into something people click away without reading.
+    if (announced === behind.hash) return;
+    announced = behind.hash;
+    emit(EV.FILE_EXTERNAL_CHANGE, { plan: planName, at: behind.at });
+  } catch {
+    /* the folder went away — the next save will report it properly */
+  }
 }
 
 function stopTimers() {

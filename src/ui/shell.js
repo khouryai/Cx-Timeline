@@ -524,9 +524,20 @@ function refreshStatus() {
   // on the status bar, so it names the plan and says who holds the pen.
   if (isFileMode()) {
     const st = filestore.state();
-    dom.storageText.textContent = st.role === 'viewer' ? `${st.plan} · ${st.holder} editing` : `${st.plan} · folder`;
-    dom.storageText.title = `${st.folder}/${st.plan}`;
+    /* Three states, in the order they matter: a newer version waiting is the
+       one thing somebody needs to notice, and putting it here is what lets the
+       notice about it be said once rather than repeated. */
+    dom.storageText.textContent = st.behind
+      ? `${st.plan} · newer version in the folder`
+      : st.role === 'viewer'
+        ? `${st.plan} · ${st.holder} editing`
+        : `${st.plan} · folder`;
+    dom.storageText.classList.toggle('behind', !!st.behind);
+    dom.storageText.title = st.behind
+      ? 'A colleague saved after you opened this. Reload from Import / export to take their version.'
+      : `${st.folder}/${st.plan}`;
   } else {
+    dom.storageText.classList.remove('behind');
     dom.storageText.textContent = isHosted() ? 'Supabase' : isFallback() ? 'localStorage' : 'IndexedDB';
     dom.storageText.title = '';
   }
@@ -538,9 +549,14 @@ const refreshCursor = debounce((ms) => {
 
 function setSaveState(state, at) {
   if (!dom.saveDot) return;
-  dom.saveDot.className = 'sb-dot' + (state === 'saving' ? ' saving' : state === 'error' ? ' error' : '');
+  dom.saveDot.className = 'sb-dot'
+    + (state === 'saving' ? ' saving' : state === 'error' ? ' error' : state === 'held' ? ' held' : '');
   dom.saveText.textContent =
-    state === 'saving' ? 'Saving…' : state === 'error' ? 'Save failed' : at ? `Saved ${fmtTimestamp(at)}` : 'Saved';
+    state === 'saving' ? 'Saving…'
+      : state === 'error' ? 'Save failed'
+        : state === 'held' ? 'Not saved — read-only'
+          : state === 'reading' ? 'Read-only'
+            : at ? `Saved ${fmtTimestamp(at)}` : 'Saved';
 }
 
 /* ── Wiring ────────────────────────────────────────────────────────────── */
@@ -591,7 +607,14 @@ function wireEvents() {
   on(EV.PANEL_CHANGED, () => updateNav());
 
   on(EV.SAVE_START, () => setSaveState('saving'));
-  on(EV.SAVE_DONE, (p) => setSaveState('saved', p?.at));
+  /* A skipped save is not a save. It happens when a colleague holds the pen,
+     and calling it "Saved" is how the status bar came to be reassuring about
+     work that had been written nowhere — but only when there was work: opening
+     a plan somebody else is editing attempts a save too. */
+  on(EV.SAVE_DONE, (p) => {
+    if (!p?.skipped) return setSaveState('saved', p?.at);
+    return setSaveState(p.unsaved ? 'held' : 'reading');
+  });
   on(EV.SAVE_ERROR, () => setSaveState('error'));
 
   on('canvas:cursor', (p) => refreshCursor(p.ms));

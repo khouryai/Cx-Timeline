@@ -391,11 +391,20 @@ export async function saveNow() {
       const result = await filestore.savePlan(doc);
 
       if (!result.ok) {
-        // Somebody else has the pen. The user has already been told by the
-        // banner, so this is not an error to raise again.
+        /* Somebody else has the pen. The user has already been told by the
+           banner, so this is not an error to raise again — but it is not a save
+           either, and it used to be recorded as one. Marking the document clean
+           here said "saved" about work that had been written nowhere, and the
+           unload warning then let it go without a word. Cache it and leave it
+           dirty: the store refuses new edits while the pen is elsewhere, so
+           what is here is whatever was in flight when it changed hands. */
         if (result.reason === 'read-only') {
-          markClean();
-          emit(EV.SAVE_DONE, { at: Date.now(), skipped: true });
+          await cacheLocally(record);
+          // Whether that matters depends entirely on whether there was
+          // anything to save. Opening a plan someone else is holding attempts
+          // one too, and telling a reader their work is unsaved when they have
+          // not touched anything is its own small lie.
+          emit(EV.SAVE_DONE, { at: Date.now(), skipped: true, unsaved: isDirty() });
           return true;
         }
         // The file moved underneath us, or the grant lapsed. Keep the work in

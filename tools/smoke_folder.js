@@ -230,19 +230,137 @@ async function main() {
   await page.keyboard.press('Shift+ArrowRight');
   await page.waitForTimeout(2000);
 
-  const dialog = await page.locator('.cx-modal', { hasText: /someone else saved|changed in the folder/i }).count();
-  check('a save that would overwrite a colleague is refused', dialog >= 1);
+  const notice = page.locator('.cx-toast', { hasText: /newer version|save was refused/i });
+  check('a save that would overwrite a colleague is refused', (await notice.count()) >= 1,
+    (await page.locator('.cx-toast').allInnerTexts()).join(' | ') || 'nothing said');
   const guarded = await planText(page, 'bart-cbtc.json');
   check('their version is left exactly as they wrote it', guarded === theirVersion);
   check('and nothing was written to the file', (await page.evaluate(() => window.__folder.writes)) === 0);
+  /* Told, not asked. A modal takes the keyboard mid-sentence to report
+     something that is neither urgent nor an error, and autosave would raise it
+     again every few seconds for as long as the two versions differ. */
+  check('and it is said without taking the keyboard away',
+    (await page.locator('.cx-modal').count()) === 0);
+  check('the status bar carries it too, so the notice never has to repeat',
+    /newer version in the folder/i.test(await page.locator('#statusbar').innerText()),
+    await page.locator('#statusbar').innerText());
+
+  // Several more autosaves go by. One standing notice, not one per attempt.
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.waitForTimeout(1200);
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.waitForTimeout(2500);
+  check('and saying it once is the whole of it, however long the two disagree',
+    (await page.locator('.cx-toast').count()) <= 2,
+    `${await page.locator('.cx-toast').count()} notice(s)`);
 
   // Taking their version is offered, not forced.
-  await page.locator('.cx-modal .cx-btn.primary').click();
-  await page.waitForTimeout(1400);
-  check('reloading brings in their version',
-    /Edited by a colleague/.test(await page.locator('#inspector, #statusbar, #toolbar').first().innerText().catch(() => '')) ||
-    (await page.evaluate(() => document.title.length > 0)),
-    'reload accepted');
+  await page.locator('.cx-toast .cx-btn', { hasText: /reload/i }).first().click();
+  await page.waitForTimeout(1600);
+  const titled = await page.locator('.tt-name').first().innerText().catch(() => '');
+  check('reloading brings in their version', titled === 'Edited by a colleague', titled || '(no name)');
+  // And the guard lets go: the next edit is written, which is the whole point
+  // of catching up rather than being told about it forever.
+  await page.evaluate(() => { window.__folder.writes = 0; });
+  await page.locator('.tl-obj.shape-bar').first().click();
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.waitForTimeout(2200);
+  check('and saving works again afterwards',
+    (await page.evaluate(() => window.__folder.writes)) > 0,
+    `${await page.evaluate(() => window.__folder.writes)} write(s)`);
+  check('and the status bar stops saying anything is waiting',
+    !/newer version in the folder/i.test(await page.locator('#statusbar').innerText()),
+    await page.locator('#statusbar').innerText());
+
+  /* ── What "changed" means ─────────────────────────────────────────────
+     The write guard above is the safety property. This is the thing that made
+     living with it unpleasant: a synced folder moves a file's metadata without
+     anybody touching the plan, and every one of those was being reported as a
+     colleague's save and refused as a conflict. */
+  console.log('\nA file moving is not a plan changing');
+
+  // Poll on demand rather than waiting twelve seconds for each of these: the
+  // application looks as soon as the window is shown, which is the same path.
+  const look = async () => {
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await page.waitForTimeout(900);
+  };
+  // Only the notices this is about. A toast confirming a reload is not the
+  // application interrupting anybody; it is the answer to something they did.
+  const behindToasts = () =>
+    page.locator('.cx-toast', { hasText: /newer version|save was refused/i });
+  const notices = () => behindToasts().count();
+  const dismissAll = async () => {
+    const xs = page.locator('.cx-toast .cx-btn.icon');
+    for (let i = await xs.count(); i > 0; i--) await xs.first().click().catch(() => {});
+    await page.waitForTimeout(200);
+  };
+  await dismissAll();
+
+  // OneDrive rewrites a file it has just carried: same bytes, new modified
+  // time. Nobody edited anything and nobody should hear about it.
+  const untouchedPlan = await planText(page, 'bart-cbtc.json');
+  await page.evaluate((text) => {
+    window.__folder.files['bart-cbtc.json'] = { text, lastModified: Date.now() + 60000 };
+    window.__folder.writes = 0;
+  }, untouchedPlan);
+  await look();
+  check('a sync client touching the file is not a colleague saving',
+    (await notices()) === 0, (await behindToasts().allInnerTexts()).join(' | '));
+  check('and the status bar does not claim a version that does not exist',
+    !/newer version/i.test(await page.locator('#statusbar').innerText()));
+
+  // …and the save after it goes through. This is the half that hurt most: the
+  // touch moved the metadata, so the guard refused a save over a file nobody
+  // had edited, and the only person working was told to reload their own work.
+  await page.locator('.tl-obj.shape-bar').first().click();
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.waitForTimeout(2200);
+  check('and the save after it is not refused over a file nobody edited',
+    (await page.evaluate(() => window.__folder.writes)) > 0,
+    `${await page.evaluate(() => window.__folder.writes)} write(s)`);
+  await dismissAll();
+
+  // A file half-way through arriving is short and unreadable. It is not a
+  // version to catch up with, and announcing it offers something nobody can
+  // open.
+  const whole = await planText(page, 'bart-cbtc.json');
+  await page.evaluate(() => {
+    window.__folder.files['bart-cbtc.json'] = { text: '{"objects": [', lastModified: Date.now() + 90000 };
+  });
+  await look();
+  check('a file caught mid-sync is not announced as a version',
+    (await notices()) === 0, (await behindToasts().allInnerTexts()).join(' | '));
+
+  // And when the rest of it lands and turns out to be what we already had, the
+  // alarm never rings at all.
+  await page.evaluate((text) => {
+    window.__folder.files['bart-cbtc.json'] = { text, lastModified: Date.now() + 120000 };
+  }, whole);
+  await look();
+  check('and when it finishes arriving unchanged, nothing is said then either',
+    (await notices()) === 0);
+
+  // A real save by somebody else is said — once, however many times we look.
+  const theirs = JSON.stringify({ ...JSON.parse(whole), name: 'Edited again' }, null, 2);
+  await page.evaluate((text) => {
+    window.__folder.files['bart-cbtc.json'] = { text, lastModified: Date.now() + 150000 };
+  }, theirs);
+  await look();
+  await look();
+  await look();
+  check('a real one is said once, not once per look',
+    (await notices()) === 1, `${await notices()} notice(s)`);
+  check('and it stands in the status bar for as long as it is true',
+    /newer version in the folder/i.test(await page.locator('#statusbar').innerText()));
+
+  await behindToasts().locator('.cx-btn', { hasText: /reload/i }).first().click();
+  await page.waitForTimeout(1600);
+  check('taking it clears the notice and the status bar with it',
+    (await notices()) === 0
+      && !/newer version/i.test(await page.locator('#statusbar').innerText()),
+    `${await notices()} notice(s) — `
+      + (await page.locator('#statusbar').innerText()).replace(/\n/g, ' / '));
 
   /* ── A colleague holds the pen ────────────────────────────────────────── */
   console.log('\nWhen a colleague has it open');
@@ -430,6 +548,65 @@ async function main() {
     !(await page.evaluate(() => document.body.classList.contains('read-only'))));
   check('and the pane does not offer to take over from yourself',
     (await page.locator('#dock .cx-btn', { hasText: /take over/i }).count()) === 0);
+
+  /* ── The same plan, in two of your own windows ────────────────────────
+     Two tabs of one browser share a claim file, because it is keyed on the
+     device. Each read it back, recognised the device as its own, and concluded
+     it was the editor — so both edited, and each save moved the file under the
+     other, which the write guard then refused. That is a stream of alerts
+     generated entirely by one person. */
+  console.log('\nTwo windows of your own');
+  const myDevice = await page.evaluate(() => {
+    try { return JSON.parse(window.__folder.files['bart-cbtc.lock.json'].text).device; } catch { return ''; }
+  });
+  check('there is a device to key a claim on', !!myDevice, myDevice || '(none)');
+
+  await page.goto('about:blank');
+  await boot({
+    files: {
+      'bart-cbtc.json': { text: sharedPlan, lastModified: Date.now() },
+      // The other window: this machine, a different window, beating now.
+      [`bart-cbtc.pen-${myDevice}.json`]: {
+        text: JSON.stringify({
+          id: 'my-other-tab', device: myDevice, holder: 'Aik',
+          since: Date.now() - 60000, beat: Date.now(),
+        }),
+        lastModified: Date.now(),
+      },
+    },
+  });
+  await openIoPane();
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1600);
+
+  check('the second window of one machine does not edit alongside the first',
+    await page.evaluate(() => document.body.classList.contains('read-only')));
+  check('and says which it is waiting on, since both are yours',
+    /another window of yours/i.test(await page.locator('#statusbar').innerText()),
+    (await page.locator('#statusbar').innerText()).replace(/\n/g, ' / '));
+  // Reading is not failing to save. A reader who has touched nothing must not
+  // be told their work is unsaved.
+  check('and does not tell a reader their work is unsaved when there is none',
+    /Read-only/.test(await page.locator('#statusbar').innerText())
+      && !/Not saved/.test(await page.locator('#statusbar').innerText()),
+    (await page.locator('#statusbar').innerText()).split('\n')[0]);
+  // It must not write the claim: the file is keyed on the device, so its own
+  // statement of it would erase the first window's.
+  check('and leaves the first window\'s claim standing rather than overwriting it',
+    await page.evaluate((d) => {
+      try { return JSON.parse(window.__folder.files[`bart-cbtc.pen-${d}.json`].text).id === 'my-other-tab'; }
+      catch { return false; }
+    }, myDevice));
+
+  // Deferring is a courtesy, not a lock — the person is sitting in front of
+  // both windows and may say which one is working.
+  await page.locator('#dock .cx-btn', { hasText: /take over/i }).first().click();
+  await page.waitForTimeout(400);
+  const sure = page.locator('.cx-modal .cx-btn.primary');
+  if (await sure.count()) await sure.first().click();
+  await page.waitForTimeout(1200);
+  check('taking over from your own other window works like any other takeover',
+    !(await page.evaluate(() => document.body.classList.contains('read-only'))));
 
   /* ── Taking over from a live colleague ────────────────────────────────── */
   console.log('\nTaking over from someone who is still there');

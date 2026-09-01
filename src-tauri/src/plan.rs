@@ -25,7 +25,14 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A lock older than this is treated as abandoned. Matches the web build.
-pub const STALE_MS: u64 = 75_000;
+///
+/// Four minutes rather than the seventy-five seconds it started at, and both
+/// sides had to move together: the shell announces a pen holder before the
+/// window opens, and two readings of one folder that disagree is exactly what
+/// this constant exists to prevent. The width is about OneDrive, not about
+/// people — a sync that takes a minute to carry a claim between machines makes
+/// a narrower window look like the other session keeps dying and coming back.
+pub const STALE_MS: u64 = 240_000;
 
 /// Size and modified time as we last saw them — the write guard's evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

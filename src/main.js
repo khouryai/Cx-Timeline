@@ -201,9 +201,34 @@ function dismissSplash() {
  */
 function installConflictHandling() {
   let asking = false;
+  /** The standing "your save was refused" notice, so there is only ever one. */
+  let refusedNotice = null;
 
   on(EV.SAVE_ERROR, async (payload) => {
     if (!payload?.conflict || asking) return;
+
+    /* In a folder this is not a one-off: autosave runs on a timer, so every few
+       seconds it tries again, is refused again, and would raise the dialog
+       again. One standing notice instead — the work is cached either way, and a
+       colleague's newer version is not an emergency. */
+    if (filestore.isConnected()) {
+      if (refusedNotice) return;
+      refusedNotice = toast({
+        tone: 'warn',
+        title: 'Your save was refused',
+        message:
+          'A colleague saved a newer version, so writing yours would have overwritten theirs. '
+          + 'Nothing is lost — this copy is cached here, and can be exported from Import / export '
+          + 'before you take theirs.',
+        sticky: true,
+        action: {
+          label: 'Reload theirs',
+          onClick: () => { cmd.reloadFromFolder({ confirm: false }); },
+        },
+      });
+      return;
+    }
+
     asking = true;
     const ok = await confirmDialog({
       title: 'Someone else saved this project',
@@ -217,6 +242,12 @@ function installConflictHandling() {
     if (!ok) return;
     if (filestore.isConnected()) await cmd.reloadFromFolder({ confirm: false });
     else window.location.reload();
+  });
+
+  // A save that lands is the end of it: the plan on disk is ours again.
+  on(EV.SAVE_DONE, () => {
+    if (refusedNotice) refusedNotice.dismiss();
+    refusedNotice = null;
   });
 }
 
@@ -239,6 +270,8 @@ function installConflictHandling() {
  */
 function installFolderHandling() {
   let asking = false;
+  /** The standing "there is a newer version" notice, so there is only ever one. */
+  let behindNotice = null;
 
   on(EV.FILE_EXTERNAL_CHANGE, async () => {
     if (asking) return;
@@ -250,15 +283,35 @@ function installFolderHandling() {
       asking = false;
       return;
     }
-    const ok = await confirmDialog({
-      title: 'This plan changed in the folder',
-      message:
-        'Someone saved a newer version. Reload to pick it up — anything you have changed here since your last save would be replaced.',
-      confirmLabel: 'Reload',
-      cancelLabel: 'Not yet',
-    });
     asking = false;
-    if (ok) await cmd.reloadFromFolder({ confirm: false });
+
+    /* Told, not asked. A modal takes the keyboard away mid-sentence to report
+       something that is not urgent and not an error — and this fires while
+       somebody is working, which is the worst possible moment to be handed a
+       dialog. `filestore` says this once per version; the notice stays until
+       it is used or dismissed, and the status bar goes on showing it either
+       way, so nothing is lost by ignoring it for ten minutes. */
+    if (behindNotice) behindNotice.dismiss();
+    behindNotice = toast({
+      tone: 'info',
+      title: 'A newer version is in the folder',
+      message: store.isDirty()
+        ? 'A colleague saved. Reloading replaces anything you have changed since your last save.'
+        : 'A colleague saved. Reload when you are ready.',
+      sticky: true,
+      action: {
+        label: 'Reload',
+        onClick: () => { cmd.reloadFromFolder({ confirm: false }); },
+      },
+    });
+  });
+
+  // The notice is about one version. Once it has been taken — or the folder
+  // settles back to agreeing with us — there is nothing left for it to say.
+  on(EV.FILE_STATE, (st) => {
+    if (st && st.behind) return;
+    if (behindNotice) behindNotice.dismiss();
+    behindNotice = null;
   });
 
   // Idle too long to keep holding the pen. Flush what is here, hand it back,

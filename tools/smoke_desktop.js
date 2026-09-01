@@ -109,6 +109,13 @@ function fakeShell() {
         .filter(([name]) => /\.json$/i.test(name) && !/\.(?:lock|pen)(?:[-_. (][^/]*)?\.json$/i.test(name) && !name.includes('/'))
         .map(([name, record]) => ({ name, size: bytes(record.text), modified: record.modified }))
         .sort((a, b) => b.modified - a.modified),
+    // Size and modified time without the bytes — what the watcher asks for
+    // every twelve seconds, and the reason it can afford to.
+    intake_stat: ({ path }) => {
+      const record = shell.files[path];
+      if (!record) throw { kind: 'not-found', message: `${path} is not in that folder.` };
+      return stampOf(record);
+    },
     read_plan: ({ name }) => {
       const record = shell.files[name];
       if (!record) throw { kind: 'not-found', message: `${name} is not in that folder.` };
@@ -409,9 +416,34 @@ async function main() {
   await page.waitForTimeout(2200);
 
   check('a save that would overwrite a colleague is refused',
-    (await page.locator('.cx-modal', { hasText: /someone else saved|changed in the folder/i }).count()) >= 1);
+    (await page.locator('.cx-toast', { hasText: /newer version|save was refused/i }).count()) >= 1,
+    (await page.locator('.cx-toast').allInnerTexts()).join(' | ') || 'nothing said');
   check('their version is left exactly as they wrote it', (await fileText('bart-cbtc.json')) === theirs);
   check('and nothing at all was written', (await page.evaluate(() => window.__desktop.writes)) === 0);
+
+  /* The other half of the same rule, and the one that made this build feel
+     broken to the only person using it: OneDrive rewrites a file it has just
+     carried, which moves the metadata the guard reads without changing a word
+     of the plan. The rules live above the I/O layer precisely so this answers
+     the same here as it does in a browser. */
+  await page.locator('.cx-toast .cx-btn', { hasText: /reload/i }).first().click();
+  await page.waitForTimeout(1600);
+  const settled = await fileText('bart-cbtc.json');
+  await page.evaluate((text) => {
+    window.__desktop.files['bart-cbtc.json'] = { text, modified: Date.now() + 60000 };
+    window.__desktop.writes = 0;
+  }, settled);
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await page.waitForTimeout(900);
+  check('but the sync client touching the file is not a colleague saving',
+    (await page.locator('.cx-toast', { hasText: /newer version|save was refused/i }).count()) === 0,
+    (await page.locator('.cx-toast').allInnerTexts()).join(' | '));
+  await page.locator('.tl-obj.shape-bar').first().click();
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.waitForTimeout(2200);
+  check('and the save after it goes through the shell as normal',
+    (await page.evaluate(() => window.__desktop.writes)) > 0,
+    `${await page.evaluate(() => window.__desktop.writes)} write(s)`);
 
   /* ── The pen, before the window ──────────────────────────────────────── */
   console.log('\nWhen a colleague already has it open');

@@ -98,7 +98,10 @@ core/filestore → core/desktop             the only module that knows the File
                                           System Access API, and the only caller
                                           of the desktop bridge
 core/model → core/query · core/history · core/analysis
-core/store → core/storage
+core/store → core/storage · core/filestore   (only to ask whether a colleague
+                                              holds the pen — a read-only
+                                              session refuses edits at the
+                                              store, not only in the CSS)
 timeline/viewport → timeline/layout → timeline/connectors
                   → timeline/renderer → timeline/interactions
 ui/icons · ui/components → ui/lists · ui/auth → ui/theme → ui/commands
@@ -251,10 +254,39 @@ subscribes. That is what keeps the graph acyclic.
   `core/filestore.js` owns the File System Access API the way `core/cloud.js`
   owns Supabase, and `core/storage.js` branches on `fileMode` beside `hosted`.
   Two rules matter and both exist because a synced folder is not a database.
-  **The lock is courtesy, the write guard is the control**: `savePlan()`
-  re-reads the file's size and modified time before every write and refuses if
-  either moved, so a colleague's save can never be silently overwritten even
-  when the pen has not synced yet. **Nobody writes anybody else's file.** Each
+  **The lock is courtesy, the write guard is the control**: `savePlan()` checks
+  that the plan on disk is still the one it last saw and refuses otherwise, so
+  a colleague's save can never be silently overwritten even when the pen has
+  not synced yet.
+- **A file moving is not a plan changing, and only the second is worth saying.**
+  Size and modified time answer "did the file move", which a sync client makes
+  it do without anybody touching the plan — so the stamp carries a digest of
+  the document as well (`fingerprint()`, which leaves out the `exported` block
+  because it holds the time of the save). Metadata is still the cheap first
+  question and decides whether the file is read at all; nothing is announced,
+  and no save is refused, until the *content* turns out to differ. A file caught
+  mid-sync does not parse, and `fingerprint()` answers null — which means "ask
+  again", never "a new version". Everything unbearable about working alongside
+  a colleague came from answering the first question and reporting it as the
+  second: a save refused over a file nobody had edited, and a dialog every
+  twelve seconds about a version that did not exist. `reconcile()` is the single
+  place that decides, so the poll and a refused save cannot disagree, and
+  announcing is the *caller's* job — which is what stops one fact being
+  reported twice in two different sentences.
+- **Say it once, in the status bar, without taking the keyboard.** A colleague's
+  save is not an error and not urgent, and it arrives while somebody is typing.
+  `filestore` emits `FILE_EXTERNAL_CHANGE` once per distinct version and holds
+  the rest in `state().behind`, so the interface can stand a notice up (with a
+  Reload button) and leave the standing fact to the status bar. A reader who has
+  changed nothing gets neither: their colleague's version simply arrives.
+- **Two windows of one install are one machine.** The claim file is keyed on the
+  device, so both windows read back a claim they recognise as their own and both
+  concluded they were the editor — then took turns being refused by the write
+  guard. `otherWindow()` tells a live sibling window from this device's own
+  abandoned claim by its beat, strictly, because our own claim file is read off
+  our own disk and no sync delayed it; the second window defers, and stops
+  writing the claim so the first window's statement of it stands. `takeOver()`
+  still works from either. **Nobody writes anybody else's file.** Each
   session states its own claim in `<plan>.pen-<device>.json` and restates it on
   every heartbeat — readers included, so the turn passes to whoever has waited
   longest the moment a holder leaves — and who holds the pen is a *reading* of
@@ -691,8 +723,8 @@ node tools/smoke.js                  # 254 checks — the application, local mod
 node tools/smoke_calendar.js         # 172 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
-node tools/smoke_folder.js           #  54 checks — the shared folder, in a browser
-node tools/smoke_desktop.js          #  49 checks — the desktop shell and its updates
+node tools/smoke_folder.js           #  73 checks — the shared folder, in a browser
+node tools/smoke_desktop.js          #  51 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               # 244 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
@@ -711,7 +743,12 @@ persistence. **Any console error fails the run.**
 
 `smoke_folder.js` replaces `window.showDirectoryPicker` with an in-memory
 folder, so the lock, the read-only handover and the write guard are covered
-without a real filesystem. No browser lets a script click its own file dialog,
+without a real filesystem — including the cases that made two people at once
+unpleasant, which are all about a folder rather than about people: a sync client
+touching a file it has just carried, a file caught half-way through arriving,
+one version announced once however many times it is looked at, and two windows
+of one machine recognising each other. It drives the watcher through
+`visibilitychange` rather than waiting out the twelve-second poll. No browser lets a script click its own file dialog,
 so the picker and a genuine OneDrive folder stay on the manual checklist in
 `DEPLOY.md` rather than being pretended at.
 

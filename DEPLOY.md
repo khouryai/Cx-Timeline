@@ -299,20 +299,41 @@ colleague sees who has the plan rather than "Someone".
 
 The lock file is a **courtesy** — a synced folder takes seconds to propagate, so
 two people opening at the same moment can both think they hold it. The guarantee
-is one layer down: every save re-reads the file's size and modified time first
-and refuses if either moved. You may be told to reload; you can never silently
-overwrite your colleague.
+is one layer down: every save checks that the plan on disk is still the one you
+opened, and refuses if it is not. You may be told to reload; you can never
+silently overwrite your colleague.
+
+What that check compares matters, and it is the difference between this being
+pleasant and being unusable. OneDrive rewrites files it has just carried: same
+bytes, new modified time. Comparing *metadata* therefore reported a colleague's
+save several times an hour when nobody had touched anything, and refused
+perfectly good saves over it. The check is on the plan's own content, so a file
+being moved about by the sync client is silent, and only a genuine newer version
+is mentioned — **once**, as a notice with a Reload button, not as a dialog that
+takes the keyboard away while you are typing. It also shows in the status bar
+for as long as it is true, which is why it never needs repeating.
+
+If you are **reading** a plan somebody else has open and have changed nothing,
+their saves simply arrive: no notice, no button, the drawing updates.
 
 Three things release the pen:
 
 - **Closing the browser and coming back.** The lock records the *browser*, not the
   tab, so a returning session recognises its own lock and takes it straight back.
   No waiting.
-- **A crash on the other machine.** No heartbeat for 75 seconds and the lock
-  reads as abandoned; the next person to open it simply gets the pen.
+- **A crash on the other machine.** No heartbeat for four minutes and the lock
+  reads as abandoned; the next person to open it simply gets the pen. (Four,
+  not the seventy-five seconds it used to be: OneDrive can take a minute to
+  carry a small file between two machines, and a shorter window made each side
+  see the other keep dying and coming back — so the pen bounced while nothing
+  at all was wrong.)
 - **An hour with no saves.** The holder's session flushes what it has, hands the
   pen back and drops to read-only, so somebody who opened a plan before lunch
   does not hold it all afternoon.
+
+**Two windows of your own** — a second tab, or the browser and the desktop app —
+are recognised as one machine. The second one opens read-only and says so; take
+over from it if that is the one you meant to work in.
 
 And **taking over is never refused.** If the holder still looks live you are
 warned that their unsaved work is at risk, but the decision is yours — the write

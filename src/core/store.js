@@ -24,6 +24,13 @@
 import { deepClone, clamp } from './util.js';
 import { emit, EV } from './events.js';
 import { isReadOnly } from './cloud.js';
+/* The other way a session can be read-only. `cloud.js` answers for a hosted
+   project; this answers for a plan in a shared folder that a colleague is
+   holding the pen on. Both had to be asked here: the interface hid the buttons
+   for a folder reader but the store still accepted the edit, so a keystroke
+   went through, autosave was refused by the folder, and the work was marked
+   saved without ever having been written anywhere. */
+import { isViewer as folderViewer } from './filestore.js';
 import {
   normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES,
   syncLists, defaultLists, LIST_DEFS, listUsage,
@@ -86,14 +93,14 @@ const ui = {
  * raise a notification on every mouse-move.
  */
 function refuseWrite(label) {
-  if (!isReadOnly()) return false;
+  if (!isReadOnly() && !folderViewer()) return false;
   if (label !== 'preview') emit(EV.EDIT_REFUSED, { label });
   return true;
 }
 
 /** True when the open project is read-only for the signed-in user. */
 export function isDocReadOnly() {
-  return isReadOnly();
+  return isReadOnly() || folderViewer();
 }
 
 /* ── Indexing ──────────────────────────────────────────────────────────── */
@@ -292,7 +299,11 @@ export function editQuiet(mutator, reason = 'quiet') {
   if (mutator(draft) === false) return false;
   doc = draft;
   reindex();
-  dirty = true;
+  /* …and for the same reason they do not make the document unsaved. A reader
+     cannot write, so a pan would have marked the plan dirty for ever and the
+     status bar would have told somebody who had touched nothing that their
+     work was not saved. */
+  if (!isDocReadOnly()) dirty = true;
   emit(EV.DOC_CHANGED, { reason, quiet: true });
   return true;
 }
