@@ -236,6 +236,11 @@ check('and the update channel carries code and styles, never configuration',
 // that looks built and cannot sign in. Refused rather than shipped.
 const wrongHost = desktop({ RC_SUPABASE_URL: 'https://rc-test.example.org', RC_SUPABASE_ANON_KEY: 'anon-test' });
 check('an installer whose window would refuse the calendar is not built', !wrongHost.ok);
+// A wildcard permits a subdomain, not a name that merely ends in the same
+// letters — which is what the browser does with it, and so the only reading
+// worth checking against.
+const lookalike = desktop({ RC_SUPABASE_URL: 'https://evilsupabase.co', RC_SUPABASE_ANON_KEY: 'anon-test' });
+check('and `*.supabase.co` is not read as permitting `evilsupabase.co`', !lookalike.ok);
 check('and it says which line to change',
   /tauri\.conf\.json/.test(wrongHost.out) && /connect-src/.test(wrongHost.out));
 

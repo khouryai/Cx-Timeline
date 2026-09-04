@@ -732,7 +732,7 @@ npm run build                        # must succeed — it also lints the module
 npm test                             # all five browser suites plus the SQL one, must exit 0
 npm run test:rust                    #  33 checks — the plan, lock and intake rules, in Rust
 
-node tools/test_dist.js              #  40 checks — every deployment shape, and that the
+node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  57 checks — the parser, the rows it derives and
                                      #              the change events, no browser

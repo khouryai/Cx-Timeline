@@ -126,10 +126,18 @@ function cspAllows(origin) {
     return { ok: false, why: 'src-tauri/tauri.conf.json could not be read' };
   }
   const connect = (/connect-src ([^;]*)/.exec(csp) || [])[1] || '';
+  const sources = connect.trim().split(/\s+/);
   const host = origin.replace(/^https:\/\//, '');
-  const named = connect.includes(origin);
-  const wild = /https:\/\/\*\.([^\s;]+)/.test(connect)
-    && host.endsWith((/https:\/\/\*\.([^\s;]+)/.exec(connect) || [])[1] || '\u0000');
+
+  // Compared as whole sources rather than as substrings, and a wildcard has to
+  // match a *subdomain* — `*.supabase.co` permits `x.supabase.co` and not
+  // `evilsupabase.co`, which is what the browser would do with it and
+  // therefore the only reading worth checking against.
+  const named = sources.includes(origin);
+  const wild = sources.some((src) => {
+    const suffix = (/^https:\/\/\*\.(.+)$/.exec(src) || [])[1];
+    return suffix ? host.endsWith(`.${suffix}`) : false;
+  });
   return { ok: named || wild, why: connect, named };
 }
 
