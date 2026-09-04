@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-09-01T04:53:48.981Z
+ * Modules: 53   Built: 2026-09-04T21:15:44.330Z
  */
 (function () {
   'use strict';
@@ -30781,11 +30781,17 @@ __mods["core/lookahead.js"] = function (__x, __req) {
          which of several near-identical greys means "divider". */
       const heading = row.cells.some((c) => !dayCol.has(c.col) && c.hex);
 
-      /* "Highlighted" means at least one day carries paint that is not shading.
-         An unmapped colour counts: until somebody says what it is, the honest
-         assumption is that it might be work, and hiding it would bury the rows
-         that most need attention. */
-      const highlighted = marks.some((m) => m.hex && m.role !== 'ignore');
+      /* "Highlighted" means at least one day carries paint that is *work*.
+         Tested as `role === 'shift'` rather than `role !== 'ignore'`, which is
+         not the same question and got the answer wrong: a `divider` is the grey
+         the workbook paints its section bands in, and a row whose only colour is
+         a divider or a weekend band has nothing scheduled on it — but it read as
+         highlighted and survived into the grid.
+         An unmapped colour still counts, because `applyLegend()` gives it
+         `shift`: until somebody says what a colour is, the honest assumption is
+         that it might be work, and hiding it would bury the rows that most need
+         attention. */
+      const highlighted = marks.some((m) => m.hex && m.role === 'shift');
 
       activities.push({ row: row.row, meta, marks, heading, highlighted });
     }
@@ -31673,7 +31679,10 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     const shown = new Set(narrowed.map((d) => d.col));
     const activities = view.activities.map((a) => ({
       ...a,
-      highlighted: a.marks.some((m) => m.hex && m.role !== 'ignore' && shown.has(m.col)),
+      // `role === 'shift'`, the same question `readGrid()` asks — a divider or a
+      // weekend band is paint, not work, and a row carrying only those has
+      // nothing scheduled in the weeks on screen.
+      highlighted: a.marks.some((m) => m.hex && m.role === 'shift' && shown.has(m.col)),
     }));
 
     return { ...view, days: narrowed, activities };

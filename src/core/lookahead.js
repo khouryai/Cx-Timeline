@@ -273,11 +273,17 @@ export function readGrid(grid, { anchorISO = null } = {}) {
        which of several near-identical greys means "divider". */
     const heading = row.cells.some((c) => !dayCol.has(c.col) && c.hex);
 
-    /* "Highlighted" means at least one day carries paint that is not shading.
-       An unmapped colour counts: until somebody says what it is, the honest
-       assumption is that it might be work, and hiding it would bury the rows
-       that most need attention. */
-    const highlighted = marks.some((m) => m.hex && m.role !== 'ignore');
+    /* "Highlighted" means at least one day carries paint that is *work*.
+       Tested as `role === 'shift'` rather than `role !== 'ignore'`, which is
+       not the same question and got the answer wrong: a `divider` is the grey
+       the workbook paints its section bands in, and a row whose only colour is
+       a divider or a weekend band has nothing scheduled on it — but it read as
+       highlighted and survived into the grid.
+       An unmapped colour still counts, because `applyLegend()` gives it
+       `shift`: until somebody says what a colour is, the honest assumption is
+       that it might be work, and hiding it would bury the rows that most need
+       attention. */
+    const highlighted = marks.some((m) => m.hex && m.role === 'shift');
 
     activities.push({ row: row.row, meta, marks, heading, highlighted });
   }

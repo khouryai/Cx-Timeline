@@ -590,7 +590,11 @@ subscribes. That is what keeps the graph acyclic.
   no wording of the meaning fixes it ("not scheduled" is still a meaning). An
   **unmapped** colour counts as a shift on purpose: it might be one, and
   treating the unexplained as ignorable would hide the rows that most need
-  looking at. The cost of that is real — with this file's layout grey
+  looking at. A row earns its place by carrying `role === 'shift'`, never by
+  carrying paint that is merely *not* `ignore` — those are different questions
+  and the second got it wrong: a `divider` is neither work nor ignorable, so a
+  row whose only colour was a section band or a weekend shade read as busy and
+  survived into the grid. The cost of that is real — with this file's layout grey
   unmapped, a four-week window shows 145 rows instead of 29 — so saying so is
   one click ("Just shading") from the list of unmapped colours, and the strip
   above the grid shows the swatches rather than only a count.
@@ -734,7 +738,7 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         #  57 checks — the parser, the rows it derives and
+node tools/test_lookahead.js         #  61 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 254 checks — the application, local mode
 node tools/smoke_calendar.js         # 172 checks — the resource calendar, accounts, the

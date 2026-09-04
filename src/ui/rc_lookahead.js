@@ -608,7 +608,10 @@ function windowed(view, today) {
   const shown = new Set(narrowed.map((d) => d.col));
   const activities = view.activities.map((a) => ({
     ...a,
-    highlighted: a.marks.some((m) => m.hex && m.role !== 'ignore' && shown.has(m.col)),
+    // `role === 'shift'`, the same question `readGrid()` asks — a divider or a
+    // weekend band is paint, not work, and a row carrying only those has
+    // nothing scheduled in the weeks on screen.
+    highlighted: a.marks.some((m) => m.hex && m.role === 'shift' && shown.has(m.col)),
   }));
 
   return { ...view, days: narrowed, activities };

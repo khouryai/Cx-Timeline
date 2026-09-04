@@ -323,7 +323,12 @@ function sheet(marks) {
   // A fixed Monday, so the week keys are known rather than relative to today.
   const first = Date.UTC(2026, 8, 7);      // Monday 7 September 2026
   const days = [...Array(14)].map((_, i) => new Date(first + i * 86400000));
-  const cell = (i, value, hex) => ({ col: 8 + i, ref: `X${i}`, value, hex, role: hex ? 'shift' : null,
+  /* The role is what `applyLegend()` would have attached, so the fixture can
+     express the three kinds of paint a real workbook carries: a shift, the
+     grey a section band is drawn in, and the grey the weekend columns are
+     shaded with. Only the first is work. */
+  const roleOf = (hex) => (hex === 'D9D9D9' ? 'divider' : hex === 'BFBFBF' ? 'ignore' : hex ? 'shift' : null);
+  const cell = (i, value, hex) => ({ col: 8 + i, ref: `X${i}`, value, hex, role: roleOf(hex),
     meaning: hex === 'FFFF00' ? 'Day Shift' : hex === 'FF0000' ? 'Cancelled' : hex ? null : null });
 
   return {
@@ -352,6 +357,23 @@ const genA = cls.readGrid(sheet([
   { label: 'Nothing scheduled', location: 'TPSS 12', days: [] },
 ]), { anchorISO: '2026-09-09' });
 const rowsA = await cls.rowsFrom(genA, { snapshotId: 'snap-a', locate });
+
+/* Paint is not work. A row carrying only the grey a section band is drawn in,
+   or only the shading on the weekend columns, has nothing scheduled on it —
+   and it used to survive into the grid because the test was "not ignored"
+   rather than "is a shift", and a divider is neither. */
+const painted = cls.readGrid(sheet([
+  { label: 'Real work', location: 'TPSS 12', days: [[0, 'FFFF00']] },
+  { label: 'Section band only', location: 'TPSS 12', days: [[0, 'D9D9D9'], [1, 'D9D9D9']] },
+  { label: 'Weekend shading only', location: 'TPSS 12', days: [[5, 'BFBFBF'], [6, 'BFBFBF']] },
+  { label: 'Shading and a shift', location: 'TPSS 12', days: [[5, 'BFBFBF'], [2, 'FFFF00']] },
+]), { anchorISO: '2026-09-09' });
+const lit = (name) => painted.activities.find((a) => a.meta[0] === name)?.highlighted;
+
+check('a row with real work is kept', lit('Real work') === true);
+check('a row painted only with a section-band grey is not', lit('Section band only') === false);
+check('nor is one carrying only weekend shading', lit('Weekend shading only') === false);
+check('but shading with a shift on top of it stays', lit('Shading and a shift') === true);
 
 check('a row is emitted per activity per week', rowsA.length === 2, `${rowsA.length} rows`);
 check('an activity with nothing scheduled is not a row',
