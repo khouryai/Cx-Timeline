@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - name: Rebuild
         run: node tools/build.js
       - name: Compare against what is committed
@@ -52,6 +52,11 @@ jobs:
           fi
           echo "the committed bundle is the source, built"
 
+  # This job needs `package-lock.json` committed, and for a long time it was
+  # not: `.gitignore` held it, so `cache: npm` failed at setup, every suite step
+  # was *skipped*, and the run went red in forty seconds looking exactly like a
+  # test failure. A red tick that never ran the tests is worse than no tick at
+  # all — it was reporting on nothing while the suites went unrun on every push.
   browser:
     name: Browser and deployment suites
     runs-on: ubuntu-latest
@@ -59,7 +64,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # 22, not 20: the runners deprecated Node 20 and are already forcing
+          # the actions themselves onto a newer one, and 22 is what the suites
+          # are developed against.
+          node-version: '22'
           cache: npm
       - run: npm ci
       # Playwright resolves its own browser when nothing is pinned — see
@@ -93,7 +101,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       # `test_sql.js` stands up its own throwaway instance with initdb rather
       # than talking to a service container, so all it needs is the binaries.
       - name: Install PostgreSQL

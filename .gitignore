@@ -1,9 +1,14 @@
 node_modules/
-package-lock.json
 *.log
 .DS_Store
 /tmp/
 dist/
+
+# `package-lock.json` is deliberately NOT ignored. Ignoring it made every
+# browser suite silently skip in CI for the life of the workflow: `npm ci`
+# refuses to run without a lockfile, and `actions/setup-node` with `cache: npm`
+# fails outright looking for one — so the job died at setup and reported a
+# failure that looked like the tests, while the tests had never started.
 
 # Assembled by tools/desktop.js from index.html, css/ and app.bundle.js, which
 # are all committed. Nothing original lives here.
