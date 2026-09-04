@@ -167,6 +167,81 @@ check('the desktop payload still carries the bundle, whatever the site calls it'
   typeof payload.bundle === 'string' && payload.bundle.length > 100000,
   `${Math.round((payload.bundle || '').length / 1024)} kB`);
 
+/* ══════════════════════════════════════════════════════════════════════════
+   The desktop shape — the installer, which is a fourth deployment
+   ═══════════════════════════════════════════════════════════════════════ */
+
+console.log('\nThe installer carries the calendar only when it is given one');
+
+/** Assemble `dist-desktop/`; returns `{ ok, out }` rather than throwing. */
+function desktop(env = {}) {
+  try {
+    return {
+      ok: true,
+      out: execFileSync('node', [path.join(ROOT, 'tools/desktop.js')], {
+        cwd: ROOT,
+        encoding: 'utf8',
+        env: { ...process.env, RC_SUPABASE_URL: '', RC_SUPABASE_ANON_KEY: '', ...env },
+      }),
+    };
+  } catch (err) {
+    return { ok: false, out: (err.stdout || '') + (err.stderr || '') };
+  }
+}
+const shellFile = (f) => {
+  const at = path.join(ROOT, 'dist-desktop', f);
+  return fs.existsSync(at) ? fs.readFileSync(at, 'utf8') : '';
+};
+
+desktop();
+check('with no keys it is what it always was: no backend of any kind',
+  /supabaseUrl:\s*''/.test(shellFile('config.js')) && !/rcSupabaseUrl/.test(shellFile('config.js')));
+check('and the Supabase client is not shipped',
+  !fs.existsSync(path.join(ROOT, 'dist-desktop', 'vendor', 'supabase.js')));
+check('nor is its script tag left behind pointing at nothing',
+  !shellFile('index.html').includes('vendor/supabase.js'));
+
+desktop({ RC_SUPABASE_URL: 'https://rc-test.supabase.co', RC_SUPABASE_ANON_KEY: 'anon-test' });
+check('with the calendar\'s keys the plan STILL has no backend',
+  /supabaseUrl:\s*''/.test(shellFile('config.js')));
+check('and only the calendar gets one',
+  shellFile('config.js').includes('https://rc-test.supabase.co'));
+check('the client is shipped for it, from the installer rather than a CDN',
+  fs.existsSync(path.join(ROOT, 'dist-desktop', 'vendor', 'supabase.js'))
+    && shellFile('index.html').includes('vendor/supabase.js'));
+
+// The plan's own variables must not be able to reach this build by being left
+// set in a shell — the same trap the folder shape is guarded against.
+desktop({
+  RC_SUPABASE_URL: 'https://rc-test.supabase.co',
+  RC_SUPABASE_ANON_KEY: 'anon-test',
+  SUPABASE_URL: 'https://leaked.supabase.co',
+  SUPABASE_ANON_KEY: 'leaked',
+});
+check('a stale SUPABASE_URL in the environment cannot give the plan one',
+  !shellFile('config.js').includes('leaked'));
+
+// The update payload carries code, never configuration. A deployment that
+// could rewrite config.js on an installed machine could give the plan a
+// backend from a thousand miles away.
+// Checked on the payload's *keys*: the bundle itself naturally mentions
+// `rcSupabaseUrl` — it is the code that reads it — so searching the text would
+// pass or fail for the wrong reason.
+const desktopPayload = JSON.parse(read('desktop/payload.json') || '{}');
+check('and the update channel carries code and styles, never configuration',
+  Object.keys(desktopPayload).sort().join(',') === 'builtAt,bundle,css,revision,version',
+  Object.keys(desktopPayload).sort().join(','));
+
+// A window whose policy forbids the host it is about to call is an installer
+// that looks built and cannot sign in. Refused rather than shipped.
+const wrongHost = desktop({ RC_SUPABASE_URL: 'https://rc-test.example.org', RC_SUPABASE_ANON_KEY: 'anon-test' });
+check('an installer whose window would refuse the calendar is not built', !wrongHost.ok);
+check('and it says which line to change',
+  /tauri\.conf\.json/.test(wrongHost.out) && /connect-src/.test(wrongHost.out));
+
+/* Leave it in the shape the repository deploys. */
+desktop();
+
 console.log('\nA hosted deployment still refuses to publish without a backend');
 const hosted = build(['--hosted'], { SUPABASE_URL: '', SUPABASE_ANON_KEY: '' });
 check('a hosted build with no backend fails', !hosted.ok);

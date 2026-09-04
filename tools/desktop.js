@@ -43,7 +43,7 @@ const PLACEHOLDER = '__CHANNEL__';
 /** Loaded in this order by `index.html`, so concatenated in this order too. */
 const STYLES = ['tokens.css', 'base.css', 'components.css', 'layout.css', 'timeline.css', 'notes.css', 'calendar.css'];
 
-/** `config.js` for the desktop build. There is no backend and never was one. */
+/** `config.js` for the desktop build. The *plan* has no backend and never had. */
 const BLANK_CONFIG = `/**
  * Deployment configuration — written by tools/desktop.js.
  *
@@ -57,6 +57,81 @@ window.CX_CONFIG = {
   requireAuth: false,
 };
 `;
+
+/**
+ * The calendar's Supabase project, from the build environment.
+ *
+ * The same two names `tools/dist.js` reads, and deliberately *not*
+ * `SUPABASE_URL` — that one belongs to the plan and must stay unset here. Two
+ * names that cannot be mistaken for each other is the whole discipline: a plan
+ * that quietly acquired a backend is the one failure nobody would notice.
+ */
+function calendarEnv() {
+  return {
+    url: process.env.RC_SUPABASE_URL || '',
+    key: process.env.RC_SUPABASE_ANON_KEY || '',
+  };
+}
+
+/**
+ * `config.js` for a desktop build that carries the resource calendar.
+ *
+ * `supabaseUrl` is still written blank, and that is the point rather than an
+ * oversight: the plan holds the P6 programme, it lives in a folder on this
+ * machine, and it gets no backend in this shape either. Only the second pair
+ * of keys is filled, and nothing on the plan's storage path reads them.
+ *
+ * This file is in the **installer**, not in the update payload — the payload
+ * carries the bundle and the stylesheets and nothing else. That is deliberate:
+ * a deployment that could rewrite `config.js` on an installed machine could
+ * give the plan a backend from a thousand miles away, which is exactly the
+ * thing every other rule here exists to prevent.
+ */
+const calendarConfig = ({ url, key }) => `/**
+ * Deployment configuration — written by tools/desktop.js (calendar shape).
+ *
+ * The plan has no backend: it lives in a folder on this machine, and
+ * \`supabaseUrl\` below stays blank so it cannot acquire one by accident.
+ *
+ * The resource calendar has its own, separate project. Nothing that reads the
+ * plan imports the client these keys create.
+ */
+window.CX_CONFIG = {
+  supabaseUrl: '',
+  supabaseAnonKey: '',
+  requireAuth: false,
+
+  rcSupabaseUrl: ${JSON.stringify(url)},
+  rcSupabaseAnonKey: ${JSON.stringify(key)},
+};
+`;
+
+/**
+ * Whether the window's own policy would let the calendar be reached.
+ *
+ * The web build narrows `connect-src` at publish time, from a file it writes.
+ * The desktop build cannot: its policy is in `src-tauri/tauri.conf.json`, which
+ * is committed, read by cargo, and cannot see a build variable. So it ships a
+ * policy wide enough to work and this checks the two agree — because the
+ * failure it prevents is silent. Everything would look built, the window would
+ * open, the calendar would sign in against a host the webview then refuses to
+ * call, and the only symptom is a network error nobody can place.
+ */
+function cspAllows(origin) {
+  const conf = path.join(ROOT, 'src-tauri', 'tauri.conf.json');
+  let csp = '';
+  try {
+    csp = JSON.parse(fs.readFileSync(conf, 'utf8'))?.app?.security?.csp || '';
+  } catch {
+    return { ok: false, why: 'src-tauri/tauri.conf.json could not be read' };
+  }
+  const connect = (/connect-src ([^;]*)/.exec(csp) || [])[1] || '';
+  const host = origin.replace(/^https:\/\//, '');
+  const named = connect.includes(origin);
+  const wild = /https:\/\/\*\.([^\s;]+)/.test(connect)
+    && host.endsWith((/https:\/\/\*\.([^\s;]+)/.exec(connect) || [])[1] || '\u0000');
+  return { ok: named || wild, why: connect, named };
+}
 
 /** Which deployment the installed application follows for updates. */
 export function updateChannel() {
@@ -147,7 +222,7 @@ export function writeChannel(distDir, builtAt = new Date().toISOString()) {
  * Every substitution is checked, and a miss fails the build rather than
  * producing a window that silently runs the wrong thing.
  */
-function shellHtml(channel) {
+function shellHtml(channel, withCalendar) {
   const source = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
   let html = source;
 
@@ -160,14 +235,22 @@ function shellHtml(channel) {
   if (marked === html) fail('could not mark the stylesheet links');
   html = marked;
 
-  // No backend in this build, so the vendored client is not shipped and its
-  // script tag must go with it.
-  const noVendor = html.replace(
-    /\n\s*<!--\s*\n\s*The Supabase client[\s\S]*?-->\s*\n\s*<script src="vendor\/supabase\.js"><\/script>/,
-    '\n    <!-- No backend in the desktop build: the Supabase client is not shipped. -->'
-  );
-  if (noVendor === html) fail('could not remove the Supabase script tag');
-  html = noVendor;
+  /* The vendored client goes with the calendar, and only with it.
+     The plan never needs one in this build — it has no backend in any desktop
+     shape — so without the calendar the script is not shipped and its tag must
+     go with it, or the window opens on a 404 for a file that is not there. */
+  if (!withCalendar) {
+    const noVendor = html.replace(
+      /\n\s*<!--\s*\n\s*The Supabase client[\s\S]*?-->\s*\n\s*<script src="vendor\/supabase\.js"><\/script>/,
+      '\n    <!-- No backend in this desktop build: the Supabase client is not shipped. -->'
+    );
+    if (noVendor === html) fail('could not remove the Supabase script tag');
+    html = noVendor;
+  } else if (!html.includes('<script src="vendor/supabase.js"></script>')) {
+    // Belt and braces: the calendar cannot start without the global this tag
+    // defines, and a moved tag would produce a build that looks complete.
+    fail('the Supabase script tag is not where the calendar shape expects it');
+  }
 
   // The one substitution the whole design rests on: the loader decides which
   // copy of the application runs, so the bundle must not be loaded directly.
@@ -209,10 +292,22 @@ export function assembleShell(builtAt = new Date().toISOString()) {
   fs.rmSync(SHELL_OUT, { recursive: true, force: true });
   fs.mkdirSync(SHELL_OUT, { recursive: true });
 
-  fs.writeFileSync(path.join(SHELL_OUT, 'index.html'), shellHtml(channel));
-  fs.writeFileSync(path.join(SHELL_OUT, 'config.js'), BLANK_CONFIG);
+  /* The calendar comes with the build only when its keys are in the
+     environment — the same two `tools/dist.js` reads. Missing keys are not an
+     error the way they are for a calendar *site*: a desktop build without them
+     is exactly what has shipped until now and does the thing the installer is
+     for, which is the plan in a folder. So it is said out loud instead. */
+  const rc = calendarEnv();
+  const withCalendar = Boolean(rc.url && rc.key);
+
+  fs.writeFileSync(path.join(SHELL_OUT, 'index.html'), shellHtml(channel, withCalendar));
+  fs.writeFileSync(
+    path.join(SHELL_OUT, 'config.js'),
+    withCalendar ? calendarConfig(rc) : BLANK_CONFIG
+  );
   fs.copyFileSync(path.join(ROOT, 'app.bundle.js'), path.join(SHELL_OUT, 'app.bundle.js'));
   copyDir(path.join(ROOT, 'css'), path.join(SHELL_OUT, 'css'));
+  if (withCalendar) copyDir(path.join(ROOT, 'vendor'), path.join(SHELL_OUT, 'vendor'));
 
   // The placeholder must appear exactly once, and must be gone afterwards. A
   // second occurrence — in a comment, say — takes the substitution and leaves
@@ -242,6 +337,32 @@ export function assembleShell(builtAt = new Date().toISOString()) {
   if (!channel) {
     console.log('  note          — cxTimeline.updateChannel is blank in package.json, so this');
     console.log('                  build will only ever run the copy inside the installer.');
+  }
+
+  if (withCalendar) {
+    const origin = new URL(rc.url).origin;
+    const csp = cspAllows(origin);
+    if (!csp.ok) {
+      console.error(`✗ the window's own policy would refuse ${origin}.`);
+      console.error('  src-tauri/tauri.conf.json → app.security.csp → connect-src currently reads:');
+      console.error(`    ${csp.why}`);
+      console.error(`  Add ${origin} and ${origin.replace(/^https:/, 'wss:')} to it, then build again.`);
+      console.error('  Refusing rather than shipping an installer whose calendar cannot connect —');
+      console.error('  the window would open, sign in, and fail with a network error nobody can place.');
+      process.exit(1);
+    }
+    console.log('✓ config.js      — the plan has no backend; the calendar has its own');
+    console.log('✓ vendor/        — Supabase client shipped for the calendar only');
+    if (!csp.named) {
+      console.log(`  note          — the window policy allows ${origin} by wildcard. Naming the`);
+      console.log('                  host in src-tauri/tauri.conf.json is tighter, and free.');
+    }
+    console.log('  reminder      — config.js and vendor/ ride in the INSTALLER, not in the');
+    console.log('                  update payload, so an installed copy needs reinstalling once.');
+  } else {
+    console.log('✓ config.js      — no backend of any kind (RC_SUPABASE_URL is not set)');
+    console.log('  note          — this build has no resource calendar. Set RC_SUPABASE_URL and');
+    console.log('                  RC_SUPABASE_ANON_KEY to include it; the plan stays in a folder.');
   }
   return SHELL_OUT;
 }

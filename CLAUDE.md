@@ -334,6 +334,23 @@ subscribes. That is what keeps the graph acyclic.
   desktop build two things a browser cannot have: no permission prompt on launch,
   and an **atomic** write (temp file, then rename) so OneDrive never reads a
   half-written plan.
+- **The desktop build has no backend for the plan, and may have one for the
+  calendar.** Those are two different sentences and `tools/desktop.js` keeps
+  them apart the way `tools/dist.js` does: `supabaseUrl` is written blank in
+  every desktop shape, and `rcSupabaseUrl` is filled only when
+  `RC_SUPABASE_URL` and `RC_SUPABASE_ANON_KEY` are in the build environment —
+  in which case the vendored client is shipped and its script tag kept, and
+  otherwise both are stripped. Missing keys are **not** an error here, unlike a
+  calendar *site*: a desktop build without them is what shipped for a year and
+  does the thing the installer is for. What is refused is an installer whose
+  own window would reject the host it is about to call — `cspAllows()` compares
+  the configured origin against `app.security.csp` in `tauri.conf.json`, which
+  is committed and cannot read a build variable, because that failure is
+  otherwise silent: the window opens, signs in, and fails on a network error
+  nobody can place. And `config.js` and `vendor/` ride in the **installer**,
+  never in the update payload — a deployment that could rewrite the config on
+  an installed machine could give the plan a backend from a thousand miles
+  away, which is what every other rule here exists to prevent.
 - **The desktop app is fed by the deployment, not by reinstalling.** The window
   loads a local page; `tools/shell/loader.js` runs the newest copy the machine
   has and fetches a newer one in the background for the *next* launch. Two rules
@@ -715,7 +732,7 @@ npm run build                        # must succeed — it also lints the module
 npm test                             # all five browser suites plus the SQL one, must exit 0
 npm run test:rust                    #  33 checks — the plan, lock and intake rules, in Rust
 
-node tools/test_dist.js              #  30 checks — every deployment shape, and that the
+node tools/test_dist.js              #  40 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  57 checks — the parser, the rows it derives and
                                      #              the change events, no browser
@@ -724,7 +741,7 @@ node tools/smoke_calendar.js         # 172 checks — the resource calendar, acc
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  73 checks — the shared folder, in a browser
-node tools/smoke_desktop.js          #  51 checks — the desktop shell and its updates
+node tools/smoke_desktop.js          #  60 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               # 244 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project

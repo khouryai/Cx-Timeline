@@ -53,12 +53,21 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       # No `npm install`: the build and the shell assembler use nothing but
       # Node's own modules, and the only dependency in package.json is Playwright
       # for the test suites, which do not run here.
+      # The calendar's keys, when the repository has them. Without them the
+      # installer is exactly what it has always been — the plan in a folder,
+      # no backend — so this is not a required secret and the build does not
+      # fail for want of it; `tools/desktop.js` says which shape it made.
+      # The plan's own SUPABASE_URL is deliberately never passed: it has no
+      # backend in this shape and must not be able to acquire one here.
       - name: Build the bundle and the shell
+        env:
+          RC_SUPABASE_URL: ${{ secrets.RC_SUPABASE_URL }}
+          RC_SUPABASE_ANON_KEY: ${{ secrets.RC_SUPABASE_ANON_KEY }}
         run: |
           node tools/build.js
           node tools/desktop.js

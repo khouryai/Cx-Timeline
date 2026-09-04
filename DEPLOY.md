@@ -557,6 +557,49 @@ friction:
 | Writing the file | Truncate, then write | Written beside the target and renamed over it, so a sync client never reads a half-written plan |
 | Getting a new version | Refresh | Picked up on the next launch, automatically |
 
+## The resource calendar in the desktop app
+
+It is included **only if the installer was built with the calendar's keys**, and
+for a long time it never was: the desktop build wrote a blank `config.js` and
+left the Supabase client out altogether, so the Calendar switch was not drawn at
+all. If your desktop app has no Calendar tab, that is why — nothing is stale and
+nothing is broken.
+
+To include it, set two build variables and build the installer:
+
+```bash
+RC_SUPABASE_URL=https://<ref>.supabase.co RC_SUPABASE_ANON_KEY=eyJ... npm run build:desktop
+```
+
+or, for the GitHub build, add `RC_SUPABASE_URL` and `RC_SUPABASE_ANON_KEY` to the
+repository secrets — **Settings → Secrets and variables → Actions** — and run
+**Actions → Desktop app** as usual. They are the same two values the site is
+published with, and the anon key is public by design: row-level security is the
+control, never the key.
+
+Three things are worth knowing before you do it.
+
+- **The plan still has no backend.** `supabaseUrl` is written blank in every
+  desktop shape, and `tools/test_dist.js` asserts it — including with the
+  calendar's keys present, and with a stale `SUPABASE_URL` left in the shell.
+  The plan stays a file in your folder.
+- **This one needs a reinstall.** The update channel carries the bundle and the
+  stylesheets and nothing else, on purpose: a deployment that could rewrite
+  `config.js` on an installed machine could give the plan a backend from a
+  thousand miles away. `config.js` and the Supabase client ride in the
+  installer, so the calendar arrives with a new installer — once. Everything
+  after that updates on its own as before.
+- **The window has its own policy.** `src-tauri/tauri.conf.json` allows
+  `https://*.supabase.co`; if your project is somewhere else the build refuses
+  and prints the exact line to change, rather than shipping an installer that
+  opens, signs in and fails on a network error nobody can place.
+
+One rough edge, and it is honest to state it: opening a **SAR PDF or an evidence
+photo** calls `window.open()`, which a Tauri window has nowhere to send. Both
+open normally in the browser. Making them work in the window means adding the
+opener plugin to the Rust side — small, but it is a Rust change and a new
+installer, so it is not done yet.
+
 ## Installing it without administrative rights
 
 The installer is built **per-user**: it writes to your own
@@ -661,7 +704,7 @@ the lock file *before the window exists*, so:
 
 ## Verifying the desktop build
 
-`npm run test:desktop` (48 checks) and `npm run test:rust` (13) cover the shell,
+`npm run test:desktop` (60 checks) and `npm run test:rust` (33) cover the shell,
 the update path including both ways a bad download can fail, and every rule about
 locks and refused writes. Three things need a real Windows machine:
 

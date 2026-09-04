@@ -307,7 +307,7 @@ async function main() {
    * which is how the folder suite once ordered its tests around a stub it could
    * not remove.
    */
-  const launch = async (state = {}) => {
+  const launch = async (state = {}, extra = null) => {
     if (context) await context.close();
     context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
     page = await context.newPage();
@@ -315,6 +315,7 @@ async function main() {
     page.on('pageerror', (e) => consoleErrors.push(String(e)));
     await page.addInitScript(`window.__desktop = ${JSON.stringify(state)};`);
     await page.addInitScript(fakeShell);
+    if (extra) await page.addInitScript(extra);
     return page;
   };
 
@@ -659,6 +660,75 @@ async function main() {
   check('and the launch after that discards it and works',
     await page.evaluate(() => window.CX_SHELL?.source === 'shipped') && (await page.locator('.tl-obj').count()) > 0,
     await page.evaluate(() => window.CX_SHELL?.source));
+
+  /* ── The resource calendar, in the installer ──────────────────────────
+     The desktop build had no calendar at all, and not by accident: the config
+     was written blank and the vendored client was stripped, so the workspace
+     switch was never even drawn. The plan still has no backend here — that is
+     the property the whole split exists to protect — but the calendar has its
+     own, exactly as the published site does. */
+  console.log('\nThe resource calendar, in the installer');
+
+  // Rebuilt in place with the keys present, which is the only difference
+  // between the two shapes. Everything else about the shell is identical.
+  execFileSync('node', [path.join(ROOT, 'tools', 'desktop.js')], {
+    cwd: ROOT,
+    stdio: 'pipe',
+    env: { ...process.env, RC_SUPABASE_URL: 'https://rc-stub.supabase.co', RC_SUPABASE_ANON_KEY: 'stub-anon-key' },
+  });
+
+  check('the vendored client is in the installer, not fetched from anywhere',
+    fs.existsSync(path.join(SHELL, 'vendor', 'supabase.js')));
+
+  /* A stand-in for the client, so the calendar can start without a network.
+     Only what booting needs: how it behaves once signed in is 172 checks in
+     tools/smoke_calendar.js and is the same bundle either way. */
+  const stubSupabase = () => {
+    window.supabase = {
+      createClient: () => ({
+        auth: {
+          getSession: () => Promise.resolve({ data: { session: null } }),
+          onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
+          signOut: () => Promise.resolve({ error: null }),
+        },
+        from: () => ({
+          select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }) }),
+        }),
+      }),
+    };
+  };
+
+  await launch({ files: {}, settings: { folder: '', plan: '' } }, stubSupabase);
+  await page.route(`${CHANNEL}/**`, (route) => route.abort());
+  await boot();
+
+  check('the plan still has no backend, which is the whole point of the split',
+    await page.evaluate(() => window.CX_CONFIG.supabaseUrl === '' && window.CX_CONFIG.supabaseAnonKey === ''));
+  check('while the calendar has one of its own',
+    await page.evaluate(() => window.CX_CONFIG.rcSupabaseUrl === 'https://rc-stub.supabase.co'));
+  check('so the workspace switch is drawn at last',
+    (await page.locator('.ws-switch').count()) === 1);
+
+  await page.locator('.ws-switch button', { hasText: /calendar/i }).click();
+  await page.waitForTimeout(900);
+  const rcText = await page.locator('#rc-frame').innerText();
+  check('and the calendar opens on its own sign-in rather than an empty state',
+    !/No resource calendar in this build/i.test(rcText), rcText.split('\n').slice(0, 2).join(' / '));
+  check('the timeline is hidden rather than torn down',
+    await page.evaluate(() => document.querySelectorAll('.tl-obj').length > 0));
+
+  /* And back. The default shape is what ships to anyone without the keys, and
+     it has to stay exactly what it was — no calendar, no client, no switch. */
+  execFileSync('node', [path.join(ROOT, 'tools', 'desktop.js')], { cwd: ROOT, stdio: 'pipe' });
+  check('without the keys the client is not shipped at all',
+    !fs.existsSync(path.join(SHELL, 'vendor', 'supabase.js')));
+  await launch({ files: {}, settings: { folder: '', plan: '' } });
+  await page.route(`${CHANNEL}/**`, (route) => route.abort());
+  await boot();
+  check('and that build has no calendar switch, as before',
+    (await page.locator('.ws-switch').count()) === 0);
+  check('but the timeline is untouched by any of it',
+    (await page.locator('.tl-obj').count()) > 0);
 
   /* ── Console ─────────────────────────────────────────────────────────── */
   console.log('\nConsole');
