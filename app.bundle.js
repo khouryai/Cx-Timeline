@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-09-04T21:21:09.378Z
+ * Modules: 53   Built: 2026-09-04T22:08:16.533Z
  */
 (function () {
   'use strict';
@@ -1450,18 +1450,26 @@ __mods["core/model.js"] = function (__x, __req) {
    */
 
   const DEFAULT_LISTS = {
+    /* Eleven statuses, eleven colours.
+       Six of them used to share four: testing with in-progress, released with
+       complete with closed, delayed with blocked, cancelled with on-hold — so a
+       plan coloured by status could not be read as one, which is the whole
+       reason for colouring by status. Each now has its own hue, and the `tone`
+       stays with the *family* it belongs to (good / warn / bad / neutral) so
+       badges, filters and the legend keep grouping them the way they always
+       did. Colour distinguishes; tone still means. */
     status: [
       { id: 'planned', label: 'Planned', color: 'var(--info)', tone: 'info' },
-      { id: 'testing', label: 'Testing', color: 'var(--warn)', tone: 'warn' },
+      { id: 'testing', label: 'Testing', color: 'var(--accent-teal)', tone: 'warn' },
       { id: 'inprogress', label: 'In Progress', color: 'var(--warn)', tone: 'warn' },
-      { id: 'released', label: 'Released', color: 'var(--good)', tone: 'good' },
+      { id: 'released', label: 'Released', color: 'var(--accent-lime)', tone: 'good' },
       { id: 'complete', label: 'Complete', color: 'var(--good)', tone: 'good' },
-      { id: 'delayed', label: 'Delayed', color: 'var(--bad)', tone: 'bad' },
+      { id: 'delayed', label: 'Delayed', color: 'var(--accent-orange)', tone: 'bad' },
       { id: 'blocked', label: 'Blocked', color: 'var(--bad)', tone: 'bad' },
       { id: 'cancelled', label: 'Cancelled', color: 'var(--neutral)', tone: 'neutral' },
-      { id: 'onhold', label: 'On Hold', color: 'var(--neutral)', tone: 'neutral' },
+      { id: 'onhold', label: 'On Hold', color: 'var(--accent-indigo)', tone: 'neutral' },
       { id: 'open', label: 'Open', color: 'var(--pending)', tone: 'pending' },
-      { id: 'closed', label: 'Closed', color: 'var(--good)', tone: 'good' },
+      { id: 'closed', label: 'Closed', color: 'var(--accent-slate)', tone: 'good' },
     ],
     subsystem: [
       { id: 'ats', label: 'ATS', color: 'var(--sys-ats)' },
@@ -2548,7 +2556,13 @@ __mods["core/model.js"] = function (__x, __req) {
   function objectColor(obj, lane) {
     if (obj.style?.fill) return obj.style.fill;
     const status = listOption('status', obj.status);
-    if (obj.type === 'release' && status?.color) return status.color;
+    /* A release and a document are read for their *state* rather than their
+       kind — nobody scanning a plan needs reminding that the thing shaped like a
+       document is a document, but whether the ITP is approved or still in review
+       is the entire question. Both therefore take the status colour, and both
+       stay overridable by `style.fill`, which is what "by default" means here.
+       Any other type joins this rule by being named in it. */
+    if ((obj.type === 'release' || obj.type === 'document') && status?.color) return status.color;
     if (lane?.color && (obj.type === 'activity' || obj.type === 'testwindow')) return lane.color;
     return TYPES[obj.type]?.accent || 'var(--type-activity)';
   }

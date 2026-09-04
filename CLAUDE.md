@@ -213,6 +213,19 @@ subscribes. That is what keeps the graph acyclic.
   objects; it never moves a bar without being told to. An activity missing
   from a later file is flagged `missing`, never deleted — something on the
   timeline may point at it.
+- **A document and a release are read for their state, not their kind.**
+  `objectColor()` gives both the status colour rather than the type accent —
+  nobody scanning a plan needs reminding that the thing shaped like a document
+  is a document, while whether the ITP is approved or still in review is the
+  entire question. `style.fill` still wins, which is what "by default" means,
+  and any other type joins by being named in that one line. The eleven
+  statuses now carry eleven *distinct* colours: six of them used to share
+  four, so a plan coloured by status could not be read as one. `tone` still
+  names the family (good / warn / bad / neutral) so badges, filters and the
+  legend group them as before — colour distinguishes, tone means. Two themes
+  had `--accent-amber` set to exactly `--warn`, which `smoke.js` now catches:
+  it resolves every status colour in all five themes and fails if two land on
+  the same value.
 - **Derived state is never stored.** Violations, critical path and float are
   computed from the document, so they appear and clear on their own. Do not
   add a `violated` field to a link — there is nothing to keep in step.
@@ -749,7 +762,7 @@ node tools/test_dist.js              #  41 checks — every deployment shape, an
                                      #              plan still has no backend in any of them
 node tools/test_lookahead.js         #  61 checks — the parser, the rows it derives and
                                      #              the change events, no browser
-node tools/smoke.js                  # 254 checks — the application, local mode
+node tools/smoke.js                  # 264 checks — the application, local mode
 node tools/smoke_calendar.js         # 172 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves

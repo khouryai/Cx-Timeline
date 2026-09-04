@@ -1587,12 +1587,41 @@ async function main() {
     check(`pane "${pane}" renders`, content.length > 40 && consoleErrors.length === errorsBefore);
   }
 
+  /* The status palette, read from `core/model.js` rather than restated here —
+     a status added without a colour of its own has to fail a check, not a
+     squint at a plan. */
+  const STATUS_COLOURS = [...fs.readFileSync(path.join(ROOT, 'src/core/model.js'), 'utf8')
+    .match(/status: \[[\s\S]*?\n  \],/)[0]
+    .matchAll(/color: '(var\(--[a-z-]+\))'/g)].map((m) => m[1]);
+
   console.log('\nThemes');
   for (const theme of ['light', 'engineering', 'blueprint', 'presentation', 'dark']) {
     await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme);
     await page.waitForTimeout(120);
     const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
     check(`theme "${theme}" applies`, bg && bg !== 'rgba(0, 0, 0, 0)');
+
+    /* Colouring by status is only worth doing if the statuses are telling
+       apart. Six of the eleven used to share four colours, and a token missing
+       from one theme resolves to nothing — which is the failure that would
+       otherwise be found by somebody squinting at a plan in Blueprint. */
+    const hues = await page.evaluate((colours) => {
+      const el = document.createElement('span');
+      document.body.appendChild(el);
+      const seen = colours.map((c) => {
+        el.style.color = '';
+        el.style.color = c;
+        return getComputedStyle(el).color;
+      });
+      el.remove();
+      return seen;
+    }, STATUS_COLOURS);
+    check(`theme "${theme}" resolves every status colour`,
+      hues.length > 0 && hues.every((c) => c && c !== 'rgba(0, 0, 0, 0)'),
+      `${hues.length} status colour(s)`);
+    check(`theme "${theme}" gives each status its own colour`,
+      new Set(hues).size === hues.length,
+      `${new Set(hues).size} distinct of ${hues.length}`);
   }
 
   console.log('\nExporters');
