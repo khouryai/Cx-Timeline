@@ -115,10 +115,82 @@ function main() {
        the interface sends `role` and the register has no such column. So the
        schema is put back to that shape and then upgraded, which is the only
        way to know the file does its job. */
+    load('supabase/migrate.sql');   // and again: it must never undo itself
+
+    /* Every order somebody might apply these in, and none may end broken.
+
+       This exists because one did. `migrate.sql` dropped the five account
+       functions and left `rc_schema.sql` to recreate them, so running the file
+       called "migrate" on its own — the obvious thing to do with a file called
+       that — left a live project with no `rc_list_invitations` and an Accounts
+       tab that died on "could not find the function in the schema cache". The
+       suite never saw it because the suite only ever ran them in the order
+       that works. */
+    const accountFns = ['rc_invite', 'rc_list_invitations', 'rc_revoke_invitation',
+      'rc_link_account', 'rc_set_role', 'rc_record_actual', 'rc_supersede_plan',
+      'rc_resolve_location'];
+    const functionsPresent = () => psql(['-d', 'cxt', '-tAc',
+      `select count(distinct proname) from pg_proc p
+         join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.proname in (${accountFns.map((f) => `'${f}'`).join(',')})`,
+    ]).trim();
+
+    /* The exact thing that happened: a project that is *working* has
+       migrate.sql run on it, and nothing else. Every function it had before
+       must still be there afterwards. */
+    const before = functionsPresent();
+    load('supabase/migrate.sql');
+    if (functionsPresent() !== before) {
+      throw new Error(
+        `migrate.sql took a working project from ${before} to ${functionsPresent()} of the `
+        + `${accountFns.length} functions the application calls — it must never drop what it `
+        + 'does not recreate');
+    }
+    console.log('✓ migrate.sql on a working project removes nothing the application calls');
+
     load('supabase/test/downgrade.sql');
     load('supabase/migrate.sql');
-    load('supabase/migrate.sql');   // and again: it must never undo itself
     load('supabase/rc_schema.sql');
+    if (functionsPresent() !== String(accountFns.length)) {
+      throw new Error('rc_schema.sql did not restore every function after a downgrade');
+    }
+    // …and the other way round: the schema file alone, with no migrate, has to
+    // converge too. It is the one people re-run when something looks wrong.
+    load('supabase/rc_schema.sql');
+    if (functionsPresent() !== String(accountFns.length)) {
+      throw new Error('rc_schema.sql is not safe to apply twice');
+    }
+    console.log('✓ rc_schema.sql converges on its own, and applying it twice is safe');
+
+    /* Whatever the application calls, the schema must define. The names are
+       read out of `core/rc.js` rather than typed here, so adding an `rpc()`
+       without the SQL to back it fails this suite instead of a screen in
+       front of somebody. */
+    const client = fs.readFileSync(path.join(ROOT, 'src/core/rc.js'), 'utf8');
+    const called = [...new Set([...client.matchAll(/rpc\('([a-z_]+)'/g)].map((m) => m[1]))];
+    const defined = psql(['-d', 'cxt', '-tAc',
+      `select string_agg(distinct p.proname, ',') from pg_proc p
+         join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.proname like 'rc\\_%'`,
+    ]).trim().split(',');
+    const orphans = called.filter((fn) => !defined.includes(fn));
+    if (orphans.length) {
+      throw new Error(`the application calls functions the schema does not define: ${orphans.join(', ')}`);
+    }
+    console.log(`✓ all ${called.length} functions core/rc.js calls exist in the schema`);
+
+    /* The same for tables and views. A missing one reads as an empty screen
+       rather than an error, which is worse. */
+    const tables = [...new Set([...client.matchAll(/(?:from|select|insert|update|del)\('(rc_[a-z_]+)'/g)]
+      .map((m) => m[1]))];
+    const present = psql(['-d', 'cxt', '-tAc',
+      "select string_agg(table_name, ',') from information_schema.tables where table_schema='public'",
+    ]).trim().split(',');
+    const missingTables = tables.filter((t) => !present.includes(t));
+    if (missingTables.length) {
+      throw new Error(`the application reads tables the schema does not define: ${missingTables.join(', ')}`);
+    }
+    console.log(`✓ all ${tables.length} tables and views core/rc.js reads exist in the schema`);
 
     const upgraded = psql(['-d', 'cxt', '-tAc', `
       select

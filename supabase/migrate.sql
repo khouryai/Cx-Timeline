@@ -14,8 +14,14 @@
 --   1. supabase/migrate.sql      ← this file, fixes columns and constraints
 --   2. supabase/rc_schema.sql    ← then this, for everything else
 --
--- Safe to run twice, and safe to run on a project that is already current:
--- every step checks before it acts and nothing here drops data.
+-- If you only ever run one of them, run `rc_schema.sql`: it converges on its
+-- own and cannot leave anything missing. This file adds the column shapes that
+-- one cannot, so a project that has been around a while wants both.
+--
+-- Safe to run twice, safe to run on a project that is already current, and
+-- safe to run *alone* — every statement here is additive. Nothing in this file
+-- drops anything, which was not always true and is the reason the note below
+-- about the account functions exists.
 --
 -- If you also run the timeline in this project, `schema.sql` goes *before*
 -- both of them — and never after, or its sign-up gate replaces the calendar's
@@ -133,30 +139,23 @@ alter table public.rc_invitations enable row level security;
 grant select, insert, update, delete on public.rc_invitations to authenticated;
 
 /*
- * Drop the account functions before `rc_schema.sql` recreates them.
+ * Nothing is dropped here any more.
  *
- * `create or replace function` refuses to change a return type, and these all
- * return a `table (...)` whose columns have been renamed since — the outputs
- * are prefixed now, because a `returns table (email text)` makes a bare
- * `email` in the body resolve to the OUT parameter and `on conflict (email)`
- * then fails at runtime rather than at creation. Dropping first is what turns
- * "cannot change return type of existing function" into a clean apply.
+ * This file used to drop the five account functions and `rc_record_actual`,
+ * because `create or replace function` refuses to change a return type or a
+ * parameter list and every one of them had changed. It relied on you running
+ * `rc_schema.sql` straight afterwards to put them back — so running the file
+ * named "migrate" on its own, which is the obvious thing to do with it, left a
+ * project with no `rc_list_invitations` at all and an Accounts tab that died
+ * on "could not find the function public.rc_list_invitations in the schema
+ * cache".
+ *
+ * A migration that can leave the database worse than it found it is not one.
+ * The drops now live in `rc_schema.sql`, immediately above the creates they
+ * belong to, so that file converges on its own and no order of anything can
+ * end anywhere but correct. This file only changes column and constraint
+ * shapes, and every statement in it is additive.
  */
-drop function if exists public.rc_invite(text, text, uuid, text);
--- And the one whose parameter list grew: recording an outcome can now name the
--- look-ahead row it was blocked against.
-drop function if exists public.rc_record_actual(
-  uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text);
--- …and again for the signature in between, which named the look-ahead row but
--- not the photograph. Every version has to be listed: `drop function` matches
--- on the argument list, so missing one leaves an overload behind and PostgREST
--- then cannot tell which of them a call meant.
-drop function if exists public.rc_record_actual(
-  uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid);
-drop function if exists public.rc_list_invitations();
-drop function if exists public.rc_revoke_invitation(text);
-drop function if exists public.rc_link_account(uuid, text);
-drop function if exists public.rc_set_role(uuid, text);
 
 commit;
 
@@ -167,11 +166,21 @@ commit;
 -- the message says which.
 -- ══════════════════════════════════════════════════════════════════════════
 
-select 'rc_people.scheduled' as what,
+select 'account functions' as what,
+       case when (
+         select count(distinct proname) from pg_proc p
+           join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'public'
+            and p.proname in ('rc_invite', 'rc_list_invitations', 'rc_revoke_invitation',
+                              'rc_link_account', 'rc_set_role', 'rc_record_actual',
+                              'rc_supersede_plan', 'rc_resolve_location')
+       ) = 8 then 'ok' else 'RUN rc_schema.sql — the application will fail without these' end as state
+union all
+select 'rc_people.scheduled',
        case when exists (
          select 1 from information_schema.columns
           where table_schema = 'public' and table_name = 'rc_people' and column_name = 'scheduled'
-       ) then 'ok' else 'MISSING' end as state
+       ) then 'ok' else 'MISSING' end
 union all
 select 'rc_legend.role',
        case when exists (

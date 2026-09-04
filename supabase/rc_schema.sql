@@ -39,17 +39,6 @@
 
 create extension if not exists pgcrypto;
 
-/*
- * The one signature that has changed since this file first shipped.
- *
- * `create or replace function` will not add a parameter — it reports "cannot
- * change name of input parameter" or refuses the new return type outright — so
- * the previous shape is dropped before it is recreated below. Harmless on a
- * project that never had it.
- */
-drop function if exists public.rc_record_actual(
-  uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text);
-
 -- ══════════════════════════════════════════════════════════════════════════
 -- Who
 -- ══════════════════════════════════════════════════════════════════════════
@@ -685,6 +674,39 @@ create policy rc_actuals_insert on public.rc_actuals
 -- authentication. What is built here is who may have an account and what they
 -- may do with it — never the credential itself.
 -- ══════════════════════════════════════════════════════════════════════════
+
+/*
+ * Drop the functions this section is about to recreate.
+ *
+ * `create or replace function` refuses to change a return type or a parameter
+ * list, and every one of these has changed at least one of the two since the
+ * first project was created — the outputs are prefixed now, and recording an
+ * outcome grew a look-ahead row and then a photograph. Without these drops the
+ * file stops on "cannot change return type of existing function" half way
+ * through, leaving a project part-applied.
+ *
+ * They live **here**, in the file that recreates them, and not in
+ * `migrate.sql` where they used to. That ordering was a trap: `migrate.sql`
+ * dropped them and depended on somebody remembering to run `rc_schema.sql`
+ * straight afterwards, so running the file named "migrate" on its own — the
+ * obvious thing to do with it — left a project with no `rc_list_invitations`
+ * at all and an Accounts tab that died on "could not find the function in the
+ * schema cache". A file that can leave the database worse than it found it is
+ * not a migration. Every drop is immediately followed by its create, in this
+ * one file, so no order of anything can end anywhere but correct.
+ */
+drop function if exists public.rc_invite(text, text, uuid, text);
+drop function if exists public.rc_list_invitations();
+drop function if exists public.rc_revoke_invitation(text);
+drop function if exists public.rc_link_account(uuid, text);
+drop function if exists public.rc_set_role(uuid, text);
+-- Every historical signature has to be named: `drop function` matches on the
+-- argument list, so missing one leaves an overload behind and PostgREST then
+-- cannot tell which of them a call meant.
+drop function if exists public.rc_record_actual(
+  uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text);
+drop function if exists public.rc_record_actual(
+  uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid);
 
 create table if not exists public.rc_invitations (
   email            text primary key,
