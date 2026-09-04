@@ -474,6 +474,15 @@ subscribes. That is what keeps the graph acyclic.
   demoting them. The column defaults to true for everybody; `rc_schema.sql`
   stands down the administrators that already exist when it is applied, once,
   and the Add-person dialog merely *suggests* the same for a new one.
+- **An invitation link points at the site, not at the window it was made in.**
+  `location.origin` inside the desktop shell is `tauri.localhost`, so an
+  invitation generated from the installed application copied an address that
+  means nothing in anybody else's browser — and the only symptom was a
+  colleague saying the link did not work. `joinLink()` uses
+  `CX_SHELL.channel`, the deployment the shell already follows for updates,
+  and falls back to the address bar in a browser where that is the right
+  answer. A desktop build with no channel has no site to name, so it says so
+  rather than copying something broken.
 - **Nothing is emailed from the application, and that is structural.** There is
   no server of its own and a browser cannot send mail, so inviting somebody
   produces a link (`#join=<address>`) to send however you already talk to
@@ -745,7 +754,7 @@ node tools/smoke_calendar.js         # 172 checks — the resource calendar, acc
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  73 checks — the shared folder, in a browser
-node tools/smoke_desktop.js          #  60 checks — the desktop shell and its updates
+node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               # 244 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project

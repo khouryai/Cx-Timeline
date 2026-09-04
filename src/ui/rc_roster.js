@@ -471,11 +471,42 @@ function bookLeave(people, kinds) {
  * forwarded link gets a stranger precisely nowhere.
  */
 function joinLink(email) {
-  const base = window.location.origin + window.location.pathname;
+  /* Where the person is being invited *to*, which is not always where this
+     window is running.
+     Inside the desktop shell `location.origin` is `tauri.localhost` — the
+     application's own internal address — so an invitation generated from the
+     installed app copied a link that means nothing in anybody else's browser,
+     and the only way to find that out was to send it to somebody. The shell
+     knows the deployment it follows for updates, and that deployment is the
+     site being joined. In a browser there is no shell and the address bar is
+     already the right answer. */
+  const channel = String(window.CX_SHELL?.channel || '').replace(/\/+$/, '');
+  const base = channel ? `${channel}/` : window.location.origin + window.location.pathname;
   return `${base}#join=${encodeURIComponent(String(email || '').trim())}`;
 }
 
+/**
+ * True when the link we would produce is one nobody else can open.
+ *
+ * Only reachable in a desktop build with no update channel configured: there
+ * is no deployment to point at and `tauri.localhost` is not one. Saying so
+ * beats copying something broken to the clipboard.
+ */
+function linkIsLocal() {
+  return !window.CX_SHELL?.channel && /^tauri\.localhost$/i.test(window.location.hostname);
+}
+
 async function copyJoinLink(email) {
+  if (linkIsLocal()) {
+    toast({
+      tone: 'warn',
+      title: 'This build has no site to link to',
+      message: `${email} is invited and can sign up on the deployed site — but this desktop `
+        + 'build has no update channel configured, so there is no address to send them.',
+      timeout: 12000,
+    });
+    return;
+  }
   const link = joinLink(email);
   try {
     await navigator.clipboard.writeText(link);

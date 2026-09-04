@@ -730,6 +730,33 @@ async function main() {
   check('but the timeline is untouched by any of it',
     (await page.locator('.tl-obj').count()) > 0);
 
+  /* An invitation link has to point at the site, not at the window ──────
+     `location.origin` inside the shell is `tauri.localhost`. An invitation
+     generated from the installed application therefore copied
+     `tauri.localhost/#join=…` to the clipboard — an address that means nothing
+     in anybody else's browser, and whose only symptom is a colleague saying
+     the link does not work. */
+  console.log('\nAn invitation link points at the site, not at this window');
+
+  const joinFrom = (host) => page.evaluate((h) => {
+    // The function as `ui/rc_roster.js` computes it, against the page it is
+    // actually running in.
+    const channel = String(window.CX_SHELL?.channel || '').replace(/\/+$/, '');
+    const base = channel ? `${channel}/` : window.location.origin + window.location.pathname;
+    return `${base}#join=${encodeURIComponent(h)}`;
+  }, host);
+
+  check('the window really is on tauri.localhost or a local origin',
+    !/^https:\/\/cx-timeline/.test(await page.evaluate(() => window.location.origin)),
+    await page.evaluate(() => window.location.origin));
+  const link = await joinFrom('them@example.com');
+  check('yet the link it hands out is the deployment',
+    link.startsWith(`${CHANNEL}/#join=`), link);
+  check('and it carries the address it was invited for',
+    link.endsWith('#join=them%40example.com'), link);
+  check('never the window\'s own internal address',
+    !/tauri\.localhost|localhost:\d+/.test(link), link);
+
   /* ── Console ─────────────────────────────────────────────────────────── */
   console.log('\nConsole');
   // Two kinds of noise are deliberate here. Most scenarios point the update
