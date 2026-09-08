@@ -335,6 +335,34 @@ subscribes. That is what keeps the graph acyclic.
   (`settings.json`), adopted by `adoptSettings()` on every settings read —
   minting a second one in localStorage would recreate, on the desktop, the exact
   bug it was introduced to fix.
+- **Waiting and taking over are not the only two options.** They were, and
+  that pair teaches people to take over by habit: waiting had no end and no
+  signal, while `takeOver()` is destructive by design and says so. `requestPen()`
+  is the third — it writes `request` into *our own* claim, nobody else's file,
+  and the holder is told once (`FILE_PEN_REQUESTED`, deduped on the request
+  stamp, or they are interrupted every heartbeat by the same question). Who
+  gets it afterwards stays the earliest live claim rather than a promise to the
+  asker: anything else is two waiters racing to promote themselves, which is a
+  distributed agreement problem a synced folder cannot win and does not need.
+  A request also shortens the idle release — an hour for a pen nobody wants,
+  ten minutes once somebody has asked, because a colleague still read-only an
+  hour after asking has learned that asking does nothing.
+- **A claim says when its holder last *saved*, not just that it is alive.**
+  `beat` means the window is open; `saved` means something is happening in it,
+  and that is the number somebody choosing between waiting, asking and taking
+  actually needs. The banner and the takeover dialog both read it, and both say
+  nothing rather than inventing one when the claim predates the field — "Dana
+  saved within the last minute, so they are probably still working" was a guess
+  printed as a fact.
+- **The pen borrows the name the calendar already knows.** `getDisplayName()`
+  falls back to "Someone", and the only place a name was ever set is a field in
+  the Shared folder pane — so the commonest reading of the read-only banner was
+  "Someone has this plan open", on the one screen where knowing who matters.
+  `installPenIdentity()` in `main.js` seeds it from `rc.me()` when the calendar
+  signs in, and **only when nothing is set**: a name somebody typed is a
+  deliberate choice and overwriting it on every session refresh would be the
+  application arguing with them. No plan data moves — the name goes into a lock
+  file in the same folder, and the plan still has no backend of any kind.
 - **`core/filestore.js` has two backends and one set of rules.** The I/O layer at
   the top of it is the only place a browser (a directory handle) and the desktop
   shell (a path) differ; every rule that matters — whose lock it is, when one is
@@ -763,10 +791,10 @@ node tools/test_dist.js              #  41 checks — every deployment shape, an
 node tools/test_lookahead.js         #  61 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 172 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 174 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
-node tools/smoke_folder.js           #  73 checks — the shared folder, in a browser
+node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
 node tools/test_sql.js               # 244 checks — both permission models, and that

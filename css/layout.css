@@ -737,6 +737,16 @@ body.presenting #app {
   display: inline-flex;
   color: var(--warn);
 }
+/* The ask sits at the far end of the bar, away from the sentence explaining
+   why it is there — it is an action, not part of the reading. */
+.cx-readonly-bar .cx-btn,
+.cx-readonly-bar .ro-asked {
+  margin-left: auto;
+}
+.cx-readonly-bar .ro-asked {
+  color: var(--text-muted);
+  font-style: italic;
+}
 
 /* Editing affordances stand down rather than lying about what they will do. */
 body.read-only #toolbar .tb-group.editing,

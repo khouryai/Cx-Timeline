@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-09-04T22:08:16.533Z
+ * Modules: 53   Built: 2026-09-08T01:22:28.110Z
  */
 (function () {
   'use strict';
@@ -540,6 +540,7 @@ __mods["core/events.js"] = function (__x, __req) {
     FILE_EXTERNAL_CHANGE: 'file:external', // a colleague's save landed in the folder
     FILE_CONFLICT: 'file:conflict', // a write was refused because the file moved underneath us
     FILE_IDLE: 'file:idle', // the holder has been idle too long; flush a save and hand the pen back
+    FILE_PEN_REQUESTED: 'file:pen-requested', // { by } — a colleague is asking for the pen
 
     /* History */
     HISTORY_CHANGED: 'history:changed', // { canUndo, canRedo, depth }
@@ -3742,6 +3743,15 @@ __mods["core/filestore.js"] = function (__x, __req) {
    * read-only, so a colleague can pick it up without having to ask.
    */
   const IDLE_RELEASE_MS = 3600000;
+  /**
+   * …and this much, once somebody has actually asked for it.
+   *
+   * An hour is the right patience for a pen nobody wants. It is far too long for
+   * one somebody is waiting on: a colleague who asked at ten past and is still
+   * read-only at eleven has learned that asking does nothing, and will take over
+   * by habit from then on — which is the behaviour the request exists to avoid.
+   */
+  const IDLE_WITH_REQUEST_MS = 600000;
   /** How often we look for someone else's save landing in the folder. */
   const POLL_MS = 12000;
   /**
@@ -3793,6 +3803,19 @@ __mods["core/filestore.js"] = function (__x, __req) {
    * statement of it stands.
    */
   let deferring = false;
+  /** When this session asked somebody else for the pen, or 0. */
+  let requestedAt = 0;
+  /**
+   * The request stamp we have already told the application about.
+   *
+   * A request sits in the asker's claim and is restated on every heartbeat, so
+   * without this the holder would be asked to hand over every twelve seconds —
+   * the same "say it once" rule the newer-version notice follows, and for the
+   * same reason.
+   */
+  let announcedRequest = 0;
+  /** How idle the holder is, when it is not us: `{ savedMs, name }` or null. */
+  let holderIdle = null;
   /** 'editor' when we hold the lock, 'viewer' when someone else does. */
   let role = null;
   /** Who holds the lock, when it is not us. */
@@ -4307,6 +4330,11 @@ __mods["core/filestore.js"] = function (__x, __req) {
          asked twice. */
       behind: !!behind,
       behindAt: behind ? behind.at : null,
+      /* How long since the holder last saved, when it is not us. What turns
+         "Dana has this open" from a fact into a decision. */
+      holderIdleMs: holderIdle ? holderIdle.savedMs : null,
+      /* Whether this session has asked for the pen and is still waiting. */
+      asked: !!requestedAt,
     };
   }
 
@@ -4458,6 +4486,9 @@ __mods["core/filestore.js"] = function (__x, __req) {
     behind = null;
     announced = '';
     deferring = false;
+    requestedAt = 0;
+    announcedRequest = 0;
+    holderIdle = null;
     role = null;
     holder = '';
     await ioForget();
@@ -4502,6 +4533,9 @@ __mods["core/filestore.js"] = function (__x, __req) {
     announced = '';
     saving = false;
     deferring = false;
+    requestedAt = 0;
+    announcedRequest = 0;
+    holderIdle = null;
     await ioRemember(folderRef, name);
 
     // State the claim first, then read every claim including our own and see who
@@ -4853,6 +4887,14 @@ __mods["core/filestore.js"] = function (__x, __req) {
             holder: getDisplayName(),
             since: claimedAt,
             beat: Date.now(),
+            /* When this session last *saved*, which is a different fact from the
+               heartbeat and the more useful one. `beat` says the window is still
+               open; `saved` says whether anything is happening in it, and that is
+               what somebody deciding between waiting and taking over needs. */
+            ...(lastSaveAt ? { saved: lastSaveAt } : {}),
+            /* Asking, rather than taking. Restated on every heartbeat so the
+               holder still sees it if they were away when it was first made. */
+            ...(requestedAt ? { request: requestedAt } : {}),
             ...(takeoverAt ? { takeover: takeoverAt } : {}),
           },
           null,
@@ -4890,6 +4932,32 @@ __mods["core/filestore.js"] = function (__x, __req) {
       : !winner || ours(winner)
         ? 'another window of yours'
         : winner.holder || 'Someone';
+
+    /* How long the holder has been sitting on it. Read from *their* claim, so it
+       is a fact about them rather than about this window, and taken from `saved`
+       rather than `beat`: a window left open all afternoon beats steadily and has
+       not touched the plan since lunch. A claim written by a copy from before
+       this shipped carries no `saved`, and null is the honest answer there. */
+    holderIdle = nextRole === 'viewer' && winner && !ours(winner) && winner.saved
+      ? { savedMs: Date.now() - winner.saved, name: winner.holder || 'Someone' }
+      : null;
+
+    /* Somebody is asking us for it. Only while we hold it — a request aimed at
+       the previous holder is not ours to answer — and only once per request, or
+       the holder is interrupted every heartbeat by the same question. */
+    if (nextRole === 'editor') {
+      const asking = claims
+        .filter((c) => c.request && !isOurs(c) && !isStale(c))
+        .sort((a, b) => b.request - a.request)[0];
+      if (asking && asking.request > announcedRequest) {
+        announcedRequest = asking.request;
+        emit(EV.FILE_PEN_REQUESTED, { by: asking.holder || 'Someone', at: asking.request });
+      }
+    }
+
+    /* Our own request is answered the moment the pen is ours; leaving it set
+       would go on asking the next holder for something we already have. */
+    if (nextRole === 'editor' && requestedAt) requestedAt = 0;
 
     if (nextRole === role && nextHolder === holder) return { role, holder, changed: false };
 
@@ -5073,8 +5141,50 @@ __mods["core/filestore.js"] = function (__x, __req) {
       live: !mine,
       mine,
       holder: winner.holder || 'Someone',
+      // Their heartbeat: are they still running at all.
       idleMs: winner.beat ? Date.now() - winner.beat : 0,
+      /* How long since they last *saved*, which is the question somebody
+         choosing between waiting and taking over is actually asking. Null on a
+         claim written before this shipped, and null is the honest answer — a
+         number invented for it would be the one thing on screen nobody could
+         account for. */
+      savedMs: winner.saved ? Date.now() - winner.saved : null,
     };
+  }
+
+  /**
+   * Ask whoever has the pen for it.
+   *
+   * The third option, and the one that was missing. Waiting had no end and no
+   * signal, and taking over is destructive by design — it is warned about
+   * because it can lose the holder's unsaved work. Faced with those two, people
+   * take over by habit until it costs somebody an afternoon.
+   *
+   * A request is deliberately *advisory*: it goes in our own claim, nobody
+   * else's file is touched, and the holder decides. It is restated on every
+   * heartbeat, so a holder who was away from the keyboard when it was made still
+   * sees it when they come back.
+   *
+   * Who gets the pen afterwards is the same rule as always — the earliest live
+   * claim — rather than a promise to the asker. Anything else means two waiters
+   * racing to promote themselves, which is a distributed agreement problem this
+   * folder cannot win and does not need: the person who cared enough to ask is
+   * almost always the one who has been waiting longest anyway.
+   */
+  async function requestPen() {
+    if (!isConnected() || role === 'editor') return false;
+    requestedAt = Date.now();
+    await writeClaim();
+    emitState();
+    return true;
+  }
+
+  /** Stop asking — the caller took over, or gave up. */
+  function withdrawRequest() {
+    if (!requestedAt) return;
+    requestedAt = 0;
+    writeClaim();
+    emitState();
   }
 
   /**
@@ -5116,12 +5226,21 @@ __mods["core/filestore.js"] = function (__x, __req) {
   function startTimers() {
     stopTimers();
     heartbeatTimer = setInterval(() => {
-      // Idle long enough that holding the pen is just in the way. Ask the
-      // application to flush a save and hand it back — this module cannot save the
-      // document itself, it only knows the file.
-      if (role === 'editor' && lastSaveAt && Date.now() - lastSaveAt > IDLE_RELEASE_MS) {
-        emit(EV.FILE_IDLE, { plan: planName, since: lastSaveAt });
-        return;
+      /* Idle long enough that holding the pen is just in the way. Ask the
+         application to flush a save and hand it back — this module cannot save
+         the document itself, it only knows the file.
+
+         Two thresholds, because patience depends on whether anybody is waiting:
+         an hour for a pen nobody has asked for, ten minutes once somebody has.
+         `announcedRequest` is the stamp of the last request seen on this plan, so
+         "somebody asked" survives the toast being dismissed. */
+      if (role === 'editor' && lastSaveAt) {
+        const idle = Date.now() - lastSaveAt;
+        const wanted = announcedRequest > 0;
+        if (idle > IDLE_RELEASE_MS || (wanted && idle > IDLE_WITH_REQUEST_MS)) {
+          emit(EV.FILE_IDLE, { plan: planName, since: lastSaveAt, requested: wanted });
+          return;
+        }
       }
       // Readers restate their claim as well as editors: a claim that stopped
       // beating is a claim that has given up, and a reader waiting for its turn
@@ -5402,6 +5521,8 @@ __mods["core/filestore.js"] = function (__x, __req) {
   Object.defineProperty(__x, "refreshFromDisk", { get: () => refreshFromDisk, enumerable: true });
   Object.defineProperty(__x, "takeOver", { get: () => takeOver, enumerable: true });
   Object.defineProperty(__x, "lockStatus", { get: () => lockStatus, enumerable: true });
+  Object.defineProperty(__x, "requestPen", { get: () => requestPen, enumerable: true });
+  Object.defineProperty(__x, "withdrawRequest", { get: () => withdrawRequest, enumerable: true });
   Object.defineProperty(__x, "yieldPen", { get: () => yieldPen, enumerable: true });
   Object.defineProperty(__x, "checkLock", { get: () => checkLock, enumerable: true });
   Object.defineProperty(__x, "handleUnload", { get: () => handleUnload, enumerable: true });
@@ -15543,12 +15664,23 @@ __mods["ui/commands.js"] = function (__x, __req) {
     const status = await filestore.lockStatus();
 
     if (status.live) {
+      /* How long since they last saved, when their copy is new enough to say.
+         "Probably still working" was a guess printed as a fact; the claim now
+         carries the number, and forty minutes idle is a different decision from
+         forty seconds. */
+      const mins = Number.isFinite(status.savedMs) ? Math.floor(status.savedMs / 60000) : null;
+      const doing = mins === null
+        ? `${status.holder} has the plan open.`
+        : mins < 1
+          ? `${status.holder} saved less than a minute ago, so they are working in it right now.`
+          : `${status.holder} last saved ${mins} minute${mins === 1 ? '' : 's'} ago.`;
+
       const ok = await confirmDialog({
         title: `${status.holder} is editing this plan`,
         message:
-          `${status.holder} saved within the last minute, so they are probably still working. ` +
-          'Taking over means their next save is refused and they will be asked to reload — ' +
-          'anything they have not saved could be lost. Continue?',
+          `${doing} Taking over means their next save is refused and they will be asked to `
+          + 'reload — anything they have not saved could be lost. Asking for it instead leaves '
+          + 'the choice with them. Continue?',
         confirmLabel: 'Take over anyway',
         cancelLabel: 'Leave it',
         danger: true,
@@ -16600,7 +16732,7 @@ __mods["ui/auth.js"] = function (__x, __req) {
       const viewingFolder = filestore.isViewer();
       const readOnly = cloud.isReadOnly() || viewingFolder;
       document.body.classList.toggle('read-only', readOnly);
-      renderBanner(readOnly, viewingFolder ? filestore.state().holder : '');
+      renderBanner(readOnly, viewingFolder ? filestore.state() : null);
     };
 
     on(EV.ACCESS_CHANGED, apply);
@@ -16624,7 +16756,23 @@ __mods["ui/auth.js"] = function (__x, __req) {
     apply();
   }
 
-  function renderBanner(readOnly, holder = '') {
+  /**
+   * How long ago, in words somebody can act on.
+   *
+   * Deliberately coarse: the difference between eleven and twelve minutes
+   * changes nobody's mind, and a ticking number in a banner reads as something
+   * that needs watching.
+   */
+  function since(ms) {
+    if (!Number.isFinite(ms)) return '';
+    const mins = Math.floor(ms / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
+    const hours = Math.round(mins / 60);
+    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  }
+
+  function renderBanner(readOnly, folder = null) {
     const existing = document.getElementById('cx-readonly-bar');
     if (!readOnly) {
       existing?.remove();
@@ -16634,14 +16782,41 @@ __mods["ui/auth.js"] = function (__x, __req) {
     // hands the pen over — so rebuild rather than bail out on an existing bar.
     existing?.remove();
 
+    const holder = folder?.holder || '';
+    /* What they are doing with it, not merely that they have it. "Dana has this
+       plan open" is a fact; "Dana has this plan open, last saved 40 minutes ago"
+       is a decision — wait, ask, or take it. */
+    const idle = folder && Number.isFinite(folder.holderIdleMs)
+      ? ` Last saved ${since(folder.holderIdleMs)}.`
+      : '';
     const message = holder
-      ? `Read-only — ${holder} has this plan open. It becomes editable when they close it.`
+      ? `Read-only — ${holder} has this plan open.${idle}`
       : 'Read-only — you have view access to this project.';
 
-    const bar = el('div', { id: 'cx-readonly-bar', class: 'cx-readonly-bar', role: 'status' }, [
+    const kids = [
       el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),
       el('span', { text: message }),
-    ]);
+    ];
+
+    /* The third option. Waiting had no end and taking over is destructive by
+       design, so people took over by habit; asking costs the holder one toast
+       and costs the asker nothing. Only in a folder, and only while somebody
+       else really has it — a hosted viewer has nobody to ask. */
+    if (holder && holder !== 'another window of yours') {
+      kids.push(folder.asked
+        ? el('span', { class: 'ro-asked', text: `Asked ${holder} — you will get it when they hand over.` })
+        : el('button', {
+          class: 'cx-btn mini',
+          text: 'Ask for the pen',
+          title: `Let ${holder} know you are waiting. They decide; nothing is taken.`,
+          onClick: async (event) => {
+            event.currentTarget.disabled = true;
+            await filestore.requestPen();
+          },
+        }));
+    }
+
+    const bar = el('div', { id: 'cx-readonly-bar', class: 'cx-readonly-bar', role: 'status' }, kids);
     document.getElementById('main')?.prepend(bar);
   }
 
@@ -33355,6 +33530,7 @@ __mods["main.js"] = function (__x, __req) {
   const workspace = __req("ui/workspace.js");
   const rcUi = __req("ui/rc.js");
   const rcClient = __req("core/rc.js");
+  const exporters = __req("io/exporters.js");
   const cmd = __req("ui/commands.js");
   const { toast, showTooltip, hideTooltip, confirmDialog } = __req("ui/components.js");
   const { renderNote, notePreview } = __req("ui/notes.js");
@@ -33486,6 +33662,7 @@ __mods["main.js"] = function (__x, __req) {
       rcClient.init().catch((err) => {
         console.warn('[cx-timeline] the resource calendar could not be reached:', err.message);
       });
+      installPenIdentity();
     }
 
     console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
@@ -33565,6 +33742,36 @@ __mods["main.js"] = function (__x, __req) {
     });
   }
 
+  /**
+   * Let the pen borrow the name the calendar already knows.
+   *
+   * The lock has always carried a *self-declared* name, typed into a field in
+   * the Shared folder pane, and `getDisplayName()` falls back to "Someone" when
+   * nobody has. So the most common reading of the read-only banner was "Someone
+   * has this plan open" — the least useful answer available, on the one screen
+   * where knowing who matters.
+   *
+   * In a calendar deployment that person is already signed in, with a real name
+   * on their roster row. Borrowing it costs nothing and moves no data: the name
+   * goes into a lock file in the same folder the plan is in, and the plan still
+   * has no backend of any kind.
+   *
+   * Only when nothing has been set. A name somebody typed is a deliberate
+   * choice — "Alex" rather than "Alexander Khoury" — and overwriting it every
+   * time the session refreshes would be the application arguing with them.
+   */
+  function installPenIdentity() {
+    const adopt = () => {
+      if (!filestore.isSupported()) return;
+      const known = filestore.getDisplayName();
+      if (known && known !== 'Someone') return;
+      const name = rcClient.me()?.name;
+      if (name) filestore.setDisplayName(name);
+    };
+    on(EV.RC_AUTH_CHANGED, adopt);
+    adopt();
+  }
+
   /* ── The shared folder ─────────────────────────────────────────────────── */
 
   /**
@@ -33586,6 +33793,10 @@ __mods["main.js"] = function (__x, __req) {
     let asking = false;
     /** The standing "there is a newer version" notice, so there is only ever one. */
     let behindNotice = null;
+    /** The standing "somebody wants the pen" notice, likewise. */
+    let handoverNotice = null;
+    /** Said once per spell of holding work that cannot be saved. */
+    let strandedNotice = null;
 
     on(EV.FILE_EXTERNAL_CHANGE, async () => {
       if (asking) return;
@@ -33623,9 +33834,65 @@ __mods["main.js"] = function (__x, __req) {
     // The notice is about one version. Once it has been taken — or the folder
     // settles back to agreeing with us — there is nothing left for it to say.
     on(EV.FILE_STATE, (st) => {
+      if (!st || st.role !== 'editor') {
+        // The pen is elsewhere; a prompt to hand it over is spent.
+        if (handoverNotice) handoverNotice.dismiss();
+        handoverNotice = null;
+      }
+      if (st && st.role === 'editor' && strandedNotice) {
+        // It is ours again, so the work that could not be saved now can be.
+        strandedNotice.dismiss();
+        strandedNotice = null;
+      }
       if (st && st.behind) return;
       if (behindNotice) behindNotice.dismiss();
       behindNotice = null;
+    });
+
+    /* Work that has nowhere to go.
+       A save skipped because a colleague holds the pen keeps the document dirty
+       and caches it — but nothing pointed at it, so the only copy of those edits
+       sat in IndexedDB with no way to reach it. Said once per spell, with the
+       way out attached. */
+    on(EV.SAVE_DONE, (p) => {
+      if (!p?.skipped || !p.unsaved || strandedNotice) return;
+      strandedNotice = toast({
+        tone: 'warn',
+        title: 'These changes are not saved',
+        message: 'A colleague has the pen, so this plan cannot be written. Nothing is lost — '
+          + 'the work is here, and it saves itself when the pen comes back.',
+        sticky: true,
+        action: {
+          label: 'Export a copy',
+          onClick: () => { exporters.exportJson(); },
+        },
+      });
+    });
+
+    /* Somebody is asking for it.
+       A toast rather than a dialog, deliberately: they are asking, not
+       demanding, and a modal in front of somebody mid-sentence turns a courtesy
+       into an interruption. Handing over flushes first, so what is on screen is
+       in the file before the pen moves. */
+    on(EV.FILE_PEN_REQUESTED, ({ by }) => {
+      if (handoverNotice) handoverNotice.dismiss();
+      handoverNotice = toast({
+        tone: 'info',
+        title: `${by} is asking for the pen`,
+        message: 'They are read-only until you hand it over or close the plan. '
+          + 'Handing over saves what you have first.',
+        sticky: true,
+        action: {
+          label: 'Hand it over',
+          onClick: async () => {
+            await saveNow().catch(() => {});
+            const handed = await filestore.yieldPen();
+            toast(handed
+              ? { tone: 'good', title: 'Handed over', message: `${by} can edit now. This plan is read-only here.` }
+              : { tone: 'warn', title: 'Nothing to hand over', message: 'You are not holding the pen.' });
+          },
+        },
+      });
     });
 
     // Idle too long to keep holding the pen. Flush what is here, hand it back,

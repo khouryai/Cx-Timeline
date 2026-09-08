@@ -41,6 +41,7 @@ import { installShortcuts } from './ui/shortcuts.js';
 import * as workspace from './ui/workspace.js';
 import * as rcUi from './ui/rc.js';
 import * as rcClient from './core/rc.js';
+import * as exporters from './io/exporters.js';
 import * as cmd from './ui/commands.js';
 import { toast, showTooltip, hideTooltip, confirmDialog } from './ui/components.js';
 import { renderNote, notePreview } from './ui/notes.js';
@@ -172,6 +173,7 @@ async function boot() {
     rcClient.init().catch((err) => {
       console.warn('[cx-timeline] the resource calendar could not be reached:', err.message);
     });
+    installPenIdentity();
   }
 
   console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
@@ -251,6 +253,36 @@ function installConflictHandling() {
   });
 }
 
+/**
+ * Let the pen borrow the name the calendar already knows.
+ *
+ * The lock has always carried a *self-declared* name, typed into a field in
+ * the Shared folder pane, and `getDisplayName()` falls back to "Someone" when
+ * nobody has. So the most common reading of the read-only banner was "Someone
+ * has this plan open" — the least useful answer available, on the one screen
+ * where knowing who matters.
+ *
+ * In a calendar deployment that person is already signed in, with a real name
+ * on their roster row. Borrowing it costs nothing and moves no data: the name
+ * goes into a lock file in the same folder the plan is in, and the plan still
+ * has no backend of any kind.
+ *
+ * Only when nothing has been set. A name somebody typed is a deliberate
+ * choice — "Alex" rather than "Alexander Khoury" — and overwriting it every
+ * time the session refreshes would be the application arguing with them.
+ */
+function installPenIdentity() {
+  const adopt = () => {
+    if (!filestore.isSupported()) return;
+    const known = filestore.getDisplayName();
+    if (known && known !== 'Someone') return;
+    const name = rcClient.me()?.name;
+    if (name) filestore.setDisplayName(name);
+  };
+  on(EV.RC_AUTH_CHANGED, adopt);
+  adopt();
+}
+
 /* ── The shared folder ─────────────────────────────────────────────────── */
 
 /**
@@ -272,6 +304,10 @@ function installFolderHandling() {
   let asking = false;
   /** The standing "there is a newer version" notice, so there is only ever one. */
   let behindNotice = null;
+  /** The standing "somebody wants the pen" notice, likewise. */
+  let handoverNotice = null;
+  /** Said once per spell of holding work that cannot be saved. */
+  let strandedNotice = null;
 
   on(EV.FILE_EXTERNAL_CHANGE, async () => {
     if (asking) return;
@@ -309,9 +345,65 @@ function installFolderHandling() {
   // The notice is about one version. Once it has been taken — or the folder
   // settles back to agreeing with us — there is nothing left for it to say.
   on(EV.FILE_STATE, (st) => {
+    if (!st || st.role !== 'editor') {
+      // The pen is elsewhere; a prompt to hand it over is spent.
+      if (handoverNotice) handoverNotice.dismiss();
+      handoverNotice = null;
+    }
+    if (st && st.role === 'editor' && strandedNotice) {
+      // It is ours again, so the work that could not be saved now can be.
+      strandedNotice.dismiss();
+      strandedNotice = null;
+    }
     if (st && st.behind) return;
     if (behindNotice) behindNotice.dismiss();
     behindNotice = null;
+  });
+
+  /* Work that has nowhere to go.
+     A save skipped because a colleague holds the pen keeps the document dirty
+     and caches it — but nothing pointed at it, so the only copy of those edits
+     sat in IndexedDB with no way to reach it. Said once per spell, with the
+     way out attached. */
+  on(EV.SAVE_DONE, (p) => {
+    if (!p?.skipped || !p.unsaved || strandedNotice) return;
+    strandedNotice = toast({
+      tone: 'warn',
+      title: 'These changes are not saved',
+      message: 'A colleague has the pen, so this plan cannot be written. Nothing is lost — '
+        + 'the work is here, and it saves itself when the pen comes back.',
+      sticky: true,
+      action: {
+        label: 'Export a copy',
+        onClick: () => { exporters.exportJson(); },
+      },
+    });
+  });
+
+  /* Somebody is asking for it.
+     A toast rather than a dialog, deliberately: they are asking, not
+     demanding, and a modal in front of somebody mid-sentence turns a courtesy
+     into an interruption. Handing over flushes first, so what is on screen is
+     in the file before the pen moves. */
+  on(EV.FILE_PEN_REQUESTED, ({ by }) => {
+    if (handoverNotice) handoverNotice.dismiss();
+    handoverNotice = toast({
+      tone: 'info',
+      title: `${by} is asking for the pen`,
+      message: 'They are read-only until you hand it over or close the plan. '
+        + 'Handing over saves what you have first.',
+      sticky: true,
+      action: {
+        label: 'Hand it over',
+        onClick: async () => {
+          await saveNow().catch(() => {});
+          const handed = await filestore.yieldPen();
+          toast(handed
+            ? { tone: 'good', title: 'Handed over', message: `${by} can edit now. This plan is read-only here.` }
+            : { tone: 'warn', title: 'Nothing to hand over', message: 'You are not holding the pen.' });
+        },
+      },
+    });
   });
 
   // Idle too long to keep holding the pen. Flush what is here, hand it back,

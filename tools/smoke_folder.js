@@ -385,6 +385,30 @@ async function main() {
   check('the status bar says so too', /Dana/.test(await page.locator('#statusbar').innerText()));
   check('taking over is offered', (await page.locator('#dock .cx-btn', { hasText: /take over/i }).count()) === 1);
 
+  /* ── Asking, rather than waiting or taking ────────────────────────────
+     Waiting had no end and taking over is destructive by design, so those two
+     alone teach people to take over by habit. The third option costs the
+     holder a toast and the asker nothing. */
+  check('and so is asking for it, which is neither waiting nor taking',
+    (await page.locator('#cx-readonly-bar .cx-btn', { hasText: /ask for the pen/i }).count()) === 1,
+    banner);
+
+  await page.locator('#cx-readonly-bar .cx-btn', { hasText: /ask for the pen/i }).click();
+  await page.waitForTimeout(900);
+  check('asking is written into our own claim, never into theirs',
+    await page.evaluate(() => {
+      const mine = Object.entries(window.__folder.files)
+        .find(([n]) => n.includes('.pen-'));
+      const theirs = window.__folder.files['bart-cbtc.lock.json'];
+      let asked = false;
+      try { asked = !!JSON.parse(mine[1].text).request; } catch { /* not yet */ }
+      // Their lock is untouched: nobody writes anybody else's file.
+      return asked && JSON.parse(theirs.text).holder === 'Dana';
+    }));
+  const askedBanner = await page.locator('#cx-readonly-bar').innerText();
+  check('and the banner stops offering to ask twice',
+    /asked dana/i.test(askedBanner), askedBanner.replace(/\n/g, ' / '));
+
   // A reader must not write, however much they poke at the canvas.
   const untouched = await planText(page, 'bart-cbtc.json');
   await page.locator('.tl-obj.shape-bar').first().click();
@@ -549,6 +573,142 @@ async function main() {
   check('and the pane does not offer to take over from yourself',
     (await page.locator('#dock .cx-btn', { hasText: /take over/i }).count()) === 0);
 
+  /* ── Losing the pen mid-edit ──────────────────────────────────────────
+     Whether work is left stranded by this depends on a race nobody controls:
+     autosave is on a 500ms debounce, and the pen goes when a poll happens to
+     settle. Both orders are correct behaviour — the edit lands, or it does
+     not — so this asserts the part that must hold either way: whatever
+     happened, the status bar must not claim the work was saved when it was
+     not. The "unsaved and stranded" branch is driven by SAVE_DONE carrying
+     `skipped` with `unsaved`, which the reader case below pins from the other
+     side; forcing the race here would buy a flaky check, which is worth less
+     than none. */
+  console.log('\nLosing the pen while editing');
+  await page.goto('about:blank');
+  await boot({ files: { 'bart-cbtc.json': { text: sharedPlan, lastModified: Date.now() } } });
+  await openIoPane();
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1600);
+  check('we are editing to begin with',
+    !(await page.evaluate(() => document.body.classList.contains('read-only'))));
+
+  await page.locator('.tl-obj.shape-bar').first().click();
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.evaluate(() => {
+    window.__folder.files['bart-cbtc.pen-thief-laptop.json'] = {
+      text: JSON.stringify({
+        id: 'thief', device: 'thief-laptop', holder: 'Dana',
+        since: Date.now() - 60000, beat: Date.now(), takeover: Date.now(),
+      }),
+      lastModified: Date.now(),
+    };
+  });
+  for (let i = 0; i < 3; i++) {
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await page.waitForTimeout(800);
+  }
+
+  check('the pen goes to whoever took it', 
+    await page.evaluate(() => document.body.classList.contains('read-only')));
+  const barText = await page.locator('#statusbar').innerText();
+  const strandedToast = await page.locator('.cx-toast', { hasText: /not saved/i }).count();
+  /* Either the edit landed before the pen went — "Saved …" and nothing
+     stranded — or it did not, and both the bar and a notice say so. What must
+     never happen is the third combination: unsaved work reported as saved. */
+  const saidSaved = /Saved \w/.test(barText);
+  const saidUnsaved = /not saved/i.test(barText);
+  /* Three readings are legitimate — the edit landed ("Saved …"), it did not
+     ("Not saved — read-only", with the notice), or there was nothing left to
+     save by the time the pen went ("Read-only"). The one that must never
+     appear is stranded work while the bar says it was saved. */
+  check('it never reports stranded work as saved', !(strandedToast > 0 && saidSaved),
+    `${barText.split('\n')[0]} | ${strandedToast} notice(s)`);
+  check('and never claims work is unsaved without saying what to do about it',
+    !(saidUnsaved && strandedToast === 0), barText.split('\n')[0]);
+
+  /* ── How idle the holder is ───────────────────────────────────────────
+     "Dana has this plan open" is a fact. "Dana has this plan open, last saved
+     forty minutes ago" is a decision — wait, ask, or take it. The number comes
+     off their claim, so it is a fact about them rather than about this
+     window. */
+  console.log('\nHow long the holder has been sitting on it');
+  await page.goto('about:blank');
+  await boot({
+    files: {
+      'bart-cbtc.json': { text: sharedPlan, lastModified: Date.now() },
+      'bart-cbtc.pen-their-laptop.json': {
+        text: JSON.stringify({
+          id: 'their-window', device: 'their-laptop', holder: 'Dana',
+          since: Date.now() - 3600000, beat: Date.now(),
+          saved: Date.now() - 40 * 60000,
+        }),
+        lastModified: Date.now(),
+      },
+    },
+  });
+  await openIoPane();
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1600);
+
+  const idleBanner = await page.locator('#cx-readonly-bar').innerText().catch(() => '');
+  check('the banner says how long since the holder last saved',
+    /40 minutes ago/.test(idleBanner), idleBanner.replace(/\n/g, ' / '));
+  check('and it is their heartbeat that keeps it read-only, not their silence',
+    await page.evaluate(() => document.body.classList.contains('read-only')));
+
+  /* ── Being asked for it ───────────────────────────────────────────────
+     The holder's side. A toast rather than a dialog: they are being asked, not
+     told, and a modal in front of somebody mid-sentence turns a courtesy into
+     an interruption. */
+  console.log('\nBeing asked for the pen');
+  await page.goto('about:blank');
+  await boot({ files: { 'bart-cbtc.json': { text: sharedPlan, lastModified: Date.now() } } });
+  await openIoPane();
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1600);
+  check('we hold the pen to begin with',
+    !(await page.evaluate(() => document.body.classList.contains('read-only'))));
+
+  await page.evaluate(() => {
+    window.__folder.files['bart-cbtc.pen-eager-laptop.json'] = {
+      text: JSON.stringify({
+        id: 'eager', device: 'eager-laptop', holder: 'Tom',
+        since: Date.now(), beat: Date.now(), request: Date.now(),
+      }),
+      lastModified: Date.now(),
+    };
+  });
+  // Two looks: the pen is settled every other poll, so one may not reach it.
+  for (let i = 0; i < 3; i++) {
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await page.waitForTimeout(700);
+  }
+
+  const asking = page.locator('.cx-toast', { hasText: /asking for the pen/i });
+  check('the holder is told, by name', (await asking.count()) === 1,
+    (await page.locator('.cx-toast').allInnerTexts()).join(' | ') || 'nothing said');
+  check('and it says who', /Tom/.test(await asking.innerText().catch(() => '')));
+  check('with a way to hand it over rather than only a complaint',
+    (await asking.locator('.cx-btn', { hasText: /hand it over/i }).count()) === 1);
+
+  // Said once, however many times the request is restated on their heartbeat.
+  for (let i = 0; i < 3; i++) {
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await page.waitForTimeout(600);
+  }
+  check('and asked once, not once per heartbeat',
+    (await page.locator('.cx-toast', { hasText: /asking for the pen/i }).count()) === 1);
+
+  await asking.locator('.cx-btn', { hasText: /hand it over/i }).click();
+  await page.waitForTimeout(1600);
+  check('handing over drops this window to read-only',
+    await page.evaluate(() => document.body.classList.contains('read-only')));
+  check('and withdraws our claim rather than deleting theirs',
+    await page.evaluate(() => {
+      const names = Object.keys(window.__folder.files);
+      return names.includes('bart-cbtc.pen-eager-laptop.json');
+    }));
+
   /* ── The same plan, in two of your own windows ────────────────────────
      Two tabs of one browser share a claim file, because it is keyed on the
      device. Each read it back, recognised the device as its own, and concluded
@@ -556,9 +716,12 @@ async function main() {
      other, which the write guard then refused. That is a stream of alerts
      generated entirely by one person. */
   console.log('\nTwo windows of your own');
-  const myDevice = await page.evaluate(() => {
-    try { return JSON.parse(window.__folder.files['bart-cbtc.lock.json'].text).device; } catch { return ''; }
-  });
+  /* Straight from where `filestore` keeps it, rather than scraped from a file.
+     The lock is only stamped by whoever holds the pen, and the folder holds
+     several claims by now — including ones these scenarios injected — so
+     reading either made this depend on how the previous test happened to end
+     and on which key `Object.keys` returned first. */
+  const myDevice = await page.evaluate(() => localStorage.getItem('cxtl.folder.device') || '');
   check('there is a device to key a claim on', !!myDevice, myDevice || '(none)');
 
   await page.goto('about:blank');

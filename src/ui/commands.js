@@ -638,12 +638,23 @@ export async function takeOverEditing() {
   const status = await filestore.lockStatus();
 
   if (status.live) {
+    /* How long since they last saved, when their copy is new enough to say.
+       "Probably still working" was a guess printed as a fact; the claim now
+       carries the number, and forty minutes idle is a different decision from
+       forty seconds. */
+    const mins = Number.isFinite(status.savedMs) ? Math.floor(status.savedMs / 60000) : null;
+    const doing = mins === null
+      ? `${status.holder} has the plan open.`
+      : mins < 1
+        ? `${status.holder} saved less than a minute ago, so they are working in it right now.`
+        : `${status.holder} last saved ${mins} minute${mins === 1 ? '' : 's'} ago.`;
+
     const ok = await confirmDialog({
       title: `${status.holder} is editing this plan`,
       message:
-        `${status.holder} saved within the last minute, so they are probably still working. ` +
-        'Taking over means their next save is refused and they will be asked to reload — ' +
-        'anything they have not saved could be lost. Continue?',
+        `${doing} Taking over means their next save is refused and they will be asked to `
+        + 'reload — anything they have not saved could be lost. Asking for it instead leaves '
+        + 'the choice with them. Continue?',
       confirmLabel: 'Take over anyway',
       cancelLabel: 'Leave it',
       danger: true,

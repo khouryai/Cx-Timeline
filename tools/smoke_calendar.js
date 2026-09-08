@@ -750,6 +750,18 @@ async function main() {
   await page.waitForSelector('#rc-frame .rc-tabs', { timeout: 10000 });
   check('signing in reveals the calendar', (await page.locator('#rc-frame .rc-tab').count()) >= 3);
 
+  /* One login, two modules. The plan's lock has always carried a name typed
+     into a field, defaulting to "Someone" — the least useful thing the
+     read-only banner could say, on the one screen where knowing who matters.
+     The calendar already knows this person, so the pen borrows the name. No
+     plan data moves: the name goes into a lock file in the same folder the
+     plan is in, and the plan still has no backend of any kind. */
+  check('the pen borrows the name the calendar already knows',
+    await page.evaluate(() => localStorage.getItem('cxtl.folder.name') === 'Alex'),
+    await page.evaluate(() => localStorage.getItem('cxtl.folder.name')));
+  check('and the plan still has no backend of its own',
+    await page.evaluate(() => window.CX_CONFIG.supabaseUrl === ''));
+
   /* ── The roster ───────────────────────────────────────────────────────── */
   console.log('\nOrganisation');
   await page.locator('#rc-frame .rc-tab', { hasText: 'Organisation' }).click();

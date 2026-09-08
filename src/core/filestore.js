@@ -95,6 +95,15 @@ const OWN_WINDOW_STALE_MS = HEARTBEAT_MS * 2 + 5000;
  * read-only, so a colleague can pick it up without having to ask.
  */
 const IDLE_RELEASE_MS = 3600000;
+/**
+ * …and this much, once somebody has actually asked for it.
+ *
+ * An hour is the right patience for a pen nobody wants. It is far too long for
+ * one somebody is waiting on: a colleague who asked at ten past and is still
+ * read-only at eleven has learned that asking does nothing, and will take over
+ * by habit from then on — which is the behaviour the request exists to avoid.
+ */
+const IDLE_WITH_REQUEST_MS = 600000;
 /** How often we look for someone else's save landing in the folder. */
 const POLL_MS = 12000;
 /**
@@ -146,6 +155,19 @@ let saving = false;
  * statement of it stands.
  */
 let deferring = false;
+/** When this session asked somebody else for the pen, or 0. */
+let requestedAt = 0;
+/**
+ * The request stamp we have already told the application about.
+ *
+ * A request sits in the asker's claim and is restated on every heartbeat, so
+ * without this the holder would be asked to hand over every twelve seconds —
+ * the same "say it once" rule the newer-version notice follows, and for the
+ * same reason.
+ */
+let announcedRequest = 0;
+/** How idle the holder is, when it is not us: `{ savedMs, name }` or null. */
+let holderIdle = null;
 /** 'editor' when we hold the lock, 'viewer' when someone else does. */
 let role = null;
 /** Who holds the lock, when it is not us. */
@@ -660,6 +682,11 @@ export function state() {
        asked twice. */
     behind: !!behind,
     behindAt: behind ? behind.at : null,
+    /* How long since the holder last saved, when it is not us. What turns
+       "Dana has this open" from a fact into a decision. */
+    holderIdleMs: holderIdle ? holderIdle.savedMs : null,
+    /* Whether this session has asked for the pen and is still waiting. */
+    asked: !!requestedAt,
   };
 }
 
@@ -811,6 +838,9 @@ export async function disconnect() {
   behind = null;
   announced = '';
   deferring = false;
+  requestedAt = 0;
+  announcedRequest = 0;
+  holderIdle = null;
   role = null;
   holder = '';
   await ioForget();
@@ -855,6 +885,9 @@ export async function openPlan(name) {
   announced = '';
   saving = false;
   deferring = false;
+  requestedAt = 0;
+  announcedRequest = 0;
+  holderIdle = null;
   await ioRemember(folderRef, name);
 
   // State the claim first, then read every claim including our own and see who
@@ -1206,6 +1239,14 @@ async function writeClaim() {
           holder: getDisplayName(),
           since: claimedAt,
           beat: Date.now(),
+          /* When this session last *saved*, which is a different fact from the
+             heartbeat and the more useful one. `beat` says the window is still
+             open; `saved` says whether anything is happening in it, and that is
+             what somebody deciding between waiting and taking over needs. */
+          ...(lastSaveAt ? { saved: lastSaveAt } : {}),
+          /* Asking, rather than taking. Restated on every heartbeat so the
+             holder still sees it if they were away when it was first made. */
+          ...(requestedAt ? { request: requestedAt } : {}),
           ...(takeoverAt ? { takeover: takeoverAt } : {}),
         },
         null,
@@ -1243,6 +1284,32 @@ async function settlePen() {
     : !winner || ours(winner)
       ? 'another window of yours'
       : winner.holder || 'Someone';
+
+  /* How long the holder has been sitting on it. Read from *their* claim, so it
+     is a fact about them rather than about this window, and taken from `saved`
+     rather than `beat`: a window left open all afternoon beats steadily and has
+     not touched the plan since lunch. A claim written by a copy from before
+     this shipped carries no `saved`, and null is the honest answer there. */
+  holderIdle = nextRole === 'viewer' && winner && !ours(winner) && winner.saved
+    ? { savedMs: Date.now() - winner.saved, name: winner.holder || 'Someone' }
+    : null;
+
+  /* Somebody is asking us for it. Only while we hold it — a request aimed at
+     the previous holder is not ours to answer — and only once per request, or
+     the holder is interrupted every heartbeat by the same question. */
+  if (nextRole === 'editor') {
+    const asking = claims
+      .filter((c) => c.request && !isOurs(c) && !isStale(c))
+      .sort((a, b) => b.request - a.request)[0];
+    if (asking && asking.request > announcedRequest) {
+      announcedRequest = asking.request;
+      emit(EV.FILE_PEN_REQUESTED, { by: asking.holder || 'Someone', at: asking.request });
+    }
+  }
+
+  /* Our own request is answered the moment the pen is ours; leaving it set
+     would go on asking the next holder for something we already have. */
+  if (nextRole === 'editor' && requestedAt) requestedAt = 0;
 
   if (nextRole === role && nextHolder === holder) return { role, holder, changed: false };
 
@@ -1426,8 +1493,50 @@ export async function lockStatus() {
     live: !mine,
     mine,
     holder: winner.holder || 'Someone',
+    // Their heartbeat: are they still running at all.
     idleMs: winner.beat ? Date.now() - winner.beat : 0,
+    /* How long since they last *saved*, which is the question somebody
+       choosing between waiting and taking over is actually asking. Null on a
+       claim written before this shipped, and null is the honest answer — a
+       number invented for it would be the one thing on screen nobody could
+       account for. */
+    savedMs: winner.saved ? Date.now() - winner.saved : null,
   };
+}
+
+/**
+ * Ask whoever has the pen for it.
+ *
+ * The third option, and the one that was missing. Waiting had no end and no
+ * signal, and taking over is destructive by design — it is warned about
+ * because it can lose the holder's unsaved work. Faced with those two, people
+ * take over by habit until it costs somebody an afternoon.
+ *
+ * A request is deliberately *advisory*: it goes in our own claim, nobody
+ * else's file is touched, and the holder decides. It is restated on every
+ * heartbeat, so a holder who was away from the keyboard when it was made still
+ * sees it when they come back.
+ *
+ * Who gets the pen afterwards is the same rule as always — the earliest live
+ * claim — rather than a promise to the asker. Anything else means two waiters
+ * racing to promote themselves, which is a distributed agreement problem this
+ * folder cannot win and does not need: the person who cared enough to ask is
+ * almost always the one who has been waiting longest anyway.
+ */
+export async function requestPen() {
+  if (!isConnected() || role === 'editor') return false;
+  requestedAt = Date.now();
+  await writeClaim();
+  emitState();
+  return true;
+}
+
+/** Stop asking — the caller took over, or gave up. */
+export function withdrawRequest() {
+  if (!requestedAt) return;
+  requestedAt = 0;
+  writeClaim();
+  emitState();
 }
 
 /**
@@ -1469,12 +1578,21 @@ export async function checkLock() {
 function startTimers() {
   stopTimers();
   heartbeatTimer = setInterval(() => {
-    // Idle long enough that holding the pen is just in the way. Ask the
-    // application to flush a save and hand it back — this module cannot save the
-    // document itself, it only knows the file.
-    if (role === 'editor' && lastSaveAt && Date.now() - lastSaveAt > IDLE_RELEASE_MS) {
-      emit(EV.FILE_IDLE, { plan: planName, since: lastSaveAt });
-      return;
+    /* Idle long enough that holding the pen is just in the way. Ask the
+       application to flush a save and hand it back — this module cannot save
+       the document itself, it only knows the file.
+
+       Two thresholds, because patience depends on whether anybody is waiting:
+       an hour for a pen nobody has asked for, ten minutes once somebody has.
+       `announcedRequest` is the stamp of the last request seen on this plan, so
+       "somebody asked" survives the toast being dismissed. */
+    if (role === 'editor' && lastSaveAt) {
+      const idle = Date.now() - lastSaveAt;
+      const wanted = announcedRequest > 0;
+      if (idle > IDLE_RELEASE_MS || (wanted && idle > IDLE_WITH_REQUEST_MS)) {
+        emit(EV.FILE_IDLE, { plan: planName, since: lastSaveAt, requested: wanted });
+        return;
+      }
     }
     // Readers restate their claim as well as editors: a claim that stopped
     // beating is a claim that has given up, and a reader waiting for its turn

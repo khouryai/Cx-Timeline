@@ -94,6 +94,7 @@ export const EV = {
   FILE_EXTERNAL_CHANGE: 'file:external', // a colleague's save landed in the folder
   FILE_CONFLICT: 'file:conflict', // a write was refused because the file moved underneath us
   FILE_IDLE: 'file:idle', // the holder has been idle too long; flush a save and hand the pen back
+  FILE_PEN_REQUESTED: 'file:pen-requested', // { by } — a colleague is asking for the pen
 
   /* History */
   HISTORY_CHANGED: 'history:changed', // { canUndo, canRedo, depth }
