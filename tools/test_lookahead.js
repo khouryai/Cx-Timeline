@@ -172,6 +172,38 @@ check('and none of them silently became a shift',
     .filter((c) => c.hex && !['FFFF00', 'FF0000'].includes(c.hex))
     .every((c) => c.meaning === null));
 
+console.log('\nA re-mapped colour means what it means now');
+
+/* `rc_legend` is versioned — `unique (valid_from, argb)` — so a colour that has
+   been re-mapped has a row per date and only the newest is what it means. That
+   choice has to live here rather than in whatever order the caller sorted its
+   array, and it did not: the lookup was a `Map` built straight from the array,
+   which keeps whichever row came *last*. `listLegend()` hands them over newest
+   first, so last meant oldest and every correction anybody made was thrown away.
+
+   The symptom was the worst kind. Pressing "Just shading" on the grey a workbook
+   shades its layout with wrote an `ignore` row, the lookup kept reading the older
+   `shift` row, and all those rows stayed on the calendar — and because the older
+   row carries a meaning the colour was no longer unmapped, so the button that
+   would have fixed it was gone. */
+const greyGrid = { rows: [{ row: 9, cells: [{ col: 8, ref: 'H9', value: '', hex: '7F7F7F' }] }] };
+const versioned = [
+  { argb: '7F7F7F', meaning: 'Shading', role: 'ignore', valid_from: '2026-09-10' },
+  { argb: '7F7F7F', meaning: 'Day Shift', role: 'shift', valid_from: '2026-05-01' },
+];
+const greyCell = (rows) => la.applyLegend(greyGrid, rows).rows[0].cells[0];
+
+check('a colour mapped twice reads as its newest mapping',
+  greyCell(versioned).role === 'ignore', `${greyCell(versioned).role} / ${greyCell(versioned).meaning}`);
+// The caller's sort order must not be able to change the answer — three call
+// sites pass this array and they do not all sort it the same way.
+check('and the answer does not depend on how the caller sorted them',
+  greyCell([...versioned].reverse()).role === 'ignore');
+check('a single entry with no valid_from still resolves',
+  greyCell([{ argb: '7F7F7F', meaning: 'Day Shift', role: 'shift' }]).meaning === 'Day Shift');
+check('and a colour nobody mapped is still collected rather than guessed at',
+  greyCell([]).meaning === null && la.applyLegend(greyGrid, []).unknown.length === 1);
+
 /* ══════════════════════════════════════════════════════════════════════════
    Classification
    ═══════════════════════════════════════════════════════════════════════ */

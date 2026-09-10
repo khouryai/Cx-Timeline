@@ -555,7 +555,28 @@ export const addPersonAlias = (personId, alias) =>
 export const addCategory = (row) => insert('rc_categories', [row]).then((r) => r[0]);
 export const updateCategory = (id, patch) => update('rc_categories', id, patch);
 export const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r[0]);
-export const addLegend = (rows) => insert('rc_legend', rows);
+/**
+ * Map colours, or re-map them.
+ *
+ * An upsert on `(valid_from, argb)` rather than a plain insert, because that is
+ * the table's unique key and mapping the same colour twice in one day is the
+ * commonest thing anybody does here — press "Just shading" on a grey, look at
+ * the calendar, decide it was actually a shift. As an insert the second attempt
+ * violated the constraint and came back as a duplicate-key error, which reads as
+ * a broken button rather than as "you already said something about that today".
+ *
+ * A colour mapped again on a *later* day still gets a row of its own: the
+ * register is versioned on purpose, and `applyLegend()` reads the newest.
+ */
+export async function addLegend(rows) {
+  requireClient();
+  const { data, error } = await client
+    .from('rc_legend')
+    .upsert(rows, { onConflict: 'valid_from,argb' })
+    .select();
+  if (error) throw new Error(`rc_legend: ${error.message}`);
+  return data || [];
+}
 export const updateLegend = (id, patch) => update('rc_legend', id, patch);
 
 /**

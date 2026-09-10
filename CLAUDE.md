@@ -691,6 +691,23 @@ subscribes. That is what keeps the graph acyclic.
   drawn as unmapped too, not only counted: `.la-day.la-unmapped` hatches the
   cell on the calendar, so a colour nobody has explained is visible on the grid
   rather than in a number at the top of it.
+- **The legend is versioned, so a colour resolves to the row *in force*.**
+  `rc_legend` is `unique (valid_from, argb)` — one row per colour per date — and
+  `inForce()` in `io/lookahead.js` picks the newest before anything is looked up.
+  It has to happen there rather than being left to the caller's sort order,
+  because three call sites pass that array and they do not all sort it the same
+  way. It was `new Map(legend.map(…))`, which keeps whichever row comes *last*;
+  `listLegend()` orders newest first, so last meant **oldest** and every
+  correction anybody ever made was discarded in favour of the first thing a
+  colour was ever called. The symptom was the worst kind of silent: pressing
+  "Just shading" on the grey the workbook shades its layout with wrote an
+  `ignore` row, the lookup kept reading the older `shift` row, every one of those
+  rows stayed on the calendar — and because the older row carries a meaning the
+  colour was no longer *unmapped*, so the button that would have fixed it
+  disappeared and pressing it again only added another row it would also ignore.
+  `addLegend()` upserts on that key for the same reason: mapping a colour twice
+  in one day is the commonest thing anybody does here, and as an insert the
+  second attempt came back as a duplicate-key error.
 - **The workbook's own key is read once, into an empty register.** BART's
   look-ahead carries a block of rows painted one colour each with a label
   beside them — "Highlight in Orange for Swing Shift" — and `readLegend()` in
@@ -880,7 +897,7 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         #  77 checks — the parser, the rows it derives and
+node tools/test_lookahead.js         #  81 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
 node tools/smoke_calendar.js         # 195 checks — the resource calendar, accounts, the

@@ -468,9 +468,51 @@ export function readLegend(grid) {
  * from Excel's recent-colours picker would misclassify a shift with nothing on
  * screen to show it happened, and the result lands in evidence.
  */
+/**
+ * One entry per colour: the one in force.
+ *
+ * `rc_legend` is *versioned* — `unique (valid_from, argb)` — so a colour that
+ * has been re-mapped has a row per date, and only the newest of them is what it
+ * means now. Choosing that has to happen here rather than being left to how the
+ * caller sorted its array, and it did not: this was
+ *
+ *     new Map(legend.map((l) => [l.argb, …]))
+ *
+ * which silently took whichever row came *last*. `listLegend()` hands them over
+ * newest first — its own comment says "a caller taking the first entry for a
+ * colour gets the one in force" — so last meant **oldest**, and every correction
+ * anybody ever made was discarded in favour of the first thing that colour was
+ * ever called.
+ *
+ * The symptom was the worst kind: pressing "Just shading" on the grey a workbook
+ * shades its layout with inserted a row saying `ignore`, the lookup kept reading
+ * the older `shift` row, and all those rows stayed on the calendar. And because
+ * the older row carries a meaning the colour was no longer *unmapped*, so the
+ * button that would have fixed it disappeared. Pressing it again only added
+ * another row it would also ignore.
+ *
+ * A missing `valid_from` sorts oldest, so the shorter `{ argb, meaning, role }`
+ * shape the ingest path passes still resolves. A future-dated row wins on the
+ * calendar the moment it exists, which is consistent with the legend being
+ * re-applied at paint time rather than frozen into a snapshot.
+ */
+function inForce(legend) {
+  const best = new Map();
+  for (const entry of legend || []) {
+    const key = String(entry.argb).toUpperCase();
+    const held = best.get(key);
+    if (held && String(held.valid_from || '') >= String(entry.valid_from || '')) continue;
+    best.set(key, {
+      valid_from: entry.valid_from || '',
+      meaning: entry.meaning,
+      role: entry.role || 'shift',
+    });
+  }
+  return best;
+}
+
 export function applyLegend(grid, legend) {
-  const byColour = new Map(
-    (legend || []).map((l) => [String(l.argb).toUpperCase(), { meaning: l.meaning, role: l.role || 'shift' }]));
+  const byColour = inForce(legend);
   const unknown = new Map();
 
   const rows = grid.rows.map((row) => ({
