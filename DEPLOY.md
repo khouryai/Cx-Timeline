@@ -405,6 +405,15 @@ its SQL editor run, in order:
 1. `supabase/schema.sql` — this shape only needs the `auth` plumbing from it.
 2. `supabase/rc_schema.sql` — the calendar itself.
 
+**An existing project needs `supabase/migrate.sql` in between**, and then
+`rc_schema.sql` after it. `create table if not exists` does nothing to a table
+that already exists, so every column added since your project was created is
+silently missing — and the interface then sends a field Postgres has never heard
+of, which takes the whole write down with it. `migrate.sql` fixes the column and
+constraint shapes and nothing else; it is additive, safe to run twice, and safe
+to run on a project that is already current. It ends with a table of "ok" rows
+saying which steps took.
+
 Then Settings → API, and copy **Project URL** and the **anon / public** key.
 The anon key is designed to be public: it identifies the project and grants
 nothing. Every rule is a row-level security policy tied to the signed-in

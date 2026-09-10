@@ -12,6 +12,7 @@
 import { el } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
 import { toISO, todayMs, fmtDate, addDays, MS_DAY } from '../core/dates.js';
+import { resourceNames } from '../core/lookahead.js';
 import { openModal } from './components.js';
 
 /**
@@ -142,6 +143,104 @@ export const SHIFTS = [
   { id: 'night', label: 'Night' },
   { id: 'possession', label: 'Possession' },
 ];
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Names written in a spreadsheet, and the people they are
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Fold a name so spelling noise cannot decide whether it matches.
+ *
+ * Case and punctuation only. Nothing about the *words* is loosened: "R. Okafor"
+ * and "r okafor" are the same name written twice, while "Okafor" is a different
+ * string and matches only because somebody said so in the alias register.
+ */
+export function foldName(text) {
+  return String(text ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * A lookup from a written name to a person id.
+ *
+ * Two sources and no third: the roster's own names, and the aliases somebody
+ * has recorded. There is deliberately no partial or surname match — a shift
+ * attributed to the wrong engineer is worse than one attributed to nobody,
+ * because nobody looks at it again. An unrecognised spelling is shown as
+ * unmatched instead, which is a question somebody answers once.
+ *
+ * The roster name wins over an alias pointing somewhere else: a name that *is*
+ * somebody's is theirs.
+ */
+export function nameRegister(people, aliases = []) {
+  const map = new Map();
+  for (const a of aliases || []) {
+    const key = foldName(a.alias);
+    if (key) map.set(key, a.person_id);
+  }
+  for (const p of people || []) {
+    const key = foldName(p.name);
+    if (key) map.set(key, p.id);
+  }
+  return map;
+}
+
+/**
+ * One row per (week, row key), from the newest snapshot that carries it.
+ *
+ * `rc_lookahead_rows` keeps every read, so asking for a span of weeks returns
+ * the same activity once per snapshot — and drawn straight out, that is the same
+ * person at the same place four times over. `rank` maps a snapshot id to its
+ * position in `listSnapshots()` output, which is newest first, so the lowest
+ * rank wins. A row whose snapshot is not in the map is treated as oldest rather
+ * than dropped: it is still a read that happened.
+ */
+export function newestPerKey(rows, rank) {
+  const best = new Map();
+  const at = (row) => (rank.has(row.snapshot_id) ? rank.get(row.snapshot_id) : Number.MAX_SAFE_INTEGER);
+  for (const row of rows || []) {
+    const key = `${row.week_start}|${row.row_key}`;
+    const held = best.get(key);
+    if (!held || at(row) < at(held)) best.set(key, row);
+  }
+  return [...best.values()];
+}
+
+/**
+ * Who the look-ahead's Resource rows put where, per day.
+ *
+ * Returns `byPerson` — a person id to a map of date to the rows naming them —
+ * and `unmatched`, the spellings the register does not know. The second half is
+ * the point as much as the first: a name nobody has mapped is a person missing
+ * from the picture, and reporting it is the difference between a view that is
+ * incomplete and one that is quietly wrong.
+ */
+export function resourceAssignments(laRows, register) {
+  const byPerson = new Map();
+  const unmatched = new Map();
+
+  for (const row of laRows || []) {
+    for (const [date, text] of Object.entries(row.resources || {})) {
+      for (const written of resourceNames(text)) {
+        const key = foldName(written);
+        if (!key) continue;
+        const personId = register.get(key);
+        if (!personId) {
+          const seen = unmatched.get(key) || { name: written, days: new Set(), rows: [] };
+          seen.days.add(date);
+          if (!seen.rows.some((r) => r.id === row.id)) seen.rows.push(row);
+          unmatched.set(key, seen);
+          continue;
+        }
+        if (!byPerson.has(personId)) byPerson.set(personId, new Map());
+        const days = byPerson.get(personId);
+        if (!days.has(date)) days.set(date, []);
+        if (!days.get(date).some((r) => r.id === row.id)) days.get(date).push(row);
+      }
+    }
+  }
+
+  return { byPerson, unmatched: [...unmatched.values()] };
+}
 
 /**
  * Whether somebody is available on a date.

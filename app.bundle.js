@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 53   Built: 2026-09-08T01:22:28.110Z
+ * Modules: 54   Built: 2026-09-10T18:35:42.456Z
  */
 (function () {
   'use strict';
@@ -13642,6 +13642,18 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_location_alias', (q) => q.order('alias'));
   }
 
+  /**
+   * The other spellings of a person, for matching the look-ahead's Resource row.
+   *
+   * A name typed into a spreadsheet cell is "R. Okafor" one week and "Okafor" the
+   * next. The register is what turns those into a person; a name it does not know
+   * is shown as unmatched rather than guessed at, which is the same answer the
+   * location aliases give and for the same reason.
+   */
+  function listPersonAliases() {
+    return select('rc_person_alias', (q) => q.order('alias'));
+  }
+
   function listCategories({ includeInactive = false } = {}) {
     return select('rc_categories', (q) => (includeInactive ? q : q.eq('active', true)).order('sort'));
   }
@@ -13679,7 +13691,8 @@ __mods["core/rc.js"] = function (__x, __req) {
   async function exportEverything() {
     requireClient();
     const tables = [
-      'rc_people', 'rc_locations', 'rc_location_alias', 'rc_categories', 'rc_parties',
+      'rc_people', 'rc_locations', 'rc_location_alias', 'rc_person_alias',
+      'rc_categories', 'rc_parties',
       'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries',
       'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
       'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
@@ -13862,6 +13875,8 @@ __mods["core/rc.js"] = function (__x, __req) {
   const updateLocation = (id, patch) => update('rc_locations', id, patch);
   const addLocationAlias = (locationId, alias) =>
     insert('rc_location_alias', [{ location_id: locationId, alias }]).then((r) => r[0]);
+  const addPersonAlias = (personId, alias) =>
+    insert('rc_person_alias', [{ person_id: personId, alias }]).then((r) => r[0]);
   const addCategory = (row) => insert('rc_categories', [row]).then((r) => r[0]);
   const updateCategory = (id, patch) => update('rc_categories', id, patch);
   const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r[0]);
@@ -13897,6 +13912,20 @@ __mods["core/rc.js"] = function (__x, __req) {
   /** Every look-ahead row for a week, so the plan can be proposed from it. */
   function lookaheadForWeek(weekStartISO) {
     return select('rc_lookahead_rows', (q) => q.eq('week_start', weekStartISO).order('sheet_row'));
+  }
+
+  /**
+   * Look-ahead rows across a span of weeks.
+   *
+   * The Resources view answers "where is everybody, for the weeks that matter",
+   * which is several weeks at once — asking week by week would be one round trip
+   * per column. Rows from every snapshot come back, so the caller keeps the newest
+   * per `row_key`: an older snapshot's copy of a week is history, not a second
+   * assignment.
+   */
+  function lookaheadBetween(fromISO, toISO) {
+    return select('rc_lookahead_rows', (q) =>
+      q.gte('week_start', fromISO).lte('week_start', toISO).order('sheet_row'));
   }
 
   /**
@@ -14091,6 +14120,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listPeople", { get: () => listPeople, enumerable: true });
   Object.defineProperty(__x, "listLocations", { get: () => listLocations, enumerable: true });
   Object.defineProperty(__x, "listLocationAliases", { get: () => listLocationAliases, enumerable: true });
+  Object.defineProperty(__x, "listPersonAliases", { get: () => listPersonAliases, enumerable: true });
   Object.defineProperty(__x, "listCategories", { get: () => listCategories, enumerable: true });
   Object.defineProperty(__x, "listParties", { get: () => listParties, enumerable: true });
   Object.defineProperty(__x, "listLegend", { get: () => listLegend, enumerable: true });
@@ -14121,6 +14151,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "addLocation", { get: () => addLocation, enumerable: true });
   Object.defineProperty(__x, "updateLocation", { get: () => updateLocation, enumerable: true });
   Object.defineProperty(__x, "addLocationAlias", { get: () => addLocationAlias, enumerable: true });
+  Object.defineProperty(__x, "addPersonAlias", { get: () => addPersonAlias, enumerable: true });
   Object.defineProperty(__x, "addCategory", { get: () => addCategory, enumerable: true });
   Object.defineProperty(__x, "updateCategory", { get: () => updateCategory, enumerable: true });
   Object.defineProperty(__x, "addParty", { get: () => addParty, enumerable: true });
@@ -14131,6 +14162,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "updateLeave", { get: () => updateLeave, enumerable: true });
   Object.defineProperty(__x, "addPlanEntries", { get: () => addPlanEntries, enumerable: true });
   Object.defineProperty(__x, "lookaheadForWeek", { get: () => lookaheadForWeek, enumerable: true });
+  Object.defineProperty(__x, "lookaheadBetween", { get: () => lookaheadBetween, enumerable: true });
   Object.defineProperty(__x, "supersedePlan", { get: () => supersedePlan, enumerable: true });
   Object.defineProperty(__x, "recordActual", { get: () => recordActual, enumerable: true });
   Object.defineProperty(__x, "resolveLocation", { get: () => resolveLocation, enumerable: true });
@@ -27609,6 +27641,705 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// core/lookahead.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/lookahead.js"] = function (__x, __req) {
+  /**
+   * Comparing two look-ahead snapshots.
+   *
+   * The look-ahead is the contractual source of truth and the resource calendar
+   * is the execution record; the difference between two snapshots is what a
+   * delay claim is eventually built from. So the rules here are about being
+   * *honest* rather than clever — the system logs what it can see and asks a
+   * person about what it cannot.
+   *
+   * Two rules do most of the work, and both exist because the obvious version
+   * produces numbers that flatter or damn the wrong party.
+   *
+   * **Only weeks in both snapshots are compared.** A four-week window rolls
+   * forward, so a week appearing at the far edge is not scope being added and a
+   * week dropping off the back is not scope being removed. Counting them as such
+   * would book a batch of phantom additions every single week, and would count
+   * finished work as deleted scope — inflating exactly the number you would most
+   * want to defend.
+   *
+   * **A crew moving site is not inferred.** When work finishes early and a team
+   * moves, one row disappears and another appears with the same resources. The
+   * activity text is not reliable enough to match on — the spec says so and it is
+   * right — so it is logged honestly as a removal and an addition, and a person
+   * can relink the pair afterwards. Guessing would be the one failure mode
+   * nobody could audit.
+   *
+   * **A Resource row belongs to the activity above it.** The workbook names who
+   * is on an activity by adding a row underneath whose description reads
+   * "Resource", with the names typed into the day cells; where and when are left
+   * blank because they are the line above's. So it is read as part of that
+   * activity rather than as one of its own — otherwise half the sheet is rows
+   * called "Resource" with no location — and a name is never matched to a person
+   * here. That happens against the roster, where an unmatched spelling can be
+   * shown to somebody instead of guessed at.
+   *
+   * Imports: nothing (leaf).
+   */
+
+  /* ── The Resource row ──────────────────────────────────────────────────── */
+
+  /**
+   * Is this what the workbook writes under an activity to name who is on it?
+   *
+   * The 4WLA carries a row directly beneath each activity whose description cell
+   * reads "Resource", and the day cells on it hold the names typed against that
+   * activity. It is recognised by that one word and nothing else — folded for
+   * case and punctuation, but not loosened any further. "Resource Names" is not
+   * it: a rule that matched anything containing the word would swallow an
+   * activity called "Resource mobilisation", and a row misread as a label is a
+   * row of work that vanishes off the calendar.
+   */
+  function isResourceLabel(text) {
+    return /^resources?$/.test(String(text ?? '').toLowerCase().replace(/[^a-z]/g, ''));
+  }
+
+  /**
+   * The people named in one cell.
+   *
+   * Typed by hand, so the separator is whatever was to hand: a comma, a slash, a
+   * newline, an ampersand. Nothing is matched to a person here — that is the
+   * roster's job, through the alias register — this only splits what was written.
+   */
+  function resourceNames(text) {
+    return String(text ?? '')
+      .split(/[,;/\n&+]|\s{2,}/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  /**
+   * Every mark on an activity, the ones on its Resource row included.
+   *
+   * Whether a row has work on it is a question about the pair, not about the
+   * activity line alone: the workbook sometimes paints the shift on the Resource
+   * row instead. Both places that ask — `readGrid()` and the calendar's window —
+   * have to ask it the same way, which is why it is a function and not two loops.
+   */
+  function marksOf(activity) {
+    return activity?.resource ? [...activity.marks, ...activity.resource.marks] : (activity?.marks || []);
+  }
+
+  /* ── Row identity ──────────────────────────────────────────────────────── */
+
+  /**
+   * A key for a row that survives the file being edited.
+   *
+   * The look-ahead has no activity IDs — no P6 numbers, nothing stable — and its
+   * descriptions are not matchable. Location, week and subsystem are what remain,
+   * plus an ordinal to separate two rows that share all three.
+   *
+   * The ordinal is the weak part, and knowingly so: inserting a row in the middle
+   * of a group shifts everything below it and produces a false removed/added
+   * pair. That is tolerable only because the manual relink exists to fix it, and
+   * because the alternative — matching on text — would produce *wrong* answers
+   * rather than noisy ones.
+   */
+  function rowKey({ weekStart, location, subsystem = '', ordinal = 0 }) {
+    return [weekStart, String(location || '').trim(), String(subsystem || '').trim(), ordinal].join('|');
+  }
+
+  /** Assign ordinals within each (week, location, subsystem) group. */
+  function keyRows(rows) {
+    const seen = new Map();
+    return rows.map((row) => {
+      const group = [row.weekStart, row.location, row.subsystem || ''].join('|');
+      const ordinal = seen.get(group) || 0;
+      seen.set(group, ordinal + 1);
+      return { ...row, rowKey: rowKey({ ...row, ordinal }) };
+    });
+  }
+
+  /* ── Reading the grid as a calendar ────────────────────────────────────── */
+
+  const WEEKDAYS = ['M', 'TU', 'W', 'TH', 'F', 'SA', 'SU'];
+
+  const MONTH_NAMES = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
+    'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+
+  /**
+   * The one month a label names, or -1.
+   *
+   * A week straddling a boundary is labelled "August/September" in this
+   * workbook, and a label naming two months anchors nothing — it is skipped
+   * rather than resolved to the first of them.
+   */
+  function oneMonth(label) {
+    const text = String(label || '').toUpperCase();
+    const hits = new Set();
+    MONTH_NAMES.forEach((name, i) => {
+      if (text.includes(name) || new RegExp(`\\b${name.slice(0, 3)}\\b`).test(text)) hits.add(i);
+    });
+    return hits.size === 1 ? [...hits][0] : -1;
+  }
+
+  /**
+   * Give every day column a real date, or none of them one.
+   *
+   * The sheet carries months and day numbers and no year at all, so a year has
+   * to come from somewhere else. Two things supply it, and the second is what
+   * makes this safe to rely on rather than a guess:
+   *
+   * **The snapshot's own timestamp** says roughly when the window was current.
+   * The look-ahead is maintained four to six weeks out, so the window brackets
+   * the day it was read; that narrows the year to one of three candidates.
+   *
+   * **The weekday letters check the answer.** The sheet writes M, Tu, W beside
+   * every day, and only one of the candidate years makes those letters come out
+   * right — the same date is a different weekday in adjacent years. So the year
+   * is not inferred and hoped for, it is *verified* against something the file
+   * already says, and where the letters do not agree no dates are claimed at
+   * all and everything that depends on them stands down.
+   *
+   * Mutates `days`, adding `date` (an ISO string) where it can.
+   */
+  function datePlease(days, anchorISO) {
+    if (!days.length) return false;
+
+    /* Day numbers first: they are always present, and a drop from 30 to 1 is a
+       month boundary whether or not anybody labelled it. That matters because
+       the visible window often starts mid-month, with the label for that month
+       sitting in a column the workbook has hidden. */
+    const nums = [];
+    for (let i = 0; i < days.length; i++) {
+      const n = parseInt(String(days[i].day).replace(/\D/g, ''), 10);
+      nums.push(Number.isFinite(n) && n >= 1 && n <= 31 ? n : (nums[i - 1] || 0) + 1);
+    }
+
+    let anchorAt = -1;
+    let anchorMonth = -1;
+    for (let i = 0; i < days.length; i++) {
+      const m = oneMonth(days[i].label);
+      if (m >= 0) { anchorAt = i; anchorMonth = m; break; }
+    }
+    if (anchorAt < 0) return false;
+
+    const months = new Array(days.length).fill(-1);
+    months[anchorAt] = anchorMonth;
+    for (let i = anchorAt + 1; i < days.length; i++) {
+      months[i] = nums[i] < nums[i - 1] ? (months[i - 1] + 1) % 12 : months[i - 1];
+    }
+    for (let i = anchorAt - 1; i >= 0; i--) {
+      months[i] = nums[i] > nums[i + 1] ? (months[i + 1] + 11) % 12 : months[i + 1];
+    }
+
+    // Relative years: the axis only ever runs forwards, so a month going
+    // backwards is the turn of a year.
+    const rel = [0];
+    for (let i = 1; i < days.length; i++) rel.push(rel[i - 1] + (months[i] < months[i - 1] ? 1 : 0));
+
+    const anchorMs = Date.parse(`${String(anchorISO || '').slice(0, 10)}T00:00:00Z`);
+    const base = Number.isFinite(anchorMs)
+      ? new Date(anchorMs).getUTCFullYear()
+      : new Date().getUTCFullYear();
+
+    const LETTERS = ['SU', 'M', 'TU', 'W', 'TH', 'F', 'SA'];
+    let bestYear = null;
+    let bestScore = -1;
+    for (const year of [base - 1, base, base + 1]) {
+      let agree = 0;
+      for (let i = 0; i < days.length; i++) {
+        const ms = Date.UTC(year + rel[i], months[i], nums[i]);
+        if (LETTERS[new Date(ms).getUTCDay()] === String(days[i].weekday).trim().toUpperCase()) agree++;
+      }
+      // Closeness to the snapshot breaks a tie; the letters decide otherwise.
+      const mid = Date.UTC(year + rel[rel.length >> 1], months[days.length >> 1], nums[days.length >> 1]);
+      const near = Number.isFinite(anchorMs) ? 1 - Math.min(1, Math.abs(mid - anchorMs) / 3.2e10) : 0;
+      const score = agree + near;
+      if (score > bestScore) { bestScore = score; bestYear = year; }
+    }
+
+    // Below this the letters are not agreeing and the reading is wrong. Saying
+    // nothing is the only honest answer: a today line on the wrong column is
+    // worse than no today line.
+    const agreement = Math.floor(bestScore) / days.length;
+    if (agreement < 0.9) return false;
+
+    for (let i = 0; i < days.length; i++) {
+      days[i].date = new Date(Date.UTC(bestYear + rel[i], months[i], nums[i]))
+        .toISOString().slice(0, 10);
+      days[i].month = `${MONTH_NAMES[months[i]].slice(0, 3)} ${bestYear + rel[i]}`;
+    }
+    return true;
+  }
+
+  /**
+   * Turn a parsed sheet into something that can be drawn: days across the top,
+   * activities down the side.
+   *
+   * Everything here is *found* rather than configured, and that is the point.
+   * The look-ahead is a spreadsheet somebody maintains by hand: rows get
+   * inserted, the window scrolls, columns are hidden and unhidden as the weeks
+   * move. A layout pinned to "dates start at column H" would be wrong the first
+   * time anybody inserted a column, and wrong silently — the grid would still
+   * draw, against the wrong days.
+   *
+   * So the date axis is located by looking for the row of weekday letters, which
+   * is the one row on the sheet whose content cannot be mistaken for anything
+   * else. The day numbers sit directly above it and the month labels above
+   * those; the columns it occupies are the calendar, and everything to the left
+   * of them is what the activity *is*.
+   *
+   * No year is invented. The sheet does not carry one, and a date is not
+   * something to infer from a month name — the axis is drawn as the workbook
+   * writes it.
+   */
+  function readGrid(grid, { anchorISO = null } = {}) {
+    const rows = (grid?.rows || []).slice().sort((a, b) => a.row - b.row);
+    const empty = { days: [], meta: [], activities: [], header: null };
+    if (!rows.length) return empty;
+
+    // The weekday row: the one where most values are M/Tu/W/Th/F/Sa/Su.
+    let header = null;
+    let best = 0;
+    for (const row of rows) {
+      const hits = row.cells.filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()));
+      if (hits.length > best && hits.length >= 7) {
+        best = hits.length;
+        header = row;
+      }
+    }
+    if (!header) return empty;
+
+    const dayCols = header.cells
+      .filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()))
+      .map((c) => c.col)
+      .sort((a, b) => a - b);
+    const dayCol = new Set(dayCols);
+    const firstDay = dayCols[0];
+
+    const at = (row, col) => row?.cells.find((c) => c.col === col);
+    const above = (n) => rows.filter((r) => r.row < header.row).slice(-n)[0] || null;
+    const numbers = above(1);
+    const months = above(2);
+
+    /* The month label is a merged cell, so only the leftmost column of each
+       block carries it. Carrying the last one forward is what merged means. */
+    let month = '';
+    const days = dayCols.map((col) => {
+      const label = String(at(months, col)?.value ?? '').trim();
+      if (label) month = label;
+      return {
+        col,
+        month,
+        // What the sheet actually wrote here, as opposed to what was carried
+        // across the merge. Only a real label can anchor the calendar.
+        label,
+        day: String(at(numbers, col)?.value ?? '').trim(),
+        weekday: String(at(header, col)?.value ?? '').trim(),
+        weekend: ['SA', 'SU'].includes(String(at(header, col)?.value ?? '').trim().toUpperCase()),
+      };
+    });
+
+    datePlease(days, anchorISO);
+
+    /* The activity columns are whatever is used to the left of the calendar.
+       Their headings are not reliably on any one row — this file labels some and
+       not others — so they are numbered by position and named where a heading
+       happens to exist above the first activity. */
+    const body = rows.filter((r) => r.row > header.row);
+    const metaCols = [...new Set(
+      body.flatMap((r) => r.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim()).map((c) => c.col))
+    )].sort((a, b) => a - b);
+
+    const activities = [];
+    for (const row of body) {
+      const meta = metaCols.map((col) => String(at(row, col)?.value ?? '').trim());
+      const marks = row.cells
+        .filter((c) => dayCol.has(c.col) && (String(c.value ?? '').trim() || c.hex))
+        .map((c) => ({
+          col: c.col,
+          value: String(c.value ?? '').trim(),
+          hex: c.hex || null,
+          meaning: c.meaning || null,
+          role: c.role || (c.hex ? 'shift' : null),
+        }));
+
+      // A row with neither a description nor a mark is spacing, not work.
+      if (!meta.some(Boolean) && !marks.some((m) => m.value)) continue;
+
+      /* A heading is a row whose *activity* cells are painted.
+         That is a structural fact rather than a reading of the colour, and it is
+         what makes it reliable: the shading that runs along the day columns of
+         every row paints only the calendar, never the description beside it. So
+         a section title is recognised without anybody having to tell the legend
+         which of several near-identical greys means "divider".
+         Only the columns *left* of the calendar count. `!dayCol.has(col)` also
+         took in anything painted to the right of the last day — a totals column,
+         a trailing border — and one of those turns every row in the workbook
+         into a heading, which is how a whole file arrived on screen at once. */
+      const heading = row.cells.some((c) => c.col < firstDay && c.hex);
+
+      /* The Resource row the workbook writes under an activity.
+         It belongs to the activity above it rather than being one of its own: it
+         carries no work of its own, it inherits where and when from the line it
+         sits under, and drawn as a separate activity it would be a hundred and
+         forty rows of the word "Resource". Its day cells are the names. */
+      const previous = activities[activities.length - 1];
+      if (!heading && previous && !previous.heading && meta.some(isResourceLabel)) {
+        previous.resource = {
+          row: row.row,
+          /* Where and when come from the activity above — that is what the
+             workbook means by leaving them blank on this row. Anything typed
+             here wins, so a resource working different hours can say so. */
+          meta: meta.map((value, i) => value || previous.meta[i] || ''),
+          marks,
+          names: marks.filter((m) => m.value).map((m) => ({ col: m.col, names: resourceNames(m.value) })),
+        };
+        previous.highlighted = marksOf(previous).some((m) => m.hex && m.role === 'shift');
+        continue;
+      }
+
+      /* "Highlighted" means at least one day carries paint that is *work*.
+         Tested as `role === 'shift'` rather than `role !== 'ignore'`, which is
+         not the same question and got the answer wrong: a `divider` is the grey
+         the workbook paints its section bands in, and a row whose only colour is
+         a divider or a weekend band has nothing scheduled on it — but it read as
+         highlighted and survived into the grid.
+         An unmapped colour still counts, because `applyLegend()` gives it
+         `shift`: until somebody says what a colour is, the honest assumption is
+         that it might be work, and hiding it would bury the rows that most need
+         attention. */
+      const highlighted = marks.some((m) => m.hex && m.role === 'shift');
+
+      /* Whether anybody wrote down what this row *is*.
+         A row of paint with no description is not an activity — it is a band, a
+         spacer, or a fill somebody dragged too far — and putting it on the
+         calendar asks the reader to work out which. It is hidden with the
+         unscheduled rows rather than dropped, so the switch still brings it back. */
+      const named = meta.some(Boolean);
+
+      activities.push({ row: row.row, meta, marks, heading, highlighted, named, resource: null });
+    }
+
+    return { days, meta: metaCols, activities, header: header.row };
+  }
+
+  /**
+   * A read grid, as rows something else can point at.
+   *
+   * One row per activity per *week*, because that is the grain the look-ahead is
+   * maintained at and the grain a plan is made at. Two rules, both of which hold
+   * everywhere else in this module:
+   *
+   * **The location is resolved, never parsed.** Each activity cell is offered to
+   * `locate` — the alias register, injected so this stays testable without a
+   * network — and the first that resolves is the location. Nothing is matched on
+   * the description: the wording differs on the two sides and is not reliable
+   * enough to carry evidence, which is what the alias list exists for.
+   *
+   * **A row with nothing scheduled that week is not a row.** The sheet carries
+   * activities for reference with no shift against them, and writing those would
+   * make the register mostly noise — and, worse, make every one of them look
+   * like scope the first time it *did* get a shift.
+   */
+  async function rowsFrom(view, { snapshotId = null, locate = async () => null } = {}) {
+    if (!view?.days?.length) return [];
+
+    const dayByCol = new Map(view.days.map((d) => [d.col, d]));
+    const out = [];
+    const ordinals = new Map();
+
+    for (const activity of view.activities) {
+      if (activity.heading) continue;
+
+      // Group this activity's marks by the week they fall in.
+      const weeks = new Map();
+      for (const mark of marksOf(activity)) {
+        if (!mark.hex || mark.role === 'ignore') continue;
+        const day = dayByCol.get(mark.col);
+        if (!day?.date) continue;
+        const week = mondayOf(day.date);
+        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
+        const bucket = weeks.get(week);
+        bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
+        if (mark.value) bucket.marks[day.date] = mark.value;
+      }
+      if (!weeks.size) continue;
+
+      /* Who the Resource row names, per day, in the words the workbook used.
+         Only into weeks that already have a shift in them: a name typed against a
+         day nobody is scheduled on is the same kind of stray as a colour on an
+         empty row, and writing it would invent a week of scope. Nothing is
+         matched to a person here — that happens against the roster, where an
+         unmatched name can be shown to somebody rather than guessed at. */
+      for (const mark of activity.resource?.marks || []) {
+        if (!mark.value) continue;
+        const day = dayByCol.get(mark.col);
+        const week = day?.date ? mondayOf(day.date) : null;
+        if (!week || !weeks.has(week)) continue;
+        weeks.get(week).resources[day.date] = mark.value;
+      }
+
+      let locationId = null;
+      let rawLocation = null;
+      for (const value of activity.meta) {
+        const hit = await locate(value);
+        if (hit) { locationId = hit; rawLocation = value; break; }
+      }
+      const label = activity.meta.filter(Boolean).join(' · ');
+
+      for (const [week, bucket] of weeks) {
+        const groupKey = [week, rawLocation || '', ''].join('|');
+        const ordinal = ordinals.get(groupKey) || 0;
+        ordinals.set(groupKey, ordinal + 1);
+        out.push({
+          snapshot_id: snapshotId,
+          week_start: week,
+          sheet_row: activity.row,
+          row_key: rowKey({ weekStart: week, location: rawLocation || '', subsystem: '', ordinal }),
+          location_id: locationId,
+          raw_location: rawLocation,
+          raw_label: label,
+          cells: bucket.cells,
+          bart_marks: bucket.marks,
+          resources: bucket.resources,
+        });
+      }
+    }
+
+    return out;
+  }
+
+  /** The Monday of an ISO date's week, in UTC. A calendar date must not shift. */
+  function mondayOf(iso) {
+    const ms = Date.parse(`${iso}T00:00:00Z`);
+    const back = (new Date(ms).getUTCDay() + 6) % 7;
+    return new Date(ms - back * 86400000).toISOString().slice(0, 10);
+  }
+
+  /* ── The window ────────────────────────────────────────────────────────── */
+
+  /**
+   * The weeks a snapshot actually covers, read from the snapshot itself.
+   *
+   * Deliberately not a constant. The spec calls it a four-week look-ahead and
+   * says it is maintained four to six weeks out, so a hard-coded 4 would
+   * misclassify the sixth week every time it appeared.
+   */
+  function windowOf(rows) {
+    const weeks = [...new Set(rows.map((r) => r.weekStart))].sort();
+    return { weeks, first: weeks[0] || null, last: weeks[weeks.length - 1] || null };
+  }
+
+  /* ── Comparing ─────────────────────────────────────────────────────────── */
+
+  /**
+   * Classify the difference between two keyed snapshots.
+   *
+   * `before` and `after` are arrays of `{ rowKey, weekStart, location, subsystem,
+   * label, cells, marks }`, where `cells` maps a date to a shift meaning and
+   * `marks` holds BART's own resource requests.
+   *
+   * Returns a list of `{ kind, weekStart, rowKey, before, after }`.
+   */
+  function classify(before, after, { cancelledMeaning = 'cancelled' } = {}) {
+    const beforeWindow = windowOf(before);
+    const afterWindow = windowOf(after);
+
+    // Only weeks present on both sides can be compared at all. Everything else
+    // is the window moving, which is recorded and kept out of the KPIs.
+    const shared = new Set(beforeWindow.weeks.filter((w) => afterWindow.weeks.includes(w)));
+
+    const events = [];
+    const beforeByKey = new Map(before.map((r) => [r.rowKey, r]));
+    const afterByKey = new Map(after.map((r) => [r.rowKey, r]));
+
+    /* Weeks entering and leaving the window. Not scope, and named so. */
+    for (const week of afterWindow.weeks) {
+      if (!beforeWindow.weeks.includes(week)) {
+        events.push({ kind: 'window_advanced', weekStart: week, rowKey: null, before: null, after: null });
+      }
+    }
+    for (const week of beforeWindow.weeks) {
+      if (!afterWindow.weeks.includes(week)) {
+        events.push({ kind: 'window_retired', weekStart: week, rowKey: null, before: null, after: null });
+      }
+    }
+
+    /* Rows added to, and removed from, a week that was already in view. */
+    for (const row of after) {
+      if (!shared.has(row.weekStart)) continue;
+      if (!beforeByKey.has(row.rowKey)) {
+        events.push({ kind: 'scope_added', weekStart: row.weekStart, rowKey: row.rowKey, before: null, after: row });
+      }
+    }
+    for (const row of before) {
+      if (!shared.has(row.weekStart)) continue;
+      if (!afterByKey.has(row.rowKey)) {
+        events.push({ kind: 'scope_removed', weekStart: row.weekStart, rowKey: row.rowKey, before: row, after: null });
+      }
+    }
+
+    /* Rows present on both sides: what changed inside them. */
+    for (const row of after) {
+      const prior = beforeByKey.get(row.rowKey);
+      if (!prior || !shared.has(row.weekStart)) continue;
+
+      const dates = [...new Set([...Object.keys(prior.cells || {}), ...Object.keys(row.cells || {})])].sort();
+      for (const date of dates) {
+        const was = (prior.cells || {})[date] || null;
+        const now = (row.cells || {})[date] || null;
+        if (was === now) continue;
+
+        // A shift turning red is a cancellation, and the colour alone cannot say
+        // whose. Whoever reviews it is asked; nothing is assumed.
+        const kind = now === cancelledMeaning && was && was !== cancelledMeaning
+          ? 'cancellation'
+          : 'shift_changed';
+
+        events.push({
+          kind,
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          date,
+          before: was,
+          after: now,
+          needsResponsibility: kind === 'cancellation',
+        });
+      }
+
+      // BART's own resource marks — an EIC added to an otherwise unchanged
+      // shift. The shift did not move, and the request still changed, so it is
+      // logged rather than folded into the row above.
+      const marksBefore = JSON.stringify(prior.marks || {});
+      const marksAfter = JSON.stringify(row.marks || {});
+      if (marksBefore !== marksAfter) {
+        events.push({
+          kind: 'resource_changed',
+          field: 'marks',
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          before: prior.marks || {},
+          after: row.marks || {},
+        });
+      }
+
+      /* And the Resource row underneath: who is on it.
+         The same kind as a mark changing rather than a kind of its own, because
+         it is the same fact — the request against this activity moved without the
+         shift moving — and a new kind would need the `rc_change_events` check
+         constraint widened in every project that already has one. `field` is what
+         tells the two apart when somebody reads the row back. */
+      const whoBefore = JSON.stringify(prior.resources || {});
+      const whoAfter = JSON.stringify(row.resources || {});
+      if (whoBefore !== whoAfter) {
+        events.push({
+          kind: 'resource_changed',
+          field: 'resources',
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          before: prior.resources || {},
+          after: row.resources || {},
+        });
+      }
+    }
+
+    return events;
+  }
+
+  /**
+   * Removals and additions in the same week that could be one crew moving site.
+   *
+   * Only ever a *suggestion*, surfaced for somebody to confirm. Work finishing
+   * early at one location and starting at another is not a cancellation, but the
+   * only evidence is that the same BART resources appear on both — and the
+   * activity text, which cannot be trusted. So the pairing is a human judgement
+   * by design, and the system's job is to make it easy rather than to guess.
+   */
+  function relinkCandidates(events) {
+    const removed = events.filter((e) => e.kind === 'scope_removed');
+    const added = events.filter((e) => e.kind === 'scope_added');
+    const out = [];
+
+    for (const gone of removed) {
+      for (const arrived of added) {
+        if (gone.weekStart !== arrived.weekStart) continue;
+        const a = JSON.stringify(gone.before?.marks || {});
+        const b = JSON.stringify(arrived.after?.marks || {});
+        if (a !== '{}' && a === b) {
+          out.push({ removed: gone, added: arrived, because: 'the same resources were requested' });
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Which events count toward the change KPIs.
+   *
+   * The window moving is real and recorded, and it is not a change of scope.
+   * Keeping the two apart is what stops the scope-added figure being meaningless
+   * within a month.
+   */
+  const KPI_KINDS = ['scope_added', 'scope_removed', 'cancellation', 'resource_changed', 'shift_changed'];
+
+  function countable(events) {
+    return events.filter((e) => KPI_KINDS.includes(e.kind));
+  }
+
+  /** A short, plain description of an event, for the change log. */
+  /**
+   * One line saying what an event was.
+   *
+   * Reads the *stored* shape: `before` and `after` are jsonb, because the table
+   * has no column for a date and a row-level change needs one. `sideOf()` in
+   * `ui/rc_lookahead.js` is what writes them, and the two have to agree — a
+   * mismatch here shows up as "undefined → undefined" on the one screen somebody
+   * reads a year later.
+   */
+  function describe(event) {
+    const day = event.date || event.after?.date || event.before?.date || 'a day';
+    switch (event.kind) {
+      case 'scope_added': return `Added: ${event.after?.label || event.rowKey}`;
+      case 'scope_removed': return `Removed: ${event.before?.label || event.rowKey}`;
+      case 'cancellation': return `Cancelled on ${day}: was ${event.before?.value ?? event.before}`;
+      case 'shift_changed':
+        return `${day}: ${event.before?.value || 'nothing'} → ${event.after?.value || 'nothing'}`;
+      case 'resource_changed': {
+        /* The *stored* shape decides which of the two this was: `sideOf()` writes
+           `{ resources }` for the Resource row and `{ marks }` for a mark on the
+           activity line. A row written before Resource rows existed carries only
+           the latter, and it still prints the sentence it always did rather than
+           "undefined → undefined" on the one screen somebody reads a year later. */
+        const who = (side) => {
+          const map = side?.resources;
+          if (!map || typeof map !== 'object') return null;
+          return [...new Set(Object.values(map).flatMap((v) => resourceNames(v)))].join(', ');
+        };
+        const was = who(event.before);
+        const now = who(event.after);
+        if (was === null && now === null) return 'BART resource request changed';
+        return `Resource: ${was || 'nobody'} → ${now || 'nobody'}`;
+      }
+      case 'window_advanced': return `Week ${event.weekStart} came into the window`;
+      case 'window_retired': return `Week ${event.weekStart} left the window`;
+      case 'location_shift': return 'Relinked as one crew moving site';
+      default: return event.kind;
+    }
+  }
+
+  Object.defineProperty(__x, "isResourceLabel", { get: () => isResourceLabel, enumerable: true });
+  Object.defineProperty(__x, "resourceNames", { get: () => resourceNames, enumerable: true });
+  Object.defineProperty(__x, "marksOf", { get: () => marksOf, enumerable: true });
+  Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
+  Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
+  Object.defineProperty(__x, "readGrid", { get: () => readGrid, enumerable: true });
+  Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
+  Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
+  Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
+  Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
+  Object.defineProperty(__x, "KPI_KINDS", { get: () => KPI_KINDS, enumerable: true });
+  Object.defineProperty(__x, "countable", { get: () => countable, enumerable: true });
+  Object.defineProperty(__x, "describe", { get: () => describe, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/rc_util.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/rc_util.js"] = function (__x, __req) {
@@ -27626,6 +28357,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   const { el } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { toISO, todayMs, fmtDate, addDays, MS_DAY } = __req("core/dates.js");
+  const { resourceNames } = __req("core/lookahead.js");
   const { openModal } = __req("ui/components.js");
 
   /**
@@ -27757,6 +28489,104 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
     { id: 'possession', label: 'Possession' },
   ];
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     Names written in a spreadsheet, and the people they are
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Fold a name so spelling noise cannot decide whether it matches.
+   *
+   * Case and punctuation only. Nothing about the *words* is loosened: "R. Okafor"
+   * and "r okafor" are the same name written twice, while "Okafor" is a different
+   * string and matches only because somebody said so in the alias register.
+   */
+  function foldName(text) {
+    return String(text ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  /**
+   * A lookup from a written name to a person id.
+   *
+   * Two sources and no third: the roster's own names, and the aliases somebody
+   * has recorded. There is deliberately no partial or surname match — a shift
+   * attributed to the wrong engineer is worse than one attributed to nobody,
+   * because nobody looks at it again. An unrecognised spelling is shown as
+   * unmatched instead, which is a question somebody answers once.
+   *
+   * The roster name wins over an alias pointing somewhere else: a name that *is*
+   * somebody's is theirs.
+   */
+  function nameRegister(people, aliases = []) {
+    const map = new Map();
+    for (const a of aliases || []) {
+      const key = foldName(a.alias);
+      if (key) map.set(key, a.person_id);
+    }
+    for (const p of people || []) {
+      const key = foldName(p.name);
+      if (key) map.set(key, p.id);
+    }
+    return map;
+  }
+
+  /**
+   * One row per (week, row key), from the newest snapshot that carries it.
+   *
+   * `rc_lookahead_rows` keeps every read, so asking for a span of weeks returns
+   * the same activity once per snapshot — and drawn straight out, that is the same
+   * person at the same place four times over. `rank` maps a snapshot id to its
+   * position in `listSnapshots()` output, which is newest first, so the lowest
+   * rank wins. A row whose snapshot is not in the map is treated as oldest rather
+   * than dropped: it is still a read that happened.
+   */
+  function newestPerKey(rows, rank) {
+    const best = new Map();
+    const at = (row) => (rank.has(row.snapshot_id) ? rank.get(row.snapshot_id) : Number.MAX_SAFE_INTEGER);
+    for (const row of rows || []) {
+      const key = `${row.week_start}|${row.row_key}`;
+      const held = best.get(key);
+      if (!held || at(row) < at(held)) best.set(key, row);
+    }
+    return [...best.values()];
+  }
+
+  /**
+   * Who the look-ahead's Resource rows put where, per day.
+   *
+   * Returns `byPerson` — a person id to a map of date to the rows naming them —
+   * and `unmatched`, the spellings the register does not know. The second half is
+   * the point as much as the first: a name nobody has mapped is a person missing
+   * from the picture, and reporting it is the difference between a view that is
+   * incomplete and one that is quietly wrong.
+   */
+  function resourceAssignments(laRows, register) {
+    const byPerson = new Map();
+    const unmatched = new Map();
+
+    for (const row of laRows || []) {
+      for (const [date, text] of Object.entries(row.resources || {})) {
+        for (const written of resourceNames(text)) {
+          const key = foldName(written);
+          if (!key) continue;
+          const personId = register.get(key);
+          if (!personId) {
+            const seen = unmatched.get(key) || { name: written, days: new Set(), rows: [] };
+            seen.days.add(date);
+            if (!seen.rows.some((r) => r.id === row.id)) seen.rows.push(row);
+            unmatched.set(key, seen);
+            continue;
+          }
+          if (!byPerson.has(personId)) byPerson.set(personId, new Map());
+          const days = byPerson.get(personId);
+          if (!days.has(date)) days.set(date, []);
+          if (!days.get(date).some((r) => r.id === row.id)) days.get(date).push(row);
+        }
+      }
+    }
+
+    return { byPerson, unmatched: [...unmatched.values()] };
+  }
+
   /**
    * Whether somebody is available on a date.
    *
@@ -27792,6 +28622,10 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "STATUSES", { get: () => STATUSES, enumerable: true });
   Object.defineProperty(__x, "STATUS_BY_ID", { get: () => STATUS_BY_ID, enumerable: true });
   Object.defineProperty(__x, "SHIFTS", { get: () => SHIFTS, enumerable: true });
+  Object.defineProperty(__x, "foldName", { get: () => foldName, enumerable: true });
+  Object.defineProperty(__x, "nameRegister", { get: () => nameRegister, enumerable: true });
+  Object.defineProperty(__x, "newestPerKey", { get: () => newestPerKey, enumerable: true });
+  Object.defineProperty(__x, "resourceAssignments", { get: () => resourceAssignments, enumerable: true });
   Object.defineProperty(__x, "availability", { get: () => availability, enumerable: true });
 };
 
@@ -28385,8 +29219,9 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
           el('button', {
             class: 'cx-btn mini ghost',
             text: 'Link account',
-            title: 'For somebody who already signed up before their team record existed.',
-            onClick: () => linkAccount(p),
+            title: 'Point an address at this row. It works before they have signed up: an open '
+              + 'invitation is aimed here instead, and the account lands on this row when it exists.',
+            onClick: () => linkAccount(p, people),
           }),
         ]),
       ]))
@@ -28501,21 +29336,57 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
     });
   }
 
-  function linkAccount(person) {
+  /**
+   * Point an address at a roster row.
+   *
+   * Three outcomes, and only one of them used to be handled. The account exists
+   * and is linked; the address is *invited* and has not signed up yet, in which
+   * case the invitation is aimed at this row and the trigger finishes the job when
+   * they arrive; or there is neither, which is the only case where there is
+   * genuinely nothing to do — so that is the only case that refuses, and it offers
+   * the invitation rather than just saying no.
+   *
+   * The middle one is why this changed. "no account exists for them@example.com —
+   * invite them first" was the commonest answer by a wide margin and it was wrong:
+   * they *had* been invited, and there was nothing the administrator could do
+   * about the rest. A refusal that names no action the reader can take reads as a
+   * broken button.
+   */
+  function linkAccount(person, people) {
     const email = textInput({ value: person.email || '', placeholder: 'them@example.com', type: 'email' });
     formModal({
       title: `Link an account to ${person.name}`,
       body: el('div', { class: 'cx-form' }, [
-        field('Email', email, 'The address of an account that already exists. If they have '
-          + 'not signed up yet, invite them instead.'),
+        field('Email', email, 'The address they sign in with. It does not have to exist yet — if it '
+          + 'has been invited and they have not signed up, the invitation is pointed at '
+          + `${person.name} instead and the account lands on this row the moment they do.`),
       ]),
       confirmLabel: 'Link',
       onConfirm: async () => {
         const address = email.value.trim();
         if (!address) throw new Error('An email address is needed.');
-        await rc.linkAccount(person.id, address);
+        let linked;
+        try {
+          linked = await rc.linkAccount(person.id, address);
+        } catch (err) {
+          /* Nothing to link and nothing on its way. The next step is an
+             invitation, so offer it rather than making somebody find the button. */
+          if (/no account and no open invitation/i.test(err.message)) {
+            throw new Error(`${address} has no account and no open invitation. Close this and use `
+              + '"Invite somebody" — pick this person as the team record, and their account will '
+              + 'attach to it when they sign up.');
+          }
+          throw err;
+        }
         notifyChanged('people');
-        toast({ message: `${address} now signs in as ${person.name}.` });
+        toast({
+          tone: 'good',
+          message: linked
+            ? `${address} now signs in as ${person.name}.`
+            : `${address} is invited but has not signed up yet — the invitation now points at `
+              + `${person.name}, and the account will attach to this row when they do.`,
+          timeout: linked ? undefined : 10000,
+        });
       },
     });
   }
@@ -28607,7 +29478,8 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
      announces itself the same way — a file that lands somewhere the page cannot
      see is the one action with no visible result. */
   const { saveFile } = __req("io/exporters.js");
-  const { STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs, dayLabel, byId, availability, notifyChanged, formModal } = __req("ui/rc_util.js");
+  const { STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, newestPerKey, resourceAssignments } = __req("ui/rc_util.js");
+
 
 
 
@@ -28763,7 +29635,8 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const review = reviewDate(date, people);
     const plan = planDate(date, people);
 
-    const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, laRows] =
+    const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, laRows,
+      aliases, snapshots] =
       await Promise.all([
         rc.listCategories(),
         rc.listLocations(),
@@ -28784,9 +29657,17 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
         // Every blocker still open, whoever raised it and whenever. This is the
         // standing item the meeting keeps returning to until somebody clears it.
         rc.listBlockers().catch(() => []),
-        // Only an administrator can read these; a member simply gets none and
-        // the block dialog offers nothing to link, which is correct.
-        rc.lookaheadForWeek(toISO(weekStart(isoToMs(review)))).catch(() => []),
+        /* Only an administrator can read these; a member simply gets none and
+           the block dialog offers nothing to link, which is correct.
+           Both weeks, not just the reviewed one: on a Friday the day being planned
+           is in the *next* week, and a look-ahead read for one week cannot say who
+           BART wants on the other. */
+        rc.lookaheadBetween(toISO(weekStart(isoToMs(review))), toISO(weekStart(isoToMs(plan))))
+          .catch(() => []),
+        // Which spellings in the workbook are whose. Nothing is matched without
+        // them beyond an exact fold of somebody's own name.
+        rc.listPersonAliases().catch(() => []),
+        rc.listSnapshots({ limit: 20 }).catch(() => []),
       ]);
 
     const chainByeId = new Map();
@@ -28800,12 +29681,23 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const planFor = (personId, iso) =>
       planRows.find((p) => p.person_id === personId && p.work_date === iso) || null;
 
+    /* Who the 4WLA's Resource rows name, per person per day.
+       This is what lets the meeting ask somebody about the work BART actually
+       wants of them rather than only about the work somebody remembered to plan —
+       the two differing is the interesting case, and until now the second was the
+       only one on screen. Duplicates from older snapshots are dropped first, or
+       the same activity arrives once per read. */
+    const rows = newestPerKey(laRows, new Map(snapshots.map((s, i) => [s.id, i])));
+    const { byPerson: askedFor } = resourceAssignments(rows, nameRegister(everybody.length ? everybody : people, aliases));
+    const askedOf = (personId, iso) => (askedFor.get(personId)?.get(iso) || []);
+
     /* One context, handed to the table, the meeting and the digest alike. They
        are three readings of one day and the moment they are given different
        data they start disagreeing on screen, in front of the room. */
     const ctx = {
       people, review, plan, planFor, actualByPerson, cats, locs,
-      categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
+      categories, locations, parties, leave, root, chainByeId, laRows: rows, blockers, everybody,
+      askedOf,
     };
 
     root.appendChild(dateBar(date, review, plan, root, ctx));
@@ -29082,6 +29974,11 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     if (wasPlanned && !laRow) {
       context.appendChild(badge('not against a look-ahead row', 'muted'));
     }
+    /* And what BART asked of them, where nobody planned it. The room needs that
+       more than the person does: it is the gap between the contract and the day. */
+    if (!wasPlanned && askedLine(ctx, person, review)) {
+      context.appendChild(badge(askedLine(ctx, person, review).slice(0, 52), 'warn'));
+    }
     for (const b of theirs) {
       context.appendChild(badge(`blocked: ${b.summary.slice(0, 36)}`, 'bad'));
     }
@@ -29112,7 +30009,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       tomorrow
         ? el('div', { text: tomorrow.task || '—' })
         : el('div', { class: 'rc-hint', text: 'nothing set yet' }),
-    ]));
+      !tomorrow && askedLine(ctx, person, plan)
+        ? el('div', { class: 'rc-hint', text: askedLine(ctx, person, plan) })
+        : null,
+    ].filter(Boolean)));
 
     wrap.appendChild(el('div', { class: 'rc-present-move' }, [
       el('button', { class: 'cx-btn ghost', text: '← Back', onClick: () => move(-1), disabled: atPerson === 0 }),
@@ -29320,6 +30220,28 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
    * the table, including any field somebody else is mid-way through, is left
    * exactly alone.
    */
+  /**
+   * What the 4WLA asks of one person on one day, as a line to read out.
+   *
+   * Only ever shown where the plan is silent. Where a day *is* planned the plan is
+   * the answer — it was a decision, taken by somebody, possibly against this very
+   * row — and printing BART's wording beside it would invite the meeting to
+   * relitigate a call that has already been made. Where nothing is planned it is
+   * the difference between "nothing planned" and "nothing planned, and here is
+   * what was wanted".
+   */
+  function askedLine(ctx, person, iso) {
+    const rows = ctx.askedOf ? ctx.askedOf(person.id, iso) : [];
+    if (!rows.length) return null;
+    const row = rows[0];
+    const where = row.raw_location || ctx.locs.get(row.location_id)?.name || '';
+    return [
+      `4WLA: ${(row.raw_label || `row ${row.sheet_row}`).slice(0, 44)}`,
+      where,
+      rows.length > 1 ? `and ${rows.length - 1} more` : null,
+    ].filter(Boolean).join(' · ');
+  }
+
   function personRow(ctx) {
     const { person, review, plan, planFor, actualByPerson, cats, locs, leave, root, chainByeId } = ctx;
 
@@ -29394,7 +30316,15 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
             ? badge(`${ordinal(chain.carries + 1)} day`, chain.carries >= 4 ? 'bad' : 'warn')
             : null,
         ].filter(Boolean))
-        : el('span', { class: 'rc-hint', text: 'nothing planned' }),
+        : el('div', {}, [
+          el('span', { class: 'rc-hint', text: 'nothing planned' }),
+          /* Nothing planned is not nothing wanted. Where the look-ahead names
+             this person on this day, the meeting gets to ask about the work
+             rather than about the gap. */
+          askedLine(ctx, person, review)
+            ? el('div', { class: 'rc-hint', text: askedLine(ctx, person, review) })
+            : null,
+        ].filter(Boolean)),
     ]));
 
     /* What happened. Absence is answered from the leave record rather than
@@ -29427,7 +30357,13 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           tomorrow.carry_chain_id ? badge('Carried over', 'warn') : null,
         ].filter(Boolean))
         : admin
-          ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap' }, [
+          ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap;align-items:center' }, [
+            /* What BART wants of them tomorrow, so the goal is set against it
+               rather than from memory. Said before the buttons, because it is the
+               thing the answer should be about. */
+            askedLine(ctx, person, plan)
+              ? el('div', { class: 'rc-hint', style: 'flex:1 1 100%', text: askedLine(ctx, person, plan) })
+              : null,
             el('button', {
               class: 'cx-btn mini ghost',
               text: 'Set goal',
@@ -30723,569 +31659,6 @@ __mods["io/lookahead.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
-// core/lookahead.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["core/lookahead.js"] = function (__x, __req) {
-  /**
-   * Comparing two look-ahead snapshots.
-   *
-   * The look-ahead is the contractual source of truth and the resource calendar
-   * is the execution record; the difference between two snapshots is what a
-   * delay claim is eventually built from. So the rules here are about being
-   * *honest* rather than clever — the system logs what it can see and asks a
-   * person about what it cannot.
-   *
-   * Two rules do most of the work, and both exist because the obvious version
-   * produces numbers that flatter or damn the wrong party.
-   *
-   * **Only weeks in both snapshots are compared.** A four-week window rolls
-   * forward, so a week appearing at the far edge is not scope being added and a
-   * week dropping off the back is not scope being removed. Counting them as such
-   * would book a batch of phantom additions every single week, and would count
-   * finished work as deleted scope — inflating exactly the number you would most
-   * want to defend.
-   *
-   * **A crew moving site is not inferred.** When work finishes early and a team
-   * moves, one row disappears and another appears with the same resources. The
-   * activity text is not reliable enough to match on — the spec says so and it is
-   * right — so it is logged honestly as a removal and an addition, and a person
-   * can relink the pair afterwards. Guessing would be the one failure mode
-   * nobody could audit.
-   *
-   * Imports: nothing (leaf).
-   */
-
-  /* ── Row identity ──────────────────────────────────────────────────────── */
-
-  /**
-   * A key for a row that survives the file being edited.
-   *
-   * The look-ahead has no activity IDs — no P6 numbers, nothing stable — and its
-   * descriptions are not matchable. Location, week and subsystem are what remain,
-   * plus an ordinal to separate two rows that share all three.
-   *
-   * The ordinal is the weak part, and knowingly so: inserting a row in the middle
-   * of a group shifts everything below it and produces a false removed/added
-   * pair. That is tolerable only because the manual relink exists to fix it, and
-   * because the alternative — matching on text — would produce *wrong* answers
-   * rather than noisy ones.
-   */
-  function rowKey({ weekStart, location, subsystem = '', ordinal = 0 }) {
-    return [weekStart, String(location || '').trim(), String(subsystem || '').trim(), ordinal].join('|');
-  }
-
-  /** Assign ordinals within each (week, location, subsystem) group. */
-  function keyRows(rows) {
-    const seen = new Map();
-    return rows.map((row) => {
-      const group = [row.weekStart, row.location, row.subsystem || ''].join('|');
-      const ordinal = seen.get(group) || 0;
-      seen.set(group, ordinal + 1);
-      return { ...row, rowKey: rowKey({ ...row, ordinal }) };
-    });
-  }
-
-  /* ── Reading the grid as a calendar ────────────────────────────────────── */
-
-  const WEEKDAYS = ['M', 'TU', 'W', 'TH', 'F', 'SA', 'SU'];
-
-  const MONTH_NAMES = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
-    'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
-
-  /**
-   * The one month a label names, or -1.
-   *
-   * A week straddling a boundary is labelled "August/September" in this
-   * workbook, and a label naming two months anchors nothing — it is skipped
-   * rather than resolved to the first of them.
-   */
-  function oneMonth(label) {
-    const text = String(label || '').toUpperCase();
-    const hits = new Set();
-    MONTH_NAMES.forEach((name, i) => {
-      if (text.includes(name) || new RegExp(`\\b${name.slice(0, 3)}\\b`).test(text)) hits.add(i);
-    });
-    return hits.size === 1 ? [...hits][0] : -1;
-  }
-
-  /**
-   * Give every day column a real date, or none of them one.
-   *
-   * The sheet carries months and day numbers and no year at all, so a year has
-   * to come from somewhere else. Two things supply it, and the second is what
-   * makes this safe to rely on rather than a guess:
-   *
-   * **The snapshot's own timestamp** says roughly when the window was current.
-   * The look-ahead is maintained four to six weeks out, so the window brackets
-   * the day it was read; that narrows the year to one of three candidates.
-   *
-   * **The weekday letters check the answer.** The sheet writes M, Tu, W beside
-   * every day, and only one of the candidate years makes those letters come out
-   * right — the same date is a different weekday in adjacent years. So the year
-   * is not inferred and hoped for, it is *verified* against something the file
-   * already says, and where the letters do not agree no dates are claimed at
-   * all and everything that depends on them stands down.
-   *
-   * Mutates `days`, adding `date` (an ISO string) where it can.
-   */
-  function datePlease(days, anchorISO) {
-    if (!days.length) return false;
-
-    /* Day numbers first: they are always present, and a drop from 30 to 1 is a
-       month boundary whether or not anybody labelled it. That matters because
-       the visible window often starts mid-month, with the label for that month
-       sitting in a column the workbook has hidden. */
-    const nums = [];
-    for (let i = 0; i < days.length; i++) {
-      const n = parseInt(String(days[i].day).replace(/\D/g, ''), 10);
-      nums.push(Number.isFinite(n) && n >= 1 && n <= 31 ? n : (nums[i - 1] || 0) + 1);
-    }
-
-    let anchorAt = -1;
-    let anchorMonth = -1;
-    for (let i = 0; i < days.length; i++) {
-      const m = oneMonth(days[i].label);
-      if (m >= 0) { anchorAt = i; anchorMonth = m; break; }
-    }
-    if (anchorAt < 0) return false;
-
-    const months = new Array(days.length).fill(-1);
-    months[anchorAt] = anchorMonth;
-    for (let i = anchorAt + 1; i < days.length; i++) {
-      months[i] = nums[i] < nums[i - 1] ? (months[i - 1] + 1) % 12 : months[i - 1];
-    }
-    for (let i = anchorAt - 1; i >= 0; i--) {
-      months[i] = nums[i] > nums[i + 1] ? (months[i + 1] + 11) % 12 : months[i + 1];
-    }
-
-    // Relative years: the axis only ever runs forwards, so a month going
-    // backwards is the turn of a year.
-    const rel = [0];
-    for (let i = 1; i < days.length; i++) rel.push(rel[i - 1] + (months[i] < months[i - 1] ? 1 : 0));
-
-    const anchorMs = Date.parse(`${String(anchorISO || '').slice(0, 10)}T00:00:00Z`);
-    const base = Number.isFinite(anchorMs)
-      ? new Date(anchorMs).getUTCFullYear()
-      : new Date().getUTCFullYear();
-
-    const LETTERS = ['SU', 'M', 'TU', 'W', 'TH', 'F', 'SA'];
-    let bestYear = null;
-    let bestScore = -1;
-    for (const year of [base - 1, base, base + 1]) {
-      let agree = 0;
-      for (let i = 0; i < days.length; i++) {
-        const ms = Date.UTC(year + rel[i], months[i], nums[i]);
-        if (LETTERS[new Date(ms).getUTCDay()] === String(days[i].weekday).trim().toUpperCase()) agree++;
-      }
-      // Closeness to the snapshot breaks a tie; the letters decide otherwise.
-      const mid = Date.UTC(year + rel[rel.length >> 1], months[days.length >> 1], nums[days.length >> 1]);
-      const near = Number.isFinite(anchorMs) ? 1 - Math.min(1, Math.abs(mid - anchorMs) / 3.2e10) : 0;
-      const score = agree + near;
-      if (score > bestScore) { bestScore = score; bestYear = year; }
-    }
-
-    // Below this the letters are not agreeing and the reading is wrong. Saying
-    // nothing is the only honest answer: a today line on the wrong column is
-    // worse than no today line.
-    const agreement = Math.floor(bestScore) / days.length;
-    if (agreement < 0.9) return false;
-
-    for (let i = 0; i < days.length; i++) {
-      days[i].date = new Date(Date.UTC(bestYear + rel[i], months[i], nums[i]))
-        .toISOString().slice(0, 10);
-      days[i].month = `${MONTH_NAMES[months[i]].slice(0, 3)} ${bestYear + rel[i]}`;
-    }
-    return true;
-  }
-
-  /**
-   * Turn a parsed sheet into something that can be drawn: days across the top,
-   * activities down the side.
-   *
-   * Everything here is *found* rather than configured, and that is the point.
-   * The look-ahead is a spreadsheet somebody maintains by hand: rows get
-   * inserted, the window scrolls, columns are hidden and unhidden as the weeks
-   * move. A layout pinned to "dates start at column H" would be wrong the first
-   * time anybody inserted a column, and wrong silently — the grid would still
-   * draw, against the wrong days.
-   *
-   * So the date axis is located by looking for the row of weekday letters, which
-   * is the one row on the sheet whose content cannot be mistaken for anything
-   * else. The day numbers sit directly above it and the month labels above
-   * those; the columns it occupies are the calendar, and everything to the left
-   * of them is what the activity *is*.
-   *
-   * No year is invented. The sheet does not carry one, and a date is not
-   * something to infer from a month name — the axis is drawn as the workbook
-   * writes it.
-   */
-  function readGrid(grid, { anchorISO = null } = {}) {
-    const rows = (grid?.rows || []).slice().sort((a, b) => a.row - b.row);
-    const empty = { days: [], meta: [], activities: [], header: null };
-    if (!rows.length) return empty;
-
-    // The weekday row: the one where most values are M/Tu/W/Th/F/Sa/Su.
-    let header = null;
-    let best = 0;
-    for (const row of rows) {
-      const hits = row.cells.filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()));
-      if (hits.length > best && hits.length >= 7) {
-        best = hits.length;
-        header = row;
-      }
-    }
-    if (!header) return empty;
-
-    const dayCols = header.cells
-      .filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()))
-      .map((c) => c.col)
-      .sort((a, b) => a - b);
-    const dayCol = new Set(dayCols);
-    const firstDay = dayCols[0];
-
-    const at = (row, col) => row?.cells.find((c) => c.col === col);
-    const above = (n) => rows.filter((r) => r.row < header.row).slice(-n)[0] || null;
-    const numbers = above(1);
-    const months = above(2);
-
-    /* The month label is a merged cell, so only the leftmost column of each
-       block carries it. Carrying the last one forward is what merged means. */
-    let month = '';
-    const days = dayCols.map((col) => {
-      const label = String(at(months, col)?.value ?? '').trim();
-      if (label) month = label;
-      return {
-        col,
-        month,
-        // What the sheet actually wrote here, as opposed to what was carried
-        // across the merge. Only a real label can anchor the calendar.
-        label,
-        day: String(at(numbers, col)?.value ?? '').trim(),
-        weekday: String(at(header, col)?.value ?? '').trim(),
-        weekend: ['SA', 'SU'].includes(String(at(header, col)?.value ?? '').trim().toUpperCase()),
-      };
-    });
-
-    datePlease(days, anchorISO);
-
-    /* The activity columns are whatever is used to the left of the calendar.
-       Their headings are not reliably on any one row — this file labels some and
-       not others — so they are numbered by position and named where a heading
-       happens to exist above the first activity. */
-    const body = rows.filter((r) => r.row > header.row);
-    const metaCols = [...new Set(
-      body.flatMap((r) => r.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim()).map((c) => c.col))
-    )].sort((a, b) => a - b);
-
-    const activities = [];
-    for (const row of body) {
-      const meta = metaCols.map((col) => String(at(row, col)?.value ?? '').trim());
-      const marks = row.cells
-        .filter((c) => dayCol.has(c.col) && (String(c.value ?? '').trim() || c.hex))
-        .map((c) => ({
-          col: c.col,
-          value: String(c.value ?? '').trim(),
-          hex: c.hex || null,
-          meaning: c.meaning || null,
-          role: c.role || (c.hex ? 'shift' : null),
-        }));
-
-      // A row with neither a description nor a mark is spacing, not work.
-      if (!meta.some(Boolean) && !marks.some((m) => m.value)) continue;
-
-      /* A heading is a row whose *activity* cells are painted.
-         That is a structural fact rather than a reading of the colour, and it is
-         what makes it reliable: the shading that runs along the day columns of
-         every row paints only the calendar, never the description beside it. So
-         a section title is recognised without anybody having to tell the legend
-         which of several near-identical greys means "divider". */
-      const heading = row.cells.some((c) => !dayCol.has(c.col) && c.hex);
-
-      /* "Highlighted" means at least one day carries paint that is *work*.
-         Tested as `role === 'shift'` rather than `role !== 'ignore'`, which is
-         not the same question and got the answer wrong: a `divider` is the grey
-         the workbook paints its section bands in, and a row whose only colour is
-         a divider or a weekend band has nothing scheduled on it — but it read as
-         highlighted and survived into the grid.
-         An unmapped colour still counts, because `applyLegend()` gives it
-         `shift`: until somebody says what a colour is, the honest assumption is
-         that it might be work, and hiding it would bury the rows that most need
-         attention. */
-      const highlighted = marks.some((m) => m.hex && m.role === 'shift');
-
-      activities.push({ row: row.row, meta, marks, heading, highlighted });
-    }
-
-    return { days, meta: metaCols, activities, header: header.row };
-  }
-
-  /**
-   * A read grid, as rows something else can point at.
-   *
-   * One row per activity per *week*, because that is the grain the look-ahead is
-   * maintained at and the grain a plan is made at. Two rules, both of which hold
-   * everywhere else in this module:
-   *
-   * **The location is resolved, never parsed.** Each activity cell is offered to
-   * `locate` — the alias register, injected so this stays testable without a
-   * network — and the first that resolves is the location. Nothing is matched on
-   * the description: the wording differs on the two sides and is not reliable
-   * enough to carry evidence, which is what the alias list exists for.
-   *
-   * **A row with nothing scheduled that week is not a row.** The sheet carries
-   * activities for reference with no shift against them, and writing those would
-   * make the register mostly noise — and, worse, make every one of them look
-   * like scope the first time it *did* get a shift.
-   */
-  async function rowsFrom(view, { snapshotId = null, locate = async () => null } = {}) {
-    if (!view?.days?.length) return [];
-
-    const dayByCol = new Map(view.days.map((d) => [d.col, d]));
-    const out = [];
-    const ordinals = new Map();
-
-    for (const activity of view.activities) {
-      if (activity.heading) continue;
-
-      // Group this activity's marks by the week they fall in.
-      const weeks = new Map();
-      for (const mark of activity.marks) {
-        if (!mark.hex || mark.role === 'ignore') continue;
-        const day = dayByCol.get(mark.col);
-        if (!day?.date) continue;
-        const week = mondayOf(day.date);
-        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {} });
-        const bucket = weeks.get(week);
-        bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
-        if (mark.value) bucket.marks[day.date] = mark.value;
-      }
-      if (!weeks.size) continue;
-
-      let locationId = null;
-      let rawLocation = null;
-      for (const value of activity.meta) {
-        const hit = await locate(value);
-        if (hit) { locationId = hit; rawLocation = value; break; }
-      }
-      const label = activity.meta.filter(Boolean).join(' · ');
-
-      for (const [week, bucket] of weeks) {
-        const groupKey = [week, rawLocation || '', ''].join('|');
-        const ordinal = ordinals.get(groupKey) || 0;
-        ordinals.set(groupKey, ordinal + 1);
-        out.push({
-          snapshot_id: snapshotId,
-          week_start: week,
-          sheet_row: activity.row,
-          row_key: rowKey({ weekStart: week, location: rawLocation || '', subsystem: '', ordinal }),
-          location_id: locationId,
-          raw_location: rawLocation,
-          raw_label: label,
-          cells: bucket.cells,
-          bart_marks: bucket.marks,
-        });
-      }
-    }
-
-    return out;
-  }
-
-  /** The Monday of an ISO date's week, in UTC. A calendar date must not shift. */
-  function mondayOf(iso) {
-    const ms = Date.parse(`${iso}T00:00:00Z`);
-    const back = (new Date(ms).getUTCDay() + 6) % 7;
-    return new Date(ms - back * 86400000).toISOString().slice(0, 10);
-  }
-
-  /* ── The window ────────────────────────────────────────────────────────── */
-
-  /**
-   * The weeks a snapshot actually covers, read from the snapshot itself.
-   *
-   * Deliberately not a constant. The spec calls it a four-week look-ahead and
-   * says it is maintained four to six weeks out, so a hard-coded 4 would
-   * misclassify the sixth week every time it appeared.
-   */
-  function windowOf(rows) {
-    const weeks = [...new Set(rows.map((r) => r.weekStart))].sort();
-    return { weeks, first: weeks[0] || null, last: weeks[weeks.length - 1] || null };
-  }
-
-  /* ── Comparing ─────────────────────────────────────────────────────────── */
-
-  /**
-   * Classify the difference between two keyed snapshots.
-   *
-   * `before` and `after` are arrays of `{ rowKey, weekStart, location, subsystem,
-   * label, cells, marks }`, where `cells` maps a date to a shift meaning and
-   * `marks` holds BART's own resource requests.
-   *
-   * Returns a list of `{ kind, weekStart, rowKey, before, after }`.
-   */
-  function classify(before, after, { cancelledMeaning = 'cancelled' } = {}) {
-    const beforeWindow = windowOf(before);
-    const afterWindow = windowOf(after);
-
-    // Only weeks present on both sides can be compared at all. Everything else
-    // is the window moving, which is recorded and kept out of the KPIs.
-    const shared = new Set(beforeWindow.weeks.filter((w) => afterWindow.weeks.includes(w)));
-
-    const events = [];
-    const beforeByKey = new Map(before.map((r) => [r.rowKey, r]));
-    const afterByKey = new Map(after.map((r) => [r.rowKey, r]));
-
-    /* Weeks entering and leaving the window. Not scope, and named so. */
-    for (const week of afterWindow.weeks) {
-      if (!beforeWindow.weeks.includes(week)) {
-        events.push({ kind: 'window_advanced', weekStart: week, rowKey: null, before: null, after: null });
-      }
-    }
-    for (const week of beforeWindow.weeks) {
-      if (!afterWindow.weeks.includes(week)) {
-        events.push({ kind: 'window_retired', weekStart: week, rowKey: null, before: null, after: null });
-      }
-    }
-
-    /* Rows added to, and removed from, a week that was already in view. */
-    for (const row of after) {
-      if (!shared.has(row.weekStart)) continue;
-      if (!beforeByKey.has(row.rowKey)) {
-        events.push({ kind: 'scope_added', weekStart: row.weekStart, rowKey: row.rowKey, before: null, after: row });
-      }
-    }
-    for (const row of before) {
-      if (!shared.has(row.weekStart)) continue;
-      if (!afterByKey.has(row.rowKey)) {
-        events.push({ kind: 'scope_removed', weekStart: row.weekStart, rowKey: row.rowKey, before: row, after: null });
-      }
-    }
-
-    /* Rows present on both sides: what changed inside them. */
-    for (const row of after) {
-      const prior = beforeByKey.get(row.rowKey);
-      if (!prior || !shared.has(row.weekStart)) continue;
-
-      const dates = [...new Set([...Object.keys(prior.cells || {}), ...Object.keys(row.cells || {})])].sort();
-      for (const date of dates) {
-        const was = (prior.cells || {})[date] || null;
-        const now = (row.cells || {})[date] || null;
-        if (was === now) continue;
-
-        // A shift turning red is a cancellation, and the colour alone cannot say
-        // whose. Whoever reviews it is asked; nothing is assumed.
-        const kind = now === cancelledMeaning && was && was !== cancelledMeaning
-          ? 'cancellation'
-          : 'shift_changed';
-
-        events.push({
-          kind,
-          weekStart: row.weekStart,
-          rowKey: row.rowKey,
-          date,
-          before: was,
-          after: now,
-          needsResponsibility: kind === 'cancellation',
-        });
-      }
-
-      // BART's own resource marks — an EIC added to an otherwise unchanged
-      // shift. The shift did not move, and the request still changed, so it is
-      // logged rather than folded into the row above.
-      const marksBefore = JSON.stringify(prior.marks || {});
-      const marksAfter = JSON.stringify(row.marks || {});
-      if (marksBefore !== marksAfter) {
-        events.push({
-          kind: 'resource_changed',
-          weekStart: row.weekStart,
-          rowKey: row.rowKey,
-          before: prior.marks || {},
-          after: row.marks || {},
-        });
-      }
-    }
-
-    return events;
-  }
-
-  /**
-   * Removals and additions in the same week that could be one crew moving site.
-   *
-   * Only ever a *suggestion*, surfaced for somebody to confirm. Work finishing
-   * early at one location and starting at another is not a cancellation, but the
-   * only evidence is that the same BART resources appear on both — and the
-   * activity text, which cannot be trusted. So the pairing is a human judgement
-   * by design, and the system's job is to make it easy rather than to guess.
-   */
-  function relinkCandidates(events) {
-    const removed = events.filter((e) => e.kind === 'scope_removed');
-    const added = events.filter((e) => e.kind === 'scope_added');
-    const out = [];
-
-    for (const gone of removed) {
-      for (const arrived of added) {
-        if (gone.weekStart !== arrived.weekStart) continue;
-        const a = JSON.stringify(gone.before?.marks || {});
-        const b = JSON.stringify(arrived.after?.marks || {});
-        if (a !== '{}' && a === b) {
-          out.push({ removed: gone, added: arrived, because: 'the same resources were requested' });
-        }
-      }
-    }
-    return out;
-  }
-
-  /**
-   * Which events count toward the change KPIs.
-   *
-   * The window moving is real and recorded, and it is not a change of scope.
-   * Keeping the two apart is what stops the scope-added figure being meaningless
-   * within a month.
-   */
-  const KPI_KINDS = ['scope_added', 'scope_removed', 'cancellation', 'resource_changed', 'shift_changed'];
-
-  function countable(events) {
-    return events.filter((e) => KPI_KINDS.includes(e.kind));
-  }
-
-  /** A short, plain description of an event, for the change log. */
-  /**
-   * One line saying what an event was.
-   *
-   * Reads the *stored* shape: `before` and `after` are jsonb, because the table
-   * has no column for a date and a row-level change needs one. `sideOf()` in
-   * `ui/rc_lookahead.js` is what writes them, and the two have to agree — a
-   * mismatch here shows up as "undefined → undefined" on the one screen somebody
-   * reads a year later.
-   */
-  function describe(event) {
-    const day = event.date || event.after?.date || event.before?.date || 'a day';
-    switch (event.kind) {
-      case 'scope_added': return `Added: ${event.after?.label || event.rowKey}`;
-      case 'scope_removed': return `Removed: ${event.before?.label || event.rowKey}`;
-      case 'cancellation': return `Cancelled on ${day}: was ${event.before?.value ?? event.before}`;
-      case 'shift_changed':
-        return `${day}: ${event.before?.value || 'nothing'} → ${event.after?.value || 'nothing'}`;
-      case 'resource_changed': return 'BART resource request changed';
-      case 'window_advanced': return `Week ${event.weekStart} came into the window`;
-      case 'window_retired': return `Week ${event.weekStart} left the window`;
-      case 'location_shift': return 'Relinked as one crew moving site';
-      default: return event.kind;
-    }
-  }
-
-  Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
-  Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
-  Object.defineProperty(__x, "readGrid", { get: () => readGrid, enumerable: true });
-  Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
-  Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
-  Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
-  Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
-  Object.defineProperty(__x, "KPI_KINDS", { get: () => KPI_KINDS, enumerable: true });
-  Object.defineProperty(__x, "countable", { get: () => countable, enumerable: true });
-  Object.defineProperty(__x, "describe", { get: () => describe, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
 // ui/rc_lookahead.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/rc_lookahead.js"] = function (__x, __req) {
@@ -31313,7 +31686,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
   const { parseSheet, applyLegend, readLegend } = __req("io/lookahead.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom } = __req("core/lookahead.js");
+  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf } = __req("core/lookahead.js");
 
 
   const { icon } = __req("ui/icons.js");
@@ -31342,6 +31715,16 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * with no way to get it back is its own kind of wrong.
    */
   let showQuietRows = false;
+  /**
+   * Whether the names on each activity's Resource row are drawn.
+   *
+   * On by default — knowing who is on a shift is most of why anybody opens this —
+   * and off is for reading the shape of the programme without a hundred and forty
+   * extra lines under it. It hides the names, never the activities: the Resource
+   * row is part of the activity above it, so switching it off changes what a row
+   * says and never which rows there are.
+   */
+  let showResources = true;
   /**
    * How much of the calendar to show, in weeks from the start of this one.
    *
@@ -31672,6 +32055,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       label: r.raw_label || '',
       cells: r.cells || {},
       marks: r.bart_marks || {},
+      resources: r.resources || {},
       locationId: r.location_id || null,
     });
 
@@ -31715,8 +32099,13 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     if (event.kind === 'scope_added' || event.kind === 'scope_removed') {
       return { label: value.label || null, location: value.location || null, week: value.weekStart || null };
     }
-    // BART's own resource marks, as a map of date to what they asked for.
-    if (event.kind === 'resource_changed') return { marks: value };
+    /* A resource request, as a map of date to what was asked for. Two shapes,
+       because there are two places it can be written: a mark on the activity line
+       itself, and the names on the Resource row underneath. `describe()` reads
+       which by the key, so the two must not be collapsed into one. */
+    if (event.kind === 'resource_changed') {
+      return event.field === 'resources' ? { resources: value } : { marks: value };
+    }
 
     return { date: event.date || null, value };
   }
@@ -31777,7 +32166,9 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       return;
     }
 
-    host.appendChild(legendStrip(legend, grid.unknown));
+    /* The key sits above the grid and is redrawn with it, because it describes
+       what is on screen. */
+    const strip = el('div');
 
     /* A filter, because a hundred and forty rows is a spreadsheet and the reason
        to look at it here is usually one subsystem or one location. */
@@ -31790,6 +32181,11 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       label: 'Show rows with nothing scheduled',
       checked: showQuietRows,
       onChange: (on) => { showQuietRows = on; draw(); },
+    });
+    const resources = checkbox({
+      label: 'Show resource names',
+      checked: showResources,
+      onChange: (on) => { showResources = on; draw(); },
     });
 
     const dated = view.days.some((d) => d.date);
@@ -31812,25 +32208,31 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     const body = el('div');
     const draw = () => {
       clear(body);
-      body.appendChild(grid_(windowed(view, today), calendarFilter, showQuietRows, today));
+      const shown = drawn(windowed(view, today), calendarFilter, showQuietRows);
+      clear(strip);
+      strip.appendChild(legendStrip(legend, grid.unknown, paintOn(shown)));
+      body.appendChild(grid_(shown, today));
     };
     // Redraw the rows only, never the input: rebuilding the field under the
     // caret is the trap this project has already been bitten by three times.
     search.addEventListener('input', () => { calendarFilter = search.value; draw(); });
 
+    host.appendChild(strip);
     host.appendChild(el('div', {
       style: 'display:flex;align-items:center;gap:16px;margin-bottom:10px;flex-wrap:wrap',
     }, [
       el('div', { style: 'flex:1;min-width:240px;max-width:340px' }, [search]),
       dated ? range : null,
       quiet,
+      resources,
     ].filter(Boolean)));
     host.appendChild(body);
     draw();
 
     const inWindow = windowed(view, today);
-    const scheduled = inWindow.activities.filter((a) => a.highlighted).length;
+    const scheduled = inWindow.activities.filter((a) => a.highlighted && a.named).length;
     const headings = view.activities.filter((a) => a.heading).length;
+    const named = view.activities.filter((a) => a.resource).length;
     host.appendChild(el('p', {
       class: 'rc-hint',
       text: `${scheduled} of ${view.activities.length} activities have something scheduled in the `
@@ -31861,7 +32263,27 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         + 'not call shading — so narrowing to four weeks drops the rows whose work was in the '
         + 'weeks before it. A colour nobody has mapped counts too: until somebody says what it is, '
         + 'it might be work, and hiding it would bury exactly the rows that need looking at. '
-        + 'Weekends are counted like any other day: possession work lands on them.',
+        + 'Weekends are counted like any other day: possession work lands on them. A section '
+        + 'heading is only drawn when something under it is: a title over nothing is not an answer, '
+        + 'and headings used to be exempt from the switch entirely — which is how a whole workbook '
+        + 'came back on screen the moment one stray colour went unmapped.',
+    }));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: named
+        ? `${named} activity(ies) carry a Resource row — the line the workbook writes underneath `
+          + 'with the names typed against each day. It is drawn as part of the activity above it, '
+          + 'taking that line\'s location and work hours, because that is what leaving them blank '
+          + 'means. "Show resource names" hides the names and never the activities.'
+        : 'No Resource rows on this sheet yet. Add a row under an activity whose description reads '
+          + '"Resource", leave its location and work hours blank so they carry down from the '
+          + 'activity, and type the names into the day cells.',
+    }));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'The key above the grid lists only the colours actually on screen. A legend of thirty '
+        + 'entries for a window carrying four of them is a key to somebody else\'s calendar; the '
+        + 'full register is in Legend.',
     }));
   }
 
@@ -31902,35 +32324,93 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       // `role === 'shift'`, the same question `readGrid()` asks — a divider or a
       // weekend band is paint, not work, and a row carrying only those has
       // nothing scheduled in the weeks on screen.
-      highlighted: a.marks.some((m) => m.hex && m.role === 'shift' && shown.has(m.col)),
+      highlighted: marksOf(a).some((m) => m.hex && m.role === 'shift' && shown.has(m.col)),
     }));
 
     return { ...view, days: narrowed, activities };
   }
 
-  /** The grid itself. Split out so the filter can redraw it without the header. */
-  function grid_(view, filter, showQuiet, today) {
+  /**
+   * Which rows are actually drawn: unscheduled ones out, then the filter.
+   *
+   * **A heading is not exempt from the switch.** It used to be — headings were
+   * kept whatever, and only the ones left dangling at the very end were trimmed —
+   * so a workbook whose activity columns carry any paint at all, or one stray
+   * colour that turned up unmapped after a read, put its entire contents back on
+   * screen with the box still unticked. What the switch says is what happens: a
+   * row with nothing scheduled is hidden, and a title over nothing is a row with
+   * nothing scheduled.
+   *
+   * The nesting is still respected, which is why this walks backwards. The
+   * workbook nests its sections — "PHASE 2" sits above "W40 — Testing and
+   * Commissioning", which sits above the work — so a heading is kept when the
+   * section under it has work *or* when the row immediately below it is a heading
+   * that was itself kept. That second clause is the parent case, and dropping it
+   * would throw away the outer level of every section that has rows.
+   */
+  function drawn(view, filter, showQuiet) {
     const terms = String(filter || '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean);
     let rows = view.activities;
 
-    /* Quiet rows go, and then any headings left dangling at the end with nothing
-       under them at all.
-       Deliberately only the trailing ones: the workbook nests its sections —
-       "PHASE 2" sits above "W40 — Testing and Commissioning", which sits above
-       the work — so dropping a heading merely because another heading follows it
-       would throw away the outer level of a section that does have rows. */
     if (!showQuiet) {
-      const kept = rows.filter((a) => a.highlighted || a.heading);
-      let last = kept.length;
-      while (last > 0 && kept[last - 1].heading) last--;
-      rows = kept.slice(0, last);
+      /* A heading that carries work is work.
+         `heading` is a fact about paint in the activity columns, and a workbook
+         that bands *every* row's description would make every row one — at which
+         point a rule that only ever kept a heading for the sake of the rows under
+         it would empty the grid completely, which is worse than the problem it is
+         here to fix. So a title is a heading with nothing scheduled on it, and
+         anything with a shift on it is judged as work like any other row. */
+      const isTitle = (a) => a.heading && !a.highlighted;
+      const keep = new Array(rows.length).fill(false);
+      let sectionHasWork = false;
+      let belowIsKeptTitle = false;
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (isTitle(rows[i])) {
+          keep[i] = sectionHasWork || belowIsKeptTitle;
+          // This title closes the section beneath it; anything above belongs to a
+          // different one.
+          sectionHasWork = false;
+          belowIsKeptTitle = keep[i];
+        } else {
+          keep[i] = rows[i].highlighted && rows[i].named;
+          if (keep[i]) sectionHasWork = true;
+          // A row of work between two titles means the upper one is not the
+          // lower one's parent.
+          belowIsKeptTitle = false;
+        }
+      }
+      rows = rows.filter((_, i) => keep[i]);
     }
+
     if (terms.length) {
       rows = rows.filter((a) => {
-        const hay = a.meta.join(' ').toLowerCase();
+        /* The names on the Resource row are part of the haystack: looking for
+           where somebody is this week is one of the two reasons anybody types in
+           this box, and it would find nothing if only the activity line counted. */
+        const hay = [...a.meta, ...(a.resource?.marks || []).map((m) => m.value)]
+          .join(' ').toLowerCase();
         return terms.some((t) => hay.includes(t));
       });
     }
+
+    return { ...view, activities: rows };
+  }
+
+  /** Every colour actually painted on the days being drawn, as a set of hexes. */
+  function paintOn(view) {
+    const shown = new Set(view.days.map((d) => d.col));
+    const hexes = new Set();
+    for (const activity of view.activities) {
+      for (const mark of marksOf(activity)) {
+        if (mark.hex && shown.has(mark.col)) hexes.add(String(mark.hex).toUpperCase());
+      }
+    }
+    return hexes;
+  }
+
+  /** The grid itself. Split out so the filter can redraw it without the header. */
+  function grid_(view, today) {
+    const rows = view.activities;
 
     /* The month band. Each label spans its own run of days, which is what the
        merged cell in the workbook meant. */
@@ -31974,35 +32454,59 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       return map;
     };
 
-    const tbody = el('tbody', {}, rows.map((a) => {
-      const marks = byCol(a.marks);
-      return el('tr', { class: a.heading ? 'la-head-row' : '' }, [
-        ...a.meta.map((value, i) => el('td', {
-          class: 'la-meta' + (i === a.meta.length - 1 ? ' la-last' : ''),
-          text: value,
-          title: value,
-        })),
-        ...view.days.map((d) => {
-          const mark = marks.get(d.col);
-          const classes = ['la-day'];
-          if (d.weekend) classes.push('la-weekend');
-          if (d.date && d.date === today) classes.push('la-today');
-          if (mark?.hex) {
-            classes.push('la-painted');
-            if (isDark(mark.hex)) classes.push('la-dark');
-            if (!mark.meaning) classes.push('la-unmapped');
-          }
-          return el('td', {
-            class: classes.join(' '),
-            style: mark?.hex ? `background:#${mark.hex}` : '',
-            text: mark?.value || '',
-            title: [a.meta.filter(Boolean)[0], d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
-              mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value]
-              .filter(Boolean).join(' · '),
-          });
-        }),
-      ]);
-    }));
+    /**
+     * One line of the grid: the activity columns frozen on the left, then a cell
+     * per day. Used for the activity and for its Resource row alike, because the
+     * two are the same shape and drawing them twice is how they drift apart.
+     */
+    const line = (meta, marks, { klass = '', what = '', resource = false }) => el('tr', {
+      class: klass,
+    }, [
+      ...meta.map((value, i) => el('td', {
+        class: 'la-meta' + (i === meta.length - 1 ? ' la-last' : ''),
+        text: value,
+        title: value,
+      })),
+      ...view.days.map((d) => {
+        const mark = marks.get(d.col);
+        const classes = ['la-day'];
+        if (resource) classes.push('la-resource');
+        if (d.weekend) classes.push('la-weekend');
+        if (d.date && d.date === today) classes.push('la-today');
+        if (mark?.hex) {
+          classes.push('la-painted');
+          if (isDark(mark.hex)) classes.push('la-dark');
+          if (!mark.meaning) classes.push('la-unmapped');
+        }
+        return el('td', {
+          class: classes.join(' '),
+          style: mark?.hex ? `background:#${mark.hex}` : '',
+          text: mark?.value || '',
+          title: [what, d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
+            mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value]
+            .filter(Boolean).join(' · '),
+        });
+      }),
+    ]);
+
+    const tbody = el('tbody');
+    for (const a of rows) {
+      const what = a.meta.filter(Boolean)[0] || '';
+      tbody.appendChild(line(a.meta, byCol(a.marks), {
+        klass: a.heading ? 'la-head-row' : '',
+        what,
+      }));
+      /* The Resource row, drawn under the activity it belongs to and never on its
+         own — it has no location or hours of its own, only the ones it inherited,
+         so away from that line it would be a row of names about nothing. */
+      if (a.resource && showResources) {
+        tbody.appendChild(line(a.resource.meta, byCol(a.resource.marks), {
+          klass: 'la-resource-row',
+          what: what ? `${what} — who is on it` : 'who is on it',
+          resource: true,
+        }));
+      }
+    }
 
     const table_ = el('table', { class: 'rc-table la-grid' }, [head, tbody]);
     const wrap = el('div', { class: 'rc-scroll', style: 'max-height:60vh' }, [table_]);
@@ -32028,7 +32532,12 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     });
 
     if (!rows.length) {
-      return el('p', { class: 'rc-hint', text: 'Nothing matches that filter.' });
+      return el('p', {
+        class: 'rc-hint',
+        text: 'Nothing scheduled in these weeks matches. Widen the window, clear the filter, or '
+          + 'tick "Show rows with nothing scheduled" to see what the workbook is carrying for '
+          + 'reference.',
+      });
     }
     return wrap;
   }
@@ -32041,15 +32550,39 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     return (0.299 * r + 0.587 * g + 0.114 * b) < 140;
   }
 
-  function legendStrip(legend, unknown) {
+  /**
+   * The key, for the calendar actually on screen.
+   *
+   * `onScreen` is the set of colours the drawn rows and days carry, and only
+   * those are listed. The register is the whole programme's — five shifts, three
+   * kinds of shading, whatever a previous year needed — and printing all of it
+   * over a four-week window is a key to somebody else's calendar: the reader
+   * checks a colour against it, finds three entries that are not here, and stops
+   * trusting the strip. The full register is one click away in Legend, which says
+   * so underneath.
+   *
+   * Pass no set at all and everything is listed, which is what a caller with
+   * nothing drawn yet wants.
+   */
+  function legendStrip(legend, unknown, onScreen = null) {
+    const showing = (hex) => !onScreen || onScreen.has(String(hex).toUpperCase());
     const strip = el('div', { class: 'la-legend' });
-    for (const entry of legend) {
+    const listed = legend.filter((entry) => showing(entry.argb));
+    for (const entry of listed) {
       strip.append(el('span', {}, [
         el('span', { class: 'la-swatch', style: `background:#${entry.argb}` }),
         el('span', { text: entry.meaning }),
       ]));
     }
-    if (unknown?.length) {
+    if (onScreen && legend.length > listed.length) {
+      strip.append(el('span', {
+        class: 'rc-hint',
+        text: `${legend.length - listed.length} more colour(s) in the register are not on screen.`,
+        title: 'The key lists what this window actually carries. Legend has the register in full.',
+      }));
+    }
+    unknown = (unknown || []).filter((u) => showing(u.hex));
+    if (unknown.length) {
       /* Show the swatches, not just a count. A colour nobody has explained keeps
          its rows on screen — an unmapped colour counts as work, deliberately —
          so "five unmapped" and "these five, and one of them is the grey your
@@ -32308,14 +32841,64 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
      Changes
      ═══════════════════════════════════════════════════════════════════════ */
 
+  /**
+   * The weeks a change is worth reading about.
+   *
+   * From the Monday a week back, to the last day the calendar covers. Everything
+   * outside that is either finished — a shift that moved in July cannot be
+   * planned around now — or beyond what the workbook has been filled in to, which
+   * is nothing at all. The register keeps the lot either way; this is which of it
+   * gets drawn, and "Everything recorded" is one click away for the times the
+   * question really is what happened in March.
+   *
+   * The far end comes from the calendar rather than from a constant, for the same
+   * reason `windowOf()` does: the look-ahead is maintained four to six weeks out,
+   * and a fixed four would hide the sixth week every time it appeared.
+   */
+  function changeWindow(view, today) {
+    const ms = new Date(`${today}T00:00:00Z`).getTime();
+    const monday = ms - ((new Date(ms).getUTCDay() + 6) % 7) * 86400000;
+    const from = new Date(monday - 7 * 86400000).toISOString().slice(0, 10);
+
+    const dated = (view?.days || []).map((d) => d.date).filter(Boolean);
+    // No axis, or no year resolved from it: fall back to six weeks out rather
+    // than to nothing, which would hide every change there is.
+    const to = dated.length
+      ? dated[dated.length - 1]
+      : new Date(monday + 42 * 86400000).toISOString().slice(0, 10);
+
+    return { from, to };
+  }
+
+  /** Whether the changes list is narrowed to that window. It is, by default. */
+  let changesInWindow = true;
+
   async function renderChanges(host) {
     const today = todayISO();
     const from = `${Number(today.slice(0, 4)) - 1}-01-01`;
-    const [events, runs, parties] = await Promise.all([
+    const [all, runs, parties, snapshots, legendRows] = await Promise.all([
       rc.listChangeEvents(from, `${today}T23:59:59Z`),
       rc.listIngestRuns({ limit: 60 }),
       rc.listParties(),
+      rc.listSnapshots({ limit: 1 }),
+      rc.listLegend(),
     ]);
+
+    /* The window is read off the calendar the last snapshot draws, so the two
+       screens cannot disagree about where the look-ahead ends. */
+    const snapshot = snapshots[0];
+    const view = snapshot?.grid
+      ? readGrid(
+        applyLegend(snapshot.grid, legendRows.map((r) => ({
+          argb: r.argb, meaning: r.meaning, role: r.role || 'shift',
+        }))),
+        { anchorISO: snapshot.taken_at }
+      )
+      : null;
+    const window_ = changeWindow(view, today);
+    const events = changesInWindow
+      ? all.filter((e) => !e.week_start || (e.week_start >= window_.from && e.week_start <= window_.to))
+      : all;
 
     /* The judgements somebody has already made. These were being written and
        never read: an attribution recorded in a meeting was invisible the moment
@@ -32341,8 +32924,38 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
        reads as a quiet week. */
     host.appendChild(coverageNote(runs));
 
+    /* What span this is a list of, and the way out of it. Said before the rows
+       rather than under them: a list that has been narrowed and does not say so
+       reads as a list of everything, which is how somebody concludes nothing
+       happened in a fortnight that was simply out of view. */
+    host.appendChild(el('div', {
+      style: 'display:flex;align-items:center;gap:16px;margin:0 0 10px;flex-wrap:wrap',
+    }, [
+      el('span', {
+        class: 'rc-hint',
+        style: 'margin:0',
+        text: changesInWindow
+          ? `Weeks ${window_.from} to ${window_.to} — from a week back to the end of the calendar `
+            + `as it was last read${all.length - events.length
+              ? `. ${all.length - events.length} older or further-out change(s) are not listed`
+              : ''}.`
+          : `Everything recorded — ${all.length} change(s), whatever week they are about.`,
+      }),
+      checkbox({
+        label: 'Everything recorded',
+        checked: !changesInWindow,
+        onChange: (on) => { changesInWindow = !on; notifyChanged('changes'); },
+      }),
+    ]));
+
     if (!events.length) {
-      host.appendChild(el('p', { class: 'rc-hint', text: 'No changes recorded yet.' }));
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: all.length
+          ? `Nothing changed in the weeks on the calendar. ${all.length} change(s) are recorded `
+            + 'outside that window — tick "Everything recorded" to see them.'
+          : 'No changes recorded yet.',
+      }));
       return;
     }
 
@@ -32790,6 +33403,575 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/rc_resources.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/rc_resources.js"] = function (__x, __req) {
+  /**
+   * Resources — who is where, and what they are on.
+   *
+   * The week plan answers "what is the team doing this week" from the plan's own
+   * side. This answers the question the other way round: for each person, where
+   * are they, and does that agree with what the look-ahead asked for. They are two
+   * readings of the same rows and neither is a copy of the other, because the
+   * question a resource asks about their own week is not the question a scheduler
+   * asks about the team's.
+   *
+   * Three things make it worth its own tab rather than another column somewhere.
+   *
+   * **The 4WLA names people, and until now nothing read that.** The workbook
+   * carries a row under each activity whose description reads "Resource", with the
+   * names typed into the day cells; `core/lookahead.js` reads it and stores it on
+   * the row. Here those names are matched against the roster — exactly, through
+   * the alias register, never by guessing at a surname — and where a spelling is
+   * not known it is *shown* rather than dropped. A view that is incomplete and
+   * says so is usable; one that is quietly wrong is not.
+   *
+   * **A person's week is not all commissioning work.** A day in the office, a day
+   * on another project, a day of training: without somewhere for those to go the
+   * huddle has a blank against somebody's name and no way to tell "nothing
+   * planned" from "nothing said". So work can be assigned here that the look-ahead
+   * has never heard of, over a span of days rather than one at a time, because
+   * that is how those days actually arrive.
+   *
+   * **Everything written here is a plan entry.** Not a second table of
+   * assignments — the same `rc_plan_entries` the week plan writes and the huddle
+   * reads, so a resource turning up in this view turns up in tomorrow's meeting
+   * with no further wiring. That is the whole of "tied to the huddle": there is
+   * one place a day is planned, and three places it is read.
+   *
+   * Imports: util, dates, rc, icons, components, rc_util.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const { toISO, addDays, todayMs } = __req("core/dates.js");
+  const rc = __req("core/rc.js");
+  const { icon } = __req("ui/icons.js");
+  const { textInput, selectInput, toast, badge, checkbox, field, emptyState, promptDialog } = __req("ui/components.js");
+
+
+  const { SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, newestPerKey, resourceAssignments, foldName } = __req("ui/rc_util.js");
+
+
+
+
+  /** Which week is on screen. Null means the one containing today. */
+  let weekOf = null;
+
+  /**
+   * Whether the days nobody works are drawn.
+   *
+   * Off by default: a seven-column grid where two columns are dots for most of the
+   * team is two columns of nothing. It is a switch rather than a rule because
+   * commissioning runs weekend possessions, and the weekend is where some of the
+   * most expensive work happens.
+   */
+  let showQuietDays = false;
+
+  async function render(root) {
+    const startMs = weekOf ?? weekStart(todayMs());
+    const days = allWeekDays(startMs);
+    const from = days[0];
+    const to = days[days.length - 1];
+    const today = todayISO();
+
+    const [people, locations, categories, leave, planRows, aliases, snapshots] = await Promise.all([
+      rc.listPeople(),
+      rc.listLocations(),
+      rc.listCategories(),
+      rc.listLeave(from, to),
+      rc.listPlan(from, to),
+      rc.listPersonAliases().catch(() => []),
+      rc.listSnapshots({ limit: 20 }).catch(() => []),
+    ]);
+
+    /* The look-ahead is administrators-only in the database, so a member gets
+       nothing back and the view simply has no BART column — which is correct, and
+       is why this is a catch rather than a permission test up here. */
+    const laRows = newestPerKey(
+      await rc.lookaheadBetween(from, to).catch(() => []),
+      new Map(snapshots.map((s, i) => [s.id, i]))
+    );
+
+    const locs = byId(locations);
+    const cats = byId(categories);
+    const register = nameRegister(people, aliases);
+    const { byPerson, unmatched } = resourceAssignments(laRows, register);
+
+    /* Only the days somebody works, unless asked otherwise. `showQuietDays` is
+       about the columns; a person who works none of them still has a row, because
+       a row that vanishes is a person nobody remembers to plan. */
+    const shown = showQuietDays
+      ? days
+      : days.filter((iso) => people.some((p) => availability(p, iso, leave).state !== 'non-working'));
+    const columns = shown.length ? shown : days;
+
+    const redraw = () => { clear(root); render(root); };
+
+    root.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('button', {
+        class: 'cx-btn icon mini ghost',
+        'aria-label': 'Previous week',
+        html: icon('chevron-left', { size: 13 }),
+        onClick: () => { weekOf = startMs - 7 * 86400000; redraw(); },
+      }),
+      el('h3', { text: `Resources — week of ${dayLabel(from, 'medium')}` }),
+      el('button', {
+        class: 'cx-btn icon mini ghost',
+        'aria-label': 'Next week',
+        html: icon('chevron-right', { size: 13 }),
+        onClick: () => { weekOf = startMs + 7 * 86400000; redraw(); },
+      }),
+      rc.canWrite()
+        ? el('button', {
+          class: 'cx-btn mini primary',
+          html: icon('plus', { size: 12 }) + '<span>Assign work</span>',
+          title: 'Anything, including a day that is not in the 4WLA at all — office, another '
+            + 'project, training.',
+          onClick: () => assign({
+            people, locations, categories, laRows, locs, days, redraw, person: null, iso: null,
+          }),
+        })
+        : null,
+    ].filter(Boolean)));
+
+    if (!people.length) {
+      root.appendChild(emptyState({
+        iconName: 'users',
+        title: 'Nobody on the team yet',
+        message: 'Add people in Organisation first. Being on the roster never requires an account.',
+      }));
+      return;
+    }
+
+    root.appendChild(el('div', {
+      style: 'display:flex;align-items:center;gap:16px;margin:0 0 10px;flex-wrap:wrap',
+    }, [
+      checkbox({
+        label: 'Show days nobody works',
+        checked: showQuietDays,
+        onChange: (on) => { showQuietDays = on; redraw(); },
+      }),
+    ]));
+
+    /* ── The grid ─────────────────────────────────────────────────────────── */
+
+    const planFor = (personId, iso) =>
+      planRows.filter((p) => p.person_id === personId && p.work_date === iso);
+
+    const body = el('tbody');
+    for (const person of people) {
+      const wanted = byPerson.get(person.id) || new Map();
+      const cells = columns.map((iso) => {
+        const state = availability(person, iso, leave);
+        const entries = planFor(person.id, iso);
+        const asked = wanted.get(iso) || [];
+        const classes = ['rc-res-cell'];
+        if (iso === today) classes.push('rc-res-today');
+
+        if (state.state === 'leave') {
+          return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [badge('Leave', 'muted')]);
+        }
+        if (state.state === 'non-working' && !entries.length && !asked.length) {
+          return el('td', {
+            class: `${classes.join(' ')} rc-inactive`,
+            'data-label': dayLabel(iso),
+          }, [el('span', { text: '·' })]);
+        }
+
+        const parts = [];
+        for (const entry of entries) {
+          parts.push(el('div', { class: 'rc-res-job' }, [
+            el('div', { text: entry.task || '—' }),
+            el('div', { class: 'rc-hint', text: [
+              locs.get(entry.location_id)?.name,
+              cats.get(entry.category_id)?.name,
+              entry.shift !== 'day' ? entry.shift : null,
+            ].filter(Boolean).join(' · ') }),
+          ]));
+        }
+
+        /* What the 4WLA asks of this person on this day, whether or not anybody
+           has planned it. Drawn beside the plan rather than instead of it: the
+           interesting case is the two disagreeing, and a view that shows only one
+           of them cannot show that at all. */
+        for (const row of asked) {
+          const agrees = entries.some((e) => e.lookahead_row_id === row.id);
+          parts.push(el('div', {
+            class: 'rc-res-asked' + (agrees ? ' agrees' : ''),
+            title: agrees
+              ? 'The plan for this day is against this look-ahead row.'
+              : 'The 4WLA names this person here and the plan does not say so.',
+          }, [
+            el('span', { class: 'rc-eyebrow', text: '4WLA' }),
+            el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 44) }),
+            el('div', {
+              class: 'rc-hint',
+              text: row.raw_location || locs.get(row.location_id)?.name || '',
+            }),
+          ]));
+        }
+
+        if (!parts.length) {
+          if (!rc.canWrite()) return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) },
+            [el('span', { class: 'rc-hint', text: '—' })]);
+          return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [
+            el('button', {
+              class: 'cx-btn mini ghost',
+              text: '+',
+              'aria-label': `Assign ${person.name} on ${dayLabel(iso)}`,
+              onClick: () => assign({
+                people, locations, categories, laRows, locs, days, redraw, person, iso,
+              }),
+            }),
+          ]);
+        }
+        if (rc.canWrite() && !entries.length) {
+          parts.push(el('button', {
+            class: 'cx-btn mini ghost',
+            text: 'Plan it',
+            onClick: () => assign({
+              people, locations, categories, laRows, locs, days, redraw, person, iso,
+              row: asked[0] || null,
+            }),
+          }));
+        }
+        return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, parts);
+      });
+
+      body.appendChild(el('tr', {}, [
+        el('td', {}, [
+          el('div', { text: person.name }),
+          el('div', { class: 'rc-hint', text: [person.title, person.subsystem].filter(Boolean).join(' · ') }),
+          person.scheduled === false ? badge('Not scheduled', 'neutral') : null,
+        ].filter(Boolean)),
+        ...cells,
+      ]));
+    }
+
+    root.appendChild(el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table rc-resources' }, [
+        el('thead', {}, [
+          el('tr', {}, [
+            el('th', { text: 'Resource' }),
+            ...columns.map((iso) => el('th', {
+              class: iso === today ? 'rc-res-today' : '',
+              text: dayLabel(iso),
+            })),
+          ]),
+        ]),
+        body,
+      ]),
+    ]));
+
+    /* ── Where everybody is ───────────────────────────────────────────────── */
+
+    const atLocation = new Map();
+    for (const entry of planRows) {
+      const name = locs.get(entry.location_id)?.name || 'no location recorded';
+      if (!atLocation.has(name)) atLocation.set(name, new Set());
+      atLocation.get(name).add(entry.person_id);
+    }
+    if (atLocation.size) {
+      const peopleById = byId(people);
+      root.appendChild(el('div', { style: 'height:20px' }));
+      root.appendChild(el('div', { class: 'rc-section-head' }, [
+        el('h3', { text: 'Where the week puts people' }),
+      ]));
+      root.appendChild(el('div', { class: 'rc-scroll' }, [
+        el('table', { class: 'rc-table' }, [
+          el('thead', {}, [el('tr', {}, [
+            el('th', { text: 'Location' }), el('th', { text: 'Who' }), el('th', { text: 'People' }),
+          ])]),
+          el('tbody', {}, [...atLocation.entries()]
+            .sort((a, b) => b[1].size - a[1].size)
+            .map(([name, ids]) => el('tr', {}, [
+              el('td', { text: name }),
+              el('td', { text: [...ids].map((id) => peopleById.get(id)?.name || '—').sort().join(', ') }),
+              el('td', { class: 'rc-num', text: String(ids.size) }),
+            ]))),
+        ]),
+      ]));
+    }
+
+    /* ── Names the roster does not know ───────────────────────────────────── */
+
+    if (unmatched.length) {
+      root.appendChild(el('div', { style: 'height:20px' }));
+      root.appendChild(el('div', { class: 'rc-section-head' }, [
+        el('h3', { text: 'Named in the 4WLA, not on the roster' }),
+      ]));
+      root.appendChild(el('div', { class: 'rc-scroll' }, [
+        el('table', { class: 'rc-table' }, [
+          el('thead', {}, [el('tr', {}, [
+            el('th', { text: 'As written' }), el('th', { text: 'Days' }),
+            el('th', { text: 'On' }), el('th', { text: '' }),
+          ])]),
+          el('tbody', {}, unmatched.map((u) => el('tr', {}, [
+            el('td', { text: u.name }),
+            el('td', { class: 'rc-num', text: String(u.days.size) }),
+            el('td', { class: 'rc-hint', text: u.rows.map((r) => r.raw_label || '').filter(Boolean).join(', ').slice(0, 60) }),
+            el('td', {}, rc.isAdmin() ? [
+              el('button', {
+                class: 'cx-btn mini',
+                text: 'That is somebody',
+                title: 'Record this spelling against a person. Nothing is guessed from a surname — '
+                  + 'a shift against the wrong engineer is worse than one against nobody.',
+                onClick: () => mapName(u, people, redraw),
+              }),
+              el('button', {
+                class: 'cx-btn mini ghost',
+                text: 'Add to the team',
+                title: 'Somebody on site who is not on the roster yet.',
+                onClick: () => addFromName(u, redraw),
+              }),
+            ] : []),
+          ]))),
+        ]),
+      ]));
+      root.appendChild(el('p', {
+        class: 'rc-hint',
+        text: 'These are the names the 4WLA has that the roster cannot place, so the rows above are '
+          + 'missing them. Nothing is matched on a surname or a set of initials: the register says '
+          + 'which spellings are whose, and a name it does not know is asked about once rather than '
+          + 'guessed at every week.',
+      }));
+    }
+
+    /* ── What this view is ────────────────────────────────────────────────── */
+
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Everything here is a plan entry — the same rows the week plan writes and the daily '
+        + 'huddle reads — so anybody assigned here is in tomorrow\'s meeting with their scope '
+        + 'against their name, ready to speak to it. There is one place a day is planned and three '
+        + 'places it is read.',
+    }));
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: laRows.length
+        ? `The 4WLA names people on ${laRows.filter((r) => Object.keys(r.resources || {}).length).length} `
+          + 'row(s) in these weeks. A "4WLA" block on a day is what BART asked for; the plan beside '
+          + 'it is what was decided. The two disagreeing is the thing worth seeing, so both are drawn.'
+        : 'No look-ahead rows read for this week yet, so nothing here can say what BART asked for. '
+          + 'Read it in Look-ahead → Check now.',
+    }));
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Work that is not commissioning work belongs here too — a day in the office, a day on '
+        + 'another project, training. Without somewhere for those to go the huddle has a blank '
+        + 'against a name and no way to tell "nothing planned" from "nothing said".',
+    }));
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Assigning
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Plan somebody onto a span of days.
+   *
+   * A span rather than a day, because that is how the off-programme days arrive:
+   * nobody is in the office for one Tuesday, they are in the office Monday to
+   * Wednesday. Every day still becomes its own `rc_plan_entries` row — the grain
+   * the huddle reads and the reports group by — so this is a convenience over the
+   * same write, never a second shape of assignment.
+   *
+   * A day that already has an entry is skipped rather than doubled. The table is
+   * append-only and nothing supersedes anything here, so two rows for one day
+   * would both be current and the huddle would show the person twice; revising a
+   * day is what the week plan's cell is for, and it says so.
+   */
+  function assign({ people, locations, categories, laRows, locs, days, redraw, person, iso, row = null }) {
+    const who = selectInput({
+      value: person?.id || people[0]?.id,
+      options: people.map((p) => ({ value: p.id, label: p.name })),
+    });
+    const from = el('input', { type: 'date', class: 'cx-input' });
+    const to = el('input', { type: 'date', class: 'cx-input' });
+    from.value = iso || days[0];
+    to.value = iso || days[0];
+
+    /* What the look-ahead asks for, offered rather than assumed — it says what and
+       where and never who, because it has no idea who is on the team. */
+    const named = laRows.filter((r) => !iso || !Object.keys(r.cells || {}).length || r.cells[iso]);
+    const pick = selectInput({
+      value: row?.id || '',
+      placeholder: '— not from the look-ahead —',
+      options: named.map((r) => ({
+        value: r.id,
+        label: [r.raw_location || locs.get(r.location_id)?.name, r.raw_label]
+          .filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
+      })),
+    });
+    const task = textInput({ value: row?.raw_label || '', placeholder: 'What they will do' });
+    const location = selectInput({
+      value: row?.location_id || '',
+      placeholder: '— nowhere on site —',
+      options: locations.map((l) => ({ value: l.id, label: l.name })),
+    });
+    const category = selectInput({
+      value: '',
+      placeholder: '— category —',
+      options: categories.map((c) => ({ value: c.id, label: c.name })),
+    });
+    const shift = selectInput({ value: 'day', options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })) });
+
+    pick.addEventListener('change', () => {
+      const chosen = named.find((r) => r.id === pick.value);
+      if (!chosen) return;
+      if (!task.value.trim()) task.value = chosen.raw_label || '';
+      if (chosen.location_id) location.value = chosen.location_id;
+    });
+
+    formModal({
+      title: person ? `Assign ${person.name}` : 'Assign work',
+      body: el('div', { class: 'cx-form' }, [
+        field('Resource', who),
+        field('From', from),
+        field('To', to, 'Inclusive. Days they do not work, days they are on leave and days already '
+          + 'planned are skipped, and it says how many.'),
+        field('From the look-ahead', pick, 'Optional. Choosing a row fills the rest in and keeps the '
+          + 'link, which is what later lets a block be recorded against the row BART themselves '
+          + 'scheduled. Leave it alone for work the 4WLA has never heard of.'),
+        field('What', task),
+        field('Where', location, 'Optional — a day in the office or on another project is not at a '
+          + 'commissioning location, and pretending otherwise would put it in the site reports.'),
+        field('Category', category),
+        field('Shift', shift),
+      ]),
+      confirmLabel: 'Assign',
+      onConfirm: async () => {
+        if (!task.value.trim()) throw new Error('Say what they will be doing.');
+        if (!from.value || !to.value) throw new Error('Both dates are needed.');
+        if (to.value < from.value) throw new Error('The end is before the start.');
+
+        const personRow = people.find((p) => p.id === who.value);
+        if (!personRow) throw new Error('Pick a person.');
+
+        /* Leave and the plan are re-read here rather than passed in: this dialog
+           can stay open while somebody else writes, and the skip has to be about
+           what is true now. */
+        const [leave, existing] = await Promise.all([
+          rc.listLeave(from.value, to.value),
+          rc.listPlan(from.value, to.value),
+        ]);
+
+        const rows = [];
+        const skipped = { leave: 0, nonWorking: 0, planned: 0 };
+        for (let ms = Date.parse(`${from.value}T00:00:00Z`);
+          ms <= Date.parse(`${to.value}T00:00:00Z`); ms = addDays(ms, 1)) {
+          const day = toISO(ms);
+          const state = availability(personRow, day, leave);
+          if (state.state === 'leave') { skipped.leave++; continue; }
+          if (state.state === 'non-working') { skipped.nonWorking++; continue; }
+          if (existing.some((e) => e.person_id === personRow.id && e.work_date === day)) {
+            skipped.planned++;
+            continue;
+          }
+          rows.push({
+            person_id: personRow.id,
+            work_date: day,
+            shift: shift.value,
+            location_id: location.value || null,
+            task: task.value.trim(),
+            category_id: category.value || null,
+            lookahead_row_id: pick.value || null,
+          });
+        }
+
+        if (!rows.length) {
+          throw new Error('Every day in that span is already planned, non-working or on leave. '
+            + 'Change an existing day from the week plan, where the outgoing version is kept.');
+        }
+
+        await rc.addPlanEntries(rows);
+        notifyChanged('plan');
+        const notes = [
+          skipped.planned ? `${skipped.planned} already planned` : null,
+          skipped.leave ? `${skipped.leave} on leave` : null,
+          skipped.nonWorking ? `${skipped.nonWorking} not a working day` : null,
+        ].filter(Boolean);
+        toast({
+          tone: 'good',
+          message: `${personRow.name} assigned for ${rows.length} day(s)`
+            + `${notes.length ? ` — skipped ${notes.join(', ')}` : ''}.`,
+          timeout: 8000,
+        });
+        redraw();
+      },
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Names
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Record which person a spelling in the workbook is.
+   *
+   * The same shape as another spelling for a location, and for the same reason:
+   * the match has to be exact, so the only way a new spelling starts matching is
+   * that somebody says it does. Once.
+   */
+  function mapName(unmatchedName, people, redraw) {
+    const who = selectInput({
+      value: people[0]?.id,
+      options: people.map((p) => ({ value: p.id, label: p.name })),
+    });
+    formModal({
+      title: `"${unmatchedName.name}" is…`,
+      body: el('div', { class: 'cx-form' }, [
+        field('Person', who),
+        el('p', {
+          class: 'rc-hint',
+          text: 'This records the spelling against them, so every week from now on matches without '
+            + 'anybody being asked again. It is not a guess and never becomes one: nothing here '
+            + 'matches on a surname, initials or a near miss.',
+        }),
+      ]),
+      confirmLabel: 'That is them',
+      onConfirm: async () => {
+        await rc.addPersonAlias(who.value, unmatchedName.name);
+        notifyChanged('people');
+        toast({ tone: 'good', message: `"${unmatchedName.name}" now matches.` });
+        redraw();
+      },
+    });
+  }
+
+  /**
+   * Somebody on site who is not on the roster at all.
+   *
+   * The spelling in the workbook becomes an alias immediately, so the row they
+   * were named on stops being unmatched. Their name is the spelling until somebody
+   * tidies it in Organisation — a person on the roster under an odd spelling is
+   * still on the roster, and an empty roster row would be worse.
+   */
+  async function addFromName(unmatchedName, redraw) {
+    const name = await promptDialog({
+      title: 'Add them to the team',
+      label: 'Name, as you would write it',
+      value: unmatchedName.name,
+      confirmLabel: 'Add',
+    });
+    if (!name || !name.trim()) return;
+    try {
+      const person = await rc.addPerson({ name: name.trim(), role: 'member', scheduled: true });
+      if (foldName(name) !== foldName(unmatchedName.name)) {
+        await rc.addPersonAlias(person.id, unmatchedName.name);
+      }
+      notifyChanged('people');
+      toast({ tone: 'good', message: `${name.trim()} is on the team, and "${unmatchedName.name}" matches them.` });
+      redraw();
+    } catch (err) {
+      toast({ tone: 'bad', message: err.message });
+    }
+  }
+
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/rc_reports.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/rc_reports.js"] = function (__x, __req) {
@@ -33181,15 +34363,18 @@ __mods["ui/rc.js"] = function (__x, __req) {
   const roster = __req("ui/rc_roster.js");
   const huddle = __req("ui/rc_huddle.js");
   const lookahead = __req("ui/rc_lookahead.js");
+  const resources = __req("ui/rc_resources.js");
   const reports = __req("ui/rc_reports.js");
 
   /**
    * The tabs, in the order the work actually happens: run today's meeting, plan
-   * the week, see what the look-ahead did to it, then the numbers.
+   * the week, see where each person is, see what the look-ahead did to it, then
+   * the numbers.
    */
   const TABS = [
     { id: 'huddle', label: 'Daily huddle' },
     { id: 'week', label: 'Week plan' },
+    { id: 'resources', label: 'Resources' },
     { id: 'lookahead', label: 'Look-ahead' },
     { id: 'reports', label: 'Reports' },
     { id: 'org', label: 'Organisation' },
@@ -33198,6 +34383,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
   const RENDERERS = {
     huddle: huddle.render,
     week: huddle.renderWeek,
+    resources: resources.render,
     lookahead: lookahead.render,
     reports: reports.render,
     org: roster.render,

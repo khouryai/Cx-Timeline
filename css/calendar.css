@@ -365,6 +365,28 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 }
 .la-grid tr.la-head-row .la-day { border-top: 2px solid var(--border-strong); }
 
+/* The Resource row the workbook writes under an activity: who is on it.
+   Drawn as a continuation of the line above rather than as a row of its own —
+   no top border, lighter type, the description set in italics — because that is
+   what it is. Its location and hours are inherited, and reading it as a
+   separate activity is exactly the mistake to design against. */
+.la-grid tr.la-resource-row > td {
+  border-top: none;
+  border-bottom: 1px solid var(--border-strong);
+}
+.la-grid tr.la-resource-row .la-meta {
+  font-style: italic;
+  color: var(--text-muted);
+}
+/* The names are words, not marks, so they get the text face and room to be
+   read — a mono 10px column of "R. Okafor" is not legible at any zoom. */
+.la-grid td.la-resource {
+  font-family: var(--f-ui);
+  font-size: var(--fs-tiny);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
 /* ── Today, and the month band ──────────────────────────────────────────── */
 
 /* Today is a line down the grid rather than a tinted cell: a fill would be one
@@ -625,4 +647,76 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   .rc-present-ask { font-size: 17px; }
   .rc-present-move { justify-content: stretch; }
   .rc-present-move .cx-btn { flex: 1; }
+}
+
+/* ── Resources: who is where ─────────────────────────────────────────────
+   People down, days across, and two things in each cell rather than one: what
+   the plan says, and what the 4WLA asked for. The interesting case is the two
+   disagreeing, so a layout that could only show one of them would hide the
+   whole point of the view. */
+
+.rc-table.rc-resources td { vertical-align: top; }
+.rc-table.rc-resources th,
+.rc-table.rc-resources td { min-width: 132px; }
+.rc-table.rc-resources th:first-child,
+.rc-table.rc-resources td:first-child { min-width: 150px; }
+
+.rc-res-cell { font-size: var(--fs-tiny); }
+/* Today is a line down the grid, the same answer the look-ahead gives — a fill
+   would compete with the badges inside the cell. */
+.rc-res-today { border-left: 2px solid var(--accent, #e60012); }
+
+.rc-res-job { margin-bottom: 4px; }
+
+/* What BART asked for, set apart from what was decided. Bordered rather than
+   tinted, because a tint would read as a status. */
+.rc-res-asked {
+  border: 1px dashed var(--warn);
+  border-radius: var(--radius-sm, 4px);
+  padding: 3px 5px;
+  margin-bottom: 4px;
+}
+/* Agreeing is the quiet case, so it stops shouting: the plan is against this
+   very row and there is nothing to reconcile. */
+.rc-res-asked.agrees {
+  border-style: solid;
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+.rc-res-asked .rc-eyebrow { display: block; margin-bottom: 1px; }
+
+@media (max-width: 620px) {
+  /* Seven columns of prose do not fit, and unlike the look-ahead grid this one
+     is a week rather than a hundred days — so it stacks into a card per person,
+     the way the huddle does, with the day name on each cell. */
+  .rc-table.rc-resources { display: block; }
+  .rc-table.rc-resources thead { display: none; }
+  .rc-table.rc-resources tbody,
+  .rc-table.rc-resources tr { display: block; }
+  .rc-table.rc-resources tr {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-3);
+    padding: var(--space-2);
+    background: var(--surface);
+  }
+  .rc-table.rc-resources td {
+    display: block;
+    border: 0;
+    padding: 4px 2px;
+    min-width: 0;
+  }
+  .rc-table.rc-resources td::before {
+    content: attr(data-label);
+    display: block;
+    font-family: var(--f-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin-bottom: 2px;
+  }
+  .rc-table.rc-resources td:first-child::before { content: none; }
+  .rc-table.rc-resources td:first-child { font-weight: 700; font-size: var(--fs-small); }
 }

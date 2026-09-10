@@ -317,6 +317,18 @@ export function listLocationAliases() {
   return select('rc_location_alias', (q) => q.order('alias'));
 }
 
+/**
+ * The other spellings of a person, for matching the look-ahead's Resource row.
+ *
+ * A name typed into a spreadsheet cell is "R. Okafor" one week and "Okafor" the
+ * next. The register is what turns those into a person; a name it does not know
+ * is shown as unmatched rather than guessed at, which is the same answer the
+ * location aliases give and for the same reason.
+ */
+export function listPersonAliases() {
+  return select('rc_person_alias', (q) => q.order('alias'));
+}
+
 export function listCategories({ includeInactive = false } = {}) {
   return select('rc_categories', (q) => (includeInactive ? q : q.eq('active', true)).order('sort'));
 }
@@ -354,7 +366,8 @@ export function listLegend({ includeInactive = false } = {}) {
 export async function exportEverything() {
   requireClient();
   const tables = [
-    'rc_people', 'rc_locations', 'rc_location_alias', 'rc_categories', 'rc_parties',
+    'rc_people', 'rc_locations', 'rc_location_alias', 'rc_person_alias',
+    'rc_categories', 'rc_parties',
     'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries',
     'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
     'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
@@ -537,6 +550,8 @@ export const addLocation = (row) => insert('rc_locations', [row]).then((r) => r[
 export const updateLocation = (id, patch) => update('rc_locations', id, patch);
 export const addLocationAlias = (locationId, alias) =>
   insert('rc_location_alias', [{ location_id: locationId, alias }]).then((r) => r[0]);
+export const addPersonAlias = (personId, alias) =>
+  insert('rc_person_alias', [{ person_id: personId, alias }]).then((r) => r[0]);
 export const addCategory = (row) => insert('rc_categories', [row]).then((r) => r[0]);
 export const updateCategory = (id, patch) => update('rc_categories', id, patch);
 export const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r[0]);
@@ -572,6 +587,20 @@ export const addPlanEntries = (rows) => insert('rc_plan_entries', rows);
 /** Every look-ahead row for a week, so the plan can be proposed from it. */
 export function lookaheadForWeek(weekStartISO) {
   return select('rc_lookahead_rows', (q) => q.eq('week_start', weekStartISO).order('sheet_row'));
+}
+
+/**
+ * Look-ahead rows across a span of weeks.
+ *
+ * The Resources view answers "where is everybody, for the weeks that matter",
+ * which is several weeks at once — asking week by week would be one round trip
+ * per column. Rows from every snapshot come back, so the caller keeps the newest
+ * per `row_key`: an older snapshot's copy of a week is history, not a second
+ * assignment.
+ */
+export function lookaheadBetween(fromISO, toISO) {
+  return select('rc_lookahead_rows', (q) =>
+    q.gte('week_start', fromISO).lte('week_start', toISO).order('sheet_row'));
 }
 
 /**

@@ -74,6 +74,43 @@ alter table public.rc_legend
 alter table public.rc_plan_entries
   add column if not exists carry_chain_id uuid;
 
+-- ── Who the look-ahead's Resource row names ───────────────────────────────
+-- The 4WLA carries a row under each activity whose description reads
+-- "Resource", with the names typed into the day cells. Without this column the
+-- insert fails on a field Postgres has never heard of, which takes the whole
+-- read down with it.
+alter table public.rc_lookahead_rows
+  add column if not exists resources jsonb not null default '{}'::jsonb;
+
+-- ── The other spellings of a person ───────────────────────────────────────
+-- New table, so nothing to alter — created here as well as in `rc_schema.sql`
+-- so a project that only ever runs this file still gets it. The policies and
+-- grants come with `rc_schema.sql`, as they do for every other table.
+create table if not exists public.rc_person_alias (
+  id        uuid primary key default gen_random_uuid(),
+  person_id uuid not null references public.rc_people(id) on delete cascade,
+  alias     text not null,
+  unique (alias)
+);
+
+alter table public.rc_person_alias enable row level security;
+drop policy if exists rc_person_alias_read on public.rc_person_alias;
+create policy rc_person_alias_read on public.rc_person_alias
+  for select to authenticated using (true);
+drop policy if exists rc_person_alias_write on public.rc_person_alias;
+create policy rc_person_alias_write on public.rc_person_alias
+  for all to authenticated
+  using (public.rc_is_admin()) with check (public.rc_is_admin());
+grant select, insert, update, delete on public.rc_person_alias to authenticated;
+
+-- ── Somewhere for a day that is not commissioning work ────────────────────
+-- A day in the office or on another project is where somebody was. Without a
+-- category for it the huddle has a blank against their name and no way to tell
+-- "nothing planned" from "nothing said".
+insert into public.rc_categories (name, sort)
+select v.name, v.sort from (values ('Office', 60), ('Other project', 70)) as v(name, sort)
+where not exists (select 1 from public.rc_categories where name = v.name);
+
 -- ── A block can name the look-ahead row it belongs to ─────────────────────
 alter table public.rc_actuals
   add column if not exists lookahead_row_id uuid
@@ -218,6 +255,16 @@ select 'rc_actuals.evidence_path',
           where table_schema = 'public' and table_name = 'rc_actuals'
             and column_name = 'evidence_path'
        ) then 'ok' else 'MISSING' end
+union all
+select 'rc_lookahead_rows.resources',
+       case when exists (
+         select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'rc_lookahead_rows'
+            and column_name = 'resources'
+       ) then 'ok' else 'MISSING' end
+union all
+select 'rc_person_alias',
+       case when to_regclass('public.rc_person_alias') is not null then 'ok' else 'MISSING' end
 union all
 select 'rc_blockers',
        case when to_regclass('public.rc_blockers') is not null then 'ok' else 'MISSING' end

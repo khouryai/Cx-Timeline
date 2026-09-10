@@ -127,12 +127,29 @@ select refuses(:'carol',
   format('update public.rc_categories set name = %L where id = %L', 'Renamed', :'cat_field'),
   'a member renaming a category');
 
+/* The other spellings of a *person*, which the look-ahead's Resource row is
+   full of: "R. Okafor" one week and "Okafor" the next. Reference data like any
+   other — everybody reads it, only an administrator writes it — because a name
+   nobody has mapped is a person missing from the picture, and everybody has to
+   be able to see the same picture. */
+select refuses(:'carol',
+  format('insert into public.rc_person_alias (person_id, alias) values (%L, %L)',
+         :'p_carol', 'C. Nwosu'),
+  'a member mapping a spelling to a person');
+
 select act_as(:'alice');
 insert into public.rc_locations (name, code) values ('Yard 3', 'Y3');
 select assert(
   (select count(*) from public.rc_locations) = 3,
   'an administrator can add a location'
 );
+insert into public.rc_person_alias (person_id, alias) values (:'p_carol', 'C. Nwosu');
+select assert((select person_id from public.rc_person_alias where alias = 'C. Nwosu') = :'p_carol',
+  'an administrator can say which spelling is whose');
+select act_as(:'carol');
+select assert((select count(*) from public.rc_person_alias) = 1,
+  'and everybody can read it, so everybody sees the same picture');
+select act_as(:'alice');
 
 -- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice 'Resolving a location spelling'; end $$;
@@ -935,9 +952,11 @@ select refuses(:'alice',
 update public.rc_people set user_id = null where id = :'p_dan';
 set role authenticated;
 select act_as(:'alice');
+-- Neither an account nor an invitation. The only case with genuinely nothing to
+-- attach and nothing on its way, and so the only one that refuses.
 select refuses(:'alice',
   format('select public.rc_link_account(%L, %L)', :'p_erin', 'nobody@example.com'),
-  'linking an address that has no account');
+  'linking an address that has neither an account nor an invitation');
 select refuses(:'alice',
   format('select public.rc_link_account(%L, %L)', :'p_erin', 'carol@example.com'),
   'linking an account that already belongs to somebody else');
@@ -948,6 +967,32 @@ select assert(public.rc_link_account(:'p_dan', 'NewTech@Example.com ') = :'u_new
   'an administrator can attach an existing account to a roster row');
 select assert((select user_id from public.rc_people where id = :'p_dan') = :'u_newtech',
   'and the link is on the row');
+
+/*
+ * An address that is invited and has not signed up yet.
+ *
+ * This used to refuse, with "no account exists for x — invite them first", and
+ * that was the commonest answer by a wide margin *and* the wrong sentence: they
+ * had been invited, and there was nothing the administrator could do about the
+ * rest. The invitation is aimed at the roster row instead and null comes back,
+ * meaning "arranged, not linked".
+ */
+select public.rc_invite('waiting@example.com', 'member');
+select assert(public.rc_link_account(:'p_erin', 'Waiting@Example.com ') is null,
+  'linking an invited address that has not signed up yet is arranged, not refused');
+select assert(
+  (select person_id from public.rc_invitations where email = 'waiting@example.com') = :'p_erin',
+  'and the invitation now points at that roster row');
+reset role;
+insert into auth.users (email) values ('waiting@example.com');
+select assert(
+  (select user_id from public.rc_people where id = :'p_erin')
+    = (select id from auth.users where email = 'waiting@example.com'),
+  'so signing up lands the account on the row it was aimed at');
+select assert((select role from public.rc_people where id = :'p_erin') = 'member',
+  'with the role the invitation carried');
+set role authenticated;
+select act_as(:'alice');
 
 -- ── Changing a role ───────────────────────────────────────────────────────
 select public.rc_set_role(:'p_dave', 'viewer');
