@@ -1432,12 +1432,64 @@ async function main() {
      The register is the whole programme's. Printed over a four-week window it
      is a key to somebody else's calendar: the reader checks a colour, finds
      three entries that are not here, and stops trusting the strip. */
-  const stripText = await page.locator('#rc-frame .la-legend').innerText();
+  const stripText = await page.locator('#rc-frame .la-legend').first().innerText();
   check('the key lists only the colours the window carries',
     /Day Shift/.test(stripText) && !/Section divider/.test(stripText),
     stripText.replace(/\n/g, ' | ').slice(0, 110));
   check('and says how many of the register it left out',
     /not on screen/.test(stripText));
+
+  /* ── Which colour is keeping rows here ────────────────────────────────
+     "It is still showing rows with nothing on them" is a question about a
+     *colour*, and the calendar could not answer it: the switch hides a row with
+     nothing scheduled, whether a row counts as scheduled is decided entirely by
+     its paint, and joining the legend to a hundred days of grid by eye is not a
+     thing to ask anybody to do. So it says which colours are doing it, and one
+     press says they are not work. */
+  const why = page.locator('#rc-frame .la-why');
+  const whyText = await why.innerText();
+  check('the calendar says which colours are keeping rows on screen',
+    /Day Shift — \d+ row\(s\)/.test(whyText), whyText.replace(/\n/g, ' | ').slice(0, 110));
+  check('and a colour mapped as work is one press from being shading',
+    (await why.locator('button', { hasText: 'Just shading' }).count()) >= 1);
+
+  /* The press has to change the row the calendar is *reading* — the one in
+     force — rather than adding a second answer for the same colour. Adding is
+     what left the register with two answers in the first place. */
+  const rowsBefore = await page.locator('#rc-frame .la-grid tbody tr').count();
+  await why.locator('.la-why-item', { hasText: 'Third Shift' })
+    .locator('button', { hasText: 'Just shading' }).click();
+  await page.waitForTimeout(600);
+  check('pressing it edits the entry in force rather than adding another',
+    await page.evaluate(() => window.__rc.rows.rc_legend
+      .filter((l) => l.argb === '00B0F0').length === 1
+      && window.__rc.rows.rc_legend.find((l) => l.argb === '00B0F0').role === 'ignore'));
+
+  /* The same row also carries a near miss of the legend's blue that nobody has
+     mapped, so it is still on screen — correctly, and that is the point of
+     listing every colour rather than only the first. Saying so about that one
+     too is what finally drops the row, and it goes through the other half of the
+     button: a colour with no entry at all gets one. */
+  await page.locator('#rc-frame .la-why .la-why-item', { hasText: '3399FF' })
+    .locator('button', { hasText: 'Just shading' }).click();
+  await page.waitForTimeout(600);
+  check('and a colour with no entry at all gets one',
+    await page.evaluate(() => window.__rc.rows.rc_legend
+      .some((l) => l.argb === '3399FF' && l.role === 'ignore')));
+  check('once nothing on a row counts as work, the row drops off the calendar',
+    (await page.locator('#rc-frame .la-grid tbody tr').count()) < rowsBefore,
+    `${rowsBefore} rows -> ${await page.locator('#rc-frame .la-grid tbody tr').count()}`);
+
+  // Put it back, so the checks after this see the calendar they expect.
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Legend' }).click();
+  await page.waitForSelector('#rc-frame .rc-table');
+  await page.evaluate(() => {
+    const blue = window.__rc.rows.rc_legend.find((l) => l.argb === '00B0F0');
+    if (blue) blue.role = 'shift';
+    window.__rc.rows.rc_legend = window.__rc.rows.rc_legend.filter((l) => l.argb !== '3399FF');
+  });
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Calendar' }).click();
+  await page.waitForSelector('#rc-frame .la-grid');
 
   // Filtering redraws the rows and leaves the field alone — rebuilding an
   // input under the caret is the trap this project has hit three times.

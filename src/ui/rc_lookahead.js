@@ -547,6 +547,7 @@ async function renderCalendar(host) {
     const shown = drawn(windowed(view, today), calendarFilter, showQuietRows);
     clear(strip);
     strip.appendChild(legendStrip(legend, grid.unknown, paintOn(shown)));
+    strip.appendChild(whyStrip(shown, legendRows));
     body.appendChild(grid_(shown, today));
   };
   // Redraw the rows only, never the input: rebuilding the field under the
@@ -900,6 +901,78 @@ function isDark(hex) {
  * Pass no set at all and everything is listed, which is what a caller with
  * nothing drawn yet wants.
  */
+/**
+ * Which colours are keeping rows on the calendar, and one click to say they are not.
+ *
+ * "It is still showing rows with nothing on them" is a question about a
+ * *colour*, and until now the calendar could not answer it. The switch hides a
+ * row with nothing scheduled; whether a row has something scheduled is decided
+ * entirely by whether any of its paint counts as `shift` — and the person
+ * looking at a hundred rows they did not expect has no way to find out which
+ * colour did that. They can see the legend, and they can see the grid, and
+ * joining the two by eye across a hundred days is not a thing anybody should be
+ * asked to do. So the calendar says it.
+ *
+ * The unmapped list above answers the same question for colours nobody has
+ * explained. This is its other half: a colour somebody *has* explained, as work,
+ * on rows where no work is happening. Both are one press from "Just shading",
+ * and for a mapped colour that press changes the role on the row in force rather
+ * than adding a second one — adding is what left a register with two answers for
+ * one colour in the first place.
+ */
+function whyStrip(view, legendRows) {
+  const shownCols = new Set(view.days.map((d) => d.col));
+  const rowsFor = new Map();
+
+  for (const activity of view.activities) {
+    // A title is on screen for the sake of the rows under it, not for its paint.
+    if (activity.heading && !activity.highlighted) continue;
+    const hexes = new Set(marksOf(activity)
+      .filter((m) => m.hex && m.role === 'shift' && shownCols.has(m.col))
+      .map((m) => String(m.hex).toUpperCase()));
+    for (const hex of hexes) rowsFor.set(hex, (rowsFor.get(hex) || 0) + 1);
+  }
+  if (!rowsFor.size) return el('div');
+
+  /* The entry in force, by the same rule `applyLegend()` uses — newest
+     `valid_from` wins — so the button edits the row the calendar is actually
+     reading rather than whichever came back first. */
+  const inForce = (hex) => (legendRows || [])
+    .filter((l) => String(l.argb).toUpperCase() === hex)
+    .sort((a, b) => String(b.valid_from || '').localeCompare(String(a.valid_from || '')))[0] || null;
+
+  const strip = el('div', { class: 'la-legend la-why' });
+  strip.appendChild(el('span', { class: 'rc-eyebrow', text: 'On screen because of' }));
+
+  for (const [hex, count] of [...rowsFor.entries()].sort((a, b) => b[1] - a[1])) {
+    const entry = inForce(hex);
+    strip.appendChild(el('span', { class: 'la-why-item' }, [
+      el('span', { class: 'la-swatch', style: `background:#${hex}` }),
+      el('span', { text: `${entry?.meaning || `#${hex}, unmapped`} — ${count} row(s)` }),
+      el('button', {
+        class: 'cx-btn mini ghost',
+        text: 'Just shading',
+        title: entry
+          ? `Rows whose only paint is ${entry.meaning} will drop out of the calendar. `
+            + 'The colour keeps its name; what changes is whether it counts as somebody being '
+            + 'on site.'
+          : 'Structure in the spreadsheet, not somebody on site.',
+        onClick: async () => {
+          try {
+            if (entry) await rc.updateLegend(entry.id, { role: 'ignore' });
+            else await rc.addLegend([{ argb: hex, meaning: 'Shading', role: 'ignore' }]);
+            notifyChanged('legend');
+            toast({ tone: 'good', message: `#${hex} is shading — ${count} row(s) drop out.` });
+          } catch (err) {
+            toast({ tone: 'bad', message: err.message });
+          }
+        },
+      }),
+    ]));
+  }
+  return strip;
+}
+
 function legendStrip(legend, unknown, onScreen = null) {
   const showing = (hex) => !onScreen || onScreen.has(String(hex).toUpperCase());
   const strip = el('div', { class: 'la-legend' });
