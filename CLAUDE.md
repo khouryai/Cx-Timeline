@@ -691,6 +691,18 @@ subscribes. That is what keeps the graph acyclic.
   drawn as unmapped too, not only counted: `.la-day.la-unmapped` hatches the
   cell on the calendar, so a colour nobody has explained is visible on the grid
   rather than in a number at the top of it.
+- **The calendar says which colours are keeping rows on it.** `whyStrip()` tallies,
+  per colour, how many drawn rows that colour is what makes count as scheduled,
+  and offers "Just shading" against each. It exists because "it is still showing
+  rows with nothing on them" is a question about a *colour* and the screen could
+  not answer it: the switch hides a row with nothing scheduled, whether a row is
+  scheduled is decided entirely by whether any of its paint counts as `shift`,
+  and joining the legend to a hundred days of grid by eye is not a thing to ask
+  anybody to do. It is the other half of the unmapped list — that one covers a
+  colour nobody has explained, this one a colour somebody explained *as work* on
+  rows where none is happening. For a mapped colour the press changes the role on
+  the entry in force rather than adding a second one, because adding is what left
+  a register with two answers for one colour to begin with.
 - **The legend is versioned, so a colour resolves to the row *in force*.**
   `rc_legend` is `unique (valid_from, argb)` — one row per colour per date — and
   `inForce()` in `io/lookahead.js` picks the newest before anything is looked up.
@@ -900,7 +912,7 @@ node tools/test_dist.js              #  41 checks — every deployment shape, an
 node tools/test_lookahead.js         #  81 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 195 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 200 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
