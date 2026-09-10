@@ -448,14 +448,38 @@ function fakeSdk() {
 
             return { select: () => Promise.resolve({ data: made, error: null }) };
           };
-          api.upsert = (row, opts) => {
-            S.calls.push({ kind: 'upsert', table, payload: row });
+          /* An upsert takes rows, plural, and `onConflict` names a *unique
+             constraint* — which is more than one column on `rc_legend`
+             (`valid_from, argb`). The stub modelled one row against one column,
+             so an array arrived as `row` and the key lookup compared against
+             undefined: it would have matched the wrong row or appended a
+             malformed one, and reported success either way. Modelling less of
+             the API than the application uses is modelling it wrong. */
+          api.upsert = (rows, opts) => {
+            S.calls.push({ kind: 'upsert', table, payload: rows });
             const list = S.rows[table] || (S.rows[table] = []);
-            const key = opts?.onConflict || 'id';
-            const hit = list.find((r) => r[key] === row[key]);
-            if (hit) Object.assign(hit, row);
-            else list.push({ ...row });
-            return { select: () => Promise.resolve({ data: [hit || row], error: null }) };
+            const keys = String(opts?.onConflict || 'id').split(',').map((k) => k.trim());
+            const defaults = {
+              ...(list.some((r) => 'active' in r) ? { active: true } : {}),
+              /* Postgres fills this in, and it is half of `rc_legend`'s unique
+                 key — so a stub that left it undefined would make every mapping
+                 land in the same undated slot and hide the versioning the
+                 lookup now depends on. */
+              ...(table === 'rc_legend' ? { valid_from: new Date().toISOString().slice(0, 10) } : {}),
+            };
+            const written = [];
+            for (const row of [].concat(rows)) {
+              const hit = list.find((r) => keys.every((k) => r[k] === row[k]));
+              if (hit) {
+                Object.assign(hit, row);
+                written.push(hit);
+              } else {
+                const made = { id: `${table}-${list.length + written.length + 1}`, ...defaults, ...row };
+                list.push(made);
+                written.push(made);
+              }
+            }
+            return { select: () => Promise.resolve({ data: written, error: null }) };
           };
           api.update = (patch) => {
             S.calls.push({ kind: 'update', table, payload: patch });
