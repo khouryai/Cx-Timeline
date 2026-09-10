@@ -60,6 +60,12 @@ function fakeSdk() {
   S.signedIn = S.signedIn === undefined ? false : S.signedIn;
   S.role = S.role || 'admin';
   S.offline = S.offline || false;
+  /* The stub's `auth.users`. It exists because "has this address got an account
+     yet" is now a question with three answers rather than two — linked, invited
+     and on its way, or nothing at all — and a stub that could not tell the
+     second from the third would hide the bug that the second used to be
+     reported as. */
+  S.accounts = S.accounts || ['alex@example.com', 'dan@example.com'];
 
   const USER = { id: 'user-rc-1', email: 'alex@example.com' };
   const iso = (offset) => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
@@ -211,12 +217,22 @@ function fakeSdk() {
               mark(todayIdx + 1, 'X.WIT', 'FFFF00'),
               mark(todayIdx + 3, 'X', 'FF0000'),
             ] },
+            /* The Resource row the workbook writes under an activity: who is
+               on it. Its location and work-hours cells are deliberately blank —
+               they carry down from the line above, which is the whole reason
+               the workbook leaves them out. One name the roster knows and one
+               it does not, because both cases have to be visible. */
+            { row: 10, label: '', cells: [
+              { col: 3, ref: 'C10', value: 'Resource', hex: null },
+              mark(todayIdx, 'Dan', null),
+              mark(todayIdx + 1, 'Dan, R. Okafor', null),
+            ] },
             /* One mark in the week that has already gone and one still ahead,
                so narrowing the window drops a column without dropping a row. */
-            { row: 10, label: '', cells: [
-              { col: 2, ref: 'B10', value: 'Operational Readiness', hex: null },
-              { col: 3, ref: 'C10', value: 'ATS Site Test', hex: null },
-              { col: 4, ref: 'D10', value: 'Station 6 Platform', hex: null },
+            { row: 14, label: '', cells: [
+              { col: 2, ref: 'B14', value: 'Operational Readiness', hex: null },
+              { col: 3, ref: 'C14', value: 'ATS Site Test', hex: null },
+              { col: 4, ref: 'D14', value: 'Station 6 Platform', hex: null },
               mark(1, 'X.PAST', '00B0F0'),
               mark(todayIdx + 2, 'X.TCE', '00B0F0'),
               mark(todayIdx + 4, 'X', '3399FF'),
@@ -225,16 +241,16 @@ function fakeSdk() {
                that stayed on screen when the flag was worked out once across
                the whole sheet instead of against the weeks being drawn — a
                four-week window showing a row with nothing in it. */
-            { row: 12, label: '', cells: [
-              { col: 3, ref: 'C12', value: 'REI Fiber Re-termination — finished', hex: null },
+            { row: 16, label: '', cells: [
+              { col: 3, ref: 'C16', value: 'REI Fiber Re-termination — finished', hex: null },
               mark(1, 'X', 'FFFF00'),
               mark(2, 'X', 'FFFF00'),
             ] },
             /* Carried in the workbook for reference, with nothing scheduled:
                the shading is the only paint on it. Most of the sheet looks
                like this, and it is what the calendar hides by default. */
-            { row: 11, label: '', cells: [
-              { col: 3, ref: 'C11', value: 'DCS Internal testing — no dates yet', hex: null },
+            { row: 15, label: '', cells: [
+              { col: 3, ref: 'C15', value: 'DCS Internal testing — no dates yet', hex: null },
               ...shade(),
             ] },
             // The workbook's own key, in the shape readLegend() looks for.
@@ -294,6 +310,10 @@ function fakeSdk() {
       raw_label: 'IXL Regression Testing',
       cells: {},
       bart_marks: {},
+      /* Who the workbook's Resource row names on the day the meeting reviews.
+         One spelling the roster knows and one it does not, because the second is
+         the case the view has to report rather than swallow. */
+      resources: { [REVIEW.iso]: 'Dan, R. Okafor' },
     }, {
       /* And one in the week the *plan* is being made for. A real four-week
          look-ahead covers both; keeping only the reviewed week made the week
@@ -312,7 +332,14 @@ function fakeSdk() {
       raw_label: 'IXL Regression Testing',
       cells: {},
       bart_marks: {},
+      // Named for today, so the Resources grid has a 4WLA block on a real column.
+      resources: { [(() => {
+        const now = new Date();
+        return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+          .toISOString().slice(0, 10);
+      })()]: 'Priya' },
     }],
+    rc_person_alias: [],
     rc_change_events: [
       { id: 'ev1', kind: 'cancellation', week_start: iso(-3), row_key: 'k1',
         before: { date: iso(-2), value: 'Day Shift' }, after: { date: iso(-2), value: 'Cancelled' },
@@ -323,6 +350,13 @@ function fakeSdk() {
       // Not scope, and it has to say so rather than being counted.
       { id: 'ev3', kind: 'window_advanced', week_start: iso(4), row_key: null,
         before: null, after: null, detected_at: new Date().toISOString() },
+      /* A change about a week four months gone. Recorded for ever — it is
+         evidence — and not what anybody opens this screen to read: a shift that
+         moved in the spring cannot be planned around now. It is out of the
+         window by default and one click away. */
+      { id: 'ev4', kind: 'scope_removed', week_start: iso(-120), row_key: 'k9',
+        before: { label: 'Old work nobody is planning round now' }, after: null,
+        detected_at: iso(-120) + 'T09:00:00Z', from_snapshot: null, to_snapshot: 'snap1' },
     ],
     /* A judgement already recorded. These were written and never read back, so
        an attribution made in a meeting vanished the moment the dialog closed
@@ -503,8 +537,27 @@ function fakeSdk() {
           if (name === 'rc_link_account') {
             const person = S.rows.rc_people.find((r) => r.id === args.p_person);
             if (!person) return Promise.resolve({ data: null, error: { message: 'no such person' } });
-            person.user_id = `user-${String(args.p_email).trim().toLowerCase()}`;
-            person.email = person.email || String(args.p_email).trim().toLowerCase();
+            const address = String(args.p_email).trim().toLowerCase();
+            /* An account that does not exist yet is a normal answer, not a
+               failure. The stub answers as the function does: link where there
+               is something to link, aim the invitation where there is one on
+               its way, and refuse only where there is neither. `S.accounts` is
+               the stub's `auth.users`. */
+            const exists = (S.accounts = S.accounts || []).includes(address);
+            if (!exists) {
+              const invite = S.rows.rc_invitations.find((i) => i.pending_email === address);
+              if (invite) {
+                invite.pending_person = args.p_person;
+                person.email = person.email || address;
+                return Promise.resolve({ data: null, error: null });
+              }
+              return Promise.resolve({
+                data: null,
+                error: { message: `no account and no open invitation for ${args.p_email} — invite them first` },
+              });
+            }
+            person.user_id = `user-${address}`;
+            person.email = person.email || address;
             return Promise.resolve({ data: person.user_id, error: null });
           }
           if (name === 'rc_set_role') {
@@ -840,6 +893,41 @@ async function main() {
     window.__rc.calls.filter((c) => c.table === 'rc_link_account').map((c) => c.payload));
   check('an existing account can be attached to a roster row',
     linked.length === 1 && linked[0].p_email === 'dan@example.com');
+
+  /* And the case that used to be a dead end. "no account exists for x — invite
+     them first" was the commonest answer by a wide margin and it was the wrong
+     sentence: they *had* been invited, and there was nothing the administrator
+     could do about the rest. The invitation is aimed at the row instead, and the
+     trigger finishes the job when they sign up. */
+  await page.locator('#rc-frame button', { hasText: 'Invite somebody' }).click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal input[type="email"]').fill('rosa@example.com');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Invite' }).click();
+  await page.waitForTimeout(400);
+  await page.locator('#rc-frame button', { hasText: 'Link account' }).first().click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal input[type="email"]').fill('rosa@example.com');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Link' }).click();
+  await page.waitForTimeout(500);
+  check('an invited address that has not signed up is arranged, not refused',
+    (await page.locator('.cx-modal').count()) === 0
+    && /has not signed up yet/.test(await page.locator('.cx-toast').last().innerText()),
+    (await page.locator('.cx-toast').last().innerText().catch(() => '')).slice(0, 80));
+  check('and the invitation now points at that roster row',
+    await page.evaluate(() => (window.__rc.rows.rc_invitations || [])
+      .some((i) => i.pending_email === 'rosa@example.com' && i.pending_person)));
+
+  // Only where there is genuinely nothing to attach and nothing on its way.
+  await page.locator('#rc-frame button', { hasText: 'Link account' }).first().click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal input[type="email"]').fill('stranger@example.com');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Link' }).click();
+  await page.waitForTimeout(400);
+  check('an address with neither is refused, and says what to do instead',
+    /use "Invite somebody"/.test(await page.locator('.cx-modal .rc-error').innerText()),
+    (await page.locator('.cx-modal .rc-error').innerText().catch(() => '')).slice(0, 70));
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Cancel' }).click();
+  await page.waitForTimeout(300);
 
   // Changing a role, straight from the row.
   await page.waitForSelector('#rc-frame .rc-table');
@@ -1258,7 +1346,7 @@ async function main() {
      stops that being a rule with no way back. */
   check('a row with nothing scheduled is hidden',
     !/no dates yet/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
-  const quietBox = page.locator('#rc-frame .cx-check input');
+  const quietBox = page.locator('#rc-frame .cx-check', { hasText: 'nothing scheduled' }).locator('input');
   await quietBox.check();
   await page.waitForTimeout(250);
   check('and comes back when asked for',
@@ -1274,8 +1362,58 @@ async function main() {
   check('and it is the row the workbook painted on the activity side',
     /HTT — Testing and Commissioning/.test(
       await page.locator('#rc-frame .la-grid tr.la-head-row').innerText()));
+  /* Three activity rows and the Resource row under one of them. A heading is
+     drawn because something under it is: it used to be exempt from the switch
+     altogether, which is how one stray unmapped colour put a whole workbook
+     back on screen with the box still unticked. */
   check('shading does not count as somebody being on site',
-    (await page.locator('#rc-frame .la-grid tbody tr').count()) === 3);
+    (await page.locator('#rc-frame .la-grid tbody tr').count()) === 4,
+    `${await page.locator('#rc-frame .la-grid tbody tr').count()} rows`);
+
+  /* ── The Resource row ──────────────────────────────────────────────────
+     The workbook names who is on an activity by adding a row underneath whose
+     description reads "Resource", with the names typed into the day cells. It
+     belongs to the activity above it: its location and work hours are blank
+     because they carry down, and drawn on its own it would be a hundred and
+     forty rows of the word "Resource". */
+  const resourceRow = page.locator('#rc-frame .la-grid tr.la-resource-row');
+  check('the Resource row under an activity is drawn as part of it',
+    (await resourceRow.count()) === 1);
+  const resourceText = await resourceRow.innerText();
+  check('and the names typed in its cells are on the calendar',
+    /Dan/.test(resourceText) && /Okafor/.test(resourceText), resourceText.replace(/\s+/g, ' ').slice(0, 90));
+  check('with the location it inherited from the activity above it',
+    /TPSS 12/.test(resourceText), resourceText.replace(/\s+/g, ' ').slice(0, 90));
+
+  // Filtering finds somebody by name, which is one of the two reasons anybody
+  // types in that box — and it would find nothing if only the activity counted.
+  const nameFilter = page.locator('#rc-frame input[placeholder^="Filter activities"]');
+  await nameFilter.fill('Okafor');
+  await page.waitForTimeout(250);
+  check('the filter finds an activity by who is on it',
+    /IXL Regression/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
+  await nameFilter.fill('');
+  await page.waitForTimeout(200);
+
+  const resourceBox = page.locator('#rc-frame .cx-check', { hasText: 'resource names' }).locator('input');
+  await resourceBox.uncheck();
+  await page.waitForTimeout(250);
+  check('and the names can be switched off without losing the activities',
+    (await page.locator('#rc-frame .la-grid tr.la-resource-row').count()) === 0
+    && /IXL Regression Testing/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
+  await resourceBox.check();
+  await page.waitForTimeout(250);
+
+  /* ── The key describes what is on screen ──────────────────────────────
+     The register is the whole programme's. Printed over a four-week window it
+     is a key to somebody else's calendar: the reader checks a colour, finds
+     three entries that are not here, and stops trusting the strip. */
+  const stripText = await page.locator('#rc-frame .la-legend').innerText();
+  check('the key lists only the colours the window carries',
+    /Day Shift/.test(stripText) && !/Section divider/.test(stripText),
+    stripText.replace(/\n/g, ' | ').slice(0, 110));
+  check('and says how many of the register it left out',
+    /not on screen/.test(stripText));
 
   // Filtering redraws the rows and leaves the field alone — rebuilding an
   // input under the caret is the trap this project has hit three times.
@@ -1338,6 +1476,85 @@ async function main() {
   check('and one nobody has answered still asks',
     /1 cancellation\(s\) have nobody against them/.test(laText),
     laText.split('\n').find((l) => /nobody against/.test(l)) || '');
+
+  /* ── The window the changes are read in ────────────────────────────────
+     From a week back to the end of the calendar as it was last read. Everything
+     outside that is either finished — a shift that moved in July cannot be
+     planned around now — or beyond what the workbook has been filled in to. The
+     register keeps the lot, and it says so, because a list that has been
+     narrowed and does not say so reads as a list of everything. */
+  check('the changes list says which weeks it covers',
+    /from a week back to the end of the calendar/.test(laText),
+    laText.split('\n').find((l) => /week back/.test(l)) || '');
+
+  const windowBox = page.locator('#rc-frame .cx-check', { hasText: 'Everything recorded' }).locator('input');
+  await windowBox.check();
+  await page.waitForTimeout(400);
+  check('and everything recorded is one click away',
+    /nobody is planning round now/.test(await page.locator('#rc-frame').innerText())
+    && /Everything recorded — \d+ change/.test(await page.locator('#rc-frame').innerText()),
+    (await page.locator('#rc-frame').innerText()).split('\n').find((l) => /Everything recorded —/.test(l)) || '');
+  await page.locator('#rc-frame .cx-check', { hasText: 'Everything recorded' }).locator('input').uncheck();
+  await page.waitForTimeout(400);
+  check('a change about a week months gone is not drawn by default',
+    !/nobody is planning round now/.test(await page.locator('#rc-frame').innerText()));
+
+  /* ── Resources ────────────────────────────────────────────────────────
+     Who is where, and whether that agrees with what the 4WLA asked for. Every
+     assignment written here is a plan entry — the same rows the week plan writes
+     and the huddle reads — so there is one place a day is planned and three
+     places it is read. */
+  console.log('\nResources');
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Resources' }).click();
+  await page.waitForSelector('#rc-frame .rc-resources', { timeout: 10000 });
+  const resText = await page.locator('#rc-frame').innerText();
+  check('the team is listed down the side',
+    /Alex/.test(resText) && /Priya/.test(resText));
+  check('and what the 4WLA asks of somebody is drawn beside the plan',
+    (await page.locator('#rc-frame .rc-res-asked').count()) >= 1);
+  /* A name nobody has mapped is reported rather than swallowed. Nothing matches
+     on a surname or a set of initials: a shift against the wrong engineer is
+     worse than one against nobody, because nobody looks at it again. */
+  check('a name the roster cannot place is named, not dropped',
+    /Named in the 4WLA, not on the roster/.test(resText) && /Okafor/.test(resText));
+  check('and it offers to record whose spelling it is',
+    (await page.locator('#rc-frame button', { hasText: 'That is somebody' }).count()) >= 1);
+
+  await page.locator('#rc-frame button', { hasText: 'That is somebody' }).first().click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal select').first().selectOption({ label: 'Dan' });
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'That is them' }).click();
+  await page.waitForTimeout(500);
+  check('mapping a spelling writes it to the alias register',
+    await page.evaluate(() => (window.__rc.rows.rc_person_alias || [])
+      .some((a) => /Okafor/.test(a.alias) && a.person_id === 'p2')));
+
+  /* Work the 4WLA has never heard of — a day in the office, a day on another
+     project. Without somewhere for those to go the huddle has a blank against a
+     name and no way to tell "nothing planned" from "nothing said". */
+  await page.locator('#rc-frame button', { hasText: 'Assign work' }).click();
+  await page.waitForSelector('.cx-modal');
+  const dates = page.locator('.cx-modal input[type="date"]');
+  const monday = await page.evaluate(() => {
+    const now = new Date();
+    const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    return new Date(t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000).toISOString().slice(0, 10);
+  });
+  const friday = await page.evaluate((m) =>
+    new Date(Date.parse(`${m}T00:00:00Z`) + 4 * 86400000).toISOString().slice(0, 10), monday);
+  await dates.nth(0).fill(monday);
+  await dates.nth(1).fill(friday);
+  await page.locator('.cx-modal input[placeholder="What they will do"]').fill('Office — as-built markups');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Assign' }).click();
+  await page.waitForTimeout(600);
+  const assigned = await page.evaluate(() => window.__rc.rows.rc_plan_entries
+    .filter((p) => /as-built markups/.test(p.task || '')));
+  check('a span of off-programme days becomes one plan entry per day',
+    assigned.length >= 2, `${assigned.length} entries`);
+  check('and it is a plan entry, so the huddle already reads it',
+    assigned.every((p) => p.person_id && p.work_date && !p.lookahead_row_id));
+  check('with no location, because the office is not a commissioning site',
+    assigned.every((p) => !p.location_id));
 
   /* ── Running the meeting ──────────────────────────────────────────────
      The table is a form for whoever holds the keyboard. This is the same data

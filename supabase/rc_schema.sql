@@ -121,6 +121,26 @@ create table if not exists public.rc_location_alias (
   unique (alias)
 );
 
+/*
+ * The other spellings of a person, for the same reason locations have them.
+ *
+ * The look-ahead's Resource row carries names typed by hand into a spreadsheet
+ * cell: "R. Okafor", "Okafor", "RO", "Rachel". Matching those to the roster is
+ * the one place the calendar has to connect a name somebody wrote to a person
+ * it knows, and it must not guess — a shift attributed to the wrong engineer is
+ * worse than one attributed to nobody, because nobody looks at it again.
+ *
+ * So an exact fold of the full name matches, an alias matches, and everything
+ * else is shown as unmatched for somebody to map in one click. That is the same
+ * answer `rc_location_alias` gives, and for the same reason.
+ */
+create table if not exists public.rc_person_alias (
+  id        uuid primary key default gen_random_uuid(),
+  person_id uuid not null references public.rc_people(id) on delete cascade,
+  alias     text not null,
+  unique (alias)
+);
+
 create table if not exists public.rc_categories (
   id     uuid primary key default gen_random_uuid(),
   name   text not null unique,
@@ -273,8 +293,25 @@ create table if not exists public.rc_lookahead_rows (
   raw_label     text,
   subsystem     text,
   cells         jsonb not null default '{}'::jsonb,
-  bart_marks    jsonb not null default '{}'::jsonb
+  bart_marks    jsonb not null default '{}'::jsonb,
+  /*
+   * Who the workbook's Resource row names, per day, in the words it used.
+   *
+   * Separate from `bart_marks` even though both are text typed into a cell,
+   * because they answer different questions — a mark on the activity line is
+   * what BART asked for, this is who is on it — and `describe()` reads which by
+   * the key. Names, never people: matching them to the roster happens where an
+   * unmatched spelling can be shown to somebody instead of guessed at.
+   */
+  resources     jsonb not null default '{}'::jsonb
 );
+
+-- `create table if not exists` does nothing to a table that already exists, so
+-- the column has to be asked for separately or every project built before the
+-- Resource row went in silently lacks it — and the insert then fails on a field
+-- Postgres has never heard of.
+alter table public.rc_lookahead_rows
+  add column if not exists resources jsonb not null default '{}'::jsonb;
 
 create index if not exists rc_la_rows_snapshot_idx on public.rc_lookahead_rows (snapshot_id);
 create index if not exists rc_la_rows_key_idx      on public.rc_lookahead_rows (week_start, row_key);
@@ -544,6 +581,7 @@ $$;
 alter table public.rc_people             enable row level security;
 alter table public.rc_locations          enable row level security;
 alter table public.rc_location_alias     enable row level security;
+alter table public.rc_person_alias       enable row level security;
 alter table public.rc_categories         enable row level security;
 alter table public.rc_parties            enable row level security;
 alter table public.rc_leave_kinds        enable row level security;
@@ -568,6 +606,7 @@ do $$
 declare t text;
 begin
   foreach t in array array['rc_people', 'rc_locations', 'rc_location_alias',
+                           'rc_person_alias',
                            'rc_categories', 'rc_parties', 'rc_leave_kinds', 'rc_legend',
                            'rc_settings']
   loop
@@ -933,11 +972,24 @@ as $$
 $$;
 
 /*
- * Attach an existing account to a roster row.
+ * Attach an account to a roster row.
  *
  * For somebody who signed up before their person record existed, or whose
  * record was created separately. Without it this is the one thing that still
  * needs the SQL editor every time somebody joins.
+ *
+ * **An account that does not exist yet is a normal answer, not a failure.**
+ * This used to refuse outright — "no account exists for x@y — invite them
+ * first" — which was the wrong sentence in the commonest case by a wide margin:
+ * the address *had* been invited, and the person simply had not signed up yet.
+ * There was nothing the administrator could do about that and nothing the
+ * refusal told them to do, so the button read as broken. Now the invitation is
+ * pointed at the roster row instead, and `rc_accept_invitation()` finishes the
+ * job the moment they sign up. Null comes back rather than a user id, meaning
+ * "arranged, not linked" — the caller says which happened.
+ *
+ * An address with no account *and* no invitation is still refused, because
+ * there is genuinely nothing to attach and nothing on its way.
  */
 create or replace function public.rc_link_account(p_person uuid, p_email text)
 returns uuid
@@ -946,15 +998,30 @@ security definer
 set search_path = ''
 as $$
 declare
+  clean  text := lower(trim(p_email));
   target uuid;
 begin
   if not public.rc_is_admin() then
     raise exception 'only an administrator can link an account' using errcode = '42501';
   end if;
+  if not exists (select 1 from public.rc_people where id = p_person) then
+    raise exception 'no such person' using errcode = 'P0002';
+  end if;
 
-  select u.id into target from auth.users u where lower(u.email) = lower(trim(p_email));
+  select u.id into target from auth.users u where lower(u.email) = clean;
   if target is null then
-    raise exception 'no account exists for % — invite them first', p_email
+    if exists (
+      select 1 from public.rc_invitations i
+       where lower(i.email) = clean and i.accepted_at is null and i.expires_at > now()
+    ) then
+      -- Invited and not yet signed up. Aim the invitation at this row and say
+      -- so; the trigger on auth.users does the linking when they arrive.
+      update public.rc_invitations set person_id = p_person
+       where lower(email) = clean and accepted_at is null;
+      update public.rc_people set email = coalesce(email, clean) where id = p_person;
+      return null;
+    end if;
+    raise exception 'no account and no open invitation for % — invite them first', p_email
       using errcode = 'P0002';
   end if;
   if exists (select 1 from public.rc_people where user_id = target and id <> p_person) then
@@ -1374,6 +1441,7 @@ do $$
 declare t text;
 begin
   foreach t in array array['rc_people', 'rc_locations', 'rc_location_alias', 'rc_categories',
+                           'rc_person_alias',
                            'rc_parties', 'rc_leave_kinds', 'rc_legend', 'rc_settings',
                            'rc_leave',
                            'rc_invitations',
@@ -1464,10 +1532,16 @@ create policy rc_evidence_write on storage.objects
 -- its own.
 -- ══════════════════════════════════════════════════════════════════════════
 
+/* The last two are not commissioning work, and that is why they are here.
+   A day in the office or on another project is where somebody actually was, and
+   without somewhere for it to go it gets recorded as a shift that went nowhere —
+   or not recorded at all, which is worse: the huddle then has a person with a
+   blank against them and no way to tell "nothing planned" from "nothing said". */
 insert into public.rc_categories (name, sort)
 select v.name, v.sort from (values
   ('Documentation', 10), ('Engineering', 20), ('Field Work', 30),
-  ('Testing', 40), ('Troubleshooting', 50)
+  ('Testing', 40), ('Troubleshooting', 50),
+  ('Office', 60), ('Other project', 70)
 ) as v(name, sort)
 where not exists (select 1 from public.rc_categories where name = v.name);
 

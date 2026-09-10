@@ -23,7 +23,7 @@ import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
 import { parseSheet, applyLegend, readLegend } from '../io/lookahead.js';
 import {
-  keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom,
+  keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
 } from '../core/lookahead.js';
 import { icon } from './icons.js';
 import { selectInput, textInput, toast, badge, emptyState, field, checkbox } from './components.js';
@@ -51,6 +51,16 @@ let calendarFilter = '';
  * with no way to get it back is its own kind of wrong.
  */
 let showQuietRows = false;
+/**
+ * Whether the names on each activity's Resource row are drawn.
+ *
+ * On by default — knowing who is on a shift is most of why anybody opens this —
+ * and off is for reading the shape of the programme without a hundred and forty
+ * extra lines under it. It hides the names, never the activities: the Resource
+ * row is part of the activity above it, so switching it off changes what a row
+ * says and never which rows there are.
+ */
+let showResources = true;
 /**
  * How much of the calendar to show, in weeks from the start of this one.
  *
@@ -381,6 +391,7 @@ async function recordChanges(previous, snapshot, rows, legend) {
     label: r.raw_label || '',
     cells: r.cells || {},
     marks: r.bart_marks || {},
+    resources: r.resources || {},
     locationId: r.location_id || null,
   });
 
@@ -424,8 +435,13 @@ function sideOf(event, which) {
   if (event.kind === 'scope_added' || event.kind === 'scope_removed') {
     return { label: value.label || null, location: value.location || null, week: value.weekStart || null };
   }
-  // BART's own resource marks, as a map of date to what they asked for.
-  if (event.kind === 'resource_changed') return { marks: value };
+  /* A resource request, as a map of date to what was asked for. Two shapes,
+     because there are two places it can be written: a mark on the activity line
+     itself, and the names on the Resource row underneath. `describe()` reads
+     which by the key, so the two must not be collapsed into one. */
+  if (event.kind === 'resource_changed') {
+    return event.field === 'resources' ? { resources: value } : { marks: value };
+  }
 
   return { date: event.date || null, value };
 }
@@ -486,7 +502,9 @@ async function renderCalendar(host) {
     return;
   }
 
-  host.appendChild(legendStrip(legend, grid.unknown));
+  /* The key sits above the grid and is redrawn with it, because it describes
+     what is on screen. */
+  const strip = el('div');
 
   /* A filter, because a hundred and forty rows is a spreadsheet and the reason
      to look at it here is usually one subsystem or one location. */
@@ -499,6 +517,11 @@ async function renderCalendar(host) {
     label: 'Show rows with nothing scheduled',
     checked: showQuietRows,
     onChange: (on) => { showQuietRows = on; draw(); },
+  });
+  const resources = checkbox({
+    label: 'Show resource names',
+    checked: showResources,
+    onChange: (on) => { showResources = on; draw(); },
   });
 
   const dated = view.days.some((d) => d.date);
@@ -521,25 +544,31 @@ async function renderCalendar(host) {
   const body = el('div');
   const draw = () => {
     clear(body);
-    body.appendChild(grid_(windowed(view, today), calendarFilter, showQuietRows, today));
+    const shown = drawn(windowed(view, today), calendarFilter, showQuietRows);
+    clear(strip);
+    strip.appendChild(legendStrip(legend, grid.unknown, paintOn(shown)));
+    body.appendChild(grid_(shown, today));
   };
   // Redraw the rows only, never the input: rebuilding the field under the
   // caret is the trap this project has already been bitten by three times.
   search.addEventListener('input', () => { calendarFilter = search.value; draw(); });
 
+  host.appendChild(strip);
   host.appendChild(el('div', {
     style: 'display:flex;align-items:center;gap:16px;margin-bottom:10px;flex-wrap:wrap',
   }, [
     el('div', { style: 'flex:1;min-width:240px;max-width:340px' }, [search]),
     dated ? range : null,
     quiet,
+    resources,
   ].filter(Boolean)));
   host.appendChild(body);
   draw();
 
   const inWindow = windowed(view, today);
-  const scheduled = inWindow.activities.filter((a) => a.highlighted).length;
+  const scheduled = inWindow.activities.filter((a) => a.highlighted && a.named).length;
   const headings = view.activities.filter((a) => a.heading).length;
+  const named = view.activities.filter((a) => a.resource).length;
   host.appendChild(el('p', {
     class: 'rc-hint',
     text: `${scheduled} of ${view.activities.length} activities have something scheduled in the `
@@ -570,7 +599,27 @@ async function renderCalendar(host) {
       + 'not call shading — so narrowing to four weeks drops the rows whose work was in the '
       + 'weeks before it. A colour nobody has mapped counts too: until somebody says what it is, '
       + 'it might be work, and hiding it would bury exactly the rows that need looking at. '
-      + 'Weekends are counted like any other day: possession work lands on them.',
+      + 'Weekends are counted like any other day: possession work lands on them. A section '
+      + 'heading is only drawn when something under it is: a title over nothing is not an answer, '
+      + 'and headings used to be exempt from the switch entirely — which is how a whole workbook '
+      + 'came back on screen the moment one stray colour went unmapped.',
+  }));
+  host.appendChild(el('p', {
+    class: 'rc-hint',
+    text: named
+      ? `${named} activity(ies) carry a Resource row — the line the workbook writes underneath `
+        + 'with the names typed against each day. It is drawn as part of the activity above it, '
+        + 'taking that line\'s location and work hours, because that is what leaving them blank '
+        + 'means. "Show resource names" hides the names and never the activities.'
+      : 'No Resource rows on this sheet yet. Add a row under an activity whose description reads '
+        + '"Resource", leave its location and work hours blank so they carry down from the '
+        + 'activity, and type the names into the day cells.',
+  }));
+  host.appendChild(el('p', {
+    class: 'rc-hint',
+    text: 'The key above the grid lists only the colours actually on screen. A legend of thirty '
+      + 'entries for a window carrying four of them is a key to somebody else\'s calendar; the '
+      + 'full register is in Legend.',
   }));
 }
 
@@ -611,35 +660,93 @@ function windowed(view, today) {
     // `role === 'shift'`, the same question `readGrid()` asks — a divider or a
     // weekend band is paint, not work, and a row carrying only those has
     // nothing scheduled in the weeks on screen.
-    highlighted: a.marks.some((m) => m.hex && m.role === 'shift' && shown.has(m.col)),
+    highlighted: marksOf(a).some((m) => m.hex && m.role === 'shift' && shown.has(m.col)),
   }));
 
   return { ...view, days: narrowed, activities };
 }
 
-/** The grid itself. Split out so the filter can redraw it without the header. */
-function grid_(view, filter, showQuiet, today) {
+/**
+ * Which rows are actually drawn: unscheduled ones out, then the filter.
+ *
+ * **A heading is not exempt from the switch.** It used to be — headings were
+ * kept whatever, and only the ones left dangling at the very end were trimmed —
+ * so a workbook whose activity columns carry any paint at all, or one stray
+ * colour that turned up unmapped after a read, put its entire contents back on
+ * screen with the box still unticked. What the switch says is what happens: a
+ * row with nothing scheduled is hidden, and a title over nothing is a row with
+ * nothing scheduled.
+ *
+ * The nesting is still respected, which is why this walks backwards. The
+ * workbook nests its sections — "PHASE 2" sits above "W40 — Testing and
+ * Commissioning", which sits above the work — so a heading is kept when the
+ * section under it has work *or* when the row immediately below it is a heading
+ * that was itself kept. That second clause is the parent case, and dropping it
+ * would throw away the outer level of every section that has rows.
+ */
+function drawn(view, filter, showQuiet) {
   const terms = String(filter || '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean);
   let rows = view.activities;
 
-  /* Quiet rows go, and then any headings left dangling at the end with nothing
-     under them at all.
-     Deliberately only the trailing ones: the workbook nests its sections —
-     "PHASE 2" sits above "W40 — Testing and Commissioning", which sits above
-     the work — so dropping a heading merely because another heading follows it
-     would throw away the outer level of a section that does have rows. */
   if (!showQuiet) {
-    const kept = rows.filter((a) => a.highlighted || a.heading);
-    let last = kept.length;
-    while (last > 0 && kept[last - 1].heading) last--;
-    rows = kept.slice(0, last);
+    /* A heading that carries work is work.
+       `heading` is a fact about paint in the activity columns, and a workbook
+       that bands *every* row's description would make every row one — at which
+       point a rule that only ever kept a heading for the sake of the rows under
+       it would empty the grid completely, which is worse than the problem it is
+       here to fix. So a title is a heading with nothing scheduled on it, and
+       anything with a shift on it is judged as work like any other row. */
+    const isTitle = (a) => a.heading && !a.highlighted;
+    const keep = new Array(rows.length).fill(false);
+    let sectionHasWork = false;
+    let belowIsKeptTitle = false;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (isTitle(rows[i])) {
+        keep[i] = sectionHasWork || belowIsKeptTitle;
+        // This title closes the section beneath it; anything above belongs to a
+        // different one.
+        sectionHasWork = false;
+        belowIsKeptTitle = keep[i];
+      } else {
+        keep[i] = rows[i].highlighted && rows[i].named;
+        if (keep[i]) sectionHasWork = true;
+        // A row of work between two titles means the upper one is not the
+        // lower one's parent.
+        belowIsKeptTitle = false;
+      }
+    }
+    rows = rows.filter((_, i) => keep[i]);
   }
+
   if (terms.length) {
     rows = rows.filter((a) => {
-      const hay = a.meta.join(' ').toLowerCase();
+      /* The names on the Resource row are part of the haystack: looking for
+         where somebody is this week is one of the two reasons anybody types in
+         this box, and it would find nothing if only the activity line counted. */
+      const hay = [...a.meta, ...(a.resource?.marks || []).map((m) => m.value)]
+        .join(' ').toLowerCase();
       return terms.some((t) => hay.includes(t));
     });
   }
+
+  return { ...view, activities: rows };
+}
+
+/** Every colour actually painted on the days being drawn, as a set of hexes. */
+function paintOn(view) {
+  const shown = new Set(view.days.map((d) => d.col));
+  const hexes = new Set();
+  for (const activity of view.activities) {
+    for (const mark of marksOf(activity)) {
+      if (mark.hex && shown.has(mark.col)) hexes.add(String(mark.hex).toUpperCase());
+    }
+  }
+  return hexes;
+}
+
+/** The grid itself. Split out so the filter can redraw it without the header. */
+function grid_(view, today) {
+  const rows = view.activities;
 
   /* The month band. Each label spans its own run of days, which is what the
      merged cell in the workbook meant. */
@@ -683,35 +790,59 @@ function grid_(view, filter, showQuiet, today) {
     return map;
   };
 
-  const tbody = el('tbody', {}, rows.map((a) => {
-    const marks = byCol(a.marks);
-    return el('tr', { class: a.heading ? 'la-head-row' : '' }, [
-      ...a.meta.map((value, i) => el('td', {
-        class: 'la-meta' + (i === a.meta.length - 1 ? ' la-last' : ''),
-        text: value,
-        title: value,
-      })),
-      ...view.days.map((d) => {
-        const mark = marks.get(d.col);
-        const classes = ['la-day'];
-        if (d.weekend) classes.push('la-weekend');
-        if (d.date && d.date === today) classes.push('la-today');
-        if (mark?.hex) {
-          classes.push('la-painted');
-          if (isDark(mark.hex)) classes.push('la-dark');
-          if (!mark.meaning) classes.push('la-unmapped');
-        }
-        return el('td', {
-          class: classes.join(' '),
-          style: mark?.hex ? `background:#${mark.hex}` : '',
-          text: mark?.value || '',
-          title: [a.meta.filter(Boolean)[0], d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
-            mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value]
-            .filter(Boolean).join(' · '),
-        });
-      }),
-    ]);
-  }));
+  /**
+   * One line of the grid: the activity columns frozen on the left, then a cell
+   * per day. Used for the activity and for its Resource row alike, because the
+   * two are the same shape and drawing them twice is how they drift apart.
+   */
+  const line = (meta, marks, { klass = '', what = '', resource = false }) => el('tr', {
+    class: klass,
+  }, [
+    ...meta.map((value, i) => el('td', {
+      class: 'la-meta' + (i === meta.length - 1 ? ' la-last' : ''),
+      text: value,
+      title: value,
+    })),
+    ...view.days.map((d) => {
+      const mark = marks.get(d.col);
+      const classes = ['la-day'];
+      if (resource) classes.push('la-resource');
+      if (d.weekend) classes.push('la-weekend');
+      if (d.date && d.date === today) classes.push('la-today');
+      if (mark?.hex) {
+        classes.push('la-painted');
+        if (isDark(mark.hex)) classes.push('la-dark');
+        if (!mark.meaning) classes.push('la-unmapped');
+      }
+      return el('td', {
+        class: classes.join(' '),
+        style: mark?.hex ? `background:#${mark.hex}` : '',
+        text: mark?.value || '',
+        title: [what, d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
+          mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value]
+          .filter(Boolean).join(' · '),
+      });
+    }),
+  ]);
+
+  const tbody = el('tbody');
+  for (const a of rows) {
+    const what = a.meta.filter(Boolean)[0] || '';
+    tbody.appendChild(line(a.meta, byCol(a.marks), {
+      klass: a.heading ? 'la-head-row' : '',
+      what,
+    }));
+    /* The Resource row, drawn under the activity it belongs to and never on its
+       own — it has no location or hours of its own, only the ones it inherited,
+       so away from that line it would be a row of names about nothing. */
+    if (a.resource && showResources) {
+      tbody.appendChild(line(a.resource.meta, byCol(a.resource.marks), {
+        klass: 'la-resource-row',
+        what: what ? `${what} — who is on it` : 'who is on it',
+        resource: true,
+      }));
+    }
+  }
 
   const table_ = el('table', { class: 'rc-table la-grid' }, [head, tbody]);
   const wrap = el('div', { class: 'rc-scroll', style: 'max-height:60vh' }, [table_]);
@@ -737,7 +868,12 @@ function grid_(view, filter, showQuiet, today) {
   });
 
   if (!rows.length) {
-    return el('p', { class: 'rc-hint', text: 'Nothing matches that filter.' });
+    return el('p', {
+      class: 'rc-hint',
+      text: 'Nothing scheduled in these weeks matches. Widen the window, clear the filter, or '
+        + 'tick "Show rows with nothing scheduled" to see what the workbook is carrying for '
+        + 'reference.',
+    });
   }
   return wrap;
 }
@@ -750,15 +886,39 @@ function isDark(hex) {
   return (0.299 * r + 0.587 * g + 0.114 * b) < 140;
 }
 
-function legendStrip(legend, unknown) {
+/**
+ * The key, for the calendar actually on screen.
+ *
+ * `onScreen` is the set of colours the drawn rows and days carry, and only
+ * those are listed. The register is the whole programme's — five shifts, three
+ * kinds of shading, whatever a previous year needed — and printing all of it
+ * over a four-week window is a key to somebody else's calendar: the reader
+ * checks a colour against it, finds three entries that are not here, and stops
+ * trusting the strip. The full register is one click away in Legend, which says
+ * so underneath.
+ *
+ * Pass no set at all and everything is listed, which is what a caller with
+ * nothing drawn yet wants.
+ */
+function legendStrip(legend, unknown, onScreen = null) {
+  const showing = (hex) => !onScreen || onScreen.has(String(hex).toUpperCase());
   const strip = el('div', { class: 'la-legend' });
-  for (const entry of legend) {
+  const listed = legend.filter((entry) => showing(entry.argb));
+  for (const entry of listed) {
     strip.append(el('span', {}, [
       el('span', { class: 'la-swatch', style: `background:#${entry.argb}` }),
       el('span', { text: entry.meaning }),
     ]));
   }
-  if (unknown?.length) {
+  if (onScreen && legend.length > listed.length) {
+    strip.append(el('span', {
+      class: 'rc-hint',
+      text: `${legend.length - listed.length} more colour(s) in the register are not on screen.`,
+      title: 'The key lists what this window actually carries. Legend has the register in full.',
+    }));
+  }
+  unknown = (unknown || []).filter((u) => showing(u.hex));
+  if (unknown.length) {
     /* Show the swatches, not just a count. A colour nobody has explained keeps
        its rows on screen — an unmapped colour counts as work, deliberately —
        so "five unmapped" and "these five, and one of them is the grey your
@@ -1017,14 +1177,64 @@ function editLegend(entry) {
    Changes
    ═══════════════════════════════════════════════════════════════════════ */
 
+/**
+ * The weeks a change is worth reading about.
+ *
+ * From the Monday a week back, to the last day the calendar covers. Everything
+ * outside that is either finished — a shift that moved in July cannot be
+ * planned around now — or beyond what the workbook has been filled in to, which
+ * is nothing at all. The register keeps the lot either way; this is which of it
+ * gets drawn, and "Everything recorded" is one click away for the times the
+ * question really is what happened in March.
+ *
+ * The far end comes from the calendar rather than from a constant, for the same
+ * reason `windowOf()` does: the look-ahead is maintained four to six weeks out,
+ * and a fixed four would hide the sixth week every time it appeared.
+ */
+function changeWindow(view, today) {
+  const ms = new Date(`${today}T00:00:00Z`).getTime();
+  const monday = ms - ((new Date(ms).getUTCDay() + 6) % 7) * 86400000;
+  const from = new Date(monday - 7 * 86400000).toISOString().slice(0, 10);
+
+  const dated = (view?.days || []).map((d) => d.date).filter(Boolean);
+  // No axis, or no year resolved from it: fall back to six weeks out rather
+  // than to nothing, which would hide every change there is.
+  const to = dated.length
+    ? dated[dated.length - 1]
+    : new Date(monday + 42 * 86400000).toISOString().slice(0, 10);
+
+  return { from, to };
+}
+
+/** Whether the changes list is narrowed to that window. It is, by default. */
+let changesInWindow = true;
+
 async function renderChanges(host) {
   const today = todayISO();
   const from = `${Number(today.slice(0, 4)) - 1}-01-01`;
-  const [events, runs, parties] = await Promise.all([
+  const [all, runs, parties, snapshots, legendRows] = await Promise.all([
     rc.listChangeEvents(from, `${today}T23:59:59Z`),
     rc.listIngestRuns({ limit: 60 }),
     rc.listParties(),
+    rc.listSnapshots({ limit: 1 }),
+    rc.listLegend(),
   ]);
+
+  /* The window is read off the calendar the last snapshot draws, so the two
+     screens cannot disagree about where the look-ahead ends. */
+  const snapshot = snapshots[0];
+  const view = snapshot?.grid
+    ? readGrid(
+      applyLegend(snapshot.grid, legendRows.map((r) => ({
+        argb: r.argb, meaning: r.meaning, role: r.role || 'shift',
+      }))),
+      { anchorISO: snapshot.taken_at }
+    )
+    : null;
+  const window_ = changeWindow(view, today);
+  const events = changesInWindow
+    ? all.filter((e) => !e.week_start || (e.week_start >= window_.from && e.week_start <= window_.to))
+    : all;
 
   /* The judgements somebody has already made. These were being written and
      never read: an attribution recorded in a meeting was invisible the moment
@@ -1050,8 +1260,38 @@ async function renderChanges(host) {
      reads as a quiet week. */
   host.appendChild(coverageNote(runs));
 
+  /* What span this is a list of, and the way out of it. Said before the rows
+     rather than under them: a list that has been narrowed and does not say so
+     reads as a list of everything, which is how somebody concludes nothing
+     happened in a fortnight that was simply out of view. */
+  host.appendChild(el('div', {
+    style: 'display:flex;align-items:center;gap:16px;margin:0 0 10px;flex-wrap:wrap',
+  }, [
+    el('span', {
+      class: 'rc-hint',
+      style: 'margin:0',
+      text: changesInWindow
+        ? `Weeks ${window_.from} to ${window_.to} — from a week back to the end of the calendar `
+          + `as it was last read${all.length - events.length
+            ? `. ${all.length - events.length} older or further-out change(s) are not listed`
+            : ''}.`
+        : `Everything recorded — ${all.length} change(s), whatever week they are about.`,
+    }),
+    checkbox({
+      label: 'Everything recorded',
+      checked: !changesInWindow,
+      onChange: (on) => { changesInWindow = !on; notifyChanged('changes'); },
+    }),
+  ]));
+
   if (!events.length) {
-    host.appendChild(el('p', { class: 'rc-hint', text: 'No changes recorded yet.' }));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: all.length
+        ? `Nothing changed in the weeks on the calendar. ${all.length} change(s) are recorded `
+          + 'outside that window — tick "Everything recorded" to see them.'
+        : 'No changes recorded yet.',
+    }));
     return;
   }
 

@@ -106,7 +106,8 @@ timeline/viewport → timeline/layout → timeline/connectors
                   → timeline/renderer → timeline/interactions
 ui/icons · ui/components → ui/lists · ui/auth → ui/theme → ui/commands
 ui/workspace → ui/rc → ui/rc_roster · ui/rc_huddle · ui/rc_lookahead
-             · ui/rc_reports → ui/rc_util   (the second interface)
+             · ui/rc_resources · ui/rc_reports
+                             → ui/rc_util   (the second interface)
                              → ui/dialogs → ui/panels → ui/shell
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
 main.js                                    the only module that may import freely
@@ -506,6 +507,97 @@ subscribes. That is what keeps the graph acyclic.
   against a description somebody typed. `ingest()` writes `rc_lookahead_rows`
   for that join — one row per activity per *week*, with the location resolved
   through the alias register and never parsed out of the description.
+- **The look-ahead now says who, and a Resource row is not an activity.** The
+  workbook names people by adding a row directly under an activity whose
+  description reads "Resource", with the names typed into the day cells and the
+  location and work-hours cells left blank *because they are the line above's*.
+  `readGrid()` attaches it to that activity (`activity.resource`) rather than
+  emitting it, inherits every blank meta cell from the parent, and folds its
+  paint into the parent's `highlighted` through `marksOf()` — the workbook
+  sometimes puts the shift colour on the Resource row instead. Drawn as an
+  activity of its own it would be a hundred and forty rows of the word
+  "Resource" at no location. `isResourceLabel()` is deliberately strict: an
+  activity called "Resource mobilisation" is work, and a row misread as a label
+  is a row that vanishes off the calendar. The names travel to the database in
+  `rc_lookahead_rows.resources` (date → the words that were typed) — separate
+  from `bart_marks`, because a mark on the activity line is what was asked for
+  and this is who is on it, and `describe()` reads which by the key. A Resource
+  row changing is `resource_changed` with `field: 'resources'`, reusing the
+  existing kind so no `rc_change_events` check constraint has to be widened in
+  a project that already has one.
+- **A name in a spreadsheet is matched exactly or reported, never guessed.**
+  `rc_person_alias` is the register, and `nameRegister()` builds the lookup from
+  it plus the roster's own names — nothing matches on a surname, a set of
+  initials or a near miss. A shift attributed to the wrong engineer is worse
+  than one attributed to nobody, because nobody looks at it again. So
+  `resourceAssignments()` returns the unmatched spellings alongside the matched
+  ones and the Resources tab lists them for somebody to map in one click, the
+  same answer `rc_location_alias` gives for a place. `foldName()` folds case and
+  punctuation and nothing else.
+- **Unscheduled rows are hidden, and a heading is not exempt.** Headings used to
+  be kept whatever the switch said, with only the ones left dangling at the very
+  end trimmed — so any paint in the activity columns, or one stray colour that
+  came back unmapped after a read, put a whole workbook on screen with the box
+  still unticked. `drawn()` in `ui/rc_lookahead.js` walks the rows backwards and
+  keeps a heading only when the section under it has work *or* when the row
+  immediately below is a heading that was itself kept: that second clause is the
+  nesting case, and without it the outer level of every real section goes. A
+  heading that carries a shift is judged as *work* rather than as a title:
+  `heading` is a fact about paint in the activity columns, and a workbook that
+  banded every row's description would otherwise empty the grid completely —
+  worse than the problem the rule exists to fix. Two narrower rules go with it — a heading is now paint in the columns *left of the
+  calendar* (`col < firstDay`, not merely "not a day column", which counted a
+  totals column past the last day), and a row nobody described is not an
+  activity (`named`), because a band or an over-dragged fill on the calendar
+  asks the reader to work out which it is.
+- **The key describes what is on screen, not the register.** `legendStrip()`
+  takes the set of colours the drawn rows and days actually carry and lists only
+  those, saying how many it left out. The register belongs to the whole
+  programme; printed over a four-week window it is a key to somebody else's
+  calendar — the reader checks a colour, finds three entries that are not there,
+  and stops trusting the strip. Legend still shows it in full.
+- **The Changes list is about the weeks anybody can still act on.** From the
+  Monday a week back to the last day the calendar covers, read off the latest
+  snapshot's own axis rather than from a constant — the look-ahead is maintained
+  four to six weeks out, so a fixed four would hide the sixth week every time it
+  appeared. Everything is still recorded and "Everything recorded" is one
+  checkbox away; what is not negotiable is that a narrowed list *says* it is
+  narrowed, because one that does not reads as a list of everything and a
+  fortnight out of view reads as a fortnight in which nothing happened.
+- **Resources is a third reading of the plan, not a second store of it.**
+  `ui/rc_resources.js` puts people down and days across and draws two things in
+  each cell — what the plan says and what the 4WLA asked for — because the
+  interesting case is the two disagreeing. Everything it writes is an
+  `rc_plan_entries` row, the same rows the week plan writes and the huddle
+  reads, so somebody assigned here is in tomorrow's meeting with their scope
+  against their name and no further wiring. That is the whole of "tied to the
+  huddle": one place a day is planned, three places it is read. Off-programme
+  work belongs here too — a day in the office, a day on another project — and
+  `Office` and `Other project` are seeded categories for it: without somewhere
+  for those days to go the huddle shows a blank against a name with no way to
+  tell "nothing planned" from "nothing said". A span of days becomes one row per
+  day, and days already planned, on leave or not worked are skipped and counted
+  rather than doubled — nothing here supersedes anything, which is what the week
+  plan's cell is for.
+- **The huddle asks about what was wanted, not only about what was planned.**
+  `askedLine()` shows the 4WLA's ask for a person on a day, and *only where the
+  plan is silent*: where a day is planned the plan is the answer — it was a
+  decision somebody took, possibly against that very row — and printing BART's
+  wording beside it invites the meeting to relitigate a settled call. The huddle
+  reads both the reviewed week and the planned one (`lookaheadBetween`), because
+  on a Friday those are different weeks and a read for one cannot say who was
+  wanted in the other. `newestPerKey()` drops the copies older snapshots carry,
+  or the same activity arrives once per read.
+- **Linking an account before it exists is normal, not a failure.**
+  `rc_link_account()` used to refuse with "no account exists for x — invite them
+  first", which was the commonest answer by a wide margin and the wrong
+  sentence: the address *had* been invited and the person had simply not signed
+  up, so the refusal named no action the reader could take and the button read as
+  broken. It now aims the open invitation at that roster row and returns null —
+  "arranged, not linked", which the caller says out loud — and
+  `rc_accept_invitation()` finishes the job when they sign up. Only an address
+  with neither an account nor an open invitation refuses, and the interface
+  points at "Invite somebody" when it does.
 - **Being scheduled is a different fact from what somebody may do.**
   `rc_people.scheduled` is what the huddle and the week plan filter on
   (`listPeople({ scheduledOnly: true })`), never the role. A manager
@@ -788,16 +880,16 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         #  61 checks — the parser, the rows it derives and
+node tools/test_lookahead.js         #  77 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 174 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 195 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 244 checks — both permission models, and that
+node tools/test_sql.js               # 251 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result

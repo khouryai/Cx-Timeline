@@ -34,6 +34,7 @@ import { saveFile } from '../io/exporters.js';
 import {
   STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs,
   dayLabel, byId, availability, notifyChanged, formModal,
+  nameRegister, newestPerKey, resourceAssignments,
 } from './rc_util.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -187,7 +188,8 @@ export async function render(root) {
   const review = reviewDate(date, people);
   const plan = planDate(date, people);
 
-  const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, laRows] =
+  const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, laRows,
+    aliases, snapshots] =
     await Promise.all([
       rc.listCategories(),
       rc.listLocations(),
@@ -208,9 +210,17 @@ export async function render(root) {
       // Every blocker still open, whoever raised it and whenever. This is the
       // standing item the meeting keeps returning to until somebody clears it.
       rc.listBlockers().catch(() => []),
-      // Only an administrator can read these; a member simply gets none and
-      // the block dialog offers nothing to link, which is correct.
-      rc.lookaheadForWeek(toISO(weekStart(isoToMs(review)))).catch(() => []),
+      /* Only an administrator can read these; a member simply gets none and
+         the block dialog offers nothing to link, which is correct.
+         Both weeks, not just the reviewed one: on a Friday the day being planned
+         is in the *next* week, and a look-ahead read for one week cannot say who
+         BART wants on the other. */
+      rc.lookaheadBetween(toISO(weekStart(isoToMs(review))), toISO(weekStart(isoToMs(plan))))
+        .catch(() => []),
+      // Which spellings in the workbook are whose. Nothing is matched without
+      // them beyond an exact fold of somebody's own name.
+      rc.listPersonAliases().catch(() => []),
+      rc.listSnapshots({ limit: 20 }).catch(() => []),
     ]);
 
   const chainByeId = new Map();
@@ -224,12 +234,23 @@ export async function render(root) {
   const planFor = (personId, iso) =>
     planRows.find((p) => p.person_id === personId && p.work_date === iso) || null;
 
+  /* Who the 4WLA's Resource rows name, per person per day.
+     This is what lets the meeting ask somebody about the work BART actually
+     wants of them rather than only about the work somebody remembered to plan —
+     the two differing is the interesting case, and until now the second was the
+     only one on screen. Duplicates from older snapshots are dropped first, or
+     the same activity arrives once per read. */
+  const rows = newestPerKey(laRows, new Map(snapshots.map((s, i) => [s.id, i])));
+  const { byPerson: askedFor } = resourceAssignments(rows, nameRegister(everybody.length ? everybody : people, aliases));
+  const askedOf = (personId, iso) => (askedFor.get(personId)?.get(iso) || []);
+
   /* One context, handed to the table, the meeting and the digest alike. They
      are three readings of one day and the moment they are given different
      data they start disagreeing on screen, in front of the room. */
   const ctx = {
     people, review, plan, planFor, actualByPerson, cats, locs,
-    categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
+    categories, locations, parties, leave, root, chainByeId, laRows: rows, blockers, everybody,
+    askedOf,
   };
 
   root.appendChild(dateBar(date, review, plan, root, ctx));
@@ -506,6 +527,11 @@ function presenter(ctx) {
   if (wasPlanned && !laRow) {
     context.appendChild(badge('not against a look-ahead row', 'muted'));
   }
+  /* And what BART asked of them, where nobody planned it. The room needs that
+     more than the person does: it is the gap between the contract and the day. */
+  if (!wasPlanned && askedLine(ctx, person, review)) {
+    context.appendChild(badge(askedLine(ctx, person, review).slice(0, 52), 'warn'));
+  }
   for (const b of theirs) {
     context.appendChild(badge(`blocked: ${b.summary.slice(0, 36)}`, 'bad'));
   }
@@ -536,7 +562,10 @@ function presenter(ctx) {
     tomorrow
       ? el('div', { text: tomorrow.task || '—' })
       : el('div', { class: 'rc-hint', text: 'nothing set yet' }),
-  ]));
+    !tomorrow && askedLine(ctx, person, plan)
+      ? el('div', { class: 'rc-hint', text: askedLine(ctx, person, plan) })
+      : null,
+  ].filter(Boolean)));
 
   wrap.appendChild(el('div', { class: 'rc-present-move' }, [
     el('button', { class: 'cx-btn ghost', text: '← Back', onClick: () => move(-1), disabled: atPerson === 0 }),
@@ -744,6 +773,28 @@ function dateBar(date, review, plan, root, ctx) {
  * the table, including any field somebody else is mid-way through, is left
  * exactly alone.
  */
+/**
+ * What the 4WLA asks of one person on one day, as a line to read out.
+ *
+ * Only ever shown where the plan is silent. Where a day *is* planned the plan is
+ * the answer — it was a decision, taken by somebody, possibly against this very
+ * row — and printing BART's wording beside it would invite the meeting to
+ * relitigate a call that has already been made. Where nothing is planned it is
+ * the difference between "nothing planned" and "nothing planned, and here is
+ * what was wanted".
+ */
+function askedLine(ctx, person, iso) {
+  const rows = ctx.askedOf ? ctx.askedOf(person.id, iso) : [];
+  if (!rows.length) return null;
+  const row = rows[0];
+  const where = row.raw_location || ctx.locs.get(row.location_id)?.name || '';
+  return [
+    `4WLA: ${(row.raw_label || `row ${row.sheet_row}`).slice(0, 44)}`,
+    where,
+    rows.length > 1 ? `and ${rows.length - 1} more` : null,
+  ].filter(Boolean).join(' · ');
+}
+
 function personRow(ctx) {
   const { person, review, plan, planFor, actualByPerson, cats, locs, leave, root, chainByeId } = ctx;
 
@@ -818,7 +869,15 @@ function personRow(ctx) {
           ? badge(`${ordinal(chain.carries + 1)} day`, chain.carries >= 4 ? 'bad' : 'warn')
           : null,
       ].filter(Boolean))
-      : el('span', { class: 'rc-hint', text: 'nothing planned' }),
+      : el('div', {}, [
+        el('span', { class: 'rc-hint', text: 'nothing planned' }),
+        /* Nothing planned is not nothing wanted. Where the look-ahead names
+           this person on this day, the meeting gets to ask about the work
+           rather than about the gap. */
+        askedLine(ctx, person, review)
+          ? el('div', { class: 'rc-hint', text: askedLine(ctx, person, review) })
+          : null,
+      ].filter(Boolean)),
   ]));
 
   /* What happened. Absence is answered from the leave record rather than
@@ -851,7 +910,13 @@ function personRow(ctx) {
         tomorrow.carry_chain_id ? badge('Carried over', 'warn') : null,
       ].filter(Boolean))
       : admin
-        ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap' }, [
+        ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap;align-items:center' }, [
+          /* What BART wants of them tomorrow, so the goal is set against it
+             rather than from memory. Said before the buttons, because it is the
+             thing the answer should be about. */
+          askedLine(ctx, person, plan)
+            ? el('div', { class: 'rc-hint', style: 'flex:1 1 100%', text: askedLine(ctx, person, plan) })
+            : null,
           el('button', {
             class: 'cx-btn mini ghost',
             text: 'Set goal',

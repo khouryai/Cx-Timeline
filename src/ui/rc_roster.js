@@ -584,8 +584,9 @@ async function renderAccounts(host) {
         el('button', {
           class: 'cx-btn mini ghost',
           text: 'Link account',
-          title: 'For somebody who already signed up before their team record existed.',
-          onClick: () => linkAccount(p),
+          title: 'Point an address at this row. It works before they have signed up: an open '
+            + 'invitation is aimed here instead, and the account lands on this row when it exists.',
+          onClick: () => linkAccount(p, people),
         }),
       ]),
     ]))
@@ -700,21 +701,57 @@ function invitePerson(people) {
   });
 }
 
-function linkAccount(person) {
+/**
+ * Point an address at a roster row.
+ *
+ * Three outcomes, and only one of them used to be handled. The account exists
+ * and is linked; the address is *invited* and has not signed up yet, in which
+ * case the invitation is aimed at this row and the trigger finishes the job when
+ * they arrive; or there is neither, which is the only case where there is
+ * genuinely nothing to do — so that is the only case that refuses, and it offers
+ * the invitation rather than just saying no.
+ *
+ * The middle one is why this changed. "no account exists for them@example.com —
+ * invite them first" was the commonest answer by a wide margin and it was wrong:
+ * they *had* been invited, and there was nothing the administrator could do
+ * about the rest. A refusal that names no action the reader can take reads as a
+ * broken button.
+ */
+function linkAccount(person, people) {
   const email = textInput({ value: person.email || '', placeholder: 'them@example.com', type: 'email' });
   formModal({
     title: `Link an account to ${person.name}`,
     body: el('div', { class: 'cx-form' }, [
-      field('Email', email, 'The address of an account that already exists. If they have '
-        + 'not signed up yet, invite them instead.'),
+      field('Email', email, 'The address they sign in with. It does not have to exist yet — if it '
+        + 'has been invited and they have not signed up, the invitation is pointed at '
+        + `${person.name} instead and the account lands on this row the moment they do.`),
     ]),
     confirmLabel: 'Link',
     onConfirm: async () => {
       const address = email.value.trim();
       if (!address) throw new Error('An email address is needed.');
-      await rc.linkAccount(person.id, address);
+      let linked;
+      try {
+        linked = await rc.linkAccount(person.id, address);
+      } catch (err) {
+        /* Nothing to link and nothing on its way. The next step is an
+           invitation, so offer it rather than making somebody find the button. */
+        if (/no account and no open invitation/i.test(err.message)) {
+          throw new Error(`${address} has no account and no open invitation. Close this and use `
+            + '"Invite somebody" — pick this person as the team record, and their account will '
+            + 'attach to it when they sign up.');
+        }
+        throw err;
+      }
       notifyChanged('people');
-      toast({ message: `${address} now signs in as ${person.name}.` });
+      toast({
+        tone: 'good',
+        message: linked
+          ? `${address} now signs in as ${person.name}.`
+          : `${address} is invited but has not signed up yet — the invitation now points at `
+            + `${person.name}, and the account will attach to this row when they do.`,
+        timeout: linked ? undefined : 10000,
+      });
     },
   });
 }

@@ -22,15 +22,18 @@ import { textInput, toast, emptyState } from './components.js';
 import * as roster from './rc_roster.js';
 import * as huddle from './rc_huddle.js';
 import * as lookahead from './rc_lookahead.js';
+import * as resources from './rc_resources.js';
 import * as reports from './rc_reports.js';
 
 /**
  * The tabs, in the order the work actually happens: run today's meeting, plan
- * the week, see what the look-ahead did to it, then the numbers.
+ * the week, see where each person is, see what the look-ahead did to it, then
+ * the numbers.
  */
 const TABS = [
   { id: 'huddle', label: 'Daily huddle' },
   { id: 'week', label: 'Week plan' },
+  { id: 'resources', label: 'Resources' },
   { id: 'lookahead', label: 'Look-ahead' },
   { id: 'reports', label: 'Reports' },
   { id: 'org', label: 'Organisation' },
@@ -39,6 +42,7 @@ const TABS = [
 const RENDERERS = {
   huddle: huddle.render,
   week: huddle.renderWeek,
+  resources: resources.render,
   lookahead: lookahead.render,
   reports: reports.render,
   org: roster.render,

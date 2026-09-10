@@ -331,20 +331,39 @@ function sheet(marks) {
   const cell = (i, value, hex) => ({ col: 8 + i, ref: `X${i}`, value, hex, role: roleOf(hex),
     meaning: hex === 'FFFF00' ? 'Day Shift' : hex === 'FF0000' ? 'Cancelled' : hex ? null : null });
 
+  /* Two spreadsheet rows per entry, so the Resource row has somewhere to be.
+     `resource` is the names typed against each day; the location and hours cells
+     are deliberately left blank, because that is exactly what the workbook does
+     and inheriting them is the behaviour under test. */
+  const body = [];
+  marks.forEach((m, n) => {
+    body.push({
+      row: 10 + n * 2,
+      label: '',
+      cells: [
+        { col: 2, ref: `B${n}`, value: m.label, hex: null },
+        { col: 3, ref: `C${n}`, value: m.location, hex: null },
+        ...m.days.map(([i, hex]) => cell(i, 'X', hex)),
+      ],
+    });
+    if (m.resource) {
+      body.push({
+        row: 11 + n * 2,
+        label: '',
+        cells: [
+          { col: 2, ref: `BR${n}`, value: 'Resource', hex: null },
+          ...m.resource.map(([i, who]) => cell(i, who, null)),
+        ],
+      });
+    }
+  });
+
   return {
     rows: [
       { row: 4, label: '', cells: [{ col: 8, ref: 'M', value: 'SEPTEMBER', hex: null }] },
       { row: 5, label: '', cells: days.map((d, i) => cell(i, String(d.getUTCDate()), null)) },
       { row: 6, label: '', cells: days.map((d, i) => cell(i, DAY[(d.getUTCDay() + 6) % 7], null)) },
-      ...marks.map((m, n) => ({
-        row: 10 + n,
-        label: '',
-        cells: [
-          { col: 2, ref: `B${n}`, value: m.label, hex: null },
-          { col: 3, ref: `C${n}`, value: m.location, hex: null },
-          ...m.days.map(([i, hex]) => cell(i, 'X', hex)),
-        ],
-      })),
+      ...body,
     ],
   };
 }
@@ -426,6 +445,115 @@ check('every event describes itself without an undefined in it',
   lines.every((l) => !/undefined/.test(l)), lines.join(' | '));
 check('and the cancellation says what it was before',
   lines.some((l) => /Cancelled on 2026-09-08: was Day Shift/.test(l)), lines.join(' | '));
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The Resource row
+   ═══════════════════════════════════════════════════════════════════════ */
+console.log('\nThe row underneath that says who is on it');
+
+const withWho = cls.readGrid(sheet([
+  {
+    label: 'IXL Regression',
+    location: 'TPSS 12',
+    days: [[0, 'FFFF00'], [1, 'FFFF00']],
+    resource: [[0, 'Dan'], [1, 'Dan, R. Okafor']],
+  },
+  { label: 'Cable pull', location: 'Yard 3', days: [[8, 'FFFF00']] },
+]), { anchorISO: '2026-09-09' });
+
+check('a Resource row is not an activity of its own',
+  withWho.activities.length === 2, `${withWho.activities.length} activities`);
+const ixl = withWho.activities.find((a) => a.meta[0] === 'IXL Regression');
+check('it is attached to the activity above it', Boolean(ixl.resource));
+/* The workbook leaves the location blank on that row because it is the line
+   above's. Reading it as blank would put a row of names at nowhere. */
+check('and takes the location the activity above it carries',
+  ixl.resource.meta[1] === 'TPSS 12', ixl.resource.meta.join(' | '));
+check('while the word "Resource" stays where it was typed',
+  ixl.resource.meta[0] === 'Resource');
+check('an activity with no Resource row simply has none',
+  withWho.activities.find((a) => a.meta[0] === 'Cable pull').resource === null);
+
+// Strict on purpose: a rule that matched anything containing the word would
+// swallow an activity called "Resource mobilisation".
+check('"Resource" and "Resources" are the row; nothing else is',
+  cls.isResourceLabel('Resource') && cls.isResourceLabel(' resources ')
+  && !cls.isResourceLabel('Resource mobilisation') && !cls.isResourceLabel('Resource Names'));
+check('a cell of names splits on whatever separator was to hand',
+  JSON.stringify(cls.resourceNames('Dan, R. Okafor / Priya'))
+    === JSON.stringify(['Dan', 'R. Okafor', 'Priya']));
+
+const whoRows = await cls.rowsFrom(withWho, { snapshotId: 'snap-w', locate });
+const whoRow = whoRows.find((r) => /IXL/.test(r.raw_label));
+check('the names travel with the row, per day',
+  whoRow.resources['2026-09-07'] === 'Dan' && whoRow.resources['2026-09-08'] === 'Dan, R. Okafor',
+  JSON.stringify(whoRow.resources));
+/* Nothing is matched to a person here. That happens against the roster, where
+   an unmatched spelling can be shown to somebody rather than guessed at. */
+check('and nothing about them was resolved to a person',
+  Object.values(whoRow.resources).every((v) => typeof v === 'string'));
+
+const swapped = cls.readGrid(sheet([
+  {
+    label: 'IXL Regression',
+    location: 'TPSS 12',
+    days: [[0, 'FFFF00'], [1, 'FFFF00']],
+    resource: [[0, 'Dan'], [1, 'Priya']],
+  },
+  { label: 'Cable pull', location: 'Yard 3', days: [[8, 'FFFF00']] },
+]), { anchorISO: '2026-09-09' });
+const swappedRows = await cls.rowsFrom(swapped, { snapshotId: 'snap-x', locate });
+const withRes = (r) => ({
+  rowKey: r.row_key, weekStart: r.week_start, location: r.raw_location || '', subsystem: '',
+  label: r.raw_label, cells: r.cells, marks: r.bart_marks, resources: r.resources,
+});
+const whoMoved = cls.classify(whoRows.map(withRes), swappedRows.map(withRes));
+
+check('somebody being swapped off a shift is a change',
+  whoMoved.filter((e) => e.kind === 'resource_changed').length === 1,
+  whoMoved.map((e) => e.kind).join(', '));
+// The shift itself did not move, and reporting it as having moved would put a
+// phantom change into the numbers a claim rests on.
+check('and the shift itself is not reported as having moved',
+  !whoMoved.some((e) => e.kind === 'shift_changed'));
+const whoEvent = whoMoved.find((e) => e.kind === 'resource_changed');
+check('it says which side of the row it was', whoEvent.field === 'resources');
+check('and describes itself by naming people rather than dates',
+  /Resource: .*Okafor.* → .*Priya/.test(cls.describe({
+    ...whoEvent, before: { resources: whoEvent.before }, after: { resources: whoEvent.after },
+  })),
+  cls.describe({ ...whoEvent, before: { resources: whoEvent.before }, after: { resources: whoEvent.after } }));
+
+/* ══════════════════════════════════════════════════════════════════════════
+   A heading is only a heading if the activity columns are painted
+   ═══════════════════════════════════════════════════════════════════════ */
+console.log('\nWhat counts as a section heading');
+
+const rightOfTheCalendar = cls.readGrid({
+  rows: [
+    { row: 5, label: '', cells: [{ col: 8, ref: 'M', value: 'SEPTEMBER', hex: null }] },
+    { row: 6, label: '', cells: [...Array(14)].map((_, i) => ({ col: 8 + i, ref: `N${i}`, value: String(7 + i), hex: null })) },
+    { row: 7, label: '', cells: [...Array(14)].map((_, i) => ({ col: 8 + i, ref: `D${i}`, value: DAY[i % 7], hex: null })) },
+    { row: 8, label: '', cells: [
+      { col: 2, ref: 'B8', value: 'Ordinary work', hex: null },
+      { col: 8, ref: 'X8', value: 'X', hex: 'FFFF00', role: 'shift' },
+      // A totals column past the end of the calendar, with a fill on it. One of
+      // these used to turn every row in the workbook into a section heading —
+      // and a heading was drawn whatever the switch said.
+      { col: 40, ref: 'AN8', value: '', hex: 'D9D9D9' },
+    ] },
+  ],
+}, { anchorISO: '2026-09-09' });
+check('paint to the right of the calendar is not a heading',
+  rightOfTheCalendar.activities[0].heading === false);
+check('and the row still counts as work',
+  rightOfTheCalendar.activities[0].highlighted === true);
+/* A row of paint with no description is not an activity — it is a band, a
+   spacer, or a fill somebody dragged too far — and putting it on the calendar
+   asks the reader to work out which. */
+check('a row nobody described is not a named activity',
+  cls.readGrid(sheet([{ label: '', location: '', days: [[0, 'FFFF00']] }]),
+    { anchorISO: '2026-09-09' }).activities.every((a) => a.named === false));
 
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {

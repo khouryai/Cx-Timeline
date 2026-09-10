@@ -24,8 +24,60 @@
  * can relink the pair afterwards. Guessing would be the one failure mode
  * nobody could audit.
  *
+ * **A Resource row belongs to the activity above it.** The workbook names who
+ * is on an activity by adding a row underneath whose description reads
+ * "Resource", with the names typed into the day cells; where and when are left
+ * blank because they are the line above's. So it is read as part of that
+ * activity rather than as one of its own — otherwise half the sheet is rows
+ * called "Resource" with no location — and a name is never matched to a person
+ * here. That happens against the roster, where an unmatched spelling can be
+ * shown to somebody instead of guessed at.
+ *
  * Imports: nothing (leaf).
  */
+
+/* ── The Resource row ──────────────────────────────────────────────────── */
+
+/**
+ * Is this what the workbook writes under an activity to name who is on it?
+ *
+ * The 4WLA carries a row directly beneath each activity whose description cell
+ * reads "Resource", and the day cells on it hold the names typed against that
+ * activity. It is recognised by that one word and nothing else — folded for
+ * case and punctuation, but not loosened any further. "Resource Names" is not
+ * it: a rule that matched anything containing the word would swallow an
+ * activity called "Resource mobilisation", and a row misread as a label is a
+ * row of work that vanishes off the calendar.
+ */
+export function isResourceLabel(text) {
+  return /^resources?$/.test(String(text ?? '').toLowerCase().replace(/[^a-z]/g, ''));
+}
+
+/**
+ * The people named in one cell.
+ *
+ * Typed by hand, so the separator is whatever was to hand: a comma, a slash, a
+ * newline, an ampersand. Nothing is matched to a person here — that is the
+ * roster's job, through the alias register — this only splits what was written.
+ */
+export function resourceNames(text) {
+  return String(text ?? '')
+    .split(/[,;/\n&+]|\s{2,}/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Every mark on an activity, the ones on its Resource row included.
+ *
+ * Whether a row has work on it is a question about the pair, not about the
+ * activity line alone: the workbook sometimes paints the shift on the Resource
+ * row instead. Both places that ask — `readGrid()` and the calendar's window —
+ * have to ask it the same way, which is why it is a function and not two loops.
+ */
+export function marksOf(activity) {
+  return activity?.resource ? [...activity.marks, ...activity.resource.marks] : (activity?.marks || []);
+}
 
 /* ── Row identity ──────────────────────────────────────────────────────── */
 
@@ -270,8 +322,32 @@ export function readGrid(grid, { anchorISO = null } = {}) {
        what makes it reliable: the shading that runs along the day columns of
        every row paints only the calendar, never the description beside it. So
        a section title is recognised without anybody having to tell the legend
-       which of several near-identical greys means "divider". */
-    const heading = row.cells.some((c) => !dayCol.has(c.col) && c.hex);
+       which of several near-identical greys means "divider".
+       Only the columns *left* of the calendar count. `!dayCol.has(col)` also
+       took in anything painted to the right of the last day — a totals column,
+       a trailing border — and one of those turns every row in the workbook
+       into a heading, which is how a whole file arrived on screen at once. */
+    const heading = row.cells.some((c) => c.col < firstDay && c.hex);
+
+    /* The Resource row the workbook writes under an activity.
+       It belongs to the activity above it rather than being one of its own: it
+       carries no work of its own, it inherits where and when from the line it
+       sits under, and drawn as a separate activity it would be a hundred and
+       forty rows of the word "Resource". Its day cells are the names. */
+    const previous = activities[activities.length - 1];
+    if (!heading && previous && !previous.heading && meta.some(isResourceLabel)) {
+      previous.resource = {
+        row: row.row,
+        /* Where and when come from the activity above — that is what the
+           workbook means by leaving them blank on this row. Anything typed
+           here wins, so a resource working different hours can say so. */
+        meta: meta.map((value, i) => value || previous.meta[i] || ''),
+        marks,
+        names: marks.filter((m) => m.value).map((m) => ({ col: m.col, names: resourceNames(m.value) })),
+      };
+      previous.highlighted = marksOf(previous).some((m) => m.hex && m.role === 'shift');
+      continue;
+    }
 
     /* "Highlighted" means at least one day carries paint that is *work*.
        Tested as `role === 'shift'` rather than `role !== 'ignore'`, which is
@@ -285,7 +361,14 @@ export function readGrid(grid, { anchorISO = null } = {}) {
        attention. */
     const highlighted = marks.some((m) => m.hex && m.role === 'shift');
 
-    activities.push({ row: row.row, meta, marks, heading, highlighted });
+    /* Whether anybody wrote down what this row *is*.
+       A row of paint with no description is not an activity — it is a band, a
+       spacer, or a fill somebody dragged too far — and putting it on the
+       calendar asks the reader to work out which. It is hidden with the
+       unscheduled rows rather than dropped, so the switch still brings it back. */
+    const named = meta.some(Boolean);
+
+    activities.push({ row: row.row, meta, marks, heading, highlighted, named, resource: null });
   }
 
   return { days, meta: metaCols, activities, header: header.row };
@@ -321,17 +404,31 @@ export async function rowsFrom(view, { snapshotId = null, locate = async () => n
 
     // Group this activity's marks by the week they fall in.
     const weeks = new Map();
-    for (const mark of activity.marks) {
+    for (const mark of marksOf(activity)) {
       if (!mark.hex || mark.role === 'ignore') continue;
       const day = dayByCol.get(mark.col);
       if (!day?.date) continue;
       const week = mondayOf(day.date);
-      if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {} });
+      if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
       const bucket = weeks.get(week);
       bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
       if (mark.value) bucket.marks[day.date] = mark.value;
     }
     if (!weeks.size) continue;
+
+    /* Who the Resource row names, per day, in the words the workbook used.
+       Only into weeks that already have a shift in them: a name typed against a
+       day nobody is scheduled on is the same kind of stray as a colour on an
+       empty row, and writing it would invent a week of scope. Nothing is
+       matched to a person here — that happens against the roster, where an
+       unmatched name can be shown to somebody rather than guessed at. */
+    for (const mark of activity.resource?.marks || []) {
+      if (!mark.value) continue;
+      const day = dayByCol.get(mark.col);
+      const week = day?.date ? mondayOf(day.date) : null;
+      if (!week || !weeks.has(week)) continue;
+      weeks.get(week).resources[day.date] = mark.value;
+    }
 
     let locationId = null;
     let rawLocation = null;
@@ -355,6 +452,7 @@ export async function rowsFrom(view, { snapshotId = null, locate = async () => n
         raw_label: label,
         cells: bucket.cells,
         bart_marks: bucket.marks,
+        resources: bucket.resources,
       });
     }
   }
@@ -468,10 +566,30 @@ export function classify(before, after, { cancelledMeaning = 'cancelled' } = {})
     if (marksBefore !== marksAfter) {
       events.push({
         kind: 'resource_changed',
+        field: 'marks',
         weekStart: row.weekStart,
         rowKey: row.rowKey,
         before: prior.marks || {},
         after: row.marks || {},
+      });
+    }
+
+    /* And the Resource row underneath: who is on it.
+       The same kind as a mark changing rather than a kind of its own, because
+       it is the same fact — the request against this activity moved without the
+       shift moving — and a new kind would need the `rc_change_events` check
+       constraint widened in every project that already has one. `field` is what
+       tells the two apart when somebody reads the row back. */
+    const whoBefore = JSON.stringify(prior.resources || {});
+    const whoAfter = JSON.stringify(row.resources || {});
+    if (whoBefore !== whoAfter) {
+      events.push({
+        kind: 'resource_changed',
+        field: 'resources',
+        weekStart: row.weekStart,
+        rowKey: row.rowKey,
+        before: prior.resources || {},
+        after: row.resources || {},
       });
     }
   }
@@ -537,7 +655,22 @@ export function describe(event) {
     case 'cancellation': return `Cancelled on ${day}: was ${event.before?.value ?? event.before}`;
     case 'shift_changed':
       return `${day}: ${event.before?.value || 'nothing'} → ${event.after?.value || 'nothing'}`;
-    case 'resource_changed': return 'BART resource request changed';
+    case 'resource_changed': {
+      /* The *stored* shape decides which of the two this was: `sideOf()` writes
+         `{ resources }` for the Resource row and `{ marks }` for a mark on the
+         activity line. A row written before Resource rows existed carries only
+         the latter, and it still prints the sentence it always did rather than
+         "undefined → undefined" on the one screen somebody reads a year later. */
+      const who = (side) => {
+        const map = side?.resources;
+        if (!map || typeof map !== 'object') return null;
+        return [...new Set(Object.values(map).flatMap((v) => resourceNames(v)))].join(', ');
+      };
+      const was = who(event.before);
+      const now = who(event.after);
+      if (was === null && now === null) return 'BART resource request changed';
+      return `Resource: ${was || 'nobody'} → ${now || 'nobody'}`;
+    }
     case 'window_advanced': return `Week ${event.weekStart} came into the window`;
     case 'window_retired': return `Week ${event.weekStart} left the window`;
     case 'location_shift': return 'Relinked as one crew moving site';
