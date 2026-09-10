@@ -44,6 +44,7 @@ import {
 import {
   SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability,
   notifyChanged, formModal, nameRegister, newestPerKey, resourceAssignments, foldName,
+  ambiguousFirstNames,
 } from './rc_util.js';
 
 /** Which week is on screen. Null means the one containing today. */
@@ -88,6 +89,11 @@ export async function render(root) {
   const cats = byId(categories);
   const register = nameRegister(people, aliases);
   const { byPerson, unmatched } = resourceAssignments(laRows, register);
+  /* "Nobody is called that" and "two people are, and I will not choose" are
+     different problems with different fixes, and a list that ran them together
+     would send somebody looking for a person who is already on the roster
+     twice. */
+  const shared = ambiguousFirstNames(people);
 
   /* Only the days somebody works, unless asked otherwise. `showQuietDays` is
      about the columns; a person who works none of them still has a row, because
@@ -299,7 +305,15 @@ export async function render(root) {
           el('th', { text: 'On' }), el('th', { text: '' }),
         ])]),
         el('tbody', {}, unmatched.map((u) => el('tr', {}, [
-          el('td', { text: u.name }),
+          el('td', {}, [
+            el('div', { text: u.name }),
+            shared.has(foldName(u.name))
+              ? el('div', {
+                class: 'rc-hint',
+                text: 'more than one person is called that — say which',
+              })
+              : null,
+          ].filter(Boolean)),
           el('td', { class: 'rc-num', text: String(u.days.size) }),
           el('td', { class: 'rc-hint', text: u.rows.map((r) => r.raw_label || '').filter(Boolean).join(', ').slice(0, 60) }),
           el('td', {}, rc.isAdmin() ? [
@@ -323,9 +337,11 @@ export async function render(root) {
     root.appendChild(el('p', {
       class: 'rc-hint',
       text: 'These are the names the 4WLA has that the roster cannot place, so the rows above are '
-        + 'missing them. Nothing is matched on a surname or a set of initials: the register says '
-        + 'which spellings are whose, and a name it does not know is asked about once rather than '
-        + 'guessed at every week.',
+        + 'missing them. A bare first name does match, where exactly one person on the roster '
+        + 'answers to it — that is what the Resource row is filled in with. Nothing is matched on '
+        + 'a surname or a set of initials, and a first name two people share matches neither: '
+        + 'picking one would put a shift against the wrong engineer, silently, because both '
+        + 'answers look equally right on screen. Either way the answer is an alias, once.',
     }));
   }
 

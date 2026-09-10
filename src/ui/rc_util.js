@@ -162,17 +162,25 @@ export function foldName(text) {
 /**
  * A lookup from a written name to a person id.
  *
- * Two sources and no third: the roster's own names, and the aliases somebody
- * has recorded. There is deliberately no partial or surname match — a shift
- * attributed to the wrong engineer is worse than one attributed to nobody,
- * because nobody looks at it again. An unrecognised spelling is shown as
- * unmatched instead, which is a question somebody answers once.
+ * Three sources and no fourth: somebody's own full name, an alias somebody
+ * recorded, and a **first name that belongs to exactly one person** — which is
+ * what the 4WLA's Resource row is actually filled in with. There is still no
+ * surname match and no near miss: a shift attributed to the wrong engineer is
+ * worse than one attributed to nobody, because nobody looks at it again. An
+ * unrecognised spelling is shown as unmatched instead, which is a question
+ * somebody answers once.
  *
- * The roster name wins over an alias pointing somewhere else: a name that *is*
- * somebody's is theirs.
+ * They are added weakest first so the stronger answer wins. A full name beats an
+ * alias pointing elsewhere — a name that *is* somebody's is theirs — and both
+ * beat a first name, which is the loosest of the three.
  */
 export function nameRegister(people, aliases = []) {
   const map = new Map();
+
+  /* Weakest first, so the stronger answer overwrites it. A first name is the
+     loosest of the three and an alias somebody typed is worth more than it;
+     somebody's own full name is worth more than either. */
+  for (const [key, id] of uniqueFirstNames(people)) map.set(key, id);
   for (const a of aliases || []) {
     const key = foldName(a.alias);
     if (key) map.set(key, a.person_id);
@@ -182,6 +190,57 @@ export function nameRegister(people, aliases = []) {
     if (key) map.set(key, p.id);
   }
   return map;
+}
+
+/**
+ * First name to person, for the names that belong to exactly one of them.
+ *
+ * The 4WLA's Resource row is filled in by hand at speed and it says "Victor",
+ * not "Victor Okonkwo" — so a register that only knew full names matched almost
+ * nothing on a real sheet. A first name is a deliberate convention here rather
+ * than a guess at a spelling, which is what makes this different from matching
+ * on a surname or a near miss.
+ *
+ * **Only where it is unambiguous.** Two people called Victor and the name maps
+ * to neither: picking one would put a shift against the wrong engineer, which is
+ * the one outcome this module is built to avoid, and it would do it silently
+ * because both answers look equally plausible on screen. The pair goes to the
+ * unmatched list instead, where `ambiguousFirstNames()` lets the interface say
+ * *why* it could not place the name — the answer is an alias, once, and then it
+ * is settled for good.
+ *
+ * A roster name that is already one word registers as a full name anyway, so
+ * this only ever adds keys; it never changes what a complete name means.
+ */
+export function uniqueFirstNames(people) {
+  const seen = new Map();
+  for (const person of people || []) {
+    const first = foldName(String(person.name || '').trim().split(/\s+/)[0]);
+    if (!first) continue;
+    if (seen.has(first)) seen.get(first).push(person.id);
+    else seen.set(first, [person.id]);
+  }
+  return [...seen.entries()]
+    .filter(([, ids]) => ids.length === 1)
+    .map(([key, ids]) => [key, ids[0]]);
+}
+
+/**
+ * The first names more than one person answers to.
+ *
+ * Reported rather than resolved. "Nobody on the roster is called that" and "two
+ * people are, and I will not choose between them" are different problems with
+ * different fixes, and a list that ran them together would send somebody looking
+ * for a missing person who is already there twice.
+ */
+export function ambiguousFirstNames(people) {
+  const seen = new Map();
+  for (const person of people || []) {
+    const first = foldName(String(person.name || '').trim().split(/\s+/)[0]);
+    if (!first) continue;
+    seen.set(first, (seen.get(first) || 0) + 1);
+  }
+  return new Set([...seen.entries()].filter(([, n]) => n > 1).map(([key]) => key));
 }
 
 /**

@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 54   Built: 2026-09-10T21:46:34.831Z
+ * Modules: 54   Built: 2026-09-10T23:28:06.875Z
  */
 (function () {
   'use strict';
@@ -28528,17 +28528,25 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   /**
    * A lookup from a written name to a person id.
    *
-   * Two sources and no third: the roster's own names, and the aliases somebody
-   * has recorded. There is deliberately no partial or surname match — a shift
-   * attributed to the wrong engineer is worse than one attributed to nobody,
-   * because nobody looks at it again. An unrecognised spelling is shown as
-   * unmatched instead, which is a question somebody answers once.
+   * Three sources and no fourth: somebody's own full name, an alias somebody
+   * recorded, and a **first name that belongs to exactly one person** — which is
+   * what the 4WLA's Resource row is actually filled in with. There is still no
+   * surname match and no near miss: a shift attributed to the wrong engineer is
+   * worse than one attributed to nobody, because nobody looks at it again. An
+   * unrecognised spelling is shown as unmatched instead, which is a question
+   * somebody answers once.
    *
-   * The roster name wins over an alias pointing somewhere else: a name that *is*
-   * somebody's is theirs.
+   * They are added weakest first so the stronger answer wins. A full name beats an
+   * alias pointing elsewhere — a name that *is* somebody's is theirs — and both
+   * beat a first name, which is the loosest of the three.
    */
   function nameRegister(people, aliases = []) {
     const map = new Map();
+
+    /* Weakest first, so the stronger answer overwrites it. A first name is the
+       loosest of the three and an alias somebody typed is worth more than it;
+       somebody's own full name is worth more than either. */
+    for (const [key, id] of uniqueFirstNames(people)) map.set(key, id);
     for (const a of aliases || []) {
       const key = foldName(a.alias);
       if (key) map.set(key, a.person_id);
@@ -28548,6 +28556,57 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       if (key) map.set(key, p.id);
     }
     return map;
+  }
+
+  /**
+   * First name to person, for the names that belong to exactly one of them.
+   *
+   * The 4WLA's Resource row is filled in by hand at speed and it says "Victor",
+   * not "Victor Okonkwo" — so a register that only knew full names matched almost
+   * nothing on a real sheet. A first name is a deliberate convention here rather
+   * than a guess at a spelling, which is what makes this different from matching
+   * on a surname or a near miss.
+   *
+   * **Only where it is unambiguous.** Two people called Victor and the name maps
+   * to neither: picking one would put a shift against the wrong engineer, which is
+   * the one outcome this module is built to avoid, and it would do it silently
+   * because both answers look equally plausible on screen. The pair goes to the
+   * unmatched list instead, where `ambiguousFirstNames()` lets the interface say
+   * *why* it could not place the name — the answer is an alias, once, and then it
+   * is settled for good.
+   *
+   * A roster name that is already one word registers as a full name anyway, so
+   * this only ever adds keys; it never changes what a complete name means.
+   */
+  function uniqueFirstNames(people) {
+    const seen = new Map();
+    for (const person of people || []) {
+      const first = foldName(String(person.name || '').trim().split(/\s+/)[0]);
+      if (!first) continue;
+      if (seen.has(first)) seen.get(first).push(person.id);
+      else seen.set(first, [person.id]);
+    }
+    return [...seen.entries()]
+      .filter(([, ids]) => ids.length === 1)
+      .map(([key, ids]) => [key, ids[0]]);
+  }
+
+  /**
+   * The first names more than one person answers to.
+   *
+   * Reported rather than resolved. "Nobody on the roster is called that" and "two
+   * people are, and I will not choose between them" are different problems with
+   * different fixes, and a list that ran them together would send somebody looking
+   * for a missing person who is already there twice.
+   */
+  function ambiguousFirstNames(people) {
+    const seen = new Map();
+    for (const person of people || []) {
+      const first = foldName(String(person.name || '').trim().split(/\s+/)[0]);
+      if (!first) continue;
+      seen.set(first, (seen.get(first) || 0) + 1);
+    }
+    return new Set([...seen.entries()].filter(([, n]) => n > 1).map(([key]) => key));
   }
 
   /**
@@ -28645,6 +28704,8 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "SHIFTS", { get: () => SHIFTS, enumerable: true });
   Object.defineProperty(__x, "foldName", { get: () => foldName, enumerable: true });
   Object.defineProperty(__x, "nameRegister", { get: () => nameRegister, enumerable: true });
+  Object.defineProperty(__x, "uniqueFirstNames", { get: () => uniqueFirstNames, enumerable: true });
+  Object.defineProperty(__x, "ambiguousFirstNames", { get: () => ambiguousFirstNames, enumerable: true });
   Object.defineProperty(__x, "newestPerKey", { get: () => newestPerKey, enumerable: true });
   Object.defineProperty(__x, "resourceAssignments", { get: () => resourceAssignments, enumerable: true });
   Object.defineProperty(__x, "availability", { get: () => availability, enumerable: true });
@@ -30881,19 +30942,35 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const from = days[0];
     const to = days[days.length - 1];
 
-    const [people, locations, leave, planRows, laRows, categories] = await Promise.all([
-      rc.listPeople({ scheduledOnly: true }),
-      rc.listLocations(),
-      // Three weeks out, not one: you find out somebody is off when you try to
-      // staff the day, which is a fortnight too late to do anything about it.
-      rc.listLeave(from, toISO(addDays(startMs, 20))),
-      rc.listPlan(from, to),
-      // What BART has asked for this week. Administrators only, so a member sees
-      // the plan without the demand behind it, which is correct.
-      rc.lookaheadForWeek(from).catch(() => []),
-      rc.listCategories(),
-    ]);
+    const [people, locations, leave, planRows, everyLaRow, categories, aliases, snapshots, everybody] =
+      await Promise.all([
+        rc.listPeople({ scheduledOnly: true }),
+        rc.listLocations(),
+        // Three weeks out, not one: you find out somebody is off when you try to
+        // staff the day, which is a fortnight too late to do anything about it.
+        rc.listLeave(from, toISO(addDays(startMs, 20))),
+        rc.listPlan(from, to),
+        // What BART has asked for this week. Administrators only, so a member sees
+        // the plan without the demand behind it, which is correct.
+        rc.lookaheadForWeek(from).catch(() => []),
+        rc.listCategories(),
+        // Which spellings are whose. Without them only a full name matches, and
+        // the Resource row is filled in with first names.
+        rc.listPersonAliases().catch(() => []),
+        rc.listSnapshots({ limit: 20 }).catch(() => []),
+        // Everybody, not just the scheduled: a name in the workbook belongs to
+        // whoever it belongs to, and filtering the register would leave a real
+        // person reading as unmatched.
+        rc.listPeople().catch(() => []),
+      ]);
     const locs = byId(locations);
+
+    /* Who the 4WLA names, per person per day. The same reading the Resources tab
+       and the huddle make, from the same two functions, so the three cannot
+       disagree about where somebody is. */
+    const laRows = newestPerKey(everyLaRow, new Map(snapshots.map((s, i) => [s.id, i])));
+    const { byPerson: askedFor } = resourceAssignments(
+      laRows, nameRegister(everybody.length ? everybody : people, aliases));
     const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
     const soon = leave.filter((l) => l.start_date > to);
 
@@ -30926,6 +31003,36 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
         if (state.state === 'leave') return el('td', {}, [badge('Leave', 'muted')]);
         if (state.state === 'non-working') return el('td', { class: 'rc-inactive' }, [el('span', { text: '·' })]);
         if (!entry) {
+          /* What the 4WLA asks of *this* person on *this* day, where the plan is
+             silent — the workbook names people on its Resource row, and until that
+             was read the week plan could only offer every row for the week and let
+             somebody remember who was wanted. Shown only where nothing is planned:
+             where a day is planned the plan is the answer, and it was a decision
+             somebody took. */
+          const asked = askedFor.get(person.id)?.get(iso) || [];
+          if (asked.length && rc.isAdmin()) {
+            const row = asked[0];
+            return el('td', {}, [
+              el('div', { class: 'rc-res-asked' }, [
+                el('span', { class: 'rc-eyebrow', text: '4WLA' }),
+                el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 40) }),
+                el('div', {
+                  class: 'rc-hint',
+                  text: row.raw_location || locs.get(row.location_id)?.name || '',
+                }),
+              ]),
+              el('button', {
+                class: 'cx-btn mini',
+                text: asked.length > 1 ? `Plan it (+${asked.length - 1} more)` : 'Plan it',
+                title: `The 4WLA names ${person.name} here. This fills the plan in from that row `
+                  + 'and keeps the link, so a block recorded later points at the row BART '
+                  + 'themselves scheduled.',
+                onClick: () => planFromLookahead({
+                  person, iso, laRows, locations, categories, locs, root, row,
+                }),
+              }),
+            ]);
+          }
           return el('td', {}, [rc.isAdmin() && laRows.length
             ? el('button', {
               class: 'cx-btn mini ghost',
@@ -30987,9 +31094,12 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     root.appendChild(el('p', {
       class: 'rc-hint',
       text: laRows.length
-        ? `The look-ahead asks for ${laRows.length} row(s) this week. The + on an empty day plans `
-          + 'against one of them, and the plan then carries the link — which is what lets a block '
-          + 'later be recorded against the row BART themselves scheduled.'
+        ? `The look-ahead asks for ${laRows.length} row(s) this week. Where its Resource row names `
+          + 'somebody, their empty day says so and "Plan it" fills the plan in from that row; where '
+          + 'it names nobody, the + offers every row for the week. Either way the plan carries the '
+          + 'link, which is what lets a block later be recorded against the row BART themselves '
+          + 'scheduled. A bare first name matches, as long as only one person on the roster answers '
+          + 'to it — Resources lists the names that could not be placed.'
         : 'Nothing read from the look-ahead for this week yet. Read it in Look-ahead → Check now '
           + 'and the empty days here will offer what it asks for.',
     }));
@@ -31086,12 +31196,17 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
    * points at the row BART themselves scheduled rather than at a description
    * somebody typed.
    */
-  function planFromLookahead({ person, iso, laRows, locations, categories, locs, root }) {
+  function planFromLookahead({ person, iso, laRows, locations, categories, locs, root, row = null }) {
     const wanted = laRows.filter((r) => !r.cells || !Object.keys(r.cells).length || r.cells[iso]);
     const rows = wanted.length ? wanted : laRows;
 
+    /* The row the workbook named this person on, already chosen. Nothing is
+       written without the confirm — the look-ahead proposes and a person assigns,
+       which is the rule this whole module is built on — but it no longer asks
+       somebody to find, in a list of every row for the week, the one it already
+       knows the answer to. */
     const pick = selectInput({
-      value: '',
+      value: row && rows.some((r) => r.id === row.id) ? row.id : '',
       placeholder: '— nothing from the look-ahead —',
       options: rows.map((r) => ({
         value: r.id,
@@ -31099,9 +31214,12 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           .filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
       })),
     });
-    const task = textInput({ placeholder: 'What they will do' });
+    // Prefilled from the chosen row where there is one, because `change` only
+    // fires when a person picks — a row selected for them would otherwise sit
+    // above three empty fields it already knows the answers to.
+    const task = textInput({ placeholder: 'What they will do', value: row?.raw_label || '' });
     const location = selectInput({
-      value: '',
+      value: row?.location_id || '',
       placeholder: '— location —',
       options: locations.map((l) => ({ value: l.id, label: l.name })),
     });
@@ -31110,7 +31228,11 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       placeholder: '— category —',
       options: categories.map((c) => ({ value: c.id, label: c.name })),
     });
-    const shift = selectInput({ value: 'day', options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })) });
+    const meaning = String(row?.cells?.[iso] || '').toLowerCase();
+    const shift = selectInput({
+      value: /night/.test(meaning) ? 'night' : /possession|blanket/.test(meaning) ? 'possession' : 'day',
+      options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })),
+    });
 
     // Choosing a row fills the rest in. It is a starting point, not a lock —
     // what the look-ahead calls an activity and what you would tell somebody to
@@ -33585,7 +33707,8 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
   const { textInput, selectInput, toast, badge, checkbox, field, emptyState, promptDialog } = __req("ui/components.js");
 
 
-  const { SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, newestPerKey, resourceAssignments, foldName } = __req("ui/rc_util.js");
+  const { SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, newestPerKey, resourceAssignments, foldName, ambiguousFirstNames } = __req("ui/rc_util.js");
+
 
 
 
@@ -33632,6 +33755,11 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
     const cats = byId(categories);
     const register = nameRegister(people, aliases);
     const { byPerson, unmatched } = resourceAssignments(laRows, register);
+    /* "Nobody is called that" and "two people are, and I will not choose" are
+       different problems with different fixes, and a list that ran them together
+       would send somebody looking for a person who is already on the roster
+       twice. */
+    const shared = ambiguousFirstNames(people);
 
     /* Only the days somebody works, unless asked otherwise. `showQuietDays` is
        about the columns; a person who works none of them still has a row, because
@@ -33843,7 +33971,15 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
             el('th', { text: 'On' }), el('th', { text: '' }),
           ])]),
           el('tbody', {}, unmatched.map((u) => el('tr', {}, [
-            el('td', { text: u.name }),
+            el('td', {}, [
+              el('div', { text: u.name }),
+              shared.has(foldName(u.name))
+                ? el('div', {
+                  class: 'rc-hint',
+                  text: 'more than one person is called that — say which',
+                })
+                : null,
+            ].filter(Boolean)),
             el('td', { class: 'rc-num', text: String(u.days.size) }),
             el('td', { class: 'rc-hint', text: u.rows.map((r) => r.raw_label || '').filter(Boolean).join(', ').slice(0, 60) }),
             el('td', {}, rc.isAdmin() ? [
@@ -33867,9 +34003,11 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
       root.appendChild(el('p', {
         class: 'rc-hint',
         text: 'These are the names the 4WLA has that the roster cannot place, so the rows above are '
-          + 'missing them. Nothing is matched on a surname or a set of initials: the register says '
-          + 'which spellings are whose, and a name it does not know is asked about once rather than '
-          + 'guessed at every week.',
+          + 'missing them. A bare first name does match, where exactly one person on the roster '
+          + 'answers to it — that is what the Resource row is filled in with. Nothing is matched on '
+          + 'a surname or a set of initials, and a first name two people share matches neither: '
+          + 'picking one would put a shift against the wrong engineer, silently, because both '
+          + 'answers look equally right on screen. Either way the answer is an alias, once.',
       }));
     }
 

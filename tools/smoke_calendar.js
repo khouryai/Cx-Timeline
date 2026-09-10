@@ -113,6 +113,16 @@ function fakeSdk() {
       // — the meeting is fifteen people in practice, not three.
       { id: 'p6', user_id: null, name: 'Tom', title: 'Signalling Technician', subsystem: 'IXL', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
       { id: 'p7', user_id: null, name: 'Uma', title: 'Comms Engineer', subsystem: 'SCADA', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
+      /* Full names, because the 4WLA's Resource row is filled in with first
+         names and a roster of one-word names would never exercise that.
+         `Victor` belongs to exactly one of them and matches; `Lena` belongs to
+         two and matches neither — picking one would put a shift against the
+         wrong engineer, silently, because both answers look equally right.
+         All three are stood down from the meeting so the huddle and week-plan
+         counts below are unchanged by their being here. */
+      { id: 'p8', user_id: null, name: 'Victor Okonkwo', title: 'Test Engineer', subsystem: 'ATS', role: 'member', active: true, scheduled: false, working_days: [1, 2, 3, 4, 5] },
+      { id: 'p9', user_id: null, name: 'Lena Fischer', title: 'Test Engineer', subsystem: 'IXL', role: 'member', active: true, scheduled: false, working_days: [1, 2, 3, 4, 5] },
+      { id: 'p10', user_id: null, name: 'Lena Brandt', title: 'Test Technician', subsystem: 'IXL', role: 'member', active: true, scheduled: false, working_days: [1, 2, 3, 4, 5] },
     ],
     rc_locations: [
       { id: 'l1', name: 'TPSS 12', code: 'T12', active: true },
@@ -333,11 +343,16 @@ function fakeSdk() {
       cells: {},
       bart_marks: {},
       // Named for today, so the Resources grid has a 4WLA block on a real column.
+      /* Bare first names, which is what the Resource row is actually filled in
+         with — never "Victor Okonkwo". Keyed on the Monday of this week rather
+         than on today, so the week plan (which draws Monday to Friday) has the
+         cell whatever day the suite happens to run. */
       resources: { [(() => {
         const now = new Date();
-        return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+        const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+        return new Date(t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000)
           .toISOString().slice(0, 10);
-      })()]: 'Priya' },
+      })()]: 'Priya, Victor, Lena' },
     }],
     rc_person_alias: [],
     rc_change_events: [
@@ -1240,6 +1255,39 @@ async function main() {
   check('and says how many can actually be staffed each day',
     /\d+ of 6/.test(weekText), weekText.split('\n').find((l) => / of \d/.test(l)) || '');
 
+  /* ── What the 4WLA asks of a named person ─────────────────────────────
+     The workbook names people on its Resource row, so an empty day for somebody
+     it named says what is wanted rather than offering every row for the week and
+     leaving whoever is planning to remember who it was for. Only where the plan
+     is silent: where a day is planned the plan is the answer, and it was a
+     decision somebody took. */
+  const askedCell = page.locator('#rc-frame tbody tr', { hasText: 'Priya' })
+    .locator('.rc-res-asked').first();
+  check('the week plan says what the 4WLA asks of a person it named',
+    (await askedCell.count()) === 1,
+    (await page.locator('#rc-frame tbody tr', { hasText: 'Priya' }).innerText())
+      .replace(/\n/g, ' | ').slice(0, 90));
+  check('and it is one press from being planned',
+    (await page.locator('#rc-frame tbody tr', { hasText: 'Priya' })
+      .locator('button', { hasText: 'Plan it' }).count()) === 1);
+
+  /* The press opens the dialog with that row already chosen and the rest filled
+     in from it — the look-ahead still only proposes, but it no longer asks
+     somebody to find, among every row for the week, the one it already knows. */
+  await page.locator('#rc-frame tbody tr', { hasText: 'Priya' })
+    .locator('button', { hasText: 'Plan it' }).click();
+  await page.waitForSelector('.cx-modal');
+  check('the row it named is already chosen',
+    (await page.locator('.cx-modal select').first().inputValue()) === 'lar2');
+  check('and what and where are filled in from it',
+    (await page.locator('.cx-modal input[placeholder="What they will do"]').inputValue())
+      === 'IXL Regression Testing');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Plan it' }).click();
+  await page.waitForTimeout(600);
+  check('confirming writes a plan entry that carries the look-ahead link',
+    await page.evaluate(() => window.__rc.rows.rc_plan_entries
+      .some((e) => e.person_id === 'p3' && e.lookahead_row_id === 'lar2')));
+
   /* ── The look-ahead and the SARs ──────────────────────────────────────── */
   console.log('\nThe look-ahead register');
   await page.locator('#rc-frame .rc-tab', { hasText: 'Look-ahead' }).click();
@@ -1593,6 +1641,29 @@ async function main() {
      worse than one against nobody, because nobody looks at it again. */
   check('a name the roster cannot place is named, not dropped',
     /Named in the 4WLA, not on the roster/.test(resText) && /Okafor/.test(resText));
+
+  /* ── A bare first name ────────────────────────────────────────────────
+     What the Resource row is actually filled in with. A register that only knew
+     full names matched almost nothing on a real sheet. */
+  check('a bare first name maps to the one person who answers to it',
+    (await page.locator('#rc-frame .rc-resources tr', { hasText: 'Victor Okonkwo' })
+      .locator('.rc-res-asked').count()) >= 1);
+  check('and it is not reported as a name nobody could place',
+    !/^Victor$/m.test(resText), resText.split('\n').filter((l) => /^Victor/.test(l)).join(' | '));
+
+  /* Two people answer to "Lena". Picking one would put a shift against the
+     wrong engineer, and it would do it silently — both answers look equally
+     right on screen — so it matches neither and says which problem it is. */
+  const lena = page.locator('#rc-frame tbody tr')
+    .filter({ has: page.locator('td div', { hasText: /^Lena$/ }) }).first();
+  check('a first name two people share matches neither',
+    (await page.locator('#rc-frame .rc-resources tr', { hasText: 'Lena Fischer' })
+      .locator('.rc-res-asked').count()) === 0
+    && (await page.locator('#rc-frame .rc-resources tr', { hasText: 'Lena Brandt' })
+      .locator('.rc-res-asked').count()) === 0);
+  check('and it says that is why, rather than "nobody is called that"',
+    /more than one person is called that/.test(await lena.innerText()),
+    (await lena.innerText()).replace(/\n/g, ' | ').slice(0, 90));
   check('and it offers to record whose spelling it is',
     (await page.locator('#rc-frame button', { hasText: 'That is somebody' }).count()) >= 1);
 

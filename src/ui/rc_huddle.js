@@ -1413,19 +1413,35 @@ export async function renderWeek(root) {
   const from = days[0];
   const to = days[days.length - 1];
 
-  const [people, locations, leave, planRows, laRows, categories] = await Promise.all([
-    rc.listPeople({ scheduledOnly: true }),
-    rc.listLocations(),
-    // Three weeks out, not one: you find out somebody is off when you try to
-    // staff the day, which is a fortnight too late to do anything about it.
-    rc.listLeave(from, toISO(addDays(startMs, 20))),
-    rc.listPlan(from, to),
-    // What BART has asked for this week. Administrators only, so a member sees
-    // the plan without the demand behind it, which is correct.
-    rc.lookaheadForWeek(from).catch(() => []),
-    rc.listCategories(),
-  ]);
+  const [people, locations, leave, planRows, everyLaRow, categories, aliases, snapshots, everybody] =
+    await Promise.all([
+      rc.listPeople({ scheduledOnly: true }),
+      rc.listLocations(),
+      // Three weeks out, not one: you find out somebody is off when you try to
+      // staff the day, which is a fortnight too late to do anything about it.
+      rc.listLeave(from, toISO(addDays(startMs, 20))),
+      rc.listPlan(from, to),
+      // What BART has asked for this week. Administrators only, so a member sees
+      // the plan without the demand behind it, which is correct.
+      rc.lookaheadForWeek(from).catch(() => []),
+      rc.listCategories(),
+      // Which spellings are whose. Without them only a full name matches, and
+      // the Resource row is filled in with first names.
+      rc.listPersonAliases().catch(() => []),
+      rc.listSnapshots({ limit: 20 }).catch(() => []),
+      // Everybody, not just the scheduled: a name in the workbook belongs to
+      // whoever it belongs to, and filtering the register would leave a real
+      // person reading as unmatched.
+      rc.listPeople().catch(() => []),
+    ]);
   const locs = byId(locations);
+
+  /* Who the 4WLA names, per person per day. The same reading the Resources tab
+     and the huddle make, from the same two functions, so the three cannot
+     disagree about where somebody is. */
+  const laRows = newestPerKey(everyLaRow, new Map(snapshots.map((s, i) => [s.id, i])));
+  const { byPerson: askedFor } = resourceAssignments(
+    laRows, nameRegister(everybody.length ? everybody : people, aliases));
   const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
   const soon = leave.filter((l) => l.start_date > to);
 
@@ -1458,6 +1474,36 @@ export async function renderWeek(root) {
       if (state.state === 'leave') return el('td', {}, [badge('Leave', 'muted')]);
       if (state.state === 'non-working') return el('td', { class: 'rc-inactive' }, [el('span', { text: '·' })]);
       if (!entry) {
+        /* What the 4WLA asks of *this* person on *this* day, where the plan is
+           silent — the workbook names people on its Resource row, and until that
+           was read the week plan could only offer every row for the week and let
+           somebody remember who was wanted. Shown only where nothing is planned:
+           where a day is planned the plan is the answer, and it was a decision
+           somebody took. */
+        const asked = askedFor.get(person.id)?.get(iso) || [];
+        if (asked.length && rc.isAdmin()) {
+          const row = asked[0];
+          return el('td', {}, [
+            el('div', { class: 'rc-res-asked' }, [
+              el('span', { class: 'rc-eyebrow', text: '4WLA' }),
+              el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 40) }),
+              el('div', {
+                class: 'rc-hint',
+                text: row.raw_location || locs.get(row.location_id)?.name || '',
+              }),
+            ]),
+            el('button', {
+              class: 'cx-btn mini',
+              text: asked.length > 1 ? `Plan it (+${asked.length - 1} more)` : 'Plan it',
+              title: `The 4WLA names ${person.name} here. This fills the plan in from that row `
+                + 'and keeps the link, so a block recorded later points at the row BART '
+                + 'themselves scheduled.',
+              onClick: () => planFromLookahead({
+                person, iso, laRows, locations, categories, locs, root, row,
+              }),
+            }),
+          ]);
+        }
         return el('td', {}, [rc.isAdmin() && laRows.length
           ? el('button', {
             class: 'cx-btn mini ghost',
@@ -1519,9 +1565,12 @@ export async function renderWeek(root) {
   root.appendChild(el('p', {
     class: 'rc-hint',
     text: laRows.length
-      ? `The look-ahead asks for ${laRows.length} row(s) this week. The + on an empty day plans `
-        + 'against one of them, and the plan then carries the link — which is what lets a block '
-        + 'later be recorded against the row BART themselves scheduled.'
+      ? `The look-ahead asks for ${laRows.length} row(s) this week. Where its Resource row names `
+        + 'somebody, their empty day says so and "Plan it" fills the plan in from that row; where '
+        + 'it names nobody, the + offers every row for the week. Either way the plan carries the '
+        + 'link, which is what lets a block later be recorded against the row BART themselves '
+        + 'scheduled. A bare first name matches, as long as only one person on the roster answers '
+        + 'to it — Resources lists the names that could not be placed.'
       : 'Nothing read from the look-ahead for this week yet. Read it in Look-ahead → Check now '
         + 'and the empty days here will offer what it asks for.',
   }));
@@ -1618,12 +1667,17 @@ async function revisePlan(entry, person, { locations, categories, locs, root }) 
  * points at the row BART themselves scheduled rather than at a description
  * somebody typed.
  */
-function planFromLookahead({ person, iso, laRows, locations, categories, locs, root }) {
+function planFromLookahead({ person, iso, laRows, locations, categories, locs, root, row = null }) {
   const wanted = laRows.filter((r) => !r.cells || !Object.keys(r.cells).length || r.cells[iso]);
   const rows = wanted.length ? wanted : laRows;
 
+  /* The row the workbook named this person on, already chosen. Nothing is
+     written without the confirm — the look-ahead proposes and a person assigns,
+     which is the rule this whole module is built on — but it no longer asks
+     somebody to find, in a list of every row for the week, the one it already
+     knows the answer to. */
   const pick = selectInput({
-    value: '',
+    value: row && rows.some((r) => r.id === row.id) ? row.id : '',
     placeholder: '— nothing from the look-ahead —',
     options: rows.map((r) => ({
       value: r.id,
@@ -1631,9 +1685,12 @@ function planFromLookahead({ person, iso, laRows, locations, categories, locs, r
         .filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
     })),
   });
-  const task = textInput({ placeholder: 'What they will do' });
+  // Prefilled from the chosen row where there is one, because `change` only
+  // fires when a person picks — a row selected for them would otherwise sit
+  // above three empty fields it already knows the answers to.
+  const task = textInput({ placeholder: 'What they will do', value: row?.raw_label || '' });
   const location = selectInput({
-    value: '',
+    value: row?.location_id || '',
     placeholder: '— location —',
     options: locations.map((l) => ({ value: l.id, label: l.name })),
   });
@@ -1642,7 +1699,11 @@ function planFromLookahead({ person, iso, laRows, locations, categories, locs, r
     placeholder: '— category —',
     options: categories.map((c) => ({ value: c.id, label: c.name })),
   });
-  const shift = selectInput({ value: 'day', options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })) });
+  const meaning = String(row?.cells?.[iso] || '').toLowerCase();
+  const shift = selectInput({
+    value: /night/.test(meaning) ? 'night' : /possession|blanket/.test(meaning) ? 'possession' : 'day',
+    options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })),
+  });
 
   // Choosing a row fills the rest in. It is a starting point, not a lock —
   // what the look-ahead calls an activity and what you would tell somebody to

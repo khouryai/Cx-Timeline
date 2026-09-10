@@ -526,14 +526,21 @@ subscribes. That is what keeps the graph acyclic.
   existing kind so no `rc_change_events` check constraint has to be widened in
   a project that already has one.
 - **A name in a spreadsheet is matched exactly or reported, never guessed.**
-  `rc_person_alias` is the register, and `nameRegister()` builds the lookup from
-  it plus the roster's own names — nothing matches on a surname, a set of
-  initials or a near miss. A shift attributed to the wrong engineer is worse
-  than one attributed to nobody, because nobody looks at it again. So
-  `resourceAssignments()` returns the unmatched spellings alongside the matched
-  ones and the Resources tab lists them for somebody to map in one click, the
-  same answer `rc_location_alias` gives for a place. `foldName()` folds case and
-  punctuation and nothing else.
+  `nameRegister()` knows three things and no fourth: somebody's own full name, an
+  alias in `rc_person_alias`, and a **first name exactly one person answers to**
+  — which is what the Resource row is actually filled in with, so a register that
+  only knew full names matched almost nothing on a real sheet. They go in weakest
+  first, so a full name beats an alias pointing elsewhere and both beat a first
+  name. There is still no surname match and no near miss. A first name **two
+  people share matches neither**: picking one would put a shift against the wrong
+  engineer, and it would do it silently, because both answers look equally right
+  on screen — `ambiguousFirstNames()` exists so the interface can say *which*
+  problem it is, since "nobody is called that" and "two people are" have
+  different fixes and a list that ran them together would send somebody looking
+  for a person already on the roster twice. `resourceAssignments()` returns the
+  unmatched spellings alongside the matched ones and the Resources tab maps them
+  in one click, the same answer `rc_location_alias` gives for a place.
+  `foldName()` folds case and punctuation and nothing else.
 - **Unscheduled rows are hidden, and a heading is not exempt.** Headings used to
   be kept whatever the switch said, with only the ones left dangling at the very
   end trimmed — so any paint in the activity columns, or one stray colour that
@@ -579,6 +586,17 @@ subscribes. That is what keeps the graph acyclic.
   day, and days already planned, on leave or not worked are skipped and counted
   rather than doubled — nothing here supersedes anything, which is what the week
   plan's cell is for.
+- **The week plan asks the 4WLA who, not just what.** An empty day for somebody
+  the Resource row names says what is wanted and offers "Plan it", which opens
+  the same dialog with that row already chosen and the task, location and shift
+  filled in from it. The look-ahead still only *proposes* — nothing is written
+  without the confirm, which is the rule this module is built on — but it no
+  longer asks whoever is planning to find, among every row for the week, the one
+  it already knows the answer to. Shown only where the plan is silent, for the
+  same reason the huddle is: where a day is planned the plan is the answer, and
+  it was a decision somebody took. The week plan, the Resources tab and the
+  huddle all reach it through `newestPerKey()` + `nameRegister()` +
+  `resourceAssignments()`, so the three cannot disagree about where somebody is.
 - **The huddle asks about what was wanted, not only about what was planned.**
   `askedLine()` shows the 4WLA's ask for a person on a day, and *only where the
   plan is silent*: where a day is planned the plan is the answer — it was a
@@ -912,7 +930,7 @@ node tools/test_dist.js              #  41 checks — every deployment shape, an
 node tools/test_lookahead.js         #  81 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 200 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 209 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
