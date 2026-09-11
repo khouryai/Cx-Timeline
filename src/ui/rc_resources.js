@@ -43,8 +43,8 @@ import {
 } from './components.js';
 import {
   SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability,
-  notifyChanged, formModal, nameRegister, resourceAssignments, foldName,
-  ambiguousFirstNames, lookaheadWithResources,
+  notifyChanged, formModal, nameRegister, foldName,
+  ambiguousFirstNames, lookaheadWithResources, assignmentIndex,
 } from './rc_util.js';
 
 /** Which week is on screen. Null means the one containing today. */
@@ -85,7 +85,12 @@ export async function render(root) {
   const locs = byId(locations);
   const cats = byId(categories);
   const register = nameRegister(people, aliases);
-  const { byPerson, unmatched } = resourceAssignments(laRows, register);
+  /* The 4WLA's Resource row *is* the plan for the days it names — derived, never
+     written — and a stored entry is somebody overriding it or planning a day the
+     sheet says nothing about. The same reading the week plan and the huddle
+     make, from the same function. */
+  const index = assignmentIndex({ planRows, laRows, register });
+  const { byPerson, unmatched } = index;
   /* "Nobody is called that" and "two people are, and I will not choose" are
      different problems with different fixes, and a list that ran them together
      would send somebody looking for a person who is already on the roster
@@ -150,15 +155,11 @@ export async function render(root) {
 
   /* ── The grid ─────────────────────────────────────────────────────────── */
 
-  const planFor = (personId, iso) =>
-    planRows.filter((p) => p.person_id === personId && p.work_date === iso);
-
   const body = el('tbody');
   for (const person of people) {
     const wanted = byPerson.get(person.id) || new Map();
     const cells = columns.map((iso) => {
       const state = availability(person, iso, leave);
-      const entries = planFor(person.id, iso);
       const asked = wanted.get(iso) || [];
       const classes = ['rc-res-cell'];
       if (iso === today) classes.push('rc-res-today');
@@ -166,7 +167,7 @@ export async function render(root) {
       if (state.state === 'leave') {
         return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [badge('Leave', 'muted')]);
       }
-      if (state.state === 'non-working' && !entries.length && !asked.length) {
+      if (state.state === 'non-working' && !index.at(person.id, iso) && !asked.length) {
         return el('td', {
           class: `${classes.join(' ')} rc-inactive`,
           'data-label': dayLabel(iso),
@@ -174,36 +175,42 @@ export async function render(root) {
       }
 
       const parts = [];
-      for (const entry of entries) {
+      const entry = index.at(person.id, iso);
+      if (entry) {
         parts.push(el('div', { class: 'rc-res-job' }, [
           el('div', { text: entry.task || '—' }),
           el('div', { class: 'rc-hint', text: [
-            locs.get(entry.location_id)?.name,
+            locs.get(entry.location_id)?.name || entry.raw_location,
             cats.get(entry.category_id)?.name,
             entry.shift !== 'day' ? entry.shift : null,
           ].filter(Boolean).join(' · ') }),
-        ]));
+          entry.from_lookahead
+            ? badge(entry.also_named_on
+              ? `From 4WLA (+${entry.also_named_on} more)` : 'From 4WLA', 'info')
+            : null,
+        ].filter(Boolean)));
       }
 
-      /* What the 4WLA asks of this person on this day, whether or not anybody
-         has planned it. Drawn beside the plan rather than instead of it: the
-         interesting case is the two disagreeing, and a view that shows only one
-         of them cannot show that at all. */
-      for (const row of asked) {
-        const agrees = entries.some((e) => e.lookahead_row_id === row.id);
-        parts.push(el('div', {
-          class: 'rc-res-asked' + (agrees ? ' agrees' : ''),
-          title: agrees
-            ? 'The plan for this day is against this look-ahead row.'
-            : 'The 4WLA names this person here and the plan does not say so.',
-        }, [
-          el('span', { class: 'rc-eyebrow', text: '4WLA' }),
-          el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 44) }),
-          el('div', {
-            class: 'rc-hint',
-            text: row.raw_location || locs.get(row.location_id)?.name || '',
-          }),
-        ]));
+      /* The one case worth drawing twice: a stored entry that overrides what the
+         sheet asks for. That is a decision somebody took against the workbook,
+         and seeing the two side by side is the whole reason this view exists.
+         Where they agree — which is now the normal case, because the sheet *is*
+         the plan — there is nothing to reconcile and only one line is drawn. */
+      if (entry && !entry.from_lookahead) {
+        for (const row of asked) {
+          if (entry.lookahead_row_id === row.id) continue;
+          parts.push(el('div', {
+            class: 'rc-res-asked',
+            title: 'The 4WLA names this person here and the plan for the day says otherwise.',
+          }, [
+            el('span', { class: 'rc-eyebrow', text: '4WLA' }),
+            el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 44) }),
+            el('div', {
+              class: 'rc-hint',
+              text: row.raw_location || locs.get(row.location_id)?.name || '',
+            }),
+          ]));
+        }
       }
 
       if (!parts.length) {
@@ -219,16 +226,6 @@ export async function render(root) {
             }),
           }),
         ]);
-      }
-      if (rc.canWrite() && !entries.length) {
-        parts.push(el('button', {
-          class: 'cx-btn mini ghost',
-          text: 'Plan it',
-          onClick: () => assign({
-            people, locations, categories, laRows, locs, days, redraw, person, iso,
-            row: asked[0] || null,
-          }),
-        }));
       }
       return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, parts);
     });
@@ -355,8 +352,11 @@ export async function render(root) {
     class: 'rc-hint',
     text: laRows.length
       ? `The 4WLA names people on ${laRows.filter((r) => Object.keys(r.resources || {}).length).length} `
-        + 'row(s) in these weeks. A "4WLA" block on a day is what BART asked for; the plan beside '
-        + 'it is what was decided. The two disagreeing is the thing worth seeing, so both are drawn.'
+        + 'row(s) in these weeks, and where it names somebody that is their plan for the day — '
+        + 'marked "From 4WLA", derived from the sheet rather than written down, so it follows the '
+        + 'workbook instead of going stale beside it. A plan entry is somebody overriding that, or '
+        + 'planning a day the sheet says nothing about; where an override disagrees with the '
+        + 'sheet, both are drawn, because that is the case worth seeing.'
       : 'No look-ahead rows read for this week yet, so nothing here can say what BART asked for. '
         + 'Read it in Look-ahead → Check now.',
   }));

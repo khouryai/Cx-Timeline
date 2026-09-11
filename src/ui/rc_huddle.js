@@ -34,7 +34,7 @@ import { saveFile } from '../io/exporters.js';
 import {
   STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs,
   dayLabel, byId, availability, notifyChanged, formModal,
-  nameRegister, resourceAssignments, lookaheadWithResources,
+  nameRegister, lookaheadWithResources, assignmentIndex,
 } from './rc_util.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -229,18 +229,18 @@ export async function render(root) {
   const actualByPerson = new Map();
   for (const a of actuals) actualByPerson.set(a.person_id, a);
 
-  const planFor = (personId, iso) =>
-    planRows.find((p) => p.person_id === personId && p.work_date === iso) || null;
-
-  /* Who the 4WLA's Resource rows name, per person per day.
-     This is what lets the meeting ask somebody about the work BART actually
-     wants of them rather than only about the work somebody remembered to plan —
-     the two differing is the interesting case, and until now the second was the
-     only one on screen. `lookaheadWithResources()` has already dropped the
-     copies older snapshots carry and taken the names off the newest one. */
-  const { byPerson: askedFor } = resourceAssignments(
-    laRows, nameRegister(everybody.length ? everybody : people, aliases));
-  const askedOf = (personId, iso) => (askedFor.get(personId)?.get(iso) || []);
+  /* What somebody is doing on a day: the plan where there is one, and the 4WLA
+     where there is not. The Resource row names people, so it *is* the plan for
+     those days — derived, never written — and a stored entry is somebody
+     overriding it or planning a day the sheet says nothing about. Until this
+     existed the meeting asked half the team what they had been planned for and
+     answered "nothing", while the workbook said exactly what. */
+  const index = assignmentIndex({
+    planRows,
+    laRows,
+    register: nameRegister(everybody.length ? everybody : people, aliases),
+  });
+  const planFor = (personId, iso) => index.at(personId, iso);
 
   /* One context, handed to the table, the meeting and the digest alike. They
      are three readings of one day and the moment they are given different
@@ -248,7 +248,6 @@ export async function render(root) {
   const ctx = {
     people, review, plan, planFor, actualByPerson, cats, locs,
     categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
-    askedOf,
   };
 
   root.appendChild(dateBar(date, review, plan, root, ctx));
@@ -525,11 +524,8 @@ function presenter(ctx) {
   if (wasPlanned && !laRow) {
     context.appendChild(badge('not against a look-ahead row', 'muted'));
   }
-  /* And what BART asked of them, where nobody planned it. The room needs that
-     more than the person does: it is the gap between the contract and the day. */
-  if (!wasPlanned && askedLine(ctx, person, review)) {
-    context.appendChild(badge(askedLine(ctx, person, review).slice(0, 52), 'warn'));
-  }
+  // Where the day came from, when it came from the workbook rather than a person.
+  if (fromSheet(wasPlanned)) context.appendChild(fromSheet(wasPlanned));
   for (const b of theirs) {
     context.appendChild(badge(`blocked: ${b.summary.slice(0, 36)}`, 'bad'));
   }
@@ -560,9 +556,7 @@ function presenter(ctx) {
     tomorrow
       ? el('div', { text: tomorrow.task || '—' })
       : el('div', { class: 'rc-hint', text: 'nothing set yet' }),
-    !tomorrow && askedLine(ctx, person, plan)
-      ? el('div', { class: 'rc-hint', text: askedLine(ctx, person, plan) })
-      : null,
+    fromSheet(tomorrow),
   ].filter(Boolean)));
 
   wrap.appendChild(el('div', { class: 'rc-present-move' }, [
@@ -772,25 +766,18 @@ function dateBar(date, review, plan, root, ctx) {
  * exactly alone.
  */
 /**
- * What the 4WLA asks of one person on one day, as a line to read out.
+ * Where a day's plan came from, when it did not come from a person.
  *
- * Only ever shown where the plan is silent. Where a day *is* planned the plan is
- * the answer — it was a decision, taken by somebody, possibly against this very
- * row — and printing BART's wording beside it would invite the meeting to
- * relitigate a call that has already been made. Where nothing is planned it is
- * the difference between "nothing planned" and "nothing planned, and here is
- * what was wanted".
+ * The 4WLA assignment *is* the plan now, so there is nothing to show beside the
+ * plan any more — what is still worth saying is that the workbook said it and
+ * nobody has overridden it. A stored entry needs no badge: somebody decided it,
+ * which is what a row in `rc_plan_entries` means.
  */
-function askedLine(ctx, person, iso) {
-  const rows = ctx.askedOf ? ctx.askedOf(person.id, iso) : [];
-  if (!rows.length) return null;
-  const row = rows[0];
-  const where = row.raw_location || ctx.locs.get(row.location_id)?.name || '';
-  return [
-    `4WLA: ${(row.raw_label || `row ${row.sheet_row}`).slice(0, 44)}`,
-    where,
-    rows.length > 1 ? `and ${rows.length - 1} more` : null,
-  ].filter(Boolean).join(' · ');
+function fromSheet(entry) {
+  if (!entry?.from_lookahead) return null;
+  return badge(entry.also_named_on
+    ? `From 4WLA (+${entry.also_named_on} more)`
+    : 'From 4WLA', 'info');
 }
 
 function personRow(ctx) {
@@ -866,16 +853,9 @@ function personRow(ctx) {
         chain && chain.carries >= 2
           ? badge(`${ordinal(chain.carries + 1)} day`, chain.carries >= 4 ? 'bad' : 'warn')
           : null,
+        fromSheet(wasPlanned),
       ].filter(Boolean))
-      : el('div', {}, [
-        el('span', { class: 'rc-hint', text: 'nothing planned' }),
-        /* Nothing planned is not nothing wanted. Where the look-ahead names
-           this person on this day, the meeting gets to ask about the work
-           rather than about the gap. */
-        askedLine(ctx, person, review)
-          ? el('div', { class: 'rc-hint', text: askedLine(ctx, person, review) })
-          : null,
-      ].filter(Boolean)),
+      : el('span', { class: 'rc-hint', text: 'nothing planned' }),
   ]));
 
   /* What happened. Absence is answered from the leave record rather than
@@ -906,15 +886,10 @@ function personRow(ctx) {
         el('div', { text: tomorrow.task || '—' }),
         el('div', { class: 'rc-hint', text: locs.get(tomorrow.location_id)?.name || '' }),
         tomorrow.carry_chain_id ? badge('Carried over', 'warn') : null,
+        fromSheet(tomorrow),
       ].filter(Boolean))
       : admin
         ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap;align-items:center' }, [
-          /* What BART wants of them tomorrow, so the goal is set against it
-             rather than from memory. Said before the buttons, because it is the
-             thing the answer should be about. */
-          askedLine(ctx, person, plan)
-            ? el('div', { class: 'rc-hint', style: 'flex:1 1 100%', text: askedLine(ctx, person, plan) })
-            : null,
           el('button', {
             class: 'cx-btn mini ghost',
             text: 'Set goal',
@@ -1107,7 +1082,13 @@ function sayMore({ ctx, person, date, plannedEntry, status, redraw, host }) {
  */
 async function commitOutcome({ ctx, person, date, plannedEntry, status, redraw, note = null, file = null }) {
   const clientUuid = newUuid();
-  const chainId = status.id === 'carried' ? carryChainFor(plannedEntry) : null;
+  /* A day the 4WLA planned has no stored row, so there is no id to chain on —
+     and a chain has to start somewhere. It starts at the first carry, which is
+     exactly when something first became stuck: before that nothing had been
+     carried at all. */
+  const chainId = status.id === 'carried'
+    ? (carryChainFor(plannedEntry) || (plannedEntry ? newUuid() : null))
+    : null;
 
   let evidencePath = null;
   if (file) {
@@ -1136,7 +1117,7 @@ async function commitOutcome({ ctx, person, date, plannedEntry, status, redraw, 
   /* A carried task is going to be done tomorrow, and re-typing it is both slow
      and how the chain used to get broken. Rolling it forward here is the only
      place that knows both the outcome and the entry it came from. */
-  if (chainId && plannedEntry && !ctx.planFor(person.id, ctx.plan)) {
+  if (chainId && plannedEntry && !ctx.planFor(person.id, ctx.plan)?.id) {
     try {
       await rollForward(plannedEntry, person, ctx.plan, chainId);
       notifyChanged('plan');
@@ -1434,11 +1415,13 @@ export async function renderWeek(root) {
     ]);
   const locs = byId(locations);
 
-  /* Who the 4WLA names, per person per day. The same reading the Resources tab
-     and the huddle make, through the same functions, so the three cannot
-     disagree about where somebody is. */
-  const { byPerson: askedFor } = resourceAssignments(
-    laRows, nameRegister(everybody.length ? everybody : people, aliases));
+  /* The same reading the Resources tab and the huddle make, through the same
+     function, so the three cannot disagree about where somebody is. */
+  const index = assignmentIndex({
+    planRows,
+    laRows,
+    register: nameRegister(everybody.length ? everybody : people, aliases),
+  });
   const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
   const soon = leave.filter((l) => l.start_date > to);
 
@@ -1467,40 +1450,11 @@ export async function renderWeek(root) {
   for (const person of people) {
     const cells = days.map((iso) => {
       const state = availability(person, iso, thisWeek);
-      const entry = planRows.find((p) => p.person_id === person.id && p.work_date === iso);
+      const entry = index.at(person.id, iso);
       if (state.state === 'leave') return el('td', {}, [badge('Leave', 'muted')]);
       if (state.state === 'non-working') return el('td', { class: 'rc-inactive' }, [el('span', { text: '·' })]);
       if (!entry) {
-        /* What the 4WLA asks of *this* person on *this* day, where the plan is
-           silent — the workbook names people on its Resource row, and until that
-           was read the week plan could only offer every row for the week and let
-           somebody remember who was wanted. Shown only where nothing is planned:
-           where a day is planned the plan is the answer, and it was a decision
-           somebody took. */
-        const asked = askedFor.get(person.id)?.get(iso) || [];
-        if (asked.length && rc.isAdmin()) {
-          const row = asked[0];
-          return el('td', {}, [
-            el('div', { class: 'rc-res-asked' }, [
-              el('span', { class: 'rc-eyebrow', text: '4WLA' }),
-              el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 40) }),
-              el('div', {
-                class: 'rc-hint',
-                text: row.raw_location || locs.get(row.location_id)?.name || '',
-              }),
-            ]),
-            el('button', {
-              class: 'cx-btn mini',
-              text: asked.length > 1 ? `Plan it (+${asked.length - 1} more)` : 'Plan it',
-              title: `The 4WLA names ${person.name} here. This fills the plan in from that row `
-                + 'and keeps the link, so a block recorded later points at the row BART '
-                + 'themselves scheduled.',
-              onClick: () => planFromLookahead({
-                person, iso, laRows, locations, categories, locs, root, row,
-              }),
-            }),
-          ]);
-        }
+        // Nothing planned and nobody named. The + still offers the week's rows.
         return el('td', {}, [rc.isAdmin() && laRows.length
           ? el('button', {
             class: 'cx-btn mini ghost',
@@ -1513,16 +1467,31 @@ export async function renderWeek(root) {
           })
           : el('span', { class: 'rc-hint', text: '—' })]);
       }
+      /* A day the 4WLA planned has no stored row to revise — revising it *is*
+         writing the first one, which is what overriding the sheet means. Both
+         go through the same cell, because to whoever is looking at it the
+         question is the same: change this day. */
       return el('td', {
         class: rc.isAdmin() ? 'rc-clickable' : '',
-        title: rc.isAdmin() ? 'Revise this — the outgoing version stays on the record.' : '',
+        title: rc.isAdmin()
+          ? (entry.from_lookahead
+            ? 'The 4WLA plans this day. Changing it writes a plan entry that overrides the sheet.'
+            : 'Revise this — the outgoing version stays on the record.')
+          : '',
         onClick: rc.isAdmin()
-          ? () => revisePlan(entry, person, { locations, categories, locs, root })
+          ? () => (entry.from_lookahead
+            ? planFromLookahead({
+              person, iso, laRows, locations, categories, locs, root,
+              row: laRows.find((r) => r.id === entry.lookahead_row_id) || null,
+            })
+            : revisePlan(entry, person, { locations, categories, locs, root }))
           : null,
       }, [
         el('div', { text: entry.task || '—' }),
-        el('div', { class: 'rc-hint', text: locs.get(entry.location_id)?.name || '' }),
-        entry.lookahead_row_id ? badge('From look-ahead', 'info') : null,
+        el('div', { class: 'rc-hint', text: locs.get(entry.location_id)?.name
+          || entry.raw_location || '' }),
+        fromSheet(entry),
+        !entry.from_lookahead && entry.lookahead_row_id ? badge('From look-ahead', 'info') : null,
         entry.supersedes_id ? badge('Revised', 'warn') : null,
       ].filter(Boolean));
     });

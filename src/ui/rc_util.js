@@ -380,6 +380,84 @@ export function resourceAssignments(laRows, register) {
 }
 
 /**
+ * What the workbook's wording says the shift is.
+ *
+ * The meaning is the legend's word for the colour, so "Night Shift" and
+ * "Blanket" are the sheet's own vocabulary rather than ours. Anything it does
+ * not recognise is a day shift, which is what an unlabelled cell has always
+ * meant on this programme.
+ */
+export function shiftFor(meaning) {
+  const said = String(meaning || '').toLowerCase();
+  if (/night/.test(said)) return 'night';
+  if (/possession|blanket/.test(said)) return 'possession';
+  return 'day';
+}
+
+/**
+ * What somebody is doing on a day: the plan where there is one, the 4WLA where
+ * there is not.
+ *
+ * **The look-ahead used to propose and a person assigned.** That rule existed
+ * for one reason — the sheet said what and where and *never who*, so a plan
+ * entry had to supply the missing fact, and inventing it would have been the
+ * guess this module refuses everywhere. The Resource row says who. There is no
+ * missing fact left, so asking somebody to press a button is asking them to
+ * re-type what the workbook already states, once per person per day.
+ *
+ * So the 4WLA assignment **is** the plan for that day. It is *derived*, not
+ * written: `rc_plan_entries` is append-only evidence of what somebody decided,
+ * and materialising the sheet into it would store a derivation — the one thing
+ * this codebase is most consistent about not doing — while making the
+ * workbook's authorship indistinguishable from a decision anybody took. It
+ * would also go stale the moment the sheet changed, and need superseding to
+ * correct, which is a revision of something nobody ever revised.
+ *
+ * A stored entry always wins. That is the whole meaning of one existing: it is
+ * somebody overriding the sheet, or planning a day the sheet says nothing about
+ * — an office day, another project, a task carried over. The sheet is the
+ * default; a row is a decision.
+ */
+export function assignmentIndex({ planRows, laRows, register }) {
+  const { byPerson, unmatched } = resourceAssignments(laRows, register);
+
+  const stored = new Map();
+  for (const row of planRows || []) stored.set(`${row.person_id}|${row.work_date}`, row);
+
+  const derived = new Map();
+  for (const [personId, days] of byPerson) {
+    for (const [iso, rows] of days) {
+      const key = `${personId}|${iso}`;
+      if (stored.has(key)) continue;
+      const row = rows[0];
+      derived.set(key, {
+        // Null, and load-bearing: every caller that writes an outcome or rolls a
+        // task forward reads this to decide whether there is a row to point at.
+        id: null,
+        from_lookahead: true,
+        also_named_on: rows.length - 1,
+        person_id: personId,
+        work_date: iso,
+        task: row.raw_label || null,
+        location_id: row.location_id || null,
+        raw_location: row.raw_location || null,
+        category_id: null,
+        shift: shiftFor(row.cells?.[iso]),
+        lookahead_row_id: row.id || null,
+        carry_chain_id: null,
+      });
+    }
+  }
+
+  return {
+    at: (personId, iso) => stored.get(`${personId}|${iso}`) || derived.get(`${personId}|${iso}`) || null,
+    byPerson,
+    unmatched,
+    derived: derived.size,
+  };
+}
+
+/**
  * Whether somebody is available on a date.
  *
  * Leave is the reason this exists. Absence is a different fact from "carried

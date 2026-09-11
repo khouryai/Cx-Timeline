@@ -498,15 +498,35 @@ subscribes. That is what keeps the graph acyclic.
   mismatch does not throw — it prints "undefined → undefined" on the one screen
   somebody reads a year later, which is why there is a check that no event
   describes itself with an `undefined` in it.
-- **The look-ahead proposes; a person assigns.** It says what is wanted and
-  where, and never who — it has no idea who is on the team — so the week plan
-  offers its rows on an empty day and the plan entry still names somebody.
-  Inventing that would be the guess this module refuses everywhere else. The
-  chosen row rides along on `lookahead_row_id`, which is what later lets a
-  block be recorded against the row BART themselves scheduled rather than
-  against a description somebody typed. `ingest()` writes `rc_lookahead_rows`
-  for that join — one row per activity per *week*, with the location resolved
-  through the alias register and never parsed out of the description.
+- **The 4WLA *is* the plan for the days it names — derived, never written.**
+  "The look-ahead proposes; a person assigns" held for one reason: the sheet said
+  what and where and *never who*, so a plan entry had to supply the missing fact
+  and inventing it would have been the guess this module refuses everywhere. The
+  Resource row says who, so there is no missing fact left, and a button asking
+  somebody to confirm it is asking them to re-type what the workbook already
+  states, once per person per day. `assignmentIndex()` answers what somebody is
+  doing on a day: a stored `rc_plan_entries` row where there is one, the 4WLA
+  assignment where there is not.
+  It is **derived** rather than materialised into rows, and that is the whole
+  design. `rc_plan_entries` is append-only evidence of what somebody *decided*;
+  writing the sheet into it would store a derivation — the rule this codebase is
+  most consistent about — make the workbook's authorship indistinguishable from a
+  decision anybody took, go stale the moment the sheet changed, and need a
+  revision to correct something nobody ever revised. A derived day carries
+  `id: null`, which is what every caller reads to know there is no row to point
+  at: `carryChainFor()` has nothing to chain on, so a carry mints the chain at
+  the first carry — which is exactly when something first became stuck — and the
+  roll-forward tests `planFor(...)?.id` so a carry, being a decision, still
+  writes tomorrow and overrides the sheet.
+  **A stored entry always wins**, and that is the whole meaning of one existing:
+  somebody overriding the sheet, or planning a day it says nothing about — an
+  office day, another project, a task carried over. Clicking a derived day in the
+  week plan writes that first row, prefilled from the sheet's own row so the
+  override still carries `lookahead_row_id` — which is what later lets a block be
+  recorded against the row BART themselves scheduled. `ingest()` still writes
+  `rc_lookahead_rows` for that join: one row per activity per *week*, with the
+  location resolved through the alias register and never parsed out of the
+  description.
 - **The look-ahead now says who, and a Resource row is not an activity.** The
   workbook names people by adding a row directly under an activity whose
   description reads "Resource", with the names typed into the day cells and the
@@ -602,26 +622,21 @@ subscribes. That is what keeps the graph acyclic.
   day, and days already planned, on leave or not worked are skipped and counted
   rather than doubled — nothing here supersedes anything, which is what the week
   plan's cell is for.
-- **The week plan asks the 4WLA who, not just what.** An empty day for somebody
-  the Resource row names says what is wanted and offers "Plan it", which opens
-  the same dialog with that row already chosen and the task, location and shift
-  filled in from it. The look-ahead still only *proposes* — nothing is written
-  without the confirm, which is the rule this module is built on — but it no
-  longer asks whoever is planning to find, among every row for the week, the one
-  it already knows the answer to. Shown only where the plan is silent, for the
-  same reason the huddle is: where a day is planned the plan is the answer, and
-  it was a decision somebody took. The week plan, the Resources tab and the
-  huddle all reach it through `newestPerKey()` + `nameRegister()` +
-  `resourceAssignments()`, so the three cannot disagree about where somebody is.
-- **The huddle asks about what was wanted, not only about what was planned.**
-  `askedLine()` shows the 4WLA's ask for a person on a day, and *only where the
-  plan is silent*: where a day is planned the plan is the answer — it was a
-  decision somebody took, possibly against that very row — and printing BART's
-  wording beside it invites the meeting to relitigate a settled call. The huddle
-  reads both the reviewed week and the planned one (`lookaheadBetween`), because
-  on a Friday those are different weeks and a read for one cannot say who was
-  wanted in the other. `newestPerKey()` drops the copies older snapshots carry,
-  or the same activity arrives once per read.
+- **Where a day came from is worth saying; what it asks is not.** `fromSheet()`
+  badges a derived day "From 4WLA" in the week plan, the Resources tab and the
+  huddle. A stored entry needs no badge — a row in that table *means* somebody
+  decided it. This replaced an `askedLine()` that printed the workbook's ask
+  beside the plan, which stopped being useful the moment the ask became the plan:
+  the only case left worth drawing twice is a stored entry that *disagrees* with
+  what the sheet asks, which is a decision taken against the workbook and the
+  whole reason the Resources view exists.
+- **The huddle reads the same index, so half the team stops reading as unplanned.**
+  `planFor()` is `assignmentIndex().at`, so "Was planned" is populated from the
+  4WLA wherever nobody stored a row — before that the meeting asked half the team
+  what they had been planned for and answered "nothing", while the workbook said
+  exactly what. It reads both the reviewed week and the planned one
+  (`lookaheadWithResources`), because on a Friday those are different weeks and a
+  read for one cannot say who was wanted in the other.
 - **Linking an account before it exists is normal, not a failure.**
   `rc_link_account()` used to refuse with "no account exists for x — invite them
   first", which was the commonest answer by a wide margin and the wrong
@@ -946,7 +961,7 @@ node tools/test_dist.js              #  41 checks — every deployment shape, an
 node tools/test_lookahead.js         #  81 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 210 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 212 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser

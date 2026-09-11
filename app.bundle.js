@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 54   Built: 2026-09-11T03:23:06.032Z
+ * Modules: 54   Built: 2026-09-11T04:02:20.315Z
  */
 (function () {
   'use strict';
@@ -29301,6 +29301,84 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /**
+   * What the workbook's wording says the shift is.
+   *
+   * The meaning is the legend's word for the colour, so "Night Shift" and
+   * "Blanket" are the sheet's own vocabulary rather than ours. Anything it does
+   * not recognise is a day shift, which is what an unlabelled cell has always
+   * meant on this programme.
+   */
+  function shiftFor(meaning) {
+    const said = String(meaning || '').toLowerCase();
+    if (/night/.test(said)) return 'night';
+    if (/possession|blanket/.test(said)) return 'possession';
+    return 'day';
+  }
+
+  /**
+   * What somebody is doing on a day: the plan where there is one, the 4WLA where
+   * there is not.
+   *
+   * **The look-ahead used to propose and a person assigned.** That rule existed
+   * for one reason — the sheet said what and where and *never who*, so a plan
+   * entry had to supply the missing fact, and inventing it would have been the
+   * guess this module refuses everywhere. The Resource row says who. There is no
+   * missing fact left, so asking somebody to press a button is asking them to
+   * re-type what the workbook already states, once per person per day.
+   *
+   * So the 4WLA assignment **is** the plan for that day. It is *derived*, not
+   * written: `rc_plan_entries` is append-only evidence of what somebody decided,
+   * and materialising the sheet into it would store a derivation — the one thing
+   * this codebase is most consistent about not doing — while making the
+   * workbook's authorship indistinguishable from a decision anybody took. It
+   * would also go stale the moment the sheet changed, and need superseding to
+   * correct, which is a revision of something nobody ever revised.
+   *
+   * A stored entry always wins. That is the whole meaning of one existing: it is
+   * somebody overriding the sheet, or planning a day the sheet says nothing about
+   * — an office day, another project, a task carried over. The sheet is the
+   * default; a row is a decision.
+   */
+  function assignmentIndex({ planRows, laRows, register }) {
+    const { byPerson, unmatched } = resourceAssignments(laRows, register);
+
+    const stored = new Map();
+    for (const row of planRows || []) stored.set(`${row.person_id}|${row.work_date}`, row);
+
+    const derived = new Map();
+    for (const [personId, days] of byPerson) {
+      for (const [iso, rows] of days) {
+        const key = `${personId}|${iso}`;
+        if (stored.has(key)) continue;
+        const row = rows[0];
+        derived.set(key, {
+          // Null, and load-bearing: every caller that writes an outcome or rolls a
+          // task forward reads this to decide whether there is a row to point at.
+          id: null,
+          from_lookahead: true,
+          also_named_on: rows.length - 1,
+          person_id: personId,
+          work_date: iso,
+          task: row.raw_label || null,
+          location_id: row.location_id || null,
+          raw_location: row.raw_location || null,
+          category_id: null,
+          shift: shiftFor(row.cells?.[iso]),
+          lookahead_row_id: row.id || null,
+          carry_chain_id: null,
+        });
+      }
+    }
+
+    return {
+      at: (personId, iso) => stored.get(`${personId}|${iso}`) || derived.get(`${personId}|${iso}`) || null,
+      byPerson,
+      unmatched,
+      derived: derived.size,
+    };
+  }
+
+  /**
    * Whether somebody is available on a date.
    *
    * Leave is the reason this exists. Absence is a different fact from "carried
@@ -29343,6 +29421,8 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "lookaheadWithResources", { get: () => lookaheadWithResources, enumerable: true });
   Object.defineProperty(__x, "graftResources", { get: () => graftResources, enumerable: true });
   Object.defineProperty(__x, "resourceAssignments", { get: () => resourceAssignments, enumerable: true });
+  Object.defineProperty(__x, "shiftFor", { get: () => shiftFor, enumerable: true });
+  Object.defineProperty(__x, "assignmentIndex", { get: () => assignmentIndex, enumerable: true });
   Object.defineProperty(__x, "availability", { get: () => availability, enumerable: true });
 };
 
@@ -30195,7 +30275,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
      announces itself the same way — a file that lands somewhere the page cannot
      see is the one action with no visible result. */
   const { saveFile } = __req("io/exporters.js");
-  const { STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, resourceAssignments, lookaheadWithResources } = __req("ui/rc_util.js");
+  const { STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, lookaheadWithResources, assignmentIndex } = __req("ui/rc_util.js");
 
 
 
@@ -30393,18 +30473,18 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const actualByPerson = new Map();
     for (const a of actuals) actualByPerson.set(a.person_id, a);
 
-    const planFor = (personId, iso) =>
-      planRows.find((p) => p.person_id === personId && p.work_date === iso) || null;
-
-    /* Who the 4WLA's Resource rows name, per person per day.
-       This is what lets the meeting ask somebody about the work BART actually
-       wants of them rather than only about the work somebody remembered to plan —
-       the two differing is the interesting case, and until now the second was the
-       only one on screen. `lookaheadWithResources()` has already dropped the
-       copies older snapshots carry and taken the names off the newest one. */
-    const { byPerson: askedFor } = resourceAssignments(
-      laRows, nameRegister(everybody.length ? everybody : people, aliases));
-    const askedOf = (personId, iso) => (askedFor.get(personId)?.get(iso) || []);
+    /* What somebody is doing on a day: the plan where there is one, and the 4WLA
+       where there is not. The Resource row names people, so it *is* the plan for
+       those days — derived, never written — and a stored entry is somebody
+       overriding it or planning a day the sheet says nothing about. Until this
+       existed the meeting asked half the team what they had been planned for and
+       answered "nothing", while the workbook said exactly what. */
+    const index = assignmentIndex({
+      planRows,
+      laRows,
+      register: nameRegister(everybody.length ? everybody : people, aliases),
+    });
+    const planFor = (personId, iso) => index.at(personId, iso);
 
     /* One context, handed to the table, the meeting and the digest alike. They
        are three readings of one day and the moment they are given different
@@ -30412,7 +30492,6 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const ctx = {
       people, review, plan, planFor, actualByPerson, cats, locs,
       categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
-      askedOf,
     };
 
     root.appendChild(dateBar(date, review, plan, root, ctx));
@@ -30689,11 +30768,8 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     if (wasPlanned && !laRow) {
       context.appendChild(badge('not against a look-ahead row', 'muted'));
     }
-    /* And what BART asked of them, where nobody planned it. The room needs that
-       more than the person does: it is the gap between the contract and the day. */
-    if (!wasPlanned && askedLine(ctx, person, review)) {
-      context.appendChild(badge(askedLine(ctx, person, review).slice(0, 52), 'warn'));
-    }
+    // Where the day came from, when it came from the workbook rather than a person.
+    if (fromSheet(wasPlanned)) context.appendChild(fromSheet(wasPlanned));
     for (const b of theirs) {
       context.appendChild(badge(`blocked: ${b.summary.slice(0, 36)}`, 'bad'));
     }
@@ -30724,9 +30800,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       tomorrow
         ? el('div', { text: tomorrow.task || '—' })
         : el('div', { class: 'rc-hint', text: 'nothing set yet' }),
-      !tomorrow && askedLine(ctx, person, plan)
-        ? el('div', { class: 'rc-hint', text: askedLine(ctx, person, plan) })
-        : null,
+      fromSheet(tomorrow),
     ].filter(Boolean)));
 
     wrap.appendChild(el('div', { class: 'rc-present-move' }, [
@@ -30936,25 +31010,18 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
    * exactly alone.
    */
   /**
-   * What the 4WLA asks of one person on one day, as a line to read out.
+   * Where a day's plan came from, when it did not come from a person.
    *
-   * Only ever shown where the plan is silent. Where a day *is* planned the plan is
-   * the answer — it was a decision, taken by somebody, possibly against this very
-   * row — and printing BART's wording beside it would invite the meeting to
-   * relitigate a call that has already been made. Where nothing is planned it is
-   * the difference between "nothing planned" and "nothing planned, and here is
-   * what was wanted".
+   * The 4WLA assignment *is* the plan now, so there is nothing to show beside the
+   * plan any more — what is still worth saying is that the workbook said it and
+   * nobody has overridden it. A stored entry needs no badge: somebody decided it,
+   * which is what a row in `rc_plan_entries` means.
    */
-  function askedLine(ctx, person, iso) {
-    const rows = ctx.askedOf ? ctx.askedOf(person.id, iso) : [];
-    if (!rows.length) return null;
-    const row = rows[0];
-    const where = row.raw_location || ctx.locs.get(row.location_id)?.name || '';
-    return [
-      `4WLA: ${(row.raw_label || `row ${row.sheet_row}`).slice(0, 44)}`,
-      where,
-      rows.length > 1 ? `and ${rows.length - 1} more` : null,
-    ].filter(Boolean).join(' · ');
+  function fromSheet(entry) {
+    if (!entry?.from_lookahead) return null;
+    return badge(entry.also_named_on
+      ? `From 4WLA (+${entry.also_named_on} more)`
+      : 'From 4WLA', 'info');
   }
 
   function personRow(ctx) {
@@ -31030,16 +31097,9 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           chain && chain.carries >= 2
             ? badge(`${ordinal(chain.carries + 1)} day`, chain.carries >= 4 ? 'bad' : 'warn')
             : null,
+          fromSheet(wasPlanned),
         ].filter(Boolean))
-        : el('div', {}, [
-          el('span', { class: 'rc-hint', text: 'nothing planned' }),
-          /* Nothing planned is not nothing wanted. Where the look-ahead names
-             this person on this day, the meeting gets to ask about the work
-             rather than about the gap. */
-          askedLine(ctx, person, review)
-            ? el('div', { class: 'rc-hint', text: askedLine(ctx, person, review) })
-            : null,
-        ].filter(Boolean)),
+        : el('span', { class: 'rc-hint', text: 'nothing planned' }),
     ]));
 
     /* What happened. Absence is answered from the leave record rather than
@@ -31070,15 +31130,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           el('div', { text: tomorrow.task || '—' }),
           el('div', { class: 'rc-hint', text: locs.get(tomorrow.location_id)?.name || '' }),
           tomorrow.carry_chain_id ? badge('Carried over', 'warn') : null,
+          fromSheet(tomorrow),
         ].filter(Boolean))
         : admin
           ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap;align-items:center' }, [
-            /* What BART wants of them tomorrow, so the goal is set against it
-               rather than from memory. Said before the buttons, because it is the
-               thing the answer should be about. */
-            askedLine(ctx, person, plan)
-              ? el('div', { class: 'rc-hint', style: 'flex:1 1 100%', text: askedLine(ctx, person, plan) })
-              : null,
             el('button', {
               class: 'cx-btn mini ghost',
               text: 'Set goal',
@@ -31271,7 +31326,13 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
    */
   async function commitOutcome({ ctx, person, date, plannedEntry, status, redraw, note = null, file = null }) {
     const clientUuid = newUuid();
-    const chainId = status.id === 'carried' ? carryChainFor(plannedEntry) : null;
+    /* A day the 4WLA planned has no stored row, so there is no id to chain on —
+       and a chain has to start somewhere. It starts at the first carry, which is
+       exactly when something first became stuck: before that nothing had been
+       carried at all. */
+    const chainId = status.id === 'carried'
+      ? (carryChainFor(plannedEntry) || (plannedEntry ? newUuid() : null))
+      : null;
 
     let evidencePath = null;
     if (file) {
@@ -31300,7 +31361,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     /* A carried task is going to be done tomorrow, and re-typing it is both slow
        and how the chain used to get broken. Rolling it forward here is the only
        place that knows both the outcome and the entry it came from. */
-    if (chainId && plannedEntry && !ctx.planFor(person.id, ctx.plan)) {
+    if (chainId && plannedEntry && !ctx.planFor(person.id, ctx.plan)?.id) {
       try {
         await rollForward(plannedEntry, person, ctx.plan, chainId);
         notifyChanged('plan');
@@ -31598,11 +31659,13 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       ]);
     const locs = byId(locations);
 
-    /* Who the 4WLA names, per person per day. The same reading the Resources tab
-       and the huddle make, through the same functions, so the three cannot
-       disagree about where somebody is. */
-    const { byPerson: askedFor } = resourceAssignments(
-      laRows, nameRegister(everybody.length ? everybody : people, aliases));
+    /* The same reading the Resources tab and the huddle make, through the same
+       function, so the three cannot disagree about where somebody is. */
+    const index = assignmentIndex({
+      planRows,
+      laRows,
+      register: nameRegister(everybody.length ? everybody : people, aliases),
+    });
     const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
     const soon = leave.filter((l) => l.start_date > to);
 
@@ -31631,40 +31694,11 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     for (const person of people) {
       const cells = days.map((iso) => {
         const state = availability(person, iso, thisWeek);
-        const entry = planRows.find((p) => p.person_id === person.id && p.work_date === iso);
+        const entry = index.at(person.id, iso);
         if (state.state === 'leave') return el('td', {}, [badge('Leave', 'muted')]);
         if (state.state === 'non-working') return el('td', { class: 'rc-inactive' }, [el('span', { text: '·' })]);
         if (!entry) {
-          /* What the 4WLA asks of *this* person on *this* day, where the plan is
-             silent — the workbook names people on its Resource row, and until that
-             was read the week plan could only offer every row for the week and let
-             somebody remember who was wanted. Shown only where nothing is planned:
-             where a day is planned the plan is the answer, and it was a decision
-             somebody took. */
-          const asked = askedFor.get(person.id)?.get(iso) || [];
-          if (asked.length && rc.isAdmin()) {
-            const row = asked[0];
-            return el('td', {}, [
-              el('div', { class: 'rc-res-asked' }, [
-                el('span', { class: 'rc-eyebrow', text: '4WLA' }),
-                el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 40) }),
-                el('div', {
-                  class: 'rc-hint',
-                  text: row.raw_location || locs.get(row.location_id)?.name || '',
-                }),
-              ]),
-              el('button', {
-                class: 'cx-btn mini',
-                text: asked.length > 1 ? `Plan it (+${asked.length - 1} more)` : 'Plan it',
-                title: `The 4WLA names ${person.name} here. This fills the plan in from that row `
-                  + 'and keeps the link, so a block recorded later points at the row BART '
-                  + 'themselves scheduled.',
-                onClick: () => planFromLookahead({
-                  person, iso, laRows, locations, categories, locs, root, row,
-                }),
-              }),
-            ]);
-          }
+          // Nothing planned and nobody named. The + still offers the week's rows.
           return el('td', {}, [rc.isAdmin() && laRows.length
             ? el('button', {
               class: 'cx-btn mini ghost',
@@ -31677,16 +31711,31 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
             })
             : el('span', { class: 'rc-hint', text: '—' })]);
         }
+        /* A day the 4WLA planned has no stored row to revise — revising it *is*
+           writing the first one, which is what overriding the sheet means. Both
+           go through the same cell, because to whoever is looking at it the
+           question is the same: change this day. */
         return el('td', {
           class: rc.isAdmin() ? 'rc-clickable' : '',
-          title: rc.isAdmin() ? 'Revise this — the outgoing version stays on the record.' : '',
+          title: rc.isAdmin()
+            ? (entry.from_lookahead
+              ? 'The 4WLA plans this day. Changing it writes a plan entry that overrides the sheet.'
+              : 'Revise this — the outgoing version stays on the record.')
+            : '',
           onClick: rc.isAdmin()
-            ? () => revisePlan(entry, person, { locations, categories, locs, root })
+            ? () => (entry.from_lookahead
+              ? planFromLookahead({
+                person, iso, laRows, locations, categories, locs, root,
+                row: laRows.find((r) => r.id === entry.lookahead_row_id) || null,
+              })
+              : revisePlan(entry, person, { locations, categories, locs, root }))
             : null,
         }, [
           el('div', { text: entry.task || '—' }),
-          el('div', { class: 'rc-hint', text: locs.get(entry.location_id)?.name || '' }),
-          entry.lookahead_row_id ? badge('From look-ahead', 'info') : null,
+          el('div', { class: 'rc-hint', text: locs.get(entry.location_id)?.name
+            || entry.raw_location || '' }),
+          fromSheet(entry),
+          !entry.from_lookahead && entry.lookahead_row_id ? badge('From look-ahead', 'info') : null,
           entry.supersedes_id ? badge('Revised', 'warn') : null,
         ].filter(Boolean));
       });
@@ -33819,7 +33868,7 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
   const { textInput, selectInput, toast, badge, checkbox, field, emptyState, promptDialog } = __req("ui/components.js");
 
 
-  const { SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, resourceAssignments, foldName, ambiguousFirstNames, lookaheadWithResources } = __req("ui/rc_util.js");
+  const { SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, foldName, ambiguousFirstNames, lookaheadWithResources, assignmentIndex } = __req("ui/rc_util.js");
 
 
 
@@ -33863,7 +33912,12 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
     const locs = byId(locations);
     const cats = byId(categories);
     const register = nameRegister(people, aliases);
-    const { byPerson, unmatched } = resourceAssignments(laRows, register);
+    /* The 4WLA's Resource row *is* the plan for the days it names — derived, never
+       written — and a stored entry is somebody overriding it or planning a day the
+       sheet says nothing about. The same reading the week plan and the huddle
+       make, from the same function. */
+    const index = assignmentIndex({ planRows, laRows, register });
+    const { byPerson, unmatched } = index;
     /* "Nobody is called that" and "two people are, and I will not choose" are
        different problems with different fixes, and a list that ran them together
        would send somebody looking for a person who is already on the roster
@@ -33928,15 +33982,11 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
 
     /* ── The grid ─────────────────────────────────────────────────────────── */
 
-    const planFor = (personId, iso) =>
-      planRows.filter((p) => p.person_id === personId && p.work_date === iso);
-
     const body = el('tbody');
     for (const person of people) {
       const wanted = byPerson.get(person.id) || new Map();
       const cells = columns.map((iso) => {
         const state = availability(person, iso, leave);
-        const entries = planFor(person.id, iso);
         const asked = wanted.get(iso) || [];
         const classes = ['rc-res-cell'];
         if (iso === today) classes.push('rc-res-today');
@@ -33944,7 +33994,7 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
         if (state.state === 'leave') {
           return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [badge('Leave', 'muted')]);
         }
-        if (state.state === 'non-working' && !entries.length && !asked.length) {
+        if (state.state === 'non-working' && !index.at(person.id, iso) && !asked.length) {
           return el('td', {
             class: `${classes.join(' ')} rc-inactive`,
             'data-label': dayLabel(iso),
@@ -33952,36 +34002,42 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
         }
 
         const parts = [];
-        for (const entry of entries) {
+        const entry = index.at(person.id, iso);
+        if (entry) {
           parts.push(el('div', { class: 'rc-res-job' }, [
             el('div', { text: entry.task || '—' }),
             el('div', { class: 'rc-hint', text: [
-              locs.get(entry.location_id)?.name,
+              locs.get(entry.location_id)?.name || entry.raw_location,
               cats.get(entry.category_id)?.name,
               entry.shift !== 'day' ? entry.shift : null,
             ].filter(Boolean).join(' · ') }),
-          ]));
+            entry.from_lookahead
+              ? badge(entry.also_named_on
+                ? `From 4WLA (+${entry.also_named_on} more)` : 'From 4WLA', 'info')
+              : null,
+          ].filter(Boolean)));
         }
 
-        /* What the 4WLA asks of this person on this day, whether or not anybody
-           has planned it. Drawn beside the plan rather than instead of it: the
-           interesting case is the two disagreeing, and a view that shows only one
-           of them cannot show that at all. */
-        for (const row of asked) {
-          const agrees = entries.some((e) => e.lookahead_row_id === row.id);
-          parts.push(el('div', {
-            class: 'rc-res-asked' + (agrees ? ' agrees' : ''),
-            title: agrees
-              ? 'The plan for this day is against this look-ahead row.'
-              : 'The 4WLA names this person here and the plan does not say so.',
-          }, [
-            el('span', { class: 'rc-eyebrow', text: '4WLA' }),
-            el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 44) }),
-            el('div', {
-              class: 'rc-hint',
-              text: row.raw_location || locs.get(row.location_id)?.name || '',
-            }),
-          ]));
+        /* The one case worth drawing twice: a stored entry that overrides what the
+           sheet asks for. That is a decision somebody took against the workbook,
+           and seeing the two side by side is the whole reason this view exists.
+           Where they agree — which is now the normal case, because the sheet *is*
+           the plan — there is nothing to reconcile and only one line is drawn. */
+        if (entry && !entry.from_lookahead) {
+          for (const row of asked) {
+            if (entry.lookahead_row_id === row.id) continue;
+            parts.push(el('div', {
+              class: 'rc-res-asked',
+              title: 'The 4WLA names this person here and the plan for the day says otherwise.',
+            }, [
+              el('span', { class: 'rc-eyebrow', text: '4WLA' }),
+              el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 44) }),
+              el('div', {
+                class: 'rc-hint',
+                text: row.raw_location || locs.get(row.location_id)?.name || '',
+              }),
+            ]));
+          }
         }
 
         if (!parts.length) {
@@ -33997,16 +34053,6 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
               }),
             }),
           ]);
-        }
-        if (rc.canWrite() && !entries.length) {
-          parts.push(el('button', {
-            class: 'cx-btn mini ghost',
-            text: 'Plan it',
-            onClick: () => assign({
-              people, locations, categories, laRows, locs, days, redraw, person, iso,
-              row: asked[0] || null,
-            }),
-          }));
         }
         return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, parts);
       });
@@ -34133,8 +34179,11 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
       class: 'rc-hint',
       text: laRows.length
         ? `The 4WLA names people on ${laRows.filter((r) => Object.keys(r.resources || {}).length).length} `
-          + 'row(s) in these weeks. A "4WLA" block on a day is what BART asked for; the plan beside '
-          + 'it is what was decided. The two disagreeing is the thing worth seeing, so both are drawn.'
+          + 'row(s) in these weeks, and where it names somebody that is their plan for the day — '
+          + 'marked "From 4WLA", derived from the sheet rather than written down, so it follows the '
+          + 'workbook instead of going stale beside it. A plan entry is somebody overriding that, or '
+          + 'planning a day the sheet says nothing about; where an override disagrees with the '
+          + 'sheet, both are drawn, because that is the case worth seeing.'
         : 'No look-ahead rows read for this week yet, so nothing here can say what BART asked for. '
           + 'Read it in Look-ahead → Check now.',
     }));

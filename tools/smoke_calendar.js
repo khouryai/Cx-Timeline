@@ -1260,38 +1260,48 @@ async function main() {
   check('and says how many can actually be staffed each day',
     /\d+ of 6/.test(weekText), weekText.split('\n').find((l) => / of \d/.test(l)) || '');
 
-  /* ── What the 4WLA asks of a named person ─────────────────────────────
-     The workbook names people on its Resource row, so an empty day for somebody
-     it named says what is wanted rather than offering every row for the week and
-     leaving whoever is planning to remember who it was for. Only where the plan
-     is silent: where a day is planned the plan is the answer, and it was a
-     decision somebody took. */
-  const askedCell = page.locator('#rc-frame tbody tr', { hasText: 'Priya' })
-    .locator('.rc-res-asked').first();
-  check('the week plan says what the 4WLA asks of a person it named',
-    (await askedCell.count()) === 1,
-    (await page.locator('#rc-frame tbody tr', { hasText: 'Priya' }).innerText())
-      .replace(/\n/g, ' | ').slice(0, 90));
-  check('and it is one press from being planned',
-    (await page.locator('#rc-frame tbody tr', { hasText: 'Priya' })
-      .locator('button', { hasText: 'Plan it' }).count()) === 1);
+  /* ── The 4WLA *is* the plan for the days it names ──────────────────────
+     "The look-ahead proposes; a person assigns" existed for one reason: the
+     sheet said what and where and never who, so a plan entry had to supply the
+     missing fact. The Resource row says who. There is no missing fact left, so
+     asking somebody to press a button is asking them to re-type what the
+     workbook already states, once per person per day. */
+  const priyaRow = page.locator('#rc-frame tbody tr', { hasText: 'Priya' });
+  const priyaText = await priyaRow.innerText();
+  check('a day the 4WLA names somebody on is their plan for that day',
+    /IXL Regression Testing/.test(priyaText) && /TPSS 12/.test(priyaText),
+    priyaText.replace(/\n/g, ' | ').slice(0, 90));
+  check('and it says the workbook said so rather than a person',
+    /From 4WLA/.test(priyaText));
+  check('so there is nothing left to press',
+    (await priyaRow.locator('button', { hasText: 'Plan it' }).count()) === 0);
 
-  /* The press opens the dialog with that row already chosen and the rest filled
-     in from it — the look-ahead still only proposes, but it no longer asks
-     somebody to find, among every row for the week, the one it already knows. */
-  await page.locator('#rc-frame tbody tr', { hasText: 'Priya' })
-    .locator('button', { hasText: 'Plan it' }).click();
+  /* Derived, never written. `rc_plan_entries` is append-only evidence of what
+     somebody *decided*; materialising the sheet into it would store a
+     derivation, make the workbook's authorship indistinguishable from a
+     decision, and go stale the moment the sheet changed. */
+  check('nothing was written to say so — the sheet is read, not copied',
+    await page.evaluate(() => !window.__rc.rows.rc_plan_entries
+      .some((e) => e.person_id === 'p3' && /IXL Regression/.test(e.task || ''))));
+
+  /* Changing it is what writes the first row: overriding the sheet is a
+     decision, and a row in that table is exactly what a decision looks like. */
+  await priyaRow.locator('td.rc-clickable').first().click();
   await page.waitForSelector('.cx-modal');
-  check('the row it named is already chosen',
-    (await page.locator('.cx-modal select').first().inputValue()) === 'lar2');
-  check('and what and where are filled in from it',
-    (await page.locator('.cx-modal input[placeholder="What they will do"]').inputValue())
+  check('changing it opens the day with the sheet\'s own row already chosen',
+    (await page.locator('.cx-modal select').first().inputValue()) === 'lar2'
+    && (await page.locator('.cx-modal input[placeholder="What they will do"]').inputValue())
       === 'IXL Regression Testing');
+  await page.locator('.cx-modal input[placeholder="What they will do"]').fill('Overridden — office');
   await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Plan it' }).click();
   await page.waitForTimeout(600);
-  check('confirming writes a plan entry that carries the look-ahead link',
+  check('and confirming writes the override, carrying the look-ahead link',
     await page.evaluate(() => window.__rc.rows.rc_plan_entries
-      .some((e) => e.person_id === 'p3' && e.lookahead_row_id === 'lar2')));
+      .some((e) => e.person_id === 'p3' && e.task === 'Overridden — office'
+        && e.lookahead_row_id === 'lar2')));
+  check('which then wins over what the sheet says',
+    /Overridden — office/.test(await priyaRow.innerText())
+    && !/From 4WLA/.test(await priyaRow.innerText()));
 
   /* ── The look-ahead and the SARs ──────────────────────────────────────── */
   console.log('\nThe look-ahead register');
@@ -1665,8 +1675,10 @@ async function main() {
         .find((r) => r.id === 'lar2').resources).length));
 
   check('a bare first name maps to the one person who answers to it',
+    /From 4WLA/.test(await page.locator('#rc-frame .rc-resources tr', { hasText: 'Victor Okonkwo' })
+      .innerText()),
     (await page.locator('#rc-frame .rc-resources tr', { hasText: 'Victor Okonkwo' })
-      .locator('.rc-res-asked').count()) >= 1);
+      .innerText()).replace(/\n/g, ' | ').slice(0, 90));
   check('and it is not reported as a name nobody could place',
     !/^Victor$/m.test(resText), resText.split('\n').filter((l) => /^Victor/.test(l)).join(' | '));
 
@@ -1676,10 +1688,10 @@ async function main() {
   const lena = page.locator('#rc-frame tbody tr')
     .filter({ has: page.locator('td div', { hasText: /^Lena$/ }) }).first();
   check('a first name two people share matches neither',
-    (await page.locator('#rc-frame .rc-resources tr', { hasText: 'Lena Fischer' })
-      .locator('.rc-res-asked').count()) === 0
-    && (await page.locator('#rc-frame .rc-resources tr', { hasText: 'Lena Brandt' })
-      .locator('.rc-res-asked').count()) === 0);
+    !/From 4WLA/.test(await page.locator('#rc-frame .rc-resources tr', { hasText: 'Lena Fischer' })
+      .innerText())
+    && !/From 4WLA/.test(await page.locator('#rc-frame .rc-resources tr', { hasText: 'Lena Brandt' })
+      .innerText()));
   check('and it says that is why, rather than "nobody is called that"',
     /more than one person is called that/.test(await lena.innerText()),
     (await lena.innerText()).replace(/\n/g, ' | ').slice(0, 90));
