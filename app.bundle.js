@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 54   Built: 2026-09-11T04:02:20.315Z
+ * Modules: 54   Built: 2026-09-11T04:57:13.239Z
  */
 (function () {
   'use strict';
@@ -27912,7 +27912,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    */
   function readGrid(grid, { anchorISO = null } = {}) {
     const rows = (grid?.rows || []).slice().sort((a, b) => a.row - b.row);
-    const empty = { days: [], meta: [], activities: [], header: null };
+    const empty = { days: [], meta: [], headings: [], activities: [], header: null };
     if (!rows.length) return empty;
 
     // The weekday row: the one where most values are M/Tu/W/Th/F/Sa/Su.
@@ -27967,6 +27967,22 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     const metaCols = [...new Set(
       body.flatMap((r) => r.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim()).map((c) => c.col))
     )].sort((a, b) => a - b);
+
+    /* What the sheet calls each of those columns.
+       The nearest thing written in that column at or above the weekday row —
+       which is where a heading is, whichever row somebody put it on. It is worth
+       reading rather than guessing because one of these columns is the location,
+       and knowing *which* is the difference between recording where the work is
+       and recording nothing. Nothing depends on a heading existing: an unlabelled
+       column is '' and is treated as it always was. */
+    const headings = metaCols.map((col) => {
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i].row > header.row) continue;
+        const text = String(at(rows[i], col)?.value ?? '').trim();
+        if (text) return text;
+      }
+      return '';
+    });
 
     const activities = [];
     for (const row of body) {
@@ -28038,7 +28054,34 @@ __mods["core/lookahead.js"] = function (__x, __req) {
       activities.push({ row: row.row, meta, marks, heading, highlighted, named, resource: null });
     }
 
-    return { days, meta: metaCols, activities, header: header.row };
+    return { days, meta: metaCols, headings, activities, header: header.row };
+  }
+
+  /**
+   * Which of the activity columns is the location, off the sheet's own heading.
+   *
+   * Found, like the date axis, rather than configured — for the same reason and
+   * with the same failure in mind: a column pinned by letter or by position is
+   * wrong the first time somebody inserts one, and wrong *silently*, because the
+   * rows still write and every one of them records the wrong place.
+   *
+   * The heading is what the workbook calls the column, so that is what is read.
+   * `-1` means it says nothing recognisable, and the caller falls back to asking
+   * the alias register which cell it knows — which is what this module did
+   * everywhere before, and still the only answer available on a sheet with no
+   * headings at all.
+   */
+  function locationColumnOf(view) {
+    const headings = view?.headings || [];
+    for (let i = 0; i < headings.length; i++) {
+      if (/\blocations?\b/i.test(headings[i])) return i;
+    }
+    // "Site" is the other word this programme's sheets use for it. Deliberately a
+    // short list: a near miss here misfiles every row on the sheet at once.
+    for (let i = 0; i < headings.length; i++) {
+      if (/\bsite\b/i.test(headings[i])) return i;
+    }
+    return -1;
   }
 
   /**
@@ -28048,19 +28091,34 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    * maintained at and the grain a plan is made at. Two rules, both of which hold
    * everywhere else in this module:
    *
-   * **The location is resolved, never parsed.** Each activity cell is offered to
-   * `locate` — the alias register, injected so this stays testable without a
-   * network — and the first that resolves is the location. Nothing is matched on
-   * the description: the wording differs on the two sides and is not reliable
-   * enough to carry evidence, which is what the alias list exists for.
+   * **The location is read from the column the sheet keeps it in, and kept
+   * whether or not it resolves.** `locationColumnOf()` finds that column by its
+   * heading; `locate` — the alias register, injected so this stays testable
+   * without a network — turns the spelling into an id where it knows it. Nothing
+   * is matched on the description: the wording differs on the two sides and is
+   * not reliable enough to carry evidence, which is what the alias list is for.
+   *
+   * The text surviving an unresolved spelling is the part that was missing. The
+   * location used to be recorded *only* where the register already knew it, so a
+   * column full of "W30" and "Y10" was discarded on every deployment that had not
+   * registered them — and with nothing kept there was nothing for anybody to map,
+   * which is the one state this module is built to make impossible. An unresolved
+   * spelling is exactly like an unmapped colour or an unmatched name: shown, and
+   * one click from being answered.
    *
    * **A row with nothing scheduled that week is not a row.** The sheet carries
    * activities for reference with no shift against them, and writing those would
    * make the register mostly noise — and, worse, make every one of them look
    * like scope the first time it *did* get a shift.
    */
-  async function rowsFrom(view, { snapshotId = null, locate = async () => null } = {}) {
+  async function rowsFrom(view, {
+    snapshotId = null, locate = async () => null, locationColumn = null,
+  } = {}) {
     if (!view?.days?.length) return [];
+
+    // Told which column, or read off the sheet's own heading. `null` is "work it
+    // out"; `-1` is "there is no heading", which is the register scan below.
+    const locCol = Number.isInteger(locationColumn) ? locationColumn : locationColumnOf(view);
 
     const dayByCol = new Map(view.days.map((d) => [d.col, d]));
     const out = [];
@@ -28097,11 +28155,27 @@ __mods["core/lookahead.js"] = function (__x, __req) {
         weeks.get(week).resources[day.date] = mark.value;
       }
 
+      /* Where the work is, from the column the sheet keeps it in.
+         **The text is kept whether or not it resolves.** It used to be recorded
+         only when the alias register already knew it, so a location column full of
+         "W30" and "Y10" was *discarded* on a deployment that had not registered
+         them yet — and with nothing kept there was nothing for anybody to map,
+         which is the one state this design is supposed to make impossible. An
+         unresolved spelling is exactly like an unmapped colour or an unmatched
+         name: shown, and one click from being answered. */
       let locationId = null;
       let rawLocation = null;
-      for (const value of activity.meta) {
-        const hit = await locate(value);
-        if (hit) { locationId = hit; rawLocation = value; break; }
+      if (locCol >= 0) {
+        rawLocation = activity.meta[locCol] || null;
+        locationId = rawLocation ? await locate(rawLocation) : null;
+      } else {
+        // Nobody has said which column it is, so the register decides: the first
+        // cell it recognises is the location. Still never the *description* —
+        // that is matched on nothing, here or anywhere else in this module.
+        for (const value of activity.meta) {
+          const hit = await locate(value);
+          if (hit) { locationId = hit; rawLocation = value; break; }
+        }
       }
       const label = activity.meta.filter(Boolean).join(' · ');
 
@@ -28158,10 +28232,29 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    * `marks` holds BART's own resource requests.
    *
    * Returns a list of `{ kind, weekStart, rowKey, before, after }`.
+   *
+   * **A read that started recording the location is not a read where everything
+   * moved.** The row key is built from the week and the location, so the first read
+   * after the location began coming off the sheet's own column — rather than only
+   * where the alias register already knew the spelling — keys every row
+   * differently. Compared naively that is every row removed and every row added:
+   * a batch of phantom scope on the one screen somebody reads a year later, booked
+   * into the KPIs, over a change that is about the *keying* and not the work. It is
+   * the same judgement the window rule makes, and drawn as narrowly as it can be —
+   * one side recording no location at all, the other recording one, and not a
+   * single key in common. A crew genuinely moving site is still a removal and an
+   * addition, which is what `relinkCandidates()` is for.
    */
   function classify(before, after, { cancelledMeaning = 'cancelled' } = {}) {
     const beforeWindow = windowOf(before);
     const afterWindow = windowOf(after);
+
+    if (before.length && after.length) {
+      const keys = new Set(after.map((r) => r.rowKey));
+      const located = (rows) => rows.filter((r) => String(r.location || '').trim()).length;
+      const sided = located(before) === 0 !== (located(after) === 0);
+      if (sided && !before.some((r) => keys.has(r.rowKey))) return [];
+    }
 
     // Only weeks present on both sides can be compared at all. Everything else
     // is the window moving, which is recorded and kept out of the KPIs.
@@ -28351,6 +28444,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
   Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
   Object.defineProperty(__x, "readGrid", { get: () => readGrid, enumerable: true });
+  Object.defineProperty(__x, "locationColumnOf", { get: () => locationColumnOf, enumerable: true });
   Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
   Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
   Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
@@ -28933,7 +29027,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   const { el } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { toISO, todayMs, fmtDate, addDays, MS_DAY } = __req("core/dates.js");
-  const { resourceNames, readGrid } = __req("core/lookahead.js");
+  const { resourceNames, readGrid, locationColumnOf } = __req("core/lookahead.js");
   const { applyLegend } = __req("io/lookahead.js");
   const rc = __req("core/rc.js");
   const { openModal } = __req("ui/components.js");
@@ -29116,6 +29210,65 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /**
+   * A lookup from a spelling of a place to a location id.
+   *
+   * The same three-source, exact-fold rule the names get, and the same fold —
+   * `rc_resolve_location()` in Postgres folds case and punctuation and nothing
+   * else, and this has to agree with it or a location would resolve on the server
+   * and not on screen. Weakest first: a code, then an alias somebody recorded,
+   * then the location's own name.
+   *
+   * The code is in here because it is what the 4WLA is actually filled in with.
+   * That sheet's Location column says "W30", not "Wayside 30", and a register
+   * that only knew names and hand-written aliases matched none of it — which is
+   * the same failure a roster of full names had against a Resource row of first
+   * names. It is not a guess: `rc_locations.code` is a field somebody typed for
+   * this location and no other.
+   */
+  function locationRegister(locations, aliases = []) {
+    const map = new Map();
+    for (const l of locations || []) {
+      const key = foldName(l.code);
+      if (key) map.set(key, l.id);
+    }
+    for (const a of aliases || []) {
+      const key = foldName(a.alias);
+      if (key) map.set(key, a.location_id);
+    }
+    for (const l of locations || []) {
+      const key = foldName(l.name);
+      if (key) map.set(key, l.id);
+    }
+    return map;
+  }
+
+  /**
+   * The spellings of a place the look-ahead uses that the register cannot place.
+   *
+   * The other half of pulling the location off the sheet. Keeping an unresolved
+   * spelling is only worth doing if somebody is shown it, and this is what the
+   * Resources tab lists — one click from "add it as a location" or "that is one we
+   * already have", exactly as an unmatched name and an unmapped colour are. A
+   * location nobody has mapped is work whose place is written down and not
+   * grouped, which is the one thing that makes a report quietly wrong rather than
+   * visibly incomplete.
+   */
+  function unmatchedLocations(laRows, register) {
+    const seen = new Map();
+    for (const row of laRows || []) {
+      if (row.location_id) continue;
+      const written = String(row.raw_location || '').trim();
+      const key = foldName(written);
+      if (!key || register?.get(key)) continue;
+      const held = seen.get(key) || { name: written, rows: [], weeks: new Set() };
+      if (!held.rows.some((r) => r.id === row.id)) held.rows.push(row);
+      if (row.week_start) held.weeks.add(row.week_start);
+      seen.set(key, held);
+    }
+    return [...seen.values()].sort((a, b) => b.rows.length - a.rows.length);
+  }
+
+  /**
    * First name to person, for the names that belong to exactly one of them.
    *
    * The 4WLA's Resource row is filled in by hand at speed and it says "Victor",
@@ -29188,7 +29341,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /**
-   * The look-ahead's rows for a span of weeks, with who it names on each.
+   * The look-ahead's rows for a span of weeks, with who it names and where.
    *
    * The one place the three views ask, so they cannot disagree about where
    * somebody is — the week plan, the Resources tab and the huddle all come
@@ -29203,6 +29356,12 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * reason it is for the legend: it is re-read at paint time, so it is right the
    * moment somebody edits the sheet rather than at the next successful write.
    *
+   * **And where the sheet says the work is**, for the same reason and out of the
+   * same grid — see `graftLocations()`. Between them they are why a derived day
+   * arrives in the week plan, the Resources tab and the huddle with both a person
+   * and a place against it, and why recording an outcome on one files it at that
+   * place rather than nowhere.
+   *
    * Grafted onto the stored rows rather than replacing them, because those carry
    * the id a plan entry links to and the location the alias register resolved.
    * The join is `sheet_row` within a week, which is the same identity the row key
@@ -29211,10 +29370,12 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * exists, and why this fills a gap rather than overruling one.
    */
   async function lookaheadWithResources(fromISO, toISO) {
-    const [stored, snapshots, legendRows] = await Promise.all([
+    const [stored, snapshots, legendRows, locations, locAliases] = await Promise.all([
       rc.lookaheadBetween(fromISO, toISO).catch(() => []),
       rc.listSnapshots({ limit: 20 }).catch(() => []),
       rc.listLegend().catch(() => []),
+      rc.listLocations({ includeInactive: true }).catch(() => []),
+      rc.listLocationAliases().catch(() => []),
     ]);
 
     const laRows = newestPerKey(stored, new Map(snapshots.map((s, i) => [s.id, i])));
@@ -29227,7 +29388,47 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       }))),
       { anchorISO: snapshot.taken_at }
     );
-    return graftResources(laRows, view);
+    return graftLocations(
+      graftResources(laRows, view),
+      view,
+      locationRegister(locations, locAliases)
+    );
+  }
+
+  /**
+   * Fill in each row's location from the grid's own Location column.
+   *
+   * Here for the reason the names are: a row written by a deployment that read
+   * the location differently — or could not resolve it and therefore kept nothing
+   * — carries no place at all, and the snapshot on screen says exactly where the
+   * work is. The sheet is re-read at paint time, so this is right the moment
+   * somebody corrects the workbook rather than at the next successful ingest.
+   *
+   * **It fills gaps and overrules nothing.** A stored `location_id` is a spelling
+   * the register resolved when the row was written and is left alone; the raw text
+   * is only supplied where there is none. The resolve is the same folded lookup
+   * the server does, so a place resolves identically whether it arrived through
+   * the ingest or through here.
+   */
+  function graftLocations(laRows, view, register) {
+    const column = locationColumnOf(view);
+    if (column < 0) return laRows;
+
+    const bySheetRow = new Map();
+    for (const activity of view?.activities || []) {
+      const text = String(activity.meta?.[column] || '').trim();
+      if (text) bySheetRow.set(activity.row, text);
+    }
+    if (!bySheetRow.size) return laRows;
+
+    return (laRows || []).map((row) => {
+      const written = bySheetRow.get(row.sheet_row);
+      if (!written) return row;
+      const raw = row.raw_location || written;
+      const id = row.location_id || register?.get(foldName(raw)) || null;
+      if (raw === row.raw_location && id === (row.location_id || null)) return row;
+      return { ...row, raw_location: raw, location_id: id };
+    });
   }
 
   /** Fill in each row's `resources` from the grid, where the sheet still says so. */
@@ -29415,10 +29616,13 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "SHIFTS", { get: () => SHIFTS, enumerable: true });
   Object.defineProperty(__x, "foldName", { get: () => foldName, enumerable: true });
   Object.defineProperty(__x, "nameRegister", { get: () => nameRegister, enumerable: true });
+  Object.defineProperty(__x, "locationRegister", { get: () => locationRegister, enumerable: true });
+  Object.defineProperty(__x, "unmatchedLocations", { get: () => unmatchedLocations, enumerable: true });
   Object.defineProperty(__x, "uniqueFirstNames", { get: () => uniqueFirstNames, enumerable: true });
   Object.defineProperty(__x, "ambiguousFirstNames", { get: () => ambiguousFirstNames, enumerable: true });
   Object.defineProperty(__x, "newestPerKey", { get: () => newestPerKey, enumerable: true });
   Object.defineProperty(__x, "lookaheadWithResources", { get: () => lookaheadWithResources, enumerable: true });
+  Object.defineProperty(__x, "graftLocations", { get: () => graftLocations, enumerable: true });
   Object.defineProperty(__x, "graftResources", { get: () => graftResources, enumerable: true });
   Object.defineProperty(__x, "resourceAssignments", { get: () => resourceAssignments, enumerable: true });
   Object.defineProperty(__x, "shiftFor", { get: () => shiftFor, enumerable: true });
@@ -31891,7 +32095,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       placeholder: '— nothing from the look-ahead —',
       options: rows.map((r) => ({
         value: r.id,
-        label: [r.raw_location || locs.get(r.location_id)?.name, r.raw_label]
+        label: [locs.get(r.location_id)?.name || r.raw_location, r.raw_label]
           .filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
       })),
     });
@@ -33868,7 +34072,8 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
   const { textInput, selectInput, toast, badge, checkbox, field, emptyState, promptDialog } = __req("ui/components.js");
 
 
-  const { SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, foldName, ambiguousFirstNames, lookaheadWithResources, assignmentIndex } = __req("ui/rc_util.js");
+  const { SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, foldName, ambiguousFirstNames, lookaheadWithResources, assignmentIndex, locationRegister, unmatchedLocations } = __req("ui/rc_util.js");
+
 
 
 
@@ -33899,13 +34104,14 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
        is why `lookaheadWithResources()` catches rather than a permission test up
        here. It is also the one place the three views ask, so they cannot disagree
        about where somebody is. */
-    const [people, locations, categories, leave, planRows, aliases, laRows] = await Promise.all([
+    const [people, locations, categories, leave, planRows, aliases, locAliases, laRows] = await Promise.all([
       rc.listPeople(),
       rc.listLocations(),
       rc.listCategories(),
       rc.listLeave(from, to),
       rc.listPlan(from, to),
       rc.listPersonAliases().catch(() => []),
+      rc.listLocationAliases().catch(() => []),
       lookaheadWithResources(from, to),
     ]);
 
@@ -33923,6 +34129,9 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
        would send somebody looking for a person who is already on the roster
        twice. */
     const shared = ambiguousFirstNames(people);
+    /* Where the sheet says the work is. The same answer as a name it cannot place:
+       the spelling is kept and shown, never discarded and never guessed at. */
+    const strangeLocations = unmatchedLocations(laRows, locationRegister(locations, locAliases));
 
     /* Only the days somebody works, unless asked otherwise. `showQuietDays` is
        about the columns; a person who works none of them still has a row, because
@@ -34034,7 +34243,11 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
               el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 44) }),
               el('div', {
                 class: 'rc-hint',
-                text: row.raw_location || locs.get(row.location_id)?.name || '',
+                /* The place the register knows, and the sheet's own spelling only
+                   where it does not know one. It read the other way round, which
+                   put "T12" on screen for a location the application can name — the
+                   code is what the workbook types, not what anybody calls it. */
+                text: locs.get(row.location_id)?.name || row.raw_location || '',
               }),
             ]));
           }
@@ -34166,6 +34379,53 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
       }));
     }
 
+    /* ── Places the register does not know ────────────────────────────────── */
+
+    if (strangeLocations.length) {
+      root.appendChild(el('div', { style: 'height:20px' }));
+      root.appendChild(el('div', { class: 'rc-section-head' }, [
+        el('h3', { text: 'Where the 4WLA says, and the register cannot place' }),
+      ]));
+      root.appendChild(el('div', { class: 'rc-scroll' }, [
+        el('table', { class: 'rc-table' }, [
+          el('thead', {}, [el('tr', {}, [
+            el('th', { text: 'As written' }), el('th', { text: 'Rows' }),
+            el('th', { text: 'On' }), el('th', { text: '' }),
+          ])]),
+          el('tbody', {}, strangeLocations.map((u) => el('tr', {}, [
+            el('td', { text: u.name }),
+            el('td', { class: 'rc-num', text: String(u.rows.length) }),
+            el('td', {
+              class: 'rc-hint',
+              text: u.rows.map((r) => r.raw_label || '').filter(Boolean).join(', ').slice(0, 60),
+            }),
+            el('td', {}, rc.isAdmin() ? [
+              el('button', {
+                class: 'cx-btn mini',
+                text: 'That is a place we have',
+                title: 'Record this spelling against a location on the register.',
+                onClick: () => mapLocation(u, locations, redraw),
+              }),
+              el('button', {
+                class: 'cx-btn mini ghost',
+                text: 'Add as a location',
+                title: 'A place the register has never carried.',
+                onClick: () => addFromLocation(u, redraw),
+              }),
+            ] : []),
+          ]))),
+        ]),
+      ]));
+      root.appendChild(el('p', {
+        class: 'rc-hint',
+        text: 'The location comes off the 4WLA\u2019s own Location column, and it is kept whether or '
+          + 'not the register knows the spelling \u2014 which is what puts these here to be answered '
+          + 'rather than dropping them. A code matches, where a location on the register carries it: '
+          + 'that column is filled in with "W30", not the full name. Until one of these is mapped the '
+          + 'days it covers still show the place as written, and the reports simply cannot group them.',
+      }));
+    }
+
     /* ── What this view is ────────────────────────────────────────────────── */
 
     root.appendChild(el('p', {
@@ -34231,7 +34491,7 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
       placeholder: '— not from the look-ahead —',
       options: named.map((r) => ({
         value: r.id,
-        label: [r.raw_location || locs.get(r.location_id)?.name, r.raw_label]
+        label: [locs.get(r.location_id)?.name || r.raw_location, r.raw_label]
           .filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
       })),
     });
@@ -34394,6 +34654,71 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
       }
       notifyChanged('people');
       toast({ tone: 'good', message: `${name.trim()} is on the team, and "${unmatchedName.name}" matches them.` });
+      redraw();
+    } catch (err) {
+      toast({ tone: 'bad', message: err.message });
+    }
+  }
+
+  /**
+   * Record which place a spelling in the workbook is.
+   *
+   * The counterpart of `mapName()`, and the same rule: exact or nothing, so the
+   * only way a new spelling starts matching is that somebody says it does. Once,
+   * and every week afterwards is answered.
+   */
+  function mapLocation(unmatched, locations, redraw) {
+    const where = selectInput({
+      value: locations[0]?.id,
+      options: locations.map((l) => ({
+        value: l.id, label: l.code ? `${l.name} (${l.code})` : l.name,
+      })),
+    });
+    formModal({
+      title: `"${unmatched.name}" is…`,
+      body: el('div', { class: 'cx-form' }, [
+        field('Location', where),
+        el('p', {
+          class: 'rc-hint',
+          text: 'This records the spelling against that location, so every week from now on resolves '
+            + 'without anybody being asked again \u2014 in the reports and the activity log as well as '
+            + 'here. Nothing is matched on a near miss.',
+        }),
+      ]),
+      confirmLabel: 'That is the place',
+      onConfirm: async () => {
+        await rc.addLocationAlias(where.value, unmatched.name);
+        notifyChanged('locations');
+        toast({ tone: 'good', message: `"${unmatched.name}" now resolves.` });
+        redraw();
+      },
+    });
+  }
+
+  /**
+   * A place the register has never carried.
+   *
+   * The spelling becomes the code rather than an alias: it is what the workbook
+   * writes and what somebody will type next week, and a code is the field
+   * `rc_resolve_location()` reads it out of. The name is the spelling until
+   * somebody gives it a fuller one in Organisation — a location under a short
+   * name is still a location, and rows filed nowhere are worse.
+   */
+  async function addFromLocation(unmatched, redraw) {
+    const name = await promptDialog({
+      title: 'Add it to the register',
+      label: 'Location name, as you would write it',
+      value: unmatched.name,
+      confirmLabel: 'Add',
+    });
+    if (!name || !name.trim()) return;
+    try {
+      const created = await rc.addLocation({ name: name.trim(), code: unmatched.name, active: true });
+      if (foldName(name) !== foldName(unmatched.name) && created?.id) {
+        await rc.addLocationAlias(created.id, unmatched.name).catch(() => {});
+      }
+      notifyChanged('locations');
+      toast({ tone: 'good', message: `${name.trim()} is on the register, and "${unmatched.name}" resolves to it.` });
       redraw();
     } catch (err) {
       toast({ tone: 'bad', message: err.message });

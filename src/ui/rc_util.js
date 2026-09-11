@@ -12,7 +12,7 @@
 import { el } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
 import { toISO, todayMs, fmtDate, addDays, MS_DAY } from '../core/dates.js';
-import { resourceNames, readGrid } from '../core/lookahead.js';
+import { resourceNames, readGrid, locationColumnOf } from '../core/lookahead.js';
 import { applyLegend } from '../io/lookahead.js';
 import * as rc from '../core/rc.js';
 import { openModal } from './components.js';
@@ -195,6 +195,65 @@ export function nameRegister(people, aliases = []) {
 }
 
 /**
+ * A lookup from a spelling of a place to a location id.
+ *
+ * The same three-source, exact-fold rule the names get, and the same fold —
+ * `rc_resolve_location()` in Postgres folds case and punctuation and nothing
+ * else, and this has to agree with it or a location would resolve on the server
+ * and not on screen. Weakest first: a code, then an alias somebody recorded,
+ * then the location's own name.
+ *
+ * The code is in here because it is what the 4WLA is actually filled in with.
+ * That sheet's Location column says "W30", not "Wayside 30", and a register
+ * that only knew names and hand-written aliases matched none of it — which is
+ * the same failure a roster of full names had against a Resource row of first
+ * names. It is not a guess: `rc_locations.code` is a field somebody typed for
+ * this location and no other.
+ */
+export function locationRegister(locations, aliases = []) {
+  const map = new Map();
+  for (const l of locations || []) {
+    const key = foldName(l.code);
+    if (key) map.set(key, l.id);
+  }
+  for (const a of aliases || []) {
+    const key = foldName(a.alias);
+    if (key) map.set(key, a.location_id);
+  }
+  for (const l of locations || []) {
+    const key = foldName(l.name);
+    if (key) map.set(key, l.id);
+  }
+  return map;
+}
+
+/**
+ * The spellings of a place the look-ahead uses that the register cannot place.
+ *
+ * The other half of pulling the location off the sheet. Keeping an unresolved
+ * spelling is only worth doing if somebody is shown it, and this is what the
+ * Resources tab lists — one click from "add it as a location" or "that is one we
+ * already have", exactly as an unmatched name and an unmapped colour are. A
+ * location nobody has mapped is work whose place is written down and not
+ * grouped, which is the one thing that makes a report quietly wrong rather than
+ * visibly incomplete.
+ */
+export function unmatchedLocations(laRows, register) {
+  const seen = new Map();
+  for (const row of laRows || []) {
+    if (row.location_id) continue;
+    const written = String(row.raw_location || '').trim();
+    const key = foldName(written);
+    if (!key || register?.get(key)) continue;
+    const held = seen.get(key) || { name: written, rows: [], weeks: new Set() };
+    if (!held.rows.some((r) => r.id === row.id)) held.rows.push(row);
+    if (row.week_start) held.weeks.add(row.week_start);
+    seen.set(key, held);
+  }
+  return [...seen.values()].sort((a, b) => b.rows.length - a.rows.length);
+}
+
+/**
  * First name to person, for the names that belong to exactly one of them.
  *
  * The 4WLA's Resource row is filled in by hand at speed and it says "Victor",
@@ -267,7 +326,7 @@ export function newestPerKey(rows, rank) {
 }
 
 /**
- * The look-ahead's rows for a span of weeks, with who it names on each.
+ * The look-ahead's rows for a span of weeks, with who it names and where.
  *
  * The one place the three views ask, so they cannot disagree about where
  * somebody is — the week plan, the Resources tab and the huddle all come
@@ -282,6 +341,12 @@ export function newestPerKey(rows, rank) {
  * reason it is for the legend: it is re-read at paint time, so it is right the
  * moment somebody edits the sheet rather than at the next successful write.
  *
+ * **And where the sheet says the work is**, for the same reason and out of the
+ * same grid — see `graftLocations()`. Between them they are why a derived day
+ * arrives in the week plan, the Resources tab and the huddle with both a person
+ * and a place against it, and why recording an outcome on one files it at that
+ * place rather than nowhere.
+ *
  * Grafted onto the stored rows rather than replacing them, because those carry
  * the id a plan entry links to and the location the alias register resolved.
  * The join is `sheet_row` within a week, which is the same identity the row key
@@ -290,10 +355,12 @@ export function newestPerKey(rows, rank) {
  * exists, and why this fills a gap rather than overruling one.
  */
 export async function lookaheadWithResources(fromISO, toISO) {
-  const [stored, snapshots, legendRows] = await Promise.all([
+  const [stored, snapshots, legendRows, locations, locAliases] = await Promise.all([
     rc.lookaheadBetween(fromISO, toISO).catch(() => []),
     rc.listSnapshots({ limit: 20 }).catch(() => []),
     rc.listLegend().catch(() => []),
+    rc.listLocations({ includeInactive: true }).catch(() => []),
+    rc.listLocationAliases().catch(() => []),
   ]);
 
   const laRows = newestPerKey(stored, new Map(snapshots.map((s, i) => [s.id, i])));
@@ -306,7 +373,47 @@ export async function lookaheadWithResources(fromISO, toISO) {
     }))),
     { anchorISO: snapshot.taken_at }
   );
-  return graftResources(laRows, view);
+  return graftLocations(
+    graftResources(laRows, view),
+    view,
+    locationRegister(locations, locAliases)
+  );
+}
+
+/**
+ * Fill in each row's location from the grid's own Location column.
+ *
+ * Here for the reason the names are: a row written by a deployment that read
+ * the location differently — or could not resolve it and therefore kept nothing
+ * — carries no place at all, and the snapshot on screen says exactly where the
+ * work is. The sheet is re-read at paint time, so this is right the moment
+ * somebody corrects the workbook rather than at the next successful ingest.
+ *
+ * **It fills gaps and overrules nothing.** A stored `location_id` is a spelling
+ * the register resolved when the row was written and is left alone; the raw text
+ * is only supplied where there is none. The resolve is the same folded lookup
+ * the server does, so a place resolves identically whether it arrived through
+ * the ingest or through here.
+ */
+export function graftLocations(laRows, view, register) {
+  const column = locationColumnOf(view);
+  if (column < 0) return laRows;
+
+  const bySheetRow = new Map();
+  for (const activity of view?.activities || []) {
+    const text = String(activity.meta?.[column] || '').trim();
+    if (text) bySheetRow.set(activity.row, text);
+  }
+  if (!bySheetRow.size) return laRows;
+
+  return (laRows || []).map((row) => {
+    const written = bySheetRow.get(row.sheet_row);
+    if (!written) return row;
+    const raw = row.raw_location || written;
+    const id = row.location_id || register?.get(foldName(raw)) || null;
+    if (raw === row.raw_location && id === (row.location_id || null)) return row;
+    return { ...row, raw_location: raw, location_id: id };
+  });
 }
 
 /** Fill in each row's `resources` from the grid, where the sheet still says so. */

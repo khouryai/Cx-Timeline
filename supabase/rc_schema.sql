@@ -1389,6 +1389,16 @@ $$;
 -- Resolve a location spelling to a record, through the alias table. Returns
 -- null rather than inventing one: an unknown spelling belongs in a queue for
 -- somebody to map, not in a row that silently claims to be somewhere.
+--
+-- Three sources, strongest first: the location's own name, an alias somebody
+-- recorded, and its **code**. The code is in here because it is what the 4WLA's
+-- Location column is actually filled in with — "W30", not "Wayside 30" — and
+-- without it that column resolved to nothing on a register that was otherwise
+-- complete, which is the same failure a roster of full names had against a
+-- Resource row of first names. It is not a guess: a code is a field somebody
+-- typed for this location and no other. `nameRegister`'s counterpart for places,
+-- `locationRegister()` in `src/ui/rc_util.js`, folds identically on purpose — a
+-- spelling must not resolve on the server and fail on screen.
 create or replace function public.rc_resolve_location(p_raw text)
 returns uuid
 language sql
@@ -1403,6 +1413,9 @@ as $$
         and f.key <> '' limit 1),
     (select a.location_id from public.rc_location_alias a, folded f
       where lower(regexp_replace(a.alias, '[^a-zA-Z0-9]', '', 'g')) = f.key
+        and f.key <> '' limit 1),
+    (select l.id from public.rc_locations l, folded f
+      where lower(regexp_replace(coalesce(l.code, ''), '[^a-zA-Z0-9]', '', 'g')) = f.key
         and f.key <> '' limit 1)
   );
 $$;

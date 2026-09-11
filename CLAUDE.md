@@ -780,6 +780,41 @@ subscribes. That is what keeps the graph acyclic.
   mapped by hand. The label lives in a *hidden* column, which is why
   `parseSheet()` keeps hidden-column text as `row.label` — the one thing it
   keeps from a hidden cell, and never a cell of the grid.
+- **The location column is found the same way the date axis is, and the spelling
+  is kept whether or not it resolves.** `locationColumnOf()` reads the heading
+  the workbook gives each activity column, so a column inserted to its left
+  cannot silently misfile every row; with no heading to read, `rowsFrom()` falls
+  back to offering each cell to the alias register, which is all a sheet with no
+  headings allows. What changed is what happens when nothing resolves: the text
+  used to be **discarded**, so a Location column full of codes nobody had
+  registered — "W30", "T12" — recorded no place at all, and with nothing kept
+  there was nothing on any screen for anybody to map. It is now kept, and an
+  unresolved spelling is exactly like an unmapped colour or an unmatched name:
+  listed on the Resources tab and one click from "Add as a location" or "That is
+  a place we have", which writes `rc_location_alias`. `rc_resolve_location()`
+  also matches `rc_locations.code`, because the code is what that column is
+  actually filled in with, and `locationRegister()` in `ui/rc_util.js` folds
+  identically — a place must not resolve on the server and fail on screen. A
+  resolved location is shown by **name**: the code is what the workbook types,
+  not what anybody calls the site.
+- **Where the work is comes off the snapshot, like who is on it.**
+  `graftLocations()` sits beside `graftResources()` in `lookaheadWithResources()`
+  and for the same reason — a stored row written before the location was read off
+  that column carries no place, and the grid on screen says exactly where it is.
+  It fills gaps and overrules nothing: a stored `location_id` is a spelling the
+  register resolved when the row was written. Between the two grafts, a derived
+  day reaches the week plan, the Resources tab and the huddle with both a person
+  and a place against it — which is what makes recording an outcome on one file
+  it at that place in `rc_actuals` rather than nowhere.
+- **A read that started recording the location is not a read where everything
+  moved.** A row key is built from the week and the location, so the first read
+  after the location began coming off the sheet's own column keys every row
+  differently — and compared naively that is every row removed and every row
+  added, a batch of phantom scope booked into the KPIs over a change in the
+  *keying* rather than the work. `classify()` records nothing when one side
+  carries no location at all, the other carries one, and not a single key is
+  shared. Drawn that narrowly on purpose: a crew genuinely moving site is still a
+  removal and an addition, which is what `relinkCandidates()` is for.
 - **The date axis is found, never configured.** `readGrid()` in
   `core/lookahead.js` locates the calendar by looking for the row of weekday
   letters, which is the one row on that sheet whose content cannot be mistaken
@@ -958,16 +993,16 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         #  81 checks — the parser, the rows it derives and
+node tools/test_lookahead.js         #  90 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 212 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 220 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 251 checks — both permission models, and that
+node tools/test_sql.js               # 253 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result

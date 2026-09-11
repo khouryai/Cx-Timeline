@@ -45,6 +45,7 @@ import {
   SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability,
   notifyChanged, formModal, nameRegister, foldName,
   ambiguousFirstNames, lookaheadWithResources, assignmentIndex,
+  locationRegister, unmatchedLocations,
 } from './rc_util.js';
 
 /** Which week is on screen. Null means the one containing today. */
@@ -72,13 +73,14 @@ export async function render(root) {
      is why `lookaheadWithResources()` catches rather than a permission test up
      here. It is also the one place the three views ask, so they cannot disagree
      about where somebody is. */
-  const [people, locations, categories, leave, planRows, aliases, laRows] = await Promise.all([
+  const [people, locations, categories, leave, planRows, aliases, locAliases, laRows] = await Promise.all([
     rc.listPeople(),
     rc.listLocations(),
     rc.listCategories(),
     rc.listLeave(from, to),
     rc.listPlan(from, to),
     rc.listPersonAliases().catch(() => []),
+    rc.listLocationAliases().catch(() => []),
     lookaheadWithResources(from, to),
   ]);
 
@@ -96,6 +98,9 @@ export async function render(root) {
      would send somebody looking for a person who is already on the roster
      twice. */
   const shared = ambiguousFirstNames(people);
+  /* Where the sheet says the work is. The same answer as a name it cannot place:
+     the spelling is kept and shown, never discarded and never guessed at. */
+  const strangeLocations = unmatchedLocations(laRows, locationRegister(locations, locAliases));
 
   /* Only the days somebody works, unless asked otherwise. `showQuietDays` is
      about the columns; a person who works none of them still has a row, because
@@ -207,7 +212,11 @@ export async function render(root) {
             el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 44) }),
             el('div', {
               class: 'rc-hint',
-              text: row.raw_location || locs.get(row.location_id)?.name || '',
+              /* The place the register knows, and the sheet's own spelling only
+                 where it does not know one. It read the other way round, which
+                 put "T12" on screen for a location the application can name — the
+                 code is what the workbook types, not what anybody calls it. */
+              text: locs.get(row.location_id)?.name || row.raw_location || '',
             }),
           ]));
         }
@@ -339,6 +348,53 @@ export async function render(root) {
     }));
   }
 
+  /* ── Places the register does not know ────────────────────────────────── */
+
+  if (strangeLocations.length) {
+    root.appendChild(el('div', { style: 'height:20px' }));
+    root.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'Where the 4WLA says, and the register cannot place' }),
+    ]));
+    root.appendChild(el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [el('tr', {}, [
+          el('th', { text: 'As written' }), el('th', { text: 'Rows' }),
+          el('th', { text: 'On' }), el('th', { text: '' }),
+        ])]),
+        el('tbody', {}, strangeLocations.map((u) => el('tr', {}, [
+          el('td', { text: u.name }),
+          el('td', { class: 'rc-num', text: String(u.rows.length) }),
+          el('td', {
+            class: 'rc-hint',
+            text: u.rows.map((r) => r.raw_label || '').filter(Boolean).join(', ').slice(0, 60),
+          }),
+          el('td', {}, rc.isAdmin() ? [
+            el('button', {
+              class: 'cx-btn mini',
+              text: 'That is a place we have',
+              title: 'Record this spelling against a location on the register.',
+              onClick: () => mapLocation(u, locations, redraw),
+            }),
+            el('button', {
+              class: 'cx-btn mini ghost',
+              text: 'Add as a location',
+              title: 'A place the register has never carried.',
+              onClick: () => addFromLocation(u, redraw),
+            }),
+          ] : []),
+        ]))),
+      ]),
+    ]));
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'The location comes off the 4WLA\u2019s own Location column, and it is kept whether or '
+        + 'not the register knows the spelling \u2014 which is what puts these here to be answered '
+        + 'rather than dropping them. A code matches, where a location on the register carries it: '
+        + 'that column is filled in with "W30", not the full name. Until one of these is mapped the '
+        + 'days it covers still show the place as written, and the reports simply cannot group them.',
+    }));
+  }
+
   /* ── What this view is ────────────────────────────────────────────────── */
 
   root.appendChild(el('p', {
@@ -404,7 +460,7 @@ function assign({ people, locations, categories, laRows, locs, days, redraw, per
     placeholder: '— not from the look-ahead —',
     options: named.map((r) => ({
       value: r.id,
-      label: [r.raw_location || locs.get(r.location_id)?.name, r.raw_label]
+      label: [locs.get(r.location_id)?.name || r.raw_location, r.raw_label]
         .filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
     })),
   });
@@ -567,6 +623,71 @@ async function addFromName(unmatchedName, redraw) {
     }
     notifyChanged('people');
     toast({ tone: 'good', message: `${name.trim()} is on the team, and "${unmatchedName.name}" matches them.` });
+    redraw();
+  } catch (err) {
+    toast({ tone: 'bad', message: err.message });
+  }
+}
+
+/**
+ * Record which place a spelling in the workbook is.
+ *
+ * The counterpart of `mapName()`, and the same rule: exact or nothing, so the
+ * only way a new spelling starts matching is that somebody says it does. Once,
+ * and every week afterwards is answered.
+ */
+function mapLocation(unmatched, locations, redraw) {
+  const where = selectInput({
+    value: locations[0]?.id,
+    options: locations.map((l) => ({
+      value: l.id, label: l.code ? `${l.name} (${l.code})` : l.name,
+    })),
+  });
+  formModal({
+    title: `"${unmatched.name}" is…`,
+    body: el('div', { class: 'cx-form' }, [
+      field('Location', where),
+      el('p', {
+        class: 'rc-hint',
+        text: 'This records the spelling against that location, so every week from now on resolves '
+          + 'without anybody being asked again \u2014 in the reports and the activity log as well as '
+          + 'here. Nothing is matched on a near miss.',
+      }),
+    ]),
+    confirmLabel: 'That is the place',
+    onConfirm: async () => {
+      await rc.addLocationAlias(where.value, unmatched.name);
+      notifyChanged('locations');
+      toast({ tone: 'good', message: `"${unmatched.name}" now resolves.` });
+      redraw();
+    },
+  });
+}
+
+/**
+ * A place the register has never carried.
+ *
+ * The spelling becomes the code rather than an alias: it is what the workbook
+ * writes and what somebody will type next week, and a code is the field
+ * `rc_resolve_location()` reads it out of. The name is the spelling until
+ * somebody gives it a fuller one in Organisation — a location under a short
+ * name is still a location, and rows filed nowhere are worse.
+ */
+async function addFromLocation(unmatched, redraw) {
+  const name = await promptDialog({
+    title: 'Add it to the register',
+    label: 'Location name, as you would write it',
+    value: unmatched.name,
+    confirmLabel: 'Add',
+  });
+  if (!name || !name.trim()) return;
+  try {
+    const created = await rc.addLocation({ name: name.trim(), code: unmatched.name, active: true });
+    if (foldName(name) !== foldName(unmatched.name) && created?.id) {
+      await rc.addLocationAlias(created.id, unmatched.name).catch(() => {});
+    }
+    notifyChanged('locations');
+    toast({ tone: 'good', message: `${name.trim()} is on the register, and "${unmatched.name}" resolves to it.` });
     redraw();
   } catch (err) {
     toast({ tone: 'bad', message: err.message });

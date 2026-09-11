@@ -245,7 +245,7 @@ function datePlease(days, anchorISO) {
  */
 export function readGrid(grid, { anchorISO = null } = {}) {
   const rows = (grid?.rows || []).slice().sort((a, b) => a.row - b.row);
-  const empty = { days: [], meta: [], activities: [], header: null };
+  const empty = { days: [], meta: [], headings: [], activities: [], header: null };
   if (!rows.length) return empty;
 
   // The weekday row: the one where most values are M/Tu/W/Th/F/Sa/Su.
@@ -300,6 +300,22 @@ export function readGrid(grid, { anchorISO = null } = {}) {
   const metaCols = [...new Set(
     body.flatMap((r) => r.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim()).map((c) => c.col))
   )].sort((a, b) => a - b);
+
+  /* What the sheet calls each of those columns.
+     The nearest thing written in that column at or above the weekday row —
+     which is where a heading is, whichever row somebody put it on. It is worth
+     reading rather than guessing because one of these columns is the location,
+     and knowing *which* is the difference between recording where the work is
+     and recording nothing. Nothing depends on a heading existing: an unlabelled
+     column is '' and is treated as it always was. */
+  const headings = metaCols.map((col) => {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].row > header.row) continue;
+      const text = String(at(rows[i], col)?.value ?? '').trim();
+      if (text) return text;
+    }
+    return '';
+  });
 
   const activities = [];
   for (const row of body) {
@@ -371,7 +387,34 @@ export function readGrid(grid, { anchorISO = null } = {}) {
     activities.push({ row: row.row, meta, marks, heading, highlighted, named, resource: null });
   }
 
-  return { days, meta: metaCols, activities, header: header.row };
+  return { days, meta: metaCols, headings, activities, header: header.row };
+}
+
+/**
+ * Which of the activity columns is the location, off the sheet's own heading.
+ *
+ * Found, like the date axis, rather than configured — for the same reason and
+ * with the same failure in mind: a column pinned by letter or by position is
+ * wrong the first time somebody inserts one, and wrong *silently*, because the
+ * rows still write and every one of them records the wrong place.
+ *
+ * The heading is what the workbook calls the column, so that is what is read.
+ * `-1` means it says nothing recognisable, and the caller falls back to asking
+ * the alias register which cell it knows — which is what this module did
+ * everywhere before, and still the only answer available on a sheet with no
+ * headings at all.
+ */
+export function locationColumnOf(view) {
+  const headings = view?.headings || [];
+  for (let i = 0; i < headings.length; i++) {
+    if (/\blocations?\b/i.test(headings[i])) return i;
+  }
+  // "Site" is the other word this programme's sheets use for it. Deliberately a
+  // short list: a near miss here misfiles every row on the sheet at once.
+  for (let i = 0; i < headings.length; i++) {
+    if (/\bsite\b/i.test(headings[i])) return i;
+  }
+  return -1;
 }
 
 /**
@@ -381,19 +424,34 @@ export function readGrid(grid, { anchorISO = null } = {}) {
  * maintained at and the grain a plan is made at. Two rules, both of which hold
  * everywhere else in this module:
  *
- * **The location is resolved, never parsed.** Each activity cell is offered to
- * `locate` — the alias register, injected so this stays testable without a
- * network — and the first that resolves is the location. Nothing is matched on
- * the description: the wording differs on the two sides and is not reliable
- * enough to carry evidence, which is what the alias list exists for.
+ * **The location is read from the column the sheet keeps it in, and kept
+ * whether or not it resolves.** `locationColumnOf()` finds that column by its
+ * heading; `locate` — the alias register, injected so this stays testable
+ * without a network — turns the spelling into an id where it knows it. Nothing
+ * is matched on the description: the wording differs on the two sides and is
+ * not reliable enough to carry evidence, which is what the alias list is for.
+ *
+ * The text surviving an unresolved spelling is the part that was missing. The
+ * location used to be recorded *only* where the register already knew it, so a
+ * column full of "W30" and "Y10" was discarded on every deployment that had not
+ * registered them — and with nothing kept there was nothing for anybody to map,
+ * which is the one state this module is built to make impossible. An unresolved
+ * spelling is exactly like an unmapped colour or an unmatched name: shown, and
+ * one click from being answered.
  *
  * **A row with nothing scheduled that week is not a row.** The sheet carries
  * activities for reference with no shift against them, and writing those would
  * make the register mostly noise — and, worse, make every one of them look
  * like scope the first time it *did* get a shift.
  */
-export async function rowsFrom(view, { snapshotId = null, locate = async () => null } = {}) {
+export async function rowsFrom(view, {
+  snapshotId = null, locate = async () => null, locationColumn = null,
+} = {}) {
   if (!view?.days?.length) return [];
+
+  // Told which column, or read off the sheet's own heading. `null` is "work it
+  // out"; `-1` is "there is no heading", which is the register scan below.
+  const locCol = Number.isInteger(locationColumn) ? locationColumn : locationColumnOf(view);
 
   const dayByCol = new Map(view.days.map((d) => [d.col, d]));
   const out = [];
@@ -430,11 +488,27 @@ export async function rowsFrom(view, { snapshotId = null, locate = async () => n
       weeks.get(week).resources[day.date] = mark.value;
     }
 
+    /* Where the work is, from the column the sheet keeps it in.
+       **The text is kept whether or not it resolves.** It used to be recorded
+       only when the alias register already knew it, so a location column full of
+       "W30" and "Y10" was *discarded* on a deployment that had not registered
+       them yet — and with nothing kept there was nothing for anybody to map,
+       which is the one state this design is supposed to make impossible. An
+       unresolved spelling is exactly like an unmapped colour or an unmatched
+       name: shown, and one click from being answered. */
     let locationId = null;
     let rawLocation = null;
-    for (const value of activity.meta) {
-      const hit = await locate(value);
-      if (hit) { locationId = hit; rawLocation = value; break; }
+    if (locCol >= 0) {
+      rawLocation = activity.meta[locCol] || null;
+      locationId = rawLocation ? await locate(rawLocation) : null;
+    } else {
+      // Nobody has said which column it is, so the register decides: the first
+      // cell it recognises is the location. Still never the *description* —
+      // that is matched on nothing, here or anywhere else in this module.
+      for (const value of activity.meta) {
+        const hit = await locate(value);
+        if (hit) { locationId = hit; rawLocation = value; break; }
+      }
     }
     const label = activity.meta.filter(Boolean).join(' · ');
 
@@ -491,10 +565,29 @@ export function windowOf(rows) {
  * `marks` holds BART's own resource requests.
  *
  * Returns a list of `{ kind, weekStart, rowKey, before, after }`.
+ *
+ * **A read that started recording the location is not a read where everything
+ * moved.** The row key is built from the week and the location, so the first read
+ * after the location began coming off the sheet's own column — rather than only
+ * where the alias register already knew the spelling — keys every row
+ * differently. Compared naively that is every row removed and every row added:
+ * a batch of phantom scope on the one screen somebody reads a year later, booked
+ * into the KPIs, over a change that is about the *keying* and not the work. It is
+ * the same judgement the window rule makes, and drawn as narrowly as it can be —
+ * one side recording no location at all, the other recording one, and not a
+ * single key in common. A crew genuinely moving site is still a removal and an
+ * addition, which is what `relinkCandidates()` is for.
  */
 export function classify(before, after, { cancelledMeaning = 'cancelled' } = {}) {
   const beforeWindow = windowOf(before);
   const afterWindow = windowOf(after);
+
+  if (before.length && after.length) {
+    const keys = new Set(after.map((r) => r.rowKey));
+    const located = (rows) => rows.filter((r) => String(r.location || '').trim()).length;
+    const sided = located(before) === 0 !== (located(after) === 0);
+    if (sided && !before.some((r) => keys.has(r.rowKey))) return [];
+  }
 
   // Only weeks present on both sides can be compared at all. Everything else
   // is the window moving, which is recorded and kept out of the KPIs.

@@ -266,6 +266,16 @@ union all
 select 'rc_person_alias',
        case when to_regclass('public.rc_person_alias') is not null then 'ok' else 'MISSING' end
 union all
+-- The 4WLA's Location column is filled in with codes, so resolving one has to
+-- try `rc_locations.code` as well as the name and the aliases. A project still
+-- running the two-source version resolves that whole column to nothing.
+select 'location codes resolve',
+       case when (select pg_get_functiondef(p.oid) from pg_proc p
+                    join pg_namespace n on n.oid = p.pronamespace
+                   where n.nspname = 'public' and p.proname = 'rc_resolve_location'
+                   limit 1) like '%l.code%'
+            then 'ok' else 'RUN rc_schema.sql — the 4WLA location column will resolve to nothing' end
+union all
 select 'rc_blockers',
        case when to_regclass('public.rc_blockers') is not null then 'ok' else 'MISSING' end
 union all

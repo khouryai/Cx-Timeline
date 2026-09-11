@@ -1647,7 +1647,7 @@ function planFromLookahead({ person, iso, laRows, locations, categories, locs, r
     placeholder: '— nothing from the look-ahead —',
     options: rows.map((r) => ({
       value: r.id,
-      label: [r.raw_location || locs.get(r.location_id)?.name, r.raw_label]
+      label: [locs.get(r.location_id)?.name || r.raw_location, r.raw_label]
         .filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
     })),
   });

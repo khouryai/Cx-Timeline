@@ -209,7 +209,17 @@ function fakeSdk() {
           rows: [
             monthRow,
             { row: 5, label: '', cells: axis.map((d, i) => mark(i, String(d.getUTCDate()), null)) },
-            { row: 6, label: '', cells: axis.map((d, i) => mark(i, LETTERS[d.getUTCDay()], null)) },
+            /* The headings the workbook gives its activity columns. Which one
+               is the location is *read* off these — `locationColumnOf()` — so a
+               column inserted to their left cannot silently misfile every row.
+               They sit on the weekday row, which is where this workbook puts
+               them; anywhere at or above it would do. */
+            { row: 6, label: '', cells: [
+              { col: 2, ref: 'B6', value: 'CDRL', hex: null },
+              { col: 3, ref: 'C6', value: 'Description of Work Activity', hex: null },
+              { col: 4, ref: 'D6', value: 'Location', hex: null },
+              ...axis.map((d, i) => mark(i, LETTERS[d.getUTCDay()], null)),
+            ] },
             /* A section heading. What makes it one is that its *activity*
                cells are painted — the shading along the day columns is on
                every row. */
@@ -222,7 +232,10 @@ function fakeSdk() {
             { row: 9, label: '', cells: [
               { col: 2, ref: 'B9', value: 'CDRL 9.04.29', hex: null },
               { col: 3, ref: 'C9', value: 'IXL Regression Testing', hex: null },
-              { col: 4, ref: 'D9', value: 'TPSS 12', hex: null },
+              /* The code, which is what this column is filled in with on the
+                 real sheet. It resolves through `rc_locations.code`, so the plan
+                 shows the location's *name* while the workbook says "T12". */
+              { col: 4, ref: 'D9', value: 'T12', hex: null },
               mark(todayIdx, 'X', 'FFFF00'),
               mark(todayIdx + 1, 'X.WIT', 'FFFF00'),
               mark(todayIdx + 3, 'X', 'FF0000'),
@@ -246,7 +259,10 @@ function fakeSdk() {
             { row: 14, label: '', cells: [
               { col: 2, ref: 'B14', value: 'Operational Readiness', hex: null },
               { col: 3, ref: 'C14', value: 'ATS Site Test', hex: null },
-              { col: 4, ref: 'D14', value: 'Station 6 Platform', hex: null },
+              /* The code, not the name — which is what this column is actually
+                 filled in with. A register that only knew names and hand-written
+                 aliases resolved none of it. */
+              { col: 4, ref: 'D14', value: 'S6P', hex: null },
               mark(1, 'X.PAST', '00B0F0'),
               mark(todayIdx + 2, 'X.TCE', '00B0F0'),
               mark(todayIdx + 4, 'X', '3399FF'),
@@ -257,6 +273,10 @@ function fakeSdk() {
                four-week window showing a row with nothing in it. */
             { row: 16, label: '', cells: [
               { col: 3, ref: 'C16', value: 'REI Fiber Re-termination — finished', hex: null },
+              /* A spelling the register has never carried. It is kept and
+                 reported rather than discarded — which is what it used to be,
+                 leaving nothing for anybody to map. */
+              { col: 4, ref: 'D16', value: 'W30', hex: null },
               mark(1, 'X', 'FFFF00'),
               mark(2, 'X', 'FFFF00'),
             ] },
@@ -322,8 +342,12 @@ function fakeSdk() {
          other's only from the snapshot. Both paths, told apart. */
       sheet_row: 14,
       row_key: 'k1',
-      location_id: 'l1',
-      raw_location: 'TPSS 12',
+      /* **No location at all**, which is what a row written before the location
+         came off the sheet's own column looks like: the register did not know
+         the spelling, so nothing was kept. The grid still says where the work
+         is, and grafting it is what puts the place back on screen. */
+      location_id: null,
+      raw_location: null,
       raw_label: 'IXL Regression Testing',
       cells: {},
       bart_marks: {},
@@ -346,8 +370,12 @@ function fakeSdk() {
       // names are joined back on.
       sheet_row: 9,
       row_key: 'k2',
-      location_id: 'l1',
-      raw_location: 'TPSS 12',
+      /* No location either, for the same reason as `lar1`. The sheet's own
+         column says "T12" and the register carries that as a code, so grafting
+         is what puts the place back — and what makes the plan read "TPSS 12"
+         over a workbook that never writes the words. */
+      location_id: null,
+      raw_location: null,
       raw_label: 'IXL Regression Testing',
       cells: {},
       bart_marks: {},
@@ -358,6 +386,33 @@ function fakeSdk() {
          shows the names perfectly well. The names therefore have to come off the
          snapshot, which is the whole point of grafting them. */
       resources: {},
+    }, {
+      /* A row at a place the register cannot place. The spelling reaches the
+         Resources tab to be answered in one click — the same answer an unmatched
+         name gets — and until it is, the days it covers still say where they
+         are; it is the reports that cannot group them. */
+      id: 'lar3',
+      snapshot_id: 'snap1',
+      week_start: (() => {
+        const now = new Date();
+        const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+        return new Date(t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000).toISOString().slice(0, 10);
+      })(),
+      sheet_row: 16,
+      row_key: 'k3',
+      location_id: null,
+      raw_location: null,
+      raw_label: 'REI Fiber Re-termination',
+      cells: {},
+      bart_marks: {},
+      resources: (() => {
+        const now = new Date();
+        const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+        const monday = t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000;
+        // Tuesday, so it cannot collide with the Monday the grid's Resource row
+        // names three people on.
+        return { [new Date(monday + 86400000).toISOString().slice(0, 10)]: 'Victor' };
+      })(),
     }],
     rc_person_alias: [],
     rc_change_events: [
@@ -1276,6 +1331,19 @@ async function main() {
   check('so there is nothing left to press',
     (await priyaRow.locator('button', { hasText: 'Plan it' }).count()) === 0);
 
+  /* ── And where, off the sheet's own Location column ────────────────────
+     `lar2` carries no location at all, which is what a row written before the
+     location came off that column looks like — and what an unresolved spelling
+     used to leave behind, which was nothing at all for anybody to map. The grid
+     says "T12", the register carries that as a location's code, and the plan
+     therefore names the place over a workbook that never writes the words. */
+  check('a stored row carrying no location still says where the work is',
+    await page.evaluate(() => window.__rc.rows.rc_lookahead_rows
+      .find((r) => r.id === 'lar2').location_id === null));
+  check('because the sheet\u2019s own column is read, and a code resolves from it',
+    /TPSS 12/.test(priyaText) && !/T12/.test(priyaText),
+    priyaText.replace(/\n/g, ' | ').slice(0, 90));
+
   /* Derived, never written. `rc_plan_entries` is append-only evidence of what
      somebody *decided*; materialising the sheet into it would store a
      derivation, make the workbook's authorship indistinguishable from a
@@ -1470,7 +1538,7 @@ async function main() {
   check('and the names typed in its cells are on the calendar',
     /Dan/.test(resourceText) && /Okafor/.test(resourceText), resourceText.replace(/\s+/g, ' ').slice(0, 90));
   check('with the location it inherited from the activity above it',
-    /TPSS 12/.test(resourceText), resourceText.replace(/\s+/g, ' ').slice(0, 90));
+    /T12/.test(resourceText), resourceText.replace(/\s+/g, ' ').slice(0, 90));
 
   // Filtering finds somebody by name, which is one of the two reasons anybody
   // types in that box — and it would find nothing if only the activity counted.
@@ -1706,6 +1774,43 @@ async function main() {
   check('mapping a spelling writes it to the alias register',
     await page.evaluate(() => (window.__rc.rows.rc_person_alias || [])
       .some((a) => /Okafor/.test(a.alias) && a.person_id === 'p2')));
+
+  /* ── A place the register cannot place ────────────────────────────────
+     The same answer an unmatched name gets, and for the same reason: the
+     spelling is kept and shown rather than discarded, so it is one click from
+     being settled. It used to be thrown away unless the register already knew
+     it — so a Location column full of codes nobody had registered recorded
+     nothing, and there was nothing on any screen to act on. */
+  const resText2 = await page.locator('#rc-frame').innerText();
+  check('a place the register cannot place is named, not dropped',
+    /and the register cannot place/.test(resText2) && /W30/.test(resText2),
+    resText2.split('\n').filter((l) => /W30/.test(l)).join(' | ').slice(0, 90));
+  check('and the day it covers still says where it is',
+    /W30/.test(await page.locator('#rc-frame .rc-resources tr', { hasText: 'Victor Okonkwo' })
+      .innerText()));
+  check('and it offers to put it on the register in one click',
+    (await page.locator('#rc-frame button', { hasText: 'Add as a location' }).count()) >= 1);
+
+  await page.locator('#rc-frame button', { hasText: 'Add as a location' }).first().click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal input.cx-input').first().fill('Wayside 30');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Add' }).click();
+  await page.waitForTimeout(700);
+  /* The spelling becomes the *code*, because that is the field
+     `rc_resolve_location()` reads it out of and what somebody will type again
+     next week. Nothing else on the register had to be touched. */
+  check('answering it records the place with the sheet\u2019s spelling as its code',
+    await page.evaluate(() => (window.__rc.rows.rc_locations || [])
+      .some((l) => l.name === 'Wayside 30' && l.code === 'W30')));
+  const afterAdd = await page.locator('#rc-frame').innerText();
+  check('and the 4WLA\u2019s spelling stops being a question',
+    !/and the register cannot place/.test(afterAdd),
+    afterAdd.split('\n').filter((l) => /W30/.test(l)).join(' | ').slice(0, 120));
+  /* And the place is then *named* rather than coded, everywhere. The code is
+     what the workbook types; it is not what anybody calls the site. */
+  check('and the place is named from then on rather than coded',
+    /Wayside 30/.test(afterAdd) && !/W30/.test(afterAdd),
+    afterAdd.split('\n').filter((l) => /Wayside 30|W30/.test(l)).join(' | ').slice(0, 120));
 
   /* Work the 4WLA has never heard of — a day in the office, a day on another
      project. Without somewhere for those to go the huddle has a blank against a

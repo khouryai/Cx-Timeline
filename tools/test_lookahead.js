@@ -351,7 +351,7 @@ console.log('\nA read becomes rows, and two reads become a difference');
    `classify()` was written, tested against hand-made rows, and never given
    any: nothing produced them, so the change log was empty by construction. */
 const DAY = ['M', 'Tu', 'W', 'Th', 'F', 'Sa', 'Su'];
-function sheet(marks) {
+function sheet(marks, { headings = true } = {}) {
   // A fixed Monday, so the week keys are known rather than relative to today.
   const first = Date.UTC(2026, 8, 7);      // Monday 7 September 2026
   const days = [...Array(14)].map((_, i) => new Date(first + i * 86400000));
@@ -390,11 +390,25 @@ function sheet(marks) {
     }
   });
 
+  /* What the workbook calls its activity columns, on the weekday row the way
+     this one writes them. Which column is the location is *read* from these —
+     see `locationColumnOf()` — so a fixture without them exercises the other
+     path, the register scan, which is all a sheet with no headings allows. */
+  const headingCells = headings
+    ? [
+      { col: 2, ref: 'H2', value: 'Description of Work Activity', hex: null },
+      { col: 3, ref: 'H3', value: 'Location', hex: null },
+    ]
+    : [];
+
   return {
     rows: [
       { row: 4, label: '', cells: [{ col: 8, ref: 'M', value: 'SEPTEMBER', hex: null }] },
       { row: 5, label: '', cells: days.map((d, i) => cell(i, String(d.getUTCDate()), null)) },
-      { row: 6, label: '', cells: days.map((d, i) => cell(i, DAY[(d.getUTCDay() + 6) % 7], null)) },
+      { row: 6, label: '', cells: [
+        ...headingCells,
+        ...days.map((d, i) => cell(i, DAY[(d.getUTCDay() + 6) % 7], null)),
+      ] },
       ...body,
     ],
   };
@@ -436,6 +450,60 @@ check('a spelling the register knows resolves to a location',
   rowsA.find((r) => /IXL/.test(r.raw_label))?.location_id === 'loc-1');
 check('and one it does not is kept for somebody to map, never guessed',
   rowsA.find((r) => /Cable pull/.test(r.raw_label))?.location_id === null);
+
+/* ── Where the work is, off the sheet's own column ────────────────────────
+   The location used to be recorded only where the register already knew the
+   spelling, so a column of codes nobody had registered was discarded — and with
+   nothing kept there was nothing for anybody to map. */
+console.log('\nThe location comes off the column the sheet keeps it in');
+
+check('the Location column is found by its heading, not by position',
+  cls.locationColumnOf(genA) === 1, `column index ${cls.locationColumnOf(genA)}`);
+check('a sheet with no headings says so rather than guessing',
+  cls.locationColumnOf(cls.readGrid(sheet([
+    { label: 'IXL Regression', location: 'TPSS 12', days: [[0, 'FFFF00']] },
+  ], { headings: false }), { anchorISO: '2026-09-09' })) === -1);
+
+check('an unresolved spelling is still written down',
+  rowsA.find((r) => /Cable pull/.test(r.raw_label))?.raw_location === 'Yard 3');
+check('and it is what the row is keyed on, so two places are two rows',
+  rowsA.find((r) => /Cable pull/.test(r.raw_label))?.row_key.includes('Yard 3'));
+
+// The description is never the location, whatever the register happens to say
+// about it — the wording differs on the two sides and is not evidence.
+const nosy = await cls.rowsFrom(genA, {
+  snapshotId: 'snap-n',
+  locate: async (text) => (text === 'IXL Regression' ? 'loc-wrong' : null),
+});
+check('the description is not offered as a location when the column is known',
+  nosy.find((r) => /IXL/.test(r.raw_label))?.location_id === null);
+
+// No heading, so the register decides — the behaviour every sheet had before,
+// and the only one available where nobody labelled the columns.
+const unlabelled = await cls.rowsFrom(cls.readGrid(sheet([
+  { label: 'IXL Regression', location: 'TPSS 12', days: [[0, 'FFFF00']] },
+  { label: 'Cable pull', location: 'Yard 3', days: [[1, 'FFFF00']] },
+], { headings: false }), { anchorISO: '2026-09-09' }), { snapshotId: 'snap-u', locate });
+check('with no heading the register still finds the one spelling it knows',
+  unlabelled.find((r) => /IXL/.test(r.raw_label))?.location_id === 'loc-1');
+check('and a column it cannot place stays unclaimed rather than being invented',
+  unlabelled.find((r) => /Cable pull/.test(r.raw_label))?.raw_location === null);
+
+/* A read that started recording the location is not a read where everything
+   moved. The row key carries the location, so that first read keys every row
+   differently — and compared naively it is a batch of phantom scope. */
+const keyedBoth = rowsA.map((r) => ({
+  rowKey: r.row_key, weekStart: r.week_start, location: r.raw_location || '',
+  subsystem: '', label: r.raw_label, cells: r.cells, marks: r.bart_marks, resources: r.resources,
+}));
+const keyedNone = keyedBoth.map((r) => ({
+  ...r, location: '', rowKey: r.rowKey.replace(/\|[^|]*\|/, '||'),
+}));
+check('the first read to record a location is not a hundred rows moving',
+  cls.classify(keyedNone, keyedBoth).length === 0,
+  `${cls.classify(keyedNone, keyedBoth).length} events`);
+check('and the reverse is the same non-event',
+  cls.classify(keyedBoth, keyedNone).length === 0);
 
 // Second read: the Tuesday shift is cancelled, and a row is added the same week.
 const genB = cls.readGrid(sheet([

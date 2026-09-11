@@ -162,6 +162,11 @@ select assert(public.rc_resolve_location('TPSS 12')   = :'loc12', 'an exact name
 select assert(public.rc_resolve_location('TPSS-12')   = :'loc12', 'punctuation is folded away');
 select assert(public.rc_resolve_location('tpss12')    = :'loc12', 'so is case and spacing');
 select assert(public.rc_resolve_location('Traction Power 12') = :'loc12', 'an alias resolves');
+-- And the code, which is what the 4WLA's Location column is actually filled in
+-- with: that sheet says "T12", not "TPSS 12". Without this the whole column
+-- resolved to nothing on a register that was otherwise complete.
+select assert(public.rc_resolve_location('T12')       = :'loc12', 'and so does the location code');
+select assert(public.rc_resolve_location('t-12')      = :'loc12', 'folded the same way as a name');
 select assert(public.rc_resolve_location('Nowhere Yard') is null,
   'an unknown spelling resolves to nothing rather than inventing a location');
 select assert(public.rc_resolve_location('') is null, 'and so does an empty one');
