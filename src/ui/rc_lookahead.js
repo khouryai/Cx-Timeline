@@ -274,13 +274,39 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
        the grid was written, so `rc_lookahead_rows` was a well-designed table
        with nothing in it and nothing downstream could reference a row. */
     let written = [];
+    let rowTrouble = null;
     try {
       const rows = await lookaheadRows(snapshot.id, grid);
       if (rows.length) written = await rc.addSnapshotRows(rows);
     } catch (err) {
-      // The snapshot is the record; the rows are a convenience over it and can
-      // be rebuilt from it. Losing them must not lose the read.
-      console.warn('[cx-timeline] look-ahead rows not written:', err.message);
+      /* A column this project has and that project has not.
+         `create table if not exists` does nothing to a table that already
+         exists, so a database built before the Resource row went in has no
+         `resources` column — and PostgREST refuses the whole insert over it.
+         The rest of the row is still worth having, so it goes without that one
+         field and the gap is *said*, rather than costing the read. */
+      const missingColumn = /resources/.test(err.message)
+        && /(column|schema cache)/i.test(err.message);
+      if (missingColumn) {
+        try {
+          const rows = (await lookaheadRows(snapshot.id, grid))
+            .map(({ resources, ...rest }) => rest);
+          if (rows.length) written = await rc.addSnapshotRows(rows);
+          rowTrouble = 'This database has no rc_lookahead_rows.resources column, so who the '
+            + 'Resource row names was not stored. Run supabase/migrate.sql and then '
+            + 'supabase/rc_schema.sql. The calendar still shows the names — it re-reads the '
+            + 'snapshot — but the Resources tab and the week plan read the stored column.';
+        } catch (second) {
+          rowTrouble = second.message;
+        }
+      } else {
+        rowTrouble = err.message;
+      }
+      /* The snapshot is the record; the rows are a convenience over it and can
+         be rebuilt from it. Losing them must not lose the read — but it must
+         not be silent either, which it was: a `console.warn` is a message to
+         nobody, and the feature it takes out simply reads as empty. */
+      console.warn('[cx-timeline] look-ahead rows:', err.message);
     }
 
     /* And then say what changed.
@@ -302,8 +328,17 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
     run.note = [
       grid.unknown.length ? `${grid.unknown.length} colour(s) not in the legend` : null,
       events.length ? `${countable(events).length} change(s) that count` : null,
+      rowTrouble ? `rows: ${rowTrouble}` : null,
     ].filter(Boolean).join('; ') || null;
     await rc.addIngestRun(run);
+
+    /* Said out loud, and at length. Something downstream of this read is now
+       empty, and "empty" and "it could not be written" must not look alike — a
+       read that half worked and reported success is how somebody concludes a
+       feature does not work. */
+    if (!silent && rowTrouble) {
+      toast({ tone: 'bad', message: `Read, but: ${rowTrouble}`, timeout: 20000 });
+    }
 
     if (!silent && grid.unknown.length) {
       toast({

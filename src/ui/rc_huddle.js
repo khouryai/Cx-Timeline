@@ -34,7 +34,7 @@ import { saveFile } from '../io/exporters.js';
 import {
   STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs,
   dayLabel, byId, availability, notifyChanged, formModal,
-  nameRegister, newestPerKey, resourceAssignments,
+  nameRegister, resourceAssignments, lookaheadWithResources,
 } from './rc_util.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -189,7 +189,7 @@ export async function render(root) {
   const plan = planDate(date, people);
 
   const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, laRows,
-    aliases, snapshots] =
+    aliases] =
     await Promise.all([
       rc.listCategories(),
       rc.listLocations(),
@@ -215,12 +215,10 @@ export async function render(root) {
          Both weeks, not just the reviewed one: on a Friday the day being planned
          is in the *next* week, and a look-ahead read for one week cannot say who
          BART wants on the other. */
-      rc.lookaheadBetween(toISO(weekStart(isoToMs(review))), toISO(weekStart(isoToMs(plan))))
-        .catch(() => []),
+      lookaheadWithResources(toISO(weekStart(isoToMs(review))), toISO(weekStart(isoToMs(plan)))),
       // Which spellings in the workbook are whose. Nothing is matched without
       // them beyond an exact fold of somebody's own name.
       rc.listPersonAliases().catch(() => []),
-      rc.listSnapshots({ limit: 20 }).catch(() => []),
     ]);
 
   const chainByeId = new Map();
@@ -238,10 +236,10 @@ export async function render(root) {
      This is what lets the meeting ask somebody about the work BART actually
      wants of them rather than only about the work somebody remembered to plan —
      the two differing is the interesting case, and until now the second was the
-     only one on screen. Duplicates from older snapshots are dropped first, or
-     the same activity arrives once per read. */
-  const rows = newestPerKey(laRows, new Map(snapshots.map((s, i) => [s.id, i])));
-  const { byPerson: askedFor } = resourceAssignments(rows, nameRegister(everybody.length ? everybody : people, aliases));
+     only one on screen. `lookaheadWithResources()` has already dropped the
+     copies older snapshots carry and taken the names off the newest one. */
+  const { byPerson: askedFor } = resourceAssignments(
+    laRows, nameRegister(everybody.length ? everybody : people, aliases));
   const askedOf = (personId, iso) => (askedFor.get(personId)?.get(iso) || []);
 
   /* One context, handed to the table, the meeting and the digest alike. They
@@ -249,7 +247,7 @@ export async function render(root) {
      data they start disagreeing on screen, in front of the room. */
   const ctx = {
     people, review, plan, planFor, actualByPerson, cats, locs,
-    categories, locations, parties, leave, root, chainByeId, laRows: rows, blockers, everybody,
+    categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
     askedOf,
   };
 
@@ -1413,7 +1411,7 @@ export async function renderWeek(root) {
   const from = days[0];
   const to = days[days.length - 1];
 
-  const [people, locations, leave, planRows, everyLaRow, categories, aliases, snapshots, everybody] =
+  const [people, locations, leave, planRows, laRows, categories, aliases, everybody] =
     await Promise.all([
       rc.listPeople({ scheduledOnly: true }),
       rc.listLocations(),
@@ -1421,14 +1419,14 @@ export async function renderWeek(root) {
       // staff the day, which is a fortnight too late to do anything about it.
       rc.listLeave(from, toISO(addDays(startMs, 20))),
       rc.listPlan(from, to),
-      // What BART has asked for this week. Administrators only, so a member sees
-      // the plan without the demand behind it, which is correct.
-      rc.lookaheadForWeek(from).catch(() => []),
+      // What BART has asked for this week, and who it named on each row.
+      // Administrators only, so a member sees the plan without the demand behind
+      // it, which is correct.
+      lookaheadWithResources(from, to),
       rc.listCategories(),
-      // Which spellings are whose. Without them only a full name matches, and
-      // the Resource row is filled in with first names.
+      // Which spellings are whose. Without them only a full name and a unique
+      // first name match, and somebody may go by neither.
       rc.listPersonAliases().catch(() => []),
-      rc.listSnapshots({ limit: 20 }).catch(() => []),
       // Everybody, not just the scheduled: a name in the workbook belongs to
       // whoever it belongs to, and filtering the register would leave a real
       // person reading as unmatched.
@@ -1437,9 +1435,8 @@ export async function renderWeek(root) {
   const locs = byId(locations);
 
   /* Who the 4WLA names, per person per day. The same reading the Resources tab
-     and the huddle make, from the same two functions, so the three cannot
+     and the huddle make, through the same functions, so the three cannot
      disagree about where somebody is. */
-  const laRows = newestPerKey(everyLaRow, new Map(snapshots.map((s, i) => [s.id, i])));
   const { byPerson: askedFor } = resourceAssignments(
     laRows, nameRegister(everybody.length ? everybody : people, aliases));
   const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);

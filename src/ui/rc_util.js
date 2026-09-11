@@ -12,7 +12,9 @@
 import { el } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
 import { toISO, todayMs, fmtDate, addDays, MS_DAY } from '../core/dates.js';
-import { resourceNames } from '../core/lookahead.js';
+import { resourceNames, readGrid } from '../core/lookahead.js';
+import { applyLegend } from '../io/lookahead.js';
+import * as rc from '../core/rc.js';
 import { openModal } from './components.js';
 
 /**
@@ -262,6 +264,82 @@ export function newestPerKey(rows, rank) {
     if (!held || at(row) < at(held)) best.set(key, row);
   }
   return [...best.values()];
+}
+
+/**
+ * The look-ahead's rows for a span of weeks, with who it names on each.
+ *
+ * The one place the three views ask, so they cannot disagree about where
+ * somebody is — the week plan, the Resources tab and the huddle all come
+ * through here.
+ *
+ * **The names are taken from the snapshot, not from the stored column.** They
+ * are stored too, in `rc_lookahead_rows.resources`, and that is what a join
+ * wants — but a database built before that column existed refuses the insert
+ * over it, and the only symptom was three screens quietly reporting that the
+ * workbook named nobody while the calendar, which re-reads the snapshot, showed
+ * the names perfectly well. So the snapshot is the authority here for the same
+ * reason it is for the legend: it is re-read at paint time, so it is right the
+ * moment somebody edits the sheet rather than at the next successful write.
+ *
+ * Grafted onto the stored rows rather than replacing them, because those carry
+ * the id a plan entry links to and the location the alias register resolved.
+ * The join is `sheet_row` within a week, which is the same identity the row key
+ * is built on and has the same weakness: a row inserted mid-sheet between two
+ * reads shifts the ones below it. That is what the stored column is for once it
+ * exists, and why this fills a gap rather than overruling one.
+ */
+export async function lookaheadWithResources(fromISO, toISO) {
+  const [stored, snapshots, legendRows] = await Promise.all([
+    rc.lookaheadBetween(fromISO, toISO).catch(() => []),
+    rc.listSnapshots({ limit: 20 }).catch(() => []),
+    rc.listLegend().catch(() => []),
+  ]);
+
+  const laRows = newestPerKey(stored, new Map(snapshots.map((s, i) => [s.id, i])));
+  const snapshot = snapshots[0];
+  if (!snapshot?.grid) return laRows;
+
+  const view = readGrid(
+    applyLegend(snapshot.grid, legendRows.map((r) => ({
+      argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
+    }))),
+    { anchorISO: snapshot.taken_at }
+  );
+  return graftResources(laRows, view);
+}
+
+/** Fill in each row's `resources` from the grid, where the sheet still says so. */
+export function graftResources(laRows, view) {
+  const dayByCol = new Map((view?.days || []).map((d) => [d.col, d]));
+
+  const bySheetRow = new Map();
+  for (const activity of view?.activities || []) {
+    if (!activity.resource) continue;
+    const perDay = {};
+    for (const mark of activity.resource.marks) {
+      if (!mark.value) continue;
+      const day = dayByCol.get(mark.col);
+      if (day?.date) perDay[day.date] = mark.value;
+    }
+    if (Object.keys(perDay).length) bySheetRow.set(activity.row, perDay);
+  }
+  if (!bySheetRow.size) return laRows;
+
+  const mondayOf = (iso) => toISO(weekStart(isoToMs(iso)));
+  return (laRows || []).map((row) => {
+    const perDay = bySheetRow.get(row.sheet_row);
+    if (!perDay) return row;
+    // A row belongs to one week; a name on a day in another week belongs to that
+    // week's copy of the row, not to this one.
+    const mine = {};
+    for (const [date, names] of Object.entries(perDay)) {
+      if (mondayOf(date) === row.week_start) mine[date] = names;
+    }
+    return Object.keys(mine).length
+      ? { ...row, resources: { ...(row.resources || {}), ...mine } }
+      : row;
+  });
 }
 
 /**

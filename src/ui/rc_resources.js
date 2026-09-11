@@ -43,8 +43,8 @@ import {
 } from './components.js';
 import {
   SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability,
-  notifyChanged, formModal, nameRegister, newestPerKey, resourceAssignments, foldName,
-  ambiguousFirstNames,
+  notifyChanged, formModal, nameRegister, resourceAssignments, foldName,
+  ambiguousFirstNames, lookaheadWithResources,
 } from './rc_util.js';
 
 /** Which week is on screen. Null means the one containing today. */
@@ -67,23 +67,20 @@ export async function render(root) {
   const to = days[days.length - 1];
   const today = todayISO();
 
-  const [people, locations, categories, leave, planRows, aliases, snapshots] = await Promise.all([
+  /* The look-ahead is administrators-only in the database, so a member gets
+     nothing back and the view simply has no BART column — which is correct, and
+     is why `lookaheadWithResources()` catches rather than a permission test up
+     here. It is also the one place the three views ask, so they cannot disagree
+     about where somebody is. */
+  const [people, locations, categories, leave, planRows, aliases, laRows] = await Promise.all([
     rc.listPeople(),
     rc.listLocations(),
     rc.listCategories(),
     rc.listLeave(from, to),
     rc.listPlan(from, to),
     rc.listPersonAliases().catch(() => []),
-    rc.listSnapshots({ limit: 20 }).catch(() => []),
+    lookaheadWithResources(from, to),
   ]);
-
-  /* The look-ahead is administrators-only in the database, so a member gets
-     nothing back and the view simply has no BART column — which is correct, and
-     is why this is a catch rather than a permission test up here. */
-  const laRows = newestPerKey(
-    await rc.lookaheadBetween(from, to).catch(() => []),
-    new Map(snapshots.map((s, i) => [s.id, i]))
-  );
 
   const locs = byId(locations);
   const cats = byId(categories);

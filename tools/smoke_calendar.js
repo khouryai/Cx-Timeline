@@ -234,6 +234,10 @@ function fakeSdk() {
                it does not, because both cases have to be visible. */
             { row: 10, label: '', cells: [
               { col: 3, ref: 'C10', value: 'Resource', hex: null },
+              /* Index 7 is the Monday of this week — the axis starts a week
+                 back — so the week plan, which draws Monday to Friday, has the
+                 cell whatever day the suite happens to run. */
+              mark(7, 'Priya, Victor, Lena', null),
               mark(todayIdx, 'Dan', null),
               mark(todayIdx + 1, 'Dan, R. Okafor', null),
             ] },
@@ -313,7 +317,10 @@ function fakeSdk() {
         return new Date(ms - ((new Date(ms).getUTCDay() + 6) % 7) * 86400000)
           .toISOString().slice(0, 10);
       })(),
-      sheet_row: 9,
+      /* A different sheet row from the one the grid's Resource row hangs off,
+         so this row's names can only have come from the stored column and the
+         other's only from the snapshot. Both paths, told apart. */
+      sheet_row: 14,
       row_key: 'k1',
       location_id: 'l1',
       raw_location: 'TPSS 12',
@@ -335,24 +342,22 @@ function fakeSdk() {
         const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
         return new Date(t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000).toISOString().slice(0, 10);
       })(),
-      sheet_row: 11,
+      // The sheet row the grid's Resource row hangs off, which is what the
+      // names are joined back on.
+      sheet_row: 9,
       row_key: 'k2',
       location_id: 'l1',
       raw_location: 'TPSS 12',
       raw_label: 'IXL Regression Testing',
       cells: {},
       bart_marks: {},
-      // Named for today, so the Resources grid has a 4WLA block on a real column.
-      /* Bare first names, which is what the Resource row is actually filled in
-         with — never "Victor Okonkwo". Keyed on the Monday of this week rather
-         than on today, so the week plan (which draws Monday to Friday) has the
-         cell whatever day the suite happens to run. */
-      resources: { [(() => {
-        const now = new Date();
-        const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-        return new Date(t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000)
-          .toISOString().slice(0, 10);
-      })()]: 'Priya, Victor, Lena' },
+      /* **Empty, deliberately.** This is what a database built before the
+         `resources` column existed looks like: the insert that would have filled
+         it is refused over that one field, so every stored row reports that the
+         workbook named nobody while the calendar, which re-reads the snapshot,
+         shows the names perfectly well. The names therefore have to come off the
+         snapshot, which is the whole point of grafting them. */
+      resources: {},
     }],
     rc_person_alias: [],
     rc_change_events: [
@@ -1645,6 +1650,20 @@ async function main() {
   /* ── A bare first name ────────────────────────────────────────────────
      What the Resource row is actually filled in with. A register that only knew
      full names matched almost nothing on a real sheet. */
+  /* ── Where the names come from ────────────────────────────────────────
+     `lar2` carries an *empty* `resources`, which is exactly what a database
+     built before that column existed looks like: PostgREST refuses the insert
+     over the one field it does not know, so every stored row says the workbook
+     named nobody — while the calendar, which re-reads the snapshot, shows the
+     names perfectly well. Three screens reported "0 row(s)" over a sheet with
+     names all over it. So the names are taken off the snapshot and grafted onto
+     the stored rows, which still carry the id a plan links to. */
+  check('names are found even when the stored column never got them',
+    await page.evaluate(() => (window.__rc.rows.rc_lookahead_rows
+      .find((r) => r.id === 'lar2').resources || null) === null
+      || !Object.keys(window.__rc.rows.rc_lookahead_rows
+        .find((r) => r.id === 'lar2').resources).length));
+
   check('a bare first name maps to the one person who answers to it',
     (await page.locator('#rc-frame .rc-resources tr', { hasText: 'Victor Okonkwo' })
       .locator('.rc-res-asked').count()) >= 1);

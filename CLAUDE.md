@@ -525,6 +525,22 @@ subscribes. That is what keeps the graph acyclic.
   row changing is `resource_changed` with `field: 'resources'`, reusing the
   existing kind so no `rc_change_events` check constraint has to be widened in
   a project that already has one.
+- **The names come off the snapshot, not off the stored column.**
+  `rc_lookahead_rows.resources` is where they belong for a join, and
+  `lookaheadWithResources()` still reads it — but it grafts on what the newest
+  snapshot's own grid says, joined by `sheet_row` within a week. That exists
+  because of a failure with no symptom anybody could act on: a database built
+  before that column refuses the whole insert over the one field it does not
+  know, so every stored row reported that the workbook named nobody, three
+  screens said "0 row(s)", and the calendar — which re-reads the snapshot —
+  showed the names perfectly well the whole time. The snapshot is the authority
+  for the same reason it is for the legend: it is re-read at paint time, so it is
+  right the moment somebody edits the sheet rather than at the next *successful*
+  write. It is one function because the week plan, the Resources tab and the
+  huddle must not disagree about where somebody is. And the write no longer fails
+  quietly: `ingest()` retries without the column, says so in the toast and in the
+  `rc_ingest_runs` note, and names the two files to run — a `console.warn` is a
+  message to nobody, and the feature it takes out simply reads as empty.
 - **A name in a spreadsheet is matched exactly or reported, never guessed.**
   `nameRegister()` knows three things and no fourth: somebody's own full name, an
   alias in `rc_person_alias`, and a **first name exactly one person answers to**
@@ -930,7 +946,7 @@ node tools/test_dist.js              #  41 checks — every deployment shape, an
 node tools/test_lookahead.js         #  81 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 209 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 210 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser

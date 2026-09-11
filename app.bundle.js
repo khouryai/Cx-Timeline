@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 54   Built: 2026-09-10T23:28:06.875Z
+ * Modules: 54   Built: 2026-09-11T03:23:06.032Z
  */
 (function () {
   'use strict';
@@ -28361,6 +28361,561 @@ __mods["core/lookahead.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// io/lookahead.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["io/lookahead.js"] = function (__x, __req) {
+  /**
+   * Reading the four-week look-ahead.
+   *
+   * The look-ahead is an Excel workbook the deputy edits in place, and it encodes
+   * shift access in **cell fill colour** against a fixed legend. So this is not
+   * an importer in the usual sense: the values matter far less than the colours,
+   * and almost everything that can go wrong is invisible in a spreadsheet you
+   * open by hand.
+   *
+   * Four rules, each of which exists because of a specific way it breaks:
+   *
+   * **One sheet, chosen by name.** The workbook is large and the four-week grid
+   * is one tab among several. `readXlsx()` in `io/importers.js` takes whichever
+   * sheet is first, which would silently read a cover page. A missing sheet is an
+   * error here, never a fall back to sheet one.
+   *
+   * **Visible rows and columns only.** Rows are hidden by hand and by autofilter,
+   * both as `hidden="1"`. A hidden *column* matters more than a hidden row: with
+   * one column per day, dropping one removes a day from the week and nothing
+   * about the result looks wrong.
+   *
+   * **The real row number travels with the row.** Blank and absent rows mean the
+   * nth row in the file is not row n, so an array index is not an identity. Row
+   * identity is what change classification rests on.
+   *
+   * **A colour that is not in the legend is never guessed.** It goes to an
+   * unknown bucket for somebody to map. The legend is stable in practice, and
+   * relying on that would still be wrong, because the failure is silent and lands
+   * in evidence.
+   *
+   * Imports: inflate, dates (leaves).
+   */
+
+  const { inflateRaw } = __req("io/inflate.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     ZIP
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Read the container into `name -> Uint8Array`, via the central directory. */
+  function readZip(buffer) {
+    const view = new DataView(buffer);
+    const bytes = new Uint8Array(buffer);
+
+    let eocd = -1;
+    for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66000); i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) throw new Error('That file is not a .xlsx (no ZIP directory found).');
+
+    const count = view.getUint16(eocd + 10, true);
+    let at = view.getUint32(eocd + 16, true);
+
+    const out = new Map();
+    for (let i = 0; i < count; i++) {
+      if (view.getUint32(at, true) !== 0x02014b50) break;
+      const method = view.getUint16(at + 10, true);
+      const compressed = view.getUint32(at + 20, true);
+      const nameLen = view.getUint16(at + 28, true);
+      const extraLen = view.getUint16(at + 30, true);
+      const commentLen = view.getUint16(at + 32, true);
+      const localAt = view.getUint32(at + 42, true);
+      const name = new TextDecoder().decode(bytes.subarray(at + 46, at + 46 + nameLen));
+
+      // The local header repeats the name and carries its own extra field, whose
+      // length routinely differs from the one in the directory.
+      const localNameLen = view.getUint16(localAt + 26, true);
+      const localExtraLen = view.getUint16(localAt + 28, true);
+      const start = localAt + 30 + localNameLen + localExtraLen;
+      const raw = bytes.subarray(start, start + compressed);
+      out.set(name, method === 0 ? raw : inflateRaw(raw));
+
+      at += 46 + nameLen + extraLen + commentLen;
+    }
+    return out;
+  }
+
+  function partText(files, name) {
+    const part = files.get(name);
+    return part ? new TextDecoder().decode(part) : '';
+  }
+
+  function decodeXml(s) {
+    return String(s)
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+      .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d))
+      .replace(/&amp;/g, '&');
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Colour
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The legacy 56-entry palette an `indexed="n"` fill refers to.
+   *
+   * Excel still writes these for anything inherited from an older workbook, so a
+   * parser that only understands `rgb=` sees nothing at all on exactly those
+   * cells — and a blank cell reads as "no shift booked", which is a different
+   * fact entirely.
+   */
+  const INDEXED = [
+    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
+    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
+    '800000', '008000', '000080', '808000', '800080', '008080', 'C0C0C0', '808080',
+    '9999FF', '993366', 'FFFFCC', 'CCFFFF', '660066', 'FF8080', '0066CC', 'CCCCFF',
+    '000080', 'FF00FF', 'FFFF00', '00FFFF', '800080', '800000', '008080', '0000FF',
+    '00CCFF', 'CCFFFF', 'CCFFCC', 'FFFF99', '99CCFF', 'FF99CC', 'CC99FF', 'FFCC99',
+    '3366FF', '33CCCC', '99CC00', 'FFCC00', 'FF9900', 'FF6600', '666699', '969696',
+    '003366', '339966', '003300', '333300', '993300', '993366', '333399', '333333',
+  ];
+
+  /** `theme="n"` indexes the scheme with the dark/light pairs swapped. */
+  const THEME_ORDER = ['lt1', 'dk1', 'lt2', 'dk2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hlink', 'folHlink'];
+
+  function readTheme(xml) {
+    const scheme = /<a:clrScheme[^>]*>([\s\S]*?)<\/a:clrScheme>/.exec(xml)?.[1] || '';
+    const colors = {};
+    for (const m of scheme.matchAll(/<a:(\w+)>([\s\S]*?)<\/a:\1>/g)) {
+      const [, key, body] = m;
+      const srgb = /<a:srgbClr val="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
+      const sys = /<a:sysClr[^>]*lastClr="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
+      if (srgb || sys) colors[key] = (srgb || sys).toUpperCase();
+    }
+    return THEME_ORDER.map((key) => colors[key] || null);
+  }
+
+  /**
+   * Apply an OOXML tint, in HLS as the specification requires.
+   *
+   * Doing it in RGB gives a near miss, and a near miss against a legend keyed on
+   * exact colours is a lookup that fails. Accent 1 at -0.25 has to come out
+   * #2F5597 — what Excel calls "Blue, Accent 1, Darker 25%".
+   */
+  function applyTint(hex, tint) {
+    if (!tint) return hex;
+    const r = parseInt(hex.slice(0, 2), 16) / 255;
+    const g = parseInt(hex.slice(2, 4), 16) / 255;
+    const b = parseInt(hex.slice(4, 6), 16) / 255;
+
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    let lum = (max + min) / 2;
+    let hue = 0;
+    let sat = 0;
+    if (max !== min) {
+      const d = max - min;
+      sat = lum > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) hue = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+      else if (max === g) hue = ((b - r) / d + 2) / 6;
+      else hue = ((r - g) / d + 4) / 6;
+    }
+
+    lum = tint < 0 ? lum * (1 + tint) : lum * (1 - tint) + tint;
+    lum = Math.min(1, Math.max(0, lum));
+
+    const toRgb = (p, q, t) => {
+      let u = t;
+      if (u < 0) u += 1;
+      if (u > 1) u -= 1;
+      if (u < 1 / 6) return p + (q - p) * 6 * u;
+      if (u < 1 / 2) return q;
+      if (u < 2 / 3) return p + (q - p) * (2 / 3 - u) * 6;
+      return p;
+    };
+
+    let out;
+    if (sat === 0) out = [lum, lum, lum];
+    else {
+      const q = lum < 0.5 ? lum * (1 + sat) : lum + sat - lum * sat;
+      const p = 2 * lum - q;
+      out = [toRgb(p, q, hue + 1 / 3), toRgb(p, q, hue), toRgb(p, q, hue - 1 / 3)];
+    }
+    return out.map((v) => Math.round(v * 255).toString(16).padStart(2, '0').toUpperCase()).join('');
+  }
+
+  /**
+   * `styleIndex -> { hex, source }` for every cell format in the workbook.
+   *
+   * The chain is `cellXfs[s].fillId -> fills[id].patternFill.fgColor`, and the
+   * colour at the end arrives in one of three notations. Resolving all three to
+   * one hex is what lets the legend be keyed on the colour rather than on how it
+   * happened to be written.
+   */
+  function readFills(stylesXml, theme) {
+    const fillsBlock = /<fills[^>]*>([\s\S]*?)<\/fills>/.exec(stylesXml)?.[1] || '';
+    const fills = (fillsBlock.match(/<fill>[\s\S]*?<\/fill>/g) || []).map((fill) => {
+      const pattern = /patternType="(\w+)"/.exec(fill)?.[1] || 'none';
+      if (pattern === 'none') return { hex: null, source: 'none' };
+
+      const fg = /<fgColor([^>]*)\/>/.exec(fill)?.[1] || '';
+      const tint = parseFloat(/tint="(-?[\d.]+)"/.exec(fg)?.[1] || '0') || 0;
+
+      const rgb = /rgb="([0-9A-Fa-f]{6,8})"/.exec(fg)?.[1];
+      if (rgb) {
+        const base = (rgb.length === 8 ? rgb.slice(2) : rgb).toUpperCase();
+        return { hex: applyTint(base, tint), source: 'rgb' };
+      }
+
+      const themed = /theme="(\d+)"/.exec(fg)?.[1];
+      if (themed != null) {
+        const base = theme[parseInt(themed, 10)] || null;
+        return { hex: base ? applyTint(base, tint) : null, source: `theme:${themed}` };
+      }
+
+      const indexed = /indexed="(\d+)"/.exec(fg)?.[1];
+      if (indexed != null) {
+        const base = INDEXED[parseInt(indexed, 10)] || null;
+        return { hex: base ? applyTint(base, tint) : null, source: `indexed:${indexed}` };
+      }
+
+      return { hex: null, source: 'unresolved' };
+    });
+
+    /* White is not a highlight.
+       An explicit white fill and no fill at all are the same thing to anybody
+       looking at the sheet — a highlight nobody can see is not one — and Excel
+       writes white fills into all sorts of default styling. Reading them as
+       colours put hundreds of cells into the unmapped bucket and asked somebody
+       to explain the absence of a highlight. */
+    const plain = fills.map((f) => (f.hex === 'FFFFFF' ? { hex: null, source: 'none' } : f));
+
+    const xfsBlock = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] || '';
+    const xfs = xfsBlock.match(/<xf[\s\S]*?(?:\/>|<\/xf>)/g) || [];
+    return xfs.map((xf) => {
+      const fillId = parseInt(/fillId="(\d+)"/.exec(xf)?.[1] ?? '0', 10);
+      return plain[fillId] || { hex: null, source: 'none' };
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The sheet
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Rows and cells, matched as either a self-closing tag or an open/close pair.
+   *
+   * The obvious `/<row[\s\S]*?(?:\/>|<\/row>)/` is wrong here, and wrong in a way
+   * that only shows up on a sheet like this one. A cell carrying a fill but no
+   * value is written `<c r="D2" s="1"/>`, and a lazy match stops at that first
+   * `/>` — truncating the row and dropping every cell after it. A workbook full
+   * of *values* never hits it, because those cells close with `</c>`. A workbook
+   * full of *colours* hits it on nearly every row.
+   */
+  const ROW_RE = /<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g;
+  const CELL_RE = /<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g;
+
+  /** 'A' -> 1, 'AA' -> 27. One-based, matching how a spreadsheet talks. */
+  function colNumber(letters) {
+    let n = 0;
+    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n;
+  }
+
+
+  /** Every sheet in the workbook, with its hidden state and its part path. */
+  function readSheets(files) {
+    const workbook = partText(files, 'xl/workbook.xml');
+    const rels = partText(files, 'xl/_rels/workbook.xml.rels');
+    const sheets = [];
+
+    for (const m of workbook.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+      const attrs = m[1];
+      const rid = /r:id="([^"]+)"/.exec(attrs)?.[1] || '';
+      let zipPath = '';
+      if (rid) {
+        const rel = new RegExp(`<Relationship[^>]*Id="${rid}"[^>]*Target="([^"]+)"`).exec(rels);
+        if (rel) {
+          const target = rel[1].replace(/^\/?xl\//, '').replace(/^\//, '');
+          if (files.has(`xl/${target}`)) zipPath = `xl/${target}`;
+        }
+      }
+      sheets.push({
+        name: decodeXml(/name="([^"]*)"/.exec(attrs)?.[1] || ''),
+        state: /state="(\w+)"/.exec(attrs)?.[1] || 'visible',
+        zipPath,
+      });
+    }
+    return sheets;
+  }
+
+  /**
+   * Parse one named sheet into a grid of visible cells.
+   *
+   * Returns `{ sheet, rows, hiddenRows, hiddenColumns, merges, conditional }`.
+   * Each row is `{ row, cells: [{ col, ref, value, hex, source }] }` where `row`
+   * is the **spreadsheet** row number.
+   */
+  function parseSheet(buffer, sheetName) {
+    const files = readZip(buffer);
+    const sheets = readSheets(files);
+
+    const chosen = sheets.find((s) => s.name === sheetName);
+    if (!chosen) {
+      // Never fall back to the first sheet. Reading a cover page and reporting a
+      // week of no work would be worse than reporting nothing at all.
+      throw new Error(
+        `The workbook has no sheet called "${sheetName}". It has: ${sheets.map((s) => s.name).join(', ')}.`
+      );
+    }
+    if (!chosen.zipPath) throw new Error(`"${sheetName}" has no readable worksheet part.`);
+    if (chosen.state !== 'visible') {
+      // A hidden sheet under the configured name almost always means the name is
+      // stale and the live grid has moved to another tab.
+      throw new Error(`"${sheetName}" is hidden in the workbook — check which tab the look-ahead is on now.`);
+    }
+
+    const sharedStrings = [];
+    for (const si of partText(files, 'xl/sharedStrings.xml').match(/<si>[\s\S]*?<\/si>/g) || []) {
+      const parts = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
+      sharedStrings.push(parts.map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join(''));
+    }
+
+    const theme = readTheme(partText(files, 'xl/theme/theme1.xml'));
+    const styleFills = readFills(partText(files, 'xl/styles.xml'), theme);
+    const xml = new TextDecoder().decode(files.get(chosen.zipPath));
+
+    /* Hidden columns. One column per day, so a hidden one silently removes a day
+       from the week — and unlike a missing row, nothing about the result looks
+       wrong. */
+    const hiddenColumns = new Set();
+    const colsBlock = /<cols[^>]*>([\s\S]*?)<\/cols>/.exec(xml)?.[1] || '';
+    for (const m of colsBlock.matchAll(/<col\b([^>]*)\/?>/g)) {
+      if (!/hidden="1"/.test(m[1])) continue;
+      const min = parseInt(/min="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
+      const max = parseInt(/max="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
+      for (let c = min; c <= max; c++) hiddenColumns.add(c);
+    }
+
+    const merges = [];
+    const mergeBlock = /<mergeCells[^>]*>([\s\S]*?)<\/mergeCells>/.exec(xml)?.[1] || '';
+    for (const m of mergeBlock.matchAll(/<mergeCell[^>]*ref="([^"]+)"/g)) merges.push(m[1]);
+
+    /* Conditional formatting is reported, not evaluated. A colour that comes
+       from a rule is not in the cell's style at all, so if the grid is painted
+       that way this parser would see an empty sheet — and saying so is the only
+       honest thing to do about it. */
+    const conditional = [];
+    for (const m of xml.matchAll(/<conditionalFormatting[^>]*sqref="([^"]+)"/g)) conditional.push(m[1]);
+
+    const rows = [];
+    let hiddenRows = 0;
+
+    for (const rowXml of xml.match(ROW_RE) || []) {
+      const head = /<row\b([^>]*)>/.exec(rowXml)?.[1] || rowXml;
+      if (/hidden="1"/.test(head)) {
+        hiddenRows++;
+        continue;
+      }
+      const rowNumber = parseInt(/\br="(\d+)"/.exec(head)?.[1] ?? '0', 10);
+
+      const cells = [];
+      /* Text from *hidden* columns is kept for one narrow purpose and no other:
+         the legend key is written in a hidden column beside a row of coloured
+         swatches, so dropping it the way every other hidden cell is dropped
+         would throw away the one thing that says what the colours mean. It never
+         becomes a cell of the grid — only this label. */
+      let label = '';
+
+      for (const cellXml of rowXml.match(CELL_RE) || []) {
+        const ref = /\br="([A-Z]+)(\d+)"/.exec(cellXml);
+        if (!ref) continue;
+        const col = colNumber(ref[1]);
+
+        const type = /\bt="([^"]+)"/.exec(cellXml)?.[1];
+        let value = '';
+        if (type === 'inlineStr') {
+          value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [])
+            .map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join('');
+        } else {
+          const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
+          if (raw != null) value = type === 's' ? (sharedStrings[parseInt(raw, 10)] ?? '') : decodeXml(raw);
+        }
+
+        if (hiddenColumns.has(col)) {
+          if (!label && String(value).trim()) label = String(value).trim();
+          continue;
+        }
+
+        const styleIndex = parseInt(/\bs="(\d+)"/.exec(cellXml)?.[1] ?? '-1', 10);
+        const fill = styleIndex >= 0 ? styleFills[styleIndex] : null;
+
+        cells.push({
+          col,
+          ref: `${ref[1]}${ref[2]}`,
+          value,
+          hex: fill?.hex || null,
+          source: fill?.source || 'none',
+        });
+      }
+
+      // A row with no visible cells at all is not a row of the grid.
+      if (cells.length) rows.push({ row: rowNumber, cells, label });
+    }
+
+    return {
+      sheet: chosen.name,
+      sheets: sheets.map((s) => ({ name: s.name, state: s.state })),
+      rows,
+      hiddenRows,
+      hiddenColumns: [...hiddenColumns],
+      merges,
+      conditional,
+    };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The legend
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The legend the workbook writes down about itself.
+   *
+   * BART's look-ahead carries its own key: a short block of rows near the bottom
+   * where the whole row is painted one colour and a label beside it reads
+   * "Highlight in Orange for Swing Shift". That is the authors' own statement of
+   * what the colours mean, so reading it is not guessing — it is the one place
+   * in this pipeline where a meaning can be taken from the file rather than
+   * typed by somebody.
+   *
+   * It stays deliberately strict. A row qualifies only when every visible cell
+   * on it carries the *same* fill and none of them holds a value: a swatch, in
+   * other words, and not a row of work that happens to be highlighted. Anything
+   * that does not match that shape is simply not returned, and the colours it
+   * used go on to the `unknown` bucket to be mapped by hand — which is the same
+   * answer this module gives everywhere else it cannot be certain.
+   */
+  function readLegend(grid) {
+    const out = [];
+    const seen = new Set();
+
+    for (const row of grid.rows || []) {
+      const cells = row.cells || [];
+      if (cells.length < 2) continue;
+      if (cells.some((c) => String(c.value ?? '').trim())) continue;
+      if (cells.some((c) => !c.hex)) continue;
+      if (new Set(cells.map((c) => c.hex)).size !== 1) continue;
+
+      const label = String(row.label || '').trim();
+      if (!label) continue;
+
+      // "Highlight in Orange for Swing Shift" → "Swing Shift". The colour word
+      // in the sentence is thrown away on purpose: the swatch is the colour, and
+      // where the two disagree the swatch is the one that was painted.
+      const phrased = /^\s*highlight\s+in\s+\S+\s+for\s+(.+?)\s*$/i.exec(label);
+      const meaning = (phrased ? phrased[1] : label).trim();
+      if (!meaning) continue;
+
+      const argb = cells[0].hex;
+      if (seen.has(argb)) continue;
+      seen.add(argb);
+      out.push({ argb, meaning, row: row.row });
+    }
+
+    return out;
+  }
+
+  /**
+   * Turn a parsed grid into shifts, against the legend.
+   *
+   * `legend` is `[{ argb, meaning }]`. A colour that is not in it is collected in
+   * `unknown` rather than defaulted to anything — the legend is stable in
+   * practice and relying on that would still be wrong, because one stray shade
+   * from Excel's recent-colours picker would misclassify a shift with nothing on
+   * screen to show it happened, and the result lands in evidence.
+   */
+  /**
+   * One entry per colour: the one in force.
+   *
+   * `rc_legend` is *versioned* — `unique (valid_from, argb)` — so a colour that
+   * has been re-mapped has a row per date, and only the newest of them is what it
+   * means now. Choosing that has to happen here rather than being left to how the
+   * caller sorted its array, and it did not: this was
+   *
+   *     new Map(legend.map((l) => [l.argb, …]))
+   *
+   * which silently took whichever row came *last*. `listLegend()` hands them over
+   * newest first — its own comment says "a caller taking the first entry for a
+   * colour gets the one in force" — so last meant **oldest**, and every correction
+   * anybody ever made was discarded in favour of the first thing that colour was
+   * ever called.
+   *
+   * The symptom was the worst kind: pressing "Just shading" on the grey a workbook
+   * shades its layout with inserted a row saying `ignore`, the lookup kept reading
+   * the older `shift` row, and all those rows stayed on the calendar. And because
+   * the older row carries a meaning the colour was no longer *unmapped*, so the
+   * button that would have fixed it disappeared. Pressing it again only added
+   * another row it would also ignore.
+   *
+   * A missing `valid_from` sorts oldest, so the shorter `{ argb, meaning, role }`
+   * shape the ingest path passes still resolves. A future-dated row wins on the
+   * calendar the moment it exists, which is consistent with the legend being
+   * re-applied at paint time rather than frozen into a snapshot.
+   */
+  function inForce(legend) {
+    const best = new Map();
+    for (const entry of legend || []) {
+      const key = String(entry.argb).toUpperCase();
+      const held = best.get(key);
+      if (held && String(held.valid_from || '') >= String(entry.valid_from || '')) continue;
+      best.set(key, {
+        valid_from: entry.valid_from || '',
+        meaning: entry.meaning,
+        role: entry.role || 'shift',
+      });
+    }
+    return best;
+  }
+
+  function applyLegend(grid, legend) {
+    const byColour = inForce(legend);
+    const unknown = new Map();
+
+    const rows = grid.rows.map((row) => ({
+      row: row.row,
+      label: row.label || '',
+      cells: row.cells.map((cell) => {
+        if (!cell.hex) return { ...cell, meaning: null, role: null };
+        const entry = byColour.get(cell.hex);
+        const meaning = entry?.meaning || null;
+        if (!meaning) {
+          const seen = unknown.get(cell.hex) || { hex: cell.hex, count: 0, samples: [] };
+          seen.count++;
+          if (seen.samples.length < 4) seen.samples.push(cell.ref);
+          unknown.set(cell.hex, seen);
+        }
+        // An unmapped colour is left as a shift on purpose: it may well be one,
+        // and treating the unexplained as ignorable would hide the rows that
+        // most need somebody to look at them.
+        return { ...cell, meaning, role: entry?.role || 'shift' };
+      }),
+    }));
+
+    return { ...grid, rows, unknown: [...unknown.values()].sort((a, b) => b.count - a.count) };
+  }
+
+  Object.defineProperty(__x, "readZip", { get: () => readZip, enumerable: true });
+  Object.defineProperty(__x, "readTheme", { get: () => readTheme, enumerable: true });
+  Object.defineProperty(__x, "applyTint", { get: () => applyTint, enumerable: true });
+  Object.defineProperty(__x, "readFills", { get: () => readFills, enumerable: true });
+  Object.defineProperty(__x, "colNumber", { get: () => colNumber, enumerable: true });
+  Object.defineProperty(__x, "readSheets", { get: () => readSheets, enumerable: true });
+  Object.defineProperty(__x, "parseSheet", { get: () => parseSheet, enumerable: true });
+  Object.defineProperty(__x, "readLegend", { get: () => readLegend, enumerable: true });
+  Object.defineProperty(__x, "applyLegend", { get: () => applyLegend, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/rc_util.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/rc_util.js"] = function (__x, __req) {
@@ -28378,7 +28933,9 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   const { el } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { toISO, todayMs, fmtDate, addDays, MS_DAY } = __req("core/dates.js");
-  const { resourceNames } = __req("core/lookahead.js");
+  const { resourceNames, readGrid } = __req("core/lookahead.js");
+  const { applyLegend } = __req("io/lookahead.js");
+  const rc = __req("core/rc.js");
   const { openModal } = __req("ui/components.js");
 
   /**
@@ -28631,6 +29188,82 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /**
+   * The look-ahead's rows for a span of weeks, with who it names on each.
+   *
+   * The one place the three views ask, so they cannot disagree about where
+   * somebody is — the week plan, the Resources tab and the huddle all come
+   * through here.
+   *
+   * **The names are taken from the snapshot, not from the stored column.** They
+   * are stored too, in `rc_lookahead_rows.resources`, and that is what a join
+   * wants — but a database built before that column existed refuses the insert
+   * over it, and the only symptom was three screens quietly reporting that the
+   * workbook named nobody while the calendar, which re-reads the snapshot, showed
+   * the names perfectly well. So the snapshot is the authority here for the same
+   * reason it is for the legend: it is re-read at paint time, so it is right the
+   * moment somebody edits the sheet rather than at the next successful write.
+   *
+   * Grafted onto the stored rows rather than replacing them, because those carry
+   * the id a plan entry links to and the location the alias register resolved.
+   * The join is `sheet_row` within a week, which is the same identity the row key
+   * is built on and has the same weakness: a row inserted mid-sheet between two
+   * reads shifts the ones below it. That is what the stored column is for once it
+   * exists, and why this fills a gap rather than overruling one.
+   */
+  async function lookaheadWithResources(fromISO, toISO) {
+    const [stored, snapshots, legendRows] = await Promise.all([
+      rc.lookaheadBetween(fromISO, toISO).catch(() => []),
+      rc.listSnapshots({ limit: 20 }).catch(() => []),
+      rc.listLegend().catch(() => []),
+    ]);
+
+    const laRows = newestPerKey(stored, new Map(snapshots.map((s, i) => [s.id, i])));
+    const snapshot = snapshots[0];
+    if (!snapshot?.grid) return laRows;
+
+    const view = readGrid(
+      applyLegend(snapshot.grid, legendRows.map((r) => ({
+        argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
+      }))),
+      { anchorISO: snapshot.taken_at }
+    );
+    return graftResources(laRows, view);
+  }
+
+  /** Fill in each row's `resources` from the grid, where the sheet still says so. */
+  function graftResources(laRows, view) {
+    const dayByCol = new Map((view?.days || []).map((d) => [d.col, d]));
+
+    const bySheetRow = new Map();
+    for (const activity of view?.activities || []) {
+      if (!activity.resource) continue;
+      const perDay = {};
+      for (const mark of activity.resource.marks) {
+        if (!mark.value) continue;
+        const day = dayByCol.get(mark.col);
+        if (day?.date) perDay[day.date] = mark.value;
+      }
+      if (Object.keys(perDay).length) bySheetRow.set(activity.row, perDay);
+    }
+    if (!bySheetRow.size) return laRows;
+
+    const mondayOf = (iso) => toISO(weekStart(isoToMs(iso)));
+    return (laRows || []).map((row) => {
+      const perDay = bySheetRow.get(row.sheet_row);
+      if (!perDay) return row;
+      // A row belongs to one week; a name on a day in another week belongs to that
+      // week's copy of the row, not to this one.
+      const mine = {};
+      for (const [date, names] of Object.entries(perDay)) {
+        if (mondayOf(date) === row.week_start) mine[date] = names;
+      }
+      return Object.keys(mine).length
+        ? { ...row, resources: { ...(row.resources || {}), ...mine } }
+        : row;
+    });
+  }
+
+  /**
    * Who the look-ahead's Resource rows put where, per day.
    *
    * Returns `byPerson` — a person id to a map of date to the rows naming them —
@@ -28707,6 +29340,8 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "uniqueFirstNames", { get: () => uniqueFirstNames, enumerable: true });
   Object.defineProperty(__x, "ambiguousFirstNames", { get: () => ambiguousFirstNames, enumerable: true });
   Object.defineProperty(__x, "newestPerKey", { get: () => newestPerKey, enumerable: true });
+  Object.defineProperty(__x, "lookaheadWithResources", { get: () => lookaheadWithResources, enumerable: true });
+  Object.defineProperty(__x, "graftResources", { get: () => graftResources, enumerable: true });
   Object.defineProperty(__x, "resourceAssignments", { get: () => resourceAssignments, enumerable: true });
   Object.defineProperty(__x, "availability", { get: () => availability, enumerable: true });
 };
@@ -29560,7 +30195,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
      announces itself the same way — a file that lands somewhere the page cannot
      see is the one action with no visible result. */
   const { saveFile } = __req("io/exporters.js");
-  const { STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, newestPerKey, resourceAssignments } = __req("ui/rc_util.js");
+  const { STATUSES, STATUS_BY_ID, SHIFTS, weekStart, weekDays, todayISO, isoToMs, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, resourceAssignments, lookaheadWithResources } = __req("ui/rc_util.js");
 
 
 
@@ -29718,7 +30353,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const plan = planDate(date, people);
 
     const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, laRows,
-      aliases, snapshots] =
+      aliases] =
       await Promise.all([
         rc.listCategories(),
         rc.listLocations(),
@@ -29744,12 +30379,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
            Both weeks, not just the reviewed one: on a Friday the day being planned
            is in the *next* week, and a look-ahead read for one week cannot say who
            BART wants on the other. */
-        rc.lookaheadBetween(toISO(weekStart(isoToMs(review))), toISO(weekStart(isoToMs(plan))))
-          .catch(() => []),
+        lookaheadWithResources(toISO(weekStart(isoToMs(review))), toISO(weekStart(isoToMs(plan)))),
         // Which spellings in the workbook are whose. Nothing is matched without
         // them beyond an exact fold of somebody's own name.
         rc.listPersonAliases().catch(() => []),
-        rc.listSnapshots({ limit: 20 }).catch(() => []),
       ]);
 
     const chainByeId = new Map();
@@ -29767,10 +30400,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
        This is what lets the meeting ask somebody about the work BART actually
        wants of them rather than only about the work somebody remembered to plan —
        the two differing is the interesting case, and until now the second was the
-       only one on screen. Duplicates from older snapshots are dropped first, or
-       the same activity arrives once per read. */
-    const rows = newestPerKey(laRows, new Map(snapshots.map((s, i) => [s.id, i])));
-    const { byPerson: askedFor } = resourceAssignments(rows, nameRegister(everybody.length ? everybody : people, aliases));
+       only one on screen. `lookaheadWithResources()` has already dropped the
+       copies older snapshots carry and taken the names off the newest one. */
+    const { byPerson: askedFor } = resourceAssignments(
+      laRows, nameRegister(everybody.length ? everybody : people, aliases));
     const askedOf = (personId, iso) => (askedFor.get(personId)?.get(iso) || []);
 
     /* One context, handed to the table, the meeting and the digest alike. They
@@ -29778,7 +30411,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
        data they start disagreeing on screen, in front of the room. */
     const ctx = {
       people, review, plan, planFor, actualByPerson, cats, locs,
-      categories, locations, parties, leave, root, chainByeId, laRows: rows, blockers, everybody,
+      categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
       askedOf,
     };
 
@@ -30942,7 +31575,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const from = days[0];
     const to = days[days.length - 1];
 
-    const [people, locations, leave, planRows, everyLaRow, categories, aliases, snapshots, everybody] =
+    const [people, locations, leave, planRows, laRows, categories, aliases, everybody] =
       await Promise.all([
         rc.listPeople({ scheduledOnly: true }),
         rc.listLocations(),
@@ -30950,14 +31583,14 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
         // staff the day, which is a fortnight too late to do anything about it.
         rc.listLeave(from, toISO(addDays(startMs, 20))),
         rc.listPlan(from, to),
-        // What BART has asked for this week. Administrators only, so a member sees
-        // the plan without the demand behind it, which is correct.
-        rc.lookaheadForWeek(from).catch(() => []),
+        // What BART has asked for this week, and who it named on each row.
+        // Administrators only, so a member sees the plan without the demand behind
+        // it, which is correct.
+        lookaheadWithResources(from, to),
         rc.listCategories(),
-        // Which spellings are whose. Without them only a full name matches, and
-        // the Resource row is filled in with first names.
+        // Which spellings are whose. Without them only a full name and a unique
+        // first name match, and somebody may go by neither.
         rc.listPersonAliases().catch(() => []),
-        rc.listSnapshots({ limit: 20 }).catch(() => []),
         // Everybody, not just the scheduled: a name in the workbook belongs to
         // whoever it belongs to, and filtering the register would leave a real
         // person reading as unmatched.
@@ -30966,9 +31599,8 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const locs = byId(locations);
 
     /* Who the 4WLA names, per person per day. The same reading the Resources tab
-       and the huddle make, from the same two functions, so the three cannot
+       and the huddle make, through the same functions, so the three cannot
        disagree about where somebody is. */
-    const laRows = newestPerKey(everyLaRow, new Map(snapshots.map((s, i) => [s.id, i])));
     const { byPerson: askedFor } = resourceAssignments(
       laRows, nameRegister(everybody.length ? everybody : people, aliases));
     const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
@@ -31289,561 +31921,6 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
-// io/lookahead.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["io/lookahead.js"] = function (__x, __req) {
-  /**
-   * Reading the four-week look-ahead.
-   *
-   * The look-ahead is an Excel workbook the deputy edits in place, and it encodes
-   * shift access in **cell fill colour** against a fixed legend. So this is not
-   * an importer in the usual sense: the values matter far less than the colours,
-   * and almost everything that can go wrong is invisible in a spreadsheet you
-   * open by hand.
-   *
-   * Four rules, each of which exists because of a specific way it breaks:
-   *
-   * **One sheet, chosen by name.** The workbook is large and the four-week grid
-   * is one tab among several. `readXlsx()` in `io/importers.js` takes whichever
-   * sheet is first, which would silently read a cover page. A missing sheet is an
-   * error here, never a fall back to sheet one.
-   *
-   * **Visible rows and columns only.** Rows are hidden by hand and by autofilter,
-   * both as `hidden="1"`. A hidden *column* matters more than a hidden row: with
-   * one column per day, dropping one removes a day from the week and nothing
-   * about the result looks wrong.
-   *
-   * **The real row number travels with the row.** Blank and absent rows mean the
-   * nth row in the file is not row n, so an array index is not an identity. Row
-   * identity is what change classification rests on.
-   *
-   * **A colour that is not in the legend is never guessed.** It goes to an
-   * unknown bucket for somebody to map. The legend is stable in practice, and
-   * relying on that would still be wrong, because the failure is silent and lands
-   * in evidence.
-   *
-   * Imports: inflate, dates (leaves).
-   */
-
-  const { inflateRaw } = __req("io/inflate.js");
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     ZIP
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /** Read the container into `name -> Uint8Array`, via the central directory. */
-  function readZip(buffer) {
-    const view = new DataView(buffer);
-    const bytes = new Uint8Array(buffer);
-
-    let eocd = -1;
-    for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66000); i--) {
-      if (view.getUint32(i, true) === 0x06054b50) {
-        eocd = i;
-        break;
-      }
-    }
-    if (eocd < 0) throw new Error('That file is not a .xlsx (no ZIP directory found).');
-
-    const count = view.getUint16(eocd + 10, true);
-    let at = view.getUint32(eocd + 16, true);
-
-    const out = new Map();
-    for (let i = 0; i < count; i++) {
-      if (view.getUint32(at, true) !== 0x02014b50) break;
-      const method = view.getUint16(at + 10, true);
-      const compressed = view.getUint32(at + 20, true);
-      const nameLen = view.getUint16(at + 28, true);
-      const extraLen = view.getUint16(at + 30, true);
-      const commentLen = view.getUint16(at + 32, true);
-      const localAt = view.getUint32(at + 42, true);
-      const name = new TextDecoder().decode(bytes.subarray(at + 46, at + 46 + nameLen));
-
-      // The local header repeats the name and carries its own extra field, whose
-      // length routinely differs from the one in the directory.
-      const localNameLen = view.getUint16(localAt + 26, true);
-      const localExtraLen = view.getUint16(localAt + 28, true);
-      const start = localAt + 30 + localNameLen + localExtraLen;
-      const raw = bytes.subarray(start, start + compressed);
-      out.set(name, method === 0 ? raw : inflateRaw(raw));
-
-      at += 46 + nameLen + extraLen + commentLen;
-    }
-    return out;
-  }
-
-  function partText(files, name) {
-    const part = files.get(name);
-    return part ? new TextDecoder().decode(part) : '';
-  }
-
-  function decodeXml(s) {
-    return String(s)
-      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
-      .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d))
-      .replace(/&amp;/g, '&');
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Colour
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * The legacy 56-entry palette an `indexed="n"` fill refers to.
-   *
-   * Excel still writes these for anything inherited from an older workbook, so a
-   * parser that only understands `rgb=` sees nothing at all on exactly those
-   * cells — and a blank cell reads as "no shift booked", which is a different
-   * fact entirely.
-   */
-  const INDEXED = [
-    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
-    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
-    '800000', '008000', '000080', '808000', '800080', '008080', 'C0C0C0', '808080',
-    '9999FF', '993366', 'FFFFCC', 'CCFFFF', '660066', 'FF8080', '0066CC', 'CCCCFF',
-    '000080', 'FF00FF', 'FFFF00', '00FFFF', '800080', '800000', '008080', '0000FF',
-    '00CCFF', 'CCFFFF', 'CCFFCC', 'FFFF99', '99CCFF', 'FF99CC', 'CC99FF', 'FFCC99',
-    '3366FF', '33CCCC', '99CC00', 'FFCC00', 'FF9900', 'FF6600', '666699', '969696',
-    '003366', '339966', '003300', '333300', '993300', '993366', '333399', '333333',
-  ];
-
-  /** `theme="n"` indexes the scheme with the dark/light pairs swapped. */
-  const THEME_ORDER = ['lt1', 'dk1', 'lt2', 'dk2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hlink', 'folHlink'];
-
-  function readTheme(xml) {
-    const scheme = /<a:clrScheme[^>]*>([\s\S]*?)<\/a:clrScheme>/.exec(xml)?.[1] || '';
-    const colors = {};
-    for (const m of scheme.matchAll(/<a:(\w+)>([\s\S]*?)<\/a:\1>/g)) {
-      const [, key, body] = m;
-      const srgb = /<a:srgbClr val="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
-      const sys = /<a:sysClr[^>]*lastClr="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
-      if (srgb || sys) colors[key] = (srgb || sys).toUpperCase();
-    }
-    return THEME_ORDER.map((key) => colors[key] || null);
-  }
-
-  /**
-   * Apply an OOXML tint, in HLS as the specification requires.
-   *
-   * Doing it in RGB gives a near miss, and a near miss against a legend keyed on
-   * exact colours is a lookup that fails. Accent 1 at -0.25 has to come out
-   * #2F5597 — what Excel calls "Blue, Accent 1, Darker 25%".
-   */
-  function applyTint(hex, tint) {
-    if (!tint) return hex;
-    const r = parseInt(hex.slice(0, 2), 16) / 255;
-    const g = parseInt(hex.slice(2, 4), 16) / 255;
-    const b = parseInt(hex.slice(4, 6), 16) / 255;
-
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    let lum = (max + min) / 2;
-    let hue = 0;
-    let sat = 0;
-    if (max !== min) {
-      const d = max - min;
-      sat = lum > 0.5 ? d / (2 - max - min) : d / (max + min);
-      if (max === r) hue = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-      else if (max === g) hue = ((b - r) / d + 2) / 6;
-      else hue = ((r - g) / d + 4) / 6;
-    }
-
-    lum = tint < 0 ? lum * (1 + tint) : lum * (1 - tint) + tint;
-    lum = Math.min(1, Math.max(0, lum));
-
-    const toRgb = (p, q, t) => {
-      let u = t;
-      if (u < 0) u += 1;
-      if (u > 1) u -= 1;
-      if (u < 1 / 6) return p + (q - p) * 6 * u;
-      if (u < 1 / 2) return q;
-      if (u < 2 / 3) return p + (q - p) * (2 / 3 - u) * 6;
-      return p;
-    };
-
-    let out;
-    if (sat === 0) out = [lum, lum, lum];
-    else {
-      const q = lum < 0.5 ? lum * (1 + sat) : lum + sat - lum * sat;
-      const p = 2 * lum - q;
-      out = [toRgb(p, q, hue + 1 / 3), toRgb(p, q, hue), toRgb(p, q, hue - 1 / 3)];
-    }
-    return out.map((v) => Math.round(v * 255).toString(16).padStart(2, '0').toUpperCase()).join('');
-  }
-
-  /**
-   * `styleIndex -> { hex, source }` for every cell format in the workbook.
-   *
-   * The chain is `cellXfs[s].fillId -> fills[id].patternFill.fgColor`, and the
-   * colour at the end arrives in one of three notations. Resolving all three to
-   * one hex is what lets the legend be keyed on the colour rather than on how it
-   * happened to be written.
-   */
-  function readFills(stylesXml, theme) {
-    const fillsBlock = /<fills[^>]*>([\s\S]*?)<\/fills>/.exec(stylesXml)?.[1] || '';
-    const fills = (fillsBlock.match(/<fill>[\s\S]*?<\/fill>/g) || []).map((fill) => {
-      const pattern = /patternType="(\w+)"/.exec(fill)?.[1] || 'none';
-      if (pattern === 'none') return { hex: null, source: 'none' };
-
-      const fg = /<fgColor([^>]*)\/>/.exec(fill)?.[1] || '';
-      const tint = parseFloat(/tint="(-?[\d.]+)"/.exec(fg)?.[1] || '0') || 0;
-
-      const rgb = /rgb="([0-9A-Fa-f]{6,8})"/.exec(fg)?.[1];
-      if (rgb) {
-        const base = (rgb.length === 8 ? rgb.slice(2) : rgb).toUpperCase();
-        return { hex: applyTint(base, tint), source: 'rgb' };
-      }
-
-      const themed = /theme="(\d+)"/.exec(fg)?.[1];
-      if (themed != null) {
-        const base = theme[parseInt(themed, 10)] || null;
-        return { hex: base ? applyTint(base, tint) : null, source: `theme:${themed}` };
-      }
-
-      const indexed = /indexed="(\d+)"/.exec(fg)?.[1];
-      if (indexed != null) {
-        const base = INDEXED[parseInt(indexed, 10)] || null;
-        return { hex: base ? applyTint(base, tint) : null, source: `indexed:${indexed}` };
-      }
-
-      return { hex: null, source: 'unresolved' };
-    });
-
-    /* White is not a highlight.
-       An explicit white fill and no fill at all are the same thing to anybody
-       looking at the sheet — a highlight nobody can see is not one — and Excel
-       writes white fills into all sorts of default styling. Reading them as
-       colours put hundreds of cells into the unmapped bucket and asked somebody
-       to explain the absence of a highlight. */
-    const plain = fills.map((f) => (f.hex === 'FFFFFF' ? { hex: null, source: 'none' } : f));
-
-    const xfsBlock = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] || '';
-    const xfs = xfsBlock.match(/<xf[\s\S]*?(?:\/>|<\/xf>)/g) || [];
-    return xfs.map((xf) => {
-      const fillId = parseInt(/fillId="(\d+)"/.exec(xf)?.[1] ?? '0', 10);
-      return plain[fillId] || { hex: null, source: 'none' };
-    });
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The sheet
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Rows and cells, matched as either a self-closing tag or an open/close pair.
-   *
-   * The obvious `/<row[\s\S]*?(?:\/>|<\/row>)/` is wrong here, and wrong in a way
-   * that only shows up on a sheet like this one. A cell carrying a fill but no
-   * value is written `<c r="D2" s="1"/>`, and a lazy match stops at that first
-   * `/>` — truncating the row and dropping every cell after it. A workbook full
-   * of *values* never hits it, because those cells close with `</c>`. A workbook
-   * full of *colours* hits it on nearly every row.
-   */
-  const ROW_RE = /<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g;
-  const CELL_RE = /<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g;
-
-  /** 'A' -> 1, 'AA' -> 27. One-based, matching how a spreadsheet talks. */
-  function colNumber(letters) {
-    let n = 0;
-    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
-    return n;
-  }
-
-
-  /** Every sheet in the workbook, with its hidden state and its part path. */
-  function readSheets(files) {
-    const workbook = partText(files, 'xl/workbook.xml');
-    const rels = partText(files, 'xl/_rels/workbook.xml.rels');
-    const sheets = [];
-
-    for (const m of workbook.matchAll(/<sheet\b([^>]*)\/?>/g)) {
-      const attrs = m[1];
-      const rid = /r:id="([^"]+)"/.exec(attrs)?.[1] || '';
-      let zipPath = '';
-      if (rid) {
-        const rel = new RegExp(`<Relationship[^>]*Id="${rid}"[^>]*Target="([^"]+)"`).exec(rels);
-        if (rel) {
-          const target = rel[1].replace(/^\/?xl\//, '').replace(/^\//, '');
-          if (files.has(`xl/${target}`)) zipPath = `xl/${target}`;
-        }
-      }
-      sheets.push({
-        name: decodeXml(/name="([^"]*)"/.exec(attrs)?.[1] || ''),
-        state: /state="(\w+)"/.exec(attrs)?.[1] || 'visible',
-        zipPath,
-      });
-    }
-    return sheets;
-  }
-
-  /**
-   * Parse one named sheet into a grid of visible cells.
-   *
-   * Returns `{ sheet, rows, hiddenRows, hiddenColumns, merges, conditional }`.
-   * Each row is `{ row, cells: [{ col, ref, value, hex, source }] }` where `row`
-   * is the **spreadsheet** row number.
-   */
-  function parseSheet(buffer, sheetName) {
-    const files = readZip(buffer);
-    const sheets = readSheets(files);
-
-    const chosen = sheets.find((s) => s.name === sheetName);
-    if (!chosen) {
-      // Never fall back to the first sheet. Reading a cover page and reporting a
-      // week of no work would be worse than reporting nothing at all.
-      throw new Error(
-        `The workbook has no sheet called "${sheetName}". It has: ${sheets.map((s) => s.name).join(', ')}.`
-      );
-    }
-    if (!chosen.zipPath) throw new Error(`"${sheetName}" has no readable worksheet part.`);
-    if (chosen.state !== 'visible') {
-      // A hidden sheet under the configured name almost always means the name is
-      // stale and the live grid has moved to another tab.
-      throw new Error(`"${sheetName}" is hidden in the workbook — check which tab the look-ahead is on now.`);
-    }
-
-    const sharedStrings = [];
-    for (const si of partText(files, 'xl/sharedStrings.xml').match(/<si>[\s\S]*?<\/si>/g) || []) {
-      const parts = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
-      sharedStrings.push(parts.map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join(''));
-    }
-
-    const theme = readTheme(partText(files, 'xl/theme/theme1.xml'));
-    const styleFills = readFills(partText(files, 'xl/styles.xml'), theme);
-    const xml = new TextDecoder().decode(files.get(chosen.zipPath));
-
-    /* Hidden columns. One column per day, so a hidden one silently removes a day
-       from the week — and unlike a missing row, nothing about the result looks
-       wrong. */
-    const hiddenColumns = new Set();
-    const colsBlock = /<cols[^>]*>([\s\S]*?)<\/cols>/.exec(xml)?.[1] || '';
-    for (const m of colsBlock.matchAll(/<col\b([^>]*)\/?>/g)) {
-      if (!/hidden="1"/.test(m[1])) continue;
-      const min = parseInt(/min="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
-      const max = parseInt(/max="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
-      for (let c = min; c <= max; c++) hiddenColumns.add(c);
-    }
-
-    const merges = [];
-    const mergeBlock = /<mergeCells[^>]*>([\s\S]*?)<\/mergeCells>/.exec(xml)?.[1] || '';
-    for (const m of mergeBlock.matchAll(/<mergeCell[^>]*ref="([^"]+)"/g)) merges.push(m[1]);
-
-    /* Conditional formatting is reported, not evaluated. A colour that comes
-       from a rule is not in the cell's style at all, so if the grid is painted
-       that way this parser would see an empty sheet — and saying so is the only
-       honest thing to do about it. */
-    const conditional = [];
-    for (const m of xml.matchAll(/<conditionalFormatting[^>]*sqref="([^"]+)"/g)) conditional.push(m[1]);
-
-    const rows = [];
-    let hiddenRows = 0;
-
-    for (const rowXml of xml.match(ROW_RE) || []) {
-      const head = /<row\b([^>]*)>/.exec(rowXml)?.[1] || rowXml;
-      if (/hidden="1"/.test(head)) {
-        hiddenRows++;
-        continue;
-      }
-      const rowNumber = parseInt(/\br="(\d+)"/.exec(head)?.[1] ?? '0', 10);
-
-      const cells = [];
-      /* Text from *hidden* columns is kept for one narrow purpose and no other:
-         the legend key is written in a hidden column beside a row of coloured
-         swatches, so dropping it the way every other hidden cell is dropped
-         would throw away the one thing that says what the colours mean. It never
-         becomes a cell of the grid — only this label. */
-      let label = '';
-
-      for (const cellXml of rowXml.match(CELL_RE) || []) {
-        const ref = /\br="([A-Z]+)(\d+)"/.exec(cellXml);
-        if (!ref) continue;
-        const col = colNumber(ref[1]);
-
-        const type = /\bt="([^"]+)"/.exec(cellXml)?.[1];
-        let value = '';
-        if (type === 'inlineStr') {
-          value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [])
-            .map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join('');
-        } else {
-          const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
-          if (raw != null) value = type === 's' ? (sharedStrings[parseInt(raw, 10)] ?? '') : decodeXml(raw);
-        }
-
-        if (hiddenColumns.has(col)) {
-          if (!label && String(value).trim()) label = String(value).trim();
-          continue;
-        }
-
-        const styleIndex = parseInt(/\bs="(\d+)"/.exec(cellXml)?.[1] ?? '-1', 10);
-        const fill = styleIndex >= 0 ? styleFills[styleIndex] : null;
-
-        cells.push({
-          col,
-          ref: `${ref[1]}${ref[2]}`,
-          value,
-          hex: fill?.hex || null,
-          source: fill?.source || 'none',
-        });
-      }
-
-      // A row with no visible cells at all is not a row of the grid.
-      if (cells.length) rows.push({ row: rowNumber, cells, label });
-    }
-
-    return {
-      sheet: chosen.name,
-      sheets: sheets.map((s) => ({ name: s.name, state: s.state })),
-      rows,
-      hiddenRows,
-      hiddenColumns: [...hiddenColumns],
-      merges,
-      conditional,
-    };
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The legend
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * The legend the workbook writes down about itself.
-   *
-   * BART's look-ahead carries its own key: a short block of rows near the bottom
-   * where the whole row is painted one colour and a label beside it reads
-   * "Highlight in Orange for Swing Shift". That is the authors' own statement of
-   * what the colours mean, so reading it is not guessing — it is the one place
-   * in this pipeline where a meaning can be taken from the file rather than
-   * typed by somebody.
-   *
-   * It stays deliberately strict. A row qualifies only when every visible cell
-   * on it carries the *same* fill and none of them holds a value: a swatch, in
-   * other words, and not a row of work that happens to be highlighted. Anything
-   * that does not match that shape is simply not returned, and the colours it
-   * used go on to the `unknown` bucket to be mapped by hand — which is the same
-   * answer this module gives everywhere else it cannot be certain.
-   */
-  function readLegend(grid) {
-    const out = [];
-    const seen = new Set();
-
-    for (const row of grid.rows || []) {
-      const cells = row.cells || [];
-      if (cells.length < 2) continue;
-      if (cells.some((c) => String(c.value ?? '').trim())) continue;
-      if (cells.some((c) => !c.hex)) continue;
-      if (new Set(cells.map((c) => c.hex)).size !== 1) continue;
-
-      const label = String(row.label || '').trim();
-      if (!label) continue;
-
-      // "Highlight in Orange for Swing Shift" → "Swing Shift". The colour word
-      // in the sentence is thrown away on purpose: the swatch is the colour, and
-      // where the two disagree the swatch is the one that was painted.
-      const phrased = /^\s*highlight\s+in\s+\S+\s+for\s+(.+?)\s*$/i.exec(label);
-      const meaning = (phrased ? phrased[1] : label).trim();
-      if (!meaning) continue;
-
-      const argb = cells[0].hex;
-      if (seen.has(argb)) continue;
-      seen.add(argb);
-      out.push({ argb, meaning, row: row.row });
-    }
-
-    return out;
-  }
-
-  /**
-   * Turn a parsed grid into shifts, against the legend.
-   *
-   * `legend` is `[{ argb, meaning }]`. A colour that is not in it is collected in
-   * `unknown` rather than defaulted to anything — the legend is stable in
-   * practice and relying on that would still be wrong, because one stray shade
-   * from Excel's recent-colours picker would misclassify a shift with nothing on
-   * screen to show it happened, and the result lands in evidence.
-   */
-  /**
-   * One entry per colour: the one in force.
-   *
-   * `rc_legend` is *versioned* — `unique (valid_from, argb)` — so a colour that
-   * has been re-mapped has a row per date, and only the newest of them is what it
-   * means now. Choosing that has to happen here rather than being left to how the
-   * caller sorted its array, and it did not: this was
-   *
-   *     new Map(legend.map((l) => [l.argb, …]))
-   *
-   * which silently took whichever row came *last*. `listLegend()` hands them over
-   * newest first — its own comment says "a caller taking the first entry for a
-   * colour gets the one in force" — so last meant **oldest**, and every correction
-   * anybody ever made was discarded in favour of the first thing that colour was
-   * ever called.
-   *
-   * The symptom was the worst kind: pressing "Just shading" on the grey a workbook
-   * shades its layout with inserted a row saying `ignore`, the lookup kept reading
-   * the older `shift` row, and all those rows stayed on the calendar. And because
-   * the older row carries a meaning the colour was no longer *unmapped*, so the
-   * button that would have fixed it disappeared. Pressing it again only added
-   * another row it would also ignore.
-   *
-   * A missing `valid_from` sorts oldest, so the shorter `{ argb, meaning, role }`
-   * shape the ingest path passes still resolves. A future-dated row wins on the
-   * calendar the moment it exists, which is consistent with the legend being
-   * re-applied at paint time rather than frozen into a snapshot.
-   */
-  function inForce(legend) {
-    const best = new Map();
-    for (const entry of legend || []) {
-      const key = String(entry.argb).toUpperCase();
-      const held = best.get(key);
-      if (held && String(held.valid_from || '') >= String(entry.valid_from || '')) continue;
-      best.set(key, {
-        valid_from: entry.valid_from || '',
-        meaning: entry.meaning,
-        role: entry.role || 'shift',
-      });
-    }
-    return best;
-  }
-
-  function applyLegend(grid, legend) {
-    const byColour = inForce(legend);
-    const unknown = new Map();
-
-    const rows = grid.rows.map((row) => ({
-      row: row.row,
-      label: row.label || '',
-      cells: row.cells.map((cell) => {
-        if (!cell.hex) return { ...cell, meaning: null, role: null };
-        const entry = byColour.get(cell.hex);
-        const meaning = entry?.meaning || null;
-        if (!meaning) {
-          const seen = unknown.get(cell.hex) || { hex: cell.hex, count: 0, samples: [] };
-          seen.count++;
-          if (seen.samples.length < 4) seen.samples.push(cell.ref);
-          unknown.set(cell.hex, seen);
-        }
-        // An unmapped colour is left as a shift on purpose: it may well be one,
-        // and treating the unexplained as ignorable would hide the rows that
-        // most need somebody to look at them.
-        return { ...cell, meaning, role: entry?.role || 'shift' };
-      }),
-    }));
-
-    return { ...grid, rows, unknown: [...unknown.values()].sort((a, b) => b.count - a.count) };
-  }
-
-  Object.defineProperty(__x, "readZip", { get: () => readZip, enumerable: true });
-  Object.defineProperty(__x, "readTheme", { get: () => readTheme, enumerable: true });
-  Object.defineProperty(__x, "applyTint", { get: () => applyTint, enumerable: true });
-  Object.defineProperty(__x, "readFills", { get: () => readFills, enumerable: true });
-  Object.defineProperty(__x, "colNumber", { get: () => colNumber, enumerable: true });
-  Object.defineProperty(__x, "readSheets", { get: () => readSheets, enumerable: true });
-  Object.defineProperty(__x, "parseSheet", { get: () => parseSheet, enumerable: true });
-  Object.defineProperty(__x, "readLegend", { get: () => readLegend, enumerable: true });
-  Object.defineProperty(__x, "applyLegend", { get: () => applyLegend, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
 // ui/rc_lookahead.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/rc_lookahead.js"] = function (__x, __req) {
@@ -32123,13 +32200,39 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
          the grid was written, so `rc_lookahead_rows` was a well-designed table
          with nothing in it and nothing downstream could reference a row. */
       let written = [];
+      let rowTrouble = null;
       try {
         const rows = await lookaheadRows(snapshot.id, grid);
         if (rows.length) written = await rc.addSnapshotRows(rows);
       } catch (err) {
-        // The snapshot is the record; the rows are a convenience over it and can
-        // be rebuilt from it. Losing them must not lose the read.
-        console.warn('[cx-timeline] look-ahead rows not written:', err.message);
+        /* A column this project has and that project has not.
+           `create table if not exists` does nothing to a table that already
+           exists, so a database built before the Resource row went in has no
+           `resources` column — and PostgREST refuses the whole insert over it.
+           The rest of the row is still worth having, so it goes without that one
+           field and the gap is *said*, rather than costing the read. */
+        const missingColumn = /resources/.test(err.message)
+          && /(column|schema cache)/i.test(err.message);
+        if (missingColumn) {
+          try {
+            const rows = (await lookaheadRows(snapshot.id, grid))
+              .map(({ resources, ...rest }) => rest);
+            if (rows.length) written = await rc.addSnapshotRows(rows);
+            rowTrouble = 'This database has no rc_lookahead_rows.resources column, so who the '
+              + 'Resource row names was not stored. Run supabase/migrate.sql and then '
+              + 'supabase/rc_schema.sql. The calendar still shows the names — it re-reads the '
+              + 'snapshot — but the Resources tab and the week plan read the stored column.';
+          } catch (second) {
+            rowTrouble = second.message;
+          }
+        } else {
+          rowTrouble = err.message;
+        }
+        /* The snapshot is the record; the rows are a convenience over it and can
+           be rebuilt from it. Losing them must not lose the read — but it must
+           not be silent either, which it was: a `console.warn` is a message to
+           nobody, and the feature it takes out simply reads as empty. */
+        console.warn('[cx-timeline] look-ahead rows:', err.message);
       }
 
       /* And then say what changed.
@@ -32151,8 +32254,17 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       run.note = [
         grid.unknown.length ? `${grid.unknown.length} colour(s) not in the legend` : null,
         events.length ? `${countable(events).length} change(s) that count` : null,
+        rowTrouble ? `rows: ${rowTrouble}` : null,
       ].filter(Boolean).join('; ') || null;
       await rc.addIngestRun(run);
+
+      /* Said out loud, and at length. Something downstream of this read is now
+         empty, and "empty" and "it could not be written" must not look alike — a
+         read that half worked and reported success is how somebody concludes a
+         feature does not work. */
+      if (!silent && rowTrouble) {
+        toast({ tone: 'bad', message: `Read, but: ${rowTrouble}`, timeout: 20000 });
+      }
 
       if (!silent && grid.unknown.length) {
         toast({
@@ -33707,7 +33819,7 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
   const { textInput, selectInput, toast, badge, checkbox, field, emptyState, promptDialog } = __req("ui/components.js");
 
 
-  const { SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, newestPerKey, resourceAssignments, foldName, ambiguousFirstNames } = __req("ui/rc_util.js");
+  const { SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, resourceAssignments, foldName, ambiguousFirstNames, lookaheadWithResources } = __req("ui/rc_util.js");
 
 
 
@@ -33733,23 +33845,20 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
     const to = days[days.length - 1];
     const today = todayISO();
 
-    const [people, locations, categories, leave, planRows, aliases, snapshots] = await Promise.all([
+    /* The look-ahead is administrators-only in the database, so a member gets
+       nothing back and the view simply has no BART column — which is correct, and
+       is why `lookaheadWithResources()` catches rather than a permission test up
+       here. It is also the one place the three views ask, so they cannot disagree
+       about where somebody is. */
+    const [people, locations, categories, leave, planRows, aliases, laRows] = await Promise.all([
       rc.listPeople(),
       rc.listLocations(),
       rc.listCategories(),
       rc.listLeave(from, to),
       rc.listPlan(from, to),
       rc.listPersonAliases().catch(() => []),
-      rc.listSnapshots({ limit: 20 }).catch(() => []),
+      lookaheadWithResources(from, to),
     ]);
-
-    /* The look-ahead is administrators-only in the database, so a member gets
-       nothing back and the view simply has no BART column — which is correct, and
-       is why this is a catch rather than a permission test up here. */
-    const laRows = newestPerKey(
-      await rc.lookaheadBetween(from, to).catch(() => []),
-      new Map(snapshots.map((s, i) => [s.id, i]))
-    );
 
     const locs = byId(locations);
     const cats = byId(categories);
