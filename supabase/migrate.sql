@@ -279,5 +279,11 @@ union all
 select 'rc_blockers',
        case when to_regclass('public.rc_blockers') is not null then 'ok' else 'MISSING' end
 union all
+-- Without it every tab that reads the sheet downloads twenty full grids to use
+-- one, which is most of the wait between tabs.
+select 'rc_lookahead_snapshot_meta',
+       case when to_regclass('public.rc_lookahead_snapshot_meta') is not null then 'ok'
+            else 'RUN rc_schema.sql — the calendar will be slow to switch tabs' end
+union all
 select 'managers stood down',
        coalesce((select count(*)::text || ' not scheduled' from public.rc_people where not scheduled), '0');

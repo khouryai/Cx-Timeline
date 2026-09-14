@@ -29,7 +29,7 @@ import {
 import { icon } from './icons.js';
 import { selectInput, textInput, toast, badge, emptyState, field, checkbox } from './components.js';
 import {
-  notifyChanged, byId, dayLabel, todayISO, formModal,
+  notifyChanged, byId, dayLabel, todayISO, formModal,, parsedView,
 } from './rc_util.js';
 
 /** Where the workbook lives, relative to the folder the plan is in. */
@@ -210,9 +210,8 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
     run.file_hash = hash;
     run.file_mtime = new Date(file.modified).toISOString();
 
-    const snapshots = await rc.listSnapshots({ limit: 1 });
-    const previous = snapshots[0] || null;
-    if (snapshots[0] && snapshots[0].file_hash === hash) {
+    const previous = await rc.latestSnapshot();
+    if (previous && previous.file_hash === hash) {
       run.outcome = 'unchanged';
       await rc.addIngestRun(run);
       if (!silent) toast({ message: 'The look-ahead has not changed since the last snapshot.' });
@@ -497,11 +496,10 @@ function sideOf(event, which) {
  * straight away instead of at the next ingest.
  */
 async function renderCalendar(host) {
-  const [snapshots, legendRows] = await Promise.all([
-    rc.listSnapshots({ limit: 1 }),
+  const [snapshot, legendRows] = await Promise.all([
+    rc.latestSnapshot(),
     rc.listLegend(),
   ]);
-  const snapshot = snapshots[0];
 
   host.appendChild(el('div', { class: 'rc-section-head' }, [
     el('h3', { text: 'The look-ahead' }),
@@ -522,10 +520,11 @@ async function renderCalendar(host) {
   // `role` matters as much as the meaning here: it is what separates a shift
   // from the shading the workbook greys most of its calendar with.
   const legend = legendRows.map((r) => ({ argb: r.argb, meaning: r.meaning, role: r.role || 'shift' }));
-  const grid = applyLegend(snapshot.grid, legend);
-  // The snapshot's own timestamp is what pins the axis to a year — see
-  // `datePlease()`. The weekday letters on the sheet then check the answer.
-  const view = readGrid(grid, { anchorISO: snapshot.taken_at });
+  /* One parse, shared with every other screen that reads the sheet — see
+     `parsedView()`. The snapshot's own timestamp is what pins the axis to a
+     year (`datePlease()`); the weekday letters on the sheet then check it. */
+  const view = parsedView(snapshot, legendRows);
+  const grid = { unknown: view.unknown };
 
   if (!view.days.length) {
     host.appendChild(emptyState({
@@ -1115,12 +1114,11 @@ function checkNowButton() {
  * spreadsheet. Where the two disagree, both are shown and the person decides.
  */
 async function renderLegend(host) {
-  const [legend, snapshots, settings] = await Promise.all([
+  const [legend, snapshot, settings] = await Promise.all([
     rc.listLegend({ includeInactive: true }),
-    rc.listSnapshots({ limit: 1 }),
+    rc.latestSnapshot(),
     rc.listSettings().catch(() => []),
   ]);
-  const snapshot = snapshots[0];
   const sheet = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
 
   /* ── Which sheet ─────────────────────────────────────────────────────── */
@@ -1192,11 +1190,9 @@ async function renderLegend(host) {
   }
 
   /* ── What is not mapped ──────────────────────────────────────────────── */
-  const grid = snapshot?.grid
-    ? applyLegend(snapshot.grid, legend.filter((l) => l.active)
-      .map((l) => ({ argb: l.argb, meaning: l.meaning, role: l.role || 'shift' })))
-    : null;
-  const unknown = grid?.unknown || [];
+  const unknown = snapshot?.grid
+    ? parsedView(snapshot, legend.filter((l) => l.active)).unknown
+    : [];
 
   host.appendChild(el('div', { style: 'height:24px' }));
   host.appendChild(el('div', { class: 'rc-section-head' }, [
@@ -1355,25 +1351,17 @@ let changesInWindow = true;
 async function renderChanges(host) {
   const today = todayISO();
   const from = `${Number(today.slice(0, 4)) - 1}-01-01`;
-  const [all, runs, parties, snapshots, legendRows] = await Promise.all([
+  const [all, runs, parties, snapshot, legendRows] = await Promise.all([
     rc.listChangeEvents(from, `${today}T23:59:59Z`),
     rc.listIngestRuns({ limit: 60 }),
     rc.listParties(),
-    rc.listSnapshots({ limit: 1 }),
+    rc.latestSnapshot(),
     rc.listLegend(),
   ]);
 
   /* The window is read off the calendar the last snapshot draws, so the two
      screens cannot disagree about where the look-ahead ends. */
-  const snapshot = snapshots[0];
-  const view = snapshot?.grid
-    ? readGrid(
-      applyLegend(snapshot.grid, legendRows.map((r) => ({
-        argb: r.argb, meaning: r.meaning, role: r.role || 'shift',
-      }))),
-      { anchorISO: snapshot.taken_at }
-    )
-    : null;
+  const view = snapshot?.grid ? parsedView(snapshot, legendRows) : null;
   const window_ = changeWindow(view, today);
   const events = changesInWindow
     ? all.filter((e) => !e.week_start || (e.week_start >= window_.from && e.week_start <= window_.to))
@@ -1573,7 +1561,9 @@ const kindTone = (k) => ({
    ═══════════════════════════════════════════════════════════════════════ */
 
 async function renderSnapshots(host) {
-  const snapshots = await rc.listSnapshots({ limit: 40 });
+  /* Forty rows of metadata, not forty grids: the two numbers this table prints
+     off each snapshot are computed in the database by the view. */
+  const snapshots = await rc.listSnapshotMeta({ limit: 40 });
 
   host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Snapshots' })]));
 
@@ -1588,8 +1578,8 @@ async function renderSnapshots(host) {
       el('td', { text: s.taken_at ? s.taken_at.slice(0, 16).replace('T', ' ') : '—' }),
       el('td', { text: s.file_mtime ? s.file_mtime.slice(0, 16).replace('T', ' ') : '—' }),
       el('td', { text: s.sheet_name }),
-      el('td', { class: 'rc-num', text: String(s.grid?.rows?.length ?? 0) }),
-      el('td', { class: 'rc-num', text: String(s.grid?.unknown?.length ?? 0) }),
+      el('td', { class: 'rc-num', text: String(s.row_count ?? 0) }),
+      el('td', { class: 'rc-num', text: String(s.unmapped_count ?? 0) }),
     ]))
   ));
 

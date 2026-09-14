@@ -152,6 +152,16 @@ function fakeSdk() {
       carry_chain_id: null, lookahead_row_id: null,
     }],
     get rc_plan_current() { return this.rc_plan_entries; },
+    /* The snapshot list without its grids, with the two counts the view
+       computes in the database. Every screen that reads the sheet lists
+       snapshots through this and fetches one grid on its own. */
+    get rc_lookahead_snapshot_meta() {
+      return this.rc_lookahead_snapshots.map((s) => ({
+        id: s.id, taken_at: s.taken_at, file_mtime: s.file_mtime, file_hash: s.file_hash,
+        legend_at: s.legend_at || null, sheet_name: s.sheet_name,
+        row_count: s.grid?.rows?.length ?? 0, unmapped_count: s.grid?.unknown?.length ?? 0,
+      }));
+    },
     rc_actuals: [],
     // A few days of history, so the reports have something to aggregate. Dates
     // are relative to today, or a fixed range would fall out of every window.
@@ -488,8 +498,14 @@ function fakeSdk() {
   /* A filter chain thin enough to be obviously right, and no thinner. */
   function query(table) {
     let rows = (S.rows[table] || []).slice();
+    /* Every read is recorded with what it asked for. The two numbers a
+       performance check needs are how many reads a tab makes and how many of
+       them carry a grid — a full snapshot is the one heavy row in the schema. */
+    const read = { kind: 'select', table, columns: '*', limit: null };
+    // Recorded when the read is awaited, not when the builder is made: a write
+    // builds one of these too and never reads through it.
     const api = {
-      select() { return api; },
+      select(columns) { if (columns) read.columns = columns; return api; },
       eq(col, v) { rows = rows.filter((r) => r[col] === v); return api; },
       neq(col, v) { rows = rows.filter((r) => r[col] !== v); return api; },
       gte(col, v) { rows = rows.filter((r) => r[col] >= v); return api; },
@@ -497,9 +513,9 @@ function fakeSdk() {
       is() { return api; },
       in(col, vs) { rows = rows.filter((r) => vs.includes(r[col])); return api; },
       order() { return api; },
-      limit() { return api; },
-      maybeSingle() { return Promise.resolve({ data: rows[0] || null, error: null }); },
-      then(resolve) { return Promise.resolve({ data: rows, error: null }).then(resolve); },
+      limit(n) { read.limit = n; return api; },
+      maybeSingle() { S.calls.push(read); return Promise.resolve({ data: rows[0] || null, error: null }); },
+      then(resolve) { S.calls.push(read); return Promise.resolve({ data: rows, error: null }).then(resolve); },
     };
     return api;
   }
@@ -2213,6 +2229,53 @@ async function main() {
   /* ══════════════════════════════════════════════════════════════════════
      The boundary
      ═══════════════════════════════════════════════════════════════════ */
+  /* ── Fast between tabs ────────────────────────────────────────────────
+     Switching tabs used to mean twenty full grids over the wire to draw one,
+     and every tab re-asking for the roster, the legend and the aliases. The
+     stub records what each read asked for, so the two facts that matter can
+     be checked rather than felt: how many grids moved, and whether a second
+     visit goes back to the network at all. */
+  console.log('\nFast between tabs');
+  const readsSoFar = await page.evaluate(() => window.__rc.calls
+    .filter((c) => c.kind === 'select').map((c) => ({ table: c.table, limit: c.limit })));
+  /* A *bounded* list of several grids is the pattern the screens used —
+     `listSnapshots({ limit: 20 })` to draw one — and the one to guard against.
+     A read with no limit at all is the backup, which takes every table out
+     whole and is meant to. */
+  check('no screen ever asks for a list of grids',
+    !readsSoFar.some((c) => c.table === 'rc_lookahead_snapshots' && c.limit !== null && c.limit > 1),
+    readsSoFar.filter((c) => c.table === 'rc_lookahead_snapshots').map((c) => `limit ${c.limit}`).join(', '));
+  check('the snapshot list is read without its grids',
+    readsSoFar.some((c) => c.table === 'rc_lookahead_snapshot_meta'));
+
+  /* Six visits, three tabs, twice round. Uncached, each visit reads the roster
+     and the sheet again; remembered, the second lap reads nothing and the
+     first lap shares one grid between the three. */
+  await page.evaluate(() => { window.__rc.calls.length = 0; });
+  const lap = async () => {
+    await page.locator('#rc-frame .rc-tab', { hasText: 'Week plan' }).click();
+    await page.waitForSelector('#rc-frame tbody tr');
+    await page.locator('#rc-frame .rc-tab', { hasText: 'Resources' }).click();
+    await page.waitForSelector('#rc-frame .rc-resources');
+    await page.locator('#rc-frame .rc-tab', { hasText: 'PTO' }).click();
+    await page.waitForSelector('#rc-frame .rc-pto');
+  };
+  await lap();
+  await lap();
+  const sweep = await page.evaluate(() => window.__rc.calls
+    .filter((c) => c.kind === 'select').map((c) => c.table));
+  const count = (table) => sweep.filter((t) => t === table).length;
+  check('six visits move at most one grid',
+    count('rc_lookahead_snapshots') <= 1, `${count('rc_lookahead_snapshots')} grid read(s)`);
+  check('and read the roster at most twice — once scheduled, once everybody',
+    count('rc_people') <= 2, `${count('rc_people')} roster read(s)`);
+  check('the second lap round the same three tabs reads nothing new',
+    sweep.length <= 12, `${sweep.length} read(s) across six visits`);
+  /* The other half — a write empties it — is what the legend checks above
+     already prove: pressing "Just shading" writes a legend row and the calendar
+     has to redraw from the *new* legend, which it did not while the upsert path
+     forgot to forget. Those four checks are the regression test for it. */
+
   console.log('\nThe timeline\'s data never leaves');
 
   await page.locator('.ws-btn', { hasText: 'Timeline' }).click();

@@ -436,6 +436,35 @@ subscribes. That is what keeps the graph acyclic.
   `CX_SHELL.confirmHealthy()`**: a module that needs a network in front of the
   desktop trial gate would make an unreachable backend look exactly like a
   broken update and get itself rolled back.
+- **A grid is the one heavy row, and it moves once.** `rc_lookahead_snapshots.grid`
+  is the whole parsed workbook, and `listSnapshots` was `select('*')` — so every
+  screen that reads the sheet downloaded twenty of them to use one, and the
+  history list downloaded forty to print two numbers off each. That was most of
+  the wait between tabs. The list now comes off
+  `rc_lookahead_snapshot_meta`, a `security_invoker` view that carries the two
+  numbers computed in the database, and the newest grid is fetched on its own by
+  `latestSnapshot()`. A caller reaching for `listSnapshots()` with a limit above
+  one is reading the wrong thing.
+- **Reads are remembered for thirty seconds and forgotten on every write.**
+  `select()` in `core/rc.js` keys a read on the table, the columns and the
+  filters the query built — captured through a proxy, because neither the
+  client's builder nor the test stub describes itself — and hands the same
+  promise back to the next caller. Every write through the module
+  (`insert`, `update`, both upserts, every `rpc`) calls `forgetReads()` first,
+  so what somebody just saved is what the next screen reads; the TTL exists for
+  the colleague whose write comes through nothing here. **Sign-out and every
+  sign-in forget too**: the database would refuse a member the administrator's
+  rows, but a cache that answered first would not. It is never longer than one
+  page — a reload starts empty — and it is one place: a second cache in a UI
+  module would be a second answer to "what is on the server".
+- **The sheet is parsed once, against the legend it was parsed with.**
+  `parsedView()` in `ui/rc_util.js` memoises `applyLegend` + `readGrid` on the
+  snapshot id and the legend as it stands, and every screen that draws the sheet
+  — the calendar, Changes, Legend, the week plan, Resources, the huddle, PTO —
+  reads through it. The legend is in the key on purpose: mapping a colour has to
+  change what is on screen at once, which is the rule the legend design rests
+  on. It carries `unknown` along with the view so nothing has to re-apply the
+  legend to find out which colours it could not place.
 - **The meeting can be run rather than filled in, and both are one path.**
   The table is a form for whoever holds the keyboard; presenter mode
   (`presenter()` in `ui/rc_huddle.js`) is the same day drawn for the room — one
@@ -1051,13 +1080,13 @@ node tools/test_dist.js              #  41 checks — every deployment shape, an
 node tools/test_lookahead.js         # 103 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 242 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 247 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 253 checks — both permission models, and that
+node tools/test_sql.js               # 256 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result

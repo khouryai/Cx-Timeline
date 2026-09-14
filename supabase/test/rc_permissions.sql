@@ -423,6 +423,18 @@ select refuses(:'carol',
   'select 1 from public.rc_lookahead_snapshots where file_hash = ''hash-one''',
   'a member reading the look-ahead register');
 
+-- The metadata view is what every screen reads instead of the grids, so it has
+-- to answer with the same numbers and refuse the same people. (`refuses()`
+-- leaves the session as the person it tried, so this says who is asking.)
+select act_as(:'alice');
+select assert((select row_count from public.rc_lookahead_snapshot_meta where id = :'snap1') = 0,
+  'the snapshot list carries the row count without the grid');
+select assert((select count(*) from public.rc_lookahead_snapshot_meta) = 1,
+  'and an administrator sees every snapshot on it');
+select refuses(:'carol',
+  'select 1 from public.rc_lookahead_snapshot_meta where file_hash = ''hash-one''',
+  'a member reading the snapshot list through the view');
+
 -- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice 'Work with no confirmed access'; end $$;
 -- ══════════════════════════════════════════════════════════════════════════

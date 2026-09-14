@@ -1269,6 +1269,22 @@ create or replace view public.rc_sars_without_rows with (security_invoker = true
      and s.superseded_by is null
      and not exists (select 1 from public.rc_sar_links k where k.sar_id = s.id);
 
+-- The snapshots without their grids.
+--
+-- A grid is the parsed workbook — a hundred and forty rows by a hundred days,
+-- with a fill on most of them — and it is the one column on the table that is
+-- large. Every screen that reads the sheet was asking for twenty of them to use
+-- one, and the history list asked for forty to print two numbers off each. That
+-- was most of the wait between tabs. This is what those callers read instead;
+-- the newest grid is fetched on its own, once, by `latestSnapshot()`.
+-- `security_invoker`, or the view would run as its owner and show a member a
+-- register the table refuses them.
+create or replace view public.rc_lookahead_snapshot_meta with (security_invoker = true) as
+  select s.id, s.taken_at, s.file_mtime, s.file_hash, s.legend_at, s.sheet_name,
+         jsonb_array_length(coalesce(s.grid -> 'rows', '[]'::jsonb))    as row_count,
+         jsonb_array_length(coalesce(s.grid -> 'unknown', '[]'::jsonb)) as unmapped_count
+    from public.rc_lookahead_snapshots s;
+
 -- ══════════════════════════════════════════════════════════════════════════
 -- Writes that must be able to fail loudly
 --
@@ -1485,9 +1501,11 @@ grant select, insert on public.rc_actuals            to authenticated;
 grant select, insert on public.rc_change_annotations to authenticated;
 
 revoke all on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
-              public.rc_rows_without_sar, public.rc_sars_without_rows from public, anon;
+              public.rc_rows_without_sar, public.rc_sars_without_rows,
+              public.rc_lookahead_snapshot_meta from public, anon;
 grant select on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
-                public.rc_rows_without_sar, public.rc_sars_without_rows to authenticated;
+                public.rc_rows_without_sar, public.rc_sars_without_rows,
+                public.rc_lookahead_snapshot_meta to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Storage: the two things that are files

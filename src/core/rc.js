@@ -183,6 +183,8 @@ export function accountLabel() {
 }
 
 async function refreshPerson() {
+  // Runs on every sign-in and account change: same rule as sign-out.
+  forgetReads();
   person = null;
   if (!client || !user) return null;
   const { data, error } = await client
@@ -243,6 +245,9 @@ export async function signUp(email, password) {
 
 export async function signOut() {
   if (!client) return;
+  // Whoever signs in next must not read this account's rows out of memory.
+  // The database would refuse them; the cache must not answer first.
+  forgetReads();
   await client.auth.signOut();
   user = null;
   person = null;
@@ -283,13 +288,64 @@ function friendlier(error) {
  * and an empty list comes back — so callers must never read "no rows" as "no
  * permission". Where the difference matters, ask `isAdmin()`.
  */
-async function select(table, build) {
+/* ── The read cache ──────────────────────────────────────────────────────
+   Every tab re-asks for the roster, the locations, the legend, the aliases and
+   the categories, and every section inside the look-ahead re-asks for the
+   snapshot. None of it changes between one click and the next, and the round
+   trips were most of the wait between tabs. So a read is remembered for a short
+   while, keyed on the table and everything the query asked for.
+
+   Two things keep it honest. **Any write through this module empties it**, so
+   what somebody just saved is what the next screen reads — the alternative,
+   an outcome recorded and the meeting still showing the old one, is exactly the
+   failure a huddle cannot afford. And the memory is short (`READ_TTL`), because
+   two people edit this calendar at once and a colleague's write comes through
+   nothing here; thirty seconds is a tab switch, not a shift. It is never longer
+   than one page: a reload starts empty. */
+const READ_TTL = 30000;
+const reads = new Map();
+
+function remember(key, fetch) {
+  const held = reads.get(key);
+  if (held && held.until > Date.now()) return held.promise;
+  const promise = fetch().then(
+    (rows) => rows,
+    (err) => { reads.delete(key); throw err; }
+  );
+  reads.set(key, { promise, until: Date.now() + READ_TTL });
+  return promise;
+}
+
+/** Forget every remembered read. Called by every write, and by whoever knows better. */
+export function forgetReads() {
+  reads.clear();
+}
+
+/**
+ * The filters a query built, as text, so two identical questions share an
+ * answer and two different ones never do. The builder is wrapped rather than
+ * inspected: the client's own object does not describe itself, and the stub the
+ * tests run against has nothing to inspect at all.
+ */
+function describe(build) {
+  const parts = [];
+  const proxy = new Proxy({}, {
+    get: (_, method) => (...args) => { parts.push(`${String(method)}(${JSON.stringify(args)})`); return proxy; },
+  });
+  if (build) build(proxy);
+  return parts.join('');
+}
+
+async function select(table, build, { columns = '*' } = {}) {
   requireClient();
-  let query = client.from(table).select('*');
-  if (build) query = build(query);
-  const { data, error } = await query;
-  if (error) throw new Error(`${table}: ${error.message}`);
-  return data || [];
+  const key = `${table}|${columns}|${describe(build)}`;
+  return remember(key, async () => {
+    let query = client.from(table).select(columns);
+    if (build) query = build(query);
+    const { data, error } = await query;
+    if (error) throw new Error(`${table}: ${error.message}`);
+    return data || [];
+  });
 }
 
 /**
@@ -467,7 +523,32 @@ export function listIngestRuns({ limit = 100 } = {}) {
   return select('rc_ingest_runs', (q) => q.order('ran_at', { ascending: false }).limit(limit));
 }
 
-export function listSnapshots({ limit = 50 } = {}) {
+/**
+ * The snapshots, newest first, **without their grids**.
+ *
+ * A grid is the whole parsed workbook and it is the one large column in the
+ * schema. Every screen that reads the sheet used to ask for twenty of them and
+ * use one; the history list asked for forty to print two numbers off each.
+ * That was most of the wait between tabs. This reads the metadata view, which
+ * carries those two numbers computed in the database, and the one grid
+ * anybody actually draws comes from `latestSnapshot()`.
+ */
+export function listSnapshotMeta({ limit = 50 } = {}) {
+  return select('rc_lookahead_snapshot_meta', (q) => q.order('taken_at', { ascending: false }).limit(limit));
+}
+
+/** The newest snapshot with its grid, or null. The only full-grid read there is. */
+export function latestSnapshot() {
+  return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(1))
+    .then((rows) => rows[0] || null);
+}
+
+/**
+ * Snapshots with their grids. Kept for anything that genuinely needs several
+ * — nothing in the interface does any more, and a caller reaching for this
+ * with a limit above one should read `listSnapshotMeta()` instead.
+ */
+export function listSnapshots({ limit = 1 } = {}) {
   return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(limit));
 }
 
@@ -514,6 +595,7 @@ export function listSarsWithoutRows() {
  */
 async function insert(table, rows) {
   requireClient();
+  forgetReads();
   const { data, error } = await client.from(table).insert(rows).select();
   if (error) throw new Error(`${table}: ${error.message}`);
   return data || [];
@@ -521,6 +603,10 @@ async function insert(table, rows) {
 
 async function rpc(name, args) {
   requireClient();
+  // Every function here that is not a pure read writes something, and the
+  // reads are cheap; forgetting on all of them is simpler than a list that
+  // has to be kept right.
+  forgetReads();
   const { data, error } = await client.rpc(name, args);
   if (error) throw new Error(`${name}: ${error.message}`);
   return data;
@@ -536,6 +622,7 @@ async function rpc(name, args) {
  */
 async function update(table, id, patch) {
   requireClient();
+  forgetReads();
   const { data, error } = await client.from(table).update(patch).eq('id', id).select();
   if (error) throw new Error(`${table}: ${error.message}`);
   if (!data || !data.length) {
@@ -570,6 +657,7 @@ export const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r
  */
 export async function addLegend(rows) {
   requireClient();
+  forgetReads();
   const { data, error } = await client
     .from('rc_legend')
     .upsert(rows, { onConflict: 'valid_from,argb' })
@@ -589,6 +677,7 @@ export const updateLegend = (id, patch) => update('rc_legend', id, patch);
  */
 export async function setSetting(key, value) {
   requireClient();
+  forgetReads();
   const { data, error } = await client
     .from('rc_settings')
     .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })

@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 55   Built: 2026-09-14T18:38:26.854Z
+ * Modules: 55   Built: 2026-09-14T20:39:40.479Z
  */
 (function () {
   'use strict';
@@ -13508,6 +13508,8 @@ __mods["core/rc.js"] = function (__x, __req) {
   }
 
   async function refreshPerson() {
+    // Runs on every sign-in and account change: same rule as sign-out.
+    forgetReads();
     person = null;
     if (!client || !user) return null;
     const { data, error } = await client
@@ -13568,6 +13570,9 @@ __mods["core/rc.js"] = function (__x, __req) {
 
   async function signOut() {
     if (!client) return;
+    // Whoever signs in next must not read this account's rows out of memory.
+    // The database would refuse them; the cache must not answer first.
+    forgetReads();
     await client.auth.signOut();
     user = null;
     person = null;
@@ -13608,13 +13613,64 @@ __mods["core/rc.js"] = function (__x, __req) {
    * and an empty list comes back — so callers must never read "no rows" as "no
    * permission". Where the difference matters, ask `isAdmin()`.
    */
-  async function select(table, build) {
+  /* ── The read cache ──────────────────────────────────────────────────────
+     Every tab re-asks for the roster, the locations, the legend, the aliases and
+     the categories, and every section inside the look-ahead re-asks for the
+     snapshot. None of it changes between one click and the next, and the round
+     trips were most of the wait between tabs. So a read is remembered for a short
+     while, keyed on the table and everything the query asked for.
+
+     Two things keep it honest. **Any write through this module empties it**, so
+     what somebody just saved is what the next screen reads — the alternative,
+     an outcome recorded and the meeting still showing the old one, is exactly the
+     failure a huddle cannot afford. And the memory is short (`READ_TTL`), because
+     two people edit this calendar at once and a colleague's write comes through
+     nothing here; thirty seconds is a tab switch, not a shift. It is never longer
+     than one page: a reload starts empty. */
+  const READ_TTL = 30000;
+  const reads = new Map();
+
+  function remember(key, fetch) {
+    const held = reads.get(key);
+    if (held && held.until > Date.now()) return held.promise;
+    const promise = fetch().then(
+      (rows) => rows,
+      (err) => { reads.delete(key); throw err; }
+    );
+    reads.set(key, { promise, until: Date.now() + READ_TTL });
+    return promise;
+  }
+
+  /** Forget every remembered read. Called by every write, and by whoever knows better. */
+  function forgetReads() {
+    reads.clear();
+  }
+
+  /**
+   * The filters a query built, as text, so two identical questions share an
+   * answer and two different ones never do. The builder is wrapped rather than
+   * inspected: the client's own object does not describe itself, and the stub the
+   * tests run against has nothing to inspect at all.
+   */
+  function describe(build) {
+    const parts = [];
+    const proxy = new Proxy({}, {
+      get: (_, method) => (...args) => { parts.push(`${String(method)}(${JSON.stringify(args)})`); return proxy; },
+    });
+    if (build) build(proxy);
+    return parts.join('');
+  }
+
+  async function select(table, build, { columns = '*' } = {}) {
     requireClient();
-    let query = client.from(table).select('*');
-    if (build) query = build(query);
-    const { data, error } = await query;
-    if (error) throw new Error(`${table}: ${error.message}`);
-    return data || [];
+    const key = `${table}|${columns}|${describe(build)}`;
+    return remember(key, async () => {
+      let query = client.from(table).select(columns);
+      if (build) query = build(query);
+      const { data, error } = await query;
+      if (error) throw new Error(`${table}: ${error.message}`);
+      return data || [];
+    });
   }
 
   /**
@@ -13792,7 +13848,32 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_ingest_runs', (q) => q.order('ran_at', { ascending: false }).limit(limit));
   }
 
-  function listSnapshots({ limit = 50 } = {}) {
+  /**
+   * The snapshots, newest first, **without their grids**.
+   *
+   * A grid is the whole parsed workbook and it is the one large column in the
+   * schema. Every screen that reads the sheet used to ask for twenty of them and
+   * use one; the history list asked for forty to print two numbers off each.
+   * That was most of the wait between tabs. This reads the metadata view, which
+   * carries those two numbers computed in the database, and the one grid
+   * anybody actually draws comes from `latestSnapshot()`.
+   */
+  function listSnapshotMeta({ limit = 50 } = {}) {
+    return select('rc_lookahead_snapshot_meta', (q) => q.order('taken_at', { ascending: false }).limit(limit));
+  }
+
+  /** The newest snapshot with its grid, or null. The only full-grid read there is. */
+  function latestSnapshot() {
+    return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(1))
+      .then((rows) => rows[0] || null);
+  }
+
+  /**
+   * Snapshots with their grids. Kept for anything that genuinely needs several
+   * — nothing in the interface does any more, and a caller reaching for this
+   * with a limit above one should read `listSnapshotMeta()` instead.
+   */
+  function listSnapshots({ limit = 1 } = {}) {
     return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(limit));
   }
 
@@ -13839,6 +13920,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function insert(table, rows) {
     requireClient();
+    forgetReads();
     const { data, error } = await client.from(table).insert(rows).select();
     if (error) throw new Error(`${table}: ${error.message}`);
     return data || [];
@@ -13846,6 +13928,10 @@ __mods["core/rc.js"] = function (__x, __req) {
 
   async function rpc(name, args) {
     requireClient();
+    // Every function here that is not a pure read writes something, and the
+    // reads are cheap; forgetting on all of them is simpler than a list that
+    // has to be kept right.
+    forgetReads();
     const { data, error } = await client.rpc(name, args);
     if (error) throw new Error(`${name}: ${error.message}`);
     return data;
@@ -13861,6 +13947,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function update(table, id, patch) {
     requireClient();
+    forgetReads();
     const { data, error } = await client.from(table).update(patch).eq('id', id).select();
     if (error) throw new Error(`${table}: ${error.message}`);
     if (!data || !data.length) {
@@ -13895,6 +13982,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function addLegend(rows) {
     requireClient();
+    forgetReads();
     const { data, error } = await client
       .from('rc_legend')
       .upsert(rows, { onConflict: 'valid_from,argb' })
@@ -13914,6 +14002,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function setSetting(key, value) {
     requireClient();
+    forgetReads();
     const { data, error } = await client
       .from('rc_settings')
       .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
@@ -14138,6 +14227,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "signIn", { get: () => signIn, enumerable: true });
   Object.defineProperty(__x, "signUp", { get: () => signUp, enumerable: true });
   Object.defineProperty(__x, "signOut", { get: () => signOut, enumerable: true });
+  Object.defineProperty(__x, "forgetReads", { get: () => forgetReads, enumerable: true });
   Object.defineProperty(__x, "listPeople", { get: () => listPeople, enumerable: true });
   Object.defineProperty(__x, "listLocations", { get: () => listLocations, enumerable: true });
   Object.defineProperty(__x, "listLocationAliases", { get: () => listLocationAliases, enumerable: true });
@@ -14159,6 +14249,8 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listCarryChains", { get: () => listCarryChains, enumerable: true });
   Object.defineProperty(__x, "listEffort", { get: () => listEffort, enumerable: true });
   Object.defineProperty(__x, "listIngestRuns", { get: () => listIngestRuns, enumerable: true });
+  Object.defineProperty(__x, "listSnapshotMeta", { get: () => listSnapshotMeta, enumerable: true });
+  Object.defineProperty(__x, "latestSnapshot", { get: () => latestSnapshot, enumerable: true });
   Object.defineProperty(__x, "listSnapshots", { get: () => listSnapshots, enumerable: true });
   Object.defineProperty(__x, "listSnapshotRows", { get: () => listSnapshotRows, enumerable: true });
   Object.defineProperty(__x, "listChangeEvents", { get: () => listChangeEvents, enumerable: true });
@@ -29425,6 +29517,39 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /**
+   * The newest snapshot, read as a calendar — once.
+   *
+   * `applyLegend()` and `readGrid()` are pure over the grid and the legend, and
+   * they are not cheap: a hundred and forty rows by a hundred days, resolved
+   * against the legend and then walked for the date axis, the headings, the
+   * Resource rows and the absence rows. Five screens were doing that on every
+   * visit, over the same snapshot and the same legend, and each one paid for it
+   * in the gap between the click and the table.
+   *
+   * So the parse is remembered against what it was made from — the snapshot's id
+   * and the legend as it stands — and handed back whole to the next caller. The
+   * legend is part of the key on purpose: mapping a colour has to change what is
+   * on screen at once, which is the rule the whole legend design rests on, and a
+   * memo that ignored it would show the old reading until the next reload. One
+   * entry, because there is one newest snapshot; a new read replaces it.
+   */
+  let parsed = null;
+
+  function parsedView(snapshot, legendRows) {
+    const legend = (legendRows || []).map((r) => ({
+      argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
+    }));
+    const key = `${snapshot.id}|${snapshot.taken_at}|${JSON.stringify(legend)}`;
+    if (parsed?.key === key) return parsed.view;
+    const grid = applyLegend(snapshot.grid, legend);
+    // The colours the legend could not place ride along: they are a fact about
+    // this grid under this legend, which is exactly what the key says.
+    const view = { ...readGrid(grid, { anchorISO: snapshot.taken_at }), unknown: grid.unknown || [] };
+    parsed = { key, view };
+    return view;
+  }
+
+  /**
    * The look-ahead for a span of weeks: `{ rows, absences }`.
    *
    * Two answers rather than one, because the sheet says two things. `rows` is the
@@ -29459,24 +29584,23 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * exists, and why this fills a gap rather than overruling one.
    */
   async function lookaheadWithResources(fromISO, toISO) {
-    const [stored, snapshots, legendRows, locations, locAliases] = await Promise.all([
+    /* The snapshot *list* is read without its grids — that is what `newestPerKey`
+       ranks on, and it only needs the ids in order. The one grid anybody draws is
+       fetched on its own. Reading twenty grids to use one was most of the wait
+       between tabs. */
+    const [stored, snapshots, snapshot, legendRows, locations, locAliases] = await Promise.all([
       rc.lookaheadBetween(fromISO, toISO).catch(() => []),
-      rc.listSnapshots({ limit: 20 }).catch(() => []),
+      rc.listSnapshotMeta({ limit: 20 }).catch(() => []),
+      rc.latestSnapshot().catch(() => null),
       rc.listLegend().catch(() => []),
       rc.listLocations({ includeInactive: true }).catch(() => []),
       rc.listLocationAliases().catch(() => []),
     ]);
 
     const laRows = newestPerKey(stored, new Map(snapshots.map((s, i) => [s.id, i])));
-    const snapshot = snapshots[0];
     if (!snapshot?.grid) return { rows: laRows, absences: [] };
 
-    const view = readGrid(
-      applyLegend(snapshot.grid, legendRows.map((r) => ({
-        argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
-      }))),
-      { anchorISO: snapshot.taken_at }
-    );
+    const view = parsedView(snapshot, legendRows);
     const rows = graftLocations(
       graftResources(laRows, view),
       view,
@@ -29798,6 +29922,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "uniqueFirstNames", { get: () => uniqueFirstNames, enumerable: true });
   Object.defineProperty(__x, "ambiguousFirstNames", { get: () => ambiguousFirstNames, enumerable: true });
   Object.defineProperty(__x, "newestPerKey", { get: () => newestPerKey, enumerable: true });
+  Object.defineProperty(__x, "parsedView", { get: () => parsedView, enumerable: true });
   Object.defineProperty(__x, "lookaheadWithResources", { get: () => lookaheadWithResources, enumerable: true });
   Object.defineProperty(__x, "graftLocations", { get: () => graftLocations, enumerable: true });
   Object.defineProperty(__x, "graftResources", { get: () => graftResources, enumerable: true });
@@ -32407,7 +32532,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
   const { icon } = __req("ui/icons.js");
   const { selectInput, textInput, toast, badge, emptyState, field, checkbox } = __req("ui/components.js");
-  const { notifyChanged, byId, dayLabel, todayISO, formModal } = __req("ui/rc_util.js");
+  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView } = __req("ui/rc_util.js");
 
 
 
@@ -32589,9 +32714,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       run.file_hash = hash;
       run.file_mtime = new Date(file.modified).toISOString();
 
-      const snapshots = await rc.listSnapshots({ limit: 1 });
-      const previous = snapshots[0] || null;
-      if (snapshots[0] && snapshots[0].file_hash === hash) {
+      const previous = await rc.latestSnapshot();
+      if (previous && previous.file_hash === hash) {
         run.outcome = 'unchanged';
         await rc.addIngestRun(run);
         if (!silent) toast({ message: 'The look-ahead has not changed since the last snapshot.' });
@@ -32876,11 +33000,10 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * straight away instead of at the next ingest.
    */
   async function renderCalendar(host) {
-    const [snapshots, legendRows] = await Promise.all([
-      rc.listSnapshots({ limit: 1 }),
+    const [snapshot, legendRows] = await Promise.all([
+      rc.latestSnapshot(),
       rc.listLegend(),
     ]);
-    const snapshot = snapshots[0];
 
     host.appendChild(el('div', { class: 'rc-section-head' }, [
       el('h3', { text: 'The look-ahead' }),
@@ -32901,10 +33024,11 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     // `role` matters as much as the meaning here: it is what separates a shift
     // from the shading the workbook greys most of its calendar with.
     const legend = legendRows.map((r) => ({ argb: r.argb, meaning: r.meaning, role: r.role || 'shift' }));
-    const grid = applyLegend(snapshot.grid, legend);
-    // The snapshot's own timestamp is what pins the axis to a year — see
-    // `datePlease()`. The weekday letters on the sheet then check the answer.
-    const view = readGrid(grid, { anchorISO: snapshot.taken_at });
+    /* One parse, shared with every other screen that reads the sheet — see
+       `parsedView()`. The snapshot's own timestamp is what pins the axis to a
+       year (`datePlease()`); the weekday letters on the sheet then check it. */
+    const view = parsedView(snapshot, legendRows);
+    const grid = { unknown: view.unknown };
 
     if (!view.days.length) {
       host.appendChild(emptyState({
@@ -33494,12 +33618,11 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * spreadsheet. Where the two disagree, both are shown and the person decides.
    */
   async function renderLegend(host) {
-    const [legend, snapshots, settings] = await Promise.all([
+    const [legend, snapshot, settings] = await Promise.all([
       rc.listLegend({ includeInactive: true }),
-      rc.listSnapshots({ limit: 1 }),
+      rc.latestSnapshot(),
       rc.listSettings().catch(() => []),
     ]);
-    const snapshot = snapshots[0];
     const sheet = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
 
     /* ── Which sheet ─────────────────────────────────────────────────────── */
@@ -33571,11 +33694,9 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     }
 
     /* ── What is not mapped ──────────────────────────────────────────────── */
-    const grid = snapshot?.grid
-      ? applyLegend(snapshot.grid, legend.filter((l) => l.active)
-        .map((l) => ({ argb: l.argb, meaning: l.meaning, role: l.role || 'shift' })))
-      : null;
-    const unknown = grid?.unknown || [];
+    const unknown = snapshot?.grid
+      ? parsedView(snapshot, legend.filter((l) => l.active)).unknown
+      : [];
 
     host.appendChild(el('div', { style: 'height:24px' }));
     host.appendChild(el('div', { class: 'rc-section-head' }, [
@@ -33734,25 +33855,17 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   async function renderChanges(host) {
     const today = todayISO();
     const from = `${Number(today.slice(0, 4)) - 1}-01-01`;
-    const [all, runs, parties, snapshots, legendRows] = await Promise.all([
+    const [all, runs, parties, snapshot, legendRows] = await Promise.all([
       rc.listChangeEvents(from, `${today}T23:59:59Z`),
       rc.listIngestRuns({ limit: 60 }),
       rc.listParties(),
-      rc.listSnapshots({ limit: 1 }),
+      rc.latestSnapshot(),
       rc.listLegend(),
     ]);
 
     /* The window is read off the calendar the last snapshot draws, so the two
        screens cannot disagree about where the look-ahead ends. */
-    const snapshot = snapshots[0];
-    const view = snapshot?.grid
-      ? readGrid(
-        applyLegend(snapshot.grid, legendRows.map((r) => ({
-          argb: r.argb, meaning: r.meaning, role: r.role || 'shift',
-        }))),
-        { anchorISO: snapshot.taken_at }
-      )
-      : null;
+    const view = snapshot?.grid ? parsedView(snapshot, legendRows) : null;
     const window_ = changeWindow(view, today);
     const events = changesInWindow
       ? all.filter((e) => !e.week_start || (e.week_start >= window_.from && e.week_start <= window_.to))
@@ -33952,7 +34065,9 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
      ═══════════════════════════════════════════════════════════════════════ */
 
   async function renderSnapshots(host) {
-    const snapshots = await rc.listSnapshots({ limit: 40 });
+    /* Forty rows of metadata, not forty grids: the two numbers this table prints
+       off each snapshot are computed in the database by the view. */
+    const snapshots = await rc.listSnapshotMeta({ limit: 40 });
 
     host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Snapshots' })]));
 
@@ -33967,8 +34082,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         el('td', { text: s.taken_at ? s.taken_at.slice(0, 16).replace('T', ' ') : '—' }),
         el('td', { text: s.file_mtime ? s.file_mtime.slice(0, 16).replace('T', ' ') : '—' }),
         el('td', { text: s.sheet_name }),
-        el('td', { class: 'rc-num', text: String(s.grid?.rows?.length ?? 0) }),
-        el('td', { class: 'rc-num', text: String(s.grid?.unknown?.length ?? 0) }),
+        el('td', { class: 'rc-num', text: String(s.row_count ?? 0) }),
+        el('td', { class: 'rc-num', text: String(s.unmapped_count ?? 0) }),
       ]))
     ));
 

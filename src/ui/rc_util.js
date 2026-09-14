@@ -328,6 +328,39 @@ export function newestPerKey(rows, rank) {
 }
 
 /**
+ * The newest snapshot, read as a calendar — once.
+ *
+ * `applyLegend()` and `readGrid()` are pure over the grid and the legend, and
+ * they are not cheap: a hundred and forty rows by a hundred days, resolved
+ * against the legend and then walked for the date axis, the headings, the
+ * Resource rows and the absence rows. Five screens were doing that on every
+ * visit, over the same snapshot and the same legend, and each one paid for it
+ * in the gap between the click and the table.
+ *
+ * So the parse is remembered against what it was made from — the snapshot's id
+ * and the legend as it stands — and handed back whole to the next caller. The
+ * legend is part of the key on purpose: mapping a colour has to change what is
+ * on screen at once, which is the rule the whole legend design rests on, and a
+ * memo that ignored it would show the old reading until the next reload. One
+ * entry, because there is one newest snapshot; a new read replaces it.
+ */
+let parsed = null;
+
+export function parsedView(snapshot, legendRows) {
+  const legend = (legendRows || []).map((r) => ({
+    argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
+  }));
+  const key = `${snapshot.id}|${snapshot.taken_at}|${JSON.stringify(legend)}`;
+  if (parsed?.key === key) return parsed.view;
+  const grid = applyLegend(snapshot.grid, legend);
+  // The colours the legend could not place ride along: they are a fact about
+  // this grid under this legend, which is exactly what the key says.
+  const view = { ...readGrid(grid, { anchorISO: snapshot.taken_at }), unknown: grid.unknown || [] };
+  parsed = { key, view };
+  return view;
+}
+
+/**
  * The look-ahead for a span of weeks: `{ rows, absences }`.
  *
  * Two answers rather than one, because the sheet says two things. `rows` is the
@@ -362,24 +395,23 @@ export function newestPerKey(rows, rank) {
  * exists, and why this fills a gap rather than overruling one.
  */
 export async function lookaheadWithResources(fromISO, toISO) {
-  const [stored, snapshots, legendRows, locations, locAliases] = await Promise.all([
+  /* The snapshot *list* is read without its grids — that is what `newestPerKey`
+     ranks on, and it only needs the ids in order. The one grid anybody draws is
+     fetched on its own. Reading twenty grids to use one was most of the wait
+     between tabs. */
+  const [stored, snapshots, snapshot, legendRows, locations, locAliases] = await Promise.all([
     rc.lookaheadBetween(fromISO, toISO).catch(() => []),
-    rc.listSnapshots({ limit: 20 }).catch(() => []),
+    rc.listSnapshotMeta({ limit: 20 }).catch(() => []),
+    rc.latestSnapshot().catch(() => null),
     rc.listLegend().catch(() => []),
     rc.listLocations({ includeInactive: true }).catch(() => []),
     rc.listLocationAliases().catch(() => []),
   ]);
 
   const laRows = newestPerKey(stored, new Map(snapshots.map((s, i) => [s.id, i])));
-  const snapshot = snapshots[0];
   if (!snapshot?.grid) return { rows: laRows, absences: [] };
 
-  const view = readGrid(
-    applyLegend(snapshot.grid, legendRows.map((r) => ({
-      argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
-    }))),
-    { anchorISO: snapshot.taken_at }
-  );
+  const view = parsedView(snapshot, legendRows);
   const rows = graftLocations(
     graftResources(laRows, view),
     view,
