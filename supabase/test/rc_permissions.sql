@@ -284,6 +284,37 @@ select refuses(:'alice',
   format('delete from public.rc_actuals where id = %L', :'act2'),
   'deleting an outcome');
 
+-- A correction is a new row pointing at the old one, and the old one stays.
+-- What every reader sees is `rc_actuals_current`; the table keeps what was
+-- first said, because the change is itself a fact about the evidence.
+select public.rc_record_actual(
+  gen_random_uuid(), :'p_dan', date '2026-09-01', 'completed', :'cat_field', :'loc12',
+  'finished after all', null, null, null, null, 'day', null, null, :'act2') as act2b \gset
+select assert((select count(*) from public.rc_actuals) = 3,
+  'correcting an outcome writes a new row');
+select assert((select count(*) from public.rc_actuals_current) = 2,
+  'and the view still shows one outcome per person per day');
+select assert(
+  (select status from public.rc_actuals_current where person_id = :'p_dan' and work_date = date '2026-09-01')
+    = 'completed',
+  'which is the corrected one');
+select assert((select supersedes_id from public.rc_actuals where id = :'act2b') = :'act2',
+  'pointing at the row it corrects');
+select assert((select status from public.rc_actuals where id = :'act2') = 'partial',
+  'while the first answer is still on the record');
+
+-- Two people correcting one outcome: the second is told, not silently overruled.
+select refuses(:'alice',
+  format('select public.rc_record_actual(%L, %L, %L, %L, null, null, null, null, null, null, null, %L, null, null, %L)',
+         gen_random_uuid(), :'p_dan', '2026-09-01', 'carried', 'day', :'act2'),
+  'correcting an outcome that has already been corrected');
+-- And a "correction" cannot move somebody else's evidence under one's own name.
+select refuses(:'alice',
+  format('select public.rc_record_actual(%L, %L, %L, %L, null, null, null, null, null, null, null, %L, null, null, %L)',
+         gen_random_uuid(), :'p_carol', '2026-09-01', 'completed', 'day', :'act2b'),
+  'correcting an outcome onto a different person');
+select act_as(:'alice');
+
 -- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice 'A block needs a reason and somebody answerable'; end $$;
 -- ══════════════════════════════════════════════════════════════════════════
@@ -334,6 +365,25 @@ select assert(
 select assert(
   (select note from public.rc_actuals where id = :'act_ev') = 'North end left to pull',
   'and what is left of the task, in the words somebody said it in');
+
+-- Editing the note after the meeting must not lose the photograph taken
+-- during it: a correction with no picture of its own inherits the old one.
+select public.rc_record_actual(
+  gen_random_uuid(), :'p_carol', date '2026-09-08',
+  'partial', :'cat_field', :'loc12', 'North end left to pull — south end done', null, null,
+  null, null, 'day', null, null, :'act_ev') as act_ev2 \gset
+select assert(
+  (select evidence_path from public.rc_actuals where id = :'act_ev2')
+    = 'evidence/44444444-4444-4444-4444-444444444444.jpg',
+  'a corrected note keeps the photograph');
+select assert(
+  (select note from public.rc_actuals_current where person_id = :'p_carol' and work_date = date '2026-09-08')
+    = 'North end left to pull — south end done',
+  'and the view reads the corrected words');
+select act_as(:'alice');
+select assert(
+  (select count(*) from public.rc_effort where person_id = :'p_carol' and work_date = date '2026-09-08') = 1,
+  'and the report counts the day once, not once per correction');
 
 -- Anybody signed in can see it: a picture only its author can open is not
 -- evidence of anything.
@@ -400,7 +450,9 @@ select assert(
 select act_as(:'carol');
 select assert((select count(*) from public.rc_effort) = 0,
   'a member sees none of it, even reading the view directly');
-select assert((select count(*) from public.rc_actuals) = 7,
+-- Nine, not seven: two of them are corrections, and the table keeps the rows
+-- they corrected. Only the view narrows.
+select assert((select count(*) from public.rc_actuals) = 9,
   'though the raw outcomes are open — the huddle happens in front of everyone');
 
 -- ══════════════════════════════════════════════════════════════════════════
@@ -542,7 +594,7 @@ select assert((select count(*) from public.rc_leave) = 1,
   'and who is on leave');
 select assert((select count(*) from public.rc_plan_current) = 1,
   'and the current plan');
-select assert((select count(*) from public.rc_actuals) = 7,
+select assert((select count(*) from public.rc_actuals) = 9,
   'and what actually happened');
 
 -- Everything a read-only account must not be able to do. Note the second one:
@@ -595,7 +647,7 @@ select assert(public.rc_my_role() = 'member', 'they are a member now');
 select assert(public.rc_can_act_for(:'p_dave'), 'and may record their own outcome');
 select public.rc_record_actual(
   '55555555-5555-5555-5555-555555555555'::uuid, :'p_dave', date '2026-09-08', 'completed');
-select assert((select count(*) from public.rc_actuals) = 8, 'which goes through');
+select assert((select count(*) from public.rc_actuals) = 10, 'which goes through');
 
 -- But only their own, and still not the plan: setting next week's tasks stays
 -- with an administrator, because the supersede chain assumes one author.

@@ -480,6 +480,26 @@ subscribes. That is what keeps the graph acyclic.
   way out of that strip writes the outcome, Escape and walking away to the next
   person included. That is the opposite of a dialog, deliberately: the one
   thing a huddle cannot afford is an outcome that looks recorded and is not.
+- **An outcome is corrected, never edited — and "recorded" is not "final".**
+  `rc_actuals` still has no UPDATE. A change of status or of note is a new row
+  whose `supersedes_id` points at the old one, written through
+  `rc_record_actual(…, p_supersedes)`, which refuses a row that has already
+  been corrected (two people editing one outcome get a refusal, not a silent
+  winner), refuses a "correction" onto a different person or day, and carries
+  the photograph forward when the new row brings none — a note edited after
+  the meeting must not lose the picture taken during it. **Every reader and
+  every report goes through `rc_actuals_current`**, the rows nobody has
+  corrected; `rc_effort` and `rc_carry_chains` read it too, or a corrected day
+  would count twice. In the interface the pick already made stays pressable
+  (`statusButtons(…, current)`): another status changes the answer, the same
+  status opens the strip to edit the note, and `notesBox()` takes a note
+  whatever the status — "completed" is one click until somebody has something
+  to say about it. An edit that changes nothing writes nothing, and Escape on
+  an edit cancels, where on a first answer it records: the first answer *is*
+  the record and every way out keeps it, while a correction saying nothing is
+  a row on the record saying nothing. The table's Edit button and the room's
+  controls call the same functions, so nothing can be said in one that the
+  other reads differently.
 - **A photograph goes up before the row, never after.** `rc_actuals` has no
   UPDATE grant, so a path attached afterwards would need a second row
   superseding the first. The picture is uploaded under the `client_uuid` the
@@ -1080,13 +1100,13 @@ node tools/test_dist.js              #  41 checks — every deployment shape, an
 node tools/test_lookahead.js         # 103 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 247 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 257 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 256 checks — both permission models, and that
+node tools/test_sql.js               # 266 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result

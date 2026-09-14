@@ -152,6 +152,10 @@ function fakeSdk() {
       carry_chain_id: null, lookahead_row_id: null,
     }],
     get rc_plan_current() { return this.rc_plan_entries; },
+    // Every outcome nobody has corrected — what the huddle reads.
+    get rc_actuals_current() {
+      return this.rc_actuals.filter((a) => !this.rc_actuals.some((b) => b.supersedes_id === a.id));
+    },
     /* The snapshot list without its grids, with the two counts the view
        computes in the database. Every screen that reads the sheet lists
        snapshots through this and fetches one grid on its own. */
@@ -633,6 +637,21 @@ function fakeSdk() {
             if (args.p_status === 'blocked' && (!args.p_blocked_reason || !args.p_blocked_party)) {
               return Promise.resolve({ data: null, error: { message: 'a blocked outcome needs a reason and a responsible party' } });
             }
+            /* A correction, as the function does it: same person and day, the
+               row not already corrected, and the photograph carried over
+               unless a new one came with it. */
+            let evidence = args.p_evidence || null;
+            if (args.p_supersedes) {
+              const prior = S.rows.rc_actuals.find((a) => a.id === args.p_supersedes);
+              if (!prior) return Promise.resolve({ data: null, error: { message: 'that outcome no longer exists' } });
+              if (prior.person_id !== args.p_person || prior.work_date !== args.p_date) {
+                return Promise.resolve({ data: null, error: { message: 'an outcome can only be corrected for the same person and day' } });
+              }
+              if (S.rows.rc_actuals.some((a) => a.supersedes_id === args.p_supersedes)) {
+                return Promise.resolve({ data: null, error: { message: 'that outcome has already been corrected — reload and try again' } });
+              }
+              if (!evidence) evidence = prior.evidence_path || null;
+            }
             const row = {
               id: `act-${S.rows.rc_actuals.length + 1}`,
               client_uuid: args.p_client_uuid,
@@ -647,7 +666,8 @@ function fakeSdk() {
               carry_chain_id: args.p_carry_chain,
               plan_entry_id: args.p_plan_entry || null,
               lookahead_row_id: args.p_lookahead_row || null,
-              evidence_path: args.p_evidence || null,
+              evidence_path: evidence,
+              supersedes_id: args.p_supersedes || null,
               // The function fills this from `auth.uid()`, and who typed an
               // outcome in is a different fact from whose outcome it is.
               created_by: S.signedIn ? USER.id : null,
@@ -1973,6 +1993,17 @@ async function main() {
     `${await page.locator('#rc-frame .rc-pto-cell.rc-pto-sheet').count()} cell(s)`);
   check('and booked leave is drawn as the record it is',
     (await page.locator('#rc-frame .rc-pto-cell.rc-pto-booked').count()) >= 1);
+  /* The cell *is* its colour. The table's row hover painted a fill over every
+     cell in the row, so crossing somebody's leave with the pointer turned it
+     white — the one grid where the hover has to leave the cells alone. */
+  const bookedCell = page.locator('#rc-frame .rc-pto-cell.rc-pto-booked').first();
+  const paintBefore = await bookedCell.evaluate((e) => getComputedStyle(e).backgroundColor);
+  await bookedCell.hover();
+  await page.waitForTimeout(80);
+  const paintDuring = await bookedCell.evaluate((e) => getComputedStyle(e).backgroundColor);
+  check('hovering a row does not paint over the leave on it',
+    paintBefore === paintDuring, `${paintBefore} → ${paintDuring}`);
+  await page.mouse.move(0, 0);
   /* The two must not read alike: one is a record with a kind and a status, the
      other is a cell somebody typed in a spreadsheet. */
   check('the two are told apart on screen rather than merged',
@@ -2044,16 +2075,77 @@ async function main() {
     (await page.locator('#rc-frame .rc-present-who').innerText()));
 
   const before3 = await page.evaluate(() => window.__rc.rows.rc_actuals.length);
+  const inFocus = await page.locator('#rc-frame .rc-present-who').innerText();
   await page.locator('#rc-frame .rc-present').press('c');
   await page.waitForTimeout(600);
   check('a status letter records it here too, through the same path',
     await page.evaluate((n) => window.__rc.rows.rc_actuals.length === n + 1, before3));
+
+  /* ── Recorded is not final ────────────────────────────────────────────
+     Pressing "completed" used to be the end of it: the buttons went away and
+     the pick could not be changed, and there was nowhere to say anything about
+     a finished day. Now the pick stays pressable and a note can be added
+     whatever the status. Every edit is a *correction* — a new row pointing at
+     the old one, the table having no UPDATE — so the first answer stays on the
+     record underneath. */
+  // This day's chain only: the rows appended since the meeting was opened on
+  // this person, not everything they have ever had recorded.
+  const current = (name) => page.evaluate(({ who, from }) => {
+    const person = window.__rc.rows.rc_people.find((p) => p.name === who);
+    const rows = window.__rc.rows.rc_actuals.slice(from).filter((a) => a.person_id === person.id);
+    const live = rows.filter((a) => !rows.some((b) => b.supersedes_id === a.id));
+    return { all: rows.length, live: live.length, status: live[0]?.status, note: live[0]?.note,
+      first: rows[0]?.status, chain: live[0]?.supersedes_id || null };
+  }, { who: name, from: before3 });
+  const pressed = page.locator('#rc-frame .rc-present button[aria-pressed="true"]');
+  check('the pick just made is shown pressed, and still pressable',
+    (await pressed.count()) === 1 && /Completed/.test(await pressed.innerText()));
+  check('with a box for a note whatever the status',
+    (await page.locator('#rc-frame .rc-present .rc-notes-box').count()) === 1);
+
+  await page.locator('#rc-frame .rc-present button', { hasText: 'Partial' }).click();
+  await page.waitForSelector('#rc-frame .rc-present .rc-saymore');
+  // The text box, not the file input beside it.
+  const saidBox = page.locator('#rc-frame .rc-present .rc-saymore input:not([type="file"])');
+  await saidBox.fill('half of it');
+  await saidBox.press('Enter');
+  await page.waitForTimeout(600);
+  let state = await current(inFocus);
+  check('changing the pick writes a correction rather than an update',
+    state.all === 2 && state.live === 1, `${state.all} row(s), ${state.live} current`);
+  check('which is what every reader now sees',
+    state.status === 'partial' && state.note === 'half of it', `${state.status}: ${state.note}`);
+  check('pointing at the answer it replaced, which stays on the record',
+    state.chain !== null && state.first === 'completed');
+
+  await page.locator('#rc-frame .rc-present .rc-notes-box').fill('half of it — north end done');
+  await page.locator('#rc-frame .rc-present button', { hasText: 'Save note' }).click();
+  await page.waitForTimeout(600);
+  state = await current(inFocus);
+  check('a note can be edited on its own, keeping the status',
+    state.all === 3 && state.status === 'partial' && /north end/.test(state.note || ''),
+    `${state.all} row(s), ${state.status}: ${state.note}`);
+
+  await page.locator('#rc-frame .rc-present button', { hasText: 'Save note' }).click();
+  await page.waitForTimeout(400);
+  check('and saving it unchanged writes nothing',
+    (await current(inFocus)).all === 3);
 
   await page.locator('#rc-frame .rc-present').press('Escape');
   await page.waitForTimeout(400);
   check('escape puts the table back',
     (await page.locator('#rc-frame .rc-present').count()) === 0
       && (await page.locator('#rc-frame .rc-huddle').count()) === 1);
+
+  /* The table offers the same edit, in the same cell, through the same path. */
+  const editRow = page.locator('#rc-frame tbody tr', { hasText: inFocus });
+  check('a recorded outcome in the table can be edited too',
+    (await editRow.locator('button', { hasText: 'Edit' }).count()) === 1);
+  await editRow.locator('button', { hasText: 'Edit' }).click();
+  await page.waitForTimeout(200);
+  check('which brings the buttons and the note back in the cell',
+    (await editRow.locator('button[aria-pressed="true"]').count()) === 1
+      && (await editRow.locator('.rc-notes-box').count()) === 1);
 
   /* ── What is still in the way ─────────────────────────────────────────
      A blocked outcome said a day was lost and stopped there. These stay above

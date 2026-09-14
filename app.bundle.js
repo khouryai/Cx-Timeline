@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 55   Built: 2026-09-14T20:39:40.479Z
+ * Modules: 55   Built: 2026-09-14T21:13:47.314Z
  */
 (function () {
   'use strict';
@@ -13805,8 +13805,15 @@ __mods["core/rc.js"] = function (__x, __req) {
       q.eq('person_id', personId).eq('work_date', dateISO).order('created_at'));
   }
 
+  /**
+   * Outcomes, as they stand.
+   *
+   * The view, never the table: a corrected outcome is a new row pointing at the
+   * old one, and the table keeps both. Reading it directly would put two answers
+   * against one person for one day and let whichever came last win.
+   */
   function listActuals(fromISO, toISO) {
-    return select('rc_actuals', (q) =>
+    return select('rc_actuals_current', (q) =>
       q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
   }
 
@@ -14066,7 +14073,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     categoryId = null, locationId = null, note = null,
     blockedReason = null, blockedPartyId = null,
     carryChainId = null, planEntryId = null, shift = 'day',
-    lookaheadRowId = null, evidencePath = null,
+    lookaheadRowId = null, evidencePath = null, supersedesId = null,
   }) =>
     rpc('rc_record_actual', {
       p_client_uuid: clientUuid,
@@ -14083,6 +14090,9 @@ __mods["core/rc.js"] = function (__x, __req) {
       p_shift: shift,
       p_lookahead_row: lookaheadRowId,
       p_evidence: evidencePath,
+      // The outcome this one corrects. The function refuses a row that has
+      // already been corrected, so two edits of one outcome cannot both land.
+      p_supersedes: supersedesId,
     });
 
   const resolveLocation = (raw) => rpc('rc_resolve_location', { p_raw: raw });
@@ -31307,6 +31317,18 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       const status = STATUS_BY_ID.get(actual.status);
       answer.appendChild(badge(status?.label || actual.status, status?.tone || 'muted'));
       for (const node of outcomeDetail(actual, ctx, person)) answer.appendChild(node);
+      /* Recorded is not final, and in the room least of all: the pick just made
+         stays pressable, and there is a box for a note whatever the status. Both
+         write a correction — a new row pointing at this one — through the same
+         path the table uses, so nothing can be said here that the table would
+         read differently. */
+      if (rc.isAdmin() || (person.id === rc.me()?.id && rc.canWrite())) {
+        const redrawRoom = () => { clear(root); render(root); };
+        answer.appendChild(statusButtons(ctx, person, review, wasPlanned, redrawRoom, actual));
+        answer.appendChild(notesBox({
+          ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw: redrawRoom,
+        }));
+      }
     } else {
       answer.appendChild(statusButtons(ctx, person, review, wasPlanned, () => {
         clear(root);
@@ -31633,10 +31655,26 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       row.appendChild(el('td', outcome, [el('span', { class: 'rc-hint', text: 'not a working day' })]));
     } else if (actual) {
       const status = STATUS_BY_ID.get(actual.status);
-      row.appendChild(el('td', outcome, [
+      const cell = el('td', outcome, [
         badge(status?.label || actual.status, status?.tone || 'muted'),
         ...outcomeDetail(actual, ctx, person),
-      ]));
+      ]);
+      /* Recorded is not final. The status can be changed and a note added or
+         edited afterwards — as a correction, a new row pointing at this one —
+         by whoever could have recorded it in the first place. */
+      if (admin || mine) {
+        cell.appendChild(el('button', {
+          class: 'cx-btn mini ghost rc-edit-outcome',
+          text: 'Edit',
+          title: 'Change the status or the note. The first answer stays on the record.',
+          onClick: () => {
+            clear(cell);
+            cell.appendChild(statusButtons(ctx, person, review, wasPlanned, redraw, actual));
+            cell.appendChild(notesBox({ ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw }));
+          },
+        }));
+      }
+      row.appendChild(cell);
     } else if (admin || mine) {
       row.appendChild(el('td', outcome, [statusButtons(ctx, person, review, wasPlanned, redraw)]));
     } else {
@@ -31720,6 +31758,8 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     if (by && by.id !== person?.id) {
       out.push(el('div', { class: 'rc-hint', text: `recorded by ${by.name}` }));
     }
+    // A changed answer says so. The first one is still on the record underneath.
+    if (actual.supersedes_id) out.push(el('div', { class: 'rc-hint', text: 'corrected' }));
     return out;
   }
 
@@ -31730,37 +31770,88 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
    * dialog because it is the one status that cannot be recorded without more —
    * a reason and somebody answerable — and the database refuses it otherwise.
    */
-  function statusButtons(ctx, person, date, plannedEntry, redraw) {
+  function statusButtons(ctx, person, date, plannedEntry, redraw, current = null) {
     const wrap = el('div', { style: 'display:flex;gap:3px;flex-wrap:wrap' });
 
     for (const status of STATUSES) {
       if (status.id === 'absent') continue;
+      const chosen = current?.status === status.id;
       wrap.appendChild(el('button', {
-        class: 'cx-btn mini ghost',
+        /* The pick already made is shown pressed and stays pressable: pressing
+           a *different* one changes the answer, and pressing the same one opens
+           the line underneath to edit what was said with it. Nothing here is
+           un-pressable — an outcome that could not be changed once pressed
+           taught people to hesitate over the one button that matters. */
+        class: chosen ? 'cx-btn mini' : 'cx-btn mini ghost',
+        'aria-pressed': String(chosen),
         text: status.label,
         title: (status.family === 'health'
           ? 'Programme health — never counted against the individual'
           : 'Counts toward individual efficiency')
-          + `  ·  press ${status.key} with this row selected`,
+          + `  ·  press ${status.key} with this row selected`
+          + (chosen ? '  ·  recorded — press to edit the note' : ''),
         onClick: () => {
           if (status.id === 'blocked') {
-            blockedDialog(ctx, person, date, plannedEntry, redraw);
+            blockedDialog(ctx, person, date, plannedEntry, redraw, current);
             return;
           }
           /* A finished task has nothing left to say about it, so it stays one
              click. Anything else does — "partial" with no note is a number
              nobody can act on in the morning — so the buttons give way to a
              line asking for it, pre-filled with the plan so it is an edit
-             rather than a retype. */
-          if (status.id === 'completed') {
-            commitOutcome({ ctx, person, date, plannedEntry, status, redraw });
+             rather than a retype. Re-pressing the pick already made is the one
+             case "completed" does open the line: that is somebody wanting to
+             say something about it after all. */
+          if (status.id === 'completed' && !chosen) {
+            commitOutcome({ ctx, person, date, plannedEntry, status, redraw, supersedes: current });
             return;
           }
           clear(wrap);
-          wrap.appendChild(sayMore({ ctx, person, date, plannedEntry, status, redraw, host: wrap }));
+          wrap.appendChild(sayMore({
+            ctx, person, date, plannedEntry, status, redraw, host: wrap, current,
+          }));
         },
       }));
     }
+    return wrap;
+  }
+
+  /**
+   * A note on an outcome, whatever its status.
+   *
+   * "Completed" stays one click because a finished task has nothing left to say
+   * about it — until it does. This is the box for that, and for every other
+   * status too: what somebody said about a day is worth writing down whether or
+   * not the status asked for it. Saving writes a correction (a new row pointing
+   * at the old one — the table has no UPDATE) with the same status and the new
+   * words, and only if the words changed: a save that changed nothing would be a
+   * row on the record saying nothing.
+   */
+  function notesBox({ ctx, person, date, plannedEntry, current, redraw }) {
+    const wrap = el('div', { class: 'rc-notes' });
+    const box = el('textarea', {
+      class: 'cx-textarea rc-notes-box',
+      rows: 2,
+      placeholder: 'Anything to add about this day',
+      'aria-label': `Notes for ${person.name}`,
+    });
+    box.value = current?.note || '';
+    const save = el('button', {
+      class: 'cx-btn mini',
+      text: 'Save note',
+      onClick: () => {
+        const note = box.value.trim() || null;
+        if (note === (current?.note || null)) { redraw(); return; }
+        commitOutcome({
+          ctx, person, date, plannedEntry, redraw, note,
+          status: STATUS_BY_ID.get(current.status),
+          supersedes: current,
+        });
+      },
+    });
+    wrap.appendChild(el('span', { class: 'rc-eyebrow', text: 'Notes' }));
+    wrap.appendChild(box);
+    wrap.appendChild(save);
     return wrap;
   }
 
@@ -31777,12 +31868,16 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
    * loses the answer, and the one thing this meeting cannot afford is an outcome
    * that looks recorded and is not.
    */
-  function sayMore({ ctx, person, date, plannedEntry, status, redraw, host }) {
+  function sayMore({ ctx, person, date, plannedEntry, status, redraw, host, current = null }) {
     const strip = el('div', { class: 'rc-saymore' });
     let done = false;
 
+    /* Editing what was already said starts from what was said; a fresh answer
+       starts from the plan, so it is an edit rather than a retype. */
+    const opening = current?.note
+      || (status.id === 'carried' || status.id === 'partial' ? (plannedEntry?.task || '') : '');
     const note = textInput({
-      value: status.id === 'carried' || status.id === 'partial' ? (plannedEntry?.task || '') : '',
+      value: opening,
       placeholder: status.id === 'reassigned' ? 'What they did instead' : 'What is left',
     });
     const photo = el('input', {
@@ -31795,13 +31890,24 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       'aria-label': 'Attach a photograph',
     });
 
-    const commit = () => {
+    const commit = ({ cancel = false } = {}) => {
       if (done) return;
       done = true;
+      const said = note.value.trim() || null;
+      const file = photo.files?.[0] || null;
+      /* A correction that changes nothing is a row on the record saying nothing,
+         so editing and then walking away, or pressing Escape, writes nothing.
+         A *first* answer is different: pressing the status was the record, and
+         every way out of here has to keep it. */
+      if (current && (cancel || (said === (current.note || null) && status.id === current.status && !file))) {
+        redraw();
+        return;
+      }
       commitOutcome({
         ctx, person, date, plannedEntry, status, redraw,
-        note: note.value.trim() || null,
-        file: photo.files?.[0] || null,
+        note: said,
+        file,
+        supersedes: current,
       });
     };
 
@@ -31817,7 +31923,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       if (event.key === 'Enter' || event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
-        if (event.key === 'Escape') note.value = '';
+        if (event.key === 'Escape') {
+          if (current) { commit({ cancel: true }); return; }
+          note.value = '';
+        }
         commit();
       }
     });
@@ -31844,7 +31953,9 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
    * the outcome is still recorded — losing what somebody said because a
    * photograph did not upload would be the wrong way round.
    */
-  async function commitOutcome({ ctx, person, date, plannedEntry, status, redraw, note = null, file = null }) {
+  async function commitOutcome({
+    ctx, person, date, plannedEntry, status, redraw, note = null, file = null, supersedes = null,
+  }) {
     const clientUuid = newUuid();
     /* A day the 4WLA planned has no stored row, so there is no id to chain on —
        and a chain has to start somewhere. It starts at the first carry, which is
@@ -31864,17 +31975,27 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       }
     }
 
+    /* A correction keeps what the first answer knew that this one does not: the
+       look-ahead row it was recorded against, and — where the status is still
+       blocked — the reason and the party, which the database refuses a block
+       without. The photograph carries over inside the function itself, so a
+       replayed queue entry keeps it too. */
+    const keep = supersedes && supersedes.status === status.id ? supersedes : null;
     const { sent, error } = await record({
       clientUuid,
       personId: person.id,
       date,
       status: status.id,
       note,
-      categoryId: plannedEntry?.category_id || null,
-      locationId: plannedEntry?.location_id || null,
-      planEntryId: plannedEntry?.id || null,
+      categoryId: plannedEntry?.category_id || supersedes?.category_id || null,
+      locationId: plannedEntry?.location_id || supersedes?.location_id || null,
+      planEntryId: plannedEntry?.id || supersedes?.plan_entry_id || null,
       carryChainId: chainId,
       evidencePath,
+      lookaheadRowId: supersedes?.lookahead_row_id || null,
+      blockedReason: keep?.blocked_reason || null,
+      blockedPartyId: keep?.blocked_party_id || null,
+      supersedesId: supersedes?.id || null,
     });
     if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
 
@@ -31939,8 +32060,8 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     return `${n}${['th', 'st', 'nd', 'rd'][n % 10] || 'th'}`;
   }
 
-  function blockedDialog(ctx, person, date, plannedEntry, redraw) {
-    const reason = textInput({ placeholder: 'What stopped it' });
+  function blockedDialog(ctx, person, date, plannedEntry, redraw, current = null) {
+    const reason = textInput({ placeholder: 'What stopped it', value: current?.blocked_reason || '' });
     const owner = selectInput({
       value: rc.me()?.id || '',
       placeholder: '— nobody yet —',
@@ -32044,6 +32165,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           blockedPartyId: party.value,
           lookaheadRowId: laRow?.value || null,
           evidencePath,
+          supersedesId: current?.id || null,
         };
         const { sent, error } = await record(entry);
         if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
@@ -32051,8 +32173,9 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
         /* The outcome says a day was lost; the blocker is the thing somebody has
            to do about it. Raised separately and after, so a failure here leaves
            the outcome standing rather than losing both — the meeting has moved
-           on by the time anything is retried. */
-        if (sent) {
+           on by the time anything is retried. Not raised twice: a day that was
+           already blocked already has its blocker on the list. */
+        if (sent && current?.status !== 'blocked') {
           try {
             const raised = await rc.raiseBlocker({
               person_id: person.id,

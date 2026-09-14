@@ -491,6 +491,19 @@ create table if not exists public.rc_actuals (
   -- person. The chain groups them so the reports count it once, and rank it
   -- by age — which is the more useful number anyway.
   carry_chain_id uuid,
+  /*
+   * The outcome this one corrects.
+   *
+   * This table has no UPDATE, and a correction is not an exception to that —
+   * it is a new row pointing at the old one, exactly as a revised plan entry
+   * and a superseded annotation are. `rc_actuals_current` is what every
+   * reader and every report uses; the table underneath keeps what was first
+   * said, because "the status was changed after the meeting" is itself a fact
+   * about the evidence. `rc_record_actual()` refuses to correct a row that
+   * has already been corrected, so two people editing one outcome get a
+   * refusal rather than one of them silently winning.
+   */
+  supersedes_id  uuid references public.rc_actuals(id) on delete set null,
   created_by     uuid not null default auth.uid() references auth.users(id),
   created_at     timestamptz not null default now(),
   -- The spec makes a reason and a responsible party mandatory on a block, so
@@ -505,6 +518,19 @@ create table if not exists public.rc_actuals (
 create index if not exists rc_actuals_person_date_idx on public.rc_actuals (person_id, work_date);
 create index if not exists rc_actuals_date_idx        on public.rc_actuals (work_date);
 create index if not exists rc_actuals_chain_idx       on public.rc_actuals (carry_chain_id);
+-- For a project built before corrections existed. `create table if not exists`
+-- does nothing to a table that is already there.
+alter table public.rc_actuals add column if not exists supersedes_id uuid
+  references public.rc_actuals(id) on delete set null;
+create index if not exists rc_actuals_supersedes_idx  on public.rc_actuals (supersedes_id);
+
+-- What is true now: every outcome nobody has corrected. Readers and reports
+-- come through here, never the table — a corrected outcome counted twice is a
+-- completion rate that is quietly wrong.
+create or replace view public.rc_actuals_current with (security_invoker = true) as
+  select a.*
+    from public.rc_actuals a
+   where not exists (select 1 from public.rc_actuals b where b.supersedes_id = a.id);
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Helpers
@@ -1214,7 +1240,7 @@ create or replace view public.rc_carry_chains as
          max(work_date)      as last_seen,
          count(*)            as carries,
          max(work_date) - min(work_date) as age_days
-    from public.rc_actuals
+    from public.rc_actuals_current
    where carry_chain_id is not null
      and status = 'carried'
    group by carry_chain_id, person_id;
@@ -1246,7 +1272,7 @@ create or replace view public.rc_effort with (security_invoker = true) as
            when a.status in ('blocked', 'reassigned')           then 'health'
            else 'absence'
          end as signal
-    from public.rc_actuals a
+    from public.rc_actuals_current a
     join public.rc_people p on p.id = a.person_id
     left join public.rc_categories c on c.id = a.category_id
     left join public.rc_locations  l on l.id = a.location_id
@@ -1347,6 +1373,9 @@ $$;
 
 -- Record a huddle outcome. Idempotent on `client_uuid`, so the offline queue
 -- can replay without fear; returns the row that ended up stored either way.
+-- The parameter list grew (`p_supersedes`), and `create or replace` cannot
+-- change one, so the old shape is dropped first.
+drop function if exists public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text);
 create or replace function public.rc_record_actual(
   p_client_uuid uuid,
   p_person      uuid,
@@ -1361,7 +1390,8 @@ create or replace function public.rc_record_actual(
   p_plan_entry  uuid default null,
   p_shift       text default 'day',
   p_lookahead_row uuid default null,
-  p_evidence    text default null
+  p_evidence    text default null,
+  p_supersedes  uuid default null
 )
 returns uuid
 language plpgsql
@@ -1371,6 +1401,7 @@ as $$
 declare
   existing uuid;
   new_id   uuid;
+  prior    public.rc_actuals%rowtype;
 begin
   if not public.rc_can_act_for(p_person) then
     raise exception 'read only: you may only record your own outcomes'
@@ -1382,6 +1413,31 @@ begin
     return existing;
   end if;
 
+  /* A correction. The row it corrects has to be this person's, on this day —
+     otherwise a "correction" could rewrite somebody else's evidence into one's
+     own — and it has to be the *current* row: correcting one that has already
+     been corrected is two people editing one outcome, and the second is told
+     rather than silently winning, the same answer `rc_supersede_plan` gives.
+     The photograph carries over unless a new one is offered: a note edited
+     after the meeting must not lose the picture taken during it. */
+  if p_supersedes is not null then
+    select * into prior from public.rc_actuals where id = p_supersedes;
+    if not found then
+      raise exception 'that outcome no longer exists' using errcode = '23503';
+    end if;
+    if prior.person_id <> p_person or prior.work_date <> p_date then
+      raise exception 'an outcome can only be corrected for the same person and day'
+        using errcode = '23514';
+    end if;
+    if exists (select 1 from public.rc_actuals where supersedes_id = p_supersedes) then
+      raise exception 'that outcome has already been corrected — reload and try again'
+        using errcode = '40001';
+    end if;
+    if p_evidence is null then
+      p_evidence := prior.evidence_path;
+    end if;
+  end if;
+
   if p_status = 'blocked'
      and (p_blocked_reason is null or btrim(p_blocked_reason) = '' or p_blocked_party is null) then
     raise exception 'a blocked outcome needs a reason and a responsible party'
@@ -1391,11 +1447,11 @@ begin
   insert into public.rc_actuals
     (client_uuid, plan_entry_id, person_id, work_date, shift, status, category_id,
      location_id, note, blocked_reason, blocked_party_id, carry_chain_id,
-     lookahead_row_id, evidence_path, created_by)
+     lookahead_row_id, evidence_path, supersedes_id, created_by)
   values
     (p_client_uuid, p_plan_entry, p_person, p_date, p_shift, p_status, p_category,
      p_location, p_note, p_blocked_reason, p_blocked_party, p_carry_chain,
-     p_lookahead_row, p_evidence, auth.uid())
+     p_lookahead_row, p_evidence, p_supersedes, auth.uid())
   returning id into new_id;
 
   return new_id;
@@ -1451,7 +1507,7 @@ revoke all on function public.rc_link_account(uuid, text)               from pub
 revoke all on function public.rc_set_role(uuid, text)                   from public, anon;
 revoke all on function public.rc_resolve_location(text)                 from public, anon;
 revoke all on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) from public, anon;
-revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text) from public, anon;
+revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid) from public, anon;
 
 grant execute on function public.rc_me()                                to authenticated;
 grant execute on function public.rc_is_admin()                          to authenticated;
@@ -1464,7 +1520,7 @@ grant execute on function public.rc_link_account(uuid, text)            to authe
 grant execute on function public.rc_set_role(uuid, text)                to authenticated;
 grant execute on function public.rc_resolve_location(text)              to authenticated;
 grant execute on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) to authenticated;
-grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text) to authenticated;
+grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid) to authenticated;
 
 do $$
 declare t text;
@@ -1502,10 +1558,10 @@ grant select, insert on public.rc_change_annotations to authenticated;
 
 revoke all on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
               public.rc_rows_without_sar, public.rc_sars_without_rows,
-              public.rc_lookahead_snapshot_meta from public, anon;
+              public.rc_lookahead_snapshot_meta, public.rc_actuals_current from public, anon;
 grant select on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
                 public.rc_rows_without_sar, public.rc_sars_without_rows,
-                public.rc_lookahead_snapshot_meta to authenticated;
+                public.rc_lookahead_snapshot_meta, public.rc_actuals_current to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Storage: the two things that are files

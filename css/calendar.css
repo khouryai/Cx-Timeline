@@ -220,7 +220,11 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   color: var(--text-main);
   vertical-align: middle;
 }
-.rc-table tbody tr:hover td { background: var(--surface-2); }
+/* Not the PTO grid: there the cell *is* its colour, and a hover fill painted
+   over every cell in the row turned a person's leave white the moment the
+   pointer crossed it. That grid highlights the name cell instead. */
+.rc-table:not(.rc-pto-grid) tbody tr:hover td { background: var(--surface-2); }
+.rc-pto-grid tbody tr:hover td.rc-pto-name { background: var(--surface-2); }
 .rc-table .rc-num { text-align: right; font-family: var(--f-mono); }
 .rc-table .rc-inactive td { opacity: 0.45; }
 
@@ -752,6 +756,22 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   align-items: center;
   gap: 4px;
 }
+
+/* A note on an outcome, whatever its status. Under the buttons rather than in
+   a dialog, for the reason the strip is: the one thing a meeting cannot afford
+   is an answer that looks recorded and is not, and a box in the row cannot be
+   dismissed. */
+.rc-notes {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 6px;
+  align-items: end;
+  margin-top: 6px;
+  max-width: 420px;
+}
+.rc-notes .rc-eyebrow { grid-column: 1 / -1; }
+.rc-notes-box { min-height: 44px; resize: vertical; font-size: var(--fs-tiny); }
+.rc-edit-outcome { margin-top: 4px; }
 
 /* ── PTO ────────────────────────────────────────────────────────────────────
    Four weeks across, the team down the side. Twenty-eight columns leave no room

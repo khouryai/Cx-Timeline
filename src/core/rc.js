@@ -480,8 +480,15 @@ export function planHistory(personId, dateISO) {
     q.eq('person_id', personId).eq('work_date', dateISO).order('created_at'));
 }
 
+/**
+ * Outcomes, as they stand.
+ *
+ * The view, never the table: a corrected outcome is a new row pointing at the
+ * old one, and the table keeps both. Reading it directly would put two answers
+ * against one person for one day and let whichever came last win.
+ */
 export function listActuals(fromISO, toISO) {
-  return select('rc_actuals', (q) =>
+  return select('rc_actuals_current', (q) =>
     q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
 }
 
@@ -741,7 +748,7 @@ export const recordActual = ({
   categoryId = null, locationId = null, note = null,
   blockedReason = null, blockedPartyId = null,
   carryChainId = null, planEntryId = null, shift = 'day',
-  lookaheadRowId = null, evidencePath = null,
+  lookaheadRowId = null, evidencePath = null, supersedesId = null,
 }) =>
   rpc('rc_record_actual', {
     p_client_uuid: clientUuid,
@@ -758,6 +765,9 @@ export const recordActual = ({
     p_shift: shift,
     p_lookahead_row: lookaheadRowId,
     p_evidence: evidencePath,
+    // The outcome this one corrects. The function refuses a row that has
+    // already been corrected, so two edits of one outcome cannot both land.
+    p_supersedes: supersedesId,
   });
 
 export const resolveLocation = (raw) => rpc('rc_resolve_location', { p_raw: raw });
