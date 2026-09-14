@@ -661,17 +661,40 @@ create policy rc_leave_write on public.rc_leave
   for all to authenticated
   using (public.rc_is_admin()) with check (public.rc_is_admin());
 
--- ── The look-ahead register — administrators only ─────────────────────────
--- This is the evidence base for delay claims, and a member has no business in
--- it. Note the annotations, which are INSERT and SELECT only: no update
--- policy and no delete policy exist, so neither is possible for anyone going
--- through the API, administrator included.
+-- ── The look-ahead register ───────────────────────────────────────────────
+-- Two halves, and the line between them is what somebody can *do* with the
+-- thing rather than how sensitive it is.
+--
+-- **The calendar is the team's.** The 4WLA is what the field team is being
+-- asked to do, and it was administrators-only — so the people named on it were
+-- the only people who could not look at it, and asked their manager to
+-- screenshot it instead. The snapshot and the rows it derives are readable by
+-- anybody signed in; writing them is still the ingestion's job and an
+-- administrator's.
+--
+-- **The register around it is not.** Ingest runs, change events, SARs and the
+-- annotations on them are the evidence base for a delay claim — a record of
+-- who decided what and when — and that stays with the people answerable for
+-- it. The annotations are INSERT and SELECT only besides: no update policy and
+-- no delete policy exists, so neither is possible for anyone going through the
+-- API, administrator included.
 
 do $$
 declare t text;
 begin
-  foreach t in array array['rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
-                           'rc_change_events', 'rc_sars', 'rc_sar_links']
+  foreach t in array array['rc_lookahead_snapshots', 'rc_lookahead_rows']
+  loop
+    execute format('drop policy if exists %1$s_admin on public.%1$s', t);
+    execute format('drop policy if exists %1$s_read on public.%1$s', t);
+    execute format(
+      'create policy %1$s_read on public.%1$s for select to authenticated using (true)', t);
+    execute format('drop policy if exists %1$s_write on public.%1$s', t);
+    execute format(
+      'create policy %1$s_write on public.%1$s for all to authenticated
+         using (public.rc_is_admin()) with check (public.rc_is_admin())', t);
+  end loop;
+
+  foreach t in array array['rc_ingest_runs', 'rc_change_events', 'rc_sars', 'rc_sar_links']
   loop
     execute format('drop policy if exists %1$s_admin on public.%1$s', t);
     execute format(
@@ -699,11 +722,19 @@ drop policy if exists rc_plan_read on public.rc_plan_entries;
 create policy rc_plan_read on public.rc_plan_entries
   for select to authenticated using (true);
 
--- Append-only: an insert policy and nothing else. Superseding is an insert.
+/* Append-only: an insert policy and nothing else. Superseding is an insert.
+ *
+ * `rc_can_act_for()`, not `rc_is_admin()` — the same rule an outcome already
+ * follows, and for the same reason. A member plans **their own** days: the
+ * office day, the other project, the task the 4WLA says nothing about. They
+ * could already say what they had done and not what they were going to do,
+ * which left the one person who knows their week unable to write any of it
+ * down. An administrator plans anyone's; a viewer plans nobody's, because
+ * `rc_can_act_for()` is false for them even about themselves. */
 drop policy if exists rc_plan_insert on public.rc_plan_entries;
 create policy rc_plan_insert on public.rc_plan_entries
   for insert to authenticated
-  with check (public.rc_is_admin() and created_by = auth.uid());
+  with check (public.rc_can_act_for(person_id) and created_by = auth.uid());
 
 -- A member sees the whole team's actuals — the huddle happens in front of
 -- everyone, so there is nothing to hide — but may only write their own.
@@ -1340,14 +1371,20 @@ declare
   old_row public.rc_plan_entries;
   new_id  uuid;
 begin
-  if not public.rc_is_admin() then
-    raise exception 'read only: only an administrator may change the plan'
-      using errcode = '42501';
-  end if;
-
   select * into old_row from public.rc_plan_entries where id = p_entry;
   if not found then
     raise exception 'no such plan entry: %', p_entry using errcode = 'P0002';
+  end if;
+
+  /* Whoever may plan a day may correct it. Read after the row is fetched
+     because the question is about *whose* day it is: a member revises their
+     own and an administrator revises anyone's, which is the rule the insert
+     policy makes and the one an outcome makes. Letting somebody write a day
+     they then could not fix is the "no way back" trap this schema avoids
+     everywhere else. */
+  if not public.rc_can_act_for(old_row.person_id) then
+    raise exception 'read only: you may only change your own plan'
+      using errcode = '42501';
   end if;
 
   if exists (select 1 from public.rc_plan_entries where supersedes_id = p_entry) then

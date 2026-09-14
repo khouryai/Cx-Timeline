@@ -116,6 +116,22 @@ alter table public.rc_actuals
   add column if not exists lookahead_row_id uuid
   references public.rc_lookahead_rows(id) on delete set null;
 
+-- ── An outcome can be corrected ───────────────────────────────────────────
+-- A correction is a new row pointing at the old one, never an UPDATE — the
+-- table still has no UPDATE grant. `rc_schema.sql` brings the function that
+-- writes it and the `rc_actuals_current` view every reader uses; this is the
+-- column they both need.
+alter table public.rc_actuals
+  add column if not exists supersedes_id uuid
+  references public.rc_actuals(id) on delete set null;
+
+-- ── The team can read the look-ahead, and plan their own days ─────────────
+-- Both are policy changes, and `rc_schema.sql` drops and recreates every policy
+-- it owns, so there is nothing to alter here. They are listed because the
+-- verification below checks them: a project still on the old policies shows an
+-- empty calendar to everybody but its administrators, and refuses a member's
+-- own plan entry with a message about permissions.
+
 -- ── A photograph of what was said ─────────────────────────────────────────
 -- Keyed on the client uuid rather than the row's own id: this table has no
 -- UPDATE grant, so the picture goes up first under a name generated on the
@@ -275,6 +291,33 @@ select 'location codes resolve',
                    where n.nspname = 'public' and p.proname = 'rc_resolve_location'
                    limit 1) like '%l.code%'
             then 'ok' else 'RUN rc_schema.sql — the 4WLA location column will resolve to nothing' end
+union all
+select 'rc_actuals.supersedes_id',
+       case when exists (
+         select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'rc_actuals'
+            and column_name = 'supersedes_id'
+       ) then 'ok' else 'MISSING' end
+union all
+select 'rc_actuals_current',
+       case when to_regclass('public.rc_actuals_current') is not null then 'ok'
+            else 'RUN rc_schema.sql — outcomes cannot be corrected without it' end
+union all
+-- A member reading the 4WLA, and planning their own day. Policies rather than
+-- columns, so what is checked is the policy's own definition.
+select 'the team can read the look-ahead',
+       case when exists (
+         select 1 from pg_policy
+          where polrelid = 'public.rc_lookahead_snapshots'::regclass
+            and polcmd = 'r' and pg_get_expr(polqual, polrelid) = 'true'
+       ) then 'ok' else 'RUN rc_schema.sql — only administrators can see the calendar' end
+union all
+select 'a member can plan their own day',
+       case when exists (
+         select 1 from pg_policy
+          where polrelid = 'public.rc_plan_entries'::regclass
+            and polcmd = 'a' and pg_get_expr(polwithcheck, polrelid) like '%can_act_for%'
+       ) then 'ok' else 'RUN rc_schema.sql — members cannot enter their own plan' end
 union all
 select 'rc_blockers',
        case when to_regclass('public.rc_blockers') is not null then 'ok' else 'MISSING' end

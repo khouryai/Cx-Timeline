@@ -753,6 +753,51 @@ subscribes. That is what keeps the graph acyclic.
   `rc_accept_invitation()` finishes the job when they sign up. Only an address
   with neither an account nor an open invitation refuses, and the interface
   points at "Invite somebody" when it does.
+- **The calendar is the team's; the register around it is not.** The 4WLA was
+  administrators-only, so the people named on it were the only people who could
+  not look at it — they asked their manager for a screenshot. `rc_lookahead_snapshots`
+  and `rc_lookahead_rows` are now readable by anybody signed in and written only
+  by an administrator; `rc_ingest_runs`, `rc_change_events`, `rc_sars` and the
+  annotations stay admin-only, because those are the evidence base for a delay
+  claim rather than a statement of what the team is being asked to do. The tab
+  shows non-admins the Calendar section alone — no Check now, no legend editing
+  — and the sections they cannot read are not offered, since a section that
+  comes back empty is a door onto a wall. The PDF export *is* theirs: it is a
+  drawing of what they can already see.
+- **A member plans their own days.** `rc_plan_entries` checks
+  `rc_can_act_for(person_id)`, the rule an outcome already followed, and
+  `rc_supersede_plan()` asks the same question of the row it is revising —
+  whoever may plan a day may correct it, or writing one somebody cannot fix is
+  the "no way back" trap this schema avoids everywhere else. In Resources the
+  person select holds the one name they could write and the per-day button
+  appears on their row only; the week plan's cell is clickable on their own row
+  for the same reason. A viewer plans nobody, including themselves, because
+  `rc_can_act_for()` is false for them.
+- **Reports and Organisation are an administrator's, and the tabs say so.** The
+  KPIs are a different audience and a different permission; the roster, the
+  locations and the accounts are the calendar's administration rather than its
+  use. Both are restricted in the policies — hiding the tab only stops offering
+  a door onto a wall, which is the same thing `rc_effort`'s `rc_is_admin()`
+  already did to anybody who reached the view directly.
+- **A day is a list of tasks, not a task.** A shift is routinely two jobs — a
+  test to witness in the morning and a cable pull after it — and a day that
+  could hold one is how somebody ends up with one of the three things they were
+  asked for. `assignmentIndex()` answers `on(person, iso)` with every entry, and
+  `at()` with the first for the one caller that needs a single row: an outcome
+  points at one plan entry and a carry carries one chain. The week plan, the
+  Resources cell, the huddle's "Was planned" and the digest all draw the list;
+  `assign()` adds to a day rather than skipping it, and the derived side emits
+  every look-ahead row naming somebody that day rather than the first with a
+  count beside it.
+- **There is one place a day is planned.** The week plan's "+" opened a dialog
+  to pick a look-ahead row and write it down — a second place, and one that
+  outlived the change making the 4WLA *be* the plan: everything the sheet names
+  is already somebody's plan without anybody pressing anything, so the button
+  only ever wrote down what the sheet already said, or invented a day it said
+  nothing about. An empty day now says "—", planning a day the sheet has never
+  heard of is Resources' job, and clicking a planned day still changes it —
+  which for a derived day writes the first row, and is labelled "Override the
+  sheet" because that is what it does.
 - **Being scheduled is a different fact from what somebody may do.**
   `rc_people.scheduled` is what the huddle and the week plan filter on
   (`listPeople({ scheduledOnly: true })`), never the role. A manager
@@ -1138,13 +1183,13 @@ node tools/test_lookahead.js         # 126 checks — the parser, the rows it de
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 264 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 273 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 266 checks — both permission models, and that
+node tools/test_sql.js               # 275 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result

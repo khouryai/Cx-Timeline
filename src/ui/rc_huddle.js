@@ -246,6 +246,10 @@ export async function render(root) {
     register: nameRegister(everybody.length ? everybody : people, aliases),
   });
   const planFor = (personId, iso) => index.at(personId, iso);
+  /* Everything planned for a day, which is what gets *shown*. `planFor` stays
+     the single entry an outcome points at — one day, one answer to "how did it
+     go" — but a shift is routinely two jobs and the meeting has to name both. */
+  const plannedOn = (personId, iso) => index.on(personId, iso);
   /* Whether the sheet says somebody is off, which is a different question from
      what they were planned to do. The meeting must not ask a person on holiday
      how their day went, and most days the workbook is the only place the
@@ -256,7 +260,7 @@ export async function render(root) {
      are three readings of one day and the moment they are given different
      data they start disagreeing on screen, in front of the room. */
   const ctx = {
-    people, review, plan, planFor, absentOn, actualByPerson, cats, locs,
+    people, review, plan, planFor, plannedOn, absentOn, actualByPerson, cats, locs,
     categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
   };
 
@@ -449,7 +453,8 @@ function askFor(planned, locs) {
 }
 
 function presenter(ctx) {
-  const { people, review, plan, planFor, absentOn, actualByPerson, locs, cats, leave, root } = ctx;
+  const { people, review, plan, planFor, plannedOn, absentOn, actualByPerson, locs, cats,
+    leave, root } = ctx;
   const wrap = el('div', { class: 'rc-present', tabindex: '0' });
 
   const asked = people.filter((p) => availability(p, review, leave, absentOn?.(p.id, review)).state === 'available');
@@ -533,6 +538,12 @@ function presenter(ctx) {
   }
   if (wasPlanned && !laRow) {
     context.appendChild(badge('not against a look-ahead row', 'muted'));
+  }
+  /* The rest of the day. The question above names the first task; a shift with
+     three jobs on it and only one of them said out loud is how the other two
+     stop being asked about. */
+  for (const also of (plannedOn ? plannedOn(person.id, review) : []).slice(1)) {
+    context.appendChild(badge(`also: ${(also.task || '—').slice(0, 36)}`, 'info'));
   }
   // Where the day came from, when it came from the workbook rather than a person.
   if (fromSheet(wasPlanned)) context.appendChild(fromSheet(wasPlanned));
@@ -619,7 +630,8 @@ function presenter(ctx) {
  * somebody's name it stops being a summary and starts being a review.
  */
 function digestText(ctx) {
-  const { people, review, plan, planFor, absentOn, actualByPerson, locs, leave, blockers, chainByeId } = ctx;
+  const { people, review, plan, planFor, plannedOn, absentOn, actualByPerson, locs, leave,
+    blockers, chainByeId } = ctx;
   const lines = [];
   const bullet = { completed: '✓', partial: '~', carried: '→', blocked: '!', reassigned: '↔' };
 
@@ -657,15 +669,20 @@ function digestText(ctx) {
   const unset = [];
   for (const person of people) {
     if (availability(person, plan, leave, absentOn?.(person.id, plan)).state !== 'available') continue;
-    const next = planFor(person.id, plan);
-    if (!next) {
+    const tasks = plannedOn ? plannedOn(person.id, plan) : [planFor(person.id, plan)].filter(Boolean);
+    if (!tasks.length) {
       unset.push(person.name);
       continue;
     }
-    const chain = next.carry_chain_id ? chainByeId?.get(next.carry_chain_id) : null;
-    const where = locs.get(next.location_id)?.name;
-    lines.push(`  ${person.name} — ${next.task || '—'}${where ? ` at ${where}` : ''}`
-      + `${chain && chain.carries >= 1 ? ` (${ordinal(chain.carries + 1)} day on it)` : ''}`);
+    // Every task, one line each, with the name only on the first — a digest is
+    // read aloud, and "Priya — X. Priya — Y" is somebody reading a table out.
+    tasks.forEach((next, i) => {
+      const chain = next.carry_chain_id ? chainByeId?.get(next.carry_chain_id) : null;
+      const where = locs.get(next.location_id)?.name;
+      const who = i === 0 ? `${person.name} — ` : `${' '.repeat(person.name.length)}   `;
+      lines.push(`  ${who}${next.task || '—'}${where ? ` at ${where}` : ''}`
+        + `${chain && chain.carries >= 1 ? ` (${ordinal(chain.carries + 1)} day on it)` : ''}`);
+    });
   }
   if (unset.length) lines.push(`  · nothing set yet for ${unset.join(', ')}`);
 
@@ -800,9 +817,9 @@ function dateBar(date, review, plan, root, ctx) {
  */
 function fromSheet(entry) {
   if (!entry?.from_lookahead) return null;
-  return badge(entry.also_named_on
-    ? `From 4WLA (+${entry.also_named_on} more)`
-    : 'From 4WLA', 'info');
+  // No "+2 more": the sheet naming somebody on two activities in one day is two
+  // tasks, and they are all drawn now rather than counted behind the first.
+  return badge('From 4WLA', 'info');
 }
 
 function personRow(ctx) {
@@ -866,22 +883,23 @@ function personRow(ctx) {
      conversation from one on its first, and that was only visible in a report
      the field team cannot open. */
   const chain = wasPlanned ? chainByeId?.get(carryChainFor(wasPlanned)) : null;
-  row.appendChild(el('td', { 'data-label': 'Was planned' }, [
-    wasPlanned
-      ? el('div', {}, [
-        el('div', { text: wasPlanned.task || '—' }),
+  const plannedDay = ctx.plannedOn ? ctx.plannedOn(person.id, review) : [wasPlanned].filter(Boolean);
+  row.appendChild(el('td', { 'data-label': 'Was planned' },
+    plannedDay.length
+      ? plannedDay.map((task, i) => el('div', { class: i ? 'rc-day-next' : '' }, [
+        el('div', { text: task.task || '—' }),
         el('div', { class: 'rc-hint' }, [
-          el('span', { text: [locs.get(wasPlanned.location_id)?.name,
-            cats.get(wasPlanned.category_id)?.name,
-            wasPlanned.shift !== 'day' ? wasPlanned.shift : null].filter(Boolean).join(' · ') }),
+          el('span', { text: [locs.get(task.location_id)?.name,
+            cats.get(task.category_id)?.name,
+            task.shift !== 'day' ? task.shift : null].filter(Boolean).join(' · ') }),
         ]),
-        chain && chain.carries >= 2
+        // The chain belongs to the task it was carried on, which is the first.
+        i === 0 && chain && chain.carries >= 2
           ? badge(`${ordinal(chain.carries + 1)} day`, chain.carries >= 4 ? 'bad' : 'warn')
           : null,
-        fromSheet(wasPlanned),
-      ].filter(Boolean))
-      : el('span', { class: 'rc-hint', text: 'nothing planned' }),
-  ]));
+        fromSheet(task),
+      ].filter(Boolean)))
+      : [el('span', { class: 'rc-hint', text: 'nothing planned' })]));
 
   /* What happened. Absence is answered from the leave record rather than
      asked for — somebody on leave did not carry anything over, and letting
@@ -1579,7 +1597,7 @@ export async function renderWeek(root) {
   for (const person of people) {
     const cells = days.map((iso) => {
       const state = availability(person, iso, thisWeek, index.absent(person.id, iso));
-      const entry = index.at(person.id, iso);
+      const planned = index.on(person.id, iso);
       /* Booked leave and the workbook's PTO row are the same fact here, and the
          badge says which: one is a record somebody made, the other is the sheet,
          and telling them apart is what the PTO tab is for. */
@@ -1588,47 +1606,48 @@ export async function renderWeek(root) {
           .filter(Boolean));
       }
       if (state.state === 'non-working') return el('td', { class: 'rc-inactive' }, [el('span', { text: '·' })]);
-      if (!entry) {
-        // Nothing planned and nobody named. The + still offers the week's rows.
-        return el('td', {}, [rc.isAdmin() && laRows.length
-          ? el('button', {
-            class: 'cx-btn mini ghost',
-            text: '+',
-            'aria-label': `Plan ${person.name} for ${dayLabel(iso)}`,
-            title: 'Plan this day from what the look-ahead asks for.',
-            onClick: () => planFromLookahead({
-              person, iso, laRows, locations, categories, locs, root,
-            }),
-          })
-          : el('span', { class: 'rc-hint', text: '—' })]);
-      }
-      /* A day the 4WLA planned has no stored row to revise — revising it *is*
-         writing the first one, which is what overriding the sheet means. Both
-         go through the same cell, because to whoever is looking at it the
-         question is the same: change this day. */
+      /* An empty day is empty, and says so.
+         There used to be a "+" here that opened a dialog to pick a look-ahead
+         row and write it down as the plan. That was a second place a day got
+         planned, and it survived the change that made the 4WLA *be* the plan:
+         everything the workbook names is already somebody's plan for that day
+         without anybody pressing anything, so the button only ever wrote down
+         what the sheet already said — or invented a day the sheet did not.
+         Planning a day the 4WLA has never heard of is what Resources is for,
+         and that is now one place rather than two. */
+      if (!planned.length) return el('td', {}, [el('span', { class: 'rc-hint', text: '—' })]);
+
+      /* Whose day it is decides whether it can be changed — the rule
+         `rc_plan_entries` makes in Postgres. A day the 4WLA planned has no
+         stored row to revise, so revising it *is* writing the first one, which
+         is what overriding the sheet means; both go through the same cell,
+         because to whoever is looking at it the question is the same. */
+      const mayChange = rc.canWrite() && (rc.isAdmin() || person.id === rc.me()?.id);
+      const first = planned[0];
       return el('td', {
-        class: rc.isAdmin() ? 'rc-clickable' : '',
-        title: rc.isAdmin()
-          ? (entry.from_lookahead
+        class: mayChange ? 'rc-clickable' : '',
+        title: mayChange
+          ? (first.from_lookahead
             ? 'The 4WLA plans this day. Changing it writes a plan entry that overrides the sheet.'
             : 'Revise this — the outgoing version stays on the record.')
           : '',
-        onClick: rc.isAdmin()
-          ? () => (entry.from_lookahead
+        onClick: mayChange
+          ? () => (first.from_lookahead
             ? planFromLookahead({
               person, iso, laRows, locations, categories, locs, root,
-              row: laRows.find((r) => r.id === entry.lookahead_row_id) || null,
+              row: laRows.find((r) => r.id === first.lookahead_row_id) || null,
             })
-            : revisePlan(entry, person, { locations, categories, locs, root }))
+            : revisePlan(first, person, { locations, categories, locs, root }))
           : null,
-      }, [
+      }, planned.flatMap((entry, i) => [
+        i ? el('div', { class: 'rc-day-rule' }) : null,
         el('div', { text: entry.task || '—' }),
         el('div', { class: 'rc-hint', text: locs.get(entry.location_id)?.name
           || entry.raw_location || '' }),
         fromSheet(entry),
         !entry.from_lookahead && entry.lookahead_row_id ? badge('From look-ahead', 'info') : null,
         entry.supersedes_id ? badge('Revised', 'warn') : null,
-      ].filter(Boolean));
+      ]).filter(Boolean));
     });
     body.appendChild(el('tr', {}, [el('td', { text: person.name }), ...cells]));
   }
@@ -1666,14 +1685,15 @@ export async function renderWeek(root) {
   root.appendChild(el('p', {
     class: 'rc-hint',
     text: laRows.length
-      ? `The look-ahead asks for ${laRows.length} row(s) this week. Where its Resource row names `
-        + 'somebody, their empty day says so and "Plan it" fills the plan in from that row; where '
-        + 'it names nobody, the + offers every row for the week. Either way the plan carries the '
-        + 'link, which is what lets a block later be recorded against the row BART themselves '
-        + 'scheduled. A bare first name matches, as long as only one person on the roster answers '
-        + 'to it — Resources lists the names that could not be placed.'
-      : 'Nothing read from the look-ahead for this week yet. Read it in Look-ahead → Check now '
-        + 'and the empty days here will offer what it asks for.',
+      ? `The look-ahead asks for ${laRows.length} row(s) this week, and where its Resource row `
+        + 'names somebody that is already their plan for the day — nothing to press, which is why '
+        + 'there is no longer a button here to press it with. Clicking a day changes it, and the '
+        + 'override keeps the link to the row BART themselves scheduled. A day the sheet says '
+        + 'nothing about is planned in Resources, so there is one place a day is planned and '
+        + 'three places it is read. A bare first name matches, as long as only one person on the '
+        + 'roster answers to it — Resources lists the names that could not be placed.'
+      : 'Nothing read from the look-ahead for this week yet. Read it in Look-ahead → Check now, '
+        + 'and where its Resource row names somebody that becomes their plan here.',
   }));
 
   root.appendChild(el('p', {
@@ -1835,7 +1855,9 @@ function planFromLookahead({ person, iso, laRows, locations, categories, locs, r
       el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Category' }), category]),
       el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Shift' }), shift]),
     ]),
-    confirmLabel: 'Plan it',
+    // "Override" rather than "Plan it": the only way in now is a day the 4WLA
+    // already planned, and what this writes is a decision against the sheet.
+    confirmLabel: 'Override the sheet',
     onConfirm: async () => {
       if (!task.value.trim()) throw new Error('A task is needed.');
       await rc.addPlanEntries([{

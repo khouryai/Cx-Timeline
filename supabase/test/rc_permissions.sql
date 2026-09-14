@@ -202,8 +202,8 @@ select assert((select count(*) from public.rc_plan_current) = 1,
 
 select refuses(:'carol',
   format('insert into public.rc_plan_entries (person_id, work_date, task) values (%L, %L, %L)',
-         :'p_carol', '2026-09-01', 'Something else'),
-  'a member writing the plan');
+         :'p_dan', '2026-09-01', 'Somebody else''s day'),
+  'a member planning somebody else''s day');
 
 -- No UPDATE and no DELETE exist for anybody, administrator included. "The plan
 -- changed the evening before" is itself delay evidence, and an update would
@@ -242,7 +242,44 @@ select refuses(:'alice',
   'revising the same entry twice');
 select refuses(:'carol',
   format('select public.rc_supersede_plan(%L, null, %L, null)', :'plan2', 'Not yours'),
-  'a member revising the plan');
+  'a member revising somebody else''s plan');
+
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'A member plans their own days'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+/* The office day, the other project, the task the 4WLA says nothing about. A
+   member could already say what they had *done* and not what they were going
+   to do, which left the one person who knows their own week unable to write
+   any of it down. */
+select act_as(:'carol');
+insert into public.rc_plan_entries (person_id, work_date, task)
+values (:'p_carol', date '2026-09-10', 'Office — as-built markups');
+select assert((select count(*) from public.rc_plan_current
+                where person_id = :'p_carol' and work_date = date '2026-09-10') = 1,
+  'a member can plan their own day');
+
+/* Several tasks on one day, which is the normal shape of a shift: a test to
+   witness in the morning and a cable pull after it. Both are current — nothing
+   supersedes anything — and every view reads a day as a list. */
+insert into public.rc_plan_entries (person_id, work_date, task)
+values (:'p_carol', date '2026-09-10', 'Witness the IXL regression run');
+select assert((select count(*) from public.rc_plan_current
+                where person_id = :'p_carol' and work_date = date '2026-09-10') = 2,
+  'a day can carry more than one task, and both are current');
+
+/* And they can correct it. Writing a day somebody then cannot fix is the "no
+   way back" trap this schema avoids everywhere else. */
+select id as mine from public.rc_plan_current
+  where person_id = :'p_carol' and task = 'Office — as-built markups' \gset
+select public.rc_supersede_plan(:'mine', null, 'Office — as-built markups and the RFI log', null)
+  as mine2 \gset
+select assert((select task from public.rc_plan_entries where id = :'mine2')
+                = 'Office — as-built markups and the RFI log',
+  'a member can revise their own day');
+select assert((select supersedes_id from public.rc_plan_entries where id = :'mine2') = :'mine',
+  'and it supersedes rather than edits, like every other revision');
+select act_as(:'alice');
 
 -- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice 'Recording what actually happened'; end $$;
@@ -471,9 +508,24 @@ select id as row1 from public.rc_lookahead_rows where snapshot_id = :'snap1' \gs
 select assert((select sheet_row from public.rc_lookahead_rows where id = :'row1') = 12,
   'the true spreadsheet row number is kept, not an array position');
 
+/* The calendar is the team's. It is what the field team is being asked to do,
+   and while it was administrators-only the people named on it were the only
+   people who could not look at it. */
+select act_as(:'carol');
+select assert((select count(*) from public.rc_lookahead_snapshots) = 1,
+  'a member can read the 4WLA snapshot');
+select assert((select count(*) from public.rc_lookahead_rows) = 1,
+  'and the rows derived from it');
 select refuses(:'carol',
-  'select 1 from public.rc_lookahead_snapshots where file_hash = ''hash-one''',
-  'a member reading the look-ahead register');
+  format('insert into public.rc_lookahead_snapshots (file_hash, sheet_name, grid)
+          values (%L, %L, ''{}''::jsonb)', 'hash-two', '4WLA'),
+  'a member writing to the look-ahead register');
+
+/* The register *around* the calendar is a different thing: ingest runs, change
+   events and SARs are the evidence base for a delay claim. */
+select assert((select count(*) from public.rc_change_events) = 0,
+  'a member sees none of the change register');
+select act_as(:'alice');
 
 -- The metadata view is what every screen reads instead of the grids, so it has
 -- to answer with the same numbers and refuse the same people. (`refuses()`
@@ -483,9 +535,13 @@ select assert((select row_count from public.rc_lookahead_snapshot_meta where id 
   'the snapshot list carries the row count without the grid');
 select assert((select count(*) from public.rc_lookahead_snapshot_meta) = 1,
   'and an administrator sees every snapshot on it');
-select refuses(:'carol',
-  'select 1 from public.rc_lookahead_snapshot_meta where file_hash = ''hash-one''',
-  'a member reading the snapshot list through the view');
+/* The view is `security_invoker`, so it follows the table — which the team can
+   now read. What it must not do is *leak* more than the table: the grids stay
+   off it, and the two counts are all it adds. */
+select act_as(:'carol');
+select assert((select count(*) from public.rc_lookahead_snapshot_meta) = 1,
+  'a member reads the snapshot list through the view, as they do the table');
+select act_as(:'alice');
 
 -- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice 'Work with no confirmed access'; end $$;
@@ -592,7 +648,9 @@ select assert((select count(*) from public.rc_locations) > 0,
   'and the locations');
 select assert((select count(*) from public.rc_leave) = 1,
   'and who is on leave');
-select assert((select count(*) from public.rc_plan_current) = 1,
+-- Three: Dan's revised day, and the two tasks Carol planned for herself on the
+-- tenth. A viewer reads the whole plan and writes none of it.
+select assert((select count(*) from public.rc_plan_current) = 3,
   'and the current plan');
 select assert((select count(*) from public.rc_actuals) = 9,
   'and what actually happened');
@@ -624,12 +682,16 @@ select refuses(:'dave',
   format('insert into public.rc_locations (name) values (%L)', 'Invented'),
   'a viewer adding reference data');
 
--- The KPIs and the claim evidence stay with the two administrators, enforced
--- by the policy rather than by hiding a tab.
+/* The KPIs and the claim evidence stay with the two administrators, enforced
+   by the policy rather than by hiding a tab. The *calendar* is not evidence —
+   it is what the team is being asked to do, and a viewer reads it like anybody
+   else on the team. */
 select assert((select count(*) from public.rc_effort) = 0,
   'a viewer sees no KPI history');
-select assert((select count(*) from public.rc_lookahead_snapshots) = 0,
-  'nor the look-ahead register');
+select assert((select count(*) from public.rc_lookahead_snapshots) = 1,
+  'but does read the 4WLA, which is what they are being asked to do');
+select assert((select count(*) from public.rc_change_events) = 0,
+  'and none of the change register around it');
 select assert((select count(*) from public.rc_change_annotations) = 0,
   'nor anybody''s judgement about who caused what');
 
@@ -649,16 +711,21 @@ select public.rc_record_actual(
   '55555555-5555-5555-5555-555555555555'::uuid, :'p_dave', date '2026-09-08', 'completed');
 select assert((select count(*) from public.rc_actuals) = 10, 'which goes through');
 
--- But only their own, and still not the plan: setting next week's tasks stays
--- with an administrator, because the supersede chain assumes one author.
+/* Only their own — of both. The promotion carries the plan with it now, which
+   is the point of the role: somebody who can say what they did can say what
+   they are going to do. Neither reaches anybody else's row. */
 select refuses(:'dave',
   format('select public.rc_record_actual(%L, %L, %L, %L)',
          gen_random_uuid(), :'p_dan', '2026-09-08', 'completed'),
   'a member recording for somebody else');
+insert into public.rc_plan_entries (person_id, work_date, task)
+values (:'p_dave', date '2026-09-09', 'Next week');
+select assert((select count(*) from public.rc_plan_current where person_id = :'p_dave') = 1,
+  'and their own plan goes through with it');
 select refuses(:'dave',
   format('insert into public.rc_plan_entries (person_id, work_date, task) values (%L, %L, %L)',
-         :'p_dave', '2026-09-09', 'Next week'),
-  'a member writing their own plan');
+         :'p_dan', '2026-09-09', 'Not theirs'),
+  'a member planning somebody else''s day');
 
 -- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice E'\nA stuck job is one chain, not five failures'; end $$;
@@ -723,9 +790,12 @@ select assert(
     where client_uuid = '88888888-8888-8888-8888-888888888888') = :'la_row',
   'a block points at the look-ahead row it was blocked against');
 
+/* And a member can follow it. The row is what the block is evidence *against*,
+   so a member reading their own blocked day and not the row it names would be
+   reading half a sentence. */
 select act_as(:'carol');
-select assert((select count(*) from public.rc_lookahead_rows) = 0,
-  'though a member cannot read the register it points into');
+select assert((select count(*) from public.rc_lookahead_rows where id = :'la_row') = 1,
+  'and a member can read the row it points into');
 select act_as(:'alice');
 
 -- ══════════════════════════════════════════════════════════════════════════
@@ -825,10 +895,15 @@ select refuses(:'alice',
   format('select public.rc_supersede_plan(%L, null, %L, null)', :'rev_first', 'Third opinion'),
   'revising an entry somebody has already revised');
 
-select act_as(:'carol');
+/* Carol may revise `rev_second`, because it is her own day — that is proved
+   above. What she may not do is reach across to somebody else's, which is the
+   half of the rule that matters here. */
+insert into public.rc_plan_entries (person_id, work_date, task)
+values (:'p_dan', '2026-09-22', 'Dan''s day');
+select id as dans_day from public.rc_plan_current where work_date = '2026-09-22' \gset
 select refuses(:'carol',
-  format('select public.rc_supersede_plan(%L, null, %L, null)', :'rev_second', 'A member rewriting the plan'),
-  'a member revising the plan at all');
+  format('select public.rc_supersede_plan(%L, null, %L, null)', :'dans_day', 'A member rewriting somebody else''s plan'),
+  'a member revising a day that is not theirs');
 select act_as(:'alice');
 
 -- ══════════════════════════════════════════════════════════════════════════

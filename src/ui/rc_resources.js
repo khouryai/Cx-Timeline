@@ -191,7 +191,8 @@ export async function render(root) {
           state.sheet ? badge('From 4WLA', 'info') : null,
         ].filter(Boolean));
       }
-      if (state.state === 'non-working' && !index.at(person.id, iso) && !asked.length) {
+      const planned = index.on(person.id, iso);
+      if (state.state === 'non-working' && !planned.length && !asked.length) {
         return el('td', {
           class: `${classes.join(' ')} rc-inactive`,
           'data-label': dayLabel(iso),
@@ -199,8 +200,9 @@ export async function render(root) {
       }
 
       const parts = [];
-      const entry = index.at(person.id, iso);
-      if (entry) {
+      // Every task on the day, not the first of them. A shift is routinely two
+      // jobs, and drawing one was how the other went missing.
+      for (const entry of planned) {
         parts.push(el('div', { class: `rc-res-job${entry.absence ? ' rc-res-away' : ''}` }, [
           el('div', { text: entry.task || '—' }),
           el('div', { class: 'rc-hint', text: [
@@ -208,12 +210,10 @@ export async function render(root) {
             cats.get(entry.category_id)?.name,
             entry.shift !== 'day' ? entry.shift : null,
           ].filter(Boolean).join(' · ') }),
-          entry.from_lookahead
-            ? badge(entry.also_named_on
-              ? `From 4WLA (+${entry.also_named_on} more)` : 'From 4WLA', 'info')
-            : null,
+          entry.from_lookahead ? badge('From 4WLA', 'info') : null,
         ].filter(Boolean)));
       }
+      const entry = planned[0] || null;
 
       /* The one case worth drawing twice: a stored entry that overrides what the
          sheet asks for. That is a decision somebody took against the workbook,
@@ -221,8 +221,9 @@ export async function render(root) {
          Where they agree — which is now the normal case, because the sheet *is*
          the plan — there is nothing to reconcile and only one line is drawn. */
       if (entry && !entry.from_lookahead) {
+        const linked = new Set(planned.map((e) => e.lookahead_row_id).filter(Boolean));
         for (const row of asked) {
-          if (entry.lookahead_row_id === row.id) continue;
+          if (linked.has(row.id)) continue;
           parts.push(el('div', {
             class: 'rc-res-asked',
             title: 'The 4WLA names this person here and the plan for the day says otherwise.',
@@ -241,20 +242,28 @@ export async function render(root) {
         }
       }
 
-      if (!parts.length) {
-        if (!rc.canWrite()) return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) },
-          [el('span', { class: 'rc-hint', text: '—' })]);
-        return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [
-          el('button', {
-            class: 'cx-btn mini ghost',
-            text: '+',
-            'aria-label': `Assign ${person.name} on ${dayLabel(iso)}`,
-            onClick: () => assign({
-              people, locations, categories, laRows, locs, days, redraw, person, iso,
-            }),
-          }),
-        ]);
+      /* Whose day this is decides whether it can be added to. A member plans
+         their own and an administrator plans anyone's, which is the rule
+         `rc_plan_entries` makes in Postgres — this only stops offering what
+         the database would refuse. */
+      const mayPlan = rc.canWrite() && (rc.isAdmin() || person.id === rc.me()?.id);
+      if (!mayPlan) {
+        return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) },
+          parts.length ? parts : [el('span', { class: 'rc-hint', text: '—' })]);
       }
+      /* The button is there whether or not the day already has something on it:
+         a shift is often more than one job, and a day that could only ever hold
+         one task is how somebody ends up with one of the three things they were
+         asked for. */
+      parts.push(el('button', {
+        class: 'cx-btn mini ghost',
+        text: parts.length ? '+ task' : '+',
+        'aria-label': `Assign ${person.name} on ${dayLabel(iso)}`,
+        title: parts.length ? 'Add another task to this day' : 'Plan this day',
+        onClick: () => assign({
+          people, locations, categories, laRows, locs, days, redraw, person, iso,
+        }),
+      }));
       return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, parts);
     });
 
@@ -456,15 +465,26 @@ export async function render(root) {
  * the huddle reads and the reports group by — so this is a convenience over the
  * same write, never a second shape of assignment.
  *
- * A day that already has an entry is skipped rather than doubled. The table is
- * append-only and nothing supersedes anything here, so two rows for one day
- * would both be current and the huddle would show the person twice; revising a
- * day is what the week plan's cell is for, and it says so.
+ * **A day can carry more than one task**, which is the normal shape of a shift:
+ * a test to witness in the morning and a cable pull after it. It used to skip a
+ * day that already had an entry, on the grounds that two current rows would
+ * show the person twice — but the answer to that was for the views to read a
+ * day as a list, not for the plan to hold one task and lose the rest. Leave and
+ * non-working days are still skipped, because those are days somebody is not
+ * there at all.
+ *
+ * **A member assigns themselves and nobody else.** `rc_plan_entries` says the
+ * same in Postgres — `rc_can_act_for(person_id)`, the rule an outcome already
+ * follows — so this is the interface agreeing with the database rather than
+ * enforcing anything: the select simply holds the one name they could write.
  */
 function assign({ people, locations, categories, laRows, locs, days, redraw, person, iso, row = null }) {
+  const mine = rc.me()?.id || null;
+  const canPlan = rc.isAdmin() ? people : people.filter((p) => p.id === mine);
   const who = selectInput({
-    value: person?.id || people[0]?.id,
-    options: people.map((p) => ({ value: p.id, label: p.name })),
+    value: person?.id || canPlan[0]?.id,
+    options: canPlan.map((p) => ({ value: p.id, label: p.name })),
+    disabled: canPlan.length <= 1,
   });
   const from = el('input', { type: 'date', class: 'cx-input' });
   const to = el('input', { type: 'date', class: 'cx-input' });
@@ -508,8 +528,9 @@ function assign({ people, locations, categories, laRows, locs, days, redraw, per
     body: el('div', { class: 'cx-form' }, [
       field('Resource', who),
       field('From', from),
-      field('To', to, 'Inclusive. Days they do not work, days they are on leave and days already '
-        + 'planned are skipped, and it says how many.'),
+      field('To', to, 'Inclusive. Days they do not work and days they are on leave are skipped, '
+        + 'and it says how many. A day that already has a task gets this one as well — a shift '
+        + 'is often more than one job.'),
       field('From the look-ahead', pick, 'Optional. Choosing a row fills the rest in and keeps the '
         + 'link, which is what later lets a block be recorded against the row BART themselves '
         + 'scheduled. Leave it alone for work the 4WLA has never heard of.'),
@@ -525,8 +546,12 @@ function assign({ people, locations, categories, laRows, locs, days, redraw, per
       if (!from.value || !to.value) throw new Error('Both dates are needed.');
       if (to.value < from.value) throw new Error('The end is before the start.');
 
-      const personRow = people.find((p) => p.id === who.value);
-      if (!personRow) throw new Error('Pick a person.');
+      const personRow = canPlan.find((p) => p.id === who.value);
+      if (!personRow) {
+        throw new Error(rc.isAdmin()
+          ? 'Pick a person.'
+          : 'You can plan your own days. An administrator plans everybody else’s.');
+      }
 
       /* Leave and the plan are re-read here rather than passed in: this dialog
          can stay open while somebody else writes, and the skip has to be about
@@ -537,16 +562,19 @@ function assign({ people, locations, categories, laRows, locs, days, redraw, per
       ]);
 
       const rows = [];
-      const skipped = { leave: 0, nonWorking: 0, planned: 0 };
+      let alsoOn = 0;
+      const skipped = { leave: 0, nonWorking: 0 };
       for (let ms = Date.parse(`${from.value}T00:00:00Z`);
         ms <= Date.parse(`${to.value}T00:00:00Z`); ms = addDays(ms, 1)) {
         const day = toISO(ms);
         const state = availability(personRow, day, leave);
         if (state.state === 'leave') { skipped.leave++; continue; }
         if (state.state === 'non-working') { skipped.nonWorking++; continue; }
+        /* A day already planned is *added to*, not skipped. What it used to do
+           was drop the task on the floor with a count in a toast, which is how
+           somebody ends up with one of the three things they were asked for. */
         if (existing.some((e) => e.person_id === personRow.id && e.work_date === day)) {
-          skipped.planned++;
-          continue;
+          alsoOn++;
         }
         rows.push({
           person_id: personRow.id,
@@ -560,21 +588,21 @@ function assign({ people, locations, categories, laRows, locs, days, redraw, per
       }
 
       if (!rows.length) {
-        throw new Error('Every day in that span is already planned, non-working or on leave. '
-          + 'Change an existing day from the week plan, where the outgoing version is kept.');
+        throw new Error('Every day in that span is non-working or on leave — there is no day '
+          + 'there to plan.');
       }
 
       await rc.addPlanEntries(rows);
       notifyChanged('plan');
       const notes = [
-        skipped.planned ? `${skipped.planned} already planned` : null,
+        alsoOn ? `${alsoOn} alongside what was already there` : null,
         skipped.leave ? `${skipped.leave} on leave` : null,
         skipped.nonWorking ? `${skipped.nonWorking} not a working day` : null,
       ].filter(Boolean);
       toast({
         tone: 'good',
         message: `${personRow.name} assigned for ${rows.length} day(s)`
-          + `${notes.length ? ` — skipped ${notes.join(', ')}` : ''}.`,
+          + `${notes.length ? ` — ${notes.join(', ')}` : ''}.`,
         timeout: 8000,
       });
       redraw();

@@ -146,7 +146,19 @@ function renderHead() {
     // Look-ahead and Reports are administrators-only in the database and
     // already say so. Showing them to a viewer offers a door that opens onto a
     // wall, so they come out of the row entirely.
-    const visible = rc.isAdmin() ? TABS : TABS.filter((t) => t.id !== 'lookahead' && t.id !== 'reports');
+    /* Reports and Organisation are an administrator's: the KPIs are a different
+       audience and a different permission, and the roster, the locations and
+       the accounts are the calendar's administration rather than its use. Both
+       are restricted in the database as well — this only stops offering a door
+       that opens onto a wall.
+       The **look-ahead stays**, for everybody. It is what the field team is
+       being asked to do, and while it was hidden the people named on it were
+       the only people who could not look at it; they asked their manager to
+       screenshot it instead. What they get is the calendar, read-only — the
+       change register, the snapshots and the SARs are still the claim evidence
+       and still administrators-only, in the policies. */
+    const ADMIN_ONLY = new Set(['reports', 'org']);
+    const visible = rc.isAdmin() ? TABS : TABS.filter((t) => !ADMIN_ONLY.has(t.id));
     if (!visible.some((t) => t.id === active)) active = visible[0].id;
     for (const tab of visible) {
       tabs.appendChild(el('button', {

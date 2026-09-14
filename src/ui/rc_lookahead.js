@@ -80,18 +80,20 @@ const WEEK_CHOICES = [
 ];
 
 export async function render(root) {
-  if (!rc.isAdmin()) {
-    root.appendChild(emptyState({
-      iconName: 'lock',
-      title: 'Administrators only',
-      message: 'The look-ahead register is the evidence base for delay claims, and it is '
-        + 'restricted in the database rather than by hiding this tab.',
-    }));
-    return;
-  }
+  /* The calendar is the team's; the register around it is not.
+     The 4WLA is what the field team is being asked to do, and this whole tab
+     used to be administrators-only — so the people named on it were the only
+     people who could not look at it, and asked their manager for a screenshot.
+     They get the calendar, and read-only: the Changes list, the snapshot
+     history and the SARs are the evidence base for a delay claim, they are
+     restricted in the *policies* rather than here, and a section that would
+     come back empty is a door onto a wall. */
+  const admin = rc.isAdmin();
+  const sections = admin ? SECTIONS : ['calendar'];
+  if (!sections.includes(section)) section = sections[0];
 
   const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
-  for (const id of SECTIONS) {
+  for (const id of sections) {
     nav.appendChild(el('button', {
       class: 'rc-tab',
       type: 'button',
@@ -103,7 +105,7 @@ export async function render(root) {
       onClick: () => { section = id; clear(root); render(root); },
     }));
   }
-  root.appendChild(nav);
+  if (sections.length > 1) root.appendChild(nav);
 
   const host = el('div');
   root.appendChild(host);
@@ -503,18 +505,25 @@ async function renderCalendar(host) {
     rc.listLegend(),
   ]);
 
+  /* Reading the workbook is an administrator's job — it needs the folder, and
+     ingestion writes the register. Everybody else is looking at the snapshot,
+     which is the whole reason it is a snapshot. */
+  const admin = rc.isAdmin();
   host.appendChild(el('div', { class: 'rc-section-head' }, [
     el('h3', { text: 'The look-ahead' }),
-    checkNowButton(),
-  ]));
+    admin ? checkNowButton() : null,
+  ].filter(Boolean)));
 
   if (!snapshot?.grid?.rows?.length) {
     host.appendChild(emptyState({
       iconName: 'calendar',
       title: 'Nothing read yet',
-      message: 'Put the workbook in the lookahead folder beside your plan and press Check now. '
-        + 'This draws the snapshot rather than the file, so once it has been read once it stays '
-        + 'readable on any machine — including the ones that have never been given the folder.',
+      message: admin
+        ? 'Put the workbook in the lookahead folder beside your plan and press Check now. '
+          + 'This draws the snapshot rather than the file, so once it has been read once it stays '
+          + 'readable on any machine — including the ones that have never been given the folder.'
+        : 'Nobody has read the workbook yet. It is drawn from the last read rather than from the '
+          + 'file, so once an administrator has pressed Check now it is here for everybody.',
     }));
     return;
   }
@@ -1016,7 +1025,10 @@ function whyStrip(view, legendRows) {
     strip.appendChild(el('span', { class: 'la-why-item' }, [
       el('span', { class: 'la-swatch', style: `background:#${hex}` }),
       el('span', { text: `${entry?.meaning || `#${hex}, unmapped`} — ${count} row(s)` }),
-      el('button', {
+      // What a colour means is the register's, and the register is an
+      // administrator's. Everybody else reads why a row is here, and that is
+      // the useful half of this strip anyway.
+      rc.isAdmin() ? el('button', {
         class: 'cx-btn mini ghost',
         text: 'Just shading',
         title: entry
@@ -1034,8 +1046,8 @@ function whyStrip(view, legendRows) {
             toast({ tone: 'bad', message: err.message });
           }
         },
-      }),
-    ]));
+      }) : null,
+    ].filter(Boolean)));
   }
   return strip;
 }
@@ -1058,7 +1070,10 @@ function legendStrip(legend, unknown, onScreen = null) {
     }));
   }
   unknown = (unknown || []).filter((u) => showing(u.hex));
-  if (unknown.length) {
+  // The way out of an unmapped colour is the Legend register, which only an
+  // administrator can write. Offering the button to everybody else would be a
+  // door onto a wall.
+  if (unknown.length && rc.isAdmin()) {
     /* Show the swatches, not just a count. A colour nobody has explained keeps
        its rows on screen — an unmapped colour counts as work, deliberately —
        so "five unmapped" and "these five, and one of them is the grey your

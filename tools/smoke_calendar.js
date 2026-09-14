@@ -1383,23 +1383,17 @@ async function main() {
   check('the week is people down and days across', /Available/.test(weekText));
   // Four people can be staffed with, and the manager is not one of them — they
   // run the meeting rather than taking work from it.
-  /* The look-ahead says what is wanted and where; it never says who, because
-     it does not know the team. So it proposes and a person assigns — and the
-     plan carries the link, which is what lets a block later point at the row
-     BART themselves scheduled. */
-  const emptyCell = page.locator('#rc-frame tbody button', { hasText: /^\+$/ }).first();
-  check('an empty day offers to plan from the look-ahead',
-    (await emptyCell.count()) >= 1);
-  await emptyCell.click();
-  await page.waitForSelector('.cx-modal');
-  await page.locator('.cx-modal select').first().selectOption('lar2');
-  await page.waitForTimeout(200);
-  check('choosing a row fills the task in from what was asked for',
-    (await page.locator('.cx-modal input').first().inputValue()) === 'IXL Regression Testing');
-  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Plan it' }).click();
-  await page.waitForTimeout(500);
-  check('and the plan keeps the link back to it',
-    await page.evaluate(() => window.__rc.rows.rc_plan_entries.some((p) => p.lookahead_row_id === 'lar2')));
+  /* An empty day is empty, and says so.
+     There used to be a "+" here that opened a dialog to pick a look-ahead row
+     and write it down. It was a second place a day got planned, and it outlived
+     the change that made the 4WLA *be* the plan: everything the sheet names is
+     already somebody's plan without anybody pressing anything, so the button
+     only ever wrote down what the sheet already said — or invented a day the
+     sheet did not, which is what Resources is for. */
+  check('an empty day offers nothing to press, because there is nothing to press',
+    (await page.locator('#rc-frame tbody button', { hasText: /^\+$/ }).count()) === 0);
+  check('and says so rather than looking broken',
+    /—/.test(await page.locator('#rc-frame tbody').innerText()));
 
   const weekText2 = await page.locator('#rc-frame').innerText();
   check('leave booked beyond this week is named before you hit it',
@@ -1422,7 +1416,7 @@ async function main() {
   check('and it says the workbook said so rather than a person',
     /From 4WLA/.test(priyaText));
   check('so there is nothing left to press',
-    (await priyaRow.locator('button', { hasText: 'Plan it' }).count()) === 0);
+    (await priyaRow.locator('button').count()) === 0);
 
   /* ── And where, off the sheet's own Location column ────────────────────
      `lar2` carries no location at all, which is what a row written before the
@@ -1470,7 +1464,9 @@ async function main() {
     && (await page.locator('.cx-modal input[placeholder="What they will do"]').inputValue())
       === 'IXL Regression Testing');
   await page.locator('.cx-modal input[placeholder="What they will do"]').fill('Overridden — office');
-  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Plan it' }).click();
+  // "Override the sheet", not "Plan it": the only way into this dialog now is a
+  // day the 4WLA already planned, so what it writes is a decision against it.
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Override the sheet' }).click();
   await page.waitForTimeout(600);
   check('and confirming writes the override, carrying the look-ahead link',
     await page.evaluate(() => window.__rc.rows.rc_plan_entries
@@ -2337,17 +2333,21 @@ async function main() {
      it, so a wrong entry stayed wrong. */
   await page.locator('#rc-frame .rc-tab', { hasText: 'Week plan' }).click();
   await page.waitForSelector('#rc-frame .rc-table');
-  const planned = page.locator('#rc-frame td.rc-clickable', { hasText: 'IXL Regression Testing' }).first();
+  /* A *stored* day — the override written above. A derived one has no row to
+     supersede yet, and changing it writes the first row instead, which is the
+     other half of the same cell and is checked where it happens. */
+  const planned = page.locator('#rc-frame td.rc-clickable', { hasText: 'Overridden — office' }).first();
   check('a planned day offers to be revised', (await planned.count()) === 1);
   await planned.click();
   await page.waitForSelector('.cx-modal');
-  await page.locator('.cx-modal input').first().fill('IXL Regression Testing — night');
+  await page.locator('.cx-modal input').first().fill('Overridden — office, night shift');
   await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Revise' }).click();
   await page.waitForTimeout(700);
   const revised = await page.evaluate(() =>
     window.__rc.calls.filter((c) => c.table === 'rc_supersede_plan').map((c) => c.payload));
   check('revising goes through the function that refuses a second revision',
-    revised.length === 1 && /night/.test(revised[0].p_task || ''), JSON.stringify(revised[0] || null));
+    revised.length === 1 && /night shift/.test(revised[0].p_task || ''),
+    JSON.stringify(revised[0] || null));
 
   await page.locator('#rc-frame .rc-tab', { hasText: 'Reports' }).click();
   await page.waitForSelector('#rc-frame .rc-table');
@@ -2505,10 +2505,17 @@ async function main() {
   await viewer.waitForSelector('#rc-frame .rc-tabs', { timeout: 10000 });
   const vTabs = await viewer.locator('#rc-frame .rc-tab').allInnerTexts();
   check('the huddle and week plan are there', vTabs.includes('Daily huddle') && vTabs.includes('Week plan'));
-  // Both already answer "administrators only", so removing them takes away a
-  // door that opens onto a wall.
-  check('the Look-ahead tab is gone', !vTabs.includes('Look-ahead'), vTabs.join(', '));
+  /* The 4WLA is what the team is being asked to do, and while this tab was
+     administrators-only the people named on it were the only people who could
+     not look at it. They get it, read-only — the register around it is still
+     restricted in the policies. */
+  check('the look-ahead is there to be read', vTabs.includes('Look-ahead'), vTabs.join(', '));
+  /* Reports and Organisation are an administrator's: the KPIs are a different
+     audience and a different permission, and the roster and the accounts are
+     the calendar's administration rather than its use. Both already answer
+     "administrators only", so removing the tabs takes away a door onto a wall. */
   check('the Reports tab is gone', !vTabs.includes('Reports'));
+  check('and so is Organisation', !vTabs.includes('Organisation'), vTabs.join(', '));
   check('and the state is named on screen',
     /Read only/.test(await viewer.locator('#rc-frame .rc-head').innerText()));
 
@@ -2522,18 +2529,106 @@ async function main() {
   check('but the schedule still renders',
     (await viewer.locator('#rc-frame tbody tr').count()) >= 4);
 
-  await viewer.locator('#rc-frame .rc-tab', { hasText: 'Organisation' }).click();
-  await viewer.waitForSelector('#rc-frame .rc-table');
-  const vOrg = await viewer.locator('#rc-frame').innerText();
-  check('the roster is readable', /Alex/.test(vOrg) && /Dan/.test(vOrg));
-  check('and carries no edit controls',
-    (await viewer.locator('#rc-frame button', { hasText: 'Add person' }).count()) === 0);
-  // Managing accounts is administrators-only in the database — the invitation
-  // list is a list of everybody's email address — so the section is not there
-  // to be opened at all.
-  check('and no Accounts section', !/Accounts/.test(vOrg));
+  /* What a viewer gets out of the look-ahead: the calendar, and nothing that
+     writes. The Changes list, the snapshot history and the SARs are the claim
+     evidence and stay with the people answerable for it. */
+  await viewer.locator('#rc-frame .rc-tab', { hasText: 'Look-ahead' }).click();
+  await viewer.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
+  check('and the 4WLA actually draws for them',
+    (await viewer.locator('#rc-frame .la-grid tbody tr').count()) >= 1);
+  const vLa = await viewer.locator('#rc-frame').innerText();
+  check('with no way to read the workbook again — that needs the folder',
+    (await viewer.locator('#rc-frame button', { hasText: 'Check now' }).count()) === 0);
+  check('and none of the register around it',
+    !/Changes/.test(vLa) && !/Snapshots/.test(vLa) && !/Site access/.test(vLa),
+    vLa.split('\n').slice(0, 3).join(' | '));
+  // But the export is theirs: it is a drawing of what they can already see.
+  check('the calendar can still be printed, because it is what they can see',
+    (await viewer.locator('#rc-frame button', { hasText: 'Export PDF' }).count()) === 1);
 
   await viewer.close();
+
+  /* ══════════════════════════════════════════════════════════════════════
+     A member plans their own week and nobody else's
+     ═══════════════════════════════════════════════════════════════════ */
+  console.log('\nA member plans their own week');
+
+  const member = await context.newPage();
+  member.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+  member.on('pageerror', (e) => consoleErrors.push(String(e)));
+  await serveStubbedConfig(member);
+  await member.addInitScript(() => { window.__rc = { role: 'member', signedIn: true }; });
+  await member.addInitScript(fakeSdk);
+  await member.goto(url_, { waitUntil: 'load' });
+  // A member is not read-only, so they land on the timeline like anybody else
+  // and switch across — only a viewer is put straight on the calendar.
+  await member.waitForSelector('.ws-switch', { timeout: 20000 });
+  await member.locator('.ws-btn', { hasText: 'Calendar' }).click();
+  await member.waitForSelector('#rc-frame .rc-tabs', { timeout: 15000 });
+
+  const mTabs = await member.locator('#rc-frame .rc-tab').allInnerTexts();
+  check('a member gets the look-ahead, and not the administration',
+    mTabs.includes('Look-ahead') && !mTabs.includes('Reports') && !mTabs.includes('Organisation'),
+    mTabs.join(', '));
+
+  await member.locator('#rc-frame .rc-tab', { hasText: 'Resources' }).click();
+  await member.waitForSelector('#rc-frame .rc-resources', { timeout: 10000 });
+
+  /* The whole of it: a member may write their own days. The interface offers it
+     on their row and nowhere else, and `rc_plan_entries` says the same in
+     Postgres — `rc_can_act_for(person_id)` — so this is the screen agreeing
+     with the database rather than being the control. */
+  const ownRow = member.locator('#rc-frame .rc-resources tbody tr', { hasText: 'Alex' });
+  const otherRow = member.locator('#rc-frame .rc-resources tbody tr', { hasText: 'Dan' });
+  check('their own row offers to be planned',
+    (await ownRow.locator('button').count()) >= 1);
+  check('and nobody else\u2019s does',
+    (await otherRow.locator('button').count()) === 0);
+
+  await member.locator('#rc-frame button', { hasText: 'Assign work' }).click();
+  await member.waitForSelector('.cx-modal');
+  const whoField = member.locator('.cx-modal select').first();
+  check('the dialog holds the one name they could write, and says so',
+    (await whoField.locator('option').count()) === 1 && (await whoField.isDisabled()));
+
+  const mDates = member.locator('.cx-modal input[type="date"]');
+  const mDay = await mDates.nth(0).inputValue();
+  await mDates.nth(1).fill(mDay);
+  await member.locator('.cx-modal input[placeholder="What they will do"]').fill('Office — RFI log');
+  await member.locator('.cx-modal .cx-modal-foot button', { hasText: 'Assign' }).click();
+  await member.waitForTimeout(700);
+  check('and the day they planned for themselves is written',
+    await member.evaluate(() => window.__rc.rows.rc_plan_entries
+      .some((e) => e.person_id === 'p1' && e.task === 'Office — RFI log')));
+
+  /* A shift is routinely more than one job. The day already has a task and the
+     button is still there — it used to skip the day and say so in a toast,
+     which is how somebody ends up with one of the three things they were asked
+     for. */
+  const planned2 = member.locator('#rc-frame .rc-resources tbody tr', { hasText: 'Alex' })
+    .locator('button', { hasText: '+ task' });
+  check('a day that already has a task can take another', (await planned2.count()) >= 1);
+  await planned2.first().click();
+  await member.waitForSelector('.cx-modal');
+  const mDates2 = member.locator('.cx-modal input[type="date"]');
+  await mDates2.nth(1).fill(await mDates2.nth(0).inputValue());
+  await member.locator('.cx-modal input[placeholder="What they will do"]').fill('Witness the IXL run');
+  await member.locator('.cx-modal .cx-modal-foot button', { hasText: 'Assign' }).click();
+  await member.waitForTimeout(700);
+  const bothTasks = await member.evaluate(() => {
+    const rows = window.__rc.rows.rc_plan_entries.filter((e) => e.person_id === 'p1');
+    const byDay = {};
+    for (const r of rows) (byDay[r.work_date] ||= []).push(r.task);
+    return Object.values(byDay).find((t) => t.length > 1) || [];
+  });
+  check('so one day carries both, rather than the second being dropped',
+    bothTasks.length === 2, bothTasks.join(' / '));
+  check('and both are drawn in the cell',
+    /Office — RFI log/.test(await ownRow.innerText())
+    && /Witness the IXL run/.test(await ownRow.innerText()),
+    (await ownRow.innerText()).replace(/\n/g, ' | ').slice(0, 110));
+
+  await member.close();
 
   /* ── Console ──────────────────────────────────────────────────────────── */
   console.log('\nConsole');

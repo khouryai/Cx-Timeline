@@ -498,8 +498,11 @@ export function numberInput({ value = 0, min, max, step = 1, onChange, mini = fa
   return input;
 }
 
-export function selectInput({ value, options, onChange, mini = false, placeholder }) {
+export function selectInput({ value, options, onChange, mini = false, placeholder, disabled = false }) {
   const select = el('select', { class: 'cx-select' + (mini ? ' mini' : '') });
+  // A field with one possible answer is shown, not hidden: "Resource: you" says
+  // whose day is being planned, where an absent field would leave it a guess.
+  if (disabled) select.disabled = true;
   if (placeholder) select.appendChild(el('option', { value: '', text: placeholder }));
   for (const opt of options) {
     const { value: v, label } = typeof opt === 'string' ? { value: opt, label: opt } : opt;

@@ -757,6 +757,12 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   gap: 4px;
 }
 
+/* Two tasks on one day, told apart without a heavy rule: a shift is often more
+   than one job, and they have to read as separate things rather than as one
+   description that wrapped. */
+.rc-day-rule { border-top: 1px dashed var(--border); margin: 5px 0; }
+.rc-day-next { margin-top: 6px; padding-top: 5px; border-top: 1px dashed var(--border); }
+
 /* A hint that is a warning rather than an aside — the export dialog saying the
    print will come out too small to read. Not an error: the export is still
    perfectly possible, and it is the reader's call. */

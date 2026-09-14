@@ -613,8 +613,18 @@ export function assignmentIndex({ planRows, laRows, register, absences = [] }) {
   const { byPerson, unmatched } = resourceAssignments(laRows, register);
   const away = absenceAssignments(absences, register);
 
+  /* A day is a **list**. A shift is routinely more than one job — a test to
+     witness in the morning and a cable pull after it — and a day that could
+     only hold one task is how somebody ends up with one of the three things
+     they were asked for. Every view reads it as a list; the one place a single
+     entry is still wanted is an outcome, which points at one row, and `at()`
+     answers that with the first. */
   const stored = new Map();
-  for (const row of planRows || []) stored.set(`${row.person_id}|${row.work_date}`, row);
+  for (const row of planRows || []) {
+    const key = `${row.person_id}|${row.work_date}`;
+    if (!stored.has(key)) stored.set(key, []);
+    stored.get(key).push(row);
+  }
 
   /* Who is away, before who is on what.
      A day on the PTO row and a day on an activity's Resource row are the same
@@ -628,11 +638,10 @@ export function assignmentIndex({ planRows, laRows, register, absences = [] }) {
     for (const [iso, kind] of days) {
       const key = `${personId}|${iso}`;
       if (stored.has(key)) continue;
-      derived.set(key, {
+      derived.set(key, [{
         id: null,
         from_lookahead: true,
         absence: kind,
-        also_named_on: 0,
         person_id: personId,
         work_date: iso,
         task: ABSENCE_LABELS[kind],
@@ -642,7 +651,7 @@ export function assignmentIndex({ planRows, laRows, register, absences = [] }) {
         shift: 'day',
         lookahead_row_id: null,
         carry_chain_id: null,
-      });
+      }]);
     }
   }
 
@@ -650,14 +659,16 @@ export function assignmentIndex({ planRows, laRows, register, absences = [] }) {
     for (const [iso, rows] of days) {
       const key = `${personId}|${iso}`;
       if (stored.has(key) || derived.has(key)) continue;
-      const row = rows[0];
-      derived.set(key, {
+      /* **Every** row the sheet names them on, not the first with a count
+         beside it. The workbook putting somebody on two activities in one day
+         is the same fact as a scheduler planning two tasks, and reading only
+         the first lost the rest with nothing on screen to say so. */
+      derived.set(key, rows.map((row) => ({
         // Null, and load-bearing: every caller that writes an outcome or rolls a
         // task forward reads this to decide whether there is a row to point at.
         id: null,
         from_lookahead: true,
         absence: null,
-        also_named_on: rows.length - 1,
         person_id: personId,
         work_date: iso,
         task: row.raw_label || null,
@@ -667,12 +678,20 @@ export function assignmentIndex({ planRows, laRows, register, absences = [] }) {
         shift: shiftFor(row.cells?.[iso]),
         lookahead_row_id: row.id || null,
         carry_chain_id: null,
-      });
+      })));
     }
   }
 
+  const on = (personId, iso) =>
+    stored.get(`${personId}|${iso}`) || derived.get(`${personId}|${iso}`) || [];
+
   return {
-    at: (personId, iso) => stored.get(`${personId}|${iso}`) || derived.get(`${personId}|${iso}`) || null,
+    /* Everything planned for that day, in order. The shape every view reads. */
+    on,
+    /* The first of them, for the one caller that needs a single row: an outcome
+       points at one plan entry, and rolling a task forward carries one chain.
+       Null when the day is empty, which is what those callers test. */
+    at: (personId, iso) => on(personId, iso)[0] || null,
     /* What the *sheet* says about somebody being away, whatever anybody has
        stored over the top of it. `availability()` takes this, so a person the
        workbook puts on PTO is not asked in the huddle how their day went. */
