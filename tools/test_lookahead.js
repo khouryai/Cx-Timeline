@@ -45,6 +45,7 @@ function throws(name, fn, pattern) {
  */
 const la = await import(path.join(ROOT, 'src/io/lookahead.js'));
 const cls = await import(path.join(ROOT, 'src/core/lookahead.js'));
+const pdf = await import(path.join(ROOT, 'src/io/rc_pdf.js'));
 
 /* ══════════════════════════════════════════════════════════════════════════
    The parser
@@ -692,6 +693,134 @@ check('an absence row is never a row of scope',
   awayRows.map((r) => r.raw_label).join(' | '));
 check('while the work on the same sheet still is',
   awayRows.some((r) => /IXL/.test(r.raw_label)));
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The calendar, drawn for print
+   ═══════════════════════════════════════════════════════════════════════ */
+console.log('\nOne page, and nothing cut off the side');
+
+const forPrint = cls.readGrid(sheet([
+  { label: 'IXL Regression', location: 'TPSS 12', days: [[0, 'FFFF00'], [1, 'FFFF00']],
+    resource: [[0, 'Priya'], [1, 'Priya, Dan']] },
+  { label: 'Cable pull at the north end of the platform, second shift', location: 'Yard 3',
+    days: [[8, 'FFFF00']] },
+  { absence: 'PTO', days: [[2, 'Rosa']] },
+]), { anchorISO: '2026-09-09' });
+
+const scene = pdf.calendarScene(forPrint, {
+  legend: [{ argb: 'FFFF00', meaning: 'Day Shift' }],
+  today: '2026-09-09',
+});
+
+check('the scene covers every day column the window carries',
+  scene.counts.days === forPrint.days.length, `${scene.counts.days} columns`);
+check('and every row it was given', scene.counts.rows === 4, `${scene.counts.rows} rows`);
+check('it has a positive extent, which is what makes it scalable',
+  scene.width > 0 && scene.height > 0, `${Math.round(scene.width)} × ${Math.round(scene.height)}`);
+
+/* Nothing may be drawn outside the box `fitToPdf` scales, or it is cut off the
+   side of the page — which is the one failure this export exists to avoid. */
+const spill = scene.items.filter((it) => {
+  const right = (it.x ?? it.x1 ?? 0) + (it.w ?? 0);
+  const far = Math.max(right, it.x2 ?? 0);
+  return far > scene.width + 0.5;
+});
+check('nothing is drawn past the right-hand edge', spill.length === 0,
+  spill.slice(0, 2).map((i) => `${i.type} at ${Math.round(i.x ?? i.x1)}`).join(', '));
+const below = scene.items.filter((it) => Math.max(it.y ?? 0, it.y2 ?? 0, it.y1 ?? 0) > scene.height + 0.5);
+check('nor past the bottom', below.length === 0, `${below.length} item(s)`);
+
+/* A long description wraps and the row grows, rather than being cut — the same
+   answer the timeline gives, and the reason the height is not simply rows×h. */
+const short = pdf.calendarScene(cls.readGrid(sheet([
+  { label: 'Short', location: 'TPSS 12', days: [[0, 'FFFF00']] },
+]), { anchorISO: '2026-09-09' }), {});
+const long = pdf.calendarScene(cls.readGrid(sheet([
+  { label: 'A description long enough that it cannot possibly sit on one line in its column',
+    location: 'TPSS 12', days: [[0, 'FFFF00']] },
+]), { anchorISO: '2026-09-09' }), {});
+check('a description too long for its column makes the row taller, not shorter',
+  long.height > short.height, `${Math.round(short.height)} → ${Math.round(long.height)}`);
+
+/* Text on a dark shift colour has to invert, and the export must reach the same
+   answer as the grid — `isDark()` is one function for exactly this reason. */
+const dark = pdf.calendarScene(cls.readGrid(sheet([
+  { label: 'Night work', location: 'TPSS 12', days: [[0, '1F3864']] },
+]), { anchorISO: '2026-09-09' }), {});
+check('a mark on a dark cell is drawn in white',
+  dark.items.some((i) => i.type === 'text' && i.text === 'X' && i.fill === '#ffffff'));
+
+// The switches are arguments, not the screen's state.
+const bare = pdf.calendarScene(forPrint, { showResources: false, showAway: false });
+check('turning the names off drops the resource rows and the away rows',
+  bare.counts.rows === 2, `${bare.counts.rows} rows`);
+check('and the activities are all still there',
+  bare.items.some((i) => i.type === 'text' && /IXL Regression/.test(i.text || '')));
+
+// The key is only worth printing for the colours actually on the page.
+check('the key is drawn when it is asked for',
+  scene.items.some((i) => i.type === 'rect' && i.fill === '#FFFF00' && i.h === 7));
+check('and left out when it is not',
+  !pdf.calendarScene(forPrint, { showLegend: false, legend: [{ argb: 'FFFF00', meaning: 'Day Shift' }] })
+    .items.some((i) => i.type === 'rect' && i.h === 7));
+
+/* Fitting is the whole promise: one page, whatever the window. A wider window
+   must come out at a smaller scale rather than spilling onto a second sheet. */
+const fitA3 = pdf.calendarFit(forPrint, { pageSize: 'a3' });
+const fitA4 = pdf.calendarFit(forPrint, { pageSize: 'a4' });
+check('a smaller sheet means a smaller scale, never a second page',
+  fitA4.scale < fitA3.scale, `A3 ${fitA3.scale.toFixed(2)} vs A4 ${fitA4.scale.toFixed(2)}`);
+check('and the fit says what the marks will actually print at',
+  fitA3.pt > 0 && fitA3.pt < 40, `${fitA3.pt.toFixed(1)} pt`);
+check('which is a number the dialog can put on screen before anything is written',
+  typeof fitA3.page === 'string' && /A3/i.test(fitA3.page), fitA3.page);
+
+/* Fitting is only half of it. A four-week window is far wider than it is tall,
+   so the width binds and the drawing stops less than half way down the sheet —
+   a page that is mostly white reads as something that went wrong. The spare
+   room is spent on the rows. */
+const natural = pdf.calendarScene(forPrint, { legend, today: '2026-09-09' });
+const filled = pdf.calendarLayout(forPrint, { pageSize: 'a3', legend, today: '2026-09-09' });
+check('the spare height on a wide sheet goes into the rows, not into white space',
+  filled.scene.height > natural.height,
+  `${Math.round(natural.height)}pt natural → ${Math.round(filled.scene.height)}pt filled`);
+check('and the type never changes size to do it — the rows just get more air',
+  filled.scene.items.filter((i) => i.type === 'text' && i.size === 7.2).length
+    === natural.items.filter((i) => i.type === 'text' && i.size === 7.2).length);
+check('filling never costs the fit: it still lands on the page',
+  filled.scene.height * filled.scale <= 842 - 52 - 34 - 18 + 0.5,
+  `${Math.round(filled.scene.height * filled.scale)}pt of ${842 - 52 - 34 - 18}pt`);
+
+/* A name is wider than a day column, and neither cutting it nor letting it run
+   across three days of somebody else's work is acceptable. It wraps, and the
+   row grows — the answer the timeline gives to the same question. */
+const named = pdf.calendarScene(cls.readGrid(sheet([
+  { label: 'IXL', location: 'TPSS 12', days: [[0, 'FFFF00']],
+    resource: [[0, 'Priya, Dan, Victor']] },
+]), { anchorISO: '2026-09-09' }), {});
+const nameText = named.items.filter((i) => i.type === 'text' && /Priya|Dan|Victor/.test(i.text || ''));
+check('a cell of names wraps inside its day column rather than running over',
+  nameText.length > 1, `${nameText.length} line(s)`);
+check('and every line of it stays inside the scene',
+  nameText.every((i) => i.x <= named.width), `width ${Math.round(named.width)}`);
+
+/* And it writes a real PDF. Checked here rather than only in the browser suite
+   because the writer is pure and a broken one is a file that downloads happily
+   and opens in nothing. */
+const blob = pdf.calendarPdf(forPrint, {
+  legend: [{ argb: 'FFFF00', meaning: 'Day Shift' }],
+  title: '4WLA — look-ahead',
+  today: '2026-09-09',
+});
+const bytes = new Uint8Array(await blob.arrayBuffer());
+const head = String.fromCharCode(...bytes.slice(0, 8));
+const tail = String.fromCharCode(...bytes.slice(-8));
+check('the bytes are a PDF', head.startsWith('%PDF-1.'), head.trim());
+check('and a complete one', /%%EOF/.test(tail), JSON.stringify(tail));
+check('of exactly one page, whatever the window',
+  (String.fromCharCode(...bytes).match(/\/Type \/Page[^s]/g) || []).length === 1);
+check('carrying the title somebody typed',
+  /4WLA/.test(String.fromCharCode(...bytes)));
 
 console.log('\nWhat counts as a section heading');
 

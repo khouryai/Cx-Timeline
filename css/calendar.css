@@ -757,6 +757,11 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   gap: 4px;
 }
 
+/* A hint that is a warning rather than an aside — the export dialog saying the
+   print will come out too small to read. Not an error: the export is still
+   perfectly possible, and it is the reader's call. */
+.rc-hint.rc-warn { color: var(--warn); font-weight: 500; }
+
 /* A note on an outcome, whatever its status. Under the buttons rather than in
    a dialog, for the reason the strip is: the one thing a meeting cannot afford
    is an answer that looks recorded and is not, and a box in the row cannot be

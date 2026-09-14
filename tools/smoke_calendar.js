@@ -901,6 +901,15 @@ async function main() {
           const parsed = JSON.parse(text);
           window.__saved = { ...(window.__saved || {}), tables: Object.keys(parsed.tables || {}) };
         } catch { /* not our JSON */ }
+        // A PDF is bytes, not JSON. Its head, tail and size are what say
+        // whether the writer produced a real file or a plausible-looking one.
+        if (/^%PDF-/.test(text)) {
+          window.__saved = {
+            ...(window.__saved || {}),
+            pdf: { head: text.slice(0, 8), tail: text.slice(-8), size: blob.size,
+              pages: (text.match(/\/Type \/Page[^s]/g) || []).length },
+          };
+        }
       });
       return create(blob);
     };
@@ -1680,6 +1689,46 @@ async function main() {
   check('and both come back together',
     (await page.locator('#rc-frame .la-grid tr.la-absence-row').count()) === 2
     && (await resourceRow.count()) === 1);
+
+  /* ── One sheet of paper ───────────────────────────────────────────────
+     What people did instead was a screenshot, and a screenshot of this grid is
+     a poor document: the frozen columns come out twice and the scroll clips
+     whichever weeks nobody was looking at. */
+  await page.locator('#rc-frame button', { hasText: 'Export PDF' }).click();
+  await page.waitForSelector('.cx-modal');
+  const dialog = await page.locator('.cx-modal').innerText();
+  // The field labels are uppercased by the stylesheet, so `innerText` reads
+  // "WEEKS" — matched case-insensitively rather than against the styling.
+  check('the export asks what to put on the page rather than assuming',
+    /weeks/i.test(dialog) && /paper/i.test(dialog) && /resource names/i.test(dialog),
+    dialog.replace(/\n/g, ' | ').slice(0, 110));
+  /* "It fits on one page" is true of anything if you shrink it far enough. The
+     number somebody can act on is how small the print ends up, and it is on
+     screen before anything is written. */
+  check('and says what the print will actually come out at, before writing it',
+    /print at about [\d.]+ pt/.test(dialog),
+    dialog.split('\n').find((l) => /pt\./.test(l)) || '');
+
+  const readingAt = () => page.locator('.cx-modal .rc-hint').first().innerText();
+  const wide = await readingAt();
+  await page.locator('.cx-modal select').first().selectOption({ label: 'Everything the sheet covers' });
+  await page.waitForTimeout(200);
+  check('widening the window makes the print smaller, and it says so',
+    (await readingAt()) !== wide, (await readingAt()).slice(0, 90));
+  await page.locator('.cx-modal select').first().selectOption({ index: 0 });
+  await page.waitForTimeout(200);
+
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Export PDF' }).click();
+  await page.waitForTimeout(900);
+  const saved = await page.evaluate(() => window.__saved || {});
+  check('it writes a real PDF', saved.pdf?.head?.startsWith('%PDF-1.'), saved.pdf?.head || 'nothing');
+  check('and a complete one', /%%EOF/.test(saved.pdf?.tail || ''), JSON.stringify(saved.pdf?.tail));
+  /* The whole promise. A four-week look-ahead reassembled from four sheets on
+     a meeting-room table is not a four-week look-ahead. */
+  check('on exactly one page, whatever the window', saved.pdf?.pages === 1,
+    `${saved.pdf?.pages} page(s), ${saved.pdf?.size} bytes`);
+  check('announced like every other export, by name and size',
+    /^lookahead-\d{4}-\d{2}-\d{2}\.pdf$/.test(saved.name || ''), saved.name || '');
 
   /* ── The key describes what is on screen ──────────────────────────────
      The register is the whole programme's. Printed over a four-week window it

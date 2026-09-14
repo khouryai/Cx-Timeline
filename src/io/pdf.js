@@ -348,6 +348,106 @@ export function sceneToPdf(scene, opts = {}) {
 }
 
 /**
+ * The page box, honouring orientation.
+ *
+ * `PAGE_SIZES` are landscape because the timeline is always wider than it is
+ * tall. A table of a hundred and forty rows against twenty-eight days is the
+ * other shape, so the choice has to exist rather than being assumed.
+ */
+export function pageBox({ pageSize = 'a3', orientation = 'landscape' } = {}) {
+  const size = PAGE_SIZES[pageSize] || PAGE_SIZES.a3;
+  return orientation === 'portrait'
+    ? { w: size.h, h: size.w, label: size.label.replace('landscape', 'portrait') }
+    : { w: size.w, h: size.h, label: size.label };
+}
+
+/**
+ * How much a scene has to shrink to land whole on one page.
+ *
+ * Exported because the *dialog* needs it before anything is written. "Fits on
+ * one page" is not the interesting question — everything fits if you shrink it
+ * far enough — the interesting question is how small the text ends up, and
+ * that is a number somebody can act on by choosing a bigger sheet or fewer
+ * weeks. Answering it after the download has landed would be answering it too
+ * late.
+ *
+ * `maxScale` stops a three-row sheet being blown up to fill A2.
+ */
+export function fitScale(scene, opts = {}) {
+  const size = pageBox(opts);
+  const margin = opts.margin ?? 26;
+  const headerH = opts.title || opts.subtitle ? 34 : 12;
+  const footerH = 18;
+  const contentW = size.w - margin * 2;
+  const contentH = size.h - margin * 2 - headerH - footerH;
+  if (!(scene.width > 0) || !(scene.height > 0)) return 1;
+  return Math.min(contentW / scene.width, contentH / scene.height, opts.maxScale ?? 1.9);
+}
+
+/**
+ * A scene drawn whole, on exactly one page.
+ *
+ * The other renderer here (`sceneToPdf`) is the timeline's: it fits the lane
+ * stack vertically and *tiles* horizontally, repeating the lane gutter on every
+ * sheet, because a multi-year programme has no business on one page. This is
+ * the opposite requirement and therefore a different function rather than a
+ * flag — a calendar you have to reassemble from four sheets on a meeting-room
+ * table is not a calendar. It scales uniformly to fit both axes, centres what
+ * is left over horizontally, and never breaks anything across a boundary.
+ *
+ * Everything below the header is the scene's own business; the header and
+ * footer are page furniture at a fixed point size, so the title stays legible
+ * however far the drawing had to shrink.
+ */
+export function fitToPdf(scene, opts = {}) {
+  const size = pageBox(opts);
+  const margin = opts.margin ?? 26;
+  const headerH = opts.title || opts.subtitle ? 34 : 12;
+  const footerH = 18;
+  const contentW = size.w - margin * 2;
+  const scale = fitScale(scene, opts);
+
+  const page = new Page(size.w, size.h);
+  const c = page.content;
+  const palette = scene.meta?.palette || {};
+
+  c.setFill(palette.bg || '#ffffff').rect(0, 0, size.w, size.h).push('f');
+
+  if (opts.title || opts.subtitle) {
+    c.setFill(palette.brand || '#e60012').rect(margin, page.flip(margin + 24), 3.5, 20).push('f');
+    if (opts.title) {
+      c.setFill(palette.text || '#111111')
+        .text(margin + 10, page.flip(margin + 12), opts.title, { size: 12, font: 'F2' });
+    }
+    if (opts.subtitle) {
+      c.setFill(palette.textSubtle || '#888888')
+        .text(margin + 10, page.flip(margin + 24), opts.subtitle, { size: 7.5, font: 'F3' });
+    }
+  }
+
+  /* What it was shrunk to, on the page itself. Somebody holding a print that is
+     hard to read should be able to see why without opening the application. */
+  const note = `${size.label}  ·  ${Math.round(scale * 100)}%`;
+  c.setFill(palette.textSubtle || '#888888').text(
+    size.w - margin - textWidth(note, 7.5, 'F3'),
+    page.flip(margin + 12),
+    note,
+    { size: 7.5, font: 'F3' }
+  );
+
+  const footer = opts.footer || `CX Timeline  ·  exported ${fmtDate(Date.now(), 'medium')}`;
+  c.setFill(palette.textSubtle || '#888888').text(margin, margin - 2, footer, { size: 6.5, font: 'F3' });
+
+  const drawW = scene.width * scale;
+  const tx = margin + Math.max(0, (contentW - drawW) / 2);
+  const ty = margin + headerH;
+
+  drawItems(c, page, scene.items, { scale, tx, ty, sceneOffsetX: 0, sceneOffsetY: 0 });
+
+  return assemble([page], opts);
+}
+
+/**
  * Emit scene items into a page's content stream under a transform.
  * `minSceneX` drops gutter-only furniture from the timeline column.
  */

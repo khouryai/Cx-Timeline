@@ -469,6 +469,25 @@ export function readLegend(grid) {
  * screen to show it happened, and the result lands in evidence.
  */
 /**
+ * Whether a cell's fill is dark enough that text on it has to go white.
+ *
+ * Perceived lightness, not average: the eye weighs green far more than blue,
+ * and an average makes BART's mid-blue shifts read as light when the label on
+ * them is invisible.
+ *
+ * Here rather than in the renderer because *two* things draw these cells — the
+ * grid on screen and the PDF export — and the moment they answer this
+ * differently the printed calendar has white text on a pale cell somewhere,
+ * which nobody notices until it is in front of a client.
+ */
+export function isDark(hex) {
+  const n = parseInt(String(hex).slice(-6), 16);
+  if (Number.isNaN(n)) return false;
+  const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  return (0.299 * r + 0.587 * g + 0.114 * b) < 140;
+}
+
+/**
  * One entry per colour: the one in force.
  *
  * `rc_legend` is *versioned* — `unique (valid_from, argb)` — so a colour that

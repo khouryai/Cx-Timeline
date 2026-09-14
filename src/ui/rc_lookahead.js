@@ -21,7 +21,9 @@
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
-import { parseSheet, applyLegend, readLegend } from '../io/lookahead.js';
+import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
+import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
+import { saveFile } from '../io/exporters.js';
 import {
   keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
   ABSENCE_LABELS,
@@ -29,7 +31,7 @@ import {
 import { icon } from './icons.js';
 import { selectInput, textInput, toast, badge, emptyState, field, checkbox } from './components.js';
 import {
-  notifyChanged, byId, dayLabel, todayISO, formModal,, parsedView,
+  notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
 } from './rc_util.js';
 
 /** Where the workbook lives, relative to the folder the plan is in. */
@@ -597,6 +599,10 @@ async function renderCalendar(host) {
     dated ? range : null,
     quiet,
     resources,
+    /* The whole view, not the windowed one: the dialog picks its own weeks, and
+       handing it what is on screen would quietly cap the export at whatever the
+       range buttons were last set to. */
+    exportButton({ view, legendRows, today, sheetName: snapshot.sheet_name }),
   ].filter(Boolean)));
   host.appendChild(body);
   draw();
@@ -686,13 +692,13 @@ async function renderCalendar(host) {
  * would hide real work. Same if the window turns out to be empty: a calendar
  * showing nothing is not an answer.
  */
-function windowed(view, today) {
+function windowed(view, today, weeks = calendarWeeks) {
   const narrowed = (() => {
-    if (!calendarWeeks || !view.days.some((d) => d.date)) return view.days;
+    if (!weeks || !view.days.some((d) => d.date)) return view.days;
     const ms = new Date(`${today}T00:00:00Z`).getTime();
     const monday = ms - ((new Date(ms).getUTCDay() + 6) % 7) * 86400000;
     const from = new Date(monday).toISOString().slice(0, 10);
-    const to = new Date(monday + (calendarWeeks * 7 - 1) * 86400000).toISOString().slice(0, 10);
+    const to = new Date(monday + (weeks * 7 - 1) * 86400000).toISOString().slice(0, 10);
     const days = view.days.filter((d) => !d.date || (d.date >= from && d.date <= to));
     // A window with nothing in it is not an answer; fall back to the sheet.
     return days.length ? days : view.days;
@@ -734,7 +740,7 @@ function windowed(view, today) {
  * that was itself kept. That second clause is the parent case, and dropping it
  * would throw away the outer level of every section that has rows.
  */
-function drawn(view, filter, showQuiet) {
+function drawn(view, filter, showQuiet, withResources = showResources) {
   const terms = String(filter || '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean);
   let rows = view.activities;
 
@@ -781,7 +787,7 @@ function drawn(view, filter, showQuiet) {
   /* "Show resource names" covers every row of names, not only the ones tucked
      under an activity. Switching the names off to read the activities alone and
      being left with two rows of people would be the switch half working. */
-  if (!showResources) rows = rows.filter((a) => !a.absence);
+  if (!withResources) rows = rows.filter((a) => !a.absence);
 
   if (terms.length) {
     rows = rows.filter((a) => {
@@ -948,14 +954,6 @@ function grid_(view, today) {
   return wrap;
 }
 
-/** Perceived lightness, so text on a painted cell stays readable. */
-function isDark(hex) {
-  const n = parseInt(String(hex).slice(-6), 16);
-  if (Number.isNaN(n)) return false;
-  const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-  return (0.299 * r + 0.587 * g + 0.114 * b) < 140;
-}
-
 /**
  * The key, for the calendar actually on screen.
  *
@@ -1081,6 +1079,152 @@ function legendStrip(legend, unknown, onScreen = null) {
     ]));
   }
   return strip;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Exporting the calendar
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Put the look-ahead on one sheet of paper.
+ *
+ * What people were doing instead was a screenshot, and a screenshot of this
+ * grid is a poor document: the frozen columns come out twice, the scroll clips
+ * whichever weeks nobody happened to be looking at, and the shift colours are
+ * whatever the monitor made of them. This is the same calendar as vector
+ * geometry — selectable text, true colours, one page.
+ *
+ * **Every switch is asked rather than inherited.** The dialog opens on what is
+ * on screen, because that is nearly always what somebody means, and then each
+ * choice is its own argument to `calendarScene()`. An export that silently
+ * depended on the last thing anybody clicked is the sort of document that turns
+ * up in a claim bundle missing a fortnight.
+ *
+ * And it says what the print will come out at *before* writing anything.
+ * "Fits on one page" is true of anything if you shrink it far enough; the
+ * question somebody can act on is whether they will be able to read it, and the
+ * answers — a bigger sheet, fewer weeks, the names off — are all in this
+ * dialog.
+ */
+function exportDialog({ view, legendRows, today, sheetName }) {
+  const weeks = selectInput({
+    value: String(calendarWeeks || 0),
+    options: [
+      ...WEEK_CHOICES.map((c) => ({ value: String(c.weeks), label: c.label })),
+      { value: '0', label: 'Everything the sheet covers' },
+    ],
+  });
+  const page = selectInput({
+    value: 'a3',
+    options: PAGE_CHOICES.map((c) => ({ value: c.id, label: c.label })),
+  });
+  const orientation = selectInput({
+    value: 'landscape',
+    options: [{ value: 'landscape', label: 'Landscape' }, { value: 'portrait', label: 'Portrait' }],
+  });
+  const title = textInput({ value: `${sheetName || '4WLA'} — look-ahead` });
+
+  const withResources = checkbox({ label: 'Resource names, and who is away', checked: showResources });
+  const withQuiet = checkbox({ label: 'Rows with nothing scheduled', checked: showQuietRows });
+  const withLegend = checkbox({ label: 'The key for the colours on it', checked: true });
+  const withFilter = checkbox({
+    label: calendarFilter ? `Only rows matching "${calendarFilter}"` : 'Apply the filter on screen',
+    checked: Boolean(calendarFilter),
+  });
+
+  const on = (box) => box.querySelector('input').checked;
+  const readout = el('p', { class: 'rc-hint' });
+
+  /* What is actually going to be drawn, from the same two functions the screen
+     draws through — so the export cannot show a different set of rows from the
+     grid it was started from. */
+  const chosen = () => {
+    const narrowed = windowed(view, today, Number(weeks.value) || 0);
+    const rows = drawn(narrowed, on(withFilter) ? calendarFilter : '', on(withQuiet), on(withResources));
+    return {
+      view: rows,
+      opts: {
+        showResources: on(withResources),
+        showAway: on(withResources),
+        showLegend: on(withLegend),
+        legend: on(withLegend)
+          ? legendRows
+            .map((r) => ({ argb: r.argb, meaning: r.meaning }))
+            .filter((e) => paintOn(rows).has(String(e.argb).toUpperCase()))
+          : [],
+        today,
+        pageSize: page.value,
+        orientation: orientation.value,
+        title: title.value.trim() || 'Look-ahead',
+        subtitle: [
+          `${sheetName || '4WLA'}`,
+          Number(weeks.value) ? `${weeks.value} weeks from ${dayLabel(today, 'medium')}` : 'whole sheet',
+        ].join('  ·  '),
+      },
+    };
+  };
+
+  const refresh = () => {
+    const { view: shown, opts } = chosen();
+    if (!shown.activities.length) {
+      readout.className = 'rc-hint rc-warn';
+      readout.textContent = 'Nothing to draw with those choices — widen the weeks, or bring the '
+        + 'rows with nothing scheduled in.';
+      return;
+    }
+    const fit = calendarFit(shown, opts);
+    const tight = fit.pt < 4.6;
+    readout.className = tight ? 'rc-hint rc-warn' : 'rc-hint';
+    readout.textContent = `${fit.days} day column(s) and ${fit.rows} row(s) on ${fit.page}, at `
+      + `${Math.round(fit.scale * 100)}% — the marks in the cells print at about `
+      + `${fit.pt.toFixed(1)} pt.`
+      + (tight ? ' That is small to read on paper: try a bigger sheet, or fewer weeks.' : '');
+  };
+
+  for (const control of [weeks, page, orientation]) control.addEventListener('change', refresh);
+  for (const box of [withResources, withQuiet, withLegend, withFilter]) {
+    box.querySelector('input').addEventListener('change', refresh);
+  }
+  refresh();
+
+  formModal({
+    title: 'Export the look-ahead',
+    body: el('div', { class: 'cx-form' }, [
+      field('Weeks', weeks),
+      el('div', { style: 'display:flex;gap:8px' }, [
+        el('div', { style: 'flex:1' }, [field('Paper', page)]),
+        el('div', { style: 'flex:1' }, [field('Orientation', orientation)]),
+      ]),
+      field('Title', title),
+      withResources,
+      withQuiet,
+      withLegend,
+      calendarFilter ? withFilter : null,
+      readout,
+      el('p', {
+        class: 'rc-hint',
+        text: 'One page, always. A four-week look-ahead reassembled from four sheets on a '
+          + 'meeting-room table is not a four-week look-ahead — so what gives is the scale, '
+          + 'and nothing is ever cut off the side.',
+      }),
+    ].filter(Boolean)),
+    confirmLabel: 'Export PDF',
+    onConfirm: async () => {
+      const { view: shown, opts } = chosen();
+      if (!shown.activities.length) throw new Error('There is nothing to draw with those choices.');
+      const blob = calendarPdf(shown, opts);
+      saveFile(`lookahead-${today}.pdf`, blob, 'application/pdf', 'Look-ahead');
+    },
+  });
+}
+
+function exportButton(context) {
+  return el('button', {
+    class: 'cx-btn mini ghost',
+    html: icon('download', { size: 12 }) + '<span>Export PDF</span>',
+    title: 'Draw this calendar on one page — weeks, names and paper size are all choices.',
+    onClick: () => exportDialog(context),
+  });
 }
 
 function checkNowButton() {

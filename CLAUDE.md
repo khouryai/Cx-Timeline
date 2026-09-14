@@ -84,6 +84,10 @@ else with a clear error:
 - `export function` / `export class` / `export const`
 - **No** `export default`, no re-exports (`export { x }`), no `export let/var`
 - **No circular imports** — the build fails and prints the cycle
+- An **empty name in an import list** (`import { a,, b }`) is a build error. It
+  is a syntax error in real JavaScript, and the linker used to filter it away —
+  so a file no browser could load bundled happily and shipped. A regex parser
+  more forgiving than the language hides exactly the mistakes it should catch.
 
 ### Layers
 
@@ -110,6 +114,8 @@ ui/workspace → ui/rc → ui/rc_roster · ui/rc_huddle · ui/rc_lookahead
                              → ui/rc_util   (the second interface)
                              → ui/dialogs → ui/panels → ui/shell
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
+io/rc_pdf → io/pdf · io/lookahead   the calendar drawn for print — no DOM,
+                                    so its geometry is tested without a browser
 main.js                                    the only module that may import freely
 ```
 
@@ -967,6 +973,32 @@ subscribes. That is what keeps the graph acyclic.
   months ago sitting in a four-week window with nothing in it, which is thirty
   eight rows in this file. Weekends count like any other day: possession work
   lands on them, and two rows here are scheduled on nothing else.
+- **The look-ahead prints on one sheet, and filling the sheet is half of it.**
+  `io/rc_pdf.js` turns a parsed view into scene items and `fitToPdf()` in
+  `io/pdf.js` puts them on a single page — a different function from the
+  timeline's `sceneToPdf()`, which fits vertically and *tiles* horizontally,
+  because a four-week look-ahead reassembled from four sheets on a meeting-room
+  table is not a four-week look-ahead. Fitting alone leaves a page two-thirds
+  white: the window is far wider than it is tall, so the width binds and the
+  drawing stops half way down. `calendarLayout()` therefore measures, then
+  rebuilds spending the spare room on the axis that is not binding — taller
+  rows, wider day columns — capped at twice a row's natural height, and never
+  by changing the type size. **Nothing is truncated to make it fit**: a
+  description too long for its column wraps and the row grows, a cell of names
+  wraps inside its day column rather than running across three days of somebody
+  else's work, and what gives instead is the scale. `calendarFit()` says what
+  that scale came to *before* anything is written, because "it fits on one
+  page" is true of anything if you shrink it far enough and the question
+  somebody can act on is whether they will be able to read it.
+- **Every switch on the export is an argument, not the screen's state.**
+  `windowed()` and `drawn()` take the weeks and the resource switch as
+  parameters; the dialog opens on what is on screen and then passes its own
+  answers down. An export that silently depended on the last thing anybody
+  clicked is the sort of document that turns up in a claim bundle missing a
+  fortnight. `isDark()` lives in `io/lookahead.js` for the same reason
+  `inForce()` does: the grid and the print both ask it, and the moment they
+  answer differently there is white text on a pale cell somewhere that nobody
+  notices until it is in front of a client.
 - **The calendar draws the snapshot, not the file.** That is what lets it
   render on a machine that was never granted the folder, which is most of them.
   The legend is re-applied to the stored grid at paint time rather than read
@@ -1072,6 +1104,11 @@ subscribes. That is what keeps the graph acyclic.
   `field` (a top-level property), `dataKeys` (inside `data`) or `styleKey`
   (inside `style`). Usage counting, deletion-with-reassign, the manager tab
   and the Dropdown Lists pane all follow from that one entry.
+- **A new calendar export**: build scene items in `io/rc_pdf.js` from the
+  parsed view and hand them to `fitToPdf()`. No DOM in that module, which is
+  what lets `tools/test_lookahead.js` assert the geometry — that nothing is
+  drawn past the edge, that a long description grows its row — without a
+  browser. Hand the bytes to `saveFile()` like everything else.
 - **A new export format**: consume the scene from `io/scene.js` rather than
   re-walking the document — that is what keeps every export agreeing with
   every other, and hand the bytes to `saveFile()` so the download announces
@@ -1097,10 +1134,11 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         # 103 checks — the parser, the rows it derives and
-                                     #              the change events, no browser
+node tools/test_lookahead.js         # 126 checks — the parser, the rows it derives, the
+                                     #              change events and the printed
+                                     #              calendar's geometry, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 257 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 264 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser

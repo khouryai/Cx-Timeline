@@ -127,10 +127,21 @@ function parseModule(file) {
     if ((m = line.match(IMPORT_NAMED))) {
       const dep = resolve(m[2]);
       deps.push(dep);
+      /* An empty binding is a typo, not an empty list.
+         `import { a,, b }` is a syntax error in real JavaScript, and this
+         linker used to `.filter(Boolean)` it away — so a source file that no
+         browser and no `import()` could load bundled perfectly happily and
+         shipped. A regex parser that is more forgiving than the language is a
+         parser that hides exactly the mistakes it should catch. */
       const bindings = m[1]
         .split(',')
         .map((s) => s.trim())
-        .filter(Boolean)
+        .filter((s, i, all) => {
+          if (s) return true;
+          // A trailing comma before the brace is legal and idiomatic.
+          if (i === all.length - 1) return false;
+          throw new Error(`${where}: empty name in the import list — "{${m[1].trim()}}"`);
+        })
         .map((s) => {
           const parts = s.split(/\s+as\s+/);
           return parts.length === 2 ? `${parts[0].trim()}: ${parts[1].trim()}` : parts[0].trim();
