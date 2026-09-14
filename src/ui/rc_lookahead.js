@@ -24,6 +24,7 @@ import * as filestore from '../core/filestore.js';
 import { parseSheet, applyLegend, readLegend } from '../io/lookahead.js';
 import {
   keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
+  ABSENCE_LABELS,
 } from '../core/lookahead.js';
 import { icon } from './icons.js';
 import { selectInput, textInput, toast, badge, emptyState, field, checkbox } from './components.js';
@@ -605,6 +606,7 @@ async function renderCalendar(host) {
   const scheduled = inWindow.activities.filter((a) => a.highlighted && a.named).length;
   const headings = view.activities.filter((a) => a.heading).length;
   const named = view.activities.filter((a) => a.resource).length;
+  const away = view.activities.filter((a) => a.absence).length;
   host.appendChild(el('p', {
     class: 'rc-hint',
     text: `${scheduled} of ${view.activities.length} activities have something scheduled in the `
@@ -650,6 +652,19 @@ async function renderCalendar(host) {
       : 'No Resource rows on this sheet yet. Add a row under an activity whose description reads '
         + '"Resource", leave its location and work hours blank so they carry down from the '
         + 'activity, and type the names into the day cells.',
+  }));
+  host.appendChild(el('p', {
+    class: 'rc-hint',
+    text: away
+      ? `${away} row(s) say who is away rather than what is happening — "PTO" and "Other Group / `
+        + 'Project", with the names typed into the day cells. They stand on their own rather than '
+        + 'under an activity, because what they say is about the person; they are never counted as '
+        + 'scope, and they hide with "Show resource names" like every other row of names. Those '
+        + 'days reach the week plan, Resources and PTO against the people they name.'
+      : 'Nothing on this sheet says who is away. Add a row at the bottom whose description reads '
+        + '"PTO", or "Other Group / Project", and type the names into the day cells — those days '
+        + 'then show against those people in the week plan, Resources and PTO instead of reading '
+        + 'as a day nobody planned.',
   }));
   host.appendChild(el('p', {
     class: 'rc-hint',
@@ -737,6 +752,16 @@ function drawn(view, filter, showQuiet) {
     let sectionHasWork = false;
     let belowIsKeptTitle = false;
     for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].absence) {
+        /* Not work, and not a title either. "Nothing scheduled" is a question
+           about an activity, and these rows have no activity — asking it of them
+           would hide the one row that says why somebody has no work this week,
+           which is the opposite of what the switch is for. They answer to the
+           resource-names switch instead, below, because that is what they are:
+           names. */
+        keep[i] = true;
+        continue;
+      }
       if (isTitle(rows[i])) {
         keep[i] = sectionHasWork || belowIsKeptTitle;
         // This title closes the section beneath it; anything above belongs to a
@@ -754,12 +779,18 @@ function drawn(view, filter, showQuiet) {
     rows = rows.filter((_, i) => keep[i]);
   }
 
+  /* "Show resource names" covers every row of names, not only the ones tucked
+     under an activity. Switching the names off to read the activities alone and
+     being left with two rows of people would be the switch half working. */
+  if (!showResources) rows = rows.filter((a) => !a.absence);
+
   if (terms.length) {
     rows = rows.filter((a) => {
       /* The names on the Resource row are part of the haystack: looking for
          where somebody is this week is one of the two reasons anybody types in
          this box, and it would find nothing if only the activity line counted. */
-      const hay = [...a.meta, ...(a.resource?.marks || []).map((m) => m.value)]
+      const hay = [...a.meta, ...(a.resource?.marks || []).map((m) => m.value),
+        ...(a.absence ? a.marks.map((m) => m.value) : [])]
         .join(' ').toLowerCase();
       return terms.some((t) => hay.includes(t));
     });
@@ -865,8 +896,12 @@ function grid_(view, today) {
   for (const a of rows) {
     const what = a.meta.filter(Boolean)[0] || '';
     tbody.appendChild(line(a.meta, byCol(a.marks), {
-      klass: a.heading ? 'la-head-row' : '',
-      what,
+      klass: [a.heading ? 'la-head-row' : '', a.absence ? 'la-resource-row la-absence-row' : '']
+        .filter(Boolean).join(' '),
+      what: a.absence ? `${ABSENCE_LABELS[a.absence]} — who is away` : what,
+      // Styled as names, because that is what the cells hold. The paint on an
+      // absence row means nothing the legend knows about.
+      resource: Boolean(a.absence),
     }));
     /* The Resource row, drawn under the activity it belongs to and never on its
        own — it has no location or hours of its own, only the ones it inherited,

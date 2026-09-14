@@ -23,6 +23,7 @@ import * as roster from './rc_roster.js';
 import * as huddle from './rc_huddle.js';
 import * as lookahead from './rc_lookahead.js';
 import * as resources from './rc_resources.js';
+import * as pto from './rc_pto.js';
 import * as reports from './rc_reports.js';
 
 /**
@@ -34,6 +35,7 @@ const TABS = [
   { id: 'huddle', label: 'Daily huddle' },
   { id: 'week', label: 'Week plan' },
   { id: 'resources', label: 'Resources' },
+  { id: 'pto', label: 'PTO' },
   { id: 'lookahead', label: 'Look-ahead' },
   { id: 'reports', label: 'Reports' },
   { id: 'org', label: 'Organisation' },
@@ -43,6 +45,7 @@ const RENDERERS = {
   huddle: huddle.render,
   week: huddle.renderWeek,
   resources: resources.render,
+  pto: pto.render,
   lookahead: lookahead.render,
   reports: reports.render,
   org: roster.render,

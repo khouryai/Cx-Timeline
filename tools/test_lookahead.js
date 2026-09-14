@@ -369,6 +369,21 @@ function sheet(marks, { headings = true } = {}) {
      and inheriting them is the behaviour under test. */
   const body = [];
   marks.forEach((m, n) => {
+    /* A row of names that is not work — "PTO", "Other Group / Project". It
+       stands on its own, with no activity above it to inherit from, which is
+       where the real sheet puts them and the whole reason they are not read the
+       way a Resource row is. */
+    if (m.absence) {
+      body.push({
+        row: 10 + n * 2,
+        label: '',
+        cells: [
+          { col: 3, ref: `A${n}`, value: m.absence, hex: null },
+          ...m.days.map(([i, who]) => cell(i, who, null)),
+        ],
+      });
+      return;
+    }
     body.push({
       row: 10 + n * 2,
       label: '',
@@ -627,6 +642,57 @@ check('and describes itself by naming people rather than dates',
 /* ══════════════════════════════════════════════════════════════════════════
    A heading is only a heading if the activity columns are painted
    ═══════════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════════════
+   Rows of names that are not work
+   ═══════════════════════════════════════════════════════════════════════ */
+console.log('\nThe rows that say who is away');
+
+const withAway = cls.readGrid(sheet([
+  { label: 'IXL Regression', location: 'TPSS 12', days: [[0, 'FFFF00'], [1, 'FFFF00']] },
+  { absence: 'PTO', days: [[1, 'Priya'], [2, 'Priya, Dan']] },
+  { absence: 'Other Group / Project', days: [[3, 'Rosa']] },
+]), { anchorISO: '2026-09-09' });
+
+check('a "PTO" row is read as an absence rather than as an activity',
+  withAway.activities.filter((a) => a.absence === 'pto').length === 1);
+check('and so is "Other Group / Project"',
+  withAway.activities.filter((a) => a.absence === 'other').length === 1);
+check('they stand on their own rather than attaching to the line above',
+  withAway.activities.find((a) => /IXL/.test(a.meta[0]))?.resource === null);
+check('an ordinary activity is not one of them',
+  withAway.activities.find((a) => /IXL/.test(a.meta[0]))?.absence === null);
+
+/* Strict, for the reason `isResourceLabel()` is strict. A row misread as a label
+   vanishes off the calendar; a label misread as work is a row of names at no
+   location that every report counts as scope. */
+check('"Other" on its own names nothing and is not a label', cls.absenceKind('Other') === null);
+check('nor is an activity that merely mentions time off',
+  cls.absenceKind('PTO cover arrangements') === null);
+check('but the spellings people actually type do match',
+  ['PTO', 'pto', 'Paid Time Off', 'Vacation', 'Holiday'].every((t) => cls.absenceKind(t) === 'pto'));
+check('and so do the ways the other row gets written',
+  ['Other Group / Project', 'Other Project', 'Other Groups & Projects']
+    .every((t) => cls.absenceKind(t) === 'other'));
+
+const away = cls.absencesFrom(withAway);
+check('every day somebody is named on becomes an entry', away.length === 3,
+  `${away.length} entries`);
+check('carrying the kind, the date and what was typed',
+  away.some((a) => a.kind === 'pto' && a.date === '2026-09-09' && a.written === 'Priya, Dan'),
+  JSON.stringify(away[1] || null));
+check('and a day the sheet left blank invents nothing',
+  away.every((a) => a.written));
+
+/* Not scope, and this is the check that matters most: emitted as rows they
+   would be "PTO" at no location, booked as scope added the first week they
+   appeared and scope removed the week they did not. */
+const awayRows = await cls.rowsFrom(withAway, { snapshotId: 'snap-away', locate });
+check('an absence row is never a row of scope',
+  awayRows.every((r) => !/PTO|Other Group/i.test(r.raw_label || '')),
+  awayRows.map((r) => r.raw_label).join(' | '));
+check('while the work on the same sheet still is',
+  awayRows.some((r) => /IXL/.test(r.raw_label)));
+
 console.log('\nWhat counts as a section heading');
 
 const rightOfTheCalendar = cls.readGrid({

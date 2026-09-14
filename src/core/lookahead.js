@@ -54,6 +54,33 @@ export function isResourceLabel(text) {
 }
 
 /**
+ * Which kind of absence a row's description names, or null.
+ *
+ * The workbook carries two rows at the bottom that are not work: "PTO" and
+ * "Other Group / Project", with names typed into the day cells the same way the
+ * Resource row carries them. They say where somebody *is not* — off, or on
+ * another group's work — which is a fact about the person rather than about an
+ * activity, and it is the fact the week plan and the huddle are otherwise
+ * missing entirely: a blank against a name reads as "nobody planned this",
+ * when the sheet said exactly why.
+ *
+ * Strict for the reason `isResourceLabel()` is strict, and with the same two
+ * failures in mind. A row misread as a label is a row of work that vanishes off
+ * the calendar; a label misread as work is a row of names at no location that
+ * every report then counts as scope. So the spellings are enumerated rather than
+ * matched loosely — "Other" alone is not one of them, because it names nothing.
+ */
+export function absenceKind(text) {
+  const folded = String(text ?? '').toLowerCase().replace(/[^a-z]/g, '');
+  if (/^(pto|paidtimeoff|timeoff|vacation|annualleave|holiday)$/.test(folded)) return 'pto';
+  if (/^other(group|project)/.test(folded)) return 'other';
+  return null;
+}
+
+/** What each kind is called on screen. One place, so three views cannot differ. */
+export const ABSENCE_LABELS = { pto: 'PTO', other: 'Other group / project' };
+
+/**
  * The people named in one cell.
  *
  * Typed by hand, so the separator is whatever was to hand: a comma, a slash, a
@@ -345,13 +372,30 @@ export function readGrid(grid, { anchorISO = null } = {}) {
        into a heading, which is how a whole file arrived on screen at once. */
     const heading = row.cells.some((c) => c.col < firstDay && c.hex);
 
+    /* "PTO" and "Other Group / Project": rows of names that are not work.
+       Unlike the Resource row they stand on their own — they sit at the bottom
+       of the sheet and belong to nobody above them, because what they say is
+       about the *person*, not about an activity. So they are emitted as rows in
+       their own right, marked with the kind, and everything downstream reads
+       `absence` to know this is not scope: `rowsFrom()` skips them so they can
+       never be counted as work added or removed, and the calendar draws them
+       with the names rather than with the activities. */
+    const absence = absenceKind(meta.find((value) => absenceKind(value)) || '');
+    if (!heading && absence) {
+      activities.push({
+        row: row.row, meta, marks, heading: false, highlighted: false,
+        named: true, resource: null, absence,
+      });
+      continue;
+    }
+
     /* The Resource row the workbook writes under an activity.
        It belongs to the activity above it rather than being one of its own: it
        carries no work of its own, it inherits where and when from the line it
        sits under, and drawn as a separate activity it would be a hundred and
        forty rows of the word "Resource". Its day cells are the names. */
     const previous = activities[activities.length - 1];
-    if (!heading && previous && !previous.heading && meta.some(isResourceLabel)) {
+    if (!heading && previous && !previous.heading && !previous.absence && meta.some(isResourceLabel)) {
       previous.resource = {
         row: row.row,
         /* Where and when come from the activity above — that is what the
@@ -384,10 +428,41 @@ export function readGrid(grid, { anchorISO = null } = {}) {
        unscheduled rows rather than dropped, so the switch still brings it back. */
     const named = meta.some(Boolean);
 
-    activities.push({ row: row.row, meta, marks, heading, highlighted, named, resource: null });
+    activities.push({ row: row.row, meta, marks, heading, highlighted, named, resource: null, absence: null });
   }
 
   return { days, meta: metaCols, headings, activities, header: header.row };
+}
+
+/**
+ * Who the sheet says is away, and on which day.
+ *
+ * One entry per day cell written on a "PTO" or "Other Group / Project" row:
+ * `{ kind, row, date, written }`, where `written` is the spelling that was
+ * typed. Nothing is matched to a person here — that is the register's job, the
+ * same as for the Resource row — and nothing is invented for a day the sheet
+ * left blank.
+ *
+ * Derived at paint time rather than stored, for the reason the whole 4WLA
+ * reading is: `rc_leave` is the record of leave somebody *booked*, and writing
+ * the workbook into it would make the sheet's authorship indistinguishable from
+ * a decision, go stale the moment somebody edited a cell, and need cancelling to
+ * correct something nobody ever booked.
+ */
+export function absencesFrom(view) {
+  const dayByCol = new Map((view?.days || []).map((d) => [d.col, d]));
+  const out = [];
+  for (const activity of view?.activities || []) {
+    if (!activity.absence) continue;
+    for (const mark of activity.marks) {
+      const written = String(mark.value || '').trim();
+      if (!written) continue;
+      const day = dayByCol.get(mark.col);
+      if (!day?.date) continue;
+      out.push({ kind: activity.absence, row: activity.row, date: day.date, written });
+    }
+  }
+  return out;
 }
 
 /**
@@ -459,6 +534,10 @@ export async function rowsFrom(view, {
 
   for (const activity of view.activities) {
     if (activity.heading) continue;
+    /* Not work, so not a row. Emitting one would put "PTO" in the register as an
+       activity at no location, and `classify()` would then book it as scope
+       added the first week it appeared and scope removed the week it did not. */
+    if (activity.absence) continue;
 
     // Group this activity's marks by the week they fall in.
     const weeks = new Map();

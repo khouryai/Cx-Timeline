@@ -188,7 +188,7 @@ export async function render(root) {
   const review = reviewDate(date, people);
   const plan = planDate(date, people);
 
-  const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, laRows,
+  const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, sheet,
     aliases] =
     await Promise.all([
       rc.listCategories(),
@@ -215,7 +215,10 @@ export async function render(root) {
          Both weeks, not just the reviewed one: on a Friday the day being planned
          is in the *next* week, and a look-ahead read for one week cannot say who
          BART wants on the other. */
-      lookaheadWithResources(toISO(weekStart(isoToMs(review))), toISO(weekStart(isoToMs(plan)))),
+      lookaheadWithResources(
+        toISO(weekStart(isoToMs(review))),
+        toISO(addDays(weekStart(isoToMs(plan)), 6))
+      ),
       // Which spellings in the workbook are whose. Nothing is matched without
       // them beyond an exact fold of somebody's own name.
       rc.listPersonAliases().catch(() => []),
@@ -235,18 +238,25 @@ export async function render(root) {
      overriding it or planning a day the sheet says nothing about. Until this
      existed the meeting asked half the team what they had been planned for and
      answered "nothing", while the workbook said exactly what. */
+  const laRows = sheet.rows;
   const index = assignmentIndex({
     planRows,
     laRows,
+    absences: sheet.absences,
     register: nameRegister(everybody.length ? everybody : people, aliases),
   });
   const planFor = (personId, iso) => index.at(personId, iso);
+  /* Whether the sheet says somebody is off, which is a different question from
+     what they were planned to do. The meeting must not ask a person on holiday
+     how their day went, and most days the workbook is the only place the
+     absence is written down at all. */
+  const absentOn = (personId, iso) => index.absent(personId, iso);
 
   /* One context, handed to the table, the meeting and the digest alike. They
      are three readings of one day and the moment they are given different
      data they start disagreeing on screen, in front of the room. */
   const ctx = {
-    people, review, plan, planFor, actualByPerson, cats, locs,
+    people, review, plan, planFor, absentOn, actualByPerson, cats, locs,
     categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
   };
 
@@ -439,10 +449,10 @@ function askFor(planned, locs) {
 }
 
 function presenter(ctx) {
-  const { people, review, plan, planFor, actualByPerson, locs, cats, leave, root } = ctx;
+  const { people, review, plan, planFor, absentOn, actualByPerson, locs, cats, leave, root } = ctx;
   const wrap = el('div', { class: 'rc-present', tabindex: '0' });
 
-  const asked = people.filter((p) => availability(p, review, leave).state === 'available');
+  const asked = people.filter((p) => availability(p, review, leave, absentOn?.(p.id, review)).state === 'available');
   const queue = asked.length ? asked : people;
   if (atPerson === null) {
     const waiting = queue.findIndex((p) => !actualByPerson.get(p.id));
@@ -536,8 +546,11 @@ function presenter(ctx) {
 
   /* The answer. */
   const answer = el('div', { class: 'rc-present-answer' });
-  const away = availability(person, review, leave);
+  const away = availability(person, review, leave, absentOn?.(person.id, review));
   if (away.state === 'leave') {
+    // "On leave" whether somebody booked it or the workbook says it. The
+    // distinction belongs in PTO, where it can be acted on; in the middle of a
+    // meeting it is the same fact.
     answer.appendChild(badge('On leave', 'muted'));
   } else if (actual) {
     const status = STATUS_BY_ID.get(actual.status);
@@ -594,7 +607,7 @@ function presenter(ctx) {
  * somebody's name it stops being a summary and starts being a review.
  */
 function digestText(ctx) {
-  const { people, review, plan, planFor, actualByPerson, locs, leave, blockers, chainByeId } = ctx;
+  const { people, review, plan, planFor, absentOn, actualByPerson, locs, leave, blockers, chainByeId } = ctx;
   const lines = [];
   const bullet = { completed: '✓', partial: '~', carried: '→', blocked: '!', reassigned: '↔' };
 
@@ -604,7 +617,7 @@ function digestText(ctx) {
 
   const silent = [];
   for (const person of people) {
-    const away = availability(person, review, leave);
+    const away = availability(person, review, leave, absentOn?.(person.id, review));
     if (away.state === 'leave') {
       lines.push(`  · ${person.name} — on leave`);
       continue;
@@ -631,7 +644,7 @@ function digestText(ctx) {
   lines.push(`What is next — ${dayLabel(plan, 'medium')}`);
   const unset = [];
   for (const person of people) {
-    if (availability(person, plan, leave).state !== 'available') continue;
+    if (availability(person, plan, leave, absentOn?.(person.id, plan)).state !== 'available') continue;
     const next = planFor(person.id, plan);
     if (!next) {
       unset.push(person.name);
@@ -781,7 +794,7 @@ function fromSheet(entry) {
 }
 
 function personRow(ctx) {
-  const { person, review, plan, planFor, actualByPerson, cats, locs, leave, root, chainByeId } = ctx;
+  const { person, review, plan, planFor, absentOn, actualByPerson, cats, locs, leave, root, chainByeId } = ctx;
 
   // Focusable, so the whole meeting can be run from the keyboard: down the
   // roster with the arrows, one letter per outcome. Fifteen people at a fixed
@@ -818,7 +831,7 @@ function personRow(ctx) {
     row.replaceWith(next);
   };
 
-  const away = availability(person, review, leave);
+  const away = availability(person, review, leave, absentOn?.(person.id, review));
   const wasPlanned = planFor(person.id, review);
   const actual = actualByPerson.get(person.id) || null;
   const tomorrow = planFor(person.id, plan);
@@ -1392,7 +1405,7 @@ export async function renderWeek(root) {
   const from = days[0];
   const to = days[days.length - 1];
 
-  const [people, locations, leave, planRows, laRows, categories, aliases, everybody] =
+  const [people, locations, leave, planRows, sheet, categories, aliases, everybody] =
     await Promise.all([
       rc.listPeople({ scheduledOnly: true }),
       rc.listLocations(),
@@ -1417,9 +1430,11 @@ export async function renderWeek(root) {
 
   /* The same reading the Resources tab and the huddle make, through the same
      function, so the three cannot disagree about where somebody is. */
+  const laRows = sheet.rows;
   const index = assignmentIndex({
     planRows,
     laRows,
+    absences: sheet.absences,
     register: nameRegister(everybody.length ? everybody : people, aliases),
   });
   const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
@@ -1444,14 +1459,21 @@ export async function renderWeek(root) {
   /* How many people are actually available each day. This is the number that
      stops work being promised that cannot be staffed. */
   const coverage = days.map((iso) =>
-    people.filter((p) => availability(p, iso, thisWeek).state === 'available').length);
+    people.filter((p) => availability(p, iso, thisWeek, index.absent(p.id, iso)).state === 'available')
+      .length);
 
   const body = el('tbody');
   for (const person of people) {
     const cells = days.map((iso) => {
-      const state = availability(person, iso, thisWeek);
+      const state = availability(person, iso, thisWeek, index.absent(person.id, iso));
       const entry = index.at(person.id, iso);
-      if (state.state === 'leave') return el('td', {}, [badge('Leave', 'muted')]);
+      /* Booked leave and the workbook's PTO row are the same fact here, and the
+         badge says which: one is a record somebody made, the other is the sheet,
+         and telling them apart is what the PTO tab is for. */
+      if (state.state === 'leave') {
+        return el('td', {}, [badge('Leave', 'muted'), state.sheet ? fromSheet({ from_lookahead: true }) : null]
+          .filter(Boolean));
+      }
       if (state.state === 'non-working') return el('td', { class: 'rc-inactive' }, [el('span', { text: '·' })]);
       if (!entry) {
         // Nothing planned and nobody named. The + still offers the week's rows.

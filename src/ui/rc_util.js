@@ -12,7 +12,9 @@
 import { el } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
 import { toISO, todayMs, fmtDate, addDays, MS_DAY } from '../core/dates.js';
-import { resourceNames, readGrid, locationColumnOf } from '../core/lookahead.js';
+import {
+  resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS,
+} from '../core/lookahead.js';
 import { applyLegend } from '../io/lookahead.js';
 import * as rc from '../core/rc.js';
 import { openModal } from './components.js';
@@ -326,7 +328,12 @@ export function newestPerKey(rows, rank) {
 }
 
 /**
- * The look-ahead's rows for a span of weeks, with who it names and where.
+ * The look-ahead for a span of weeks: `{ rows, absences }`.
+ *
+ * Two answers rather than one, because the sheet says two things. `rows` is the
+ * work — one per activity per week, with who is on it and where. `absences` is
+ * the "PTO" and "Other Group / Project" rows, which are about people rather than
+ * about work and are therefore never rows of scope.
  *
  * The one place the three views ask, so they cannot disagree about where
  * somebody is — the week plan, the Resources tab and the huddle all come
@@ -365,7 +372,7 @@ export async function lookaheadWithResources(fromISO, toISO) {
 
   const laRows = newestPerKey(stored, new Map(snapshots.map((s, i) => [s.id, i])));
   const snapshot = snapshots[0];
-  if (!snapshot?.grid) return laRows;
+  if (!snapshot?.grid) return { rows: laRows, absences: [] };
 
   const view = readGrid(
     applyLegend(snapshot.grid, legendRows.map((r) => ({
@@ -373,11 +380,16 @@ export async function lookaheadWithResources(fromISO, toISO) {
     }))),
     { anchorISO: snapshot.taken_at }
   );
-  return graftLocations(
+  const rows = graftLocations(
     graftResources(laRows, view),
     view,
     locationRegister(locations, locAliases)
   );
+  /* Narrowed to the window that was asked for, because the snapshot carries the
+     whole four-to-six weeks and a caller asking about one week must not be told
+     who is off in another. */
+  const absences = absencesFrom(view).filter((a) => a.date >= fromISO && a.date <= toISO);
+  return { rows, absences };
 }
 
 /**
@@ -487,6 +499,46 @@ export function resourceAssignments(laRows, register) {
 }
 
 /**
+ * Who the sheet says is away, matched to the roster.
+ *
+ * The same shape and the same rules as `resourceAssignments()` — exact fold,
+ * full name over alias over a first name exactly one person answers to, and an
+ * unmatched spelling reported rather than guessed at. A name typed on the PTO
+ * row is the same kind of thing as a name typed on a Resource row, so there is
+ * one register and not a second one that could disagree about who "Victor" is.
+ *
+ * **PTO beats another group's project** where somebody is written on both rows
+ * for one day, because being off is the stronger claim about a day: on another
+ * project they are working and could be asked about it, and on leave they could
+ * not. Answering "both" is not available — a day has one answer in every view
+ * that reads this.
+ */
+export function absenceAssignments(absences, register) {
+  const byPerson = new Map();
+  const unmatched = new Map();
+
+  for (const entry of absences || []) {
+    for (const written of resourceNames(entry.written)) {
+      const key = foldName(written);
+      if (!key) continue;
+      const personId = register.get(key);
+      if (!personId) {
+        const seen = unmatched.get(key) || { name: written, days: new Set(), kinds: new Set() };
+        seen.days.add(entry.date);
+        seen.kinds.add(entry.kind);
+        unmatched.set(key, seen);
+        continue;
+      }
+      if (!byPerson.has(personId)) byPerson.set(personId, new Map());
+      const days = byPerson.get(personId);
+      if (days.get(entry.date) !== 'pto') days.set(entry.date, entry.kind);
+    }
+  }
+
+  return { byPerson, unmatched: [...unmatched.values()] };
+}
+
+/**
  * What the workbook's wording says the shift is.
  *
  * The meaning is the legend's word for the colour, so "Night Shift" and
@@ -525,23 +577,54 @@ export function shiftFor(meaning) {
  * — an office day, another project, a task carried over. The sheet is the
  * default; a row is a decision.
  */
-export function assignmentIndex({ planRows, laRows, register }) {
+export function assignmentIndex({ planRows, laRows, register, absences = [] }) {
   const { byPerson, unmatched } = resourceAssignments(laRows, register);
+  const away = absenceAssignments(absences, register);
 
   const stored = new Map();
   for (const row of planRows || []) stored.set(`${row.person_id}|${row.work_date}`, row);
 
+  /* Who is away, before who is on what.
+     A day on the PTO row and a day on an activity's Resource row are the same
+     sheet contradicting itself, and the answer has to be one of them: a person
+     recorded as being at a location on a day they were off is exactly the kind
+     of thing that gets found a year later in a claim. The row about the *person*
+     wins, because it is the more specific statement — and a stored entry still
+     beats both, since that is somebody deciding against the sheet. */
   const derived = new Map();
+  for (const [personId, days] of away.byPerson) {
+    for (const [iso, kind] of days) {
+      const key = `${personId}|${iso}`;
+      if (stored.has(key)) continue;
+      derived.set(key, {
+        id: null,
+        from_lookahead: true,
+        absence: kind,
+        also_named_on: 0,
+        person_id: personId,
+        work_date: iso,
+        task: ABSENCE_LABELS[kind],
+        location_id: null,
+        raw_location: null,
+        category_id: null,
+        shift: 'day',
+        lookahead_row_id: null,
+        carry_chain_id: null,
+      });
+    }
+  }
+
   for (const [personId, days] of byPerson) {
     for (const [iso, rows] of days) {
       const key = `${personId}|${iso}`;
-      if (stored.has(key)) continue;
+      if (stored.has(key) || derived.has(key)) continue;
       const row = rows[0];
       derived.set(key, {
         // Null, and load-bearing: every caller that writes an outcome or rolls a
         // task forward reads this to decide whether there is a row to point at.
         id: null,
         from_lookahead: true,
+        absence: null,
         also_named_on: rows.length - 1,
         person_id: personId,
         work_date: iso,
@@ -558,8 +641,13 @@ export function assignmentIndex({ planRows, laRows, register }) {
 
   return {
     at: (personId, iso) => stored.get(`${personId}|${iso}`) || derived.get(`${personId}|${iso}`) || null,
+    /* What the *sheet* says about somebody being away, whatever anybody has
+       stored over the top of it. `availability()` takes this, so a person the
+       workbook puts on PTO is not asked in the huddle how their day went. */
+    absent: (personId, iso) => away.byPerson.get(personId)?.get(iso) || null,
     byPerson,
     unmatched,
+    awayUnmatched: away.unmatched,
     derived: derived.size,
   };
 }
@@ -572,7 +660,7 @@ export function assignmentIndex({ planRows, laRows, register }) {
  * distributed across the performance statuses — which is precisely what the
  * five-status split is designed to prevent.
  */
-export function availability(person, iso, leaveRows) {
+export function availability(person, iso, leaveRows, absent = null) {
   const ms = isoToMs(iso);
   const weekday = new Date(ms).getUTCDay() || 7; // ISO: Monday 1 … Sunday 7
   const working = Array.isArray(person?.working_days) ? person.working_days : [1, 2, 3, 4, 5];
@@ -582,6 +670,13 @@ export function availability(person, iso, leaveRows) {
       && l.status !== 'cancelled' && l.status !== 'declined'
   );
   if (leave) return { state: 'leave', leave };
+  /* The 4WLA's PTO row, where nobody booked the leave. Most days it is the only
+     place the absence is written down at all — somebody types a name into the
+     workbook and never opens Organisation — and without reading it the huddle
+     asks a person on holiday how their day went, and the week plan shows them as
+     a day nobody bothered to fill in. Another group's project is *not* leave:
+     they are working, they can be asked, and where they are is the assignment. */
+  if (absent === 'pto') return { state: 'leave', sheet: 'pto' };
   if (!working.includes(weekday)) return { state: 'non-working' };
   return { state: 'available' };
 }

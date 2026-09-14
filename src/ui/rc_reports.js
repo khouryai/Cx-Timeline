@@ -75,14 +75,43 @@ export async function render(root) {
 
   root.appendChild(controls(root, from, to));
 
-  if (!effort.length) {
-    root.appendChild(el('p', { class: 'rc-hint', text: 'Nothing recorded in that range.' }));
+  /* The report is about the people who take shifts.
+     A manager runs the meeting rather than taking work from it, so their own
+     handful of rows sits in the middle of a table about field delivery,
+     flattering or damning a number that was never about them. It is `scheduled`
+     that decides and never the role — an administrator who *does* take shifts
+     is in here exactly as before, which is the whole reason that column is
+     separate from permission.
+     The name lookup stays complete: filtering it as well would print "—"
+     against a row rather than removing it. And the count of what was left out is
+     said out loud, because a narrowed report that does not say it is narrowed
+     reads as a report of everything. */
+  const takesShifts = new Set(people.filter((p) => p.scheduled !== false).map((p) => p.id));
+  const shown = effort.filter((r) => takesShifts.has(r.person_id));
+  const setAside = effort.length - shown.length;
+
+  if (!shown.length) {
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: effort.length
+        ? 'Nothing recorded in that range by anybody who takes shifts.'
+        : 'Nothing recorded in that range.',
+    }));
   } else {
-    root.appendChild(summary(effort));
-    root.appendChild(breakdown(effort, people, categories, locations));
+    root.appendChild(summary(shown));
+    root.appendChild(breakdown(shown, people, categories, locations));
   }
 
-  root.appendChild(carryOver(chains, people));
+  if (setAside) {
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: `${setAside} row(s) are not counted here: they belong to people who are not `
+        + 'scheduled — the managers who run the calendar rather than take work from it. '
+        + 'Somebody who does both is counted normally; Organisation is where that is set.',
+    }));
+  }
+
+  root.appendChild(carryOver(chains.filter((c) => takesShifts.has(c.person_id)), people));
   root.appendChild(lookaheadNumbers(events));
 
   root.appendChild(el('p', {
@@ -325,6 +354,9 @@ async function exportCsv(from, to) {
     const peopleById = byId(people);
     const catsById = byId(categories);
     const locsById = byId(locations);
+    /* The same narrowing the screen makes. A CSV that disagreed with the table
+       it was exported from would be the worse of the two to find out about. */
+    const takesShifts = new Set(people.filter((p) => p.scheduled !== false).map((p) => p.id));
 
     const esc = (v) => {
       const s = String(v ?? '');
@@ -332,7 +364,8 @@ async function exportCsv(from, to) {
     };
     const header = ['Date', 'Person', 'Subsystem', 'Status', 'Signal', 'Category', 'Location'];
     const lines = [header.join(',')];
-    for (const row of effort) {
+    const rows = effort.filter((r) => takesShifts.has(r.person_id));
+    for (const row of rows) {
       lines.push([
         row.work_date,
         peopleById.get(row.person_id)?.name || row.person_name || '',
@@ -348,7 +381,7 @@ async function exportCsv(from, to) {
       `resource-calendar-${from}-to-${to}.csv`,
       lines.join('\n'),
       'text/csv;charset=utf-8',
-      `${effort.length} record(s)`
+      `${rows.length} record(s)`
     );
   } catch (err) {
     toast({ tone: 'error', message: err.message });

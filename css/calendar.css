@@ -378,6 +378,19 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   font-style: italic;
   color: var(--text-muted);
 }
+/* "PTO" and "Other Group / Project" stand on their own rather than under an
+   activity, so unlike the Resource row they get their top border back — a row
+   about a person is not a continuation of the line above it, and drawn as one it
+   would look like the previous activity's crew. */
+.la-grid tr.la-absence-row > td {
+  border-top: 1px solid var(--border);
+}
+.la-grid tr.la-absence-row .la-meta {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
 /* The names are words, not marks, so they get the text face and room to be
    read — a mono 10px column of "R. Okafor" is not legible at any zoom. */
 .la-grid td.la-resource {
@@ -668,6 +681,10 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 
 .rc-res-job { margin-bottom: 4px; }
 
+/* A day on another group's project is work, and it is not this programme's —
+   set back rather than badged, because it is one of several things in a cell. */
+.rc-res-job.rc-res-away { color: var(--text-muted); font-style: italic; }
+
 /* What BART asked for, set apart from what was decided. Bordered rather than
    tinted, because a tint would read as a status. */
 .rc-res-asked {
@@ -734,4 +751,81 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+/* ── PTO ────────────────────────────────────────────────────────────────────
+   Four weeks across, the team down the side. Twenty-eight columns leave no room
+   for words, so the cell *is* the answer: a fill for booked leave, a hatch for a
+   day only the 4WLA knows about, and the title attribute carries the rest. The
+   two must not read as the same thing — one is a record, the other is a
+   spreadsheet cell somebody typed — which is what the hatch is for. */
+
+.rc-pto-grid th,
+.rc-pto-grid td { text-align: center; padding: 3px 2px; }
+.rc-pto-grid .rc-pto-day {
+  font-family: var(--f-mono);
+  font-size: var(--fs-tiny);
+  font-weight: 500;
+  line-height: 1.25;
+  min-width: 26px;
+  color: var(--text-muted);
+}
+.rc-pto-grid .rc-pto-name {
+  text-align: left;
+  white-space: nowrap;
+  position: sticky;
+  left: 0;
+  background: var(--surface);
+  z-index: 1;
+  min-width: 140px;
+}
+.rc-pto-cell { height: 22px; }
+.rc-pto-weekend { background: var(--surface-sunk, rgba(127, 127, 127, 0.06)); }
+.rc-pto-off { background: var(--surface-sunk, rgba(127, 127, 127, 0.06)); }
+.rc-pto-today { border-left: 2px solid var(--accent, #e60012); }
+
+/* Booked: a solid fill, because it is a record. */
+.rc-pto-booked { background: var(--accent-blue, #3399ff); }
+/* Booked *and* on the sheet — the two agreeing, which is the case that needs no
+   attention at all, so it only deepens rather than adding a second signal. */
+.rc-pto-booked.rc-pto-agreed { background: var(--good); }
+/* The sheet alone. Hatched for the same reason an unmapped colour is hatched on
+   the look-ahead: it is real and it is unconfirmed, and those are different. */
+.rc-pto-sheet {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--warn) 0 3px,
+    transparent 3px 6px
+  );
+}
+.rc-pto-sheet.rc-clickable { cursor: pointer; }
+.rc-pto-sheet.rc-clickable:hover { outline: 2px solid var(--warn); outline-offset: -2px; }
+/* Another group's project is not leave, and must never be mistaken for it. */
+.rc-pto-other {
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--text-muted) 0 2px,
+    transparent 2px 6px
+  );
+}
+
+.rc-pto-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 10px 0 4px;
+  font-size: var(--fs-tiny);
+  color: var(--text-muted);
+}
+.rc-pto-key-item { display: inline-flex; align-items: center; gap: 6px; }
+.rc-pto-swatch {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  display: inline-block;
+}
+
+@media (max-width: 900px) {
+  .rc-pto-grid .rc-pto-name { min-width: 110px; }
 }

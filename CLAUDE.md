@@ -106,7 +106,7 @@ timeline/viewport → timeline/layout → timeline/connectors
                   → timeline/renderer → timeline/interactions
 ui/icons · ui/components → ui/lists · ui/auth → ui/theme → ui/commands
 ui/workspace → ui/rc → ui/rc_roster · ui/rc_huddle · ui/rc_lookahead
-             · ui/rc_resources · ui/rc_reports
+             · ui/rc_resources · ui/rc_pto · ui/rc_reports
                              → ui/rc_util   (the second interface)
                              → ui/dialogs → ui/panels → ui/shell
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
@@ -545,6 +545,57 @@ subscribes. That is what keeps the graph acyclic.
   row changing is `resource_changed` with `field: 'resources'`, reusing the
   existing kind so no `rc_change_events` check constraint has to be widened in
   a project that already has one.
+- **The sheet says who is away as well as who is on what, and neither is
+  scope.** Two rows at the bottom of the 4WLA — "PTO" and "Other Group /
+  Project" — carry names in their day cells the way a Resource row does, and
+  `absenceKind()` recognises them as strictly as `isResourceLabel()` does, for
+  the same two failures: a row misread as a label vanishes off the calendar, and
+  a label misread as work is a row of names at no location. Unlike a Resource
+  row they **stand on their own** — they belong to nobody above them, because
+  what they say is about the *person* — so `readGrid()` emits them with
+  `absence` set, `rowsFrom()` skips them, and `classify()` therefore never books
+  "PTO" as scope added the first week it appears and scope removed the week it
+  does not. `absencesFrom()` derives the per-day entries at paint time; nothing
+  is written, for the reason nothing about the 4WLA is written.
+- **A day off and a day on somebody else's project are different answers.**
+  `absenceAssignments()` matches the names through the *same* register the
+  Resource row uses, so there is one answer to "who is Victor". PTO makes
+  somebody unavailable — `availability()` takes it as a fourth argument and
+  returns `leave`, which is what stops the huddle asking a person on holiday how
+  their day went and stops the week plan drawing their week as days nobody
+  filled in. Another group's project is **work**: they stay available and the
+  assignment says where. In `assignmentIndex()` the order is stored entry, then
+  absence, then activity — the row about the person beats the row about the
+  work, because a person recorded at a location on a day they were off is what
+  gets found a year later in a claim, and a stored entry beats both because that
+  is somebody deciding against the sheet.
+- **PTO is a third reading, not a second store.** `ui/rc_pto.js` draws four
+  weeks of the team and puts two things in each cell: what somebody booked in
+  `rc_leave` — a record, with a kind and a status — and what the 4WLA's PTO row
+  says, which on this programme is usually the only place an absence is written
+  down at all. The two must not read alike, which is what the hatch is for: one
+  is a record and the other is a cell somebody typed. A day the sheet calls PTO
+  with nothing booked is the normal case, not an error, and clicking it books
+  the same single `rc_leave` row Organisation writes — a second way of recording
+  leave would be a second answer to "is Dana off on Tuesday". The Organisation
+  list stays as the full record; this is the weeks anybody is actually staffing.
+  It is the one calendar view that does **not** filter on `scheduled`: managers
+  take leave too, and dropping them would be wrong on exactly the weeks it
+  matters.
+- **Who takes shifts decides who is in a view about work.** The huddle and the
+  week plan already filtered on `rc_people.scheduled`; the Resources tab did
+  not, and Reports counted every `rc_effort` row whoever it belonged to — so a
+  manager who runs the calendar sat in the middle of a screen about who is
+  where, and their handful of outcomes moved a completion rate that was never
+  about them. Both now narrow to `scheduled`, and both **say** they have
+  narrowed: Reports names how many rows it set aside, because a report that
+  quietly narrows itself reads as a report of everything. The name lookup is
+  never filtered — that would print "—" against a row rather than removing it —
+  and neither is the *register*, because a name in the workbook belongs to
+  whoever it belongs to and matching against the scheduled roster alone would
+  report a real person as a spelling nobody could place. It is still
+  `scheduled` and never the role: an administrator who does take shifts is in
+  all of it exactly as before.
 - **The names come off the snapshot, not off the stored column.**
   `rc_lookahead_rows.resources` is where they belong for a join, and
   `lookaheadWithResources()` still reads it — but it grafts on what the newest
@@ -958,6 +1009,10 @@ subscribes. That is what keeps the graph acyclic.
   group, icon, shape, whether it has duration, accent, inspector fields). The
   palette, context menus, legend, filters and CSV export all pick it up. Add a
   `build<Shape>` branch in `timeline/renderer.js` only if it needs a new shape.
+- **A new calendar tab**: add it to `TABS` and `RENDERERS` in `ui/rc.js`, and
+  give it a module beside `ui/rc_resources.js` that imports `ui/rc_util.js` for
+  the shared reading — never a second copy of `assignmentIndex()` or a second
+  register, which is the whole reason that module exists.
 - **A new dock pane**: add it to `PANES`, `TITLES` and `RENDERERS` in
   `ui/panels.js`, and to `NAV` in `ui/shell.js`. A pane that changes only its
   own view state — a filter, a search — must emit `EV.PANE_REFRESH` to redraw
@@ -993,10 +1048,10 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         #  90 checks — the parser, the rows it derives and
+node tools/test_lookahead.js         # 103 checks — the parser, the rows it derives and
                                      #              the change events, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 220 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 242 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser

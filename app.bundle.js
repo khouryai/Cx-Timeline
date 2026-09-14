@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 54   Built: 2026-09-11T04:57:13.239Z
+ * Modules: 55   Built: 2026-09-14T18:38:26.854Z
  */
 (function () {
   'use strict';
@@ -27721,6 +27721,33 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   }
 
   /**
+   * Which kind of absence a row's description names, or null.
+   *
+   * The workbook carries two rows at the bottom that are not work: "PTO" and
+   * "Other Group / Project", with names typed into the day cells the same way the
+   * Resource row carries them. They say where somebody *is not* — off, or on
+   * another group's work — which is a fact about the person rather than about an
+   * activity, and it is the fact the week plan and the huddle are otherwise
+   * missing entirely: a blank against a name reads as "nobody planned this",
+   * when the sheet said exactly why.
+   *
+   * Strict for the reason `isResourceLabel()` is strict, and with the same two
+   * failures in mind. A row misread as a label is a row of work that vanishes off
+   * the calendar; a label misread as work is a row of names at no location that
+   * every report then counts as scope. So the spellings are enumerated rather than
+   * matched loosely — "Other" alone is not one of them, because it names nothing.
+   */
+  function absenceKind(text) {
+    const folded = String(text ?? '').toLowerCase().replace(/[^a-z]/g, '');
+    if (/^(pto|paidtimeoff|timeoff|vacation|annualleave|holiday)$/.test(folded)) return 'pto';
+    if (/^other(group|project)/.test(folded)) return 'other';
+    return null;
+  }
+
+  /** What each kind is called on screen. One place, so three views cannot differ. */
+  const ABSENCE_LABELS = { pto: 'PTO', other: 'Other group / project' };
+
+  /**
    * The people named in one cell.
    *
    * Typed by hand, so the separator is whatever was to hand: a comma, a slash, a
@@ -28012,13 +28039,30 @@ __mods["core/lookahead.js"] = function (__x, __req) {
          into a heading, which is how a whole file arrived on screen at once. */
       const heading = row.cells.some((c) => c.col < firstDay && c.hex);
 
+      /* "PTO" and "Other Group / Project": rows of names that are not work.
+         Unlike the Resource row they stand on their own — they sit at the bottom
+         of the sheet and belong to nobody above them, because what they say is
+         about the *person*, not about an activity. So they are emitted as rows in
+         their own right, marked with the kind, and everything downstream reads
+         `absence` to know this is not scope: `rowsFrom()` skips them so they can
+         never be counted as work added or removed, and the calendar draws them
+         with the names rather than with the activities. */
+      const absence = absenceKind(meta.find((value) => absenceKind(value)) || '');
+      if (!heading && absence) {
+        activities.push({
+          row: row.row, meta, marks, heading: false, highlighted: false,
+          named: true, resource: null, absence,
+        });
+        continue;
+      }
+
       /* The Resource row the workbook writes under an activity.
          It belongs to the activity above it rather than being one of its own: it
          carries no work of its own, it inherits where and when from the line it
          sits under, and drawn as a separate activity it would be a hundred and
          forty rows of the word "Resource". Its day cells are the names. */
       const previous = activities[activities.length - 1];
-      if (!heading && previous && !previous.heading && meta.some(isResourceLabel)) {
+      if (!heading && previous && !previous.heading && !previous.absence && meta.some(isResourceLabel)) {
         previous.resource = {
           row: row.row,
           /* Where and when come from the activity above — that is what the
@@ -28051,10 +28095,41 @@ __mods["core/lookahead.js"] = function (__x, __req) {
          unscheduled rows rather than dropped, so the switch still brings it back. */
       const named = meta.some(Boolean);
 
-      activities.push({ row: row.row, meta, marks, heading, highlighted, named, resource: null });
+      activities.push({ row: row.row, meta, marks, heading, highlighted, named, resource: null, absence: null });
     }
 
     return { days, meta: metaCols, headings, activities, header: header.row };
+  }
+
+  /**
+   * Who the sheet says is away, and on which day.
+   *
+   * One entry per day cell written on a "PTO" or "Other Group / Project" row:
+   * `{ kind, row, date, written }`, where `written` is the spelling that was
+   * typed. Nothing is matched to a person here — that is the register's job, the
+   * same as for the Resource row — and nothing is invented for a day the sheet
+   * left blank.
+   *
+   * Derived at paint time rather than stored, for the reason the whole 4WLA
+   * reading is: `rc_leave` is the record of leave somebody *booked*, and writing
+   * the workbook into it would make the sheet's authorship indistinguishable from
+   * a decision, go stale the moment somebody edited a cell, and need cancelling to
+   * correct something nobody ever booked.
+   */
+  function absencesFrom(view) {
+    const dayByCol = new Map((view?.days || []).map((d) => [d.col, d]));
+    const out = [];
+    for (const activity of view?.activities || []) {
+      if (!activity.absence) continue;
+      for (const mark of activity.marks) {
+        const written = String(mark.value || '').trim();
+        if (!written) continue;
+        const day = dayByCol.get(mark.col);
+        if (!day?.date) continue;
+        out.push({ kind: activity.absence, row: activity.row, date: day.date, written });
+      }
+    }
+    return out;
   }
 
   /**
@@ -28126,6 +28201,10 @@ __mods["core/lookahead.js"] = function (__x, __req) {
 
     for (const activity of view.activities) {
       if (activity.heading) continue;
+      /* Not work, so not a row. Emitting one would put "PTO" in the register as an
+         activity at no location, and `classify()` would then book it as scope
+         added the first week it appeared and scope removed the week it did not. */
+      if (activity.absence) continue;
 
       // Group this activity's marks by the week they fall in.
       const weeks = new Map();
@@ -28439,11 +28518,14 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "isResourceLabel", { get: () => isResourceLabel, enumerable: true });
+  Object.defineProperty(__x, "absenceKind", { get: () => absenceKind, enumerable: true });
+  Object.defineProperty(__x, "ABSENCE_LABELS", { get: () => ABSENCE_LABELS, enumerable: true });
   Object.defineProperty(__x, "resourceNames", { get: () => resourceNames, enumerable: true });
   Object.defineProperty(__x, "marksOf", { get: () => marksOf, enumerable: true });
   Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
   Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
   Object.defineProperty(__x, "readGrid", { get: () => readGrid, enumerable: true });
+  Object.defineProperty(__x, "absencesFrom", { get: () => absencesFrom, enumerable: true });
   Object.defineProperty(__x, "locationColumnOf", { get: () => locationColumnOf, enumerable: true });
   Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
   Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
@@ -29027,7 +29109,9 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   const { el } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { toISO, todayMs, fmtDate, addDays, MS_DAY } = __req("core/dates.js");
-  const { resourceNames, readGrid, locationColumnOf } = __req("core/lookahead.js");
+  const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS } = __req("core/lookahead.js");
+
+
   const { applyLegend } = __req("io/lookahead.js");
   const rc = __req("core/rc.js");
   const { openModal } = __req("ui/components.js");
@@ -29341,7 +29425,12 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /**
-   * The look-ahead's rows for a span of weeks, with who it names and where.
+   * The look-ahead for a span of weeks: `{ rows, absences }`.
+   *
+   * Two answers rather than one, because the sheet says two things. `rows` is the
+   * work — one per activity per week, with who is on it and where. `absences` is
+   * the "PTO" and "Other Group / Project" rows, which are about people rather than
+   * about work and are therefore never rows of scope.
    *
    * The one place the three views ask, so they cannot disagree about where
    * somebody is — the week plan, the Resources tab and the huddle all come
@@ -29380,7 +29469,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
 
     const laRows = newestPerKey(stored, new Map(snapshots.map((s, i) => [s.id, i])));
     const snapshot = snapshots[0];
-    if (!snapshot?.grid) return laRows;
+    if (!snapshot?.grid) return { rows: laRows, absences: [] };
 
     const view = readGrid(
       applyLegend(snapshot.grid, legendRows.map((r) => ({
@@ -29388,11 +29477,16 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       }))),
       { anchorISO: snapshot.taken_at }
     );
-    return graftLocations(
+    const rows = graftLocations(
       graftResources(laRows, view),
       view,
       locationRegister(locations, locAliases)
     );
+    /* Narrowed to the window that was asked for, because the snapshot carries the
+       whole four-to-six weeks and a caller asking about one week must not be told
+       who is off in another. */
+    const absences = absencesFrom(view).filter((a) => a.date >= fromISO && a.date <= toISO);
+    return { rows, absences };
   }
 
   /**
@@ -29502,6 +29596,46 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /**
+   * Who the sheet says is away, matched to the roster.
+   *
+   * The same shape and the same rules as `resourceAssignments()` — exact fold,
+   * full name over alias over a first name exactly one person answers to, and an
+   * unmatched spelling reported rather than guessed at. A name typed on the PTO
+   * row is the same kind of thing as a name typed on a Resource row, so there is
+   * one register and not a second one that could disagree about who "Victor" is.
+   *
+   * **PTO beats another group's project** where somebody is written on both rows
+   * for one day, because being off is the stronger claim about a day: on another
+   * project they are working and could be asked about it, and on leave they could
+   * not. Answering "both" is not available — a day has one answer in every view
+   * that reads this.
+   */
+  function absenceAssignments(absences, register) {
+    const byPerson = new Map();
+    const unmatched = new Map();
+
+    for (const entry of absences || []) {
+      for (const written of resourceNames(entry.written)) {
+        const key = foldName(written);
+        if (!key) continue;
+        const personId = register.get(key);
+        if (!personId) {
+          const seen = unmatched.get(key) || { name: written, days: new Set(), kinds: new Set() };
+          seen.days.add(entry.date);
+          seen.kinds.add(entry.kind);
+          unmatched.set(key, seen);
+          continue;
+        }
+        if (!byPerson.has(personId)) byPerson.set(personId, new Map());
+        const days = byPerson.get(personId);
+        if (days.get(entry.date) !== 'pto') days.set(entry.date, entry.kind);
+      }
+    }
+
+    return { byPerson, unmatched: [...unmatched.values()] };
+  }
+
+  /**
    * What the workbook's wording says the shift is.
    *
    * The meaning is the legend's word for the colour, so "Night Shift" and
@@ -29540,23 +29674,54 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * — an office day, another project, a task carried over. The sheet is the
    * default; a row is a decision.
    */
-  function assignmentIndex({ planRows, laRows, register }) {
+  function assignmentIndex({ planRows, laRows, register, absences = [] }) {
     const { byPerson, unmatched } = resourceAssignments(laRows, register);
+    const away = absenceAssignments(absences, register);
 
     const stored = new Map();
     for (const row of planRows || []) stored.set(`${row.person_id}|${row.work_date}`, row);
 
+    /* Who is away, before who is on what.
+       A day on the PTO row and a day on an activity's Resource row are the same
+       sheet contradicting itself, and the answer has to be one of them: a person
+       recorded as being at a location on a day they were off is exactly the kind
+       of thing that gets found a year later in a claim. The row about the *person*
+       wins, because it is the more specific statement — and a stored entry still
+       beats both, since that is somebody deciding against the sheet. */
     const derived = new Map();
+    for (const [personId, days] of away.byPerson) {
+      for (const [iso, kind] of days) {
+        const key = `${personId}|${iso}`;
+        if (stored.has(key)) continue;
+        derived.set(key, {
+          id: null,
+          from_lookahead: true,
+          absence: kind,
+          also_named_on: 0,
+          person_id: personId,
+          work_date: iso,
+          task: ABSENCE_LABELS[kind],
+          location_id: null,
+          raw_location: null,
+          category_id: null,
+          shift: 'day',
+          lookahead_row_id: null,
+          carry_chain_id: null,
+        });
+      }
+    }
+
     for (const [personId, days] of byPerson) {
       for (const [iso, rows] of days) {
         const key = `${personId}|${iso}`;
-        if (stored.has(key)) continue;
+        if (stored.has(key) || derived.has(key)) continue;
         const row = rows[0];
         derived.set(key, {
           // Null, and load-bearing: every caller that writes an outcome or rolls a
           // task forward reads this to decide whether there is a row to point at.
           id: null,
           from_lookahead: true,
+          absence: null,
           also_named_on: rows.length - 1,
           person_id: personId,
           work_date: iso,
@@ -29573,8 +29738,13 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
 
     return {
       at: (personId, iso) => stored.get(`${personId}|${iso}`) || derived.get(`${personId}|${iso}`) || null,
+      /* What the *sheet* says about somebody being away, whatever anybody has
+         stored over the top of it. `availability()` takes this, so a person the
+         workbook puts on PTO is not asked in the huddle how their day went. */
+      absent: (personId, iso) => away.byPerson.get(personId)?.get(iso) || null,
       byPerson,
       unmatched,
+      awayUnmatched: away.unmatched,
       derived: derived.size,
     };
   }
@@ -29587,7 +29757,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * distributed across the performance statuses — which is precisely what the
    * five-status split is designed to prevent.
    */
-  function availability(person, iso, leaveRows) {
+  function availability(person, iso, leaveRows, absent = null) {
     const ms = isoToMs(iso);
     const weekday = new Date(ms).getUTCDay() || 7; // ISO: Monday 1 … Sunday 7
     const working = Array.isArray(person?.working_days) ? person.working_days : [1, 2, 3, 4, 5];
@@ -29597,6 +29767,13 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
         && l.status !== 'cancelled' && l.status !== 'declined'
     );
     if (leave) return { state: 'leave', leave };
+    /* The 4WLA's PTO row, where nobody booked the leave. Most days it is the only
+       place the absence is written down at all — somebody types a name into the
+       workbook and never opens Organisation — and without reading it the huddle
+       asks a person on holiday how their day went, and the week plan shows them as
+       a day nobody bothered to fill in. Another group's project is *not* leave:
+       they are working, they can be asked, and where they are is the assignment. */
+    if (absent === 'pto') return { state: 'leave', sheet: 'pto' };
     if (!working.includes(weekday)) return { state: 'non-working' };
     return { state: 'available' };
   }
@@ -29625,6 +29802,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "graftLocations", { get: () => graftLocations, enumerable: true });
   Object.defineProperty(__x, "graftResources", { get: () => graftResources, enumerable: true });
   Object.defineProperty(__x, "resourceAssignments", { get: () => resourceAssignments, enumerable: true });
+  Object.defineProperty(__x, "absenceAssignments", { get: () => absenceAssignments, enumerable: true });
   Object.defineProperty(__x, "shiftFor", { get: () => shiftFor, enumerable: true });
   Object.defineProperty(__x, "assignmentIndex", { get: () => assignmentIndex, enumerable: true });
   Object.defineProperty(__x, "availability", { get: () => availability, enumerable: true });
@@ -30636,7 +30814,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const review = reviewDate(date, people);
     const plan = planDate(date, people);
 
-    const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, laRows,
+    const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, sheet,
       aliases] =
       await Promise.all([
         rc.listCategories(),
@@ -30663,7 +30841,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
            Both weeks, not just the reviewed one: on a Friday the day being planned
            is in the *next* week, and a look-ahead read for one week cannot say who
            BART wants on the other. */
-        lookaheadWithResources(toISO(weekStart(isoToMs(review))), toISO(weekStart(isoToMs(plan)))),
+        lookaheadWithResources(
+          toISO(weekStart(isoToMs(review))),
+          toISO(addDays(weekStart(isoToMs(plan)), 6))
+        ),
         // Which spellings in the workbook are whose. Nothing is matched without
         // them beyond an exact fold of somebody's own name.
         rc.listPersonAliases().catch(() => []),
@@ -30683,18 +30864,25 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
        overriding it or planning a day the sheet says nothing about. Until this
        existed the meeting asked half the team what they had been planned for and
        answered "nothing", while the workbook said exactly what. */
+    const laRows = sheet.rows;
     const index = assignmentIndex({
       planRows,
       laRows,
+      absences: sheet.absences,
       register: nameRegister(everybody.length ? everybody : people, aliases),
     });
     const planFor = (personId, iso) => index.at(personId, iso);
+    /* Whether the sheet says somebody is off, which is a different question from
+       what they were planned to do. The meeting must not ask a person on holiday
+       how their day went, and most days the workbook is the only place the
+       absence is written down at all. */
+    const absentOn = (personId, iso) => index.absent(personId, iso);
 
     /* One context, handed to the table, the meeting and the digest alike. They
        are three readings of one day and the moment they are given different
        data they start disagreeing on screen, in front of the room. */
     const ctx = {
-      people, review, plan, planFor, actualByPerson, cats, locs,
+      people, review, plan, planFor, absentOn, actualByPerson, cats, locs,
       categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
     };
 
@@ -30887,10 +31075,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
   }
 
   function presenter(ctx) {
-    const { people, review, plan, planFor, actualByPerson, locs, cats, leave, root } = ctx;
+    const { people, review, plan, planFor, absentOn, actualByPerson, locs, cats, leave, root } = ctx;
     const wrap = el('div', { class: 'rc-present', tabindex: '0' });
 
-    const asked = people.filter((p) => availability(p, review, leave).state === 'available');
+    const asked = people.filter((p) => availability(p, review, leave, absentOn?.(p.id, review)).state === 'available');
     const queue = asked.length ? asked : people;
     if (atPerson === null) {
       const waiting = queue.findIndex((p) => !actualByPerson.get(p.id));
@@ -30984,8 +31172,11 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
 
     /* The answer. */
     const answer = el('div', { class: 'rc-present-answer' });
-    const away = availability(person, review, leave);
+    const away = availability(person, review, leave, absentOn?.(person.id, review));
     if (away.state === 'leave') {
+      // "On leave" whether somebody booked it or the workbook says it. The
+      // distinction belongs in PTO, where it can be acted on; in the middle of a
+      // meeting it is the same fact.
       answer.appendChild(badge('On leave', 'muted'));
     } else if (actual) {
       const status = STATUS_BY_ID.get(actual.status);
@@ -31042,7 +31233,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
    * somebody's name it stops being a summary and starts being a review.
    */
   function digestText(ctx) {
-    const { people, review, plan, planFor, actualByPerson, locs, leave, blockers, chainByeId } = ctx;
+    const { people, review, plan, planFor, absentOn, actualByPerson, locs, leave, blockers, chainByeId } = ctx;
     const lines = [];
     const bullet = { completed: '✓', partial: '~', carried: '→', blocked: '!', reassigned: '↔' };
 
@@ -31052,7 +31243,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
 
     const silent = [];
     for (const person of people) {
-      const away = availability(person, review, leave);
+      const away = availability(person, review, leave, absentOn?.(person.id, review));
       if (away.state === 'leave') {
         lines.push(`  · ${person.name} — on leave`);
         continue;
@@ -31079,7 +31270,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     lines.push(`What is next — ${dayLabel(plan, 'medium')}`);
     const unset = [];
     for (const person of people) {
-      if (availability(person, plan, leave).state !== 'available') continue;
+      if (availability(person, plan, leave, absentOn?.(person.id, plan)).state !== 'available') continue;
       const next = planFor(person.id, plan);
       if (!next) {
         unset.push(person.name);
@@ -31229,7 +31420,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
   }
 
   function personRow(ctx) {
-    const { person, review, plan, planFor, actualByPerson, cats, locs, leave, root, chainByeId } = ctx;
+    const { person, review, plan, planFor, absentOn, actualByPerson, cats, locs, leave, root, chainByeId } = ctx;
 
     // Focusable, so the whole meeting can be run from the keyboard: down the
     // roster with the arrows, one letter per outcome. Fifteen people at a fixed
@@ -31266,7 +31457,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       row.replaceWith(next);
     };
 
-    const away = availability(person, review, leave);
+    const away = availability(person, review, leave, absentOn?.(person.id, review));
     const wasPlanned = planFor(person.id, review);
     const actual = actualByPerson.get(person.id) || null;
     const tomorrow = planFor(person.id, plan);
@@ -31840,7 +32031,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const from = days[0];
     const to = days[days.length - 1];
 
-    const [people, locations, leave, planRows, laRows, categories, aliases, everybody] =
+    const [people, locations, leave, planRows, sheet, categories, aliases, everybody] =
       await Promise.all([
         rc.listPeople({ scheduledOnly: true }),
         rc.listLocations(),
@@ -31865,9 +32056,11 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
 
     /* The same reading the Resources tab and the huddle make, through the same
        function, so the three cannot disagree about where somebody is. */
+    const laRows = sheet.rows;
     const index = assignmentIndex({
       planRows,
       laRows,
+      absences: sheet.absences,
       register: nameRegister(everybody.length ? everybody : people, aliases),
     });
     const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
@@ -31892,14 +32085,21 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     /* How many people are actually available each day. This is the number that
        stops work being promised that cannot be staffed. */
     const coverage = days.map((iso) =>
-      people.filter((p) => availability(p, iso, thisWeek).state === 'available').length);
+      people.filter((p) => availability(p, iso, thisWeek, index.absent(p.id, iso)).state === 'available')
+        .length);
 
     const body = el('tbody');
     for (const person of people) {
       const cells = days.map((iso) => {
-        const state = availability(person, iso, thisWeek);
+        const state = availability(person, iso, thisWeek, index.absent(person.id, iso));
         const entry = index.at(person.id, iso);
-        if (state.state === 'leave') return el('td', {}, [badge('Leave', 'muted')]);
+        /* Booked leave and the workbook's PTO row are the same fact here, and the
+           badge says which: one is a record somebody made, the other is the sheet,
+           and telling them apart is what the PTO tab is for. */
+        if (state.state === 'leave') {
+          return el('td', {}, [badge('Leave', 'muted'), state.sheet ? fromSheet({ from_lookahead: true }) : null]
+            .filter(Boolean));
+        }
         if (state.state === 'non-working') return el('td', { class: 'rc-inactive' }, [el('span', { text: '·' })]);
         if (!entry) {
           // Nothing planned and nobody named. The + still offers the week's rows.
@@ -32201,7 +32401,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
   const { parseSheet, applyLegend, readLegend } = __req("io/lookahead.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf } = __req("core/lookahead.js");
+  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, ABSENCE_LABELS } = __req("core/lookahead.js");
+
 
 
   const { icon } = __req("ui/icons.js");
@@ -32784,6 +32985,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     const scheduled = inWindow.activities.filter((a) => a.highlighted && a.named).length;
     const headings = view.activities.filter((a) => a.heading).length;
     const named = view.activities.filter((a) => a.resource).length;
+    const away = view.activities.filter((a) => a.absence).length;
     host.appendChild(el('p', {
       class: 'rc-hint',
       text: `${scheduled} of ${view.activities.length} activities have something scheduled in the `
@@ -32829,6 +33031,19 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         : 'No Resource rows on this sheet yet. Add a row under an activity whose description reads '
           + '"Resource", leave its location and work hours blank so they carry down from the '
           + 'activity, and type the names into the day cells.',
+    }));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: away
+        ? `${away} row(s) say who is away rather than what is happening — "PTO" and "Other Group / `
+          + 'Project", with the names typed into the day cells. They stand on their own rather than '
+          + 'under an activity, because what they say is about the person; they are never counted as '
+          + 'scope, and they hide with "Show resource names" like every other row of names. Those '
+          + 'days reach the week plan, Resources and PTO against the people they name.'
+        : 'Nothing on this sheet says who is away. Add a row at the bottom whose description reads '
+          + '"PTO", or "Other Group / Project", and type the names into the day cells — those days '
+          + 'then show against those people in the week plan, Resources and PTO instead of reading '
+          + 'as a day nobody planned.',
     }));
     host.appendChild(el('p', {
       class: 'rc-hint',
@@ -32916,6 +33131,16 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       let sectionHasWork = false;
       let belowIsKeptTitle = false;
       for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i].absence) {
+          /* Not work, and not a title either. "Nothing scheduled" is a question
+             about an activity, and these rows have no activity — asking it of them
+             would hide the one row that says why somebody has no work this week,
+             which is the opposite of what the switch is for. They answer to the
+             resource-names switch instead, below, because that is what they are:
+             names. */
+          keep[i] = true;
+          continue;
+        }
         if (isTitle(rows[i])) {
           keep[i] = sectionHasWork || belowIsKeptTitle;
           // This title closes the section beneath it; anything above belongs to a
@@ -32933,12 +33158,18 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       rows = rows.filter((_, i) => keep[i]);
     }
 
+    /* "Show resource names" covers every row of names, not only the ones tucked
+       under an activity. Switching the names off to read the activities alone and
+       being left with two rows of people would be the switch half working. */
+    if (!showResources) rows = rows.filter((a) => !a.absence);
+
     if (terms.length) {
       rows = rows.filter((a) => {
         /* The names on the Resource row are part of the haystack: looking for
            where somebody is this week is one of the two reasons anybody types in
            this box, and it would find nothing if only the activity line counted. */
-        const hay = [...a.meta, ...(a.resource?.marks || []).map((m) => m.value)]
+        const hay = [...a.meta, ...(a.resource?.marks || []).map((m) => m.value),
+          ...(a.absence ? a.marks.map((m) => m.value) : [])]
           .join(' ').toLowerCase();
         return terms.some((t) => hay.includes(t));
       });
@@ -33044,8 +33275,12 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     for (const a of rows) {
       const what = a.meta.filter(Boolean)[0] || '';
       tbody.appendChild(line(a.meta, byCol(a.marks), {
-        klass: a.heading ? 'la-head-row' : '',
-        what,
+        klass: [a.heading ? 'la-head-row' : '', a.absence ? 'la-resource-row la-absence-row' : '']
+          .filter(Boolean).join(' '),
+        what: a.absence ? `${ABSENCE_LABELS[a.absence]} — who is away` : what,
+        // Styled as names, because that is what the cells hold. The paint on an
+        // absence row means nothing the legend knows about.
+        resource: Boolean(a.absence),
       }));
       /* The Resource row, drawn under the activity it belongs to and never on its
          own — it has no location or hours of its own, only the ones it inherited,
@@ -34104,25 +34339,39 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
        is why `lookaheadWithResources()` catches rather than a permission test up
        here. It is also the one place the three views ask, so they cannot disagree
        about where somebody is. */
-    const [people, locations, categories, leave, planRows, aliases, locAliases, laRows] = await Promise.all([
-      rc.listPeople(),
-      rc.listLocations(),
-      rc.listCategories(),
-      rc.listLeave(from, to),
-      rc.listPlan(from, to),
-      rc.listPersonAliases().catch(() => []),
-      rc.listLocationAliases().catch(() => []),
-      lookaheadWithResources(from, to),
-    ]);
+    const [people, locations, categories, leave, planRows, aliases, locAliases, sheet, everybody] =
+      await Promise.all([
+        /* The people who take shifts, which is what this view is a reading of.
+           A manager administers the calendar and is never assigned to a location,
+           so a row of seven dots against their name is a row of noise in the middle
+           of the one screen that answers "who is where". It is `scheduled` that
+           decides and never the role — an administrator who *does* take shifts
+           stays here, which is the whole reason the column exists — and it is the
+           same filter the week plan and the huddle already make. */
+        rc.listPeople({ scheduledOnly: true }),
+        rc.listLocations(),
+        rc.listCategories(),
+        rc.listLeave(from, to),
+        rc.listPlan(from, to),
+        rc.listPersonAliases().catch(() => []),
+        rc.listLocationAliases().catch(() => []),
+        lookaheadWithResources(from, to),
+        /* Everybody, for the register only. A name in the workbook belongs to
+           whoever it belongs to, and matching it against the scheduled roster alone
+           would report a real person — a manager the sheet happens to name — as a
+           spelling nobody could place. */
+        rc.listPeople().catch(() => []),
+      ]);
+    const laRows = sheet.rows;
 
     const locs = byId(locations);
     const cats = byId(categories);
-    const register = nameRegister(people, aliases);
+    const register = nameRegister(everybody.length ? everybody : people, aliases);
     /* The 4WLA's Resource row *is* the plan for the days it names — derived, never
        written — and a stored entry is somebody overriding it or planning a day the
        sheet says nothing about. The same reading the week plan and the huddle
        make, from the same function. */
-    const index = assignmentIndex({ planRows, laRows, register });
+    const index = assignmentIndex({ planRows, laRows, absences: sheet.absences, register });
     const { byPerson, unmatched } = index;
     /* "Nobody is called that" and "two people are, and I will not choose" are
        different problems with different fixes, and a list that ran them together
@@ -34195,13 +34444,18 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
     for (const person of people) {
       const wanted = byPerson.get(person.id) || new Map();
       const cells = columns.map((iso) => {
-        const state = availability(person, iso, leave);
+        const state = availability(person, iso, leave, index.absent(person.id, iso));
         const asked = wanted.get(iso) || [];
         const classes = ['rc-res-cell'];
         if (iso === today) classes.push('rc-res-today');
 
         if (state.state === 'leave') {
-          return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [badge('Leave', 'muted')]);
+          return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [
+            badge('Leave', 'muted'),
+            // Whether anybody booked it or the 4WLA's PTO row is the only place it
+            // is written down. Both are the same day off; only one has a record.
+            state.sheet ? badge('From 4WLA', 'info') : null,
+          ].filter(Boolean));
         }
         if (state.state === 'non-working' && !index.at(person.id, iso) && !asked.length) {
           return el('td', {
@@ -34213,7 +34467,7 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
         const parts = [];
         const entry = index.at(person.id, iso);
         if (entry) {
-          parts.push(el('div', { class: 'rc-res-job' }, [
+          parts.push(el('div', { class: `rc-res-job${entry.absence ? ' rc-res-away' : ''}` }, [
             el('div', { text: entry.task || '—' }),
             el('div', { class: 'rc-hint', text: [
               locs.get(entry.location_id)?.name || entry.raw_location,
@@ -34729,6 +34983,377 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/rc_pto.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/rc_pto.js"] = function (__x, __req) {
+  /**
+   * PTO — who is off, what is booked, and where the two disagree.
+   *
+   * Leave already had a home: a list in Organisation, admin-only, sorted by start
+   * date. That is the *record* and it stays there. It is not a view anybody can
+   * plan around, because the question a scheduler actually asks is "who is off in
+   * the weeks I am staffing", and a list of date ranges does not answer it —
+   * you find out somebody is away when you try to put them somewhere.
+   *
+   * So this is a calendar, and it draws two things in each cell, for the reason
+   * the Resources tab draws two:
+   *
+   * **What somebody booked**, from `rc_leave` — a record, with a kind and a
+   * status, that survives the workbook being edited.
+   *
+   * **What the 4WLA says**, from the "PTO" row at the bottom of the sheet — names
+   * typed into day cells, derived at paint time and never written anywhere. On
+   * this programme that row is usually the *only* place an absence is written
+   * down: somebody types a name into the workbook and never opens Organisation.
+   * Reading it is what stops the huddle asking a person on holiday how their day
+   * went, and what stops the week plan drawing their week as days nobody filled
+   * in.
+   *
+   * The interesting cell is the one where they differ. A day the sheet says is PTO
+   * with nothing booked against it is not an error — it is the normal case, and
+   * one click from becoming a record. A day booked that the sheet does not know
+   * about is the other direction, and worth seeing before somebody is scheduled
+   * into it.
+   *
+   * **Nothing here is derived from a role.** Managers take leave too, and a PTO
+   * calendar that quietly dropped them would be wrong on exactly the weeks it
+   * matters. `scheduled` is what the week plan and Resources filter on because
+   * those are about work; this is about people.
+   *
+   * Imports: util, dates, rc, icons, components, rc_util.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const { toISO, addDays, todayMs } = __req("core/dates.js");
+  const rc = __req("core/rc.js");
+  const { icon } = __req("ui/icons.js");
+  const { textInput, selectInput, toast, badge, field, emptyState } = __req("ui/components.js");
+
+
+  const { weekStart, todayISO, dayLabel, byId, availability, isoToMs, notifyChanged, formModal, nameRegister, absenceAssignments, lookaheadWithResources } = __req("ui/rc_util.js");
+
+
+
+
+  /** Which four weeks are on screen. Null means the one containing today. */
+  let weekOf = null;
+
+  /**
+   * Four weeks, not one.
+   *
+   * Leave is arranged weeks ahead and the whole point of drawing it is to see it
+   * coming; a one-week window shows you the holiday that started yesterday. Four
+   * is also what the look-ahead is maintained to, so the sheet's own PTO row has
+   * something to say across the whole view rather than only the first column of it.
+   */
+  const WEEKS = 4;
+
+  async function render(root) {
+    const startMs = weekOf ?? weekStart(todayMs());
+    const days = [];
+    for (let i = 0; i < WEEKS * 7; i++) days.push(toISO(addDays(startMs, i)));
+    const from = days[0];
+    const to = days[days.length - 1];
+    const today = todayISO();
+
+    /* Everybody active, managers included — see the header comment. The
+       look-ahead is administrators-only in the database, so a member gets nothing
+       back from it and simply sees the booked side, which is correct. */
+    const [people, kinds, leave, sheet, aliases] = await Promise.all([
+      rc.listPeople(),
+      rc.listLeaveKinds().catch(() => []),
+      rc.listLeave(from, to),
+      lookaheadWithResources(from, to).catch(() => ({ rows: [], absences: [] })),
+      rc.listPersonAliases().catch(() => []),
+    ]);
+
+    const kindsById = byId(kinds);
+    const register = nameRegister(people, aliases);
+    /* The same register and the same matching rules the Resource row gets: a name
+       on the PTO row is the same kind of thing as a name on a Resource row, so
+       there is one answer to "who is Victor" and not two that could differ. */
+    const away = absenceAssignments(sheet.absences, register);
+    const redraw = () => { clear(root); render(root); };
+    const admin = rc.isAdmin();
+
+    const host = el('div', { class: 'rc-pto' });
+    root.appendChild(host);
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('button', {
+        class: 'cx-btn icon mini ghost',
+        'aria-label': 'Previous week',
+        html: icon('chevron-left', { size: 13 }),
+        onClick: () => { weekOf = startMs - 7 * 86400000; redraw(); },
+      }),
+      el('h3', { text: `PTO — ${dayLabel(from, 'medium')} to ${dayLabel(to, 'medium')}` }),
+      el('button', {
+        class: 'cx-btn icon mini ghost',
+        'aria-label': 'Next week',
+        html: icon('chevron-right', { size: 13 }),
+        onClick: () => { weekOf = startMs + 7 * 86400000; redraw(); },
+      }),
+      el('button', {
+        class: 'cx-btn mini ghost',
+        text: 'This week',
+        onClick: () => { weekOf = null; redraw(); },
+      }),
+      admin ? el('button', {
+        class: 'cx-btn mini primary',
+        text: 'Book leave',
+        onClick: () => bookLeave({ people, kinds, redraw }),
+      }) : null,
+    ].filter(Boolean)));
+
+    if (!people.length) {
+      host.appendChild(emptyState({ title: 'Nobody on the roster yet.' }));
+      return;
+    }
+
+    /* ── The calendar ─────────────────────────────────────────────────────── */
+
+    const headCells = [el('th', { class: 'rc-pto-name', text: 'Person' })];
+    for (const iso of days) {
+      const ms = isoToMs(iso);
+      const weekend = [0, 6].includes(new Date(ms).getUTCDay());
+      headCells.push(el('th', {
+        class: ['rc-pto-day', weekend ? 'rc-pto-weekend' : '', iso === today ? 'rc-pto-today' : '']
+          .filter(Boolean).join(' '),
+        // The weekday letter and the date, which is as much as a 28-column header
+        // has room for and all anybody reads off it.
+        html: `${'MTWTFSS'[(new Date(ms).getUTCDay() + 6) % 7]}<br>${iso.slice(8)}`,
+        title: dayLabel(iso, 'medium'),
+      }));
+    }
+
+    const body = el('tbody');
+    let bookedDays = 0;
+    let sheetOnly = 0;
+
+    for (const person of people) {
+      const mine = away.byPerson.get(person.id) || new Map();
+      const cells = days.map((iso) => {
+        const state = availability(person, iso, leave, mine.get(iso) === 'pto' ? 'pto' : null);
+        const sheetSays = mine.get(iso) || null;
+        const booked = state.leave || null;
+        const classes = ['rc-pto-cell'];
+        if (iso === today) classes.push('rc-pto-today');
+        if ([0, 6].includes(new Date(isoToMs(iso)).getUTCDay())) classes.push('rc-pto-weekend');
+
+        if (booked) {
+          bookedDays++;
+          classes.push('rc-pto-booked');
+          if (sheetSays === 'pto') classes.push('rc-pto-agreed');
+          return el('td', {
+            class: classes.join(' '),
+            'data-label': dayLabel(iso),
+            title: [kindsById.get(booked.kind_id)?.name || 'Leave',
+              booked.status !== 'approved' ? booked.status : null,
+              sheetSays === 'pto' ? 'and the 4WLA says so too' : 'not on the 4WLA',
+              booked.note].filter(Boolean).join(' · '),
+            text: '',
+          });
+        }
+
+        if (sheetSays === 'pto') {
+          sheetOnly++;
+          classes.push('rc-pto-sheet');
+          /* Nothing booked, and the workbook says they are off. Not an error —
+             it is how almost every absence on this programme is recorded — so the
+             cell offers to make it a record rather than complaining about it. */
+          return el('td', {
+            class: `${classes.join(' ')}${admin ? ' rc-clickable' : ''}`,
+            'data-label': dayLabel(iso),
+            title: `The 4WLA says ${person.name} is off on ${dayLabel(iso, 'medium')}, and nothing is `
+              + 'booked. Everything reads it as leave either way; booking it makes a record that '
+              + 'survives the sheet being edited.',
+            onClick: admin
+              ? () => bookLeave({ people, kinds, redraw, person, from: iso, to: iso })
+              : null,
+          });
+        }
+
+        if (sheetSays === 'other') {
+          classes.push('rc-pto-other');
+          return el('td', {
+            class: classes.join(' '),
+            'data-label': dayLabel(iso),
+            title: `The 4WLA has ${person.name} on another group's project. That is work, not `
+              + 'leave — they are in the huddle with it against their name.',
+          });
+        }
+
+        if (state.state === 'non-working') classes.push('rc-pto-off');
+        return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) });
+      });
+
+      body.appendChild(el('tr', {}, [
+        el('td', { class: 'rc-pto-name', text: person.name }),
+        ...cells,
+      ]));
+    }
+
+    host.appendChild(el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table rc-pto-grid' }, [el('thead', {}, [el('tr', {}, headCells)]), body]),
+    ]));
+
+    host.appendChild(el('div', { class: 'rc-pto-key' }, [
+      key('rc-pto-booked', 'Booked'),
+      key('rc-pto-booked rc-pto-agreed', 'Booked, and on the 4WLA'),
+      key('rc-pto-sheet', 'On the 4WLA only'),
+      key('rc-pto-other', "Another group's project"),
+    ]));
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: `${bookedDays} booked day(s) in this window, and ${sheetOnly} the 4WLA says are PTO with `
+        + 'nothing booked against them. The second number is not a fault: the workbook is where '
+        + 'most absences on this programme are written down, and everything — the huddle, the week '
+        + 'plan, Resources — already reads it as leave. Booking one makes a record that survives '
+        + 'the sheet being edited, and an administrator can do it by clicking the day.',
+    }));
+
+    /* ── Names the PTO row uses that the roster cannot place ──────────────── */
+
+    if (away.unmatched.length) {
+      host.appendChild(el('div', { style: 'height:20px' }));
+      host.appendChild(el('div', { class: 'rc-section-head' }, [
+        el('h3', { text: 'Named as away, not on the roster' }),
+      ]));
+      host.appendChild(el('div', { class: 'rc-scroll' }, [
+        el('table', { class: 'rc-table' }, [
+          el('thead', {}, [el('tr', {}, [
+            el('th', { text: 'As written' }), el('th', { text: 'Days' }), el('th', { text: 'On' }),
+          ])]),
+          el('tbody', {}, away.unmatched.map((u) => el('tr', {}, [
+            el('td', { text: u.name }),
+            el('td', { class: 'rc-num', text: String(u.days.size) }),
+            el('td', { class: 'rc-hint', text: [...u.kinds].map((k) => (k === 'pto' ? 'PTO' : 'Other group / project')).join(', ') }),
+          ]))),
+        ]),
+      ]));
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: 'These spellings are on the sheet’s PTO and Other Group rows and the roster cannot '
+          + 'place them, so those days are not showing against anybody. It is the same answer a name '
+          + 'on a Resource row gets and the same place to give it: Resources maps a spelling to a '
+          + 'person in one click, and it is settled for both rows at once.',
+      }));
+    }
+
+    /* ── What is booked ───────────────────────────────────────────────────── */
+
+    const booked = leave
+      .filter((l) => l.status !== 'cancelled' && l.status !== 'declined')
+      .sort((a, b) => a.start_date.localeCompare(b.start_date));
+
+    host.appendChild(el('div', { style: 'height:20px' }));
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'Booked in this window' }),
+    ]));
+
+    if (!booked.length) {
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: 'Nothing booked in these four weeks. Where the 4WLA names somebody on its PTO row the '
+          + 'calendar above still shows it, and everything else still reads it as leave.',
+      }));
+    } else {
+      const peopleById = byId(people);
+      host.appendChild(el('div', { class: 'rc-scroll' }, [
+        el('table', { class: 'rc-table' }, [
+          el('thead', {}, [el('tr', {}, [
+            el('th', { text: 'Person' }), el('th', { text: 'From' }), el('th', { text: 'To' }),
+            el('th', { text: 'Kind' }), el('th', { text: 'State' }), el('th', { text: '' }),
+          ])]),
+          el('tbody', {}, booked.map((l) => el('tr', {}, [
+            el('td', { text: peopleById.get(l.person_id)?.name || '—' }),
+            el('td', { text: dayLabel(l.start_date, 'medium') }),
+            el('td', { text: dayLabel(l.end_date, 'medium') }),
+            el('td', { text: kindsById.get(l.kind_id)?.name || '—' }),
+            el('td', {}, [badge(l.status === 'approved' ? 'Approved' : l.status,
+              l.status === 'approved' ? 'good' : 'warn')]),
+            el('td', { class: 'rc-hint', text: l.note || '' }),
+          ]))),
+        ]),
+      ]));
+    }
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Leave is why the huddle can tell "away" apart from "carried over", and why absence is '
+        + 'not silently distributed across the performance statuses. The full record, including '
+        + 'cancelled leave and every kind, is in Organisation → Leave; this is the four weeks '
+        + 'anybody is actually staffing.',
+    }));
+  }
+
+  /** One swatch and its meaning. The key is four cells, so it is drawn as cells. */
+  function key(klass, label) {
+    return el('span', { class: 'rc-pto-key-item' }, [
+      el('span', { class: `rc-pto-swatch ${klass}` }),
+      el('span', { text: label }),
+    ]);
+  }
+
+  /**
+   * Book leave, optionally already knowing whose and when.
+   *
+   * The same write Organisation makes — one `rc_leave` row — because a second way
+   * of recording leave is a second answer to "is Dana off on Tuesday". Prefilled
+   * when it is opened from a day on the calendar, so turning what the workbook
+   * says into a record is a confirmation rather than a retype.
+   */
+  function bookLeave({ people, kinds, redraw, person = null, from = '', to = '' }) {
+    const who = selectInput({
+      value: person?.id || people[0]?.id,
+      options: people.map((p) => ({ value: p.id, label: p.name })),
+    });
+    const start = el('input', { type: 'date', class: 'cx-input', value: from });
+    const end = el('input', { type: 'date', class: 'cx-input', value: to });
+    const kind = selectInput({
+      value: kinds[0]?.id || '',
+      placeholder: kinds.length ? undefined : '— no kinds set up —',
+      options: kinds.map((k) => ({ value: k.id, label: k.name })),
+    });
+    const note = textInput({ placeholder: 'Optional', value: person && from ? 'From the 4WLA' : '' });
+
+    formModal({
+      title: person ? `Book leave for ${person.name}` : 'Book leave',
+      body: el('div', { class: 'cx-form' }, [
+        field('Person', who),
+        field('From', start),
+        field('To', end, 'Inclusive, as a calendar is.'),
+        field('Kind', kind),
+        field('Note', note),
+        el('p', {
+          class: 'rc-hint',
+          text: 'Everything already reads the 4WLA’s PTO row as leave. Booking it makes a record '
+            + 'that survives somebody editing the sheet, and gives the day a kind and a status.',
+        }),
+      ]),
+      confirmLabel: 'Book',
+      onConfirm: async () => {
+        if (!start.value || !end.value) throw new Error('Both dates are needed.');
+        if (end.value < start.value) throw new Error('The end is before the start.');
+        await rc.addLeave({
+          person_id: who.value,
+          start_date: start.value,
+          end_date: end.value,
+          kind_id: kind.value || null,
+          note: note.value.trim() || null,
+        });
+        notifyChanged('leave');
+        toast({ tone: 'good', message: 'Leave booked.' });
+        redraw();
+      },
+    });
+  }
+
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/rc_reports.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/rc_reports.js"] = function (__x, __req) {
@@ -34809,14 +35434,43 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
 
     root.appendChild(controls(root, from, to));
 
-    if (!effort.length) {
-      root.appendChild(el('p', { class: 'rc-hint', text: 'Nothing recorded in that range.' }));
+    /* The report is about the people who take shifts.
+       A manager runs the meeting rather than taking work from it, so their own
+       handful of rows sits in the middle of a table about field delivery,
+       flattering or damning a number that was never about them. It is `scheduled`
+       that decides and never the role — an administrator who *does* take shifts
+       is in here exactly as before, which is the whole reason that column is
+       separate from permission.
+       The name lookup stays complete: filtering it as well would print "—"
+       against a row rather than removing it. And the count of what was left out is
+       said out loud, because a narrowed report that does not say it is narrowed
+       reads as a report of everything. */
+    const takesShifts = new Set(people.filter((p) => p.scheduled !== false).map((p) => p.id));
+    const shown = effort.filter((r) => takesShifts.has(r.person_id));
+    const setAside = effort.length - shown.length;
+
+    if (!shown.length) {
+      root.appendChild(el('p', {
+        class: 'rc-hint',
+        text: effort.length
+          ? 'Nothing recorded in that range by anybody who takes shifts.'
+          : 'Nothing recorded in that range.',
+      }));
     } else {
-      root.appendChild(summary(effort));
-      root.appendChild(breakdown(effort, people, categories, locations));
+      root.appendChild(summary(shown));
+      root.appendChild(breakdown(shown, people, categories, locations));
     }
 
-    root.appendChild(carryOver(chains, people));
+    if (setAside) {
+      root.appendChild(el('p', {
+        class: 'rc-hint',
+        text: `${setAside} row(s) are not counted here: they belong to people who are not `
+          + 'scheduled — the managers who run the calendar rather than take work from it. '
+          + 'Somebody who does both is counted normally; Organisation is where that is set.',
+      }));
+    }
+
+    root.appendChild(carryOver(chains.filter((c) => takesShifts.has(c.person_id)), people));
     root.appendChild(lookaheadNumbers(events));
 
     root.appendChild(el('p', {
@@ -35059,6 +35713,9 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
       const peopleById = byId(people);
       const catsById = byId(categories);
       const locsById = byId(locations);
+      /* The same narrowing the screen makes. A CSV that disagreed with the table
+         it was exported from would be the worse of the two to find out about. */
+      const takesShifts = new Set(people.filter((p) => p.scheduled !== false).map((p) => p.id));
 
       const esc = (v) => {
         const s = String(v ?? '');
@@ -35066,7 +35723,8 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
       };
       const header = ['Date', 'Person', 'Subsystem', 'Status', 'Signal', 'Category', 'Location'];
       const lines = [header.join(',')];
-      for (const row of effort) {
+      const rows = effort.filter((r) => takesShifts.has(r.person_id));
+      for (const row of rows) {
         lines.push([
           row.work_date,
           peopleById.get(row.person_id)?.name || row.person_name || '',
@@ -35082,7 +35740,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
         `resource-calendar-${from}-to-${to}.csv`,
         lines.join('\n'),
         'text/csv;charset=utf-8',
-        `${effort.length} record(s)`
+        `${rows.length} record(s)`
       );
     } catch (err) {
       toast({ tone: 'error', message: err.message });
@@ -35121,6 +35779,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
   const huddle = __req("ui/rc_huddle.js");
   const lookahead = __req("ui/rc_lookahead.js");
   const resources = __req("ui/rc_resources.js");
+  const pto = __req("ui/rc_pto.js");
   const reports = __req("ui/rc_reports.js");
 
   /**
@@ -35132,6 +35791,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
     { id: 'huddle', label: 'Daily huddle' },
     { id: 'week', label: 'Week plan' },
     { id: 'resources', label: 'Resources' },
+    { id: 'pto', label: 'PTO' },
     { id: 'lookahead', label: 'Look-ahead' },
     { id: 'reports', label: 'Reports' },
     { id: 'org', label: 'Organisation' },
@@ -35141,6 +35801,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
     huddle: huddle.render,
     week: huddle.renderWeek,
     resources: resources.render,
+    pto: pto.render,
     lookahead: lookahead.render,
     reports: reports.render,
     org: roster.render,

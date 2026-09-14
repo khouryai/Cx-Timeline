@@ -73,25 +73,39 @@ export async function render(root) {
      is why `lookaheadWithResources()` catches rather than a permission test up
      here. It is also the one place the three views ask, so they cannot disagree
      about where somebody is. */
-  const [people, locations, categories, leave, planRows, aliases, locAliases, laRows] = await Promise.all([
-    rc.listPeople(),
-    rc.listLocations(),
-    rc.listCategories(),
-    rc.listLeave(from, to),
-    rc.listPlan(from, to),
-    rc.listPersonAliases().catch(() => []),
-    rc.listLocationAliases().catch(() => []),
-    lookaheadWithResources(from, to),
-  ]);
+  const [people, locations, categories, leave, planRows, aliases, locAliases, sheet, everybody] =
+    await Promise.all([
+      /* The people who take shifts, which is what this view is a reading of.
+         A manager administers the calendar and is never assigned to a location,
+         so a row of seven dots against their name is a row of noise in the middle
+         of the one screen that answers "who is where". It is `scheduled` that
+         decides and never the role — an administrator who *does* take shifts
+         stays here, which is the whole reason the column exists — and it is the
+         same filter the week plan and the huddle already make. */
+      rc.listPeople({ scheduledOnly: true }),
+      rc.listLocations(),
+      rc.listCategories(),
+      rc.listLeave(from, to),
+      rc.listPlan(from, to),
+      rc.listPersonAliases().catch(() => []),
+      rc.listLocationAliases().catch(() => []),
+      lookaheadWithResources(from, to),
+      /* Everybody, for the register only. A name in the workbook belongs to
+         whoever it belongs to, and matching it against the scheduled roster alone
+         would report a real person — a manager the sheet happens to name — as a
+         spelling nobody could place. */
+      rc.listPeople().catch(() => []),
+    ]);
+  const laRows = sheet.rows;
 
   const locs = byId(locations);
   const cats = byId(categories);
-  const register = nameRegister(people, aliases);
+  const register = nameRegister(everybody.length ? everybody : people, aliases);
   /* The 4WLA's Resource row *is* the plan for the days it names — derived, never
      written — and a stored entry is somebody overriding it or planning a day the
      sheet says nothing about. The same reading the week plan and the huddle
      make, from the same function. */
-  const index = assignmentIndex({ planRows, laRows, register });
+  const index = assignmentIndex({ planRows, laRows, absences: sheet.absences, register });
   const { byPerson, unmatched } = index;
   /* "Nobody is called that" and "two people are, and I will not choose" are
      different problems with different fixes, and a list that ran them together
@@ -164,13 +178,18 @@ export async function render(root) {
   for (const person of people) {
     const wanted = byPerson.get(person.id) || new Map();
     const cells = columns.map((iso) => {
-      const state = availability(person, iso, leave);
+      const state = availability(person, iso, leave, index.absent(person.id, iso));
       const asked = wanted.get(iso) || [];
       const classes = ['rc-res-cell'];
       if (iso === today) classes.push('rc-res-today');
 
       if (state.state === 'leave') {
-        return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [badge('Leave', 'muted')]);
+        return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [
+          badge('Leave', 'muted'),
+          // Whether anybody booked it or the 4WLA's PTO row is the only place it
+          // is written down. Both are the same day off; only one has a record.
+          state.sheet ? badge('From 4WLA', 'info') : null,
+        ].filter(Boolean));
       }
       if (state.state === 'non-working' && !index.at(person.id, iso) && !asked.length) {
         return el('td', {
@@ -182,7 +201,7 @@ export async function render(root) {
       const parts = [];
       const entry = index.at(person.id, iso);
       if (entry) {
-        parts.push(el('div', { class: 'rc-res-job' }, [
+        parts.push(el('div', { class: `rc-res-job${entry.absence ? ' rc-res-away' : ''}` }, [
           el('div', { text: entry.task || '—' }),
           el('div', { class: 'rc-hint', text: [
             locs.get(entry.location_id)?.name || entry.raw_location,

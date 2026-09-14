@@ -118,11 +118,13 @@ function fakeSdk() {
          `Victor` belongs to exactly one of them and matches; `Lena` belongs to
          two and matches neither — picking one would put a shift against the
          wrong engineer, silently, because both answers look equally right.
-         All three are stood down from the meeting so the huddle and week-plan
-         counts below are unchanged by their being here. */
-      { id: 'p8', user_id: null, name: 'Victor Okonkwo', title: 'Test Engineer', subsystem: 'ATS', role: 'member', active: true, scheduled: false, working_days: [1, 2, 3, 4, 5] },
-      { id: 'p9', user_id: null, name: 'Lena Fischer', title: 'Test Engineer', subsystem: 'IXL', role: 'member', active: true, scheduled: false, working_days: [1, 2, 3, 4, 5] },
-      { id: 'p10', user_id: null, name: 'Lena Brandt', title: 'Test Technician', subsystem: 'IXL', role: 'member', active: true, scheduled: false, working_days: [1, 2, 3, 4, 5] },
+         They take shifts, and they say so: `scheduled` is what the huddle, the
+         week plan and the Resources tab all filter on, and standing a field
+         engineer down to keep a count in this file stable would be using the
+         one flag that decides who is in the meeting to mean something else. */
+      { id: 'p8', user_id: null, name: 'Victor Okonkwo', title: 'Test Engineer', subsystem: 'ATS', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
+      { id: 'p9', user_id: null, name: 'Lena Fischer', title: 'Test Engineer', subsystem: 'IXL', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
+      { id: 'p10', user_id: null, name: 'Lena Brandt', title: 'Test Technician', subsystem: 'IXL', role: 'member', active: true, scheduled: true, working_days: [1, 2, 3, 4, 5] },
     ],
     rc_locations: [
       { id: 'l1', name: 'TPSS 12', code: 'T12', active: true },
@@ -157,7 +159,12 @@ function fakeSdk() {
       { carry_chain_id: 'chain-1', person_id: 'p2', first_seen: iso(-6), last_seen: iso(-1), carries: 4, age_days: 5 },
     ],
     rc_effort: [
-      { id: 'e1', person_id: 'p1', person_name: 'Alex', subsystem: 'ATS', work_date: iso(-2), status: 'completed', signal: 'performance', category_id: 'c1', location_id: 'l1' },
+      { id: 'e1', person_id: 'p5', person_name: 'Rosa', subsystem: 'IXL', work_date: iso(-2), status: 'completed', signal: 'performance', category_id: 'c1', location_id: 'l1' },
+      /* The manager's own outcome. Alex runs the calendar and is stood down from
+         the meeting, so this is not part of a report about field delivery — it is
+         set aside and *counted* as set aside, because a report that quietly
+         narrowed itself would read as a report of everything. */
+      { id: 'e5', person_id: 'p1', person_name: 'Alex', subsystem: 'ATS', work_date: iso(-2), status: 'completed', signal: 'performance', category_id: 'c1', location_id: 'l1' },
       { id: 'e2', person_id: 'p3', person_name: 'Priya', subsystem: 'IXL', work_date: iso(-3), status: 'partial', signal: 'performance', category_id: 'c2', location_id: 'l2' },
       { id: 'e3', person_id: 'p2', person_name: 'Dan', subsystem: 'Wayside', work_date: iso(-4), status: 'blocked', signal: 'health', category_id: 'c1', location_id: 'l1', blocked_party_id: 'party1' },
       { id: 'e4', person_id: 'p4', person_name: 'Sam', subsystem: 'SCADA', work_date: iso(-5), status: 'reassigned', signal: 'health', category_id: 'c2', location_id: 'l2' },
@@ -196,6 +203,13 @@ function fakeSdk() {
       });
 
       const mark = (i, value, hex) => ({ col: col(i), ref: `X${i}`, value, hex });
+      /* A weekday column of this week that is neither `todayIdx` nor the day
+         after it — the two Dan's Resource cells occupy. 7..11 is Monday to
+         Friday, and this lands inside it for every day the suite can run on. */
+      const crewIdx = todayIdx >= 9 ? 7 : todayIdx + 2;
+      // Where the day the huddle reviews sits on this axis, or -1 if it falls
+      // before the window starts.
+      const reviewIdx = Math.round((Date.parse(`${REVIEW.iso}T00:00:00Z`) - first) / 86400000);
       const shade = () => axis.map((_, i) => mark(i, '', '7F7F7F'));
 
       return [{
@@ -247,10 +261,14 @@ function fakeSdk() {
                it does not, because both cases have to be visible. */
             { row: 10, label: '', cells: [
               { col: 3, ref: 'C10', value: 'Resource', hex: null },
-              /* Index 7 is the Monday of this week — the axis starts a week
-                 back — so the week plan, which draws Monday to Friday, has the
-                 cell whatever day the suite happens to run. */
-              mark(7, 'Priya, Victor, Lena', null),
+              /* A weekday of this week that is never the one Dan is on.
+                 The axis starts a week back, so 7..11 is this Monday to Friday
+                 and the week plan draws all five whatever day the suite runs.
+                 It was pinned to 7 — and on a *Monday* that is `todayIdx`, so
+                 two cells shared one column, which no spreadsheet can do: the
+                 later one won, Dan's name landed on the crew's cell, and the
+                 week plan showed Priya with nothing planned one day in seven. */
+              mark(crewIdx, 'Priya, Victor, Lena', null),
               mark(todayIdx, 'Dan', null),
               mark(todayIdx + 1, 'Dan, R. Okafor', null),
             ] },
@@ -286,6 +304,25 @@ function fakeSdk() {
             { row: 15, label: '', cells: [
               { col: 3, ref: 'C15', value: 'DCS Internal testing — no dates yet', hex: null },
               ...shade(),
+            ] },
+            /* The two rows at the bottom that say who is *away*. They stand on
+               their own — no activity above them — because what they say is
+               about the person: Rosa is off, Tom is on somebody else's project.
+               Never scope, drawn with the names, and hidden by the same switch
+               that hides every other row of names. */
+            { row: 17, label: '', cells: [
+              { col: 3, ref: 'C17', value: 'PTO', hex: null },
+              /* The day the huddle reviews, so the meeting can be shown to read
+                 this row — and a day of the week being planned, so the week plan
+                 and Resources can be too. On most days those are the same week;
+                 on a Monday they are not, which is exactly when a fixture that
+                 covered only one of them would stop proving anything. */
+              ...(reviewIdx >= 0 && reviewIdx !== crewIdx ? [mark(reviewIdx, 'Rosa', null)] : []),
+              mark(crewIdx, 'Rosa', null),
+            ] },
+            { row: 18, label: '', cells: [
+              { col: 3, ref: 'C18', value: 'Other Group / Project', hex: null },
+              mark(crewIdx, 'Tom', null),
             ] },
             // The workbook's own key, in the shape readLegend() looks for.
             { row: 20, label: 'Highlight in Yellow for Day Shift',
@@ -1073,6 +1110,17 @@ async function main() {
   // fact from a miss, or it gets distributed across the performance statuses.
   check('somebody who does not work that day is not asked',
     /not a working day/.test(huddleText));
+  /* Nor is somebody the workbook says is off. Most days that row is the only
+     place an absence is written down — nobody opens Organisation to book it —
+     so a meeting that did not read it asked a person on holiday how their day
+     went, in front of the room. */
+  const rosaHuddle = page.locator('#rc-frame tbody tr', { hasText: 'Rosa' });
+  check('and neither is somebody the 4WLA puts on PTO',
+    (await rosaHuddle.locator('button', { hasText: 'Completed' }).count()) === 0,
+    (await rosaHuddle.innerText()).replace(/\n/g, ' | ').slice(0, 90));
+  check('the meeting says they are away rather than leaving the row blank',
+    /leave|away/i.test(await rosaHuddle.innerText()),
+    (await rosaHuddle.innerText()).replace(/\n/g, ' | ').slice(0, 70));
   /* ── Running the meeting ──────────────────────────────────────────────
      A carried task is going to be done tomorrow. Re-typing it was slow, and
      it was also how the chain got broken: rolling it forward makes a new
@@ -1313,7 +1361,7 @@ async function main() {
     /Coming up: Uma/.test(weekText2), weekText2.split('\n').find((l) => /Coming up/.test(l)) || '');
 
   check('and says how many can actually be staffed each day',
-    /\d+ of 6/.test(weekText), weekText.split('\n').find((l) => / of \d/.test(l)) || '');
+    /\d+ of \d+/.test(weekText), weekText.split('\n').find((l) => / of \d/.test(l)) || '');
 
   /* ── The 4WLA *is* the plan for the days it names ──────────────────────
      "The look-ahead proposes; a person assigns" existed for one reason: the
@@ -1348,6 +1396,22 @@ async function main() {
      somebody *decided*; materialising the sheet into it would store a
      derivation, make the workbook's authorship indistinguishable from a
      decision, and go stale the moment the sheet changed. */
+  /* ── What the sheet says about somebody being away ────────────────────
+     A blank against a name reads as "nobody planned this". The workbook said
+     exactly why, on a row nothing used to read. */
+  const rosaRow = page.locator('#rc-frame tbody tr', { hasText: 'Rosa' });
+  const rosaText = await rosaRow.innerText();
+  check('a day the 4WLA puts somebody on PTO reads as leave, not as a gap',
+    /Leave/.test(rosaText), rosaText.replace(/\n/g, ' | ').slice(0, 90));
+  check('and it says the workbook is where that came from',
+    /From 4WLA/.test(rosaText));
+  const tomText = await page.locator('#rc-frame tbody tr', { hasText: 'Tom' }).innerText();
+  /* Another group's project is work, not leave. Folding the two together would
+     put somebody who is on site somewhere else down as absent. */
+  check('another group\u2019s project is drawn as what they are doing',
+    /Other group \/ project/i.test(tomText), tomText.replace(/\n/g, ' | ').slice(0, 90));
+  check('and not as leave', !/Leave/.test(tomText));
+
   check('nothing was written to say so — the sheet is read, not copied',
     await page.evaluate(() => !window.__rc.rows.rc_plan_entries
       .some((e) => e.person_id === 'p3' && /IXL Regression/.test(e.task || ''))));
@@ -1522,7 +1586,7 @@ async function main() {
      altogether, which is how one stray unmapped colour put a whole workbook
      back on screen with the box still unticked. */
   check('shading does not count as somebody being on site',
-    (await page.locator('#rc-frame .la-grid tbody tr').count()) === 4,
+    (await page.locator('#rc-frame .la-grid tbody tr').count()) === 6,
     `${await page.locator('#rc-frame .la-grid tbody tr').count()} rows`);
 
   /* ── The Resource row ──────────────────────────────────────────────────
@@ -1531,7 +1595,7 @@ async function main() {
      belongs to the activity above it: its location and work hours are blank
      because they carry down, and drawn on its own it would be a hundred and
      forty rows of the word "Resource". */
-  const resourceRow = page.locator('#rc-frame .la-grid tr.la-resource-row');
+  const resourceRow = page.locator('#rc-frame .la-grid tr.la-resource-row:not(.la-absence-row)');
   check('the Resource row under an activity is drawn as part of it',
     (await resourceRow.count()) === 1);
   const resourceText = await resourceRow.innerText();
@@ -1550,14 +1614,36 @@ async function main() {
   await nameFilter.fill('');
   await page.waitForTimeout(200);
 
+  /* ── The rows that say who is away ────────────────────────────────────
+     "PTO" and "Other Group / Project" stand on their own at the bottom of the
+     sheet, because what they say is about the person rather than about an
+     activity. They are drawn — a blank against somebody's name in the week plan
+     used to be the only trace of an absence the workbook stated plainly. */
+  const absenceRows = page.locator('#rc-frame .la-grid tr.la-absence-row');
+  check('the rows that say who is away are drawn', (await absenceRows.count()) === 2,
+    `${await absenceRows.count()} rows`);
+  const absenceText = await absenceRows.allInnerTexts();
+  check('with the names typed on them', /Rosa/.test(absenceText.join(' ')) && /Tom/.test(absenceText.join(' ')),
+    absenceText.join(' | ').replace(/\s+/g, ' ').slice(0, 90));
+  check('and they are never counted as scope',
+    await page.evaluate(() => !(window.__rc.rows.rc_lookahead_rows || [])
+      .some((r) => /^(PTO|Other Group)/i.test(r.raw_label || ''))));
+
   const resourceBox = page.locator('#rc-frame .cx-check', { hasText: 'resource names' }).locator('input');
   await resourceBox.uncheck();
   await page.waitForTimeout(250);
   check('and the names can be switched off without losing the activities',
     (await page.locator('#rc-frame .la-grid tr.la-resource-row').count()) === 0
     && /IXL Regression Testing/.test(await page.locator('#rc-frame .la-grid tbody').innerText()));
+  /* One switch, every row of names. Switching them off to read the activities
+     alone and being left with two rows of people would be it half working. */
+  check('and the away rows go with them, because they are names too',
+    (await page.locator('#rc-frame .la-grid tr.la-absence-row').count()) === 0);
   await resourceBox.check();
   await page.waitForTimeout(250);
+  check('and both come back together',
+    (await page.locator('#rc-frame .la-grid tr.la-absence-row').count()) === 2
+    && (await resourceRow.count()) === 1);
 
   /* ── The key describes what is on screen ──────────────────────────────
      The register is the whole programme's. Printed over a four-week window it
@@ -1766,7 +1852,11 @@ async function main() {
   check('and it offers to record whose spelling it is',
     (await page.locator('#rc-frame button', { hasText: 'That is somebody' }).count()) >= 1);
 
-  await page.locator('#rc-frame button', { hasText: 'That is somebody' }).first().click();
+  // The row for this spelling, rather than whichever unmatched name happens to
+  // come first — there are several now, and mapping the wrong one would write a
+  // perfectly good alias and fail the assertion for a reason that is not a bug.
+  await page.locator('#rc-frame tbody tr', { hasText: 'Okafor' })
+    .locator('button', { hasText: 'That is somebody' }).first().click();
   await page.waitForSelector('.cx-modal');
   await page.locator('.cx-modal select').first().selectOption({ label: 'Dan' });
   await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'That is them' }).click();
@@ -1838,6 +1928,57 @@ async function main() {
     assigned.every((p) => p.person_id && p.work_date && !p.lookahead_row_id));
   check('with no location, because the office is not a commissioning site',
     assigned.every((p) => !p.location_id));
+
+  /* An administrator runs the calendar and is never assigned to a location, so
+     a row of dots against their name is noise in the middle of the one screen
+     that answers "who is where". `scheduled` decides it and never the role. */
+  check('the manager who runs the calendar is not a row in Resources',
+    !(await page.locator('#rc-frame .rc-resources tbody').innerText()).includes('Alex'));
+  check('but they are still in the register, so the sheet can name them',
+    !/Alex/.test((await page.locator('#rc-frame').innerText())
+      .split('Named in the 4WLA')[1] || ''));
+
+  /* ── PTO ──────────────────────────────────────────────────────────────
+     Leave already had a list in Organisation. This is the four weeks anybody is
+     actually staffing, and it draws two things: what somebody booked, and what
+     the 4WLA's PTO row says — which on this programme is usually the only place
+     an absence is written down at all. */
+  console.log('\nPTO');
+  await page.locator('#rc-frame .rc-tab', { hasText: 'PTO' }).click();
+  await page.waitForSelector('#rc-frame .rc-pto', { timeout: 10000 });
+  const ptoText = await page.locator('#rc-frame .rc-pto').innerText();
+  check('the team is drawn against four weeks, not a list of date ranges',
+    (await page.locator('#rc-frame .rc-pto-grid thead th.rc-pto-day').count()) === 28,
+    `${await page.locator('#rc-frame .rc-pto-grid thead th.rc-pto-day').count()} columns`);
+  check('everybody is on it, managers included — they take leave too',
+    /Alex/.test(ptoText) && /Rosa/.test(ptoText));
+  check('a day the 4WLA says is PTO is drawn even though nothing is booked',
+    (await page.locator('#rc-frame .rc-pto-cell.rc-pto-sheet').count()) >= 1,
+    `${await page.locator('#rc-frame .rc-pto-cell.rc-pto-sheet').count()} cell(s)`);
+  check('and booked leave is drawn as the record it is',
+    (await page.locator('#rc-frame .rc-pto-cell.rc-pto-booked').count()) >= 1);
+  /* The two must not read alike: one is a record with a kind and a status, the
+     other is a cell somebody typed in a spreadsheet. */
+  check('the two are told apart on screen rather than merged',
+    /On the 4WLA only/.test(ptoText) && /Booked/.test(ptoText));
+  check('and the count of each is said out loud',
+    /the 4WLA says are PTO with nothing booked/.test(ptoText),
+    ptoText.split('\n').find((l) => /booked day/.test(l))?.slice(0, 100) || '');
+
+  /* Booking one is a confirmation, not a retype: everything already reads the
+     sheet as leave, and this gives the day a record that survives an edit. */
+  await page.locator('#rc-frame .rc-pto-cell.rc-pto-sheet').first().click();
+  await page.waitForSelector('.cx-modal');
+  check('clicking one offers to make it a record, prefilled',
+    (await page.locator('.cx-modal input[type="date"]').first().inputValue()).length === 10);
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Book' }).click();
+  await page.waitForTimeout(600);
+  check('and booking it writes one leave row, the same one Organisation writes',
+    await page.evaluate(() => (window.__rc.rows.rc_leave || [])
+      .some((l) => /From the 4WLA/.test(l.note || ''))));
+  check('nothing about the look-ahead was written to do it',
+    await page.evaluate(() => !window.__rc.calls
+      .some((c) => c.kind === 'insert' && c.table === 'rc_lookahead_rows')));
 
   /* ── Running the meeting ──────────────────────────────────────────────
      The table is a form for whoever holds the keyboard. This is the same data
