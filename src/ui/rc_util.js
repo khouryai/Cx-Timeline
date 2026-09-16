@@ -13,7 +13,7 @@ import { el } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
 import { toISO, todayMs, fmtDate, addDays, MS_DAY } from '../core/dates.js';
 import {
-  resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS,
+  resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS,
 } from '../core/lookahead.js';
 import { applyLegend } from '../io/lookahead.js';
 import * as rc from '../core/rc.js';
@@ -539,11 +539,17 @@ export function resourceAssignments(laRows, register) {
  * row is the same kind of thing as a name typed on a Resource row, so there is
  * one register and not a second one that could disagree about who "Victor" is.
  *
- * **PTO beats another group's project** where somebody is written on both rows
- * for one day, because being off is the stronger claim about a day: on another
- * project they are working and could be asked about it, and on leave they could
- * not. Answering "both" is not available — a day has one answer in every view
- * that reads this.
+ * **Being off outranks everything else.** Somebody written on the PTO row and
+ * on a work row for the same day is the sheet contradicting itself about one
+ * person, and the stronger claim is the one saying they were not there at all:
+ * on another project or at their desk they are working and can be asked how it
+ * went, and on leave they cannot.
+ *
+ * Two *work* rows on one day are not a contradiction, though — a morning at the
+ * desk and an afternoon on somebody else's project is an ordinary day — so the
+ * answer is a list, the same shape the plan itself now has. It is a list per
+ * day rather than a single kind for exactly that reason: collapsing them would
+ * drop one of the two things the sheet plainly said.
  */
 export function absenceAssignments(absences, register) {
   const byPerson = new Map();
@@ -563,7 +569,10 @@ export function absenceAssignments(absences, register) {
       }
       if (!byPerson.has(personId)) byPerson.set(personId, new Map());
       const days = byPerson.get(personId);
-      if (days.get(entry.date) !== 'pto') days.set(entry.date, entry.kind);
+      const kinds = days.get(entry.date) || [];
+      if (kinds.includes(entry.kind)) continue;
+      if (entry.kind === 'pto') days.set(entry.date, ['pto']);
+      else if (!kinds.includes('pto')) days.set(entry.date, [...kinds, entry.kind]);
     }
   }
 
@@ -609,9 +618,21 @@ export function shiftFor(meaning) {
  * — an office day, another project, a task carried over. The sheet is the
  * default; a row is a decision.
  */
-export function assignmentIndex({ planRows, laRows, register, absences = [] }) {
+export function assignmentIndex({ planRows, laRows, register, absences = [], categories = [] }) {
   const { byPerson, unmatched } = resourceAssignments(laRows, register);
   const away = absenceAssignments(absences, register);
+
+  /* Which seeded category an off-programme day belongs to.
+     A day in the office is a day somebody worked, and a report that could not
+     say *what* they worked on is the blank the `Office` and `Other project`
+     categories were seeded to fill. Matched on the name the schema seeds,
+     folded; a renamed category stops matching and the day arrives
+     uncategorised, which is ungrouped rather than grouped wrongly. */
+  const categoryFor = (kind) => {
+    const want = ABSENCE_KINDS[kind]?.category;
+    if (!want) return null;
+    return (categories || []).find((c) => foldName(c.name) === foldName(want))?.id || null;
+  };
 
   /* A day is a **list**. A shift is routinely more than one job — a test to
      witness in the morning and a cable pull after it — and a day that could
@@ -635,10 +656,12 @@ export function assignmentIndex({ planRows, laRows, register, absences = [] }) {
      beats both, since that is somebody deciding against the sheet. */
   const derived = new Map();
   for (const [personId, days] of away.byPerson) {
-    for (const [iso, kind] of days) {
+    for (const [iso, kinds] of days) {
       const key = `${personId}|${iso}`;
       if (stored.has(key)) continue;
-      derived.set(key, [{
+      // One entry per kind: a day at the desk and a day on another group's
+      // project are two things the sheet said, not one to choose between.
+      derived.set(key, kinds.map((kind) => ({
         id: null,
         from_lookahead: true,
         absence: kind,
@@ -647,11 +670,11 @@ export function assignmentIndex({ planRows, laRows, register, absences = [] }) {
         task: ABSENCE_LABELS[kind],
         location_id: null,
         raw_location: null,
-        category_id: null,
+        category_id: categoryFor(kind),
         shift: 'day',
         lookahead_row_id: null,
         carry_chain_id: null,
-      }]);
+      })));
     }
   }
 
@@ -695,7 +718,12 @@ export function assignmentIndex({ planRows, laRows, register, absences = [] }) {
     /* What the *sheet* says about somebody being away, whatever anybody has
        stored over the top of it. `availability()` takes this, so a person the
        workbook puts on PTO is not asked in the huddle how their day went. */
-    absent: (personId, iso) => away.byPerson.get(personId)?.get(iso) || null,
+    absent: (personId, iso) => {
+      const kinds = away.byPerson.get(personId)?.get(iso) || [];
+      // Leave first: it is the only one `availability()` acts on, and a day
+      // carrying it carries nothing else.
+      return kinds.includes('pto') ? 'pto' : (kinds[0] || null);
+    },
     byPerson,
     unmatched,
     awayUnmatched: away.unmatched,
@@ -725,9 +753,11 @@ export function availability(person, iso, leaveRows, absent = null) {
      place the absence is written down at all — somebody types a name into the
      workbook and never opens Organisation — and without reading it the huddle
      asks a person on holiday how their day went, and the week plan shows them as
-     a day nobody bothered to fill in. Another group's project is *not* leave:
-     they are working, they can be asked, and where they are is the assignment. */
-  if (absent === 'pto') return { state: 'leave', sheet: 'pto' };
+     a day nobody bothered to fill in. The office and another group's project are
+     *not* leave: those are days somebody worked, they can be asked how it went,
+     and where they were is the assignment. `ABSENCE_KINDS[kind].leave` is the
+     one place that distinction lives. */
+  if (absent && ABSENCE_KINDS[absent]?.leave) return { state: 'leave', sheet: absent };
   if (!working.includes(weekday)) return { state: 'non-working' };
   return { state: 'available' };
 }

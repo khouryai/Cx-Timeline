@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 56   Built: 2026-09-14T23:33:57.000Z
+ * Modules: 56   Built: 2026-09-16T00:22:02.186Z
  */
 (function () {
   'use strict';
@@ -27931,13 +27931,15 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   /**
    * Which kind of absence a row's description names, or null.
    *
-   * The workbook carries two rows at the bottom that are not work: "PTO" and
-   * "Other Group / Project", with names typed into the day cells the same way the
-   * Resource row carries them. They say where somebody *is not* — off, or on
-   * another group's work — which is a fact about the person rather than about an
-   * activity, and it is the fact the week plan and the huddle are otherwise
-   * missing entirely: a blank against a name reads as "nobody planned this",
-   * when the sheet said exactly why.
+   * The workbook carries rows at the bottom that are not site work: "PTO",
+   * "Office" and "Other Group / Project", with names typed into the day cells the
+   * same way the Resource row carries them. They say where somebody is when they
+   * are not on the programme — off, at their desk, or on another group's work —
+   * which is a fact about the person rather than about an activity, and it is the
+   * fact the week plan and the huddle are otherwise missing entirely: a blank
+   * against a name reads as "nobody planned this", when the sheet said exactly
+   * why. Only PTO means they were not working; the rest are days like any other,
+   * and they carry a category so the reports can group them.
    *
    * Strict for the reason `isResourceLabel()` is strict, and with the same two
    * failures in mind. A row misread as a label is a row of work that vanishes off
@@ -27948,12 +27950,40 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   function absenceKind(text) {
     const folded = String(text ?? '').toLowerCase().replace(/[^a-z]/g, '');
     if (/^(pto|paidtimeoff|timeoff|vacation|annualleave|holiday)$/.test(folded)) return 'pto';
+    if (/^(office|officeday|inoffice|officebased)$/.test(folded)) return 'office';
     if (/^other(group|project)/.test(folded)) return 'other';
     return null;
   }
 
+  /**
+   * The three facts about each kind, in one table.
+   *
+   * They were spread across three modules — the label here, whether it counts as
+   * leave inside `availability()`, and nothing at all about which category the
+   * day belongs to — and the first time a kind was added that was three places to
+   * remember. What each one *is*:
+   *
+   * **`leave`** decides whether the person was there at all. PTO is the only one:
+   * somebody in the office or on another group's project is working, they can be
+   * asked how the day went, and folding them into leave would put a person who
+   * was at their desk down as absent.
+   *
+   * **`category`** is the seeded `rc_categories` row the day belongs to, matched
+   * by name because that is what the schema seeds it as. A renamed category
+   * simply stops matching and the day arrives uncategorised — ungrouped in the
+   * reports rather than grouped wrongly, which is the right way for a
+   * name match to fail.
+   */
+  const ABSENCE_KINDS = {
+    pto:    { label: 'PTO',                   leave: true,  category: null },
+    office: { label: 'Office',                leave: false, category: 'Office' },
+    other:  { label: 'Other group / project', leave: false, category: 'Other project' },
+  };
+
   /** What each kind is called on screen. One place, so three views cannot differ. */
-  const ABSENCE_LABELS = { pto: 'PTO', other: 'Other group / project' };
+  const ABSENCE_LABELS = Object.fromEntries(
+    Object.entries(ABSENCE_KINDS).map(([kind, it]) => [kind, it.label])
+  );
 
   /**
    * The people named in one cell.
@@ -28247,7 +28277,8 @@ __mods["core/lookahead.js"] = function (__x, __req) {
          into a heading, which is how a whole file arrived on screen at once. */
       const heading = row.cells.some((c) => c.col < firstDay && c.hex);
 
-      /* "PTO" and "Other Group / Project": rows of names that are not work.
+      /* "PTO", "Office", "Other Group / Project": rows of names that are not
+         site work.
          Unlike the Resource row they stand on their own — they sit at the bottom
          of the sheet and belong to nobody above them, because what they say is
          about the *person*, not about an activity. So they are emitted as rows in
@@ -28727,6 +28758,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "isResourceLabel", { get: () => isResourceLabel, enumerable: true });
   Object.defineProperty(__x, "absenceKind", { get: () => absenceKind, enumerable: true });
+  Object.defineProperty(__x, "ABSENCE_KINDS", { get: () => ABSENCE_KINDS, enumerable: true });
   Object.defineProperty(__x, "ABSENCE_LABELS", { get: () => ABSENCE_LABELS, enumerable: true });
   Object.defineProperty(__x, "resourceNames", { get: () => resourceNames, enumerable: true });
   Object.defineProperty(__x, "marksOf", { get: () => marksOf, enumerable: true });
@@ -29337,7 +29369,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   const { el } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { toISO, todayMs, fmtDate, addDays, MS_DAY } = __req("core/dates.js");
-  const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS } = __req("core/lookahead.js");
+  const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS } = __req("core/lookahead.js");
 
 
   const { applyLegend } = __req("io/lookahead.js");
@@ -29864,11 +29896,17 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * row is the same kind of thing as a name typed on a Resource row, so there is
    * one register and not a second one that could disagree about who "Victor" is.
    *
-   * **PTO beats another group's project** where somebody is written on both rows
-   * for one day, because being off is the stronger claim about a day: on another
-   * project they are working and could be asked about it, and on leave they could
-   * not. Answering "both" is not available — a day has one answer in every view
-   * that reads this.
+   * **Being off outranks everything else.** Somebody written on the PTO row and
+   * on a work row for the same day is the sheet contradicting itself about one
+   * person, and the stronger claim is the one saying they were not there at all:
+   * on another project or at their desk they are working and can be asked how it
+   * went, and on leave they cannot.
+   *
+   * Two *work* rows on one day are not a contradiction, though — a morning at the
+   * desk and an afternoon on somebody else's project is an ordinary day — so the
+   * answer is a list, the same shape the plan itself now has. It is a list per
+   * day rather than a single kind for exactly that reason: collapsing them would
+   * drop one of the two things the sheet plainly said.
    */
   function absenceAssignments(absences, register) {
     const byPerson = new Map();
@@ -29888,7 +29926,10 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
         }
         if (!byPerson.has(personId)) byPerson.set(personId, new Map());
         const days = byPerson.get(personId);
-        if (days.get(entry.date) !== 'pto') days.set(entry.date, entry.kind);
+        const kinds = days.get(entry.date) || [];
+        if (kinds.includes(entry.kind)) continue;
+        if (entry.kind === 'pto') days.set(entry.date, ['pto']);
+        else if (!kinds.includes('pto')) days.set(entry.date, [...kinds, entry.kind]);
       }
     }
 
@@ -29934,9 +29975,21 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * — an office day, another project, a task carried over. The sheet is the
    * default; a row is a decision.
    */
-  function assignmentIndex({ planRows, laRows, register, absences = [] }) {
+  function assignmentIndex({ planRows, laRows, register, absences = [], categories = [] }) {
     const { byPerson, unmatched } = resourceAssignments(laRows, register);
     const away = absenceAssignments(absences, register);
+
+    /* Which seeded category an off-programme day belongs to.
+       A day in the office is a day somebody worked, and a report that could not
+       say *what* they worked on is the blank the `Office` and `Other project`
+       categories were seeded to fill. Matched on the name the schema seeds,
+       folded; a renamed category stops matching and the day arrives
+       uncategorised, which is ungrouped rather than grouped wrongly. */
+    const categoryFor = (kind) => {
+      const want = ABSENCE_KINDS[kind]?.category;
+      if (!want) return null;
+      return (categories || []).find((c) => foldName(c.name) === foldName(want))?.id || null;
+    };
 
     /* A day is a **list**. A shift is routinely more than one job — a test to
        witness in the morning and a cable pull after it — and a day that could
@@ -29960,10 +30013,12 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
        beats both, since that is somebody deciding against the sheet. */
     const derived = new Map();
     for (const [personId, days] of away.byPerson) {
-      for (const [iso, kind] of days) {
+      for (const [iso, kinds] of days) {
         const key = `${personId}|${iso}`;
         if (stored.has(key)) continue;
-        derived.set(key, [{
+        // One entry per kind: a day at the desk and a day on another group's
+        // project are two things the sheet said, not one to choose between.
+        derived.set(key, kinds.map((kind) => ({
           id: null,
           from_lookahead: true,
           absence: kind,
@@ -29972,11 +30027,11 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
           task: ABSENCE_LABELS[kind],
           location_id: null,
           raw_location: null,
-          category_id: null,
+          category_id: categoryFor(kind),
           shift: 'day',
           lookahead_row_id: null,
           carry_chain_id: null,
-        }]);
+        })));
       }
     }
 
@@ -30020,7 +30075,12 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       /* What the *sheet* says about somebody being away, whatever anybody has
          stored over the top of it. `availability()` takes this, so a person the
          workbook puts on PTO is not asked in the huddle how their day went. */
-      absent: (personId, iso) => away.byPerson.get(personId)?.get(iso) || null,
+      absent: (personId, iso) => {
+        const kinds = away.byPerson.get(personId)?.get(iso) || [];
+        // Leave first: it is the only one `availability()` acts on, and a day
+        // carrying it carries nothing else.
+        return kinds.includes('pto') ? 'pto' : (kinds[0] || null);
+      },
       byPerson,
       unmatched,
       awayUnmatched: away.unmatched,
@@ -30050,9 +30110,11 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
        place the absence is written down at all — somebody types a name into the
        workbook and never opens Organisation — and without reading it the huddle
        asks a person on holiday how their day went, and the week plan shows them as
-       a day nobody bothered to fill in. Another group's project is *not* leave:
-       they are working, they can be asked, and where they are is the assignment. */
-    if (absent === 'pto') return { state: 'leave', sheet: 'pto' };
+       a day nobody bothered to fill in. The office and another group's project are
+       *not* leave: those are days somebody worked, they can be asked how it went,
+       and where they were is the assignment. `ABSENCE_KINDS[kind].leave` is the
+       one place that distinction lives. */
+    if (absent && ABSENCE_KINDS[absent]?.leave) return { state: 'leave', sheet: absent };
     if (!working.includes(weekday)) return { state: 'non-working' };
     return { state: 'available' };
   }
@@ -31149,6 +31211,9 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       planRows,
       laRows,
       absences: sheet.absences,
+      // So an office day off the sheet lands in the Office category, and the
+      // outcome recorded against it files there too.
+      categories,
       register: nameRegister(everybody.length ? everybody : people, aliases),
     });
     const planFor = (personId, iso) => index.at(personId, iso);
@@ -32472,6 +32537,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       planRows,
       laRows,
       absences: sheet.absences,
+      categories,
       register: nameRegister(everybody.length ? everybody : people, aliases),
     });
     const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
@@ -35414,7 +35480,7 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
        written — and a stored entry is somebody overriding it or planning a day the
        sheet says nothing about. The same reading the week plan and the huddle
        make, from the same function. */
-    const index = assignmentIndex({ planRows, laRows, absences: sheet.absences, register });
+    const index = assignmentIndex({ planRows, laRows, absences: sheet.absences, categories, register });
     const { byPerson, unmatched } = index;
     /* "Nobody is called that" and "two people are, and I will not choose" are
        different problems with different fixes, and a list that ran them together
@@ -36101,6 +36167,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
   const { textInput, selectInput, toast, badge, field, emptyState } = __req("ui/components.js");
 
 
+  const { ABSENCE_LABELS } = __req("core/lookahead.js");
   const { weekStart, todayISO, dayLabel, byId, availability, isoToMs, notifyChanged, formModal, nameRegister, absenceAssignments, lookaheadWithResources } = __req("ui/rc_util.js");
 
 
@@ -36204,8 +36271,12 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
     for (const person of people) {
       const mine = away.byPerson.get(person.id) || new Map();
       const cells = days.map((iso) => {
-        const state = availability(person, iso, leave, mine.get(iso) === 'pto' ? 'pto' : null);
-        const sheetSays = mine.get(iso) || null;
+        /* A day carries a *list* of what the sheet said — PTO alone, or the
+           work rows it names somebody on. Leave is what `availability()` acts
+           on; the rest are drawn as what they are. */
+        const kinds = mine.get(iso) || [];
+        const state = availability(person, iso, leave, kinds.includes('pto') ? 'pto' : null);
+        const sheetSays = kinds.includes('pto') ? 'pto' : (kinds[0] || null);
         const booked = state.leave || null;
         const classes = ['rc-pto-cell'];
         if (iso === today) classes.push('rc-pto-today');
@@ -36244,13 +36315,17 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
           });
         }
 
-        if (sheetSays === 'other') {
-          classes.push('rc-pto-other');
+        /* Off the programme but not off. Drawn so a day the sheet accounted for
+           does not read as a blank here, and hatched the other way from leave so
+           the two can never be mistaken: these are days somebody worked. */
+        if (sheetSays === 'office' || sheetSays === 'other') {
+          classes.push('rc-pto-elsewhere');
           return el('td', {
             class: classes.join(' '),
             'data-label': dayLabel(iso),
-            title: `The 4WLA has ${person.name} on another group's project. That is work, not `
-              + 'leave — they are in the huddle with it against their name.',
+            title: `The 4WLA has ${person.name} ${kinds.map((k) => ABSENCE_LABELS[k].toLowerCase())
+              .join(' and ')} that day. That is work, not leave — they are in the huddle with it `
+              + 'against their name.',
           });
         }
 
@@ -36272,7 +36347,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
       key('rc-pto-booked', 'Booked'),
       key('rc-pto-booked rc-pto-agreed', 'Booked, and on the 4WLA'),
       key('rc-pto-sheet', 'On the 4WLA only'),
-      key('rc-pto-other', "Another group's project"),
+      key('rc-pto-elsewhere', 'Off the programme, not off work'),
     ]));
 
     host.appendChild(el('p', {
@@ -36299,7 +36374,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
           el('tbody', {}, away.unmatched.map((u) => el('tr', {}, [
             el('td', { text: u.name }),
             el('td', { class: 'rc-num', text: String(u.days.size) }),
-            el('td', { class: 'rc-hint', text: [...u.kinds].map((k) => (k === 'pto' ? 'PTO' : 'Other group / project')).join(', ') }),
+            el('td', { class: 'rc-hint', text: [...u.kinds].map((k) => ABSENCE_LABELS[k] || k).join(', ') }),
           ]))),
         ]),
       ]));

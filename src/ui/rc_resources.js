@@ -105,7 +105,7 @@ export async function render(root) {
      written — and a stored entry is somebody overriding it or planning a day the
      sheet says nothing about. The same reading the week plan and the huddle
      make, from the same function. */
-  const index = assignmentIndex({ planRows, laRows, absences: sheet.absences, register });
+  const index = assignmentIndex({ planRows, laRows, absences: sheet.absences, categories, register });
   const { byPerson, unmatched } = index;
   /* "Nobody is called that" and "two people are, and I will not choose" are
      different problems with different fixes, and a list that ran them together

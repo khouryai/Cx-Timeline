@@ -56,13 +56,15 @@ export function isResourceLabel(text) {
 /**
  * Which kind of absence a row's description names, or null.
  *
- * The workbook carries two rows at the bottom that are not work: "PTO" and
- * "Other Group / Project", with names typed into the day cells the same way the
- * Resource row carries them. They say where somebody *is not* — off, or on
- * another group's work — which is a fact about the person rather than about an
- * activity, and it is the fact the week plan and the huddle are otherwise
- * missing entirely: a blank against a name reads as "nobody planned this",
- * when the sheet said exactly why.
+ * The workbook carries rows at the bottom that are not site work: "PTO",
+ * "Office" and "Other Group / Project", with names typed into the day cells the
+ * same way the Resource row carries them. They say where somebody is when they
+ * are not on the programme — off, at their desk, or on another group's work —
+ * which is a fact about the person rather than about an activity, and it is the
+ * fact the week plan and the huddle are otherwise missing entirely: a blank
+ * against a name reads as "nobody planned this", when the sheet said exactly
+ * why. Only PTO means they were not working; the rest are days like any other,
+ * and they carry a category so the reports can group them.
  *
  * Strict for the reason `isResourceLabel()` is strict, and with the same two
  * failures in mind. A row misread as a label is a row of work that vanishes off
@@ -73,12 +75,40 @@ export function isResourceLabel(text) {
 export function absenceKind(text) {
   const folded = String(text ?? '').toLowerCase().replace(/[^a-z]/g, '');
   if (/^(pto|paidtimeoff|timeoff|vacation|annualleave|holiday)$/.test(folded)) return 'pto';
+  if (/^(office|officeday|inoffice|officebased)$/.test(folded)) return 'office';
   if (/^other(group|project)/.test(folded)) return 'other';
   return null;
 }
 
+/**
+ * The three facts about each kind, in one table.
+ *
+ * They were spread across three modules — the label here, whether it counts as
+ * leave inside `availability()`, and nothing at all about which category the
+ * day belongs to — and the first time a kind was added that was three places to
+ * remember. What each one *is*:
+ *
+ * **`leave`** decides whether the person was there at all. PTO is the only one:
+ * somebody in the office or on another group's project is working, they can be
+ * asked how the day went, and folding them into leave would put a person who
+ * was at their desk down as absent.
+ *
+ * **`category`** is the seeded `rc_categories` row the day belongs to, matched
+ * by name because that is what the schema seeds it as. A renamed category
+ * simply stops matching and the day arrives uncategorised — ungrouped in the
+ * reports rather than grouped wrongly, which is the right way for a
+ * name match to fail.
+ */
+export const ABSENCE_KINDS = {
+  pto:    { label: 'PTO',                   leave: true,  category: null },
+  office: { label: 'Office',                leave: false, category: 'Office' },
+  other:  { label: 'Other group / project', leave: false, category: 'Other project' },
+};
+
 /** What each kind is called on screen. One place, so three views cannot differ. */
-export const ABSENCE_LABELS = { pto: 'PTO', other: 'Other group / project' };
+export const ABSENCE_LABELS = Object.fromEntries(
+  Object.entries(ABSENCE_KINDS).map(([kind, it]) => [kind, it.label])
+);
 
 /**
  * The people named in one cell.
@@ -372,7 +402,8 @@ export function readGrid(grid, { anchorISO = null } = {}) {
        into a heading, which is how a whole file arrived on screen at once. */
     const heading = row.cells.some((c) => c.col < firstDay && c.hex);
 
-    /* "PTO" and "Other Group / Project": rows of names that are not work.
+    /* "PTO", "Office", "Other Group / Project": rows of names that are not
+       site work.
        Unlike the Resource row they stand on their own — they sit at the bottom
        of the sheet and belong to nobody above them, because what they say is
        about the *person*, not about an activity. So they are emitted as rows in

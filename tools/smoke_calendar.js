@@ -134,6 +134,11 @@ function fakeSdk() {
     rc_categories: [
       { id: 'c1', name: 'Field Work', sort: 30, active: true },
       { id: 'c2', name: 'Testing', sort: 40, active: true },
+      /* Seeded by `rc_schema.sql`, and here for the same reason: without
+         somewhere for an office day to be grouped, a day somebody worked shows
+         in the reports as work of no kind. */
+      { id: 'c3', name: 'Office', sort: 60, active: true },
+      { id: 'c4', name: 'Other project', sort: 70, active: true },
     ],
     rc_parties: [{ id: 'party1', name: 'BART', active: true }, { id: 'party2', name: 'Hitachi', active: true }],
     rc_leave_kinds: [{ id: 'k1', name: 'Annual leave', active: true }],
@@ -337,6 +342,14 @@ function fakeSdk() {
             { row: 18, label: '', cells: [
               { col: 3, ref: 'C18', value: 'Other Group / Project', hex: null },
               mark(crewIdx, 'Tom', null),
+            ] },
+            /* And the office. Not leave — a day somebody worked, at their desk
+               — so it is an assignment like any other, carrying the seeded
+               Office category so the reports can group it. */
+            { row: 19, label: '', cells: [
+              { col: 3, ref: 'C19', value: 'Office', hex: null },
+              ...(reviewIdx >= 0 && reviewIdx !== crewIdx ? [mark(reviewIdx, 'Uma', null)] : []),
+              mark(crewIdx, 'Uma', null),
             ] },
             // The workbook's own key, in the shape readLegend() looks for.
             { row: 20, label: 'Highlight in Yellow for Day Shift',
@@ -1451,6 +1464,19 @@ async function main() {
     /Other group \/ project/i.test(tomText), tomText.replace(/\n/g, ' | ').slice(0, 90));
   check('and not as leave', !/Leave/.test(tomText));
 
+  /* ── The office row ───────────────────────────────────────────────────
+     The third of them, and the one that is most plainly an activity: a day at
+     the desk is a day somebody worked. It arrives in the week plan as their
+     plan for that day, exactly as a day on site does. */
+  const umaRow = page.locator('#rc-frame tbody tr', { hasText: 'Uma' });
+  const umaText = await umaRow.innerText();
+  check('a day the 4WLA puts somebody in the office is their plan for that day',
+    /Office/.test(umaText), umaText.replace(/\n/g, ' | ').slice(0, 90));
+  check('and it says the workbook is where that came from', /From 4WLA/.test(umaText));
+  check('it is work, so it is not drawn as leave', !/Leave/.test(umaText));
+  check('so they are not asked for an outcome as though they were away',
+    (await umaRow.locator('button', { hasText: 'Plan it' }).count()) === 0);
+
   check('nothing was written to say so — the sheet is read, not copied',
     await page.evaluate(() => !window.__rc.rows.rc_plan_entries
       .some((e) => e.person_id === 'p3' && /IXL Regression/.test(e.task || ''))));
@@ -1627,7 +1653,7 @@ async function main() {
      altogether, which is how one stray unmapped colour put a whole workbook
      back on screen with the box still unticked. */
   check('shading does not count as somebody being on site',
-    (await page.locator('#rc-frame .la-grid tbody tr').count()) === 6,
+    (await page.locator('#rc-frame .la-grid tbody tr').count()) === 7,
     `${await page.locator('#rc-frame .la-grid tbody tr').count()} rows`);
 
   /* ── The Resource row ──────────────────────────────────────────────────
@@ -1661,11 +1687,12 @@ async function main() {
      activity. They are drawn — a blank against somebody's name in the week plan
      used to be the only trace of an absence the workbook stated plainly. */
   const absenceRows = page.locator('#rc-frame .la-grid tr.la-absence-row');
-  check('the rows that say who is away are drawn', (await absenceRows.count()) === 2,
+  check('the rows that say who is away are drawn', (await absenceRows.count()) === 3,
     `${await absenceRows.count()} rows`);
   const absenceText = await absenceRows.allInnerTexts();
-  check('with the names typed on them', /Rosa/.test(absenceText.join(' ')) && /Tom/.test(absenceText.join(' ')),
-    absenceText.join(' | ').replace(/\s+/g, ' ').slice(0, 90));
+  check('with the names typed on them',
+    ['Rosa', 'Tom', 'Uma'].every((who) => absenceText.join(' ').includes(who)),
+    absenceText.join(' | ').replace(/\s+/g, ' ').slice(0, 110));
   check('and they are never counted as scope',
     await page.evaluate(() => !(window.__rc.rows.rc_lookahead_rows || [])
       .some((r) => /^(PTO|Other Group)/i.test(r.raw_label || ''))));
@@ -1683,7 +1710,7 @@ async function main() {
   await resourceBox.check();
   await page.waitForTimeout(250);
   check('and both come back together',
-    (await page.locator('#rc-frame .la-grid tr.la-absence-row').count()) === 2
+    (await page.locator('#rc-frame .la-grid tr.la-absence-row').count()) === 3
     && (await resourceRow.count()) === 1);
 
   /* ── One sheet of paper ───────────────────────────────────────────────
@@ -1891,6 +1918,19 @@ async function main() {
      worse than one against nobody, because nobody looks at it again. */
   check('a name the roster cannot place is named, not dropped',
     /Named in the 4WLA, not on the roster/.test(resText) && /Okafor/.test(resText));
+
+  /* ── An office day is an allocated day ────────────────────────────────
+     The cell draws the task and, under it, the location and the *category*. A
+     day at the desk with no category is work of no kind: the reports group by
+     category, so that is the difference between a day being shown and a day
+     being allocated. `Office` is seeded for exactly this. */
+  const umaCell = page.locator('#rc-frame .rc-resources tbody tr', { hasText: 'Uma' });
+  const umaRes = await umaCell.innerText();
+  check('the 4WLA\u2019s office row lands in Resources as a day\u2019s work',
+    /Office/.test(umaRes), umaRes.replace(/\n/g, ' | ').slice(0, 110));
+  check('and carries the seeded Office category, so the reports can group it',
+    (await umaCell.locator('.rc-res-job .rc-hint', { hasText: 'Office' }).count()) >= 1,
+    umaRes.replace(/\n/g, ' | ').slice(0, 110));
 
   /* ── A bare first name ────────────────────────────────────────────────
      What the Resource row is actually filled in with. A register that only knew

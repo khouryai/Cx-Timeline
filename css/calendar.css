@@ -831,8 +831,10 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 }
 .rc-pto-sheet.rc-clickable { cursor: pointer; }
 .rc-pto-sheet.rc-clickable:hover { outline: 2px solid var(--warn); outline-offset: -2px; }
-/* Another group's project is not leave, and must never be mistaken for it. */
-.rc-pto-other {
+/* Off the programme — the office, another group's project — is not leave, and
+   must never be mistaken for it. Hatched the other way from a sheet-only PTO
+   day so the two read as different things at a glance. */
+.rc-pto-elsewhere {
   background: repeating-linear-gradient(
     -45deg,
     var(--text-muted) 0 2px,

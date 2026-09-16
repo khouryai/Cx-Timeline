@@ -652,12 +652,15 @@ const withAway = cls.readGrid(sheet([
   { label: 'IXL Regression', location: 'TPSS 12', days: [[0, 'FFFF00'], [1, 'FFFF00']] },
   { absence: 'PTO', days: [[1, 'Priya'], [2, 'Priya, Dan']] },
   { absence: 'Other Group / Project', days: [[3, 'Rosa']] },
+  { absence: 'Office', days: [[3, 'Uma']] },
 ]), { anchorISO: '2026-09-09' });
 
 check('a "PTO" row is read as an absence rather than as an activity',
   withAway.activities.filter((a) => a.absence === 'pto').length === 1);
 check('and so is "Other Group / Project"',
   withAway.activities.filter((a) => a.absence === 'other').length === 1);
+check('and "Office", which is the same kind of row',
+  withAway.activities.filter((a) => a.absence === 'office').length === 1);
 check('they stand on their own rather than attaching to the line above',
   withAway.activities.find((a) => /IXL/.test(a.meta[0]))?.resource === null);
 check('an ordinary activity is not one of them',
@@ -674,9 +677,27 @@ check('but the spellings people actually type do match',
 check('and so do the ways the other row gets written',
   ['Other Group / Project', 'Other Project', 'Other Groups & Projects']
     .every((t) => cls.absenceKind(t) === 'other'));
+check('and the office row',
+  ['Office', 'office', 'Office Day', 'In Office'].every((t) => cls.absenceKind(t) === 'office'));
+// Strict, for the reason the others are: an activity is not a label.
+check('while an activity that merely happens at the office is work',
+  cls.absenceKind('Office fit-out') === null && cls.absenceKind('Office move') === null);
+
+/* Three facts per kind in one table, because they used to be in three modules
+   and adding a kind meant remembering all three. */
+check('only leave means somebody was not working',
+  cls.ABSENCE_KINDS.pto.leave === true
+  && cls.ABSENCE_KINDS.office.leave === false
+  && cls.ABSENCE_KINDS.other.leave === false);
+check('and a day off the programme names the category it belongs to',
+  cls.ABSENCE_KINDS.office.category === 'Office'
+  && cls.ABSENCE_KINDS.other.category === 'Other project'
+  && cls.ABSENCE_KINDS.pto.category === null);
+check('the labels come off the same table, so nothing can drift',
+  cls.ABSENCE_LABELS.office === 'Office' && cls.ABSENCE_LABELS.pto === 'PTO');
 
 const away = cls.absencesFrom(withAway);
-check('every day somebody is named on becomes an entry', away.length === 3,
+check('every day somebody is named on becomes an entry', away.length === 4,
   `${away.length} entries`);
 check('carrying the kind, the date and what was typed',
   away.some((a) => a.kind === 'pto' && a.date === '2026-09-09' && a.written === 'Priya, Dan'),
@@ -689,7 +710,7 @@ check('and a day the sheet left blank invents nothing',
    appeared and scope removed the week they did not. */
 const awayRows = await cls.rowsFrom(withAway, { snapshotId: 'snap-away', locate });
 check('an absence row is never a row of scope',
-  awayRows.every((r) => !/PTO|Other Group/i.test(r.raw_label || '')),
+  awayRows.every((r) => !/PTO|Other Group|^Office$/i.test(r.raw_label || '')),
   awayRows.map((r) => r.raw_label).join(' | '));
 check('while the work on the same sheet still is',
   awayRows.some((r) => /IXL/.test(r.raw_label)));

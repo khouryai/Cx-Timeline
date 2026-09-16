@@ -42,6 +42,7 @@ import { icon } from './icons.js';
 import {
   textInput, selectInput, toast, badge, field, emptyState,
 } from './components.js';
+import { ABSENCE_LABELS } from '../core/lookahead.js';
 import {
   weekStart, todayISO, dayLabel, byId, availability, isoToMs,
   notifyChanged, formModal, nameRegister, absenceAssignments, lookaheadWithResources,
@@ -145,8 +146,12 @@ export async function render(root) {
   for (const person of people) {
     const mine = away.byPerson.get(person.id) || new Map();
     const cells = days.map((iso) => {
-      const state = availability(person, iso, leave, mine.get(iso) === 'pto' ? 'pto' : null);
-      const sheetSays = mine.get(iso) || null;
+      /* A day carries a *list* of what the sheet said — PTO alone, or the
+         work rows it names somebody on. Leave is what `availability()` acts
+         on; the rest are drawn as what they are. */
+      const kinds = mine.get(iso) || [];
+      const state = availability(person, iso, leave, kinds.includes('pto') ? 'pto' : null);
+      const sheetSays = kinds.includes('pto') ? 'pto' : (kinds[0] || null);
       const booked = state.leave || null;
       const classes = ['rc-pto-cell'];
       if (iso === today) classes.push('rc-pto-today');
@@ -185,13 +190,17 @@ export async function render(root) {
         });
       }
 
-      if (sheetSays === 'other') {
-        classes.push('rc-pto-other');
+      /* Off the programme but not off. Drawn so a day the sheet accounted for
+         does not read as a blank here, and hatched the other way from leave so
+         the two can never be mistaken: these are days somebody worked. */
+      if (sheetSays === 'office' || sheetSays === 'other') {
+        classes.push('rc-pto-elsewhere');
         return el('td', {
           class: classes.join(' '),
           'data-label': dayLabel(iso),
-          title: `The 4WLA has ${person.name} on another group's project. That is work, not `
-            + 'leave — they are in the huddle with it against their name.',
+          title: `The 4WLA has ${person.name} ${kinds.map((k) => ABSENCE_LABELS[k].toLowerCase())
+            .join(' and ')} that day. That is work, not leave — they are in the huddle with it `
+            + 'against their name.',
         });
       }
 
@@ -213,7 +222,7 @@ export async function render(root) {
     key('rc-pto-booked', 'Booked'),
     key('rc-pto-booked rc-pto-agreed', 'Booked, and on the 4WLA'),
     key('rc-pto-sheet', 'On the 4WLA only'),
-    key('rc-pto-other', "Another group's project"),
+    key('rc-pto-elsewhere', 'Off the programme, not off work'),
   ]));
 
   host.appendChild(el('p', {
@@ -240,7 +249,7 @@ export async function render(root) {
         el('tbody', {}, away.unmatched.map((u) => el('tr', {}, [
           el('td', { text: u.name }),
           el('td', { class: 'rc-num', text: String(u.days.size) }),
-          el('td', { class: 'rc-hint', text: [...u.kinds].map((k) => (k === 'pto' ? 'PTO' : 'Other group / project')).join(', ') }),
+          el('td', { class: 'rc-hint', text: [...u.kinds].map((k) => ABSENCE_LABELS[k] || k).join(', ') }),
         ]))),
       ]),
     ]));

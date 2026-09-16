@@ -600,30 +600,50 @@ subscribes. That is what keeps the graph acyclic.
   row changing is `resource_changed` with `field: 'resources'`, reusing the
   existing kind so no `rc_change_events` check constraint has to be widened in
   a project that already has one.
-- **The sheet says who is away as well as who is on what, and neither is
-  scope.** Two rows at the bottom of the 4WLA — "PTO" and "Other Group /
+- **The sheet says who is away as well as who is on what, and none of it is
+  scope.** Rows at the bottom of the 4WLA — "PTO", "Office", "Other Group /
   Project" — carry names in their day cells the way a Resource row does, and
   `absenceKind()` recognises them as strictly as `isResourceLabel()` does, for
   the same two failures: a row misread as a label vanishes off the calendar, and
-  a label misread as work is a row of names at no location. Unlike a Resource
-  row they **stand on their own** — they belong to nobody above them, because
-  what they say is about the *person* — so `readGrid()` emits them with
-  `absence` set, `rowsFrom()` skips them, and `classify()` therefore never books
-  "PTO" as scope added the first week it appears and scope removed the week it
-  does not. `absencesFrom()` derives the per-day entries at paint time; nothing
-  is written, for the reason nothing about the 4WLA is written.
-- **A day off and a day on somebody else's project are different answers.**
+  a label misread as work is a row of names at no location. ("Office fit-out" is
+  work; "Office" is a label.) Unlike a Resource row they **stand on their own** —
+  they belong to nobody above them, because what they say is about the *person* —
+  so `readGrid()` emits them with `absence` set, `rowsFrom()` skips them, and
+  `classify()` therefore never books "PTO" as scope added the first week it
+  appears and scope removed the week it does not. `absencesFrom()` derives the
+  per-day entries at paint time; nothing is written, for the reason nothing about
+  the 4WLA is written.
+- **`ABSENCE_KINDS` holds three facts about each kind, in one table.** They used
+  to be spread across three modules — the label in `core/lookahead.js`, whether
+  it counted as leave inside `availability()`, and nothing at all about which
+  category the day belonged to — so adding a kind meant remembering three
+  places. `leave` is true for PTO alone: somebody at their desk or on another
+  group's project **worked**, they can be asked how the day went, and folding
+  them into leave would put a person who was at their desk down as absent.
+  `category` names the seeded `rc_categories` row the day belongs to — `Office`
+  and `Other project`, matched by the name the schema seeds, folded. That is
+  what makes an off-programme day *allocated* rather than merely shown: the
+  reports group by category, an outcome recorded against the day inherits it
+  through `commitOutcome`, and a day with no category is work of no kind. A
+  renamed category stops matching and the day arrives uncategorised — ungrouped
+  rather than grouped wrongly, which is the right way for a name match to fail.
+- **A day off and a day spent elsewhere are different answers.**
   `absenceAssignments()` matches the names through the *same* register the
   Resource row uses, so there is one answer to "who is Victor". PTO makes
   somebody unavailable — `availability()` takes it as a fourth argument and
   returns `leave`, which is what stops the huddle asking a person on holiday how
   their day went and stops the week plan drawing their week as days nobody
-  filled in. Another group's project is **work**: they stay available and the
-  assignment says where. In `assignmentIndex()` the order is stored entry, then
-  absence, then activity — the row about the person beats the row about the
-  work, because a person recorded at a location on a day they were off is what
-  gets found a year later in a claim, and a stored entry beats both because that
-  is somebody deciding against the sheet.
+  filled in. The office and another group's project are **work**: they stay
+  available, the assignment says where they were, and it carries a category.
+  A day carries a **list** of kinds, not one — being off outranks everything and
+  collapses the rest, but two *work* rows on one day is an ordinary day (a
+  morning at the desk, an afternoon on somebody else's project) and answering
+  with one of them would drop the other, which is the same rule the plan itself
+  follows. In `assignmentIndex()` the order is stored entry, then absence, then
+  activity — the row about the person beats the row about the work, because a
+  person recorded at a location on a day they were off is what gets found a year
+  later in a claim, and a stored entry beats both because that is somebody
+  deciding against the sheet.
 - **PTO is a third reading, not a second store.** `ui/rc_pto.js` draws four
   weeks of the team and puts two things in each cell: what somebody booked in
   `rc_leave` — a record, with a kind and a status — and what the 4WLA's PTO row
@@ -636,7 +656,10 @@ subscribes. That is what keeps the graph acyclic.
   list stays as the full record; this is the weeks anybody is actually staffing.
   It is the one calendar view that does **not** filter on `scheduled`: managers
   take leave too, and dropping them would be wrong on exactly the weeks it
-  matters.
+  matters. The office and another group's project are drawn there as well, in a
+  hatch of their own — a day the sheet accounted for should not read as a blank
+  on the one screen about where people are — but never as leave, because those
+  are days somebody worked.
 - **Who takes shifts decides who is in a view about work.** The huddle and the
   week plan already filtered on `rc_people.scheduled`; the Resources tab did
   not, and Reports counted every `rc_effort` row whoever it belonged to — so a
@@ -1179,11 +1202,11 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         # 126 checks — the parser, the rows it derives, the
+node tools/test_lookahead.js         # 132 checks — the parser, the rows it derives, the
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 273 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 279 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser

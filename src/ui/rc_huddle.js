@@ -243,6 +243,9 @@ export async function render(root) {
     planRows,
     laRows,
     absences: sheet.absences,
+    // So an office day off the sheet lands in the Office category, and the
+    // outcome recorded against it files there too.
+    categories,
     register: nameRegister(everybody.length ? everybody : people, aliases),
   });
   const planFor = (personId, iso) => index.at(personId, iso);
@@ -1566,6 +1569,7 @@ export async function renderWeek(root) {
     planRows,
     laRows,
     absences: sheet.absences,
+    categories,
     register: nameRegister(everybody.length ? everybody : people, aliases),
   });
   const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
