@@ -307,22 +307,41 @@ export function ambiguousFirstNames(people) {
 }
 
 /**
- * One row per (week, row key), from the newest snapshot that carries it.
+ * The newest read of each week, whole — one row per (week, row key).
  *
  * `rc_lookahead_rows` keeps every read, so asking for a span of weeks returns
- * the same activity once per snapshot — and drawn straight out, that is the same
+ * the same activity once per snapshot, and drawn straight out that is the same
  * person at the same place four times over. `rank` maps a snapshot id to its
  * position in `listSnapshots()` output, which is newest first, so the lowest
  * rank wins. A row whose snapshot is not in the map is treated as oldest rather
  * than dropped: it is still a read that happened.
+ *
+ * **The unit is the week, not the row.** Taking the newest copy of each row key
+ * independently keeps a row that only an *older* snapshot carries — so an
+ * activity somebody deleted from the workbook went on being somebody's plan for
+ * ever, and the symptom was the one that is impossible to argue with: a person
+ * booked in the week plan onto an activity that is not in the 4WLA. A snapshot
+ * is a complete statement of the weeks it covers, so the newest one to mention a
+ * week is that week's answer and a row missing from it was removed. Older reads
+ * of the same week are still on the record; they are simply not the plan.
+ * A week the newest file no longer reaches keeps the newest read that did cover
+ * it, which is what makes a rolled-forward window show last month at all.
  */
 export function newestPerKey(rows, rank) {
-  const best = new Map();
   const at = (row) => (rank.has(row.snapshot_id) ? rank.get(row.snapshot_id) : Number.MAX_SAFE_INTEGER);
+
+  // The newest read that says anything about each week.
+  const newestFor = new Map();
   for (const row of rows || []) {
+    const held = newestFor.get(row.week_start);
+    if (held === undefined || at(row) < held) newestFor.set(row.week_start, at(row));
+  }
+
+  const best = new Map();
+  for (const row of rows || []) {
+    if (at(row) !== newestFor.get(row.week_start)) continue;
     const key = `${row.week_start}|${row.row_key}`;
-    const held = best.get(key);
-    if (!held || at(row) < at(held)) best.set(key, row);
+    if (!best.has(key)) best.set(key, row);
   }
   return [...best.values()];
 }
@@ -389,10 +408,12 @@ export function parsedView(snapshot, legendRows) {
  *
  * Grafted onto the stored rows rather than replacing them, because those carry
  * the id a plan entry links to and the location the alias register resolved.
- * The join is `sheet_row` within a week, which is the same identity the row key
- * is built on and has the same weakness: a row inserted mid-sheet between two
- * reads shifts the ones below it. That is what the stored column is for once it
- * exists, and why this fills a gap rather than overruling one.
+ * The join is `sheet_row` within a week, which is a position in one file — so it
+ * is only offered the rows that came out of *this* snapshot. Across two reads a
+ * row inserted mid-sheet shifts every row below it, and the graft would then
+ * hand an activity another activity's names and another activity's place. It
+ * fills a gap rather than overruling one, which is what the stored column is for
+ * once a project has it.
  */
 export async function lookaheadWithResources(fromISO, toISO) {
   /* The snapshot *list* is read without its grids — that is what `newestPerKey`
@@ -413,9 +434,10 @@ export async function lookaheadWithResources(fromISO, toISO) {
 
   const view = parsedView(snapshot, legendRows);
   const rows = graftLocations(
-    graftResources(laRows, view),
+    graftResources(laRows, view, snapshot.id),
     view,
-    locationRegister(locations, locAliases)
+    locationRegister(locations, locAliases),
+    snapshot.id
   );
   /* Narrowed to the window that was asked for, because the snapshot carries the
      whole four-to-six weeks and a caller asking about one week must not be told
@@ -439,7 +461,7 @@ export async function lookaheadWithResources(fromISO, toISO) {
  * the server does, so a place resolves identically whether it arrived through
  * the ingest or through here.
  */
-export function graftLocations(laRows, view, register) {
+export function graftLocations(laRows, view, register, snapshotId) {
   const column = locationColumnOf(view);
   if (column < 0) return laRows;
 
@@ -451,6 +473,7 @@ export function graftLocations(laRows, view, register) {
   if (!bySheetRow.size) return laRows;
 
   return (laRows || []).map((row) => {
+    if (!fromSnapshot(row, snapshotId)) return row;
     const written = bySheetRow.get(row.sheet_row);
     if (!written) return row;
     const raw = row.raw_location || written;
@@ -460,8 +483,24 @@ export function graftLocations(laRows, view, register) {
   });
 }
 
+/**
+ * Is this stored row one of the rows the grid in hand was read from?
+ *
+ * Both grafts join on `sheet_row`, which is a position in *one* file: rows 42 of
+ * two different reads are two different activities the moment anybody inserts a
+ * line. A week the newest snapshot no longer covers is served by an older read,
+ * so its rows sit beside the newest ones in the same array — and joining the
+ * newest grid onto them by position is how somebody ends up with another
+ * activity's names and another activity's location. With no snapshot named the
+ * guard stands down, because a caller that has not said which file the grid came
+ * from is asking for the old behaviour.
+ */
+function fromSnapshot(row, snapshotId) {
+  return !snapshotId || !row.snapshot_id || row.snapshot_id === snapshotId;
+}
+
 /** Fill in each row's `resources` from the grid, where the sheet still says so. */
-export function graftResources(laRows, view) {
+export function graftResources(laRows, view, snapshotId) {
   const dayByCol = new Map((view?.days || []).map((d) => [d.col, d]));
 
   const bySheetRow = new Map();
@@ -479,6 +518,7 @@ export function graftResources(laRows, view) {
 
   const mondayOf = (iso) => toISO(weekStart(isoToMs(iso)));
   return (laRows || []).map((row) => {
+    if (!fromSnapshot(row, snapshotId)) return row;
     const perDay = bySheetRow.get(row.sheet_row);
     if (!perDay) return row;
     // A row belongs to one week; a name on a day in another week belongs to that

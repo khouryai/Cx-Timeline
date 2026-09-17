@@ -590,6 +590,42 @@ check('while the word "Resource" stays where it was typed',
 check('an activity with no Resource row simply has none',
   withWho.activities.find((a) => a.meta[0] === 'Cable pull').resource === null);
 
+/* The case that got it wrong, and the reason the rule is "directly above".
+   The workbook hides an activity — a finished one, usually — and `parseSheet()`
+   drops it long before this sees the grid, so the only trace left is the gap in
+   the row numbering. The names underneath used to attach to whichever activity
+   had been pushed last, which is the one *above* the row somebody hid: nothing
+   on the calendar showed it, because the names are drawn against the row they
+   were typed on, but the derived plan put a person onto an activity that is not
+   in the 4WLA at all. */
+const gapped = sheet([
+  { label: 'IXL Regression', location: 'TPSS 12', days: [[0, 'FFFF00']] },
+  { label: 'Sim rack relocation', location: 'Yard 3', days: [[1, 'FFFF00']], resource: [[1, 'Viktor']] },
+]);
+gapped.rows = gapped.rows.filter((r) => r.row !== 12);   // somebody hid the activity
+const orphan = cls.readGrid(gapped, { anchorISO: '2026-09-09' });
+
+check('a Resource row whose own activity was hidden attaches to nobody',
+  orphan.activities.every((a) => a.resource === null),
+  orphan.activities.map((a) => `${a.meta[0]}:${a.resource ? 'named' : '—'}`).join(' | '));
+/* Dropped rather than drawn: it is a label row whatever it is attached to, and
+   pushed as an activity it would be the word "Resource" at no location, counted
+   as scope by every report. */
+check('and is not left on the calendar as an activity of its own',
+  !orphan.activities.some((a) => cls.isResourceLabel(a.meta[0])),
+  orphan.activities.map((a) => a.meta[0]).join(' | '));
+const orphanRows = await cls.rowsFrom(orphan, { snapshotId: 'snap-gap', locate });
+check('so no row carries somebody else\u2019s names',
+  orphanRows.every((r) => !Object.keys(r.resources || {}).length),
+  JSON.stringify(orphanRows.map((r) => r.resources)));
+
+// The positive control for the same rule, one row apart on the sheet.
+const joined = sheet([
+  { label: 'Sim rack relocation', location: 'Yard 3', days: [[1, 'FFFF00']], resource: [[1, 'Viktor']] },
+]);
+check('a Resource row directly below its activity still attaches',
+  cls.readGrid(joined, { anchorISO: '2026-09-09' }).activities[0].resource?.names?.[0]?.names?.[0] === 'Viktor');
+
 // Strict on purpose: a rule that matched anything containing the word would
 // swallow an activity called "Resource mobilisation".
 check('"Resource" and "Resources" are the row; nothing else is',

@@ -424,19 +424,40 @@ export function readGrid(grid, { anchorISO = null } = {}) {
        It belongs to the activity above it rather than being one of its own: it
        carries no work of its own, it inherits where and when from the line it
        sits under, and drawn as a separate activity it would be a hundred and
-       forty rows of the word "Resource". Its day cells are the names. */
-    const previous = activities[activities.length - 1];
-    if (!heading && previous && !previous.heading && !previous.absence && meta.some(isResourceLabel)) {
-      previous.resource = {
-        row: row.row,
-        /* Where and when come from the activity above — that is what the
-           workbook means by leaving them blank on this row. Anything typed
-           here wins, so a resource working different hours can say so. */
-        meta: meta.map((value, i) => value || previous.meta[i] || ''),
-        marks,
-        names: marks.filter((m) => m.value).map((m) => ({ col: m.col, names: resourceNames(m.value) })),
-      };
-      previous.highlighted = marksOf(previous).some((m) => m.hex && m.role === 'shift');
+       forty rows of the word "Resource". Its day cells are the names.
+
+       **Directly above means the row directly above, on the sheet.** This used
+       to take whichever activity happened to have been pushed last, however far
+       up the sheet it was — so anything the parser stepped over on the way down
+       silently re-parented the names. A hidden row is the case that bit: the
+       workbook hides an activity, `parseSheet()` drops it before this ever sees
+       it, and the Resource row underneath attached itself to the activity above
+       the hidden one. Nothing on the calendar showed it, because the names were
+       drawn against the row they were typed on — but the derived plan booked
+       somebody onto an activity that is not in the 4WLA at all, which is exactly
+       how it was found. `above.row === row.row - 1` is the whole test: a gap in
+       the numbering means *something* was between them — hidden, skipped as
+       spacing, or a band — and there is no honest way to say whose names these
+       are.
+
+       An orphan is dropped rather than drawn. It is a label row whatever it is
+       attached to: pushed as an activity it would be the word "Resource" at no
+       location, counted as scope by every report, which is worse than the wrong
+       parent it replaces. */
+    if (!heading && meta.some(isResourceLabel)) {
+      const above = activities[activities.length - 1];
+      if (above && above.row === row.row - 1 && !above.heading && !above.absence) {
+        above.resource = {
+          row: row.row,
+          /* Where and when come from the activity above — that is what the
+             workbook means by leaving them blank on this row. Anything typed
+             here wins, so a resource working different hours can say so. */
+          meta: meta.map((value, i) => value || above.meta[i] || ''),
+          marks,
+          names: marks.filter((m) => m.value).map((m) => ({ col: m.col, names: resourceNames(m.value) })),
+        };
+        above.highlighted = marksOf(above).some((m) => m.hex && m.role === 'shift');
+      }
       continue;
     }
 

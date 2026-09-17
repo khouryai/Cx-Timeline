@@ -356,6 +356,17 @@ function fakeSdk() {
               cells: [2, 3].map((c) => ({ col: c, ref: 'X20', value: '', hex: 'FFFF00' })) },
           ],
         },
+      }, {
+        /* Last week's read of the same file, kept the way every read is kept.
+           It carries no grid because nothing draws it — `latestSnapshot()` takes
+           the first, and the list is what ranks them. It exists so there is an
+           *older* answer about this week for the newest one to overrule. */
+        id: 'snap0',
+        taken_at: new Date(Date.now() - 7 * 86400000).toISOString(),
+        file_mtime: new Date(Date.now() - 7 * 86400000).toISOString(),
+        file_hash: 'stub-hash-older',
+        sheet_name: '4WLA',
+        grid: { merges: [], hiddenColumns: [], unknown: [], rows: [] },
       }];
     })(),
     rc_legend: [
@@ -476,6 +487,38 @@ function fakeSdk() {
         // Tuesday, so it cannot collide with the Monday the grid's Resource row
         // names three people on.
         return { [new Date(monday + 86400000).toISOString().slice(0, 10)]: 'Victor' };
+      })(),
+    }, {
+      /* **An activity somebody deleted from the workbook.**
+         It was read last week and never again: `snap0` carries it, `snap1` covers
+         the same week and does not. Every read is kept, so it is still in the
+         table — and taking the newest copy of each row *key* kept it for ever,
+         because no newer row shares the key of a row that no longer exists. The
+         symptom was the one nobody can argue with: a person in the week plan,
+         against an activity that is not in the 4WLA. The newest read of a week is
+         that week's answer, whole. */
+      id: 'lar4',
+      snapshot_id: 'snap0',
+      week_start: (() => {
+        const now = new Date();
+        const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+        return new Date(t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000).toISOString().slice(0, 10);
+      })(),
+      sheet_row: 30,
+      row_key: 'k4-withdrawn',
+      location_id: 'l2',
+      raw_location: 'Yard 3',
+      raw_label: 'Sim Rack Relocation',
+      cells: {},
+      bart_marks: {},
+      resources: (() => {
+        const now = new Date();
+        const t = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+        const monday = t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000;
+        // Every weekday of the week, so no day the suite can run on misses it.
+        const out = {};
+        for (let i = 0; i < 5; i++) out[new Date(monday + i * 86400000).toISOString().slice(0, 10)] = 'Priya';
+        return out;
       })(),
     }],
     rc_person_alias: [],
@@ -1428,6 +1471,14 @@ async function main() {
     priyaText.replace(/\n/g, ' | ').slice(0, 90));
   check('and it says the workbook said so rather than a person',
     /From 4WLA/.test(priyaText));
+  /* And the other half of that: an activity the workbook no longer carries is
+     not still somebody's plan. `lar4` names Priya every weekday of this week and
+     comes from the read *before* the current one, which covers the same week and
+     has no such row. Kept per row key it survived for ever, because nothing
+     newer shares the key of a row that was deleted. */
+  check('an activity deleted from the workbook stops being anybody\u2019s plan',
+    !/Sim Rack Relocation/.test(await page.locator('#rc-frame').innerText()),
+    priyaText.replace(/\n/g, ' | ').slice(0, 90));
   check('so there is nothing left to press',
     (await priyaRow.locator('button').count()) === 0);
 

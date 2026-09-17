@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 56   Built: 2026-09-16T00:22:02.186Z
+ * Modules: 56   Built: 2026-09-17T00:38:06.325Z
  */
 (function () {
   'use strict';
@@ -28299,19 +28299,40 @@ __mods["core/lookahead.js"] = function (__x, __req) {
          It belongs to the activity above it rather than being one of its own: it
          carries no work of its own, it inherits where and when from the line it
          sits under, and drawn as a separate activity it would be a hundred and
-         forty rows of the word "Resource". Its day cells are the names. */
-      const previous = activities[activities.length - 1];
-      if (!heading && previous && !previous.heading && !previous.absence && meta.some(isResourceLabel)) {
-        previous.resource = {
-          row: row.row,
-          /* Where and when come from the activity above — that is what the
-             workbook means by leaving them blank on this row. Anything typed
-             here wins, so a resource working different hours can say so. */
-          meta: meta.map((value, i) => value || previous.meta[i] || ''),
-          marks,
-          names: marks.filter((m) => m.value).map((m) => ({ col: m.col, names: resourceNames(m.value) })),
-        };
-        previous.highlighted = marksOf(previous).some((m) => m.hex && m.role === 'shift');
+         forty rows of the word "Resource". Its day cells are the names.
+
+         **Directly above means the row directly above, on the sheet.** This used
+         to take whichever activity happened to have been pushed last, however far
+         up the sheet it was — so anything the parser stepped over on the way down
+         silently re-parented the names. A hidden row is the case that bit: the
+         workbook hides an activity, `parseSheet()` drops it before this ever sees
+         it, and the Resource row underneath attached itself to the activity above
+         the hidden one. Nothing on the calendar showed it, because the names were
+         drawn against the row they were typed on — but the derived plan booked
+         somebody onto an activity that is not in the 4WLA at all, which is exactly
+         how it was found. `above.row === row.row - 1` is the whole test: a gap in
+         the numbering means *something* was between them — hidden, skipped as
+         spacing, or a band — and there is no honest way to say whose names these
+         are.
+
+         An orphan is dropped rather than drawn. It is a label row whatever it is
+         attached to: pushed as an activity it would be the word "Resource" at no
+         location, counted as scope by every report, which is worse than the wrong
+         parent it replaces. */
+      if (!heading && meta.some(isResourceLabel)) {
+        const above = activities[activities.length - 1];
+        if (above && above.row === row.row - 1 && !above.heading && !above.absence) {
+          above.resource = {
+            row: row.row,
+            /* Where and when come from the activity above — that is what the
+               workbook means by leaving them blank on this row. Anything typed
+               here wins, so a resource working different hours can say so. */
+            meta: meta.map((value, i) => value || above.meta[i] || ''),
+            marks,
+            names: marks.filter((m) => m.value).map((m) => ({ col: m.col, names: resourceNames(m.value) })),
+          };
+          above.highlighted = marksOf(above).some((m) => m.hex && m.role === 'shift');
+        }
         continue;
       }
 
@@ -29664,22 +29685,41 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /**
-   * One row per (week, row key), from the newest snapshot that carries it.
+   * The newest read of each week, whole — one row per (week, row key).
    *
    * `rc_lookahead_rows` keeps every read, so asking for a span of weeks returns
-   * the same activity once per snapshot — and drawn straight out, that is the same
+   * the same activity once per snapshot, and drawn straight out that is the same
    * person at the same place four times over. `rank` maps a snapshot id to its
    * position in `listSnapshots()` output, which is newest first, so the lowest
    * rank wins. A row whose snapshot is not in the map is treated as oldest rather
    * than dropped: it is still a read that happened.
+   *
+   * **The unit is the week, not the row.** Taking the newest copy of each row key
+   * independently keeps a row that only an *older* snapshot carries — so an
+   * activity somebody deleted from the workbook went on being somebody's plan for
+   * ever, and the symptom was the one that is impossible to argue with: a person
+   * booked in the week plan onto an activity that is not in the 4WLA. A snapshot
+   * is a complete statement of the weeks it covers, so the newest one to mention a
+   * week is that week's answer and a row missing from it was removed. Older reads
+   * of the same week are still on the record; they are simply not the plan.
+   * A week the newest file no longer reaches keeps the newest read that did cover
+   * it, which is what makes a rolled-forward window show last month at all.
    */
   function newestPerKey(rows, rank) {
-    const best = new Map();
     const at = (row) => (rank.has(row.snapshot_id) ? rank.get(row.snapshot_id) : Number.MAX_SAFE_INTEGER);
+
+    // The newest read that says anything about each week.
+    const newestFor = new Map();
     for (const row of rows || []) {
+      const held = newestFor.get(row.week_start);
+      if (held === undefined || at(row) < held) newestFor.set(row.week_start, at(row));
+    }
+
+    const best = new Map();
+    for (const row of rows || []) {
+      if (at(row) !== newestFor.get(row.week_start)) continue;
       const key = `${row.week_start}|${row.row_key}`;
-      const held = best.get(key);
-      if (!held || at(row) < at(held)) best.set(key, row);
+      if (!best.has(key)) best.set(key, row);
     }
     return [...best.values()];
   }
@@ -29746,10 +29786,12 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    *
    * Grafted onto the stored rows rather than replacing them, because those carry
    * the id a plan entry links to and the location the alias register resolved.
-   * The join is `sheet_row` within a week, which is the same identity the row key
-   * is built on and has the same weakness: a row inserted mid-sheet between two
-   * reads shifts the ones below it. That is what the stored column is for once it
-   * exists, and why this fills a gap rather than overruling one.
+   * The join is `sheet_row` within a week, which is a position in one file — so it
+   * is only offered the rows that came out of *this* snapshot. Across two reads a
+   * row inserted mid-sheet shifts every row below it, and the graft would then
+   * hand an activity another activity's names and another activity's place. It
+   * fills a gap rather than overruling one, which is what the stored column is for
+   * once a project has it.
    */
   async function lookaheadWithResources(fromISO, toISO) {
     /* The snapshot *list* is read without its grids — that is what `newestPerKey`
@@ -29770,9 +29812,10 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
 
     const view = parsedView(snapshot, legendRows);
     const rows = graftLocations(
-      graftResources(laRows, view),
+      graftResources(laRows, view, snapshot.id),
       view,
-      locationRegister(locations, locAliases)
+      locationRegister(locations, locAliases),
+      snapshot.id
     );
     /* Narrowed to the window that was asked for, because the snapshot carries the
        whole four-to-six weeks and a caller asking about one week must not be told
@@ -29796,7 +29839,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * the server does, so a place resolves identically whether it arrived through
    * the ingest or through here.
    */
-  function graftLocations(laRows, view, register) {
+  function graftLocations(laRows, view, register, snapshotId) {
     const column = locationColumnOf(view);
     if (column < 0) return laRows;
 
@@ -29808,6 +29851,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
     if (!bySheetRow.size) return laRows;
 
     return (laRows || []).map((row) => {
+      if (!fromSnapshot(row, snapshotId)) return row;
       const written = bySheetRow.get(row.sheet_row);
       if (!written) return row;
       const raw = row.raw_location || written;
@@ -29817,8 +29861,24 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
     });
   }
 
+  /**
+   * Is this stored row one of the rows the grid in hand was read from?
+   *
+   * Both grafts join on `sheet_row`, which is a position in *one* file: rows 42 of
+   * two different reads are two different activities the moment anybody inserts a
+   * line. A week the newest snapshot no longer covers is served by an older read,
+   * so its rows sit beside the newest ones in the same array — and joining the
+   * newest grid onto them by position is how somebody ends up with another
+   * activity's names and another activity's location. With no snapshot named the
+   * guard stands down, because a caller that has not said which file the grid came
+   * from is asking for the old behaviour.
+   */
+  function fromSnapshot(row, snapshotId) {
+    return !snapshotId || !row.snapshot_id || row.snapshot_id === snapshotId;
+  }
+
   /** Fill in each row's `resources` from the grid, where the sheet still says so. */
-  function graftResources(laRows, view) {
+  function graftResources(laRows, view, snapshotId) {
     const dayByCol = new Map((view?.days || []).map((d) => [d.col, d]));
 
     const bySheetRow = new Map();
@@ -29836,6 +29896,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
 
     const mondayOf = (iso) => toISO(weekStart(isoToMs(iso)));
     return (laRows || []).map((row) => {
+      if (!fromSnapshot(row, snapshotId)) return row;
       const perDay = bySheetRow.get(row.sheet_row);
       if (!perDay) return row;
       // A row belongs to one week; a name on a day in another week belongs to that
