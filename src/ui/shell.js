@@ -114,7 +114,7 @@ function buildSidenav() {
   // granted, so a viewer could never load it. What they *would* see is
   // `makeStarterProject()` — the built-in sample, with plausible-looking
   // releases and campaigns — and mistaking fabricated demo content for a real
-  // programme is its own small problem.
+  // project is its own small problem.
   if (rcClient.isConfigured() && !rcClient.isViewer()) {
     dom.sidenav.appendChild(workspaceSwitch());
   }
@@ -149,7 +149,7 @@ function buildSidenav() {
   dom.sidenav.appendChild(
     el('div', { class: 'sidenav-footer' }, [
       cloud.isConfigured() ? accountBlock() : null,
-      el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.programme || doc.client || fallbackTag() }),
+      el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.project || doc.client || fallbackTag() }),
       el('button', {
         class: 'cx-btn mini',
         html: icon('maximize', { size: 12 }) + '<span>Present</span>',
@@ -183,7 +183,7 @@ function workspaceSwitch() {
   ]);
 }
 
-/** What to call a project that has not been given a client or programme. */
+/** What to call a project that has not been given a client or project. */
 function fallbackTag() {
   if (!cloud.isConfigured()) return 'Local project';
   return { owner: 'You own this', editor: 'Shared with you', viewer: 'View only' }[cloud.getRole()] || 'Untitled';
@@ -210,7 +210,7 @@ function updateNav() {
   }
 
   const tag = dom.sidenav.querySelector('[data-project-tag]');
-  if (tag) tag.textContent = doc.programme || doc.client || fallbackTag();
+  if (tag) tag.textContent = doc.project || doc.client || fallbackTag();
 }
 
 /* ── Toolbar ───────────────────────────────────────────────────────────── */
@@ -383,7 +383,7 @@ function refreshToolbar() {
 
   dom.title.querySelector('.tt-name').textContent = doc.name;
   dom.title.querySelector('.tt-meta').textContent =
-    [doc.client, doc.programme].filter(Boolean).join(' · ') || fallbackTag();
+    [doc.client, doc.project].filter(Boolean).join(' · ') || fallbackTag();
 
   dom.undoBtn.disabled = !history.canUndo;
   dom.redoBtn.disabled = !history.canRedo;

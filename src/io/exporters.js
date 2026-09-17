@@ -279,7 +279,7 @@ export function exportSvg(opts = {}) {
   const scene = makeScene(opts);
   const svg = sceneToSvg(scene, {
     title: doc.name,
-    description: [doc.client, doc.programme, doc.description].filter(Boolean).join(' — '),
+    description: [doc.client, doc.project, doc.description].filter(Boolean).join(' — '),
   });
   return saveFile(`${stem(doc)}.svg`, svg, 'image/svg+xml;charset=utf-8', 'SVG drawing');
 }
@@ -313,7 +313,7 @@ export const exportJpeg = (opts) => exportRaster({ ...opts, type: 'image/jpeg', 
    ═══════════════════════════════════════════════════════════════════════ */
 
 /**
- * High-quality vector PDF, landscape, tiled across pages when the programme
+ * High-quality vector PDF, landscape, tiled across pages when the project
  * is wider than one sheet.
  */
 export function exportPdf(opts = {}) {
@@ -325,7 +325,7 @@ export function exportPdf(opts = {}) {
       pageSize: opts.pageSize || 'a3',
       multiPage: opts.multiPage !== false,
       title: doc.name,
-      subtitle: [doc.client, doc.programme].filter(Boolean).join('  ·  '),
+      subtitle: [doc.client, doc.project].filter(Boolean).join('  ·  '),
       author: doc.client || 'CX Timeline',
     });
     return saveFile(`${stem(doc)}.pdf`, blob, 'application/pdf', 'PDF');

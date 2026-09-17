@@ -463,7 +463,7 @@ export async function newProject() {
   });
   if (!ok) return;
   await makeBackup('before-new');
-  store.replaceDoc(makeProject('Untitled Programme'), 'new');
+  store.replaceDoc(makeProject('Untitled Project'), 'new');
   fitAll();
   toast({ tone: 'good', title: 'New project created' });
 }
@@ -483,7 +483,7 @@ export async function saveSnapshot() {
  * The picker must be opened from a click, so this is only ever reachable from a
  * button. When the folder already holds exactly one plan it opens straight into
  * it; otherwise the user chooses, because guessing between a colleague's plans
- * is how you end up editing the wrong programme.
+ * is how you end up editing the wrong project.
  */
 export async function connectFolder() {
   if (!filestore.isSupported()) {
@@ -556,12 +556,12 @@ export async function openFolderPlanByName(name) {
 /** Write the plan currently open into the connected folder for the first time. */
 export async function createFolderPlanFromCurrent() {
   const doc = store.getDoc();
-  const suggested = `${(doc.name || 'programme').replace(/[^a-z0-9 \-_]+/gi, '').trim() || 'programme'}.json`;
+  const suggested = `${(doc.name || 'project').replace(/[^a-z0-9 \-_]+/gi, '').trim() || 'project'}.json`;
   const name = await promptDialog({
     title: 'Put this plan in the folder',
     label: 'File name',
     value: suggested,
-    placeholder: 'programme.json',
+    placeholder: 'project.json',
   });
   if (!name) return false;
 

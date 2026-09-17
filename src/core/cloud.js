@@ -255,7 +255,7 @@ export async function createProject(doc) {
     .from('projects')
     .insert({
       owner_id: user.id,
-      name: doc?.name || 'Untitled Programme',
+      name: doc?.name || 'Untitled Project',
       doc,
       object_count: (doc?.objects || []).length,
     })

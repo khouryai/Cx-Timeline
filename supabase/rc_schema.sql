@@ -457,7 +457,7 @@ create table if not exists public.rc_actuals (
                    -- Performance signals: these count toward an individual's
                    -- efficiency.
                    'completed', 'partial', 'carried',
-                   -- Neutral signals: programme health, never individual
+                   -- Neutral signals: project health, never individual
                    -- performance. Somebody blocked by BART did not underperform.
                    'blocked', 'reassigned',
                    -- Not a performance signal at all.
@@ -1295,7 +1295,7 @@ create or replace view public.rc_effort with (security_invoker = true) as
          l.name        as location_name,
          a.blocked_party_id,
          a.carry_chain_id,
-         -- Which family a status belongs to. Performance and programme health
+         -- Which family a status belongs to. Performance and project health
          -- are never averaged together: one measures the team, the other
          -- measures what was done to it.
          case
@@ -1341,6 +1341,170 @@ create or replace view public.rc_lookahead_snapshot_meta with (security_invoker 
          jsonb_array_length(coalesce(s.grid -> 'rows', '[]'::jsonb))    as row_count,
          jsonb_array_length(coalesce(s.grid -> 'unknown', '[]'::jsonb)) as unmapped_count
     from public.rc_lookahead_snapshots s;
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- Deleting a reference row, where deleting it is honest
+--
+-- Retiring is the right answer nearly always: it drops something out of every
+-- picker and keeps every outcome ever recorded against it. But "nearly always"
+-- was being enforced by not offering the other option at all, and the case it
+-- left nowhere to go is the commonest one there is — a person added twice, a
+-- location typed wrong, a colour mapped by mistake. A register that can only
+-- ever grow fills up with rows nobody meant, and retiring them puts them in a
+-- list of things that *used* to be true, which is a different and worse lie.
+--
+-- So: delete, and refuse the moment anything points at the row.
+--
+-- The refusal is the whole design. `rc_plan_entries` and `rc_actuals` cascade
+-- on `person_id`, which means an unguarded delete of somebody with a year of
+-- outcomes behind them would take the evidence with it, silently, at the
+-- database — exactly the ending this schema is built to make impossible. So
+-- each of these counts what points at the row first and raises with the number,
+-- naming Retire as the answer. What is left deletable is a row nothing has been
+-- recorded against yet, which is precisely the row somebody wants gone.
+--
+-- Functions rather than table writes for the reason everything else here is:
+-- a DELETE that RLS refuses matches nothing and reports success, so a caller
+-- would be told it worked.
+-- ══════════════════════════════════════════════════════════════════════════
+
+/* Somebody on the roster nothing has been recorded against.
+   Their aliases and any leave booked for them go with them — those are about
+   the person and mean nothing without them — and a row in a plan, an outcome,
+   a blocker or an invitation stops the delete instead. */
+create or replace function public.rc_delete_person(p_person uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare held bigint;
+declare was  text;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may delete somebody' using errcode = '42501';
+  end if;
+
+  select role into was from public.rc_people where id = p_person;
+  if was is null then
+    raise exception 'no such person' using errcode = 'P0002';
+  end if;
+
+  if was = 'admin'
+     and (select count(*) from public.rc_people where role = 'admin' and active) <= 1 then
+    raise exception 'that is the only administrator left' using errcode = '23514';
+  end if;
+
+  select (select count(*) from public.rc_plan_entries where person_id = p_person)
+       + (select count(*) from public.rc_actuals      where person_id = p_person)
+       + (select count(*) from public.rc_blockers     where person_id = p_person)
+       + (select count(*) from public.rc_blocker_updates where owner_id = p_person)
+       + (select count(*) from public.rc_invitations  where person_id = p_person)
+    into held;
+
+  if held > 0 then
+    raise exception
+      'there are % record(s) against this person — retire them instead, which keeps every one of them',
+      held using errcode = '23503';
+  end if;
+
+  delete from public.rc_people where id = p_person;
+  if not found then
+    raise exception 'nothing was deleted' using errcode = 'P0002';
+  end if;
+end;
+$$;
+
+/* A place nothing has been recorded at. Its spellings go with it. */
+create or replace function public.rc_delete_location(p_location uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare held bigint;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may delete a location' using errcode = '42501';
+  end if;
+
+  select (select count(*) from public.rc_plan_entries   where location_id = p_location)
+       + (select count(*) from public.rc_actuals        where location_id = p_location)
+       + (select count(*) from public.rc_lookahead_rows where location_id = p_location)
+       + (select count(*) from public.rc_change_events  where location_id = p_location)
+       + (select count(*) from public.rc_sars           where location_id = p_location)
+       + (select count(*) from public.rc_blockers       where location_id = p_location)
+    into held;
+
+  if held > 0 then
+    raise exception
+      'there are % record(s) at this location — retire it instead, which keeps every one of them',
+      held using errcode = '23503';
+  end if;
+
+  delete from public.rc_locations where id = p_location;
+  if not found then
+    raise exception 'nothing was deleted' using errcode = 'P0002';
+  end if;
+end;
+$$;
+
+/* A category nothing has been grouped under.
+   The seeded ones are ordinary rows here: a deployment that does not do
+   off-project work has no reason to keep `Other project` in every picker. */
+create or replace function public.rc_delete_category(p_category uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare held bigint;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may delete a category' using errcode = '42501';
+  end if;
+
+  select (select count(*) from public.rc_plan_entries where category_id = p_category)
+       + (select count(*) from public.rc_actuals      where category_id = p_category)
+    into held;
+
+  if held > 0 then
+    raise exception
+      'there are % record(s) in this category — retire it instead, which keeps every one of them',
+      held using errcode = '23503';
+  end if;
+
+  delete from public.rc_categories where id = p_category;
+  if not found then
+    raise exception 'nothing was deleted' using errcode = 'P0002';
+  end if;
+end;
+$$;
+
+/* A colour mapped by mistake.
+   Nothing points at a legend row — a snapshot stores the colours it saw, and
+   the meaning is re-applied at paint time — so there is nothing to refuse over.
+   What deleting *does* mean is that the colour reverts to unmapped and goes
+   back into the "not in the legend" list, which is where a wrong answer belongs.
+   Retiring a row and deleting it differ on exactly one thing: a retired row
+   still shadows an older one that is in force, and a deleted one does not. */
+create or replace function public.rc_delete_legend(p_entry uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may delete a legend entry' using errcode = '42501';
+  end if;
+
+  delete from public.rc_legend where id = p_entry;
+  if not found then
+    raise exception 'nothing was deleted' using errcode = 'P0002';
+  end if;
+end;
+$$;
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Writes that must be able to fail loudly
@@ -1543,6 +1707,10 @@ revoke all on function public.rc_list_invitations()                     from pub
 revoke all on function public.rc_link_account(uuid, text)               from public, anon;
 revoke all on function public.rc_set_role(uuid, text)                   from public, anon;
 revoke all on function public.rc_resolve_location(text)                 from public, anon;
+revoke all on function public.rc_delete_person(uuid)                    from public, anon;
+revoke all on function public.rc_delete_location(uuid)                  from public, anon;
+revoke all on function public.rc_delete_category(uuid)                  from public, anon;
+revoke all on function public.rc_delete_legend(uuid)                    from public, anon;
 revoke all on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) from public, anon;
 revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid) from public, anon;
 
@@ -1556,6 +1724,10 @@ grant execute on function public.rc_list_invitations()                  to authe
 grant execute on function public.rc_link_account(uuid, text)            to authenticated;
 grant execute on function public.rc_set_role(uuid, text)                to authenticated;
 grant execute on function public.rc_resolve_location(text)              to authenticated;
+grant execute on function public.rc_delete_person(uuid)                 to authenticated;
+grant execute on function public.rc_delete_location(uuid)               to authenticated;
+grant execute on function public.rc_delete_category(uuid)               to authenticated;
+grant execute on function public.rc_delete_legend(uuid)                 to authenticated;
 grant execute on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) to authenticated;
 grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid) to authenticated;
 

@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 56   Built: 2026-09-17T00:38:06.325Z
+ * Modules: 56   Built: 2026-09-17T16:18:43.296Z
  */
 (function () {
   'use strict';
@@ -1196,7 +1196,7 @@ __mods["core/model.js"] = function (__x, __req) {
 
 
   /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
-  const SCHEMA_VERSION = 4;
+  const SCHEMA_VERSION = 5;
 
   /* ══════════════════════════════════════════════════════════════════════════
      Object type registry
@@ -1696,7 +1696,7 @@ __mods["core/model.js"] = function (__x, __req) {
   /* ══════════════════════════════════════════════════════════════════════════
      The P6 register
 
-     A Primavera schedule is the contract programme; this plan is the
+     A Primavera schedule is the contract project; this plan is the
      commissioning narrative. They are different documents with different
      owners, so P6 data is held apart from the objects rather than merged into
      them: `doc.p6` is a register keyed by activity ID, and an object points at
@@ -1704,7 +1704,7 @@ __mods["core/model.js"] = function (__x, __req) {
 
      Each activity carries two date sets, because that is how the reviews work:
 
-       baseline   the target programme. Imported once, replaced only by another
+       baseline   the target project. Imported once, replaced only by another
                   baseline import.
        progress   where it stands now. Re-imported monthly, and what an object
                   is compared against.
@@ -2137,7 +2137,7 @@ __mods["core/model.js"] = function (__x, __req) {
   }
 
   /** A brand-new, empty-but-usable project. */
-  function makeProject(name = 'Untitled Programme') {
+  function makeProject(name = 'Untitled Project') {
     const start = startOfMonth(todayMs());
     return {
       schema: SCHEMA_VERSION,
@@ -2145,7 +2145,7 @@ __mods["core/model.js"] = function (__x, __req) {
       name,
       description: '',
       client: '',
-      programme: '',
+      project: '',
       created: Date.now(),
       modified: Date.now(),
       settings: defaultSettings(),
@@ -2175,7 +2175,7 @@ __mods["core/model.js"] = function (__x, __req) {
   function makeStarterProject() {
     const doc = makeProject('Line 1 — Signalling Commissioning');
     doc.client = 'Metro Authority';
-    doc.programme = 'CBTC Deployment · Phase 2';
+    doc.project = 'CBTC Deployment · Phase 2';
     doc.description = 'Software release, testing and commissioning plan for the Phase 2 signalling deployment.';
 
     const laneSpec = [
@@ -2215,7 +2215,7 @@ __mods["core/model.js"] = function (__x, __req) {
       // sample plan should not open with broken constraints.
       makeObject({ type: 'campaign', lane: lane(8), start: D(90), end: D(130), title: 'Dynamic Testing Campaign 1', status: 'planned', progress: 0, owner: 'J. Moreau', subsystem: 'ats', area: 'Depot → Station 6', data: { testPackage: 'TP-DYN-01' } }),
       makeObject({ type: 'campaign', lane: lane(8), start: D(136), end: D(176), title: 'Site Acceptance Testing', status: 'planned', progress: 0, owner: 'J. Moreau', area: 'Full alignment', data: { testPackage: 'TP-SAT-01' } }),
-      makeObject({ type: 'milestone', lane: lane(8), start: D(180), title: 'Provisional Acceptance', status: 'planned', owner: 'Programme' }),
+      makeObject({ type: 'milestone', lane: lane(8), start: D(180), title: 'Provisional Acceptance', status: 'planned', owner: 'Project' }),
       makeObject({ type: 'freeze', lane: lane(0), start: D(88), end: D(102), title: 'Code Freeze', status: 'planned' }),
       makeObject({ type: 'customer', lane: lane(9), start: D(140), end: D(152), title: 'Customer Witness Testing', status: 'planned', owner: 'Metro Authority' }),
       makeObject({ type: 'outage', lane: lane(9), start: D(72), end: D(75), title: 'Traction Power Outage', status: 'planned', area: 'Sector 3' }),
@@ -2289,6 +2289,20 @@ __mods["core/model.js"] = function (__x, __req) {
       doc.schema = 4;
       return doc;
     },
+
+    // v4 → v5: the field beside `client` is called the project, not the
+    // programme. A word, but a stored one — the old key has to be carried across
+    // or every plan written before this loses what was typed into it. Kept rather
+    // than dropped where both somehow exist: a value somebody typed is never the
+    // thing a rename throws away.
+    (doc) => {
+      if (doc.project === undefined || doc.project === '') {
+        if (typeof doc.programme === 'string') doc.project = doc.programme;
+      }
+      delete doc.programme;
+      doc.schema = 5;
+      return doc;
+    },
   ];
 
   /**
@@ -2305,13 +2319,13 @@ __mods["core/model.js"] = function (__x, __req) {
       if (step) doc = step(doc);
     }
 
-    const base = makeProject(doc.name || 'Untitled Programme');
+    const base = makeProject(doc.name || 'Untitled Project');
     doc.schema = SCHEMA_VERSION;
     doc.id = doc.id || base.id;
     doc.name = doc.name || base.name;
     doc.description = doc.description ?? '';
     doc.client = doc.client ?? '';
-    doc.programme = doc.programme ?? '';
+    doc.project = doc.project ?? '';
     doc.created = doc.created || Date.now();
     doc.modified = doc.modified || Date.now();
     doc.settings = { ...defaultSettings(), ...(doc.settings || {}) };
@@ -2942,7 +2956,7 @@ __mods["core/cloud.js"] = function (__x, __req) {
       .from('projects')
       .insert({
         owner_id: user.id,
-        name: doc?.name || 'Untitled Programme',
+        name: doc?.name || 'Untitled Project',
         doc,
         object_count: (doc?.objects || []).length,
       })
@@ -5562,7 +5576,7 @@ __mods["core/history.js"] = function (__x, __req) {
   const COLLECTIONS = ['lanes', 'objects', 'links', 'baselines', 'groups', 'attachments'];
 
   /** Top-level fields diffed by value. */
-  const FIELDS = ['name', 'description', 'client', 'programme', 'settings', 'lists', 'laneOrder', 'meta'];
+  const FIELDS = ['name', 'description', 'client', 'project', 'settings', 'lists', 'laneOrder', 'meta'];
 
   /* ── Diff ──────────────────────────────────────────────────────────────── */
 
@@ -8489,8 +8503,8 @@ __mods["core/analysis.js"] = function (__x, __req) {
     return { state: 'ontrack', label: 'On track', expected, actual, variance };
   }
 
-  /** Programme-level roll-up for the status bar and the review panes. */
-  function programmeHealth(doc) {
+  /** Project-level roll-up for the status bar and the review panes. */
+  function projectHealth(doc) {
     const today = effectiveToday(doc);
     const counts = { done: 0, ontrack: 0, ahead: 0, behind: 0, overdue: 0, future: 0, late: 0 };
     let weighted = 0;
@@ -8552,7 +8566,7 @@ __mods["core/analysis.js"] = function (__x, __req) {
   Object.defineProperty(__x, "criticalPath", { get: () => criticalPath, enumerable: true });
   Object.defineProperty(__x, "compareBaseline", { get: () => compareBaseline, enumerable: true });
   Object.defineProperty(__x, "objectHealth", { get: () => objectHealth, enumerable: true });
-  Object.defineProperty(__x, "programmeHealth", { get: () => programmeHealth, enumerable: true });
+  Object.defineProperty(__x, "projectHealth", { get: () => projectHealth, enumerable: true });
   Object.defineProperty(__x, "slipByLane", { get: () => slipByLane, enumerable: true });
   Object.defineProperty(__x, "workingDaysRemaining", { get: () => workingDaysRemaining, enumerable: true });
 };
@@ -10800,7 +10814,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
    * raw throughput but buys everything the brief asks for: gradients, pattern
    * fills, shadows, rounded corners, live text, CSS transitions and hit-testing
    * the browser does for us. Virtualisation keeps the node count proportional to
-   * what is on screen, not to the size of the plan, so a five-year programme
+   * what is on screen, not to the size of the plan, so a five-year project
    * scrolls as smoothly as a five-week one.
    *
    * Element reuse is keyed by object id: a drag updates `style.left` on an
@@ -13329,7 +13343,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * A second, entirely separate Supabase client from `core/cloud.js`, and the
    * separation is the feature rather than duplication.
    *
-   * The timeline's plan is proprietary: it holds the P6 programme and it never
+   * The timeline's plan is proprietary: it holds the P6 project and it never
    * leaves its OneDrive folder. The resource calendar holds none of that, so it
    * lives in Postgres where the deputy and the team can reach it from a browser.
    * Until now that boundary was guaranteed by the *build* — `tools/desktop.js`
@@ -14000,6 +14014,27 @@ __mods["core/rc.js"] = function (__x, __req) {
   const updateLegend = (id, patch) => update('rc_legend', id, patch);
 
   /**
+   * Delete a reference row outright, where nothing has been recorded against it.
+   *
+   * Retiring is still the right answer for anything that has been used, and the
+   * refusal says so by name. These exist for the row that was never meant: a
+   * person added twice, a location typed wrong, a colour mapped by mistake —
+   * which retiring only ever turns into a permanent entry in a list of things
+   * that used to be true.
+   *
+   * Functions rather than `.delete()`, for the reason every other write here is a
+   * function: a DELETE the policies refuse matches no rows and comes back as
+   * success, so the interface would report a deletion that never happened. These
+   * raise — over permission, over the last administrator, and over anything
+   * pointing at the row — and `rpc()` turns that into a message somebody can act
+   * on.
+   */
+  const deletePerson = (id) => rpc('rc_delete_person', { p_person: id });
+  const deleteLocation = (id) => rpc('rc_delete_location', { p_location: id });
+  const deleteCategory = (id) => rpc('rc_delete_category', { p_category: id });
+  const deleteLegend = (id) => rpc('rc_delete_legend', { p_entry: id });
+
+  /**
    * Write a setting.
    *
    * An upsert rather than an update, because the first time anybody names the
@@ -14280,6 +14315,10 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "addParty", { get: () => addParty, enumerable: true });
   Object.defineProperty(__x, "addLegend", { get: () => addLegend, enumerable: true });
   Object.defineProperty(__x, "updateLegend", { get: () => updateLegend, enumerable: true });
+  Object.defineProperty(__x, "deletePerson", { get: () => deletePerson, enumerable: true });
+  Object.defineProperty(__x, "deleteLocation", { get: () => deleteLocation, enumerable: true });
+  Object.defineProperty(__x, "deleteCategory", { get: () => deleteCategory, enumerable: true });
+  Object.defineProperty(__x, "deleteLegend", { get: () => deleteLegend, enumerable: true });
   Object.defineProperty(__x, "setSetting", { get: () => setSetting, enumerable: true });
   Object.defineProperty(__x, "addLeave", { get: () => addLeave, enumerable: true });
   Object.defineProperty(__x, "updateLeave", { get: () => updateLeave, enumerable: true });
@@ -15647,7 +15686,7 @@ __mods["ui/commands.js"] = function (__x, __req) {
     });
     if (!ok) return;
     await makeBackup('before-new');
-    store.replaceDoc(makeProject('Untitled Programme'), 'new');
+    store.replaceDoc(makeProject('Untitled Project'), 'new');
     fitAll();
     toast({ tone: 'good', title: 'New project created' });
   }
@@ -15667,7 +15706,7 @@ __mods["ui/commands.js"] = function (__x, __req) {
    * The picker must be opened from a click, so this is only ever reachable from a
    * button. When the folder already holds exactly one plan it opens straight into
    * it; otherwise the user chooses, because guessing between a colleague's plans
-   * is how you end up editing the wrong programme.
+   * is how you end up editing the wrong project.
    */
   async function connectFolder() {
     if (!filestore.isSupported()) {
@@ -15740,12 +15779,12 @@ __mods["ui/commands.js"] = function (__x, __req) {
   /** Write the plan currently open into the connected folder for the first time. */
   async function createFolderPlanFromCurrent() {
     const doc = store.getDoc();
-    const suggested = `${(doc.name || 'programme').replace(/[^a-z0-9 \-_]+/gi, '').trim() || 'programme'}.json`;
+    const suggested = `${(doc.name || 'project').replace(/[^a-z0-9 \-_]+/gi, '').trim() || 'project'}.json`;
     const name = await promptDialog({
       title: 'Put this plan in the folder',
       label: 'File name',
       value: suggested,
-      placeholder: 'programme.json',
+      placeholder: 'project.json',
     });
     if (!name) return false;
 
@@ -16408,7 +16447,7 @@ __mods["ui/lists.js"] = function (__x, __req) {
           emptyState({
             iconName: 'list',
             title: 'No options yet',
-            message: `Add the ${def.label.toLowerCase()} values this programme uses.`,
+            message: `Add the ${def.label.toLowerCase()} values this project uses.`,
           })
         );
       } else {
@@ -18764,7 +18803,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
    * Two things are deliberately kept apart here:
    *
    *   P6 slip      how far the scheduler has moved the activity since the
-   *                baseline. Their number, about their programme.
+   *                baseline. Their number, about their project.
    *   Your variance how far your plan differs from where P6 has it now. Your
    *                number, and the one you have to be able to explain.
    *
@@ -19023,7 +19062,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
           kind = v;
           if (parsed) renderPreview();
         },
-      }), 'A baseline is the target programme and is replaced only by another baseline. Progress is where the schedule stands now, and is re-imported each month.'),
+      }), 'A baseline is the target project and is replaced only by another baseline. Progress is where the schedule stands now, and is re-imported each month.'),
 
       el('button', {
         class: 'cx-btn mini',
@@ -20825,12 +20864,12 @@ __mods["io/scene.js"] = function (__x, __req) {
     /* ── Header ────────────────────────────────────────────────────────── */
     items.push({ type: 'rect', x: 0, y: 0, w: width, h: M.headerH, fill: palette.chrome });
     items.push({ type: 'rect', x: 20, y: 15, w: 4, h: 30, fill: palette.brand, radius: 2 });
-    items.push({ type: 'text', x: 32, y: 28, text: doc.name || 'Untitled Programme', size: 15, weight: 700, fill: palette.text });
+    items.push({ type: 'text', x: 32, y: 28, text: doc.name || 'Untitled Project', size: 15, weight: 700, fill: palette.text });
     items.push({
       type: 'text',
       x: 32,
       y: 44,
-      text: [doc.client, doc.programme].filter(Boolean).join('  ·  ') || 'CX Timeline',
+      text: [doc.client, doc.project].filter(Boolean).join('  ·  ') || 'CX Timeline',
       size: 8.5,
       fill: palette.textSubtle,
       family: 'mono',
@@ -21689,7 +21728,7 @@ __mods["io/pdf.js"] = function (__x, __req) {
    * vendored into a local-first app, and no CDN to be offline from.
    *
    * The writer supports the base-14 fonts (no embedding needed), landscape
-   * pages, and horizontal tiling so a multi-year programme spills across pages
+   * pages, and horizontal tiling so a multi-year project spills across pages
    * with the lane gutter repeated on each one.
    *
    * Imports: dates (for the footer stamp).
@@ -22070,7 +22109,7 @@ __mods["io/pdf.js"] = function (__x, __req) {
    *
    * The other renderer here (`sceneToPdf`) is the timeline's: it fits the lane
    * stack vertically and *tiles* horizontally, repeating the lane gutter on every
-   * sheet, because a multi-year programme has no business on one page. This is
+   * sheet, because a multi-year project has no business on one page. This is
    * the opposite requirement and therefore a different function rather than a
    * flag — a calendar you have to reassemble from four sheets on a meeting-room
    * table is not a calendar. It scales uniformly to fit both axes, centres what
@@ -22631,7 +22670,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
     const scene = makeScene(opts);
     const svg = sceneToSvg(scene, {
       title: doc.name,
-      description: [doc.client, doc.programme, doc.description].filter(Boolean).join(' — '),
+      description: [doc.client, doc.project, doc.description].filter(Boolean).join(' — '),
     });
     return saveFile(`${stem(doc)}.svg`, svg, 'image/svg+xml;charset=utf-8', 'SVG drawing');
   }
@@ -22665,7 +22704,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
      ═══════════════════════════════════════════════════════════════════════ */
 
   /**
-   * High-quality vector PDF, landscape, tiled across pages when the programme
+   * High-quality vector PDF, landscape, tiled across pages when the project
    * is wider than one sheet.
    */
   function exportPdf(opts = {}) {
@@ -22677,7 +22716,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
         pageSize: opts.pageSize || 'a3',
         multiPage: opts.multiPage !== false,
         title: doc.name,
-        subtitle: [doc.client, doc.programme].filter(Boolean).join('  ·  '),
+        subtitle: [doc.client, doc.project].filter(Boolean).join('  ·  '),
         author: doc.client || 'CX Timeline',
       });
       return saveFile(`${stem(doc)}.pdf`, blob, 'application/pdf', 'PDF');
@@ -22821,7 +22860,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const cloud = __req("core/cloud.js");
   const filestore = __req("core/filestore.js");
   const { search, summarise, facet, filterPredicate } = __req("core/query.js");
-  const { criticalPath, compareBaseline, programmeHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
+  const { criticalPath, compareBaseline, projectHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
@@ -23752,7 +23791,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
       ])
     );
 
-    const health = programmeHealth(doc);
+    const health = projectHealth(doc);
     root.appendChild(
       el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '12px' } }, [
         chipStat('Complete', `${health.percentComplete}%`, health.percentComplete > 60 ? 'good' : 'info'),
@@ -23925,7 +23964,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
       );
     }
 
-    // Other plans sitting in the folder, so switching programmes does not mean
+    // Other plans sitting in the folder, so switching projects does not mean
     // going back through the picker.
     const list = el('div', { class: 'cx-list', style: { marginTop: '8px' } });
     if (st.folder) {
@@ -24480,7 +24519,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   }
 
   async function newCloudProject() {
-    const name = await promptDialog({ title: 'New project', label: 'Name', value: 'Untitled Programme' });
+    const name = await promptDialog({ title: 'New project', label: 'Name', value: 'Untitled Project' });
     if (!name) return;
     try {
       const doc = makeProject(name);
@@ -25130,7 +25169,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
     // granted, so a viewer could never load it. What they *would* see is
     // `makeStarterProject()` — the built-in sample, with plausible-looking
     // releases and campaigns — and mistaking fabricated demo content for a real
-    // programme is its own small problem.
+    // project is its own small problem.
     if (rcClient.isConfigured() && !rcClient.isViewer()) {
       dom.sidenav.appendChild(workspaceSwitch());
     }
@@ -25165,7 +25204,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
     dom.sidenav.appendChild(
       el('div', { class: 'sidenav-footer' }, [
         cloud.isConfigured() ? accountBlock() : null,
-        el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.programme || doc.client || fallbackTag() }),
+        el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.project || doc.client || fallbackTag() }),
         el('button', {
           class: 'cx-btn mini',
           html: icon('maximize', { size: 12 }) + '<span>Present</span>',
@@ -25199,7 +25238,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
     ]);
   }
 
-  /** What to call a project that has not been given a client or programme. */
+  /** What to call a project that has not been given a client or project. */
   function fallbackTag() {
     if (!cloud.isConfigured()) return 'Local project';
     return { owner: 'You own this', editor: 'Shared with you', viewer: 'View only' }[cloud.getRole()] || 'Untitled';
@@ -25226,7 +25265,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
     }
 
     const tag = dom.sidenav.querySelector('[data-project-tag]');
-    if (tag) tag.textContent = doc.programme || doc.client || fallbackTag();
+    if (tag) tag.textContent = doc.project || doc.client || fallbackTag();
   }
 
   /* ── Toolbar ───────────────────────────────────────────────────────────── */
@@ -25399,7 +25438,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
 
     dom.title.querySelector('.tt-name').textContent = doc.name;
     dom.title.querySelector('.tt-meta').textContent =
-      [doc.client, doc.programme].filter(Boolean).join(' · ') || fallbackTag();
+      [doc.client, doc.project].filter(Boolean).join(' · ') || fallbackTag();
 
     dom.undoBtn.disabled = !history.canUndo;
     dom.redoBtn.disabled = !history.canRedo;
@@ -26946,7 +26985,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       section('Project details', [
         field('Name', textInput({ value: doc.name, onInput: (v) => store.setMeta({ name: v }, 'Rename project', { mergeKey: 'projname' }) })),
         field('Client', textInput({ value: doc.client, placeholder: 'Metro Authority', onInput: (v) => store.setMeta({ client: v }, 'Change client') })),
-        field('Programme', textInput({ value: doc.programme, placeholder: 'CBTC Deployment · Phase 2', onInput: (v) => store.setMeta({ programme: v }, 'Change programme') })),
+        field('Project', textInput({ value: doc.project, placeholder: 'CBTC Deployment · Phase 2', onInput: (v) => store.setMeta({ project: v }, 'Change project') })),
         field('Description', el('textarea', {
           class: 'cx-textarea',
           rows: 3,
@@ -26992,7 +27031,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/minimap.js"] = function (__x, __req) {
   /**
-   * Minimap — a navigator overview of the whole programme.
+   * Minimap — a navigator overview of the whole project.
    *
    * Draws every object as a coloured tick across the project's full extent,
    * with a draggable window showing what the main canvas is looking at. On a
@@ -27934,7 +27973,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    * The workbook carries rows at the bottom that are not site work: "PTO",
    * "Office" and "Other Group / Project", with names typed into the day cells the
    * same way the Resource row carries them. They say where somebody is when they
-   * are not on the programme — off, at their desk, or on another group's work —
+   * are not on the project — off, at their desk, or on another group's work —
    * which is a fact about the person rather than about an activity, and it is the
    * fact the week plan and the huddle are otherwise missing entirely: a blank
    * against a name reads as "nobody planned this", when the sheet said exactly
@@ -27989,13 +28028,25 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    * The people named in one cell.
    *
    * Typed by hand, so the separator is whatever was to hand: a comma, a slash, a
-   * newline, an ampersand. Nothing is matched to a person here — that is the
+   * newline, an ampersand, a plus, the word "and", or simply two spaces where somebody
+   * pressed the bar twice. Nothing is matched to a person here — that is the
    * roster's job, through the alias register — this only splits what was written.
+   *
+   * **Spacing is noise, not a name.** A cell reading `Victor ,Rosa` and one
+   * reading `Victor, Rosa` are the same two people, so each piece is trimmed and
+   * its own internal runs of whitespace are collapsed before it is handed on: a
+   * name carrying a stray double space would otherwise fold to a different string
+   * from the same name typed once, and match nobody for a reason no reader could
+   * see. A newline inside a cell is a separator rather than a space, because that
+   * is how a second name gets into one cell in Excel.
    */
   function resourceNames(text) {
     return String(text ?? '')
-      .split(/[,;/\n&+]|\s{2,}/)
-      .map((s) => s.trim())
+      /* "and" is tried before the two-space rule on purpose: an alternation is
+         read left to right, so `\s{2,}` would otherwise eat the spaces around a
+         spelled-out "and" and leave the word behind as a person. */
+      .split(/\s+and\s+|[,;/\n&+]|\s{2,}/i)
+      .map((s) => s.trim().replace(/\s+/g, ' '))
       .filter(Boolean);
   }
 
@@ -28411,7 +28462,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     for (let i = 0; i < headings.length; i++) {
       if (/\blocations?\b/i.test(headings[i])) return i;
     }
-    // "Site" is the other word this programme's sheets use for it. Deliberately a
+    // "Site" is the other word this project's sheets use for it. Deliberately a
     // short list: a near miss here misfiles every row on the sheet at once.
     for (let i = 0; i < headings.length; i++) {
       if (/\bsite\b/i.test(headings[i])) return i;
@@ -29547,10 +29598,15 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * Three sources and no fourth: somebody's own full name, an alias somebody
    * recorded, and a **first name that belongs to exactly one person** — which is
    * what the 4WLA's Resource row is actually filled in with. There is still no
-   * surname match and no near miss: a shift attributed to the wrong engineer is
-   * worse than one attributed to nobody, because nobody looks at it again. An
-   * unrecognised spelling is shown as unmatched instead, which is a question
-   * somebody answers once.
+   * surname match: "Okafor" is a different string from "Rita Okafor" and matches
+   * only because somebody said so in the alias register.
+   *
+   * The register itself is exact. A misspelling is answered separately, by
+   * `nearestName()`, and only after this has failed — bounded by the length of
+   * what was written, refused where two registered spellings are equally close,
+   * and reported to the Resources tab when it does answer. That division is the
+   * point: everything that reads this Map gets an exact answer, and the one place
+   * that corrects a spelling says out loud that it did.
    *
    * They are added weakest first so the stronger answer wins. A full name beats an
    * alias pointing elsewhere — a name that *is* somebody's is theirs — and both
@@ -29572,6 +29628,86 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       if (key) map.set(key, p.id);
     }
     return map;
+  }
+
+  /**
+   * How far apart two folded names are, giving up once they are further than
+   * `limit`.
+   *
+   * Ordinary Levenshtein over two rows, with the whole row abandoned the moment
+   * every cell in it is past the limit — which is what keeps this cheap against a
+   * roster: almost every pair is obviously different and is dropped on the first
+   * row. A transposition ("Okonwko") costs two here rather than one, which is
+   * deliberate: a cheaper transposition would let a two-letter difference through
+   * at a distance the caller thinks is one.
+   */
+  function nameDistance(a, b, limit = 2) {
+    if (a === b) return 0;
+    if (Math.abs(a.length - b.length) > limit) return limit + 1;
+    let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+    for (let i = 1; i <= a.length; i++) {
+      const row = [i];
+      let best = i;
+      for (let j = 1; j <= b.length; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        row[j] = Math.min(row[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+        if (row[j] < best) best = row[j];
+      }
+      if (best > limit) return limit + 1;
+      prev = row;
+    }
+    return prev[b.length];
+  }
+
+  /**
+   * How much misspelling a name of this length is allowed to carry.
+   *
+   * One character in a short name and two in a long one. Scaled because a fixed
+   * allowance is wrong at both ends: two edits turn "Ana" into "Eve", while one
+   * edit is barely a typo in "Kowalczyk". Below five folded characters nothing is
+   * allowed at all — at that length half the roster is within one edit of the
+   * other half.
+   */
+  function slackFor(key) {
+    if (key.length < 5) return 0;
+    return key.length >= 8 ? 2 : 1;
+  }
+
+  /**
+   * The one person a misspelling can only have meant.
+   *
+   * The register matches exactly, and that stays the rule wherever an exact answer
+   * exists — this is only ever asked after one has failed. What it adds is the
+   * case the exact rule handled badly: a name typed into a spreadsheet at speed,
+   * where "Okonkwo" arrives as "Okonwko" and a whole week of somebody's shifts
+   * lands in the unmatched list for a transposed pair of letters.
+   *
+   * Two guards keep it from becoming the guessing the rest of this module
+   * refuses. The distance is bounded by the length of what was written, so a
+   * short name is still matched exactly. And a near miss that is near **two**
+   * registered spellings at the same distance matches neither, for the reason two
+   * people called Victor match neither: picking one would put a shift against the
+   * wrong engineer, and it would look exactly as right on screen as the correct
+   * answer.
+   *
+   * The answer is still *reported*. `resourceAssignments()` returns every name it
+   * placed this way, and the Resources tab lists them, because a spelling matched
+   * approximately is a spelling worth an alias — after which it is settled for
+   * good and nothing is being inferred at all.
+   */
+  function nearestName(key, register) {
+    const limit = slackFor(key);
+    if (!limit) return null;
+    let best = null;
+    let bestAt = limit + 1;
+    let tied = false;
+    for (const [candidate, id] of register) {
+      const d = nameDistance(key, candidate, limit);
+      if (d > limit) continue;
+      if (d < bestAt) { bestAt = d; best = { key: candidate, id }; tied = false; }
+      else if (d === bestAt && best && best.id !== id) tied = true;
+    }
+    return tied ? null : best;
   }
 
   /**
@@ -29915,27 +30051,38 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * Who the look-ahead's Resource rows put where, per day.
    *
    * Returns `byPerson` — a person id to a map of date to the rows naming them —
-   * and `unmatched`, the spellings the register does not know. The second half is
+   * `unmatched`, the spellings the register cannot place at all, and `near`, the
+   * ones it placed by correcting a misspelling. The second and third halves are
    * the point as much as the first: a name nobody has mapped is a person missing
-   * from the picture, and reporting it is the difference between a view that is
-   * incomplete and one that is quietly wrong.
+   * from the picture, and a name matched approximately is one placed on a judgement
+   * somebody should get the chance to confirm. Reporting both is the difference
+   * between a view that is incomplete and one that is quietly wrong.
    */
   function resourceAssignments(laRows, register) {
     const byPerson = new Map();
     const unmatched = new Map();
+    const near = new Map();
+    const resolve = nameResolver(register);
 
     for (const row of laRows || []) {
       for (const [date, text] of Object.entries(row.resources || {})) {
         for (const written of resourceNames(text)) {
           const key = foldName(written);
           if (!key) continue;
-          const personId = register.get(key);
+          const { id: personId, corrected } = resolve(key);
           if (!personId) {
             const seen = unmatched.get(key) || { name: written, days: new Set(), rows: [] };
             seen.days.add(date);
             if (!seen.rows.some((r) => r.id === row.id)) seen.rows.push(row);
             unmatched.set(key, seen);
             continue;
+          }
+          if (corrected) {
+            const seen = near.get(key)
+              || { name: written, person_id: personId, days: new Set(), rows: [] };
+            seen.days.add(date);
+            if (!seen.rows.some((r) => r.id === row.id)) seen.rows.push(row);
+            near.set(key, seen);
           }
           if (!byPerson.has(personId)) byPerson.set(personId, new Map());
           const days = byPerson.get(personId);
@@ -29945,7 +30092,33 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       }
     }
 
-    return { byPerson, unmatched: [...unmatched.values()] };
+    return { byPerson, unmatched: [...unmatched.values()], near: [...near.values()] };
+  }
+
+  /**
+   * The register's answer for one folded spelling: exact where it has one, the
+   * nearest unambiguous misspelling where it does not.
+   *
+   * A closure rather than a bare function because the near-miss scan walks the
+   * whole register, and a hundred days of a real sheet ask about the same handful
+   * of spellings over and over — memoising is what keeps that one pass rather than
+   * thousands. `corrected` says which of the two answers it is, so a caller can
+   * report a name it only matched approximately instead of quietly absorbing it.
+   */
+  function nameResolver(register) {
+    const memo = new Map();
+    return (key) => {
+      if (memo.has(key)) return memo.get(key);
+      const exact = register.get(key);
+      const answer = exact
+        ? { id: exact, corrected: null }
+        : (() => {
+          const guess = nearestName(key, register);
+          return guess ? { id: guess.id, corrected: guess.key } : { id: null, corrected: null };
+        })();
+      memo.set(key, answer);
+      return answer;
+    };
   }
 
   /**
@@ -29972,12 +30145,20 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   function absenceAssignments(absences, register) {
     const byPerson = new Map();
     const unmatched = new Map();
+    const near = new Map();
+    const resolve = nameResolver(register);
 
     for (const entry of absences || []) {
       for (const written of resourceNames(entry.written)) {
         const key = foldName(written);
         if (!key) continue;
-        const personId = register.get(key);
+        const { id: personId, corrected } = resolve(key);
+        if (corrected && personId) {
+          const seen = near.get(key)
+            || { name: written, person_id: personId, days: new Set(), rows: [] };
+          seen.days.add(entry.date);
+          near.set(key, seen);
+        }
         if (!personId) {
           const seen = unmatched.get(key) || { name: written, days: new Set(), kinds: new Set() };
           seen.days.add(entry.date);
@@ -29994,7 +30175,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       }
     }
 
-    return { byPerson, unmatched: [...unmatched.values()] };
+    return { byPerson, unmatched: [...unmatched.values()], near: [...near.values()] };
   }
 
   /**
@@ -30003,7 +30184,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * The meaning is the legend's word for the colour, so "Night Shift" and
    * "Blanket" are the sheet's own vocabulary rather than ours. Anything it does
    * not recognise is a day shift, which is what an unlabelled cell has always
-   * meant on this programme.
+   * meant on this project.
    */
   function shiftFor(meaning) {
     const said = String(meaning || '').toLowerCase();
@@ -30037,10 +30218,10 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * default; a row is a decision.
    */
   function assignmentIndex({ planRows, laRows, register, absences = [], categories = [] }) {
-    const { byPerson, unmatched } = resourceAssignments(laRows, register);
+    const { byPerson, unmatched, near } = resourceAssignments(laRows, register);
     const away = absenceAssignments(absences, register);
 
-    /* Which seeded category an off-programme day belongs to.
+    /* Which seeded category an off-project day belongs to.
        A day in the office is a day somebody worked, and a report that could not
        say *what* they worked on is the blank the `Office` and `Other project`
        categories were seeded to fill. Matched on the name the schema seeds,
@@ -30144,6 +30325,10 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       },
       byPerson,
       unmatched,
+      /* Spellings placed by correcting a misspelling rather than by matching one.
+         Carried out so the Resources tab can list them: the answer stands, and an
+         alias is what turns it from a judgement into a fact. */
+      near: [...near, ...away.near],
       awayUnmatched: away.unmatched,
       derived: derived.size,
     };
@@ -30195,6 +30380,8 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "SHIFTS", { get: () => SHIFTS, enumerable: true });
   Object.defineProperty(__x, "foldName", { get: () => foldName, enumerable: true });
   Object.defineProperty(__x, "nameRegister", { get: () => nameRegister, enumerable: true });
+  Object.defineProperty(__x, "nameDistance", { get: () => nameDistance, enumerable: true });
+  Object.defineProperty(__x, "nearestName", { get: () => nearestName, enumerable: true });
   Object.defineProperty(__x, "locationRegister", { get: () => locationRegister, enumerable: true });
   Object.defineProperty(__x, "unmatchedLocations", { get: () => unmatchedLocations, enumerable: true });
   Object.defineProperty(__x, "uniqueFirstNames", { get: () => uniqueFirstNames, enumerable: true });
@@ -30221,11 +30408,16 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
    * Reference data before transactional data: nothing else in the calendar means
    * anything until there are people to schedule and places to send them.
    *
-   * Two decisions run through it. **Nobody is ever deleted** — a leaver's history
-   * has to stay for the reports while they drop out of every picker, so `active`
-   * is the only thing that changes. And **every vocabulary is a table**, because
-   * the reports group by them and "doc" typed one week against "documentation"
-   * the next are two categories to a database and one to a person.
+   * Two decisions run through it. **Nothing anybody has used is ever deleted** —
+   * a leaver's history has to stay for the reports while they drop out of every
+   * picker, which is what Retire does and why it is the first answer offered.
+   * Delete is the second, and it is for the row that was never meant: somebody
+   * added twice, a location typed wrong. Postgres decides which is which —
+   * `rc_delete_person()` and its siblings count what points at the row and refuse
+   * with the number — because only the database can see everything that does.
+   * And **every vocabulary is a table**, because the reports group by them and
+   * "doc" typed one week against "documentation" the next are two categories to a
+   * database and one to a person.
    *
    * Imports: util, events, dates, rc, icons, components, rc_util.
    */
@@ -30257,6 +30449,40 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
   // ordinary states, and the word is the information — tinting one of them would
   // read as a warning about somebody who is simply on the team.
   const ROLE_TONE = { admin: 'info', member: 'neutral', viewer: 'neutral' };
+
+  /**
+   * The Delete button that sits beside Retire.
+   *
+   * It asks first, and then it lets the database answer. Nothing here works out
+   * whether a row is safe to remove: the interface cannot see every table that
+   * might point at it, and a check written twice is a check that will one day
+   * disagree with itself. The refusal Postgres raises already names the number of
+   * records in the way and says to retire instead, so it is shown as it comes.
+   */
+  function deleteButton({ label, message, run, after }) {
+    return el('button', {
+      class: 'cx-btn mini ghost danger',
+      text: 'Delete',
+      title: 'Removes it for good. Refused, with a count, if anything has been recorded against it '
+        + '— retire it in that case, which keeps the history.',
+      onClick: async () => {
+        const ok = await confirmDialog({
+          title: label,
+          message,
+          confirmLabel: 'Delete',
+          danger: true,
+        });
+        if (!ok) return;
+        try {
+          await run();
+          toast({ tone: 'good', message: 'Deleted.' });
+          notifyChanged(after);
+        } catch (err) {
+          toast({ tone: 'bad', message: err?.message || String(err) });
+        }
+      },
+    });
+  }
 
   async function render(root) {
     // Accounts is administrators-only in the database — `rc_list_invitations()`
@@ -30334,14 +30560,24 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
             notifyChanged('people');
           },
         }),
+        deleteButton({
+          label: `Delete ${p.name}?`,
+          message: 'Their aliases and any leave booked for them go too. If anything has been '
+            + 'planned or recorded against them this is refused, and retiring them is the answer '
+            + '— that keeps every outcome and takes them out of the pickers just the same.',
+          run: () => rc.deletePerson(p.id),
+          after: 'people',
+        }),
       ] : []),
     ]));
 
     host.appendChild(table(['Name', 'Title', 'Subsystem', 'Role', 'In the huddle', 'Days', ''], rows));
     host.appendChild(el('p', {
       class: 'rc-hint',
-      text: 'Retiring somebody keeps every outcome they ever recorded. Nobody is deleted, because '
-        + 'the reports would lose their history with them. "In the huddle" is a separate question '
+      text: 'Retiring somebody keeps every outcome they ever recorded, which is why it is the first '
+        + 'answer for anybody who has been here. Delete is for a row that was never meant — the same '
+        + 'person added twice — and the database refuses it, with a count, the moment anything has '
+        + 'been planned or recorded against them. "In the huddle" is a separate question '
         + 'from what somebody may do: a manager administers the calendar without being assigned to '
         + 'a location, and an administrator who does take shifts stays in the meeting.',
     }));
@@ -30483,6 +30719,14 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
             notifyChanged('locations');
           },
         }),
+        deleteButton({
+          label: `Delete ${l.name}?`,
+          message: 'Its other spellings go with it. If any plan, outcome, look-ahead row or SAR '
+            + 'names this place the delete is refused — retire it instead, which drops it from the '
+            + 'pickers and keeps everything already recorded there.',
+          run: () => rc.deleteLocation(l.id),
+          after: 'locations',
+        }),
         el('button', {
           class: 'cx-btn mini ghost',
           text: 'Add spelling',
@@ -30543,6 +30787,14 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
             await rc.updateCategory(c.id, { active: !c.active });
             notifyChanged('categories');
           },
+        }),
+        deleteButton({
+          label: `Delete ${c.name}?`,
+          message: 'Refused if anything has been grouped under it, because the reports would lose '
+            + 'the grouping with it. Retiring takes it out of the pickers and leaves every rollup '
+            + 'reading as it does today.',
+          run: () => rc.deleteCategory(c.id),
+          after: 'categories',
         }),
       ] : []),
     ]))));
@@ -31577,8 +31829,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     for (const also of (plannedOn ? plannedOn(person.id, review) : []).slice(1)) {
       context.appendChild(badge(`also: ${(also.task || '—').slice(0, 36)}`, 'info'));
     }
-    // Where the day came from, when it came from the workbook rather than a person.
-    if (fromSheet(wasPlanned)) context.appendChild(fromSheet(wasPlanned));
+    // Flagged only where a person typed the day in. The workbook is the default
+    // and needs no announcing.
+    const byHand = manualEntry(wasPlanned);
+    if (byHand) context.appendChild(byHand);
     for (const b of theirs) {
       context.appendChild(badge(`blocked: ${b.summary.slice(0, 36)}`, 'bad'));
     }
@@ -31624,7 +31878,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       tomorrow
         ? el('div', { text: tomorrow.task || '—' })
         : el('div', { class: 'rc-hint', text: 'nothing set yet' }),
-      fromSheet(tomorrow),
+      manualEntry(tomorrow),
     ].filter(Boolean)));
 
     wrap.appendChild(el('div', { class: 'rc-present-move' }, [
@@ -31840,18 +32094,22 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
    * exactly alone.
    */
   /**
-   * Where a day's plan came from, when it did not come from a person.
+   * Where a day's plan came from, when it did not come from the workbook.
    *
-   * The 4WLA assignment *is* the plan now, so there is nothing to show beside the
-   * plan any more — what is still worth saying is that the workbook said it and
-   * nobody has overridden it. A stored entry needs no badge: somebody decided it,
-   * which is what a row in `rc_plan_entries` means.
+   * The badge used to run the other way — "From 4WLA" against every derived day —
+   * and it was on nearly every cell on the screen, which is the definition of a
+   * badge saying nothing. The 4WLA *is* the plan: that is the assumption now, and
+   * an assumption does not need announcing a hundred times.
+   *
+   * What is worth a flag is the exception. A stored `rc_plan_entries` row is
+   * somebody typing a day in by hand — overriding the sheet, or planning a day it
+   * says nothing about — and that is the one case a reader should stop on,
+   * because it is the only thing on the screen the workbook cannot account for.
+   * `id` is what tells them apart: a derived day carries `id: null` by design.
    */
-  function fromSheet(entry) {
-    if (!entry?.from_lookahead) return null;
-    // No "+2 more": the sheet naming somebody on two activities in one day is two
-    // tasks, and they are all drawn now rather than counted behind the first.
-    return badge('From 4WLA', 'info');
+  function manualEntry(entry) {
+    if (!entry || entry.from_lookahead || !entry.id) return null;
+    return badge('Manual', 'warn');
   }
 
   function personRow(ctx) {
@@ -31929,7 +32187,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           i === 0 && chain && chain.carries >= 2
             ? badge(`${ordinal(chain.carries + 1)} day`, chain.carries >= 4 ? 'bad' : 'warn')
             : null,
-          fromSheet(task),
+          manualEntry(task),
         ].filter(Boolean)))
         : [el('span', { class: 'rc-hint', text: 'nothing planned' })]));
 
@@ -31977,7 +32235,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           el('div', { text: tomorrow.task || '—' }),
           el('div', { class: 'rc-hint', text: locs.get(tomorrow.location_id)?.name || '' }),
           tomorrow.carry_chain_id ? badge('Carried over', 'warn') : null,
-          fromSheet(tomorrow),
+          manualEntry(tomorrow),
         ].filter(Boolean))
         : admin
           ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap;align-items:center' }, [
@@ -32075,7 +32333,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
         'aria-pressed': String(chosen),
         text: status.label,
         title: (status.family === 'health'
-          ? 'Programme health — never counted against the individual'
+          ? 'Project health — never counted against the individual'
           : 'Counts toward individual efficiency')
           + `  ·  press ${status.key} with this row selected`
           + (chosen ? '  ·  recorded — press to edit the note' : ''),
@@ -32394,7 +32652,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       body: el('div', { class: 'cx-form' }, [
         el('p', {
           class: 'rc-hint',
-          text: 'A block is programme health, not a mark against anyone — which is exactly '
+          text: 'A block is project health, not a mark against anyone — which is exactly '
             + 'why it needs a reason and somebody answerable. The database refuses it without both.',
         }),
         el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Reason' }), reason]),
@@ -32631,13 +32889,11 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       const cells = days.map((iso) => {
         const state = availability(person, iso, thisWeek, index.absent(person.id, iso));
         const planned = index.on(person.id, iso);
-        /* Booked leave and the workbook's PTO row are the same fact here, and the
-           badge says which: one is a record somebody made, the other is the sheet,
-           and telling them apart is what the PTO tab is for. */
-        if (state.state === 'leave') {
-          return el('td', {}, [badge('Leave', 'muted'), state.sheet ? fromSheet({ from_lookahead: true }) : null]
-            .filter(Boolean));
-        }
+        /* Booked leave and the workbook's PTO row are the same fact here, and
+           they are drawn as one: which of the two wrote the day down is what the
+           PTO tab is for, and that tab now says it in one colour rather than two
+           for the same reason this badge is gone. */
+        if (state.state === 'leave') return el('td', {}, [badge('Leave', 'muted')]);
         if (state.state === 'non-working') return el('td', { class: 'rc-inactive' }, [el('span', { text: '·' })]);
         /* An empty day is empty, and says so.
            There used to be a "+" here that opened a dialog to pick a look-ahead
@@ -32677,8 +32933,11 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           el('div', { text: entry.task || '—' }),
           el('div', { class: 'rc-hint', text: locs.get(entry.location_id)?.name
             || entry.raw_location || '' }),
-          fromSheet(entry),
-          !entry.from_lookahead && entry.lookahead_row_id ? badge('From look-ahead', 'info') : null,
+          /* One flag, for the one exception. A stored row that still points at a
+             look-ahead row used to get a second badge saying so; it is the same
+             fact twice now that the workbook is the assumption, and two badges on
+             a cell this size is how neither gets read. */
+          manualEntry(entry),
           entry.supersedes_id ? badge('Revised', 'warn') : null,
         ]).filter(Boolean));
       });
@@ -33429,7 +33688,9 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
 
   const { icon } = __req("ui/icons.js");
-  const { selectInput, textInput, toast, badge, emptyState, field, checkbox } = __req("ui/components.js");
+  const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog } = __req("ui/components.js");
+
+
   const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView } = __req("ui/rc_util.js");
 
 
@@ -33458,7 +33719,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * Whether the names on each activity's Resource row are drawn.
    *
    * On by default — knowing who is on a shift is most of why anybody opens this —
-   * and off is for reading the shape of the programme without a hundred and forty
+   * and off is for reading the shape of the project without a hundred and forty
    * extra lines under it. It hides the names, never the activities: the Resource
    * row is part of the activity above it, so switching it off changes what a row
    * says and never which rows there are.
@@ -34244,9 +34505,24 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       d.date && d.date === today ? 'la-today' : '',
     ].filter(Boolean).join(' ');
 
+    /* What the workbook calls each of the frozen columns.
+       `readGrid()` already reads them — it has to, because one of them is the
+       Location and the rows depend on knowing which — and they were being thrown
+       away here: the header said "Activity" across all of them, so a grid whose
+       left-hand side is Location, SSWP, Party to action and work hours arrived on
+       screen as four anonymous columns of text. The printed calendar has read them
+       since it was written, so this is the same answer in the same words —
+       `io/rc_pdf.js` falls back to "Activity" over the first column and to nothing
+       over a column the sheet never labelled, and a heading that differed between
+       the screen and the print would be a heading nobody could trust. */
+    const headings = view.meta.map((_, i) => {
+      const said = String(view.headings?.[i] || '').trim();
+      return said || (i === 0 ? 'Activity' : '');
+    });
+
     const head = el('thead', {}, [
       el('tr', {}, [
-        el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: '' }),
+        el('th', { class: 'la-meta la-meta-all la-last', colSpan: view.meta.length, text: '' }),
         /* The label is a sticky span inside the band rather than text in it.
            A month spans thirty columns, so once you scroll past its first day
            the label itself has scrolled away and the band above you is
@@ -34256,11 +34532,15 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         ])),
       ]),
       el('tr', {}, [
-        el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: 'Activity' }),
+        ...headings.map((text, i) => el('th', {
+          class: `la-meta la-meta-head${i === headings.length - 1 ? ' la-last' : ''}`,
+          text,
+          title: text,
+        })),
         ...view.days.map((d) => el('th', { class: dayClass(d, 'la-num'), text: d.day })),
       ]),
       el('tr', {}, [
-        el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: '' }),
+        el('th', { class: 'la-meta la-meta-all la-last', colSpan: view.meta.length, text: '' }),
         ...view.days.map((d) => el('th', { class: dayClass(d), text: d.weekday })),
       ]),
     ]);
@@ -34341,12 +34621,17 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       let left = 0;
       const widths = [...firstRow.querySelectorAll('.la-meta')].map((td) => td.getBoundingClientRect().width);
       widths.forEach((width, i) => {
+        /* Every cell in that column, heading included — the heading row now has
+           one cell per column rather than one spanning the lot, so it has to be
+           frozen at the same offsets or the names slide out from over their
+           values. The two rows that still span everything are pinned at zero,
+           which is where a cell covering all of them starts. */
         for (const cell of table_.querySelectorAll(`.la-meta:nth-child(${i + 1})`)) {
-          if (cell.tagName === 'TD') cell.style.left = `${left}px`;
+          if (!cell.classList.contains('la-meta-all')) cell.style.left = `${left}px`;
         }
         left += width;
       });
-      for (const th of table_.querySelectorAll('thead .la-meta')) th.style.left = '0px';
+      for (const th of table_.querySelectorAll('thead .la-meta-all')) th.style.left = '0px';
       // The month label pins just past the frozen columns; only the browser
       // knows how wide the content made them.
       table_.style.setProperty('--la-meta-w', `${left}px`);
@@ -34367,7 +34652,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * The key, for the calendar actually on screen.
    *
    * `onScreen` is the set of colours the drawn rows and days carry, and only
-   * those are listed. The register is the whole programme's — five shifts, three
+   * those are listed. The register is the whole project's — five shifts, three
    * kinds of shading, whatever a previous year needed — and printing all of it
    * over a four-week window is a key to somebody else's calendar: the reader
    * checks a colour against it, finds three entries that are not here, and stops
@@ -34741,6 +35026,37 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
               onClick: async () => {
                 await rc.updateLegend(entry.id, { active: !entry.active });
                 notifyChanged('legend');
+              },
+            }),
+            /* Delete, beside Retire, because the two differ on one thing and it
+               matters here more than anywhere. A retired row still *shadows* an
+               older row for the same colour — `inForce()` picks the newest before
+               the active filter is applied on some paths — so retiring a mistake
+               leaves the mistake deciding what the colour means. Deleting it puts
+               the colour back where a wrong answer belongs: in the "not in the
+               legend" list, one click from being answered again. */
+            el('button', {
+              class: 'cx-btn mini ghost danger',
+              text: 'Delete',
+              title: 'Removes the mapping outright. The colour goes back to unmapped, and every '
+                + 'snapshot is re-read against the register at paint time, so nothing is lost.',
+              onClick: async () => {
+                const ok = await confirmDialog({
+                  title: `Delete the mapping for #${entry.argb}?`,
+                  message: `"${entry.meaning}" stops being what that colour means. It goes back into `
+                    + '"Seen in the workbook, not in the legend", where it can be mapped again. '
+                    + 'Retire it instead if you want the mapping kept on the record.',
+                  confirmLabel: 'Delete',
+                  danger: true,
+                });
+                if (!ok) return;
+                try {
+                  await rc.deleteLegend(entry.id);
+                  toast({ tone: 'good', message: 'Deleted.' });
+                  notifyChanged('legend');
+                } catch (err) {
+                  toast({ tone: 'bad', message: err?.message || String(err) });
+                }
               },
             }),
           ]),
@@ -35542,7 +35858,7 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
        sheet says nothing about. The same reading the week plan and the huddle
        make, from the same function. */
     const index = assignmentIndex({ planRows, laRows, absences: sheet.absences, categories, register });
-    const { byPerson, unmatched } = index;
+    const { byPerson, unmatched, near } = index;
     /* "Nobody is called that" and "two people are, and I will not choose" are
        different problems with different fixes, and a list that ran them together
        would send somebody looking for a person who is already on the roster
@@ -35621,11 +35937,10 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
 
         if (state.state === 'leave') {
           return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [
+            // Booked, or only on the 4WLA's PTO row: one day off either way, and
+            // which of the two wrote it down is the PTO tab's question.
             badge('Leave', 'muted'),
-            // Whether anybody booked it or the 4WLA's PTO row is the only place it
-            // is written down. Both are the same day off; only one has a record.
-            state.sheet ? badge('From 4WLA', 'info') : null,
-          ].filter(Boolean));
+          ]);
         }
         const planned = index.on(person.id, iso);
         if (state.state === 'non-working' && !planned.length && !asked.length) {
@@ -35646,7 +35961,10 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
               cats.get(entry.category_id)?.name,
               entry.shift !== 'day' ? entry.shift : null,
             ].filter(Boolean).join(' · ') }),
-            entry.from_lookahead ? badge('From 4WLA', 'info') : null,
+            /* The workbook is the assumption, so only a day somebody typed in
+               carries a flag. A derived day has `id: null` by design, which is
+               what tells the two apart. */
+            !entry.from_lookahead && entry.id ? badge('Manual', 'warn') : null,
           ].filter(Boolean)));
         }
         const entry = planned[0] || null;
@@ -35812,6 +36130,50 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
       }));
     }
 
+    /* ── Names placed by correcting a spelling ────────────────────────────── */
+
+    if (near.length) {
+      const peopleById = byId(people);
+      root.appendChild(el('div', { style: 'height:20px' }));
+      root.appendChild(el('div', { class: 'rc-section-head' }, [
+        el('h3', { text: 'Matched by correcting a spelling' }),
+      ]));
+      root.appendChild(el('div', { class: 'rc-scroll' }, [
+        el('table', { class: 'rc-table' }, [
+          el('thead', {}, [el('tr', {}, [
+            el('th', { text: 'As written' }), el('th', { text: 'Read as' }),
+            el('th', { text: 'Days' }), el('th', { text: '' }),
+          ])]),
+          el('tbody', {}, near.map((u) => el('tr', {}, [
+            el('td', { text: u.name }),
+            el('td', {}, [
+              el('span', { text: peopleById.get(u.person_id)?.name || '—' }),
+              badge('near miss', 'warn'),
+            ]),
+            el('td', { class: 'rc-num', text: String(u.days.size) }),
+            el('td', {}, rc.isAdmin() ? [
+              el('button', {
+                class: 'cx-btn mini ghost',
+                text: 'Record the spelling',
+                title: 'Keeps this spelling against that person for good, so nothing has to be '
+                  + 'corrected on the next read.',
+                onClick: () => mapName(u, people, redraw),
+              }),
+            ] : []),
+          ]))),
+        ]),
+      ]));
+      root.appendChild(el('p', {
+        class: 'rc-hint',
+        text: 'These spellings are not on the roster and are one or two characters away from exactly '
+          + 'one name that is, so they are read as that person rather than dropped — a transposed pair '
+          + 'of letters used to cost somebody a whole week of shifts. It is listed because it is a '
+          + 'correction rather than a match: a short name is still matched exactly, and a spelling '
+          + 'equally close to two people is matched to neither. Recording it as an alias turns the '
+          + 'judgement into a fact.',
+      }));
+    }
+
     /* ── Places the register does not know ────────────────────────────────── */
 
     if (strangeLocations.length) {
@@ -35873,10 +36235,11 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
       text: laRows.length
         ? `The 4WLA names people on ${laRows.filter((r) => Object.keys(r.resources || {}).length).length} `
           + 'row(s) in these weeks, and where it names somebody that is their plan for the day — '
-          + 'marked "From 4WLA", derived from the sheet rather than written down, so it follows the '
-          + 'workbook instead of going stale beside it. A plan entry is somebody overriding that, or '
-          + 'planning a day the sheet says nothing about; where an override disagrees with the '
-          + 'sheet, both are drawn, because that is the case worth seeing.'
+          + 'derived from the sheet rather than written down, so it follows the workbook instead of '
+          + 'going stale beside it. That is the assumption everywhere and it carries no badge. What '
+          + 'is flagged "Manual" is a plan entry: somebody overriding the sheet, or planning a day it '
+          + 'says nothing about. Where an override disagrees with the sheet both are drawn, because '
+          + 'that is the case worth seeing.'
         : 'No look-ahead rows read for this week yet, so nothing here can say what BART asked for. '
           + 'Read it in Look-ahead → Check now.',
     }));
@@ -35895,7 +36258,7 @@ __mods["ui/rc_resources.js"] = function (__x, __req) {
   /**
    * Plan somebody onto a span of days.
    *
-   * A span rather than a day, because that is how the off-programme days arrive:
+   * A span rather than a day, because that is how the off-project days arrive:
    * nobody is in the office for one Tuesday, they are in the office Monday to
    * Wednesday. Every day still becomes its own `rc_plan_entries` row — the grain
    * the huddle reads and the reports group by — so this is a convenience over the
@@ -36193,25 +36556,28 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
    * the weeks I am staffing", and a list of date ranges does not answer it —
    * you find out somebody is away when you try to put them somewhere.
    *
-   * So this is a calendar, and it draws two things in each cell, for the reason
-   * the Resources tab draws two:
+   * So this is a calendar. It reads two things into each cell, for the reason the
+   * Resources tab draws two — though both come out the same colour, because on
+   * this screen they are the same fact:
    *
    * **What somebody booked**, from `rc_leave` — a record, with a kind and a
    * status, that survives the workbook being edited.
    *
    * **What the 4WLA says**, from the "PTO" row at the bottom of the sheet — names
    * typed into day cells, derived at paint time and never written anywhere. On
-   * this programme that row is usually the *only* place an absence is written
+   * this project that row is usually the *only* place an absence is written
    * down: somebody types a name into the workbook and never opens Organisation.
    * Reading it is what stops the huddle asking a person on holiday how their day
    * went, and what stops the week plan drawing their week as days nobody filled
    * in.
    *
-   * The interesting cell is the one where they differ. A day the sheet says is PTO
-   * with nothing booked against it is not an error — it is the normal case, and
-   * one click from becoming a record. A day booked that the sheet does not know
-   * about is the other direction, and worth seeing before somebody is scheduled
-   * into it.
+   * **They are drawn as one colour, and that is deliberate.** Which of the two
+   * wrote a day down is bookkeeping; the question this screen answers is who is
+   * away, and a reader scanning four weeks of the team should not have to learn
+   * three swatches to answer it. The distinction is still there to be had — in the
+   * cell's title, in the counts under the grid, and in the fact that a day only
+   * the sheet knows about can be clicked to book it — but it is not what the
+   * colour is for.
    *
    * **Nothing here is derived from a role.** Managers take leave too, and a PTO
    * calendar that quietly dropped them would be wrong on exactly the weeks it
@@ -36350,7 +36716,11 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
           return el('td', {
             class: classes.join(' '),
             'data-label': dayLabel(iso),
+            /* The colour says "off"; the title says where that came from. That is
+               the whole of what splitting the swatch used to buy, and it costs
+               nothing to read it here instead. */
             title: [kindsById.get(booked.kind_id)?.name || 'Leave',
+              'booked',
               booked.status !== 'approved' ? booked.status : null,
               sheetSays === 'pto' ? 'and the 4WLA says so too' : 'not on the 4WLA',
               booked.note].filter(Boolean).join(' · '),
@@ -36362,7 +36732,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
           sheetOnly++;
           classes.push('rc-pto-sheet');
           /* Nothing booked, and the workbook says they are off. Not an error —
-             it is how almost every absence on this programme is recorded — so the
+             it is how almost every absence on this project is recorded — so the
              cell offers to make it a record rather than complaining about it. */
           return el('td', {
             class: `${classes.join(' ')}${admin ? ' rc-clickable' : ''}`,
@@ -36376,9 +36746,10 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
           });
         }
 
-        /* Off the programme but not off. Drawn so a day the sheet accounted for
-           does not read as a blank here, and hatched the other way from leave so
-           the two can never be mistaken: these are days somebody worked. */
+        /* Off the project but not off. Drawn so a day the sheet accounted for
+           does not read as a blank here, and in a colour of its own rather than a
+           shade of the leave one, so the two can never be mistaken: these are days
+           somebody worked. */
         if (sheetSays === 'office' || sheetSays === 'other') {
           classes.push('rc-pto-elsewhere');
           return el('td', {
@@ -36404,18 +36775,22 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
       el('table', { class: 'rc-table rc-pto-grid' }, [el('thead', {}, [el('tr', {}, headCells)]), body]),
     ]));
 
+    /* Two swatches, because there are two facts.
+       Leave is one colour however it was written down: booked in the application
+       and typed into the 4WLA's PTO row are the same day off, and drawing them
+       apart made a reader learn three swatches to answer one question. Where it
+       came from is still said — in the cell's title, in the counts below, and in
+       whether the day can be clicked to book it. */
     host.appendChild(el('div', { class: 'rc-pto-key' }, [
-      key('rc-pto-booked', 'Booked'),
-      key('rc-pto-booked rc-pto-agreed', 'Booked, and on the 4WLA'),
-      key('rc-pto-sheet', 'On the 4WLA only'),
-      key('rc-pto-elsewhere', 'Off the programme, not off work'),
+      key('rc-pto-booked', 'PTO — booked or on the 4WLA'),
+      key('rc-pto-elsewhere', 'Off the project, not off work'),
     ]));
 
     host.appendChild(el('p', {
       class: 'rc-hint',
       text: `${bookedDays} booked day(s) in this window, and ${sheetOnly} the 4WLA says are PTO with `
         + 'nothing booked against them. The second number is not a fault: the workbook is where '
-        + 'most absences on this programme are written down, and everything — the huddle, the week '
+        + 'most absences on this project are written down, and everything — the huddle, the week '
         + 'plan, Resources — already reads it as leave. Booking one makes a record that survives '
         + 'the sheet being edited, and an administrator can do it by clicking the day.',
     }));
@@ -36578,7 +36953,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
    * number is computed on the way out, so refining a definition never means a
    * migration and no figure can go stale against the rows it came from.
    *
-   * **Performance and programme health are never averaged together.** Completed,
+   * **Performance and project health are never averaged together.** Completed,
    * partial and carried are what somebody did; blocked and reassigned are what
    * was done to them. A possession released late is not underperformance, and
    * folding it in would make the number worse than useless — people would simply
@@ -37044,7 +37419,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
 
     // A row written anywhere reloads whatever is on screen. There is no document
     // and no diff here, so the cheapest correct thing is to re-read — the
-    // volumes are a fortnight of one small team, not a programme's worth of bars.
+    // volumes are a fortnight of one small team, not a project's worth of bars.
     on(EV.RC_CHANGED, () => render());
     on(EV.RC_AUTH_CHANGED, () => render());
     on(EV.RC_QUEUE_CHANGED, () => renderHead());

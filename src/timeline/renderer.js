@@ -5,7 +5,7 @@
  * raw throughput but buys everything the brief asks for: gradients, pattern
  * fills, shadows, rounded corners, live text, CSS transitions and hit-testing
  * the browser does for us. Virtualisation keeps the node count proportional to
- * what is on screen, not to the size of the plan, so a five-year programme
+ * what is on screen, not to the size of the plan, so a five-year project
  * scrolls as smoothly as a five-week one.
  *
  * Element reuse is keyed by object id: a drag updates `style.left` on an

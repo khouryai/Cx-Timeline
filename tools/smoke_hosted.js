@@ -56,7 +56,7 @@ function fakeSdk() {
   const DOC = {
     schema: 2,
     id: 'proj-doc-1',
-    name: 'Hosted Programme',
+    name: 'Hosted Project',
     settings: {},
     lanes: [{ id: 'lane-1', name: 'Software Releases', color: '#5b93f5', height: 64 }],
     laneOrder: ['lane-1'],
@@ -134,7 +134,7 @@ function fakeSdk() {
           window.__cx.calls.push({ op: 'rpc', name, args });
           if (name === 'list_my_projects') {
             return { data: [
-              { id: 'proj-1', name: 'Hosted Programme', role: window.__cx.role, object_count: 1, rev: 3,
+              { id: 'proj-1', name: 'Hosted Project', role: window.__cx.role, object_count: 1, rev: 3,
                 updated_at: new Date().toISOString(), created_at: new Date().toISOString(),
                 owner_email: 'alice@example.com', member_count: 2 },
               { id: 'proj-2', name: 'Line 2 Extension', role: 'viewer', object_count: 12, rev: 9,

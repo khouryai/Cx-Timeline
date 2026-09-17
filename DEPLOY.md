@@ -395,7 +395,7 @@ folder the person at it grants by clicking, and that grant is per browser
 profile — so the control is OneDrive's sharing, not the application's. The
 Timeline workspace is hidden from read-only accounts anyway, because what they
 would otherwise see is the built-in sample plan, and fabricated demo content
-mistaken for a real programme is its own small problem.
+mistaken for a real project is its own small problem.
 
 ## 1. A second Supabase project
 
@@ -748,7 +748,7 @@ Free at this scale, and the ceilings are generous:
 - **Cloudflare** — unlimited bandwidth; 100,000 Worker requests/day on the
   free plan, which static assets served from cache barely touch.
 - **Supabase free tier** — 500 MB database, 1 GB file storage, 50,000 monthly
-  active users. A programme plan is a few hundred kilobytes; attachments are
+  active users. A project plan is a few hundred kilobytes; attachments are
   what will eventually push you over, and they are stored outside the
   document precisely so that stays predictable.
 

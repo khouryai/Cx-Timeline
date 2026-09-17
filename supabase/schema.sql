@@ -74,7 +74,7 @@ on conflict (id) do nothing;
 create table if not exists public.projects (
   id           uuid primary key default gen_random_uuid(),
   owner_id     uuid not null references auth.users(id) on delete cascade,
-  name         text not null default 'Untitled Programme',
+  name         text not null default 'Untitled Project',
   doc          jsonb not null,
   -- Denormalised so the project list does not have to open every document.
   object_count integer not null default 0,

@@ -31,7 +31,7 @@ import { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackup
 import * as cloud from '../core/cloud.js';
 import * as filestore from '../core/filestore.js';
 import { search, summarise, facet, filterPredicate } from '../core/query.js';
-import { criticalPath, compareBaseline, programmeHealth, objectHealth, slipByLane, linkViolations, evaluateLink } from '../core/analysis.js';
+import { criticalPath, compareBaseline, projectHealth, objectHealth, slipByLane, linkViolations, evaluateLink } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
@@ -962,7 +962,7 @@ function paneLegendSettings(root) {
     ])
   );
 
-  const health = programmeHealth(doc);
+  const health = projectHealth(doc);
   root.appendChild(
     el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '12px' } }, [
       chipStat('Complete', `${health.percentComplete}%`, health.percentComplete > 60 ? 'good' : 'info'),
@@ -1135,7 +1135,7 @@ function sharedFolderSection() {
     );
   }
 
-  // Other plans sitting in the folder, so switching programmes does not mean
+  // Other plans sitting in the folder, so switching projects does not mean
   // going back through the picker.
   const list = el('div', { class: 'cx-list', style: { marginTop: '8px' } });
   if (st.folder) {
@@ -1690,7 +1690,7 @@ async function openCloudProject(project) {
 }
 
 async function newCloudProject() {
-  const name = await promptDialog({ title: 'New project', label: 'Name', value: 'Untitled Programme' });
+  const name = await promptDialog({ title: 'New project', label: 'Name', value: 'Untitled Project' });
   if (!name) return;
   try {
     const doc = makeProject(name);

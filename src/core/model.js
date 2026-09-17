@@ -17,7 +17,7 @@ import {
 } from './dates.js';
 
 /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /* ══════════════════════════════════════════════════════════════════════════
    Object type registry
@@ -517,7 +517,7 @@ export function linkTypeBetween(fromSide, toSide) {
 /* ══════════════════════════════════════════════════════════════════════════
    The P6 register
 
-   A Primavera schedule is the contract programme; this plan is the
+   A Primavera schedule is the contract project; this plan is the
    commissioning narrative. They are different documents with different
    owners, so P6 data is held apart from the objects rather than merged into
    them: `doc.p6` is a register keyed by activity ID, and an object points at
@@ -525,7 +525,7 @@ export function linkTypeBetween(fromSide, toSide) {
 
    Each activity carries two date sets, because that is how the reviews work:
 
-     baseline   the target programme. Imported once, replaced only by another
+     baseline   the target project. Imported once, replaced only by another
                 baseline import.
      progress   where it stands now. Re-imported monthly, and what an object
                 is compared against.
@@ -958,7 +958,7 @@ export function defaultSettings() {
 }
 
 /** A brand-new, empty-but-usable project. */
-export function makeProject(name = 'Untitled Programme') {
+export function makeProject(name = 'Untitled Project') {
   const start = startOfMonth(todayMs());
   return {
     schema: SCHEMA_VERSION,
@@ -966,7 +966,7 @@ export function makeProject(name = 'Untitled Programme') {
     name,
     description: '',
     client: '',
-    programme: '',
+    project: '',
     created: Date.now(),
     modified: Date.now(),
     settings: defaultSettings(),
@@ -996,7 +996,7 @@ export function makeProject(name = 'Untitled Programme') {
 export function makeStarterProject() {
   const doc = makeProject('Line 1 — Signalling Commissioning');
   doc.client = 'Metro Authority';
-  doc.programme = 'CBTC Deployment · Phase 2';
+  doc.project = 'CBTC Deployment · Phase 2';
   doc.description = 'Software release, testing and commissioning plan for the Phase 2 signalling deployment.';
 
   const laneSpec = [
@@ -1036,7 +1036,7 @@ export function makeStarterProject() {
     // sample plan should not open with broken constraints.
     makeObject({ type: 'campaign', lane: lane(8), start: D(90), end: D(130), title: 'Dynamic Testing Campaign 1', status: 'planned', progress: 0, owner: 'J. Moreau', subsystem: 'ats', area: 'Depot → Station 6', data: { testPackage: 'TP-DYN-01' } }),
     makeObject({ type: 'campaign', lane: lane(8), start: D(136), end: D(176), title: 'Site Acceptance Testing', status: 'planned', progress: 0, owner: 'J. Moreau', area: 'Full alignment', data: { testPackage: 'TP-SAT-01' } }),
-    makeObject({ type: 'milestone', lane: lane(8), start: D(180), title: 'Provisional Acceptance', status: 'planned', owner: 'Programme' }),
+    makeObject({ type: 'milestone', lane: lane(8), start: D(180), title: 'Provisional Acceptance', status: 'planned', owner: 'Project' }),
     makeObject({ type: 'freeze', lane: lane(0), start: D(88), end: D(102), title: 'Code Freeze', status: 'planned' }),
     makeObject({ type: 'customer', lane: lane(9), start: D(140), end: D(152), title: 'Customer Witness Testing', status: 'planned', owner: 'Metro Authority' }),
     makeObject({ type: 'outage', lane: lane(9), start: D(72), end: D(75), title: 'Traction Power Outage', status: 'planned', area: 'Sector 3' }),
@@ -1110,6 +1110,20 @@ const MIGRATIONS = [
     doc.schema = 4;
     return doc;
   },
+
+  // v4 → v5: the field beside `client` is called the project, not the
+  // programme. A word, but a stored one — the old key has to be carried across
+  // or every plan written before this loses what was typed into it. Kept rather
+  // than dropped where both somehow exist: a value somebody typed is never the
+  // thing a rename throws away.
+  (doc) => {
+    if (doc.project === undefined || doc.project === '') {
+      if (typeof doc.programme === 'string') doc.project = doc.programme;
+    }
+    delete doc.programme;
+    doc.schema = 5;
+    return doc;
+  },
 ];
 
 /**
@@ -1126,13 +1140,13 @@ export function normalise(input) {
     if (step) doc = step(doc);
   }
 
-  const base = makeProject(doc.name || 'Untitled Programme');
+  const base = makeProject(doc.name || 'Untitled Project');
   doc.schema = SCHEMA_VERSION;
   doc.id = doc.id || base.id;
   doc.name = doc.name || base.name;
   doc.description = doc.description ?? '';
   doc.client = doc.client ?? '';
-  doc.programme = doc.programme ?? '';
+  doc.project = doc.project ?? '';
   doc.created = doc.created || Date.now();
   doc.modified = doc.modified || Date.now();
   doc.settings = { ...defaultSettings(), ...(doc.settings || {}) };

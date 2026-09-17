@@ -9,7 +9,7 @@
  * huddle — including the offline queue, which is the part a real meeting
  * depends on.
  *
- * **The timeline's data never leaves.** The plan holds the P6 programme and is
+ * **The timeline's data never leaves.** The plan holds the P6 project and is
  * proprietary; it lives in a OneDrive folder and must never reach Supabase.
  * Until this feature that was guaranteed by the *build* — the desktop shape has
  * no backend at all and physically could not have sent anything. Putting a
@@ -287,9 +287,15 @@ function fakeSdk() {
                  two cells shared one column, which no spreadsheet can do: the
                  later one won, Dan's name landed on the crew's cell, and the
                  week plan showed Priya with nothing planned one day in seven. */
-              mark(crewIdx, 'Priya, Victor, Lena', null),
+              /* Typed by hand, which is what the separators and the spacing in
+                 here are: a comma with a space before it, a spelled-out "and",
+                 and a surname one letter pair out of order. All three used to
+                 cost somebody their shifts — the first two by folding to a
+                 string nothing matched, the third by being reported as a
+                 person nobody had heard of. */
+              mark(crewIdx, 'Priya ,  Victor and Lena', null),
               mark(todayIdx, 'Dan', null),
-              mark(todayIdx + 1, 'Dan, R. Okafor', null),
+              mark(todayIdx + 1, 'Dan, R. Okafor, Victor Okonkow', null),
             ] },
             /* One mark in the week that has already gone and one still ahead,
                so narrowing the window drops a column without dropping a row. */
@@ -1469,8 +1475,11 @@ async function main() {
   check('a day the 4WLA names somebody on is their plan for that day',
     /IXL Regression Testing/.test(priyaText) && /TPSS 12/.test(priyaText),
     priyaText.replace(/\n/g, ' | ').slice(0, 90));
-  check('and it says the workbook said so rather than a person',
-    /From 4WLA/.test(priyaText));
+  /* And it says nothing about where it came from, because the workbook is the
+     assumption. A badge on nearly every cell is a badge saying nothing; what is
+     flagged is the exception, which is a day somebody typed in by hand. */
+  check('and it is not badged, because the workbook is the assumption',
+    !/Manual/.test(priyaText), priyaText.replace(/\n/g, ' | ').slice(0, 90));
   /* And the other half of that: an activity the workbook no longer carries is
      not still somebody's plan. `lar4` names Priya every weekday of this week and
      comes from the read *before* the current one, which covers the same week and
@@ -1506,8 +1515,8 @@ async function main() {
   const rosaText = await rosaRow.innerText();
   check('a day the 4WLA puts somebody on PTO reads as leave, not as a gap',
     /Leave/.test(rosaText), rosaText.replace(/\n/g, ' | ').slice(0, 90));
-  check('and it says the workbook is where that came from',
-    /From 4WLA/.test(rosaText));
+  check('and it reads as leave whoever wrote it down',
+    !/Manual/.test(rosaText), rosaText.replace(/\n/g, ' | ').slice(0, 90));
   const tomText = await page.locator('#rc-frame tbody tr', { hasText: 'Tom' }).innerText();
   /* Another group's project is work, not leave. Folding the two together would
      put somebody who is on site somewhere else down as absent. */
@@ -1523,7 +1532,8 @@ async function main() {
   const umaText = await umaRow.innerText();
   check('a day the 4WLA puts somebody in the office is their plan for that day',
     /Office/.test(umaText), umaText.replace(/\n/g, ' | ').slice(0, 90));
-  check('and it says the workbook is where that came from', /From 4WLA/.test(umaText));
+  check('and it carries no badge either — nobody typed it in',
+    !/Manual/.test(umaText), umaText.replace(/\n/g, ' | ').slice(0, 90));
   check('it is work, so it is not drawn as leave', !/Leave/.test(umaText));
   check('so they are not asked for an outcome as though they were away',
     (await umaRow.locator('button', { hasText: 'Plan it' }).count()) === 0);
@@ -1549,9 +1559,10 @@ async function main() {
     await page.evaluate(() => window.__rc.rows.rc_plan_entries
       .some((e) => e.person_id === 'p3' && e.task === 'Overridden — office'
         && e.lookahead_row_id === 'lar2')));
-  check('which then wins over what the sheet says',
+  check('which then wins over what the sheet says, and says a person typed it',
     /Overridden — office/.test(await priyaRow.innerText())
-    && !/From 4WLA/.test(await priyaRow.innerText()));
+    && /Manual/.test(await priyaRow.innerText()),
+    (await priyaRow.innerText()).replace(/\n/g, ' | ').slice(0, 90));
 
   /* ── The look-ahead and the SARs ──────────────────────────────────────── */
   console.log('\nThe look-ahead register');
@@ -1563,8 +1574,12 @@ async function main() {
      colours it was painted. It draws the snapshot rather than the file,
      which is what lets it render on a machine that has never been given
      the folder — including this one. */
+  /* The day columns alone. That row also carries the sheet's own headings —
+     Location, SSWP, Party to action — one cell each, so counting every `th` and
+     taking one off (which is what this did, when "Activity" spanned them all)
+     counts the frozen side as days. */
   const dayHeadCount = async () =>
-    (await page.locator('#rc-frame .la-grid thead tr').nth(1).locator('th').count()) - 1;
+    page.locator('#rc-frame .la-grid thead tr').nth(1).locator('th:not(.la-meta)').count();
 
   /* The sheet carries months and day numbers and no year at all, so the axis
      is dated from the snapshot's timestamp and then *checked* against the
@@ -1805,7 +1820,7 @@ async function main() {
     /^lookahead-\d{4}-\d{2}-\d{2}\.pdf$/.test(saved.name || ''), saved.name || '');
 
   /* ── The key describes what is on screen ──────────────────────────────
-     The register is the whole programme's. Printed over a four-week window it
+     The register is the whole project's. Printed over a four-week window it
      is a key to somebody else's calendar: the reader checks a colour, finds
      three entries that are not here, and stops trusting the strip. */
   const stripText = await page.locator('#rc-frame .la-legend').first().innerText();
@@ -2001,12 +2016,29 @@ async function main() {
         .find((r) => r.id === 'lar2').resources).length));
 
   check('a bare first name maps to the one person who answers to it',
-    /From 4WLA/.test(await page.locator('#rc-frame .rc-resources tr', { hasText: 'Victor Okonkwo' })
+    /IXL Regression Testing/.test(await page.locator('#rc-frame .rc-resources tr', { hasText: 'Victor Okonkwo' })
       .innerText()),
     (await page.locator('#rc-frame .rc-resources tr', { hasText: 'Victor Okonkwo' })
       .innerText()).replace(/\n/g, ' | ').slice(0, 90));
   check('and it is not reported as a name nobody could place',
     !/^Victor$/m.test(resText), resText.split('\n').filter((l) => /^Victor/.test(l)).join(' | '));
+
+  /* ── A misspelling ────────────────────────────────────────────────────
+     "Victor Okonkow" — one transposed pair of letters, typed into a spreadsheet
+     at speed. It used to cost him the whole day: nothing in the register folds
+     to that string, so it went to the unmatched list and his shift showed
+     against nobody. It is read as him now, within a bound set by the length of
+     what was written, and only because exactly one registered spelling is that
+     close. And it is *said*, because a correction is not a match: the Resources
+     tab lists it with one click to record the spelling for good. */
+  check('a misspelling one letter pair out is read as the person it can only be',
+    /Matched by correcting a spelling/.test(resText)
+    && /Victor Okonkow/.test(resText),
+    resText.split('\n').filter((l) => /Okonkow/.test(l)).join(' | '));
+  check('and it says so rather than absorbing it, with a way to settle it',
+    (await page.locator('#rc-frame button', { hasText: 'Record the spelling' }).count()) >= 1);
+  check('a name that is merely near two people is still matched to neither',
+    !/Matched by correcting a spelling[\s\S]*?\bLena\b/.test(resText));
 
   /* Two people answer to "Lena". Picking one would put a shift against the
      wrong engineer, and it would do it silently — both answers look equally
@@ -2014,9 +2046,9 @@ async function main() {
   const lena = page.locator('#rc-frame tbody tr')
     .filter({ has: page.locator('td div', { hasText: /^Lena$/ }) }).first();
   check('a first name two people share matches neither',
-    !/From 4WLA/.test(await page.locator('#rc-frame .rc-resources tr', { hasText: 'Lena Fischer' })
+    !/IXL Regression Testing/.test(await page.locator('#rc-frame .rc-resources tr', { hasText: 'Lena Fischer' })
       .innerText())
-    && !/From 4WLA/.test(await page.locator('#rc-frame .rc-resources tr', { hasText: 'Lena Brandt' })
+    && !/IXL Regression Testing/.test(await page.locator('#rc-frame .rc-resources tr', { hasText: 'Lena Brandt' })
       .innerText()));
   check('and it says that is why, rather than "nobody is called that"',
     /more than one person is called that/.test(await lena.innerText()),
@@ -2094,7 +2126,7 @@ async function main() {
   await page.waitForTimeout(600);
   const assigned = await page.evaluate(() => window.__rc.rows.rc_plan_entries
     .filter((p) => /as-built markups/.test(p.task || '')));
-  check('a span of off-programme days becomes one plan entry per day',
+  check('a span of off-project days becomes one plan entry per day',
     assigned.length >= 2, `${assigned.length} entries`);
   check('and it is a plan entry, so the huddle already reads it',
     assigned.every((p) => p.person_id && p.work_date && !p.lookahead_row_id));
@@ -2113,7 +2145,7 @@ async function main() {
   /* ── PTO ──────────────────────────────────────────────────────────────
      Leave already had a list in Organisation. This is the four weeks anybody is
      actually staffing, and it draws two things: what somebody booked, and what
-     the 4WLA's PTO row says — which on this programme is usually the only place
+     the 4WLA's PTO row says — which on this project is usually the only place
      an absence is written down at all. */
   console.log('\nPTO');
   await page.locator('#rc-frame .rc-tab', { hasText: 'PTO' }).click();
@@ -2140,10 +2172,34 @@ async function main() {
   check('hovering a row does not paint over the leave on it',
     paintBefore === paintDuring, `${paintBefore} → ${paintDuring}`);
   await page.mouse.move(0, 0);
-  /* The two must not read alike: one is a record with a kind and a status, the
-     other is a cell somebody typed in a spreadsheet. */
-  check('the two are told apart on screen rather than merged',
-    /On the 4WLA only/.test(ptoText) && /Booked/.test(ptoText));
+  /* Leave is one colour however it was written down. Which of the two wrote a
+     day down is bookkeeping; the question this screen answers is who is away,
+     and three swatches for one fact meant decoding the key to read the grid.
+     The distinction is still available in the cell's title and in the counts. */
+  check('booked leave and the sheet\u2019s own row are drawn as one colour',
+    await page.evaluate(() => {
+      const paint = (sel) => {
+        const cell = document.querySelector(sel);
+        return cell ? getComputedStyle(cell).backgroundImage + '|'
+          + getComputedStyle(cell).backgroundColor : null;
+      };
+      const booked = paint('#rc-frame .rc-pto-cell.rc-pto-booked');
+      const sheet = paint('#rc-frame .rc-pto-cell.rc-pto-sheet');
+      return Boolean(booked) && booked === sheet;
+    }));
+  check('and a day off the project is drawn as something else again',
+    await page.evaluate(() => {
+      const paint = (sel) => {
+        const cell = document.querySelector(sel);
+        return cell ? getComputedStyle(cell).backgroundColor : null;
+      };
+      const off = paint('#rc-frame .rc-pto-cell.rc-pto-elsewhere');
+      return !off || off !== paint('#rc-frame .rc-pto-cell.rc-pto-booked');
+    }));
+  check('the key says the two things it draws, and not three',
+    /PTO/.test(ptoText) && /Off the project/i.test(ptoText)
+    && !/On the 4WLA only/.test(ptoText),
+    ptoText.split('\n').filter((l) => /PTO —|Off the project/i.test(l)).join(' | '));
   check('and the count of each is said out loud',
     /the 4WLA says are PTO with nothing booked/.test(ptoText),
     ptoText.split('\n').find((l) => /booked day/.test(l))?.slice(0, 100) || '');
@@ -2412,7 +2468,7 @@ async function main() {
   const repText = await page.locator('#rc-frame').innerText();
   check('an arbitrary range can be chosen, not fixed buckets',
     /Last year/.test(repText) && /Custom/.test(repText));
-  check('performance and programme health are reported apart',
+  check('performance and project health are reported apart',
     /blocked/i.test(repText) && /completed/i.test(repText) && /reassigned/i.test(repText));
   // The rate is over the performance family only. Counting a day somebody was
   // blocked as a day they failed to complete would make a team look worse for
@@ -2588,7 +2644,7 @@ async function main() {
 
   // The plan lives in a folder only its owner granted, so a viewer could never
   // load it — what they would see is the built-in sample, and mistaking that
-  // for a real programme is the reason the switch goes away.
+  // for a real project is the reason the switch goes away.
   check('a viewer gets no Timeline switch', (await viewer.locator('.ws-switch').count()) === 0);
   check('and lands on the calendar',
     await viewer.evaluate(() => document.body.dataset.workspace === 'calendar'));

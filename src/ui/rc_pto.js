@@ -7,25 +7,28 @@
  * the weeks I am staffing", and a list of date ranges does not answer it —
  * you find out somebody is away when you try to put them somewhere.
  *
- * So this is a calendar, and it draws two things in each cell, for the reason
- * the Resources tab draws two:
+ * So this is a calendar. It reads two things into each cell, for the reason the
+ * Resources tab draws two — though both come out the same colour, because on
+ * this screen they are the same fact:
  *
  * **What somebody booked**, from `rc_leave` — a record, with a kind and a
  * status, that survives the workbook being edited.
  *
  * **What the 4WLA says**, from the "PTO" row at the bottom of the sheet — names
  * typed into day cells, derived at paint time and never written anywhere. On
- * this programme that row is usually the *only* place an absence is written
+ * this project that row is usually the *only* place an absence is written
  * down: somebody types a name into the workbook and never opens Organisation.
  * Reading it is what stops the huddle asking a person on holiday how their day
  * went, and what stops the week plan drawing their week as days nobody filled
  * in.
  *
- * The interesting cell is the one where they differ. A day the sheet says is PTO
- * with nothing booked against it is not an error — it is the normal case, and
- * one click from becoming a record. A day booked that the sheet does not know
- * about is the other direction, and worth seeing before somebody is scheduled
- * into it.
+ * **They are drawn as one colour, and that is deliberate.** Which of the two
+ * wrote a day down is bookkeeping; the question this screen answers is who is
+ * away, and a reader scanning four weeks of the team should not have to learn
+ * three swatches to answer it. The distinction is still there to be had — in the
+ * cell's title, in the counts under the grid, and in the fact that a day only
+ * the sheet knows about can be clicked to book it — but it is not what the
+ * colour is for.
  *
  * **Nothing here is derived from a role.** Managers take leave too, and a PTO
  * calendar that quietly dropped them would be wrong on exactly the weeks it
@@ -164,7 +167,11 @@ export async function render(root) {
         return el('td', {
           class: classes.join(' '),
           'data-label': dayLabel(iso),
+          /* The colour says "off"; the title says where that came from. That is
+             the whole of what splitting the swatch used to buy, and it costs
+             nothing to read it here instead. */
           title: [kindsById.get(booked.kind_id)?.name || 'Leave',
+            'booked',
             booked.status !== 'approved' ? booked.status : null,
             sheetSays === 'pto' ? 'and the 4WLA says so too' : 'not on the 4WLA',
             booked.note].filter(Boolean).join(' · '),
@@ -176,7 +183,7 @@ export async function render(root) {
         sheetOnly++;
         classes.push('rc-pto-sheet');
         /* Nothing booked, and the workbook says they are off. Not an error —
-           it is how almost every absence on this programme is recorded — so the
+           it is how almost every absence on this project is recorded — so the
            cell offers to make it a record rather than complaining about it. */
         return el('td', {
           class: `${classes.join(' ')}${admin ? ' rc-clickable' : ''}`,
@@ -190,9 +197,10 @@ export async function render(root) {
         });
       }
 
-      /* Off the programme but not off. Drawn so a day the sheet accounted for
-         does not read as a blank here, and hatched the other way from leave so
-         the two can never be mistaken: these are days somebody worked. */
+      /* Off the project but not off. Drawn so a day the sheet accounted for
+         does not read as a blank here, and in a colour of its own rather than a
+         shade of the leave one, so the two can never be mistaken: these are days
+         somebody worked. */
       if (sheetSays === 'office' || sheetSays === 'other') {
         classes.push('rc-pto-elsewhere');
         return el('td', {
@@ -218,18 +226,22 @@ export async function render(root) {
     el('table', { class: 'rc-table rc-pto-grid' }, [el('thead', {}, [el('tr', {}, headCells)]), body]),
   ]));
 
+  /* Two swatches, because there are two facts.
+     Leave is one colour however it was written down: booked in the application
+     and typed into the 4WLA's PTO row are the same day off, and drawing them
+     apart made a reader learn three swatches to answer one question. Where it
+     came from is still said — in the cell's title, in the counts below, and in
+     whether the day can be clicked to book it. */
   host.appendChild(el('div', { class: 'rc-pto-key' }, [
-    key('rc-pto-booked', 'Booked'),
-    key('rc-pto-booked rc-pto-agreed', 'Booked, and on the 4WLA'),
-    key('rc-pto-sheet', 'On the 4WLA only'),
-    key('rc-pto-elsewhere', 'Off the programme, not off work'),
+    key('rc-pto-booked', 'PTO — booked or on the 4WLA'),
+    key('rc-pto-elsewhere', 'Off the project, not off work'),
   ]));
 
   host.appendChild(el('p', {
     class: 'rc-hint',
     text: `${bookedDays} booked day(s) in this window, and ${sheetOnly} the 4WLA says are PTO with `
       + 'nothing booked against them. The second number is not a fault: the workbook is where '
-      + 'most absences on this programme are written down, and everything — the huddle, the week '
+      + 'most absences on this project are written down, and everything — the huddle, the week '
       + 'plan, Resources — already reads it as leave. Booking one makes a record that survives '
       + 'the sheet being edited, and an administrator can do it by clicking the day.',
   }));

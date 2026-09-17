@@ -4,7 +4,7 @@
  * A second, entirely separate Supabase client from `core/cloud.js`, and the
  * separation is the feature rather than duplication.
  *
- * The timeline's plan is proprietary: it holds the P6 programme and it never
+ * The timeline's plan is proprietary: it holds the P6 project and it never
  * leaves its OneDrive folder. The resource calendar holds none of that, so it
  * lives in Postgres where the deputy and the team can reach it from a browser.
  * Until now that boundary was guaranteed by the *build* — `tools/desktop.js`
@@ -673,6 +673,27 @@ export async function addLegend(rows) {
   return data || [];
 }
 export const updateLegend = (id, patch) => update('rc_legend', id, patch);
+
+/**
+ * Delete a reference row outright, where nothing has been recorded against it.
+ *
+ * Retiring is still the right answer for anything that has been used, and the
+ * refusal says so by name. These exist for the row that was never meant: a
+ * person added twice, a location typed wrong, a colour mapped by mistake —
+ * which retiring only ever turns into a permanent entry in a list of things
+ * that used to be true.
+ *
+ * Functions rather than `.delete()`, for the reason every other write here is a
+ * function: a DELETE the policies refuse matches no rows and comes back as
+ * success, so the interface would report a deletion that never happened. These
+ * raise — over permission, over the last administrator, and over anything
+ * pointing at the row — and `rpc()` turns that into a message somebody can act
+ * on.
+ */
+export const deletePerson = (id) => rpc('rc_delete_person', { p_person: id });
+export const deleteLocation = (id) => rpc('rc_delete_location', { p_location: id });
+export const deleteCategory = (id) => rpc('rc_delete_category', { p_category: id });
+export const deleteLegend = (id) => rpc('rc_delete_legend', { p_entry: id });
 
 /**
  * Write a setting.

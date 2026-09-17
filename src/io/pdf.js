@@ -8,7 +8,7 @@
  * vendored into a local-first app, and no CDN to be offline from.
  *
  * The writer supports the base-14 fonts (no embedding needed), landscape
- * pages, and horizontal tiling so a multi-year programme spills across pages
+ * pages, and horizontal tiling so a multi-year project spills across pages
  * with the lane gutter repeated on each one.
  *
  * Imports: dates (for the footer stamp).
@@ -389,7 +389,7 @@ export function fitScale(scene, opts = {}) {
  *
  * The other renderer here (`sceneToPdf`) is the timeline's: it fits the lane
  * stack vertically and *tiles* horizontally, repeating the lane gutter on every
- * sheet, because a multi-year programme has no business on one page. This is
+ * sheet, because a multi-year project has no business on one page. This is
  * the opposite requirement and therefore a different function rather than a
  * flag — a calendar you have to reassemble from four sheets on a meeting-room
  * table is not a calendar. It scales uniformly to fit both axes, centres what

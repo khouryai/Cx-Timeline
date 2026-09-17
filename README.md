@@ -3,7 +3,7 @@
 **A hosted interactive timeline and commissioning planner.**
 
 Built for managing software releases, testing schedules, commissioning
-campaigns and programme milestones on rail signalling projects — and designed
+campaigns and project milestones on rail signalling projects — and designed
 to sit alongside the CX Portal as part of the same software suite.
 
 Sign in, and your projects are wherever you open them. Share a plan with the
@@ -214,7 +214,7 @@ already uses as suggestions rather than blocking a new name.
 
 ### Primavera P6
 
-A P6 schedule is the contract programme; this is the commissioning narrative.
+A P6 schedule is the contract project; this is the commissioning narrative.
 They stay separate documents with separate owners, and the P6 side is a
 **register** rather than a copy of your plan.
 
@@ -226,7 +226,7 @@ whose start and finish are the same day are all handled.
 
 Every import is tagged, and both are kept per activity:
 
-- **Baseline** — the target programme. Replaced only by another baseline.
+- **Baseline** — the target project. Replaced only by another baseline.
 - **Progress** — where the schedule stands now. Re-imported monthly.
 
 Nothing is drawn until you choose. From the **P6 Schedule** pane you can
@@ -274,7 +274,7 @@ store. The **Timeline / Calendar** switch at the top of the sidebar moves
 between them; the timeline is hidden rather than closed, so switching back lands
 exactly where you left off.
 
-It exists because the timeline answers *what the programme is* and this answers
+It exists because the timeline answers *what the project is* and this answers
 *who is doing it today*. The two are deliberately not linked: the plan holds
 proprietary P6 data and never leaves its folder, while the calendar is
 non-proprietary and lives in Postgres so the whole team can reach it from a
@@ -287,7 +287,7 @@ yesterday, what actually happened, and what they are doing tomorrow. Five
 outcomes, one keypress each — and they fall into two families that are never
 averaged together:
 
-| Performance — what somebody did | Programme health — what was done to them |
+| Performance — what somebody did | Project health — what was done to them |
 |---|---|
 | Completed · Partial · Carried over | Blocked · Reassigned |
 
@@ -540,7 +540,7 @@ account.
 
 The resource calendar is a **separate** Supabase project from the timeline's,
 named separately in `config.js`. That separation is the point: the plan holds
-proprietary programme data and stays in your folder, while the calendar holds
+proprietary project data and stays in your folder, while the calendar holds
 people's names, attendance and outcomes and goes to the database so the team can
 reach it. Two different kinds of data, two different audiences, two different
 homes — and the personal half is worth its own retention answer.

@@ -4,11 +4,16 @@
  * Reference data before transactional data: nothing else in the calendar means
  * anything until there are people to schedule and places to send them.
  *
- * Two decisions run through it. **Nobody is ever deleted** — a leaver's history
- * has to stay for the reports while they drop out of every picker, so `active`
- * is the only thing that changes. And **every vocabulary is a table**, because
- * the reports group by them and "doc" typed one week against "documentation"
- * the next are two categories to a database and one to a person.
+ * Two decisions run through it. **Nothing anybody has used is ever deleted** —
+ * a leaver's history has to stay for the reports while they drop out of every
+ * picker, which is what Retire does and why it is the first answer offered.
+ * Delete is the second, and it is for the row that was never meant: somebody
+ * added twice, a location typed wrong. Postgres decides which is which —
+ * `rc_delete_person()` and its siblings count what points at the row and refuse
+ * with the number — because only the database can see everything that does.
+ * And **every vocabulary is a table**, because the reports group by them and
+ * "doc" typed one week against "documentation" the next are two categories to a
+ * database and one to a person.
  *
  * Imports: util, events, dates, rc, icons, components, rc_util.
  */
@@ -40,6 +45,40 @@ const ROLES = [
 // ordinary states, and the word is the information — tinting one of them would
 // read as a warning about somebody who is simply on the team.
 const ROLE_TONE = { admin: 'info', member: 'neutral', viewer: 'neutral' };
+
+/**
+ * The Delete button that sits beside Retire.
+ *
+ * It asks first, and then it lets the database answer. Nothing here works out
+ * whether a row is safe to remove: the interface cannot see every table that
+ * might point at it, and a check written twice is a check that will one day
+ * disagree with itself. The refusal Postgres raises already names the number of
+ * records in the way and says to retire instead, so it is shown as it comes.
+ */
+function deleteButton({ label, message, run, after }) {
+  return el('button', {
+    class: 'cx-btn mini ghost danger',
+    text: 'Delete',
+    title: 'Removes it for good. Refused, with a count, if anything has been recorded against it '
+      + '— retire it in that case, which keeps the history.',
+    onClick: async () => {
+      const ok = await confirmDialog({
+        title: label,
+        message,
+        confirmLabel: 'Delete',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        await run();
+        toast({ tone: 'good', message: 'Deleted.' });
+        notifyChanged(after);
+      } catch (err) {
+        toast({ tone: 'bad', message: err?.message || String(err) });
+      }
+    },
+  });
+}
 
 export async function render(root) {
   // Accounts is administrators-only in the database — `rc_list_invitations()`
@@ -117,14 +156,24 @@ async function renderPeople(host) {
           notifyChanged('people');
         },
       }),
+      deleteButton({
+        label: `Delete ${p.name}?`,
+        message: 'Their aliases and any leave booked for them go too. If anything has been '
+          + 'planned or recorded against them this is refused, and retiring them is the answer '
+          + '— that keeps every outcome and takes them out of the pickers just the same.',
+        run: () => rc.deletePerson(p.id),
+        after: 'people',
+      }),
     ] : []),
   ]));
 
   host.appendChild(table(['Name', 'Title', 'Subsystem', 'Role', 'In the huddle', 'Days', ''], rows));
   host.appendChild(el('p', {
     class: 'rc-hint',
-    text: 'Retiring somebody keeps every outcome they ever recorded. Nobody is deleted, because '
-      + 'the reports would lose their history with them. "In the huddle" is a separate question '
+    text: 'Retiring somebody keeps every outcome they ever recorded, which is why it is the first '
+      + 'answer for anybody who has been here. Delete is for a row that was never meant — the same '
+      + 'person added twice — and the database refuses it, with a count, the moment anything has '
+      + 'been planned or recorded against them. "In the huddle" is a separate question '
       + 'from what somebody may do: a manager administers the calendar without being assigned to '
       + 'a location, and an administrator who does take shifts stays in the meeting.',
   }));
@@ -266,6 +315,14 @@ async function renderLocations(host) {
           notifyChanged('locations');
         },
       }),
+      deleteButton({
+        label: `Delete ${l.name}?`,
+        message: 'Its other spellings go with it. If any plan, outcome, look-ahead row or SAR '
+          + 'names this place the delete is refused — retire it instead, which drops it from the '
+          + 'pickers and keeps everything already recorded there.',
+        run: () => rc.deleteLocation(l.id),
+        after: 'locations',
+      }),
       el('button', {
         class: 'cx-btn mini ghost',
         text: 'Add spelling',
@@ -326,6 +383,14 @@ async function renderCategories(host) {
           await rc.updateCategory(c.id, { active: !c.active });
           notifyChanged('categories');
         },
+      }),
+      deleteButton({
+        label: `Delete ${c.name}?`,
+        message: 'Refused if anything has been grouped under it, because the reports would lose '
+          + 'the grouping with it. Retiring takes it out of the pickers and leaves every rollup '
+          + 'reading as it does today.',
+        run: () => rc.deleteCategory(c.id),
+        after: 'categories',
       }),
     ] : []),
   ]))));

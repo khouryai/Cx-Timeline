@@ -296,6 +296,16 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   text-overflow: ellipsis;
 }
 .la-grid thead .la-meta { z-index: 4; }
+/* The names the workbook gives its own left-hand columns — Location, SSWP,
+   Party to action, and whatever else that sheet carries. They sit in the day-
+   number row, one per column, so they have to take the header's background
+   rather than the body's: `.la-meta` is the more specific selector and would
+   otherwise leave them the colour of the rows underneath. */
+.la-grid thead .la-meta-head {
+  background: var(--surface-2);
+  color: var(--text-main);
+  vertical-align: bottom;
+}
 .la-grid .la-meta.la-last { border-right: 2px solid var(--border-strong); }
 
 .la-grid thead th {
@@ -685,7 +695,7 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 
 .rc-res-job { margin-bottom: 4px; }
 
-/* A day on another group's project is work, and it is not this programme's —
+/* A day on another group's project is work, and it is not this project's —
    set back rather than badged, because it is one of several things in a cell. */
 .rc-res-job.rc-res-away { color: var(--text-muted); font-style: italic; }
 
@@ -786,10 +796,11 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 
 /* ── PTO ────────────────────────────────────────────────────────────────────
    Four weeks across, the team down the side. Twenty-eight columns leave no room
-   for words, so the cell *is* the answer: a fill for booked leave, a hatch for a
-   day only the 4WLA knows about, and the title attribute carries the rest. The
-   two must not read as the same thing — one is a record, the other is a
-   spreadsheet cell somebody typed — which is what the hatch is for. */
+   for words, so the cell *is* the answer: one colour for leave however it was
+   written down, another for a day spent off the project but at work, and the
+   title attribute carries the rest. Those two must never read alike — one is a
+   day somebody was away and the other is a day they worked — and nothing else
+   here earns a colour of its own. */
 
 .rc-pto-grid th,
 .rc-pto-grid td { text-align: center; padding: 3px 2px; }
@@ -815,32 +826,24 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 .rc-pto-off { background: var(--surface-sunk, rgba(127, 127, 127, 0.06)); }
 .rc-pto-today { border-left: 2px solid var(--accent, #e60012); }
 
-/* Booked: a solid fill, because it is a record. */
-.rc-pto-booked { background: var(--accent-blue, #3399ff); }
-/* Booked *and* on the sheet — the two agreeing, which is the case that needs no
-   attention at all, so it only deepens rather than adding a second signal. */
-.rc-pto-booked.rc-pto-agreed { background: var(--good); }
-/* The sheet alone. Hatched for the same reason an unmapped colour is hatched on
-   the look-ahead: it is real and it is unconfirmed, and those are different. */
-.rc-pto-sheet {
-  background: repeating-linear-gradient(
-    45deg,
-    var(--warn) 0 3px,
-    transparent 3px 6px
-  );
-}
+/* PTO is one colour, wherever it was written down.
+   It used to be three — a fill for a booking, a deepened fill where the sheet
+   agreed, a hatch for the sheet alone — which drew a distinction about
+   *bookkeeping* in the one colour on the screen that answers "who is off". A
+   reader scanning four weeks of the team for a day somebody is away had to
+   learn three swatches to read one fact. Where the day came from is still
+   worth knowing and is still said: it is in the cell's title, in the count
+   under the grid, and in whether the cell can be clicked to book it. */
+.rc-pto-booked,
+.rc-pto-booked.rc-pto-agreed,
+.rc-pto-sheet { background: var(--rc-pto); }
 .rc-pto-sheet.rc-clickable { cursor: pointer; }
-.rc-pto-sheet.rc-clickable:hover { outline: 2px solid var(--warn); outline-offset: -2px; }
-/* Off the programme — the office, another group's project — is not leave, and
-   must never be mistaken for it. Hatched the other way from a sheet-only PTO
-   day so the two read as different things at a glance. */
-.rc-pto-elsewhere {
-  background: repeating-linear-gradient(
-    -45deg,
-    var(--text-muted) 0 2px,
-    transparent 2px 6px
-  );
-}
+.rc-pto-sheet.rc-clickable:hover { outline: 2px solid var(--text); outline-offset: -2px; }
+/* Off the project — the office, another group's work — is not leave, and must
+   never be mistaken for it. A colour of its own rather than a hatch of the
+   leave colour, because those are days somebody worked and the difference
+   between them and a day off is the whole question this screen answers. */
+.rc-pto-elsewhere { background: var(--rc-offproject); }
 
 .rc-pto-key {
   display: flex;

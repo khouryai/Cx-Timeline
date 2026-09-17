@@ -725,7 +725,7 @@ check('only leave means somebody was not working',
   cls.ABSENCE_KINDS.pto.leave === true
   && cls.ABSENCE_KINDS.office.leave === false
   && cls.ABSENCE_KINDS.other.leave === false);
-check('and a day off the programme names the category it belongs to',
+check('and a day off the project names the category it belongs to',
   cls.ABSENCE_KINDS.office.category === 'Office'
   && cls.ABSENCE_KINDS.other.category === 'Other project'
   && cls.ABSENCE_KINDS.pto.category === null);

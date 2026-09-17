@@ -169,10 +169,15 @@ export function foldName(text) {
  * Three sources and no fourth: somebody's own full name, an alias somebody
  * recorded, and a **first name that belongs to exactly one person** — which is
  * what the 4WLA's Resource row is actually filled in with. There is still no
- * surname match and no near miss: a shift attributed to the wrong engineer is
- * worse than one attributed to nobody, because nobody looks at it again. An
- * unrecognised spelling is shown as unmatched instead, which is a question
- * somebody answers once.
+ * surname match: "Okafor" is a different string from "Rita Okafor" and matches
+ * only because somebody said so in the alias register.
+ *
+ * The register itself is exact. A misspelling is answered separately, by
+ * `nearestName()`, and only after this has failed — bounded by the length of
+ * what was written, refused where two registered spellings are equally close,
+ * and reported to the Resources tab when it does answer. That division is the
+ * point: everything that reads this Map gets an exact answer, and the one place
+ * that corrects a spelling says out loud that it did.
  *
  * They are added weakest first so the stronger answer wins. A full name beats an
  * alias pointing elsewhere — a name that *is* somebody's is theirs — and both
@@ -194,6 +199,86 @@ export function nameRegister(people, aliases = []) {
     if (key) map.set(key, p.id);
   }
   return map;
+}
+
+/**
+ * How far apart two folded names are, giving up once they are further than
+ * `limit`.
+ *
+ * Ordinary Levenshtein over two rows, with the whole row abandoned the moment
+ * every cell in it is past the limit — which is what keeps this cheap against a
+ * roster: almost every pair is obviously different and is dropped on the first
+ * row. A transposition ("Okonwko") costs two here rather than one, which is
+ * deliberate: a cheaper transposition would let a two-letter difference through
+ * at a distance the caller thinks is one.
+ */
+export function nameDistance(a, b, limit = 2) {
+  if (a === b) return 0;
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      row[j] = Math.min(row[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+      if (row[j] < best) best = row[j];
+    }
+    if (best > limit) return limit + 1;
+    prev = row;
+  }
+  return prev[b.length];
+}
+
+/**
+ * How much misspelling a name of this length is allowed to carry.
+ *
+ * One character in a short name and two in a long one. Scaled because a fixed
+ * allowance is wrong at both ends: two edits turn "Ana" into "Eve", while one
+ * edit is barely a typo in "Kowalczyk". Below five folded characters nothing is
+ * allowed at all — at that length half the roster is within one edit of the
+ * other half.
+ */
+function slackFor(key) {
+  if (key.length < 5) return 0;
+  return key.length >= 8 ? 2 : 1;
+}
+
+/**
+ * The one person a misspelling can only have meant.
+ *
+ * The register matches exactly, and that stays the rule wherever an exact answer
+ * exists — this is only ever asked after one has failed. What it adds is the
+ * case the exact rule handled badly: a name typed into a spreadsheet at speed,
+ * where "Okonkwo" arrives as "Okonwko" and a whole week of somebody's shifts
+ * lands in the unmatched list for a transposed pair of letters.
+ *
+ * Two guards keep it from becoming the guessing the rest of this module
+ * refuses. The distance is bounded by the length of what was written, so a
+ * short name is still matched exactly. And a near miss that is near **two**
+ * registered spellings at the same distance matches neither, for the reason two
+ * people called Victor match neither: picking one would put a shift against the
+ * wrong engineer, and it would look exactly as right on screen as the correct
+ * answer.
+ *
+ * The answer is still *reported*. `resourceAssignments()` returns every name it
+ * placed this way, and the Resources tab lists them, because a spelling matched
+ * approximately is a spelling worth an alias — after which it is settled for
+ * good and nothing is being inferred at all.
+ */
+export function nearestName(key, register) {
+  const limit = slackFor(key);
+  if (!limit) return null;
+  let best = null;
+  let bestAt = limit + 1;
+  let tied = false;
+  for (const [candidate, id] of register) {
+    const d = nameDistance(key, candidate, limit);
+    if (d > limit) continue;
+    if (d < bestAt) { bestAt = d; best = { key: candidate, id }; tied = false; }
+    else if (d === bestAt && best && best.id !== id) tied = true;
+  }
+  return tied ? null : best;
 }
 
 /**
@@ -537,27 +622,38 @@ export function graftResources(laRows, view, snapshotId) {
  * Who the look-ahead's Resource rows put where, per day.
  *
  * Returns `byPerson` — a person id to a map of date to the rows naming them —
- * and `unmatched`, the spellings the register does not know. The second half is
+ * `unmatched`, the spellings the register cannot place at all, and `near`, the
+ * ones it placed by correcting a misspelling. The second and third halves are
  * the point as much as the first: a name nobody has mapped is a person missing
- * from the picture, and reporting it is the difference between a view that is
- * incomplete and one that is quietly wrong.
+ * from the picture, and a name matched approximately is one placed on a judgement
+ * somebody should get the chance to confirm. Reporting both is the difference
+ * between a view that is incomplete and one that is quietly wrong.
  */
 export function resourceAssignments(laRows, register) {
   const byPerson = new Map();
   const unmatched = new Map();
+  const near = new Map();
+  const resolve = nameResolver(register);
 
   for (const row of laRows || []) {
     for (const [date, text] of Object.entries(row.resources || {})) {
       for (const written of resourceNames(text)) {
         const key = foldName(written);
         if (!key) continue;
-        const personId = register.get(key);
+        const { id: personId, corrected } = resolve(key);
         if (!personId) {
           const seen = unmatched.get(key) || { name: written, days: new Set(), rows: [] };
           seen.days.add(date);
           if (!seen.rows.some((r) => r.id === row.id)) seen.rows.push(row);
           unmatched.set(key, seen);
           continue;
+        }
+        if (corrected) {
+          const seen = near.get(key)
+            || { name: written, person_id: personId, days: new Set(), rows: [] };
+          seen.days.add(date);
+          if (!seen.rows.some((r) => r.id === row.id)) seen.rows.push(row);
+          near.set(key, seen);
         }
         if (!byPerson.has(personId)) byPerson.set(personId, new Map());
         const days = byPerson.get(personId);
@@ -567,7 +663,33 @@ export function resourceAssignments(laRows, register) {
     }
   }
 
-  return { byPerson, unmatched: [...unmatched.values()] };
+  return { byPerson, unmatched: [...unmatched.values()], near: [...near.values()] };
+}
+
+/**
+ * The register's answer for one folded spelling: exact where it has one, the
+ * nearest unambiguous misspelling where it does not.
+ *
+ * A closure rather than a bare function because the near-miss scan walks the
+ * whole register, and a hundred days of a real sheet ask about the same handful
+ * of spellings over and over — memoising is what keeps that one pass rather than
+ * thousands. `corrected` says which of the two answers it is, so a caller can
+ * report a name it only matched approximately instead of quietly absorbing it.
+ */
+function nameResolver(register) {
+  const memo = new Map();
+  return (key) => {
+    if (memo.has(key)) return memo.get(key);
+    const exact = register.get(key);
+    const answer = exact
+      ? { id: exact, corrected: null }
+      : (() => {
+        const guess = nearestName(key, register);
+        return guess ? { id: guess.id, corrected: guess.key } : { id: null, corrected: null };
+      })();
+    memo.set(key, answer);
+    return answer;
+  };
 }
 
 /**
@@ -594,12 +716,20 @@ export function resourceAssignments(laRows, register) {
 export function absenceAssignments(absences, register) {
   const byPerson = new Map();
   const unmatched = new Map();
+  const near = new Map();
+  const resolve = nameResolver(register);
 
   for (const entry of absences || []) {
     for (const written of resourceNames(entry.written)) {
       const key = foldName(written);
       if (!key) continue;
-      const personId = register.get(key);
+      const { id: personId, corrected } = resolve(key);
+      if (corrected && personId) {
+        const seen = near.get(key)
+          || { name: written, person_id: personId, days: new Set(), rows: [] };
+        seen.days.add(entry.date);
+        near.set(key, seen);
+      }
       if (!personId) {
         const seen = unmatched.get(key) || { name: written, days: new Set(), kinds: new Set() };
         seen.days.add(entry.date);
@@ -616,7 +746,7 @@ export function absenceAssignments(absences, register) {
     }
   }
 
-  return { byPerson, unmatched: [...unmatched.values()] };
+  return { byPerson, unmatched: [...unmatched.values()], near: [...near.values()] };
 }
 
 /**
@@ -625,7 +755,7 @@ export function absenceAssignments(absences, register) {
  * The meaning is the legend's word for the colour, so "Night Shift" and
  * "Blanket" are the sheet's own vocabulary rather than ours. Anything it does
  * not recognise is a day shift, which is what an unlabelled cell has always
- * meant on this programme.
+ * meant on this project.
  */
 export function shiftFor(meaning) {
   const said = String(meaning || '').toLowerCase();
@@ -659,10 +789,10 @@ export function shiftFor(meaning) {
  * default; a row is a decision.
  */
 export function assignmentIndex({ planRows, laRows, register, absences = [], categories = [] }) {
-  const { byPerson, unmatched } = resourceAssignments(laRows, register);
+  const { byPerson, unmatched, near } = resourceAssignments(laRows, register);
   const away = absenceAssignments(absences, register);
 
-  /* Which seeded category an off-programme day belongs to.
+  /* Which seeded category an off-project day belongs to.
      A day in the office is a day somebody worked, and a report that could not
      say *what* they worked on is the blank the `Office` and `Other project`
      categories were seeded to fill. Matched on the name the schema seeds,
@@ -766,6 +896,10 @@ export function assignmentIndex({ planRows, laRows, register, absences = [], cat
     },
     byPerson,
     unmatched,
+    /* Spellings placed by correcting a misspelling rather than by matching one.
+       Carried out so the Resources tab can list them: the answer stands, and an
+       alias is what turns it from a judgement into a fact. */
+    near: [...near, ...away.near],
     awayUnmatched: away.unmatched,
     derived: derived.size,
   };

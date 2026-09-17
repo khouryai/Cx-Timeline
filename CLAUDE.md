@@ -622,7 +622,7 @@ subscribes. That is what keeps the graph acyclic.
   them into leave would put a person who was at their desk down as absent.
   `category` names the seeded `rc_categories` row the day belongs to — `Office`
   and `Other project`, matched by the name the schema seeds, folded. That is
-  what makes an off-programme day *allocated* rather than merely shown: the
+  what makes an off-project day *allocated* rather than merely shown: the
   reports group by category, an outcome recorded against the day inherits it
   through `commitOutcome`, and a day with no category is work of no kind. A
   renamed category stops matching and the day arrives uncategorised — ungrouped
@@ -647,9 +647,14 @@ subscribes. That is what keeps the graph acyclic.
 - **PTO is a third reading, not a second store.** `ui/rc_pto.js` draws four
   weeks of the team and puts two things in each cell: what somebody booked in
   `rc_leave` — a record, with a kind and a status — and what the 4WLA's PTO row
-  says, which on this programme is usually the only place an absence is written
-  down at all. The two must not read alike, which is what the hatch is for: one
-  is a record and the other is a cell somebody typed. A day the sheet calls PTO
+  says, which on this project is usually the only place an absence is written
+  down at all. **They are drawn as one colour** (`--rc-pto`), and that is the
+  point: which of the two wrote a day down is bookkeeping, the question the
+  screen answers is who is away, and three swatches for one fact meant a reader
+  scanning four weeks had to decode the key before they could read the grid.
+  The distinction is still available — in the cell's title, in the counts under
+  the grid, and in whether the day can be clicked to book it — it is simply not
+  what the colour is for. A day the sheet calls PTO
   with nothing booked is the normal case, not an error, and clicking it books
   the same single `rc_leave` row Organisation writes — a second way of recording
   leave would be a second answer to "is Dana off on Tuesday". The Organisation
@@ -657,9 +662,10 @@ subscribes. That is what keeps the graph acyclic.
   It is the one calendar view that does **not** filter on `scheduled`: managers
   take leave too, and dropping them would be wrong on exactly the weeks it
   matters. The office and another group's project are drawn there as well, in a
-  hatch of their own — a day the sheet accounted for should not read as a blank
-  on the one screen about where people are — but never as leave, because those
-  are days somebody worked.
+  colour of their own (`--rc-offproject`) — a day the sheet accounted for should
+  not read as a blank on the one screen about where people are — but never as
+  leave, because those are days somebody worked. That is the one distinction
+  this grid does spend a colour on, and both tokens are defined in every theme.
 - **Who takes shifts decides who is in a view about work.** The huddle and the
   week plan already filtered on `rc_people.scheduled`; the Resources tab did
   not, and Reports counted every `rc_effort` row whoever it belonged to — so a
@@ -690,13 +696,14 @@ subscribes. That is what keeps the graph acyclic.
   quietly: `ingest()` retries without the column, says so in the toast and in the
   `rc_ingest_runs` note, and names the two files to run — a `console.warn` is a
   message to nobody, and the feature it takes out simply reads as empty.
-- **A name in a spreadsheet is matched exactly or reported, never guessed.**
+- **A name in a spreadsheet is matched exactly, corrected out loud, or
+  reported — never guessed.**
   `nameRegister()` knows three things and no fourth: somebody's own full name, an
   alias in `rc_person_alias`, and a **first name exactly one person answers to**
   — which is what the Resource row is actually filled in with, so a register that
   only knew full names matched almost nothing on a real sheet. They go in weakest
   first, so a full name beats an alias pointing elsewhere and both beat a first
-  name. There is still no surname match and no near miss. A first name **two
+  name. There is still no surname match. A first name **two
   people share matches neither**: picking one would put a shift against the wrong
   engineer, and it would do it silently, because both answers look equally right
   on screen — `ambiguousFirstNames()` exists so the interface can say *which*
@@ -706,6 +713,21 @@ subscribes. That is what keeps the graph acyclic.
   unmatched spellings alongside the matched ones and the Resources tab maps them
   in one click, the same answer `rc_location_alias` gives for a place.
   `foldName()` folds case and punctuation and nothing else.
+  **A misspelling is the one near miss, and it is answered outside the
+  register.** `nearestName()` runs only after an exact lookup has failed: a
+  bounded edit distance — nothing at all below five folded characters, one
+  edit up to seven, two beyond that — and a refusal where two registered
+  spellings are equally close, for the same reason two people called Victor
+  match neither. It exists because a transposed pair of letters used to cost
+  somebody a week of shifts, and because the answer is never silent:
+  `resourceAssignments()` returns every name it placed that way in `near`, and
+  the Resources tab lists them with one click to record the spelling as an
+  alias, after which nothing is being inferred at all. Keep the two apart —
+  the Map is exact, and the one function that corrects a spelling says so.
+  `resourceNames()` is the other half: a cell is split on a comma, a slash, a
+  newline, an ampersand, a plus, the word "and" or a double space, and each
+  piece has its own internal spacing collapsed, so `Victor ,Rosa` and
+  `Victor, Rosa` are the same two people.
 - **Unscheduled rows are hidden, and a heading is not exempt.** Headings used to
   be kept whatever the switch said, with only the ones left dangling at the very
   end trimmed — so any paint in the activity columns, or one stray colour that
@@ -725,7 +747,7 @@ subscribes. That is what keeps the graph acyclic.
 - **The key describes what is on screen, not the register.** `legendStrip()`
   takes the set of colours the drawn rows and days actually carry and lists only
   those, saying how many it left out. The register belongs to the whole
-  programme; printed over a four-week window it is a key to somebody else's
+  project; printed over a four-week window it is a key to somebody else's
   calendar — the reader checks a colour, finds three entries that are not there,
   and stops trusting the strip. Legend still shows it in full.
 - **The Changes list is about the weeks anybody can still act on.** From the
@@ -743,7 +765,7 @@ subscribes. That is what keeps the graph acyclic.
   `rc_plan_entries` row, the same rows the week plan writes and the huddle
   reads, so somebody assigned here is in tomorrow's meeting with their scope
   against their name and no further wiring. That is the whole of "tied to the
-  huddle": one place a day is planned, three places it is read. Off-programme
+  huddle": one place a day is planned, three places it is read. Off-project
   work belongs here too — a day in the office, a day on another project — and
   `Office` and `Other project` are seeded categories for it: without somewhere
   for those days to go the huddle shows a blank against a name with no way to
@@ -751,10 +773,16 @@ subscribes. That is what keeps the graph acyclic.
   day, and days already planned, on leave or not worked are skipped and counted
   rather than doubled — nothing here supersedes anything, which is what the week
   plan's cell is for.
-- **Where a day came from is worth saying; what it asks is not.** `fromSheet()`
-  badges a derived day "From 4WLA" in the week plan, the Resources tab and the
-  huddle. A stored entry needs no badge — a row in that table *means* somebody
-  decided it. This replaced an `askedLine()` that printed the workbook's ask
+- **The workbook is the assumption, so only a hand-typed day is flagged.**
+  `manualEntry()` badges a *stored* `rc_plan_entries` row "Manual" in the week
+  plan, the Resources tab and the huddle; a derived day carries nothing. It ran
+  the other way round — `fromSheet()` badged every derived day "From 4WLA" —
+  which put a badge on nearly every cell on the screen, and a badge on
+  everything says nothing. What a reader should stop on is the exception: a day
+  somebody typed in against the sheet, or on a day the sheet never mentioned,
+  which is the only thing on screen the workbook cannot account for. `id` is the
+  test, because a derived day carries `id: null` by design. That in turn
+  replaced an `askedLine()` that printed the workbook's ask
   beside the plan, which stopped being useful the moment the ask became the plan:
   the only case left worth drawing twice is a stored entry that *disagrees* with
   what the sheet asks, which is a decision taken against the workbook and the
@@ -889,6 +917,22 @@ subscribes. That is what keeps the graph acyclic.
   blocked. `rc_effort.signal` is where the split lives. Leave is a third thing
   again, which is why `rc_leave` exists: without it, absence gets silently
   distributed across the performance statuses.
+- **Retire is the first answer; Delete is the second, and Postgres decides
+  which applies.** Retiring keeps every outcome ever recorded and drops the row
+  out of the pickers, which is right for anything anybody has used. It was the
+  *only* answer, and the case that left nowhere to go is the commonest there is:
+  a person added twice, a location typed wrong, a colour mapped by mistake —
+  rows nobody meant, which retiring only ever turns into permanent entries in a
+  list of things that used to be true. So `rc_delete_person()`,
+  `rc_delete_location()`, `rc_delete_category()` and `rc_delete_legend()` count
+  what points at the row and **raise with the number**, naming Retire as the
+  answer. They are `security definer` functions rather than table deletes for
+  the reason everything else here is: a DELETE that RLS refuses matches nothing
+  and reports success. The guard is not optional — `rc_plan_entries` and
+  `rc_actuals` cascade on `person_id`, so an unguarded delete would take the
+  evidence with it at the database, silently. The interface checks nothing
+  itself and shows the refusal as it comes: a rule written twice is a rule that
+  will one day disagree with itself.
 - **Evidence is append-only, in the database.** `rc_plan_entries` and
   `rc_actuals` have no UPDATE or DELETE grant, and neither does
   `rc_change_annotations` — a correction is a new row that supersedes the old.
@@ -954,6 +998,18 @@ subscribes. That is what keeps the graph acyclic.
   mapped by hand. The label lives in a *hidden* column, which is why
   `parseSheet()` keeps hidden-column text as `row.label` — the one thing it
   keeps from a hidden cell, and never a cell of the grid.
+- **The sheet's own column headings are read once and drawn everywhere.**
+  `readGrid()` returns `headings`, one per frozen activity column, because it
+  has to — finding the Location column depends on it. The printed calendar has
+  drawn them since it was written; the grid on screen threw them away and put
+  "Activity" across the lot, so a left-hand side of Location, SSWP and Party to
+  action arrived as three anonymous columns of text. Both now fall back the same
+  way — "Activity" over the first column, nothing over a column the sheet never
+  labelled — because a heading that differed between the screen and the print is
+  a heading nobody can trust. The header cells are frozen at the same offsets as
+  the body's, which is what `la-meta-all` marks the two rows that still span
+  every column, so they stay pinned at zero while the named ones track their
+  values.
 - **The location column is found the same way the date axis is, and the spelling
   is kept whether or not it resolves.** `locationColumnOf()` reads the heading
   the workbook gives each activity column, so a column inserted to its left
@@ -1202,17 +1258,17 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         # 132 checks — the parser, the rows it derives, the
+node tools/test_lookahead.js         # 136 checks — the parser, the rows it derives, the
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 279 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 285 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 275 checks — both permission models, and that
+node tools/test_sql.js               # 285 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result

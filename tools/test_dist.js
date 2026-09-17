@@ -4,7 +4,7 @@
  *
  * `tools/dist.js` decides something no test elsewhere covers: whether the
  * published site can talk to a backend, and to which one. That is a security
- * property rather than a packaging detail — the plan holds the P6 programme and
+ * property rather than a packaging detail — the plan holds the P6 project and
  * must not acquire a backend in any shape that ships it from a folder — and it
  * is enforced in three independent places (the config, the script tag, the
  * content-security policy). Any one of them silently flipping would either

@@ -106,7 +106,7 @@ export async function render(root) {
      sheet says nothing about. The same reading the week plan and the huddle
      make, from the same function. */
   const index = assignmentIndex({ planRows, laRows, absences: sheet.absences, categories, register });
-  const { byPerson, unmatched } = index;
+  const { byPerson, unmatched, near } = index;
   /* "Nobody is called that" and "two people are, and I will not choose" are
      different problems with different fixes, and a list that ran them together
      would send somebody looking for a person who is already on the roster
@@ -185,11 +185,10 @@ export async function render(root) {
 
       if (state.state === 'leave') {
         return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [
+          // Booked, or only on the 4WLA's PTO row: one day off either way, and
+          // which of the two wrote it down is the PTO tab's question.
           badge('Leave', 'muted'),
-          // Whether anybody booked it or the 4WLA's PTO row is the only place it
-          // is written down. Both are the same day off; only one has a record.
-          state.sheet ? badge('From 4WLA', 'info') : null,
-        ].filter(Boolean));
+        ]);
       }
       const planned = index.on(person.id, iso);
       if (state.state === 'non-working' && !planned.length && !asked.length) {
@@ -210,7 +209,10 @@ export async function render(root) {
             cats.get(entry.category_id)?.name,
             entry.shift !== 'day' ? entry.shift : null,
           ].filter(Boolean).join(' · ') }),
-          entry.from_lookahead ? badge('From 4WLA', 'info') : null,
+          /* The workbook is the assumption, so only a day somebody typed in
+             carries a flag. A derived day has `id: null` by design, which is
+             what tells the two apart. */
+          !entry.from_lookahead && entry.id ? badge('Manual', 'warn') : null,
         ].filter(Boolean)));
       }
       const entry = planned[0] || null;
@@ -376,6 +378,50 @@ export async function render(root) {
     }));
   }
 
+  /* ── Names placed by correcting a spelling ────────────────────────────── */
+
+  if (near.length) {
+    const peopleById = byId(people);
+    root.appendChild(el('div', { style: 'height:20px' }));
+    root.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'Matched by correcting a spelling' }),
+    ]));
+    root.appendChild(el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [el('tr', {}, [
+          el('th', { text: 'As written' }), el('th', { text: 'Read as' }),
+          el('th', { text: 'Days' }), el('th', { text: '' }),
+        ])]),
+        el('tbody', {}, near.map((u) => el('tr', {}, [
+          el('td', { text: u.name }),
+          el('td', {}, [
+            el('span', { text: peopleById.get(u.person_id)?.name || '—' }),
+            badge('near miss', 'warn'),
+          ]),
+          el('td', { class: 'rc-num', text: String(u.days.size) }),
+          el('td', {}, rc.isAdmin() ? [
+            el('button', {
+              class: 'cx-btn mini ghost',
+              text: 'Record the spelling',
+              title: 'Keeps this spelling against that person for good, so nothing has to be '
+                + 'corrected on the next read.',
+              onClick: () => mapName(u, people, redraw),
+            }),
+          ] : []),
+        ]))),
+      ]),
+    ]));
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'These spellings are not on the roster and are one or two characters away from exactly '
+        + 'one name that is, so they are read as that person rather than dropped — a transposed pair '
+        + 'of letters used to cost somebody a whole week of shifts. It is listed because it is a '
+        + 'correction rather than a match: a short name is still matched exactly, and a spelling '
+        + 'equally close to two people is matched to neither. Recording it as an alias turns the '
+        + 'judgement into a fact.',
+    }));
+  }
+
   /* ── Places the register does not know ────────────────────────────────── */
 
   if (strangeLocations.length) {
@@ -437,10 +483,11 @@ export async function render(root) {
     text: laRows.length
       ? `The 4WLA names people on ${laRows.filter((r) => Object.keys(r.resources || {}).length).length} `
         + 'row(s) in these weeks, and where it names somebody that is their plan for the day — '
-        + 'marked "From 4WLA", derived from the sheet rather than written down, so it follows the '
-        + 'workbook instead of going stale beside it. A plan entry is somebody overriding that, or '
-        + 'planning a day the sheet says nothing about; where an override disagrees with the '
-        + 'sheet, both are drawn, because that is the case worth seeing.'
+        + 'derived from the sheet rather than written down, so it follows the workbook instead of '
+        + 'going stale beside it. That is the assumption everywhere and it carries no badge. What '
+        + 'is flagged "Manual" is a plan entry: somebody overriding the sheet, or planning a day it '
+        + 'says nothing about. Where an override disagrees with the sheet both are drawn, because '
+        + 'that is the case worth seeing.'
       : 'No look-ahead rows read for this week yet, so nothing here can say what BART asked for. '
         + 'Read it in Look-ahead → Check now.',
   }));
@@ -459,7 +506,7 @@ export async function render(root) {
 /**
  * Plan somebody onto a span of days.
  *
- * A span rather than a day, because that is how the off-programme days arrive:
+ * A span rather than a day, because that is how the off-project days arrive:
  * nobody is in the office for one Tuesday, they are in the office Monday to
  * Wednesday. Every day still becomes its own `rc_plan_entries` row — the grain
  * the huddle reads and the reports group by — so this is a convenience over the

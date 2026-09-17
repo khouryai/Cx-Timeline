@@ -333,12 +333,12 @@ export function buildScene(doc, opts = {}) {
   /* ── Header ────────────────────────────────────────────────────────── */
   items.push({ type: 'rect', x: 0, y: 0, w: width, h: M.headerH, fill: palette.chrome });
   items.push({ type: 'rect', x: 20, y: 15, w: 4, h: 30, fill: palette.brand, radius: 2 });
-  items.push({ type: 'text', x: 32, y: 28, text: doc.name || 'Untitled Programme', size: 15, weight: 700, fill: palette.text });
+  items.push({ type: 'text', x: 32, y: 28, text: doc.name || 'Untitled Project', size: 15, weight: 700, fill: palette.text });
   items.push({
     type: 'text',
     x: 32,
     y: 44,
-    text: [doc.client, doc.programme].filter(Boolean).join('  ·  ') || 'CX Timeline',
+    text: [doc.client, doc.project].filter(Boolean).join('  ·  ') || 'CX Timeline',
     size: 8.5,
     fill: palette.textSubtle,
     family: 'mono',

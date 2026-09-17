@@ -77,7 +77,7 @@ function calendarEnv() {
  * `config.js` for a desktop build that carries the resource calendar.
  *
  * `supabaseUrl` is still written blank, and that is the point rather than an
- * oversight: the plan holds the P6 programme, it lives in a folder on this
+ * oversight: the plan holds the P6 project, it lives in a folder on this
  * machine, and it gets no backend in this shape either. Only the second pair
  * of keys is filled, and nothing on the plan's storage path reads them.
  *

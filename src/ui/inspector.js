@@ -1283,7 +1283,7 @@ function renderProject() {
     section('Project details', [
       field('Name', textInput({ value: doc.name, onInput: (v) => store.setMeta({ name: v }, 'Rename project', { mergeKey: 'projname' }) })),
       field('Client', textInput({ value: doc.client, placeholder: 'Metro Authority', onInput: (v) => store.setMeta({ client: v }, 'Change client') })),
-      field('Programme', textInput({ value: doc.programme, placeholder: 'CBTC Deployment · Phase 2', onInput: (v) => store.setMeta({ programme: v }, 'Change programme') })),
+      field('Project', textInput({ value: doc.project, placeholder: 'CBTC Deployment · Phase 2', onInput: (v) => store.setMeta({ project: v }, 'Change project') })),
       field('Description', el('textarea', {
         class: 'cx-textarea',
         rows: 3,

@@ -477,7 +477,7 @@ select assert((select count(*) from public.rc_effort) = 7,
   'an administrator sees the effort history');
 select assert(
   (select signal from public.rc_effort where id = :'act3') = 'health',
-  'a block is a programme-health signal, never an individual one');
+  'a block is a project-health signal, never an individual one');
 select assert(
   (select signal from public.rc_effort where id = :'act1') = 'performance',
   'a completion is a performance signal');
@@ -1161,6 +1161,66 @@ select assert((select role from public.rc_people where id = :'p_alice') = 'admin
 select public.rc_set_role(:'p_bob', 'admin');
 select act_as(:'bob');
 select assert(public.rc_is_admin(), 'and a promoted person is an administrator again');
+
+-- ── Deleting a reference row, and refusing to ─────────────────────────────
+-- Retire keeps the history and is the right answer for anybody who has been
+-- here. Delete is for a row that was never meant, and the refusal is the whole
+-- design: `rc_plan_entries` and `rc_actuals` cascade on `person_id`, so an
+-- unguarded delete would take a year of evidence with it at the database.
+select act_as(:'alice');
+
+select refuses(:'alice',
+  format('select public.rc_delete_person(%L)', :'p_dan'),
+  'deleting somebody with outcomes recorded against them');
+select assert((select count(*) from public.rc_people where id = :'p_dan') = 1,
+  'so they are still there to be retired instead');
+
+select refuses(:'alice',
+  format('select public.rc_delete_location(%L)', :'loc12'),
+  'deleting a location work has been recorded at');
+select refuses(:'alice',
+  format('select public.rc_delete_person(%L)', gen_random_uuid()),
+  'deleting nobody');
+
+-- A row nothing points at is the case this exists for.
+insert into public.rc_people (name, role) values ('Typo Twice', 'member');
+select id as p_typo from public.rc_people where name = 'Typo Twice' \gset
+select public.rc_delete_person(:'p_typo');
+select assert((select count(*) from public.rc_people where id = :'p_typo') = 0,
+  'a person nothing has been recorded against is deleted outright');
+
+insert into public.rc_locations (name, code) values ('Mistyped Yard', 'MY1');
+select id as loc_typo from public.rc_locations where name = 'Mistyped Yard' \gset
+insert into public.rc_location_alias (location_id, alias) values (:'loc_typo', 'Mispelt Yard');
+select public.rc_delete_location(:'loc_typo');
+select assert((select count(*) from public.rc_locations where id = :'loc_typo') = 0,
+  'and so is a location nothing names');
+select assert((select count(*) from public.rc_location_alias where location_id = :'loc_typo') = 0,
+  'its spellings going with it, because they mean nothing without it');
+
+insert into public.rc_legend (argb, meaning, role, valid_from)
+values ('ABCDEF', 'Mapped by mistake', 'shift', date '2026-01-01');
+select id as leg_typo from public.rc_legend where argb = 'ABCDEF' \gset
+select public.rc_delete_legend(:'leg_typo');
+select assert((select count(*) from public.rc_legend where id = :'leg_typo') = 0,
+  'a colour mapped by mistake goes back to being unmapped');
+
+-- Not a member's to do, whatever the row.
+insert into public.rc_people (name, role) values ('Spare', 'member');
+select id as p_spare from public.rc_people where name = 'Spare' \gset
+select refuses(:'carol',
+  format('select public.rc_delete_person(%L)', :'p_spare'),
+  'a member deleting somebody off the roster');
+-- `refuses()` leaves the claim set to whoever it acted as.
+select act_as(:'alice');
+
+-- The same guard `rc_set_role` makes, for the same reason: there has to be
+-- somebody left who can administer it.
+select public.rc_set_role(:'p_bob', 'member');
+select refuses(:'alice',
+  format('select public.rc_delete_person(%L)', :'p_alice'),
+  'deleting the only administrator left');
+select public.rc_set_role(:'p_bob', 'admin');
 
 reset role;
 do $$ begin raise notice ''; raise notice 'All resource calendar checks passed.'; end $$;

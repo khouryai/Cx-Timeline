@@ -114,7 +114,7 @@ window.CX_CONFIG = {
  * `config.js` for a calendar deployment.
  *
  * `supabaseUrl` is still written blank, and that is the point rather than an
- * oversight: the plan holds the P6 programme and never gets a backend in this
+ * oversight: the plan holds the P6 project and never gets a backend in this
  * shape either. Only the second pair of keys is filled, and nothing on the
  * plan's storage path reads them.
  */

@@ -330,7 +330,7 @@ export function listEditor({ listId = null, tabs: showTabs = true } = {}) {
         emptyState({
           iconName: 'list',
           title: 'No options yet',
-          message: `Add the ${def.label.toLowerCase()} values this programme uses.`,
+          message: `Add the ${def.label.toLowerCase()} values this project uses.`,
         })
       );
     } else {

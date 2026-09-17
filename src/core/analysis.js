@@ -447,8 +447,8 @@ export function objectHealth(obj, today) {
   return { state: 'ontrack', label: 'On track', expected, actual, variance };
 }
 
-/** Programme-level roll-up for the status bar and the review panes. */
-export function programmeHealth(doc) {
+/** Project-level roll-up for the status bar and the review panes. */
+export function projectHealth(doc) {
   const today = effectiveToday(doc);
   const counts = { done: 0, ontrack: 0, ahead: 0, behind: 0, overdue: 0, future: 0, late: 0 };
   let weighted = 0;

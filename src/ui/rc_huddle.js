@@ -548,8 +548,10 @@ function presenter(ctx) {
   for (const also of (plannedOn ? plannedOn(person.id, review) : []).slice(1)) {
     context.appendChild(badge(`also: ${(also.task || '—').slice(0, 36)}`, 'info'));
   }
-  // Where the day came from, when it came from the workbook rather than a person.
-  if (fromSheet(wasPlanned)) context.appendChild(fromSheet(wasPlanned));
+  // Flagged only where a person typed the day in. The workbook is the default
+  // and needs no announcing.
+  const byHand = manualEntry(wasPlanned);
+  if (byHand) context.appendChild(byHand);
   for (const b of theirs) {
     context.appendChild(badge(`blocked: ${b.summary.slice(0, 36)}`, 'bad'));
   }
@@ -595,7 +597,7 @@ function presenter(ctx) {
     tomorrow
       ? el('div', { text: tomorrow.task || '—' })
       : el('div', { class: 'rc-hint', text: 'nothing set yet' }),
-    fromSheet(tomorrow),
+    manualEntry(tomorrow),
   ].filter(Boolean)));
 
   wrap.appendChild(el('div', { class: 'rc-present-move' }, [
@@ -811,18 +813,22 @@ function dateBar(date, review, plan, root, ctx) {
  * exactly alone.
  */
 /**
- * Where a day's plan came from, when it did not come from a person.
+ * Where a day's plan came from, when it did not come from the workbook.
  *
- * The 4WLA assignment *is* the plan now, so there is nothing to show beside the
- * plan any more — what is still worth saying is that the workbook said it and
- * nobody has overridden it. A stored entry needs no badge: somebody decided it,
- * which is what a row in `rc_plan_entries` means.
+ * The badge used to run the other way — "From 4WLA" against every derived day —
+ * and it was on nearly every cell on the screen, which is the definition of a
+ * badge saying nothing. The 4WLA *is* the plan: that is the assumption now, and
+ * an assumption does not need announcing a hundred times.
+ *
+ * What is worth a flag is the exception. A stored `rc_plan_entries` row is
+ * somebody typing a day in by hand — overriding the sheet, or planning a day it
+ * says nothing about — and that is the one case a reader should stop on,
+ * because it is the only thing on the screen the workbook cannot account for.
+ * `id` is what tells them apart: a derived day carries `id: null` by design.
  */
-function fromSheet(entry) {
-  if (!entry?.from_lookahead) return null;
-  // No "+2 more": the sheet naming somebody on two activities in one day is two
-  // tasks, and they are all drawn now rather than counted behind the first.
-  return badge('From 4WLA', 'info');
+function manualEntry(entry) {
+  if (!entry || entry.from_lookahead || !entry.id) return null;
+  return badge('Manual', 'warn');
 }
 
 function personRow(ctx) {
@@ -900,7 +906,7 @@ function personRow(ctx) {
         i === 0 && chain && chain.carries >= 2
           ? badge(`${ordinal(chain.carries + 1)} day`, chain.carries >= 4 ? 'bad' : 'warn')
           : null,
-        fromSheet(task),
+        manualEntry(task),
       ].filter(Boolean)))
       : [el('span', { class: 'rc-hint', text: 'nothing planned' })]));
 
@@ -948,7 +954,7 @@ function personRow(ctx) {
         el('div', { text: tomorrow.task || '—' }),
         el('div', { class: 'rc-hint', text: locs.get(tomorrow.location_id)?.name || '' }),
         tomorrow.carry_chain_id ? badge('Carried over', 'warn') : null,
-        fromSheet(tomorrow),
+        manualEntry(tomorrow),
       ].filter(Boolean))
       : admin
         ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap;align-items:center' }, [
@@ -1046,7 +1052,7 @@ function statusButtons(ctx, person, date, plannedEntry, redraw, current = null) 
       'aria-pressed': String(chosen),
       text: status.label,
       title: (status.family === 'health'
-        ? 'Programme health — never counted against the individual'
+        ? 'Project health — never counted against the individual'
         : 'Counts toward individual efficiency')
         + `  ·  press ${status.key} with this row selected`
         + (chosen ? '  ·  recorded — press to edit the note' : ''),
@@ -1365,7 +1371,7 @@ function blockedDialog(ctx, person, date, plannedEntry, redraw, current = null) 
     body: el('div', { class: 'cx-form' }, [
       el('p', {
         class: 'rc-hint',
-        text: 'A block is programme health, not a mark against anyone — which is exactly '
+        text: 'A block is project health, not a mark against anyone — which is exactly '
           + 'why it needs a reason and somebody answerable. The database refuses it without both.',
       }),
       el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Reason' }), reason]),
@@ -1602,13 +1608,11 @@ export async function renderWeek(root) {
     const cells = days.map((iso) => {
       const state = availability(person, iso, thisWeek, index.absent(person.id, iso));
       const planned = index.on(person.id, iso);
-      /* Booked leave and the workbook's PTO row are the same fact here, and the
-         badge says which: one is a record somebody made, the other is the sheet,
-         and telling them apart is what the PTO tab is for. */
-      if (state.state === 'leave') {
-        return el('td', {}, [badge('Leave', 'muted'), state.sheet ? fromSheet({ from_lookahead: true }) : null]
-          .filter(Boolean));
-      }
+      /* Booked leave and the workbook's PTO row are the same fact here, and
+         they are drawn as one: which of the two wrote the day down is what the
+         PTO tab is for, and that tab now says it in one colour rather than two
+         for the same reason this badge is gone. */
+      if (state.state === 'leave') return el('td', {}, [badge('Leave', 'muted')]);
       if (state.state === 'non-working') return el('td', { class: 'rc-inactive' }, [el('span', { text: '·' })]);
       /* An empty day is empty, and says so.
          There used to be a "+" here that opened a dialog to pick a look-ahead
@@ -1648,8 +1652,11 @@ export async function renderWeek(root) {
         el('div', { text: entry.task || '—' }),
         el('div', { class: 'rc-hint', text: locs.get(entry.location_id)?.name
           || entry.raw_location || '' }),
-        fromSheet(entry),
-        !entry.from_lookahead && entry.lookahead_row_id ? badge('From look-ahead', 'info') : null,
+        /* One flag, for the one exception. A stored row that still points at a
+           look-ahead row used to get a second badge saying so; it is the same
+           fact twice now that the workbook is the assumption, and two badges on
+           a cell this size is how neither gets read. */
+        manualEntry(entry),
         entry.supersedes_id ? badge('Revised', 'warn') : null,
       ]).filter(Boolean));
     });

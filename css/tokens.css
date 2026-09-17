@@ -199,6 +199,13 @@
   --accent-lime: #a3e635;
   --accent-slate: #7c93ad;
 
+  /* The PTO calendar's two answers. Leave is one colour wherever it was written
+     down — booked, or only on the 4WLA — and a day spent off the project but at
+     work is another. Named for what they mean rather than reused from an accent
+     at the call site, so a theme can move either without moving the other. */
+  --rc-pto: #8b5cf6;
+  --rc-offproject: #2dd4bf;
+
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.3), 0 8px 20px -8px rgba(0, 0, 0, 0.55);
   --shadow-lg: 0 4px 10px rgba(0, 0, 0, 0.35), 0 32px 64px -24px rgba(0, 0, 0, 0.7);
@@ -270,6 +277,13 @@
   --accent-lime: #4d7c0f;
   --accent-slate: #475569;
 
+  /* The PTO calendar's two answers. Leave is one colour wherever it was written
+     down — booked, or only on the 4WLA — and a day spent off the project but at
+     work is another. Named for what they mean rather than reused from an accent
+     at the call site, so a theme can move either without moving the other. */
+  --rc-pto: #6d28d9;
+  --rc-offproject: #0d9488;
+
   --shadow-sm: 0 1px 2px rgba(15, 17, 21, 0.05), 0 1px 1px rgba(15, 17, 21, 0.03);
   --shadow-md: 0 1px 2px rgba(15, 17, 21, 0.04), 0 6px 16px -8px rgba(15, 17, 21, 0.14);
   --shadow-lg: 0 2px 6px rgba(15, 17, 21, 0.06), 0 28px 56px -20px rgba(15, 17, 21, 0.3);
@@ -337,6 +351,13 @@
   --accent-teal: #2dd4bf;
   --accent-lime: #a3e635;
   --accent-slate: #8296ab;
+
+  /* The PTO calendar's two answers. Leave is one colour wherever it was written
+     down — booked, or only on the 4WLA — and a day spent off the project but at
+     work is another. Named for what they mean rather than reused from an accent
+     at the call site, so a theme can move either without moving the other. */
+  --rc-pto: #a78bfa;
+  --rc-offproject: #2dd4bf;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.6);
   --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.5), 0 10px 24px -10px rgba(0, 0, 0, 0.7);
@@ -408,6 +429,13 @@
   --accent-lime: #bef264;
   --accent-slate: #94a9c0;
 
+  /* The PTO calendar's two answers. Leave is one colour wherever it was written
+     down — booked, or only on the 4WLA — and a day spent off the project but at
+     work is another. Named for what they mean rather than reused from an accent
+     at the call site, so a theme can move either without moving the other. */
+  --rc-pto: #c4b5fd;
+  --rc-offproject: #5eead4;
+
   --shadow-sm: 0 1px 2px rgba(2, 12, 30, 0.5);
   --shadow-md: 0 2px 6px rgba(2, 12, 30, 0.45), 0 10px 24px -10px rgba(2, 12, 30, 0.7);
   --shadow-lg: 0 4px 12px rgba(2, 12, 30, 0.5), 0 34px 70px -26px rgba(2, 12, 30, 0.8);
@@ -475,6 +503,13 @@
   --accent-teal: #0f766e;
   --accent-lime: #4d7c0f;
   --accent-slate: #425466;
+
+  /* The PTO calendar's two answers. Leave is one colour wherever it was written
+     down — booked, or only on the 4WLA — and a day spent off the project but at
+     work is another. Named for what they mean rather than reused from an accent
+     at the call site, so a theme can move either without moving the other. */
+  --rc-pto: #5b21b6;
+  --rc-offproject: #0f766e;
 
   --shadow-sm: 0 1px 2px rgba(16, 19, 24, 0.06);
   --shadow-md: 0 2px 4px rgba(16, 19, 24, 0.06), 0 8px 18px -10px rgba(16, 19, 24, 0.18);

@@ -29,7 +29,9 @@ import {
   ABSENCE_LABELS,
 } from '../core/lookahead.js';
 import { icon } from './icons.js';
-import { selectInput, textInput, toast, badge, emptyState, field, checkbox } from './components.js';
+import {
+  selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog,
+} from './components.js';
 import {
   notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
 } from './rc_util.js';
@@ -58,7 +60,7 @@ let showQuietRows = false;
  * Whether the names on each activity's Resource row are drawn.
  *
  * On by default — knowing who is on a shift is most of why anybody opens this —
- * and off is for reading the shape of the programme without a hundred and forty
+ * and off is for reading the shape of the project without a hundred and forty
  * extra lines under it. It hides the names, never the activities: the Resource
  * row is part of the activity above it, so switching it off changes what a row
  * says and never which rows there are.
@@ -844,9 +846,24 @@ function grid_(view, today) {
     d.date && d.date === today ? 'la-today' : '',
   ].filter(Boolean).join(' ');
 
+  /* What the workbook calls each of the frozen columns.
+     `readGrid()` already reads them — it has to, because one of them is the
+     Location and the rows depend on knowing which — and they were being thrown
+     away here: the header said "Activity" across all of them, so a grid whose
+     left-hand side is Location, SSWP, Party to action and work hours arrived on
+     screen as four anonymous columns of text. The printed calendar has read them
+     since it was written, so this is the same answer in the same words —
+     `io/rc_pdf.js` falls back to "Activity" over the first column and to nothing
+     over a column the sheet never labelled, and a heading that differed between
+     the screen and the print would be a heading nobody could trust. */
+  const headings = view.meta.map((_, i) => {
+    const said = String(view.headings?.[i] || '').trim();
+    return said || (i === 0 ? 'Activity' : '');
+  });
+
   const head = el('thead', {}, [
     el('tr', {}, [
-      el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: '' }),
+      el('th', { class: 'la-meta la-meta-all la-last', colSpan: view.meta.length, text: '' }),
       /* The label is a sticky span inside the band rather than text in it.
          A month spans thirty columns, so once you scroll past its first day
          the label itself has scrolled away and the band above you is
@@ -856,11 +873,15 @@ function grid_(view, today) {
       ])),
     ]),
     el('tr', {}, [
-      el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: 'Activity' }),
+      ...headings.map((text, i) => el('th', {
+        class: `la-meta la-meta-head${i === headings.length - 1 ? ' la-last' : ''}`,
+        text,
+        title: text,
+      })),
       ...view.days.map((d) => el('th', { class: dayClass(d, 'la-num'), text: d.day })),
     ]),
     el('tr', {}, [
-      el('th', { class: 'la-meta la-last', colSpan: view.meta.length, text: '' }),
+      el('th', { class: 'la-meta la-meta-all la-last', colSpan: view.meta.length, text: '' }),
       ...view.days.map((d) => el('th', { class: dayClass(d), text: d.weekday })),
     ]),
   ]);
@@ -941,12 +962,17 @@ function grid_(view, today) {
     let left = 0;
     const widths = [...firstRow.querySelectorAll('.la-meta')].map((td) => td.getBoundingClientRect().width);
     widths.forEach((width, i) => {
+      /* Every cell in that column, heading included — the heading row now has
+         one cell per column rather than one spanning the lot, so it has to be
+         frozen at the same offsets or the names slide out from over their
+         values. The two rows that still span everything are pinned at zero,
+         which is where a cell covering all of them starts. */
       for (const cell of table_.querySelectorAll(`.la-meta:nth-child(${i + 1})`)) {
-        if (cell.tagName === 'TD') cell.style.left = `${left}px`;
+        if (!cell.classList.contains('la-meta-all')) cell.style.left = `${left}px`;
       }
       left += width;
     });
-    for (const th of table_.querySelectorAll('thead .la-meta')) th.style.left = '0px';
+    for (const th of table_.querySelectorAll('thead .la-meta-all')) th.style.left = '0px';
     // The month label pins just past the frozen columns; only the browser
     // knows how wide the content made them.
     table_.style.setProperty('--la-meta-w', `${left}px`);
@@ -967,7 +993,7 @@ function grid_(view, today) {
  * The key, for the calendar actually on screen.
  *
  * `onScreen` is the set of colours the drawn rows and days carry, and only
- * those are listed. The register is the whole programme's — five shifts, three
+ * those are listed. The register is the whole project's — five shifts, three
  * kinds of shading, whatever a previous year needed — and printing all of it
  * over a four-week window is a key to somebody else's calendar: the reader
  * checks a colour against it, finds three entries that are not here, and stops
@@ -1341,6 +1367,37 @@ async function renderLegend(host) {
             onClick: async () => {
               await rc.updateLegend(entry.id, { active: !entry.active });
               notifyChanged('legend');
+            },
+          }),
+          /* Delete, beside Retire, because the two differ on one thing and it
+             matters here more than anywhere. A retired row still *shadows* an
+             older row for the same colour — `inForce()` picks the newest before
+             the active filter is applied on some paths — so retiring a mistake
+             leaves the mistake deciding what the colour means. Deleting it puts
+             the colour back where a wrong answer belongs: in the "not in the
+             legend" list, one click from being answered again. */
+          el('button', {
+            class: 'cx-btn mini ghost danger',
+            text: 'Delete',
+            title: 'Removes the mapping outright. The colour goes back to unmapped, and every '
+              + 'snapshot is re-read against the register at paint time, so nothing is lost.',
+            onClick: async () => {
+              const ok = await confirmDialog({
+                title: `Delete the mapping for #${entry.argb}?`,
+                message: `"${entry.meaning}" stops being what that colour means. It goes back into `
+                  + '"Seen in the workbook, not in the legend", where it can be mapped again. '
+                  + 'Retire it instead if you want the mapping kept on the record.',
+                confirmLabel: 'Delete',
+                danger: true,
+              });
+              if (!ok) return;
+              try {
+                await rc.deleteLegend(entry.id);
+                toast({ tone: 'good', message: 'Deleted.' });
+                notifyChanged('legend');
+              } catch (err) {
+                toast({ tone: 'bad', message: err?.message || String(err) });
+              }
             },
           }),
         ]),

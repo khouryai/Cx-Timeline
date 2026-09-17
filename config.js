@@ -27,7 +27,7 @@ window.CX_CONFIG = {
 
   /**
    * Require an account. On by default: a hosted deployment has no business
-   * offering an anonymous, unshareable copy of someone's programme plan.
+   * offering an anonymous, unshareable copy of someone's project plan.
    */
   requireAuth: true,
 
@@ -36,7 +36,7 @@ window.CX_CONFIG = {
    * one above, and deliberately so.
    *
    * The two halves of this application hold different kinds of data. The plan
-   * carries the P6 programme and is proprietary; in the deployment this was
+   * carries the P6 project and is proprietary; in the deployment this was
    * built for it stays in a OneDrive folder and `supabaseUrl` above is left
    * blank forever. The resource calendar carries people, shifts and outcomes,
    * none of it proprietary, and goes to Postgres so the deputy and the team can

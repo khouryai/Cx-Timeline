@@ -8,7 +8,7 @@
  * Two things are deliberately kept apart here:
  *
  *   P6 slip      how far the scheduler has moved the activity since the
- *                baseline. Their number, about their programme.
+ *                baseline. Their number, about their project.
  *   Your variance how far your plan differs from where P6 has it now. Your
  *                number, and the one you have to be able to explain.
  *
@@ -267,7 +267,7 @@ export function openImport(preset = 'progress') {
         kind = v;
         if (parsed) renderPreview();
       },
-    }), 'A baseline is the target programme and is replaced only by another baseline. Progress is where the schedule stands now, and is re-imported each month.'),
+    }), 'A baseline is the target project and is replaced only by another baseline. Progress is where the schedule stands now, and is re-imported each month.'),
 
     el('button', {
       class: 'cx-btn mini',

@@ -81,7 +81,7 @@ export function build() {
 
   // A row written anywhere reloads whatever is on screen. There is no document
   // and no diff here, so the cheapest correct thing is to re-read — the
-  // volumes are a fortnight of one small team, not a programme's worth of bars.
+  // volumes are a fortnight of one small team, not a project's worth of bars.
   on(EV.RC_CHANGED, () => render());
   on(EV.RC_AUTH_CHANGED, () => render());
   on(EV.RC_QUEUE_CHANGED, () => renderHead());

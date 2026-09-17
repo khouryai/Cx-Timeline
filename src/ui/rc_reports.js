@@ -12,7 +12,7 @@
  * number is computed on the way out, so refining a definition never means a
  * migration and no figure can go stale against the rows it came from.
  *
- * **Performance and programme health are never averaged together.** Completed,
+ * **Performance and project health are never averaged together.** Completed,
  * partial and carried are what somebody did; blocked and reassigned are what
  * was done to them. A possession released late is not underperformance, and
  * folding it in would make the number worse than useless — people would simply

@@ -59,7 +59,7 @@ export function isResourceLabel(text) {
  * The workbook carries rows at the bottom that are not site work: "PTO",
  * "Office" and "Other Group / Project", with names typed into the day cells the
  * same way the Resource row carries them. They say where somebody is when they
- * are not on the programme — off, at their desk, or on another group's work —
+ * are not on the project — off, at their desk, or on another group's work —
  * which is a fact about the person rather than about an activity, and it is the
  * fact the week plan and the huddle are otherwise missing entirely: a blank
  * against a name reads as "nobody planned this", when the sheet said exactly
@@ -114,13 +114,25 @@ export const ABSENCE_LABELS = Object.fromEntries(
  * The people named in one cell.
  *
  * Typed by hand, so the separator is whatever was to hand: a comma, a slash, a
- * newline, an ampersand. Nothing is matched to a person here — that is the
+ * newline, an ampersand, a plus, the word "and", or simply two spaces where somebody
+ * pressed the bar twice. Nothing is matched to a person here — that is the
  * roster's job, through the alias register — this only splits what was written.
+ *
+ * **Spacing is noise, not a name.** A cell reading `Victor ,Rosa` and one
+ * reading `Victor, Rosa` are the same two people, so each piece is trimmed and
+ * its own internal runs of whitespace are collapsed before it is handed on: a
+ * name carrying a stray double space would otherwise fold to a different string
+ * from the same name typed once, and match nobody for a reason no reader could
+ * see. A newline inside a cell is a separator rather than a space, because that
+ * is how a second name gets into one cell in Excel.
  */
 export function resourceNames(text) {
   return String(text ?? '')
-    .split(/[,;/\n&+]|\s{2,}/)
-    .map((s) => s.trim())
+    /* "and" is tried before the two-space rule on purpose: an alternation is
+       read left to right, so `\s{2,}` would otherwise eat the spaces around a
+       spelled-out "and" and leave the word behind as a person. */
+    .split(/\s+and\s+|[,;/\n&+]|\s{2,}/i)
+    .map((s) => s.trim().replace(/\s+/g, ' '))
     .filter(Boolean);
 }
 
@@ -536,7 +548,7 @@ export function locationColumnOf(view) {
   for (let i = 0; i < headings.length; i++) {
     if (/\blocations?\b/i.test(headings[i])) return i;
   }
-  // "Site" is the other word this programme's sheets use for it. Deliberately a
+  // "Site" is the other word this project's sheets use for it. Deliberately a
   // short list: a near miss here misfiles every row on the sheet at once.
   for (let i = 0; i < headings.length; i++) {
     if (/\bsite\b/i.test(headings[i])) return i;

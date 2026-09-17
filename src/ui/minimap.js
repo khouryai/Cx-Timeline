@@ -1,5 +1,5 @@
 /**
- * Minimap — a navigator overview of the whole programme.
+ * Minimap — a navigator overview of the whole project.
  *
  * Draws every object as a coloured tick across the project's full extent,
  * with a draggable window showing what the main canvas is looking at. On a
