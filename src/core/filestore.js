@@ -52,6 +52,7 @@
 
 import { emit, EV } from './events.js';
 import * as desktop from './desktop.js';
+import { planLocked, lockReason } from './access.js';
 
 /** How often a session restates its claim, in ms. */
 const HEARTBEAT_MS = 30000;
@@ -1465,6 +1466,16 @@ function isStale(lock) {
  */
 export async function takeOver() {
   if (!isConnected()) return false;
+  /* …with one exception, and it is not a race: an account that may not edit the
+     plan at all has no turn to take. The pen is who goes next among people who
+     *can* write; `planLocked()` says this account never can, so taking it would
+     hand out a pen that the store would refuse the first edit from — read-only
+     with a different explanation, which is worse than read-only. */
+  if (planLocked()) {
+    const err = new Error(lockReason());
+    err.kind = 'forbidden';
+    throw err;
+  }
   // Stated in our own claim rather than by overwriting theirs: they find out by
   // reading, on their next poll, and drop to read-only the same way we would.
   takeoverAt = Date.now();
@@ -1525,6 +1536,8 @@ export async function lockStatus() {
  */
 export async function requestPen() {
   if (!isConnected() || role === 'editor') return false;
+  // Nothing to ask for: see `takeOver()`.
+  if (planLocked()) return false;
   requestedAt = Date.now();
   await writeClaim();
   emitState();

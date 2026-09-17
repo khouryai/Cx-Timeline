@@ -458,6 +458,18 @@ export function listLeaveKinds() {
 }
 
 /** Leave overlapping a window. Both ends are inclusive, as a calendar is. */
+/**
+ * Leave awaiting an answer, whoever it belongs to.
+ *
+ * Its own read rather than a filter over `listLeave()`, because the question is
+ * about the whole register and not about a window: a request for October made
+ * today is a thing an administrator has to answer today, and a window that only
+ * covers the weeks on screen would hide it until it was too late to matter.
+ */
+export function pendingLeave() {
+  return select('rc_leave', (q) => q.eq('status', 'requested').order('start_date'));
+}
+
 export function listLeave(fromISO, toISO) {
   return select('rc_leave', (q) =>
     q.lte('start_date', toISO).gte('end_date', fromISO).neq('status', 'cancelled'));
@@ -717,7 +729,28 @@ export async function setSetting(key, value) {
   return data[0];
 }
 
+/**
+ * Book leave, or ask for it.
+ *
+ * The status is the permission, and the policies are written on exactly that:
+ * an administrator may insert any status and the default is `approved`, while a
+ * member may insert `requested` for themselves and nothing else. So the caller
+ * says which it is — `requestLeave()` below is the member's door, and it exists
+ * so no screen has to remember to pass the right string.
+ */
 export const addLeave = (row) => insert('rc_leave', [row]).then((r) => r[0]);
+
+/**
+ * Ask for leave. The same single `rc_leave` row, as a question.
+ *
+ * A second table for requests would be a second answer to "is Dana off on
+ * Tuesday", which is the thing this module is most careful about — so a request
+ * is the row it will become, with `status` saying it has not been answered yet.
+ * Approving it is an update an administrator makes; there is nothing to copy
+ * across and nothing that can go missing in between.
+ */
+export const requestLeave = (row) =>
+  insert('rc_leave', [{ ...row, status: 'requested' }]).then((r) => r[0]);
 export const updateLeave = (id, patch) => update('rc_leave', id, patch);
 
 export const addPlanEntries = (rows) => insert('rc_plan_entries', rows);
@@ -756,6 +789,31 @@ export const supersedePlan = (entryId, { locationId = null, task = null, categor
     p_category: categoryId,
     p_shift: shift,
   });
+
+/**
+ * Withdraw a day. Returns the id of the tombstone.
+ *
+ * "Delete my task" with the record kept, which is the only shape a delete takes
+ * here: there is no DELETE grant on `rc_plan_entries`, so this writes a row
+ * superseding the original and marked withdrawn, and `rc_plan_current` drops the
+ * pair. The schedule stops showing the day; the table still says it was planned
+ * and then withdrawn, by whom and when.
+ *
+ * Whoever may plan a day may withdraw it — a member their own, an administrator
+ * anybody's — which is the same question the insert policy asks.
+ */
+export const withdrawPlan = (entryId) => rpc('rc_withdraw_plan', { p_entry: entryId });
+
+/**
+ * Move a day to the person the look-ahead now names. Returns the new entry's id.
+ *
+ * An administrator's: it writes a day against somebody else, which is the whole
+ * point. Refuses a move onto the person who already has it, so a re-read that
+ * changed nothing writes nothing — otherwise every ingest would supersede every
+ * linked entry with a revision saying the same thing.
+ */
+export const reassignPlan = (entryId, personId) =>
+  rpc('rc_reassign_plan', { p_entry: entryId, p_person: personId });
 
 /**
  * Record one huddle outcome. Idempotent on `clientUuid`.

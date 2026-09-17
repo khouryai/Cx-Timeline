@@ -41,6 +41,7 @@ import { installShortcuts } from './ui/shortcuts.js';
 import * as workspace from './ui/workspace.js';
 import * as rcUi from './ui/rc.js';
 import * as rcClient from './core/rc.js';
+import { lockPlan, setAccount } from './core/access.js';
 import * as exporters from './io/exporters.js';
 import * as cmd from './ui/commands.js';
 import { toast, showTooltip, hideTooltip, confirmDialog } from './ui/components.js';
@@ -175,6 +176,10 @@ async function boot() {
     });
     installPenIdentity();
   }
+  // Whether this account may edit the plan at all. Outside the filestore branch
+  // above: it is about the account, not about the folder, and it decides the
+  // store's gate whichever backend the plan is on.
+  installPlanAccess();
 
   console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
 
@@ -281,6 +286,56 @@ function installPenIdentity() {
   };
   on(EV.RC_AUTH_CHANGED, adopt);
   adopt();
+}
+
+/**
+ * A calendar member reads the plan and never writes it.
+ *
+ * The plan is the P6 narrative: it carries the contract schedule, the baselines
+ * and the dependencies, and it is maintained by whoever runs the project. The
+ * calendar's members are the field team — they record their own days and read
+ * what they have been asked to do. They were read-only in practice, because the
+ * plan lives in a folder and somebody else usually held the pen, and that is not
+ * the same thing at all: the pen is a *turn*, so "Take over editing" was on
+ * screen and a member who pressed it got the plan.
+ *
+ * So it is stated rather than left to the folder. The role comes from the
+ * calendar, which `core/store.js` and `core/filestore.js` must never import, so
+ * it is pushed down into `core/access.js` from here — the one module that may
+ * see both. After that the store refuses every edit and the pen refuses to be
+ * taken, and the interface stops offering either, in that order of importance.
+ *
+ * **Only when the calendar has an opinion.** No backend, local mode, and every
+ * test suite leave the lock alone, and a signed-out session is not a member of
+ * anything: the timeline is exactly as editable as it has always been until an
+ * account that is a member of a configured calendar signs in.
+ */
+function installPlanAccess() {
+  const apply = () => {
+    /* Whose view this is. The calendar's account where there is one, the
+       timeline's own where there is not, and '' for a local build with neither —
+       which is one shared view per browser profile, exactly as it has always
+       been. It is a key and never a name: it goes into a localStorage key. */
+    setAccount(rcClient.currentUser()?.id || cloud.currentUser()?.id || '');
+    store.restoreAccountView();
+
+    const member = rcClient.isConfigured() && rcClient.isSignedIn()
+      && Boolean(rcClient.me()) && !rcClient.isAdmin();
+    lockPlan(member
+      ? 'Your calendar account is not an administrator, so the plan opens read-only. '
+        + 'Everything you filter, hide or compare here is yours alone and stays with your '
+        + 'account.'
+      : '');
+    emit(EV.ACCESS_CHANGED, { readOnly: store.isDocReadOnly() });
+    emit(EV.FILE_STATE, filestore.state());
+  };
+  on(EV.RC_AUTH_CHANGED, apply);
+  on(EV.AUTH_CHANGED, apply);
+  // A different plan is a different view. Restored on replacement rather than
+  // carried over: the last filter applied to somebody else's bars is not a
+  // filter anybody asked for.
+  on(EV.DOC_REPLACED, () => store.restoreAccountView());
+  apply();
 }
 
 /* ── The shared folder ─────────────────────────────────────────────────── */

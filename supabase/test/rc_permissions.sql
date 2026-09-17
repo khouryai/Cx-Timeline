@@ -180,13 +180,48 @@ insert into public.rc_leave (person_id, start_date, end_date, status)
 values (:'p_dan', date '2026-09-07', date '2026-09-11', 'approved');
 select assert((select count(*) from public.rc_leave) = 1, 'an administrator can book leave');
 
+/* A member asks; an administrator answers.
+   Booking was administrators-only, which made the commonest thing anybody wants
+   from this module something they had to get somebody else to type — so it went
+   into the 4WLA instead, or nowhere. The status is the whole permission: a
+   member may write `requested` for themselves and nothing else, so a request
+   cannot approve itself and nobody can ask on somebody else's behalf. */
 select refuses(:'carol',
   format('insert into public.rc_leave (person_id, start_date, end_date) values (%L, %L, %L)',
          :'p_carol', '2026-09-14', '2026-09-15'),
-  'a member booking their own leave');
+  'a member booking their own leave as approved');
+select refuses(:'carol',
+  format('insert into public.rc_leave (person_id, start_date, end_date, status)
+          values (%L, %L, %L, ''requested'')', :'p_dan', '2026-09-14', '2026-09-15'),
+  'a member asking for somebody else''s leave');
 
 select act_as(:'carol');
-select assert((select count(*) from public.rc_leave) = 1, 'but they can see it');
+insert into public.rc_leave (person_id, start_date, end_date, status)
+values (:'p_carol', date '2026-09-14', date '2026-09-15', 'requested');
+select assert((select count(*) from public.rc_leave where status = 'requested') = 1,
+  'a member can ask for their own leave');
+select id as leave_carol from public.rc_leave where person_id = :'p_carol' \gset
+
+-- Asking has to be something you can take back, or people learn not to ask.
+-- Cancelling is the only status a member can write, which is what stops the
+-- update policy being a way to approve yourself.
+select refuses(:'carol',
+  format('update public.rc_leave set status = ''approved'' where id = %L', :'leave_carol'),
+  'a member approving their own request');
+update public.rc_leave set status = 'cancelled' where id = :'leave_carol';
+select assert((select status from public.rc_leave where id = :'leave_carol') = 'cancelled',
+  'but they can withdraw it');
+select refuses(:'carol',
+  format('delete from public.rc_leave where id = %L', :'leave_carol'),
+  'a member deleting a leave row outright');
+
+select act_as(:'alice');
+update public.rc_leave set status = 'approved' where id = :'leave_carol';
+select assert((select status from public.rc_leave where id = :'leave_carol') = 'approved',
+  'an administrator answers it');
+
+select act_as(:'carol');
+select assert((select count(*) from public.rc_leave) = 2, 'and they can see both');
 
 -- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice 'The plan is append-only'; end $$;
@@ -279,7 +314,68 @@ select assert((select task from public.rc_plan_entries where id = :'mine2')
   'a member can revise their own day');
 select assert((select supersedes_id from public.rc_plan_entries where id = :'mine2') = :'mine',
   'and it supersedes rather than edits, like every other revision');
+
+/* And they can take it back.
+   "Delete my task" with the record kept, which is the only shape a delete can
+   take on a table with no DELETE grant: a tombstone superseding the original,
+   and `rc_plan_current` drops the pair. The schedule stops showing the day; the
+   table still says it was planned and then withdrawn, by whom and when. */
+select public.rc_withdraw_plan(:'mine2') as gone \gset
+select assert((select count(*) from public.rc_plan_current
+                where person_id = :'p_carol' and work_date = date '2026-09-10') = 1,
+  'a member can withdraw their own day, and it leaves the schedule');
+select assert((select withdrawn from public.rc_plan_entries where id = :'gone'),
+  'as a tombstone rather than a deletion');
+select assert((select count(*) from public.rc_plan_entries
+                where person_id = :'p_carol' and work_date = date '2026-09-10') = 4,
+  'so every version of that day is still on the record');
+select refuses(:'carol',
+  format('select public.rc_withdraw_plan(%L)', :'gone'),
+  'withdrawing the same entry twice');
+select refuses(:'carol',
+  format('select public.rc_withdraw_plan(%L)', :'plan2'),
+  'a member withdrawing somebody else''s day');
+
 select act_as(:'alice');
+
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'The sheet moves a task to somebody else'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+/* A stored entry linked to a look-ahead row is somebody confirming or
+   overriding what the sheet said. When the next read of that sheet names a
+   different person on the same row the work has moved — and leaving the entry
+   against the original person is how somebody turns up for a shift that is not
+   theirs while the person who now has it has a blank against their name. */
+insert into public.rc_plan_entries (person_id, work_date, task)
+values (:'p_dan', date '2026-09-24', 'Witness the TPSS energisation');
+select id as moving from public.rc_plan_current where work_date = date '2026-09-24' \gset
+
+select refuses(:'carol',
+  format('select public.rc_reassign_plan(%L, %L)', :'moving', :'p_carol'),
+  'a member reassigning a day to themselves');
+-- `refuses()` leaves the claim set to whoever it acted as.
+select act_as(:'alice');
+
+select public.rc_reassign_plan(:'moving', :'p_carol') as moved \gset
+select assert((select person_id from public.rc_plan_entries where id = :'moved') = :'p_carol',
+  'an administrator moves it to the person the sheet now names');
+select assert((select reassigned_from from public.rc_plan_entries where id = :'moved') = :'p_dan',
+  'and the new row says where it came from, so it can be badged as moved');
+select assert((select supersedes_id from public.rc_plan_entries where id = :'moved') = :'moving',
+  'the outgoing row stays, like every other revision');
+select assert((select count(*) from public.rc_plan_current
+                where work_date = date '2026-09-24') = 1,
+  'and only one of them is the plan');
+
+-- A re-read that changed nothing must write nothing, or every ingest would fill
+-- the history with revisions saying the same thing.
+select refuses(:'alice',
+  format('select public.rc_reassign_plan(%L, %L)', :'moved', :'p_carol'),
+  'moving a day to the person who already has it');
+select refuses(:'alice',
+  format('select public.rc_reassign_plan(%L, %L)', :'moving', :'p_carol'),
+  'moving a day that has already been revised');
 
 -- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice 'Recording what actually happened'; end $$;
@@ -646,7 +742,7 @@ select assert((select count(*) from public.rc_people where active) > 0,
   'a viewer can read the roster');
 select assert((select count(*) from public.rc_locations) > 0,
   'and the locations');
-select assert((select count(*) from public.rc_leave) = 1,
+select assert((select count(*) from public.rc_leave) = 2,
   'and who is on leave');
 -- Three: Dan's revised day, and the two tasks Carol planned for herself on the
 -- tenth. A viewer reads the whole plan and writes none of it.
@@ -678,6 +774,13 @@ select refuses(:'dave',
   format('insert into public.rc_leave (person_id, start_date, end_date) values (%L, %L, %L)',
          :'p_dave', '2026-09-14', '2026-09-15'),
   'a viewer booking their own leave');
+-- A viewer cannot even ask. `rc_can_act_for()` is false for them, which is the
+-- same line that stops them recording their own outcome — asking for leave is a
+-- write and a viewer writes nothing.
+select refuses(:'dave',
+  format('insert into public.rc_leave (person_id, start_date, end_date, status)
+          values (%L, %L, %L, ''requested'')', :'p_dave', '2026-09-14', '2026-09-15'),
+  'a viewer asking for their own leave');
 select refuses(:'dave',
   format('insert into public.rc_locations (name) values (%L)', 'Invented'),
   'a viewer adding reference data');

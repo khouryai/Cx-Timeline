@@ -689,11 +689,93 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 .rc-table.rc-resources td:first-child { min-width: 150px; }
 
 .rc-res-cell { font-size: var(--fs-tiny); }
-/* Today is a line down the grid, the same answer the look-ahead gives — a fill
-   would compete with the badges inside the cell. */
-.rc-res-today { border-left: 2px solid var(--accent, #e60012); }
 
-.rc-res-job { margin-bottom: 4px; }
+/* ── Today ───────────────────────────────────────────────────────────────
+   A week grid is read by running a finger down a day, and the day somebody is
+   nearly always looking for is this one. It used to be a two-pixel rule on the
+   left edge of the cells, which is invisible in a table that has borders
+   anyway — so the whole column is tinted and the heading says the word. The
+   tint is `--info-light`, a wash rather than a colour: the cells carry status
+   badges and an outcome of their own, and anything stronger would compete with
+   the content it is supposed to be pointing at. */
+.rc-res-today,
+/* …and it survives the row hover.
+   `.rc-table tbody tr:hover td` is the more specific selector, so crossing a
+   row with the pointer painted `--surface-2` straight over today's column and
+   the one thing the reader was following disappeared. The PTO grid learnt this
+   the same way, with somebody's leave turning white under the cursor. */
+.rc-table.rc-resources tbody tr:hover td.rc-res-today {
+  background: var(--info-light);
+  box-shadow: inset 2px 0 0 var(--info), inset -2px 0 0 var(--info);
+}
+.rc-res-today-head { color: var(--info); }
+.rc-today-tag {
+  display: block;
+  font-family: var(--f-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--info);
+}
+
+/* The bottom row: how many people can actually be staffed. Set apart from the
+   people above it, because it is about the day rather than about anybody. */
+.rc-res-coverage td {
+  border-top: 2px solid var(--border-strong);
+  font-size: var(--fs-tiny);
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+
+/* ── One task ───────────────────────────────────────────────────────────── */
+
+.rc-res-job {
+  margin-bottom: 6px;
+  padding-left: 6px;
+  border-left: 2px solid var(--border);
+}
+.rc-res-task { font-weight: 500; color: var(--text-main); }
+.rc-res-flags { display: flex; flex-wrap: wrap; gap: 3px; }
+.rc-res-flags:empty { display: none; }
+/* The actions are the least interesting thing in a cell that already carries a
+   task, a place, its flags and how it went — so they are icons, and quiet until
+   the cell is under the pointer or one of them has focus. Never *hidden*: a
+   touch screen has no hover, and this calendar is used standing up. */
+.rc-res-acts { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 3px; }
+.rc-res-acts .cx-btn { opacity: 0.45; padding: 2px 4px; }
+.rc-res-cell:hover .rc-res-acts .cx-btn,
+.rc-res-acts .cx-btn:focus-visible,
+.rc-res-acts .cx-btn:hover { opacity: 1; }
+
+/* A day the huddle has already answered, coloured by the answer.
+   The left edge carries it rather than a fill: a fill on a cell that may hold
+   three tasks would say the whole day went that way. Completed is deliberately
+   quiet — the interesting cells are the ones that are not. */
+.rc-res-done.rc-res-completed  { border-left-color: var(--good); }
+.rc-res-done.rc-res-partial,
+.rc-res-done.rc-res-carried    { border-left-color: var(--warn); }
+.rc-res-done.rc-res-blocked    { border-left-color: var(--bad); }
+.rc-res-done.rc-res-reassigned { border-left-color: var(--info); }
+.rc-res-done.rc-res-absent     { border-left-color: var(--text-faint); }
+
+/* A day off asked for and not answered. Set apart from the tasks above it,
+   because it is about the person rather than about the work — and it is a
+   question rather than a state, which is why it is not drawn as leave. */
+.rc-res-asked-off { margin-top: 4px; }
+
+/* What was said about it in the meeting. Recorded elsewhere and read here, so
+   it is set back from the plan above it rather than dressed as another field. */
+.rc-res-outcome {
+  margin-top: 4px;
+  padding-top: 3px;
+  border-top: 1px dotted var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+}
+.rc-res-outcome .rc-eyebrow { font-size: 9px; letter-spacing: 0.1em; }
 
 /* A day on another group's project is work, and it is not this project's —
    set back rather than badged, because it is one of several things in a cell. */
@@ -839,6 +921,23 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 .rc-pto-sheet { background: var(--rc-pto); }
 .rc-pto-sheet.rc-clickable { cursor: pointer; }
 .rc-pto-sheet.rc-clickable:hover { outline: 2px solid var(--text); outline-offset: -2px; }
+/* Asked for and not answered. Hatched in the leave colour rather than filled
+   with it: it is the same *kind* of thing as a day off and it is not one yet,
+   and the day can still be staffed while the question is open. The hatch is
+   how that reads at a glance across four weeks of the team. */
+.rc-pto-asked {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--rc-pto) 0 3px,
+    transparent 3px 7px
+  );
+}
+
+/* A request waiting on somebody. Bordered rather than tinted, for the reason
+   the 4WLA block in the week plan is: a tint would read as a status, and this
+   is a list of open questions. */
+.rc-pto-asks { border-color: var(--warn-border); }
+
 /* Off the project — the office, another group's work — is not leave, and must
    never be mistaken for it. A colour of its own rather than a hatch of the
    leave colour, because those are days somebody worked and the difference

@@ -16,6 +16,7 @@ import { TYPES, makeBaseline, makeObject, projectExtent, effectiveToday, makePro
 import * as store from '../core/store.js';
 import { saveNow, makeBackup, openFolderPlan, createFolderPlan, leaveFolder } from '../core/storage.js';
 import * as filestore from '../core/filestore.js';
+import * as access from '../core/access.js';
 import { linkViolations, resolutionFor } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
@@ -635,6 +636,15 @@ export async function reloadFromFolder({ confirm = true } = {}) {
  * to reload rather than overwriting.
  */
 export async function takeOverEditing() {
+  /* Except by somebody who may not edit the plan at all. The pen decides who
+     goes next among people who can write, and this account never can — so
+     taking it would produce a session that looks editable and refuses the first
+     edit. Said plainly rather than refused silently. */
+  if (access.planLocked()) {
+    toast({ tone: 'info', title: 'The plan is read-only for your account', message: access.lockReason() });
+    return false;
+  }
+
   const status = await filestore.lockStatus();
 
   if (status.live) {
@@ -689,6 +699,11 @@ export async function takeOverEditing() {
  */
 export async function announceStartupPen(pen) {
   if (!pen || pen.mine) return null;
+  /* An account that may not edit the plan is read-only for a reason that has
+     nothing to do with the pen, and saying "Dana has it open, take over?" would
+     be offering something that cannot happen and naming the wrong cause. Their
+     own reason is on the Shared folder pane and in the status bar. */
+  if (access.planLocked()) return 'viewer';
 
   if (!pen.live) {
     if (pen.free && pen.holder) {
@@ -729,7 +744,13 @@ export async function announceStartupPen(pen) {
           kind: 'danger',
           onClick: async () => {
             settled = true;
-            await filestore.takeOver();
+            try {
+              await filestore.takeOver();
+            } catch (err) {
+              toast({ tone: 'bad', title: 'The pen stays where it is', message: err.message });
+              resolve('viewer');
+              return;
+            }
             emit(EV.FILE_STATE, filestore.state());
             resolve('editing');
           },

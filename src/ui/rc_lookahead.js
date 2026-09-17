@@ -26,7 +26,7 @@ import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
 import { saveFile } from '../io/exporters.js';
 import {
   keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
-  ABSENCE_LABELS,
+  reassignments, ABSENCE_LABELS,
 } from '../core/lookahead.js';
 import { icon } from './icons.js';
 import {
@@ -34,7 +34,9 @@ import {
 } from './components.js';
 import {
   notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
+  isoToMs, nameRegister, foldName,
 } from './rc_util.js';
+import { toISO, addDays } from '../core/dates.js';
 
 /** Where the workbook lives, relative to the folder the plan is in. */
 const LOOKAHEAD_DIR = 'lookahead';
@@ -330,13 +332,38 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
       console.warn('[cx-timeline] change events not written:', err.message);
     }
 
+    /* And move the days the sheet has handed to somebody else.
+       A stored entry pointing at a look-ahead row is somebody confirming or
+       overriding what that row said; when this read names a different person on
+       it, the task has moved. Done here rather than at paint time because it is
+       a *write*, and because this is the one moment somebody deliberately asked
+       the sheet what it says now. */
+    let moved = [];
+    try {
+      moved = await applyReassignments(written);
+    } catch (err) {
+      // Same reasoning as the rows and the events: the snapshot is stored, so a
+      // failure here costs a re-derivation on the next read rather than a read.
+      console.warn('[cx-timeline] reassignments not applied:', err.message);
+    }
+
     run.outcome = 'snapshot';
     run.note = [
       grid.unknown.length ? `${grid.unknown.length} colour(s) not in the legend` : null,
       events.length ? `${countable(events).length} change(s) that count` : null,
+      moved.length ? `${moved.length} task(s) moved to somebody else` : null,
       rowTrouble ? `rows: ${rowTrouble}` : null,
     ].filter(Boolean).join('; ') || null;
     await rc.addIngestRun(run);
+
+    if (!silent && moved.length) {
+      toast({
+        tone: 'warn',
+        message: `${moved.length} planned task(s) moved to the person this read names on the row `
+          + '— flagged "Reassigned" in the week plan, with who had it before.',
+        timeout: 12000,
+      });
+    }
 
     /* Said out loud, and at length. Something downstream of this read is now
        empty, and "empty" and "it could not be written" must not look alike — a
@@ -416,6 +443,64 @@ async function lookaheadRows(snapshotId, grid) {
  *
  * Returns the events, so the caller can say how many of them count.
  */
+/**
+ * Move every planned day the sheet has just handed to somebody else.
+ *
+ * `reassignments()` decides *which*, and refuses to decide unless it is certain
+ * — the row has to name exactly one person the roster knows on that day, and
+ * somebody other than whoever has it. This does the writing:
+ * `rc_reassign_plan()` supersedes the entry with one against the new person and
+ * records where it came from, so the outgoing row stays and the week plan can
+ * badge the new one "Reassigned from Dana".
+ *
+ * Each move is attempted on its own and a refusal is logged rather than thrown.
+ * The function refuses an entry somebody has already revised, and one refusal
+ * must not stop the other nine: they are independent facts about independent
+ * days, and the next read will offer the failed one again.
+ *
+ * Returns what actually moved, which is what the toast and the ingest note say.
+ */
+async function applyReassignments(rows) {
+  if (!rows || !rows.length) return [];
+
+  const weeks = [...new Set(rows.map((r) => r.week_start).filter(Boolean))].sort();
+  if (!weeks.length) return [];
+  const from = weeks[0];
+  const to = toISO(addDays(isoToMs(weeks[weeks.length - 1]), 6));
+
+  const [planRows, people, aliases] = await Promise.all([
+    rc.listPlan(from, to),
+    rc.listPeople(),
+    rc.listPersonAliases().catch(() => []),
+  ]);
+
+  const register = nameRegister(people, aliases);
+  const moves = reassignments({
+    planRows,
+    laRows: rows,
+    // The register, as the lookup the derivation takes. Exact, like everywhere
+    // else: a near miss is reported on the week plan and answered with an
+    // alias, never used to move somebody's shift.
+    resolve: (name) => register.get(foldName(name)) || null,
+  });
+  if (!moves.length) return [];
+
+  const done = [];
+  for (const move of moves) {
+    try {
+      await rc.reassignPlan(move.entry.id, move.to);
+      done.push(move);
+    } catch (err) {
+      /* Already revised, already withdrawn, or already theirs. None of them is
+         a fault and none of them should stop the rest — the next read offers
+         this one again. */
+      console.warn('[cx-timeline] a task could not be moved:', err.message);
+    }
+  }
+  if (done.length) notifyChanged('plan');
+  return done;
+}
+
 async function recordChanges(previous, snapshot, rows, legend) {
   if (!previous || !rows.length) return [];
 

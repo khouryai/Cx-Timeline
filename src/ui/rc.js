@@ -22,19 +22,22 @@ import { textInput, toast, emptyState } from './components.js';
 import * as roster from './rc_roster.js';
 import * as huddle from './rc_huddle.js';
 import * as lookahead from './rc_lookahead.js';
-import * as resources from './rc_resources.js';
+import * as week from './rc_week.js';
 import * as pto from './rc_pto.js';
 import * as reports from './rc_reports.js';
 
 /**
  * The tabs, in the order the work actually happens: run today's meeting, plan
- * the week, see where each person is, see what the look-ahead did to it, then
- * the numbers.
+ * the week, see who is off, see what the look-ahead did to it, then the numbers.
+ *
+ * **"Resources" is gone, folded into "Week plan".** They were people down and
+ * days across in both cases, over the same `rc_plan_entries`, through the same
+ * `assignmentIndex()` — the same table drawn twice with a different subtitle,
+ * and each one missing something the other had.
  */
 const TABS = [
   { id: 'huddle', label: 'Daily huddle' },
   { id: 'week', label: 'Week plan' },
-  { id: 'resources', label: 'Resources' },
   { id: 'pto', label: 'PTO' },
   { id: 'lookahead', label: 'Look-ahead' },
   { id: 'reports', label: 'Reports' },
@@ -43,8 +46,7 @@ const TABS = [
 
 const RENDERERS = {
   huddle: huddle.render,
-  week: huddle.renderWeek,
-  resources: resources.render,
+  week: week.render,
   pto: pto.render,
   lookahead: lookahead.render,
   reports: reports.render,
@@ -157,7 +159,12 @@ function renderHead() {
        screenshot it instead. What they get is the calendar, read-only — the
        change register, the snapshots and the SARs are still the claim evidence
        and still administrators-only, in the policies. */
-    const ADMIN_ONLY = new Set(['reports', 'org']);
+    /* The **daily huddle** joins them. It is the meeting: it asks a whole team
+       in turn how yesterday went, and it is where an outcome is entered. A
+       member has nothing to run and nothing to enter there but their own day,
+       and what they need out of it — the status and the note recorded against
+       their work — is now in the week plan, beside the rest of their week. */
+    const ADMIN_ONLY = new Set(['huddle', 'reports', 'org']);
     const visible = rc.isAdmin() ? TABS : TABS.filter((t) => !ADMIN_ONLY.has(t.id));
     if (!visible.some((t) => t.id === active)) active = visible[0].id;
     for (const tab of visible) {
@@ -170,6 +177,12 @@ function renderHead() {
       }));
     }
     headEl.appendChild(tabs);
+
+    /* Leave waiting on an answer. The whole point of a member being able to ask
+       is that somebody answers, and a request nobody is told about is a request
+       that sits there — so it is on the chrome rather than only inside the tab,
+       and it says how many and where to go. */
+    if (rc.isAdmin()) headEl.appendChild(pendingLeaveChip());
 
     const pending = huddle.pendingCount();
     headEl.appendChild(el('span', {
@@ -198,6 +211,39 @@ function renderHead() {
       },
     }));
   }
+}
+
+/**
+ * "Two people are waiting on you", on the chrome.
+ *
+ * A member can ask for leave now, and asking is only worth anything if somebody
+ * answers — a request that nobody is told about is a request that sits in a tab
+ * an administrator had no reason to open. So it is counted on the header, next
+ * to the offline queue, and pressing it goes where the answer is given.
+ *
+ * Built empty and filled when the count arrives. The header is drawn
+ * synchronously on every render and this is a network read: waiting for it would
+ * hold up the tabs, and a chip that appears a moment later is exactly as useful.
+ * A read that fails leaves it hidden, which is the same as none waiting — it is
+ * a prompt, not a control, and the PTO tab is the record either way.
+ */
+function pendingLeaveChip() {
+  const chip = el('button', {
+    class: 'rc-queue rc-queue-ask',
+    hidden: true,
+    type: 'button',
+    title: 'Leave your team has asked for and nobody has answered. Answer it in PTO.',
+    onClick: () => showTab('pto'),
+  });
+  rc.pendingLeave()
+    .then((rows) => {
+      const n = (rows || []).length;
+      if (!n) return;
+      chip.textContent = `${n} leave request${n === 1 ? '' : 's'}`;
+      chip.hidden = false;
+    })
+    .catch(() => {});
+  return chip;
 }
 
 /* ── The states that are not the calendar ──────────────────────────────── */

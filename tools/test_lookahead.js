@@ -907,6 +907,103 @@ check('a row nobody described is not a named activity',
   cls.readGrid(sheet([{ label: '', location: '', days: [[0, 'FFFF00']] }]),
     { anchorISO: '2026-09-09' }).activities.every((a) => a.named === false));
 
+/* ══════════════════════════════════════════════════════════════════════════
+   A task the sheet has handed to somebody else
+   ══════════════════════════════════════════════════════════════════════════
+   A stored plan entry pointing at a look-ahead row is somebody confirming or
+   overriding what that row said. When a later read puts a different name on the
+   same row for the same day the work has moved — and leaving the entry where it
+   was is how somebody turns up for a shift that is not theirs while the person
+   who now has it has a blank against their name.
+
+   The lookup is injected, like `rowsFrom()`'s, so all of this runs with no
+   browser and no network. */
+console.log('\nWhen the sheet moves a task to somebody else');
+
+const ROSTER = { victor: 'p-victor', dana: 'p-dana', rosa: 'p-rosa' };
+const resolve = (name) => ROSTER[String(name).trim().toLowerCase()] || null;
+const laRow = (resources) => ({ id: 'lar1', week_start: '2026-09-07', resources });
+const entryOn = (person, date, row = 'lar1') => ({
+  id: 'plan1', person_id: person, work_date: date, lookahead_row_id: row,
+});
+
+const handedOver = cls.reassignments({
+  planRows: [entryOn('p-dana', '2026-09-08')],
+  laRows: [laRow({ '2026-09-08': 'Victor' })],
+  resolve,
+});
+check('a row that now names somebody else moves the day',
+  handedOver.length === 1 && handedOver[0].to === 'p-victor' && handedOver[0].from === 'p-dana',
+  JSON.stringify(handedOver.map((m) => `${m.from} → ${m.to}`)));
+
+check('a row that still names the same person moves nothing',
+  cls.reassignments({
+    planRows: [entryOn('p-victor', '2026-09-08')],
+    laRows: [laRow({ '2026-09-08': 'Victor' })],
+    resolve,
+  }).length === 0);
+
+/* The sheet going quiet on a day is not a reassignment. It happens whenever an
+   activity is rescheduled, and moving a task to nobody is not a thing that can
+   be written. */
+check('a day the row no longer names anybody on moves nothing',
+  cls.reassignments({
+    planRows: [entryOn('p-dana', '2026-09-08')],
+    laRows: [laRow({ '2026-09-09': 'Victor' })],
+    resolve,
+  }).length === 0);
+
+/* Two names is a crew, and a crew is not "this task moved to Victor" — it is
+   several entries, which is a decision somebody takes rather than one this can
+   derive. */
+check('a day naming two people moves nothing, because that is a crew',
+  cls.reassignments({
+    planRows: [entryOn('p-dana', '2026-09-08')],
+    laRows: [laRow({ '2026-09-08': 'Victor, Rosa' })],
+    resolve,
+  }).length === 0);
+
+/* An unmatched spelling stops it as firmly. Those are reported on the week plan
+   and answered with an alias; guessing here would be the near-miss matching the
+   register refuses everywhere. */
+check('and a spelling nobody has mapped moves nothing either',
+  cls.reassignments({
+    planRows: [entryOn('p-dana', '2026-09-08')],
+    laRows: [laRow({ '2026-09-08': 'Whoever' })],
+    resolve,
+  }).length === 0);
+check('nor does one alongside a name it does know',
+  cls.reassignments({
+    planRows: [entryOn('p-dana', '2026-09-08')],
+    laRows: [laRow({ '2026-09-08': 'Victor, Whoever' })],
+    resolve,
+  }).length === 0);
+
+/* A day nobody linked to the sheet is nobody's to move: it is work the 4WLA has
+   never heard of — an office day, another project — and the sheet has no opinion
+   about who should be doing it. */
+check('a task with no look-ahead link is never moved',
+  cls.reassignments({
+    planRows: [{ id: 'plan2', person_id: 'p-dana', work_date: '2026-09-08', lookahead_row_id: null }],
+    laRows: [laRow({ '2026-09-08': 'Victor' })],
+    resolve,
+  }).length === 0);
+check('and neither is one pointing at a row this read did not carry',
+  cls.reassignments({
+    planRows: [entryOn('p-dana', '2026-09-08', 'lar-gone')],
+    laRows: [laRow({ '2026-09-08': 'Victor' })],
+    resolve,
+  }).length === 0);
+
+/* The same tolerance the rest of the matching has. A cell typed at speed is
+   still the cell, and "Victor and Rosa" is two people however it was written. */
+check('the spacing in the cell does not decide whether a task moves',
+  cls.reassignments({
+    planRows: [entryOn('p-dana', '2026-09-08')],
+    laRows: [laRow({ '2026-09-08': '  Victor  ' })],
+    resolve,
+  }).length === 1);
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

@@ -31,6 +31,7 @@ import { isReadOnly } from './cloud.js';
    went through, autosave was refused by the folder, and the work was marked
    saved without ever having been written anywhere. */
 import { isViewer as folderViewer } from './filestore.js';
+import { planLocked, readView, writeView } from './access.js';
 import {
   normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES,
   syncLists, defaultLists, LIST_DEFS, listUsage,
@@ -93,14 +94,22 @@ const ui = {
  * raise a notification on every mouse-move.
  */
 function refuseWrite(label) {
-  if (!isReadOnly() && !folderViewer()) return false;
+  if (!isDocReadOnly()) return false;
   if (label !== 'preview') emit(EV.EDIT_REFUSED, { label });
   return true;
 }
 
-/** True when the open project is read-only for the signed-in user. */
+/**
+ * True when the open project is read-only for the signed-in user.
+ *
+ * Three different facts, and any one of them is enough. The cloud project may
+ * be shared with them as a viewer; a colleague may hold the pen on the folder;
+ * or the account may not be allowed to edit the plan at all, which is what
+ * `planLocked()` says — a resource-calendar member reads the plan and never
+ * writes it, and unlike the pen that is not a turn they can take.
+ */
 export function isDocReadOnly() {
-  return isReadOnly() || folderViewer();
+  return isReadOnly() || folderViewer() || planLocked();
 }
 
 /* ── Indexing ──────────────────────────────────────────────────────────── */
@@ -444,22 +453,12 @@ export function getFilters() {
 
 export function setFilters(patch) {
   Object.assign(ui.filters, patch);
+  persistView();
   emit(EV.FILTER_CHANGED, { filters: ui.filters });
 }
 
 export function resetFilters() {
-  setFilters({
-    text: '',
-    types: [],
-    statuses: [],
-    lanes: [],
-    owners: [],
-    subsystems: [],
-    areas: [],
-    tags: [],
-    from: null,
-    to: null,
-  });
+  setFilters(resetFilterShape());
 }
 
 export function hasActiveFilters() {
@@ -753,6 +752,25 @@ export function createsCycle(from, to) {
  */
 const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart', 'dateOrder']);
 
+/**
+ * Settings that say how somebody is *looking* at the plan, not what it says.
+ *
+ * Whether filtered-out objects dim or disappear, which baseline is being
+ * compared against, and whether that comparison is drawn at all. They lived in
+ * `doc.settings` like everything else, and that was wrong in two directions at
+ * once: one person narrowing the view narrowed it for whoever opened the file
+ * next, and a reader could not set them at all — the only way to record the
+ * choice was an edit to a plan they may not edit, so selecting a baseline was
+ * refused with a notification about read-only mode.
+ *
+ * They still live on `doc.settings`, because the renderer, the layout packer and
+ * every exporter read them from there and a second answer would be a second
+ * place to look. What changed is who owns the value: it is set quietly, never
+ * enters history, never marks the plan unsaved, and is remembered per account in
+ * `core/access.js` instead of being saved with the document.
+ */
+const VIEW_PREFERENCES = new Set(['filterMode', 'activeBaseline', 'showBaseline']);
+
 /** Settings changes are undoable — they alter how the plan reads. */
 export function setSetting(key, value, label = 'Change setting') {
   if (doc.settings[key] === value) return false;
@@ -761,9 +779,90 @@ export function setSetting(key, value, label = 'Change setting') {
       d.settings[key] = value;
     }, 'preference');
   }
+  if (VIEW_PREFERENCES.has(key)) {
+    const done = editQuiet((d) => {
+      d.settings[key] = value;
+    }, 'view');
+    persistView();
+    return done;
+  }
   return edit(label, (d) => {
     d.settings[key] = value;
   });
+}
+
+/* ── The view that belongs to one account ──────────────────────────────── */
+
+/** True while `restoreAccountView()` is applying, so it does not write back its own read. */
+let restoring = false;
+
+/**
+ * Remember how this account is looking at this plan.
+ *
+ * Keyed on the document's id, so opening a different plan is a different view
+ * rather than the last one's filter applied to somebody else's bars. Called from
+ * every path that changes one of those things, rather than on a timer: there is
+ * no cost worth debouncing — it is one small object — and a filter that is only
+ * remembered a second later is one that is lost by a reload.
+ */
+export function persistView() {
+  if (restoring) return;
+  writeView(doc.id, {
+    filters: ui.filters,
+    filterMode: doc.settings.filterMode,
+    activeBaseline: doc.settings.activeBaseline,
+    showBaseline: doc.settings.showBaseline,
+  });
+}
+
+/**
+ * Put it back, on load and whenever the document is replaced.
+ *
+ * A baseline that is no longer in the plan is dropped rather than selected: the
+ * remembered id can outlive the thing it names, and a comparison against a
+ * baseline that does not exist draws nothing while claiming to draw something.
+ */
+export function restoreAccountView() {
+  const saved = readView(doc.id);
+  if (!saved) return false;
+  restoring = true;
+  try {
+    if (saved.filters && typeof saved.filters === 'object') {
+      setFilters({ ...resetFilterShape(), ...saved.filters });
+    }
+    const patch = {};
+    if (saved.filterMode === 'dim' || saved.filterMode === 'hide') {
+      patch.filterMode = saved.filterMode;
+    }
+    const known = saved.activeBaseline
+      && (doc.baselines || []).some((b) => b.id === saved.activeBaseline);
+    if (known) {
+      patch.activeBaseline = saved.activeBaseline;
+      patch.showBaseline = Boolean(saved.showBaseline);
+    }
+    if (Object.keys(patch).length) {
+      editQuiet((d) => { Object.assign(d.settings, patch); }, 'view');
+    }
+  } finally {
+    restoring = false;
+  }
+  return true;
+}
+
+/** The empty filter, in one place — `resetFilters()` and the restore both need it. */
+function resetFilterShape() {
+  return {
+    text: '',
+    types: [],
+    statuses: [],
+    lanes: [],
+    owners: [],
+    subsystems: [],
+    areas: [],
+    tags: [],
+    from: null,
+    to: null,
+  };
 }
 
 /** View state (zoom, pan) persists but stays out of history. */

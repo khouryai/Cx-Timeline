@@ -912,17 +912,31 @@ export function assignmentIndex({ planRows, laRows, register, absences = [], cat
  * over" or "reassigned", and without somewhere for it to go it gets silently
  * distributed across the performance statuses — which is precisely what the
  * five-status split is designed to prevent.
+ *
+ * Returns `{ state, leave?, sheet?, asked? }`. `asked` is a leave row nobody
+ * has answered yet and it never changes the state: a member asking for a day
+ * off must not take themselves out of the schedule, or the administrator would
+ * be answering a question that had already answered itself.
  */
 export function availability(person, iso, leaveRows, absent = null) {
   const ms = isoToMs(iso);
   const weekday = new Date(ms).getUTCDay() || 7; // ISO: Monday 1 … Sunday 7
   const working = Array.isArray(person?.working_days) ? person.working_days : [1, 2, 3, 4, 5];
 
-  const leave = (leaveRows || []).find(
+  const mine = (leaveRows || []).filter(
     (l) => l.person_id === person.id && l.start_date <= iso && l.end_date >= iso
       && l.status !== 'cancelled' && l.status !== 'declined'
   );
-  if (leave) return { state: 'leave', leave };
+  /* **A request is not leave yet**, and that distinction is the whole point of
+     a member being able to ask. An unanswered request used to count here — the
+     filter only dropped `cancelled` and `declined` — which would have taken
+     somebody out of the schedule the moment they asked and left the
+     administrator answering a question that had already answered itself. So it
+     is carried alongside instead: the state stays `available`, and `asked` lets
+     a screen say the question is open. */
+  const leave = mine.find((l) => l.status !== 'requested');
+  const asked = mine.find((l) => l.status === 'requested') || null;
+  if (leave) return { state: 'leave', leave, asked };
   /* The 4WLA's PTO row, where nobody booked the leave. Most days it is the only
      place the absence is written down at all — somebody types a name into the
      workbook and never opens Organisation — and without reading it the huddle
@@ -931,7 +945,7 @@ export function availability(person, iso, leaveRows, absent = null) {
      *not* leave: those are days somebody worked, they can be asked how it went,
      and where they were is the assignment. `ABSENCE_KINDS[kind].leave` is the
      one place that distinction lives. */
-  if (absent && ABSENCE_KINDS[absent]?.leave) return { state: 'leave', sheet: absent };
-  if (!working.includes(weekday)) return { state: 'non-working' };
-  return { state: 'available' };
+  if (absent && ABSENCE_KINDS[absent]?.leave) return { state: 'leave', sheet: absent, asked };
+  if (!working.includes(weekday)) return { state: 'non-working', asked };
+  return { state: 'available', asked };
 }

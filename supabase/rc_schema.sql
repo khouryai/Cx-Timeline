@@ -425,9 +425,44 @@ create table if not exists public.rc_plan_entries (
    */
   carry_chain_id   uuid,
   supersedes_id    uuid references public.rc_plan_entries(id),
+  /*
+   * A day somebody decided not to do after all.
+   *
+   * There is no DELETE grant on this table and there is not going to be: a plan
+   * that changed the evening before the shift is delay evidence, and a row that
+   * can vanish is evidence that can vanish. So withdrawing is a *write* — a
+   * tombstone row superseding the original, carrying this flag — and
+   * `rc_plan_current` drops both of them. The record still says the day was
+   * planned, by whom, and then withdrawn, by whom and when; the schedule simply
+   * stops showing it. `rc_withdraw_plan()` is the only thing that sets it.
+   */
+  withdrawn        boolean not null default false,
+  /*
+   * Who this task used to belong to, when it has been moved.
+   *
+   * The 4WLA's Resource row is the plan for the days it names, so a stored entry
+   * linked to one of its rows is somebody overriding or confirming what the
+   * sheet said. When the next read of that sheet names a *different* person on
+   * the same row, the task has moved — and leaving it against the original
+   * person is how somebody turns up for a shift that is no longer theirs while
+   * the person who now has it is never told.
+   *
+   * So `rc_reassign_plan()` supersedes the row with one against the new person
+   * and records where it came from here. It is a column rather than a derivation
+   * because the thing worth knowing is that it *moved*, and once the sheet has
+   * moved on there is nothing left to derive that from.
+   */
+  reassigned_from  uuid references public.rc_people(id),
   created_by       uuid not null default auth.uid() references auth.users(id),
   created_at       timestamptz not null default now()
 );
+
+-- Added after the table shipped; `create table if not exists` does nothing to a
+-- project that already has it. `migrate.sql` carries the same two.
+alter table public.rc_plan_entries
+  add column if not exists withdrawn boolean not null default false;
+alter table public.rc_plan_entries
+  add column if not exists reassigned_from uuid references public.rc_people(id);
 
 create index if not exists rc_plan_person_date_idx on public.rc_plan_entries (person_id, work_date);
 create index if not exists rc_plan_date_idx        on public.rc_plan_entries (work_date);
@@ -440,7 +475,13 @@ create or replace view public.rc_plan_current as
    where not exists (
            select 1 from public.rc_plan_entries newer
             where newer.supersedes_id = p.id
-         );
+         )
+     /* A withdrawn row is a tombstone, not a plan. It is the newest row for its
+        day — that is what makes it supersede the original — so without this it
+        would *be* the current plan and the day would read as a task with
+        nothing in it. Both sides disappear together: the original because
+        something supersedes it, the tombstone because of this. */
+     and not p.withdrawn;
 
 -- What actually happened, captured live in the huddle.
 create table if not exists public.rc_actuals (
@@ -649,17 +690,59 @@ end;
 $$;
 
 -- ── Leave ─────────────────────────────────────────────────────────────────
--- Readable by everyone (the schedule is not a secret from the people in it),
--- writable only by administrators.
+-- Readable by everyone (the schedule is not a secret from the people in it).
+--
+-- **Asking is a member's; answering is an administrator's.** Booking leave was
+-- administrators-only, which made the commonest thing anybody wants to do with
+-- this module a thing they had to ask somebody else to type — so it was typed
+-- into the 4WLA instead, or into nothing at all, and the PTO tab's normal case
+-- became "the sheet says they are off and nothing is booked".
+--
+-- So a member inserts their own row and it lands as `requested`. The status is
+-- the whole of the permission: the check pins a member's insert to `requested`
+-- for their own person id, and nothing a member can write moves it off that.
+-- Approving, declining and cancelling are updates, and updates are an
+-- administrator's — with one exception, below, which is the row still being a
+-- question.
 
 drop policy if exists rc_leave_read on public.rc_leave;
 create policy rc_leave_read on public.rc_leave
   for select to authenticated using (true);
 
+-- Kept, so an existing project's admin-only write is replaced rather than
+-- joined by the narrower policies below: two `for all` policies would OR
+-- together and the narrow one would never bind.
 drop policy if exists rc_leave_write on public.rc_leave;
-create policy rc_leave_write on public.rc_leave
-  for all to authenticated
-  using (public.rc_is_admin()) with check (public.rc_is_admin());
+
+drop policy if exists rc_leave_insert on public.rc_leave;
+create policy rc_leave_insert on public.rc_leave
+  for insert to authenticated
+  with check (
+    public.rc_is_admin()
+    or (public.rc_can_act_for(person_id) and status = 'requested')
+  );
+
+drop policy if exists rc_leave_update on public.rc_leave;
+create policy rc_leave_update on public.rc_leave
+  for update to authenticated
+  /* A member may withdraw a request nobody has answered yet, and that is all.
+     Without it, asking is a thing you cannot take back — which teaches people
+     not to ask. The `with check` is what stops it being anything else: the only
+     status a member can write is `cancelled`, so a request cannot approve
+     itself. */
+  using (
+    public.rc_is_admin()
+    or (public.rc_can_act_for(person_id) and status = 'requested')
+  )
+  with check (
+    public.rc_is_admin()
+    or (public.rc_can_act_for(person_id) and status = 'cancelled')
+  );
+
+drop policy if exists rc_leave_delete on public.rc_leave;
+create policy rc_leave_delete on public.rc_leave
+  for delete to authenticated
+  using (public.rc_is_admin());
 
 -- ── The look-ahead register ───────────────────────────────────────────────
 -- Two halves, and the line between them is what somebody can *do* with the
@@ -1572,6 +1655,144 @@ begin
 end;
 $$;
 
+/*
+ * Withdraw a planned day.
+ *
+ * "Delete my task" with the evidence kept, which is the only shape a delete can
+ * take here: `rc_plan_entries` has no DELETE grant, because a plan that changed
+ * the evening before the shift is what a delay claim is built from and a row
+ * that can be removed is a record that can be edited. So it writes a tombstone
+ * superseding the original, and `rc_plan_current` drops the pair — the schedule
+ * stops showing the day while the table still says it was planned and then
+ * withdrawn, by whom, and when.
+ *
+ * Whoever may plan a day may withdraw it: `rc_can_act_for()`, the same question
+ * the insert policy and `rc_supersede_plan()` ask. A member withdraws their own
+ * and an administrator withdraws anybody's.
+ *
+ * A row that has already been superseded is refused rather than tombstoned
+ * twice, exactly as a revision is: two people clearing one day get a refusal
+ * instead of one of them silently winning.
+ */
+create or replace function public.rc_withdraw_plan(p_entry uuid)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  old_row public.rc_plan_entries;
+  new_id  uuid;
+begin
+  select * into old_row from public.rc_plan_entries where id = p_entry;
+  if not found then
+    raise exception 'no such plan entry: %', p_entry using errcode = 'P0002';
+  end if;
+
+  if not public.rc_can_act_for(old_row.person_id) then
+    raise exception 'read only: you may only withdraw your own plan'
+      using errcode = '42501';
+  end if;
+
+  if old_row.withdrawn then
+    raise exception 'plan entry % is already withdrawn', p_entry using errcode = '40001';
+  end if;
+
+  if exists (select 1 from public.rc_plan_entries where supersedes_id = p_entry) then
+    raise exception 'plan entry % has already been revised', p_entry using errcode = '40001';
+  end if;
+
+  insert into public.rc_plan_entries
+    (person_id, work_date, shift, location_id, task, category_id,
+     lookahead_row_id, carry_chain_id, supersedes_id, withdrawn, created_by)
+  values
+    (old_row.person_id, old_row.work_date, old_row.shift, old_row.location_id,
+     old_row.task, old_row.category_id, old_row.lookahead_row_id,
+     old_row.carry_chain_id, p_entry, true, auth.uid())
+  returning id into new_id;
+
+  return new_id;
+end;
+$$;
+
+/*
+ * Move a planned day to the person the look-ahead now names.
+ *
+ * The 4WLA is the plan for the days it names, and a stored entry pointing at one
+ * of its rows is somebody having confirmed or overridden it. When the next read
+ * of that sheet puts a different name on the same row, the work has moved — and
+ * until this existed the entry stayed against whoever it was first written for.
+ * The visible cost of that is somebody turning up for a shift that is not theirs
+ * any more while the person who now has it has a blank against their name.
+ *
+ * A supersede rather than an update, for the reason everything here is: the
+ * outgoing row stays, and "it was Dana's until the sheet moved it to Victor on
+ * the 9th" is a sentence the record can still make. `reassigned_from` on the new
+ * row is what the interface reads to badge it — the thing worth knowing is that
+ * it moved, and once the sheet has moved on there is nothing left to derive that
+ * from.
+ *
+ * **An administrator's, and deliberately not a member's.** It writes a day
+ * against somebody else — the whole point is that the person changes — so
+ * `rc_can_act_for()` is the wrong question and would answer no for every member
+ * anyway. It is driven from the ingest, which is an administrator pressing
+ * "Check now".
+ *
+ * Refuses a move onto the person who already has it, so a re-read that changed
+ * nothing writes nothing: without that, every ingest would supersede every
+ * linked entry and the history would fill with revisions that said the same
+ * thing.
+ */
+create or replace function public.rc_reassign_plan(p_entry uuid, p_person uuid)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  old_row public.rc_plan_entries;
+  new_id  uuid;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may reassign a planned day'
+      using errcode = '42501';
+  end if;
+
+  select * into old_row from public.rc_plan_entries where id = p_entry;
+  if not found then
+    raise exception 'no such plan entry: %', p_entry using errcode = 'P0002';
+  end if;
+
+  if not exists (select 1 from public.rc_people where id = p_person and active) then
+    raise exception 'no such person on the roster: %', p_person using errcode = 'P0002';
+  end if;
+
+  if old_row.person_id = p_person then
+    raise exception 'plan entry % already belongs to that person', p_entry
+      using errcode = '23505';
+  end if;
+
+  if old_row.withdrawn then
+    raise exception 'plan entry % was withdrawn', p_entry using errcode = '40001';
+  end if;
+
+  if exists (select 1 from public.rc_plan_entries where supersedes_id = p_entry) then
+    raise exception 'plan entry % has already been revised', p_entry using errcode = '40001';
+  end if;
+
+  insert into public.rc_plan_entries
+    (person_id, work_date, shift, location_id, task, category_id,
+     lookahead_row_id, carry_chain_id, supersedes_id, reassigned_from, created_by)
+  values
+    (p_person, old_row.work_date, old_row.shift, old_row.location_id,
+     old_row.task, old_row.category_id, old_row.lookahead_row_id,
+     old_row.carry_chain_id, p_entry, old_row.person_id, auth.uid())
+  returning id into new_id;
+
+  return new_id;
+end;
+$$;
+
 -- Record a huddle outcome. Idempotent on `client_uuid`, so the offline queue
 -- can replay without fear; returns the row that ended up stored either way.
 -- The parameter list grew (`p_supersedes`), and `create or replace` cannot
@@ -1712,6 +1933,8 @@ revoke all on function public.rc_delete_location(uuid)                  from pub
 revoke all on function public.rc_delete_category(uuid)                  from public, anon;
 revoke all on function public.rc_delete_legend(uuid)                    from public, anon;
 revoke all on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) from public, anon;
+revoke all on function public.rc_withdraw_plan(uuid)                    from public, anon;
+revoke all on function public.rc_reassign_plan(uuid, uuid)              from public, anon;
 revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid) from public, anon;
 
 grant execute on function public.rc_me()                                to authenticated;
@@ -1729,6 +1952,8 @@ grant execute on function public.rc_delete_location(uuid)               to authe
 grant execute on function public.rc_delete_category(uuid)               to authenticated;
 grant execute on function public.rc_delete_legend(uuid)                 to authenticated;
 grant execute on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) to authenticated;
+grant execute on function public.rc_withdraw_plan(uuid)                 to authenticated;
+grant execute on function public.rc_reassign_plan(uuid, uuid)           to authenticated;
 grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid) to authenticated;
 
 do $$

@@ -1,35 +1,46 @@
 /**
- * Resources — who is where, and what they are on.
+ * The week plan — who is where, what they are on, and how it went.
  *
- * The week plan answers "what is the team doing this week" from the plan's own
- * side. This answers the question the other way round: for each person, where
- * are they, and does that agree with what the look-ahead asked for. They are two
- * readings of the same rows and neither is a copy of the other, because the
- * question a resource asks about their own week is not the question a scheduler
- * asks about the team's.
+ * One tab, and it used to be two. "Week plan" drew the team's week from the
+ * plan's side; "Resources" drew the same rows the other way round, per person,
+ * with what the 4WLA asked for beside them. They were people down and days
+ * across in both cases, over the same `rc_plan_entries`, through the same
+ * `assignmentIndex()` — the same table drawn twice with a different subtitle,
+ * and each one missing something the other had. Whichever you opened, the answer
+ * you wanted was on the other.
  *
- * Three things make it worth its own tab rather than another column somewhere.
+ * So there is one. It carries every part that was load-bearing in either:
  *
- * **The 4WLA names people, and until now nothing read that.** The workbook
- * carries a row under each activity whose description reads "Resource", with the
- * names typed into the day cells; `core/lookahead.js` reads it and stores it on
- * the row. Here those names are matched against the roster — exactly, through
- * the alias register, never by guessing at a surname — and where a spelling is
- * not known it is *shown* rather than dropped. A view that is incomplete and
- * says so is usable; one that is quietly wrong is not.
+ * **What each person is on, per day**, every task and not the first of them,
+ * because a shift is routinely two jobs.
  *
- * **A person's week is not all commissioning work.** A day in the office, a day
- * on another project, a day of training: without somewhere for those to go the
- * huddle has a blank against somebody's name and no way to tell "nothing
- * planned" from "nothing said". So work can be assigned here that the look-ahead
- * has never heard of, over a span of days rather than one at a time, because
- * that is how those days actually arrive.
+ * **What the 4WLA asked for**, where a stored entry disagrees with it. That is
+ * a decision somebody took against the workbook and it is the one case worth
+ * drawing twice; where they agree — the normal case, since the sheet *is* the
+ * plan — there is nothing to reconcile and one line is drawn.
  *
- * **Everything written here is a plan entry.** Not a second table of
- * assignments — the same `rc_plan_entries` the week plan writes and the huddle
- * reads, so a resource turning up in this view turns up in tomorrow's meeting
- * with no further wiring. That is the whole of "tied to the huddle": there is
- * one place a day is planned, and three places it is read.
+ * **How yesterday went.** The huddle records an outcome against a day, and the
+ * meeting is an administrator's screen. Without it here a member had no way to
+ * see what was said about their own work: the status, the note, the photograph,
+ * whether it was carried over. It is read-only in this view — recording is the
+ * meeting's job and there must be one recording path — but it is *shown*, and
+ * that is most of why a member needs to open this at all.
+ *
+ * **Who can actually be staffed each day**, on the bottom row. The number that
+ * stops work being promised for a day that cannot be covered.
+ *
+ * **The names and places the registers cannot resolve.** A view that is
+ * incomplete and says so is usable; one that is quietly wrong is not.
+ *
+ * **A member's own row is theirs.** They create, revise and withdraw tasks on
+ * it and on no other, which is `rc_can_act_for()` in Postgres — this only
+ * stops offering what the database would refuse. Withdrawing is a tombstone
+ * rather than a delete, because `rc_plan_entries` has no DELETE grant and a
+ * plan that changed the evening before a shift is delay evidence.
+ *
+ * Everything written here is an `rc_plan_entries` row — the same rows the huddle
+ * reads and the reports group by. There is one place a day is planned and
+ * several places it is read.
  *
  * Imports: util, dates, rc, icons, components, rc_util.
  */
@@ -40,9 +51,10 @@ import * as rc from '../core/rc.js';
 import { icon } from './icons.js';
 import {
   textInput, selectInput, toast, badge, checkbox, field, emptyState, promptDialog,
+  confirmDialog,
 } from './components.js';
 import {
-  SHIFTS, weekStart, allWeekDays, todayISO, dayLabel, byId, availability,
+  SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability,
   notifyChanged, formModal, nameRegister, foldName,
   ambiguousFirstNames, lookaheadWithResources, assignmentIndex,
   locationRegister, unmatchedLocations,
@@ -73,7 +85,7 @@ export async function render(root) {
      is why `lookaheadWithResources()` catches rather than a permission test up
      here. It is also the one place the three views ask, so they cannot disagree
      about where somebody is. */
-  const [people, locations, categories, leave, planRows, aliases, locAliases, sheet, everybody] =
+  const [people, locations, categories, leave, planRows, actuals, aliases, locAliases, sheet, everybody] =
     await Promise.all([
       /* The people who take shifts, which is what this view is a reading of.
          A manager administers the calendar and is never assigned to a location,
@@ -85,8 +97,17 @@ export async function render(root) {
       rc.listPeople({ scheduledOnly: true }),
       rc.listLocations(),
       rc.listCategories(),
-      rc.listLeave(from, to),
+      /* Three weeks past the end of this one, not one. You find out somebody is
+         off when you try to staff the day, which is a fortnight too late to do
+         anything about it — so the window for leave is wider than the window
+         for the grid, and what falls outside it is named underneath. */
+      rc.listLeave(from, toISO(addDays(startMs, 27))),
       rc.listPlan(from, to),
+      /* How it went, from the huddle. Read-only here: recording is the
+         meeting's job and there is one recording path. Shown because the
+         meeting is an administrator's screen, so without this a member had
+         nowhere to see what was said about their own week. */
+      rc.listActuals(from, to).catch(() => []),
       rc.listPersonAliases().catch(() => []),
       rc.listLocationAliases().catch(() => []),
       lookaheadWithResources(from, to),
@@ -116,12 +137,40 @@ export async function render(root) {
      the spelling is kept and shown, never discarded and never guessed at. */
   const strangeLocations = unmatchedLocations(laRows, locationRegister(locations, locAliases));
 
+  /* How each day went, indexed two ways.
+     An outcome points at one plan entry where there was one to point at, and at
+     nothing but a person and a date where the day was derived from the sheet —
+     so both keys are needed or the derived days, which are most of them, would
+     show no outcome at all. The entry wins: two people can be planned on one
+     day and the note belongs to the task it was recorded against. */
+  const outcomeByEntry = new Map();
+  const outcomeByDay = new Map();
+  for (const row of actuals) {
+    if (row.plan_entry_id) outcomeByEntry.set(row.plan_entry_id, row);
+    const key = `${row.person_id}|${row.work_date}`;
+    if (!outcomeByDay.has(key)) outcomeByDay.set(key, []);
+    outcomeByDay.get(key).push(row);
+  }
+  /* The outcome for one drawn task. A stored entry is matched on its id; a
+     derived day takes whichever outcome was recorded against the person and the
+     date, because there is no row for it to point at. */
+  const outcomeFor = (entry, personId, iso) => {
+    if (entry?.id && outcomeByEntry.has(entry.id)) return outcomeByEntry.get(entry.id);
+    if (entry?.id) return null;
+    const day = outcomeByDay.get(`${personId}|${iso}`) || [];
+    return day.find((a_) => !a_.plan_entry_id) || day[0] || null;
+  };
+
+  const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
+  const soon = leave.filter((l) => l.start_date > to
+    && l.status !== 'cancelled' && l.status !== 'declined');
+
   /* Only the days somebody works, unless asked otherwise. `showQuietDays` is
      about the columns; a person who works none of them still has a row, because
      a row that vanishes is a person nobody remembers to plan. */
   const shown = showQuietDays
     ? days
-    : days.filter((iso) => people.some((p) => availability(p, iso, leave).state !== 'non-working'));
+    : days.filter((iso) => people.some((p) => availability(p, iso, thisWeek).state !== 'non-working'));
   const columns = shown.length ? shown : days;
 
   const redraw = () => { clear(root); render(root); };
@@ -133,7 +182,12 @@ export async function render(root) {
       html: icon('chevron-left', { size: 13 }),
       onClick: () => { weekOf = startMs - 7 * 86400000; redraw(); },
     }),
-    el('h3', { text: `Resources — week of ${dayLabel(from, 'medium')}` }),
+    el('h3', { text: `Week of ${dayLabel(from, 'medium')}` }),
+    weekOf === null ? null : el('button', {
+      class: 'cx-btn mini ghost',
+      text: 'This week',
+      onClick: () => { weekOf = null; redraw(); },
+    }),
     el('button', {
       class: 'cx-btn icon mini ghost',
       'aria-label': 'Next week',
@@ -178,7 +232,7 @@ export async function render(root) {
   for (const person of people) {
     const wanted = byPerson.get(person.id) || new Map();
     const cells = columns.map((iso) => {
-      const state = availability(person, iso, leave, index.absent(person.id, iso));
+      const state = availability(person, iso, thisWeek, index.absent(person.id, iso));
       const asked = wanted.get(iso) || [];
       const classes = ['rc-res-cell'];
       if (iso === today) classes.push('rc-res-today');
@@ -198,21 +252,117 @@ export async function render(root) {
         }, [el('span', { text: '·' })]);
       }
 
+      /* Whose day this is decides whether it can be changed. A member plans,
+         revises and withdraws their own and nobody else's; an administrator does
+         anybody's. That is `rc_can_act_for()` in Postgres — this only stops
+         offering what the database would refuse. */
+      const mayPlan = rc.canWrite() && (rc.isAdmin() || person.id === rc.me()?.id);
+
       const parts = [];
       // Every task on the day, not the first of them. A shift is routinely two
       // jobs, and drawing one was how the other went missing.
       for (const entry of planned) {
-        parts.push(el('div', { class: `rc-res-job${entry.absence ? ' rc-res-away' : ''}` }, [
-          el('div', { text: entry.task || '—' }),
+        const outcome = outcomeFor(entry, person.id, iso);
+        const status = outcome ? STATUS_BY_ID.get(outcome.status) : null;
+        parts.push(el('div', {
+          class: ['rc-res-job', entry.absence ? 'rc-res-away' : '',
+            outcome ? `rc-res-done rc-res-${outcome.status}` : ''].filter(Boolean).join(' '),
+        }, [
+          el('div', { class: 'rc-res-task', text: entry.task || '—' }),
           el('div', { class: 'rc-hint', text: [
             locs.get(entry.location_id)?.name || entry.raw_location,
             cats.get(entry.category_id)?.name,
             entry.shift !== 'day' ? entry.shift : null,
           ].filter(Boolean).join(' · ') }),
-          /* The workbook is the assumption, so only a day somebody typed in
-             carries a flag. A derived day has `id: null` by design, which is
-             what tells the two apart. */
-          !entry.from_lookahead && entry.id ? badge('Manual', 'warn') : null,
+          el('div', { class: 'rc-res-flags' }, [
+            /* The workbook is the assumption, so only a day somebody typed in
+               carries a flag. A derived day has `id: null` by design, which is
+               what tells the two apart. */
+            !entry.from_lookahead && entry.id ? badge('Manual', 'warn') : null,
+            /* Moved, because a later read of the sheet named somebody else on
+               the row this was written against. Drawn on the person who has it
+               now and naming the one who had it, which is the only version of
+               this that answers "why am I on this". */
+            entry.reassigned_from
+              ? badge(`Reassigned from ${nameOf(everybody, people, entry.reassigned_from)}`, 'info')
+              : null,
+            entry.supersedes_id && !entry.reassigned_from ? badge('Revised', 'warn') : null,
+            entry.carry_chain_id ? badge('Carried over', 'warn') : null,
+          ].filter(Boolean)),
+          /* How it went, from the huddle — the whole reason a member opens this.
+             Read-only: the meeting is where an outcome is recorded and there is
+             one recording path, so this states it and offers nothing. */
+          outcome
+            ? el('div', { class: 'rc-res-outcome' }, [
+              /* An eyebrow, because this is a different *kind* of thing from
+                 the flags above it: those say what the plan is, this says what
+                 happened. Without it the status badge read as a fourth flag. */
+              el('span', { class: 'rc-eyebrow', text: 'Recorded' }),
+              badge(status?.label || outcome.status, status?.tone || 'muted'),
+              outcome.blocked_reason
+                ? el('div', { class: 'rc-hint', text: outcome.blocked_reason })
+                : null,
+              outcome.note ? el('div', { class: 'rc-hint', text: outcome.note }) : null,
+              outcome.evidence_path
+                ? el('button', {
+                  class: 'cx-btn mini ghost rc-evidence',
+                  html: `${icon('paperclip', { size: 11 })}<span>Photo</span>`,
+                  title: 'Open the photograph taken with this outcome',
+                  onClick: async () => {
+                    try {
+                      window.open(await rc.evidenceUrl(outcome.evidence_path), '_blank', 'noopener');
+                    } catch (err) {
+                      toast({ tone: 'bad', message: `That photograph could not be opened — ${err.message}` });
+                    }
+                  },
+                })
+                : null,
+              outcome.supersedes_id ? el('div', { class: 'rc-hint', text: 'corrected' }) : null,
+            ].filter(Boolean))
+            : null,
+          /* Changing it. A derived day has no row to revise, so revising it *is*
+             writing the first one — which is what overriding the sheet means, and
+             is labelled as that. Withdrawing is only ever offered for a stored
+             row: there is nothing to withdraw from a day the sheet is asserting,
+             and the honest answer there is to override it. */
+          mayPlan
+            ? el('div', { class: 'rc-res-acts' }, [
+              /* Icons rather than words. Seven columns of "Edit" and "Delete"
+                 is more chrome than content in a cell that already carries a
+                 task, a place, its flags and how it went — and the actions are
+                 the least interesting thing in it. Labelled for a screen reader
+                 and titled for a pointer, which is what an icon-only button
+                 owes anybody. */
+              el('button', {
+                class: 'cx-btn icon mini ghost',
+                'aria-label': entry.from_lookahead
+                  ? `Override the sheet for ${person.name} on ${dayLabel(iso)}`
+                  : `Revise ${entry.task || 'this task'}`,
+                html: icon(entry.from_lookahead ? 'refresh' : 'edit', { size: 11 }),
+                title: entry.from_lookahead
+                  ? 'Override the sheet. The 4WLA plans this day, so changing it writes the first '
+                    + 'plan entry against it.'
+                  : 'Revise this — the outgoing version stays on the record.',
+                onClick: () => (entry.from_lookahead
+                  ? overrideSheet({
+                    person, iso, laRows, locations, categories, locs, redraw,
+                    row: laRows.find((r) => r.id === entry.lookahead_row_id) || null,
+                  })
+                  : revisePlan(entry, person, { locations, categories, locs, redraw })),
+              }),
+              entry.id
+                ? el('button', {
+                  class: 'cx-btn icon mini ghost danger',
+                  'aria-label': `Remove ${entry.task || 'this task'} from ${dayLabel(iso)}`,
+                  html: icon('trash', { size: 11 }),
+                  title: 'Takes the day off the schedule. The record keeps it — a plan that '
+                    + 'changed the evening before a shift is itself evidence — so this writes a '
+                    + 'withdrawal rather than removing anything.',
+                  onClick: () => withdraw(entry, person, redraw),
+                })
+                : null,
+            ].filter(Boolean))
+            : null,
         ].filter(Boolean)));
       }
       const entry = planned[0] || null;
@@ -244,11 +394,17 @@ export async function render(root) {
         }
       }
 
-      /* Whose day this is decides whether it can be added to. A member plans
-         their own and an administrator plans anyone's, which is the rule
-         `rc_plan_entries` makes in Postgres — this only stops offering what
-         the database would refuse. */
-      const mayPlan = rc.canWrite() && (rc.isAdmin() || person.id === rc.me()?.id);
+      /* A day off somebody has asked for and nobody has answered.
+         Not leave — the day is still staffable and an administrator still has a
+         decision to make — but drawn, because a request nobody can see while
+         they are staffing the week is a request that gets scheduled straight
+         over. PTO is where it is answered. */
+      if (state.asked) {
+        parts.push(el('div', { class: 'rc-res-asked-off' }, [
+          badge('Leave requested', 'warn'),
+        ]));
+      }
+
       if (!mayPlan) {
         return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) },
           parts.length ? parts : [el('span', { class: 'rc-hint', text: '—' })]);
@@ -258,7 +414,7 @@ export async function render(root) {
          one task is how somebody ends up with one of the three things they were
          asked for. */
       parts.push(el('button', {
-        class: 'cx-btn mini ghost',
+        class: 'cx-btn mini ghost rc-res-add',
         text: parts.length ? '+ task' : '+',
         'aria-label': `Assign ${person.name} on ${dayLabel(iso)}`,
         title: parts.length ? 'Add another task to this day' : 'Plan this day',
@@ -279,20 +435,59 @@ export async function render(root) {
     ]));
   }
 
+  /* How many people can actually be staffed each day.
+     The number that stops work being promised for a day it cannot be covered,
+     and the one part of the old week-plan tab that had no counterpart here. */
+  const coverage = columns.map((iso) => people.filter((p) =>
+    availability(p, iso, thisWeek, index.absent(p.id, iso)).state === 'available').length);
+
+  body.appendChild(el('tr', { class: 'rc-res-coverage' }, [
+    el('td', {}, [el('strong', { text: 'Can be staffed' })]),
+    ...coverage.map((n, i) => el('td', {
+      class: ['rc-num', columns[i] === today ? 'rc-res-today' : ''].filter(Boolean).join(' '),
+      'data-label': dayLabel(columns[i]),
+    }, [el('span', { text: `${n} of ${people.length}` })])),
+  ]));
+
   root.appendChild(el('div', { class: 'rc-scroll' }, [
     el('table', { class: 'rc-table rc-resources' }, [
       el('thead', {}, [
         el('tr', {}, [
           el('th', { text: 'Resource' }),
           ...columns.map((iso) => el('th', {
-            class: iso === today ? 'rc-res-today' : '',
-            text: dayLabel(iso),
+            /* Today, marked on the column rather than on one cell. A week grid
+               is read by running a finger down a day, and the day somebody is
+               nearly always looking for is this one — it used to be a two-pixel
+               rule on the left edge of the cells, which is invisible against a
+               table that has borders anyway. */
+            class: iso === today ? 'rc-res-today rc-res-today-head' : '',
+            html: iso === today
+              ? `${dayLabel(iso)}<span class="rc-today-tag">Today</span>`
+              : undefined,
+            text: iso === today ? undefined : dayLabel(iso),
           })),
         ]),
       ]),
       body,
     ]),
   ]));
+
+  /* Leave that has not started yet. Three weeks past the end of the grid,
+     because finding out when you try to staff the day is a fortnight too late
+     to do anything about it. */
+  if (soon.length) {
+    const peopleById = byId(people);
+    root.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Coming up: ' + soon
+        .sort((a_, b_) => a_.start_date.localeCompare(b_.start_date))
+        .slice(0, 6)
+        .map((l) => `${peopleById.get(l.person_id)?.name || 'somebody'} from ${dayLabel(l.start_date)}`
+          + `${l.status === 'requested' ? ' (requested)' : ''}`)
+        .join(', ')
+        + '. Requests are in PTO, where an administrator answers them.',
+    }));
+  }
 
   /* ── Where everybody is ───────────────────────────────────────────────── */
 
@@ -473,10 +668,22 @@ export async function render(root) {
 
   root.appendChild(el('p', {
     class: 'rc-hint',
-    text: 'Everything here is a plan entry — the same rows the week plan writes and the daily '
-      + 'huddle reads — so anybody assigned here is in tomorrow\'s meeting with their scope '
-      + 'against their name, ready to speak to it. There is one place a day is planned and three '
-      + 'places it is read.',
+    text: 'Everything here is a plan entry — the same rows the daily huddle reads and the reports '
+      + 'group by — so anybody assigned here is in tomorrow\'s meeting with their scope against '
+      + 'their name. This was two tabs, "Week plan" and "Resources", drawing the same table twice '
+      + 'with a different subtitle; whichever you opened, the part you wanted was on the other.',
+  }));
+  root.appendChild(el('p', {
+    class: 'rc-hint',
+    text: rc.isAdmin()
+      ? 'A member sees all of this and can create, change and remove tasks on their own row and '
+        + 'nowhere else — the rule `rc_plan_entries` makes in Postgres, not something this screen '
+        + 'decides. Removing one writes a withdrawal rather than deleting anything, so the record '
+        + 'still holds the day as planned.'
+      : 'Your own row is yours: add a task, change one, or take one off. Everybody else\'s is '
+        + 'read-only, and the database says so rather than this screen. What the huddle recorded '
+        + 'against a day is shown here because that meeting is where it is entered — this is where '
+        + 'you can read it back.',
   }));
   root.appendChild(el('p', {
     class: 'rc-hint',
@@ -497,6 +704,216 @@ export async function render(root) {
       + 'another project, training. Without somewhere for those to go the huddle has a blank '
       + 'against a name and no way to tell "nothing planned" from "nothing said".',
   }));
+}
+
+/**
+ * A roster name from an id, whoever they are.
+ *
+ * Looked up in *everybody* before the scheduled roster, because the person a
+ * task was reassigned away from may be a manager or somebody who has since been
+ * stood down — and "Reassigned from —" is worse than not saying it at all.
+ */
+function nameOf(everybody, people, id) {
+  if (!id) return 'somebody';
+  const found = (everybody || []).find((p) => p.id === id)
+    || (people || []).find((p) => p.id === id);
+  return found?.name || 'somebody';
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Changing a day that is already planned
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Revise a stored entry.
+ *
+ * Never an update. The outgoing row stays and the new one points at it, so "the
+ * plan changed the evening before the shift" is a thing the record can still say
+ * a year later — which is the whole reason the table is append-only.
+ * `rc_supersede_plan()` refuses to revise an entry that has already been
+ * revised, so two people editing the same day get a refusal rather than one of
+ * them silently winning.
+ *
+ * The history is shown because it is the point: a revision nobody can see is an
+ * edit with extra steps.
+ */
+async function revisePlan(entry, person, { locations, categories, locs, redraw }) {
+  const history = await rc.planHistory(person.id, entry.work_date).catch(() => []);
+
+  const task = textInput({ value: entry.task || '', placeholder: 'What they will do' });
+  const location = selectInput({
+    value: entry.location_id || '',
+    placeholder: '— location —',
+    options: locations.map((l) => ({ value: l.id, label: l.name })),
+  });
+  const category = selectInput({
+    value: entry.category_id || '',
+    placeholder: '— category —',
+    options: categories.map((c) => ({ value: c.id, label: c.name })),
+  });
+  const shift = selectInput({
+    value: entry.shift || 'day',
+    options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })),
+  });
+
+  formModal({
+    title: `${person.name} — ${dayLabel(entry.work_date, 'medium')}`,
+    body: el('div', { class: 'cx-form' }, [
+      field('Task', task),
+      field('Location', location),
+      field('Category', category),
+      field('Shift', shift),
+      history.length > 1
+        ? el('div', { class: 'cx-field' }, [
+          el('label', { class: 'cx-label', text: `Already revised ${history.length - 1} time(s)` }),
+          el('div', { class: 'rc-hint' }, history.map((h) => el('div', {
+            text: `${(h.created_at || '').slice(0, 16).replace('T', ' ')} — ${h.task || '—'}`
+              + `${locs.get(h.location_id)?.name ? ` · ${locs.get(h.location_id).name}` : ''}`,
+          }))),
+        ])
+        : null,
+      el('p', {
+        class: 'rc-hint',
+        text: 'The version you are replacing stays on the record. A plan that changed the '
+          + 'evening before a shift is itself delay evidence, so nothing here overwrites '
+          + 'anything — and an entry somebody else has already revised is refused rather than '
+          + 'quietly losing one of the two changes.',
+      }),
+    ].filter(Boolean)),
+    confirmLabel: 'Revise',
+    onConfirm: async () => {
+      if (!task.value.trim()) throw new Error('A task is needed.');
+      await rc.supersedePlan(entry.id, {
+        locationId: location.value || null,
+        task: task.value.trim(),
+        categoryId: category.value || null,
+        shift: shift.value,
+      });
+      notifyChanged('plan');
+      redraw();
+    },
+  });
+}
+
+/**
+ * Take a day off the schedule.
+ *
+ * "Delete my task", and it is a *write*: `rc_plan_entries` has no DELETE grant,
+ * because a plan that changed the evening before the shift is what a delay claim
+ * is built from and a row that can be removed is a record that can be edited. So
+ * `rc_withdraw_plan()` writes a tombstone superseding the original and
+ * `rc_plan_current` drops the pair — the day leaves the schedule and the table
+ * still says it was planned and then withdrawn, by whom and when.
+ *
+ * Asked first, because it is the one action here with no visible result other
+ * than something disappearing, and said plainly afterwards.
+ */
+async function withdraw(entry, person, redraw) {
+  const ok = await confirmDialog({
+    title: `Remove this from ${person.name}’s ${dayLabel(entry.work_date, 'medium')}?`,
+    message: 'It comes off the schedule. Nothing is deleted: the record keeps the day as planned '
+      + 'and then withdrawn, because a plan that changed the evening before a shift is itself '
+      + 'evidence. An outcome already recorded against it stays on the record too.',
+    confirmLabel: 'Remove it',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await rc.withdrawPlan(entry.id);
+    notifyChanged('plan');
+    toast({ tone: 'good', message: 'Off the schedule, and still on the record.' });
+    redraw();
+  } catch (err) {
+    toast({ tone: 'bad', message: err?.message || String(err) });
+  }
+}
+
+/**
+ * Write the first stored row for a day the 4WLA planned.
+ *
+ * A derived day has no row to revise, so revising it *is* writing the first one
+ * — and what that means is a decision taken against the workbook, which is why
+ * the button says "Override the sheet" rather than "Plan it". The sheet's own
+ * row is prefilled and the link is kept, which is what later lets a block be
+ * recorded against the row BART themselves scheduled.
+ */
+function overrideSheet({ person, iso, laRows, locations, categories, locs, redraw, row = null }) {
+  const wanted = laRows.filter((r) => !r.cells || !Object.keys(r.cells).length || r.cells[iso]);
+  const rows = wanted.length ? wanted : laRows;
+
+  const pick = selectInput({
+    value: row && rows.some((r) => r.id === row.id) ? row.id : '',
+    placeholder: '— nothing from the look-ahead —',
+    options: rows.map((r) => ({
+      value: r.id,
+      label: [locs.get(r.location_id)?.name || r.raw_location, r.raw_label]
+        .filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
+    })),
+  });
+  // Prefilled from the chosen row where there is one, because `change` only
+  // fires when a person picks — a row selected for them would otherwise sit
+  // above three empty fields it already knows the answers to.
+  const task = textInput({ placeholder: 'What they will do', value: row?.raw_label || '' });
+  const location = selectInput({
+    value: row?.location_id || '',
+    placeholder: '— location —',
+    options: locations.map((l) => ({ value: l.id, label: l.name })),
+  });
+  const category = selectInput({
+    value: '',
+    placeholder: '— category —',
+    options: categories.map((c) => ({ value: c.id, label: c.name })),
+  });
+  const shiftFrom = (meaning) => {
+    const said = String(meaning || '').toLowerCase();
+    if (/night/.test(said)) return 'night';
+    if (/possession|blanket/.test(said)) return 'possession';
+    return 'day';
+  };
+  const shift = selectInput({
+    value: shiftFrom(row?.cells?.[iso]),
+    options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })),
+  });
+
+  // Choosing a row fills the rest in. It is a starting point, not a lock —
+  // what the look-ahead calls an activity and what you would tell somebody to
+  // do are rarely the same sentence.
+  pick.addEventListener('change', () => {
+    const chosen = rows.find((r) => r.id === pick.value);
+    if (!chosen) return;
+    if (!task.value.trim()) task.value = chosen.raw_label || '';
+    if (chosen.location_id) location.value = chosen.location_id;
+    shift.value = shiftFrom(chosen.cells?.[iso]);
+  });
+
+  formModal({
+    title: `${person.name} — ${dayLabel(iso, 'medium')}`,
+    body: el('div', { class: 'cx-form' }, [
+      field('From the look-ahead', pick,
+        'What BART asked for on this day. Choosing one fills the rest in and keeps the link, '
+        + 'which is what later lets a block be recorded against the row BART themselves '
+        + 'scheduled.'),
+      field('Task', task),
+      field('Location', location),
+      field('Category', category),
+      field('Shift', shift),
+    ]),
+    confirmLabel: 'Override the sheet',
+    onConfirm: async () => {
+      if (!task.value.trim()) throw new Error('A task is needed.');
+      await rc.addPlanEntries([{
+        person_id: person.id,
+        work_date: iso,
+        shift: shift.value,
+        location_id: location.value || null,
+        task: task.value.trim(),
+        category_id: category.value || null,
+        lookahead_row_id: pick.value || null,
+      }]);
+      notifyChanged('plan');
+      redraw();
+    },
+  });
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

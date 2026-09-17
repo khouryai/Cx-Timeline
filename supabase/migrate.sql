@@ -74,6 +74,20 @@ alter table public.rc_legend
 alter table public.rc_plan_entries
   add column if not exists carry_chain_id uuid;
 
+-- ── Withdrawing a day, and moving one ─────────────────────────────────────
+-- There is no DELETE grant on this table and there is not going to be, so
+-- "delete my task" is a tombstone row superseding the original and carrying
+-- `withdrawn`; `rc_plan_current` drops the pair. And when a later read of the
+-- 4WLA puts a different name on a row somebody's entry is linked to, the task
+-- moves: `reassigned_from` is what the new row carries so the interface can say
+-- it moved rather than having to derive that from a sheet that has moved on.
+-- Without the columns both functions fail on a field Postgres has never heard
+-- of, and `rc_plan_current` cannot be redefined to exclude a tombstone.
+alter table public.rc_plan_entries
+  add column if not exists withdrawn boolean not null default false;
+alter table public.rc_plan_entries
+  add column if not exists reassigned_from uuid references public.rc_people(id);
+
 -- ── Who the look-ahead's Resource row names ───────────────────────────────
 -- The 4WLA carries a row under each activity whose description reads
 -- "Resource", with the names typed into the day cells. Without this column the
@@ -327,6 +341,22 @@ union all
 select 'rc_lookahead_snapshot_meta',
        case when to_regclass('public.rc_lookahead_snapshot_meta') is not null then 'ok'
             else 'RUN rc_schema.sql — the calendar will be slow to switch tabs' end
+union all
+select 'a member can ask for leave',
+       case when exists (
+         select 1 from pg_policy
+          where polrelid = 'public.rc_leave'::regclass
+            and polcmd = 'a' and pg_get_expr(polwithcheck, polrelid) like '%requested%'
+       ) then 'ok' else 'RUN rc_schema.sql — only administrators can book leave' end
+union all
+select 'a task can be withdrawn and moved',
+       case when to_regclass('public.rc_plan_entries') is not null
+             and exists (
+                   select 1 from information_schema.columns
+                    where table_schema = 'public' and table_name = 'rc_plan_entries'
+                      and column_name = 'withdrawn'
+                 )
+            then 'ok' else 'RUN this file — a member cannot delete their own task' end
 union all
 select 'managers stood down',
        coalesce((select count(*)::text || ' not scheduled' from public.rc_people where not scheduled), '0');

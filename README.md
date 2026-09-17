@@ -281,11 +281,12 @@ non-proprietary and lives in Postgres so the whole team can reach it from a
 browser. Nothing in the plan's code path can even see the calendar's backend,
 and a test asserts it.
 
-**The daily huddle** is the screen it is built around. One page, everyone side
-by side, all subsystems in one meeting: what each person was planned to do
-yesterday, what actually happened, and what they are doing tomorrow. Five
-outcomes, one keypress each — and they fall into two families that are never
-averaged together:
+**The daily huddle** is the screen it is built around, and it is an
+administrator's: it asks a whole team in turn how yesterday went and it is the
+one path an outcome is recorded through. One page, everyone side by side, all
+subsystems in one meeting: what each person was planned to do yesterday, what
+actually happened, and what they are doing tomorrow. Five outcomes, one keypress
+each — and they fall into two families that are never averaged together:
 
 | Performance — what somebody did | Project health — what was done to them |
 |---|---|
@@ -299,11 +300,27 @@ database rather than by a dialog somebody dismisses at 3:07pm.
 The meeting happens whether or not the wifi does: entries queue on the machine
 and go up on their own when the connection returns.
 
+**The week plan** is where everybody else lives. People down, days across: every
+task on each day, what the 4WLA asked for where a stored entry disagrees with
+it, and the status and note the huddle recorded against each one — read-only,
+because there is one recording path, but *visible*, which is how a member sees
+what was said about their own work. Today is a tinted column with the word in
+the heading. A member creates, changes and removes tasks on their own row and no
+other; the database says the same thing, rather than this screen deciding it.
+Removing one writes a withdrawal rather than deleting anything, because a plan
+that changed the evening before a shift is itself evidence.
+
 **Leave** is a third thing again. Somebody on annual leave did not carry
 anything over, and without somewhere for absence to go it gets quietly spread
-across the performance statuses. Leave sits behind the week grid, so a clash is
-visible rather than merely flagged, and the bottom row says how many people can
-actually be staffed each day.
+across the performance statuses. It sits in the week grid, so a clash is visible
+rather than merely flagged, and the bottom row says how many people can actually
+be staffed each day. **A member asks and an administrator answers**: a request
+is the same single row it will become, with its status saying nobody has decided
+yet, so approving one changes a word rather than copying anything. It is not
+leave until somebody answers — asking must not take you out of the schedule
+before the decision — and the count of unanswered requests sits on the
+calendar's header, because a request nobody is told about is one that sits
+there.
 
 **Reports** run over any date range — "back one year from today" is as easy as
 "this month" — grouped by person, category, location or subsystem. A carried
@@ -497,7 +514,12 @@ A few decisions worth knowing about:
 - **Permissions live in the database.** Roles are enforced by row-level
   security in Postgres, so bypassing the interface achieves nothing. The
   read-only UI explains the state; it does not create it. `npm run test:sql`
-  proves it against a real PostgreSQL.
+  proves it against a real PostgreSQL. A calendar member records their own days,
+  plans their own week and asks for their own leave; the plan itself opens
+  read-only for them, and the pen cannot be taken — being read-only in practice
+  because somebody else held it is not the same as being read-only. What they
+  filter, hide and compare against is theirs alone and stays with their account
+  rather than travelling in the plan.
 
 ### Working on it
 
@@ -509,14 +531,14 @@ npm run build:dist    # what Cloudflare runs
 npm run build:desktop # assemble the frontend the Windows installer contains
 
 npm test              # every suite below except the Rust one
-npm run test:smoke    # 254 checks — the application, local mode
-npm run test:lookahead #  45 checks — the look-ahead parser, no browser
-npm run test:calendar #  45 checks — the resource calendar, and its isolation
-npm run test:folder   #  43 checks — the shared folder, in a browser
-npm run test:desktop  #  48 checks — the desktop shell, and its updates
+npm run test:smoke    # 264 checks — the application, local mode
+npm run test:lookahead # 145 checks — the look-ahead parser, no browser
+npm run test:calendar # 307 checks — the resource calendar, and its isolation
+npm run test:folder   #  89 checks — the shared folder, in a browser
+npm run test:desktop  #  64 checks — the desktop shell, and its updates
 npm run test:hosted   #  49 checks — sign-in, sharing and read-only mode
-npm run test:sql      # 140 checks — both permission models, on real PostgreSQL
-npm run test:rust     #  32 checks — the plan, lock and intake rules; no webview needed
+npm run test:sql      # 304 checks — both permission models, on real PostgreSQL
+npm run test:rust     #  33 checks — the plan, lock and intake rules; no webview needed
 ```
 
 After editing anything under `src/`, run `npm run build` — `index.html` loads

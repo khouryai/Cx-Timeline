@@ -137,6 +137,72 @@ export function resourceNames(text) {
 }
 
 /**
+ * Stored days whose look-ahead row now names somebody else.
+ *
+ * The 4WLA's Resource row is the plan for the days it names, so a stored
+ * `rc_plan_entries` row carrying a `lookahead_row_id` is somebody having
+ * confirmed or overridden what that row said. When a later read of the sheet
+ * puts a different name on the same row for the same day, the work has moved —
+ * and until this existed the entry stayed against whoever it was first written
+ * for. The visible cost is somebody turning up for a shift that is not theirs
+ * any more while the person who now has it has a blank against their name.
+ *
+ * `resolve` is the name lookup, **injected** for the reason `rowsFrom()` takes
+ * `locate`: the register lives two layers up, this module is a leaf, and the
+ * whole pipeline has to be testable with no browser and no network. It answers
+ * a person id for a written name, or null.
+ *
+ * Returns `[{ entry, from, to }]`, and returns nothing at all unless it is
+ * certain:
+ *
+ * **The row has to say something about that day.** A day the sheet no longer
+ * names anybody on is not a reassignment — it is the sheet going quiet, which
+ * happens whenever an activity is rescheduled, and moving a task to nobody is
+ * not a thing that can be written.
+ *
+ * **It has to name exactly one person the roster knows.** Two names on a day is
+ * a crew, and a crew is not "this task moved to Victor" — it is several entries,
+ * which is a decision somebody takes rather than one this can derive. An
+ * unmatched spelling stops it too: those are reported and answered with an
+ * alias, and guessing here would be the near-miss matching the register refuses.
+ *
+ * **It has to be somebody else.** A re-read that changed nothing must produce
+ * nothing, or every ingest would supersede every linked entry with a revision
+ * saying the same thing. `rc_reassign_plan()` refuses that case as well, so it
+ * is checked on both sides on purpose.
+ */
+export function reassignments({ planRows, laRows, resolve }) {
+  const byRow = new Map();
+  for (const row of laRows || []) {
+    if (row?.id) byRow.set(row.id, row);
+  }
+
+  const out = [];
+  for (const entry of planRows || []) {
+    if (!entry?.id || !entry.lookahead_row_id) continue;
+    const row = byRow.get(entry.lookahead_row_id);
+    if (!row) continue;
+    const written = resourceNames(row.resources?.[entry.work_date] || '');
+    if (!written.length) continue;
+
+    const ids = new Set();
+    let unknown = false;
+    for (const name of written) {
+      const id = resolve ? resolve(name) : null;
+      if (id) ids.add(id);
+      else unknown = true;
+    }
+    // One person, and every name on the day accounted for. Anything else is a
+    // crew or a spelling nobody has mapped, and neither is a move.
+    if (unknown || ids.size !== 1) continue;
+    const [to] = [...ids];
+    if (to === entry.person_id) continue;
+    out.push({ entry, from: entry.person_id, to });
+  }
+  return out;
+}
+
+/**
  * Every mark on an activity, the ones on its Resource row included.
  *
  * Whether a row has work on it is a question about the pair, not about the

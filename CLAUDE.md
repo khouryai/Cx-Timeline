@@ -93,6 +93,11 @@ else with a clear error:
 
 ```
 core/util · core/events · core/dates      leaves — import nothing
+core/access                               a leaf: may this account edit the
+                                          plan, and the view that is theirs
+                                          alone. Written by main.js, read by
+                                          store and filestore — which must
+                                          never see core/rc
 core/cloud                                the only module that knows Supabase
 core/rc                                   the resource calendar's *separate*
                                           Supabase client — the plan's path
@@ -102,15 +107,19 @@ core/filestore → core/desktop             the only module that knows the File
                                           System Access API, and the only caller
                                           of the desktop bridge
 core/model → core/query · core/history · core/analysis
-core/store → core/storage · core/filestore   (only to ask whether a colleague
-                                              holds the pen — a read-only
-                                              session refuses edits at the
-                                              store, not only in the CSS)
+core/store → core/filestore · core/access    (only to ask whether a colleague
+                                              holds the pen, and whether this
+                                              account may write at all — a
+                                              read-only session refuses edits
+                                              at the store, not only in the
+                                              CSS. Never core/storage: that
+                                              imports the store, and the build
+                                              rejects the cycle)
 timeline/viewport → timeline/layout → timeline/connectors
                   → timeline/renderer → timeline/interactions
 ui/icons · ui/components → ui/lists · ui/auth → ui/theme → ui/commands
 ui/workspace → ui/rc → ui/rc_roster · ui/rc_huddle · ui/rc_lookahead
-             · ui/rc_resources · ui/rc_pto · ui/rc_reports
+             · ui/rc_week · ui/rc_pto · ui/rc_reports
                              → ui/rc_util   (the second interface)
                              → ui/dialogs → ui/panels → ui/shell
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
@@ -667,7 +676,8 @@ subscribes. That is what keeps the graph acyclic.
   leave, because those are days somebody worked. That is the one distinction
   this grid does spend a colour on, and both tokens are defined in every theme.
 - **Who takes shifts decides who is in a view about work.** The huddle and the
-  week plan already filtered on `rc_people.scheduled`; the Resources tab did
+  week plan already filtered on `rc_people.scheduled`; the Resources tab (now
+  folded into it) did
   not, and Reports counted every `rc_effort` row whoever it belonged to — so a
   manager who runs the calendar sat in the middle of a screen about who is
   where, and their handful of outcomes moved a completion rate that was never
@@ -691,8 +701,8 @@ subscribes. That is what keeps the graph acyclic.
   showed the names perfectly well the whole time. The snapshot is the authority
   for the same reason it is for the legend: it is re-read at paint time, so it is
   right the moment somebody edits the sheet rather than at the next *successful*
-  write. It is one function because the week plan, the Resources tab and the
-  huddle must not disagree about where somebody is. And the write no longer fails
+  write. It is one function because the week plan and the huddle must not
+  disagree about where somebody is. And the write no longer fails
   quietly: `ingest()` retries without the column, says so in the toast and in the
   `rc_ingest_runs` note, and names the two files to run — a `console.warn` is a
   message to nobody, and the feature it takes out simply reads as empty.
@@ -710,7 +720,7 @@ subscribes. That is what keeps the graph acyclic.
   problem it is, since "nobody is called that" and "two people are" have
   different fixes and a list that ran them together would send somebody looking
   for a person already on the roster twice. `resourceAssignments()` returns the
-  unmatched spellings alongside the matched ones and the Resources tab maps them
+  unmatched spellings alongside the matched ones and the week plan maps them
   in one click, the same answer `rc_location_alias` gives for a place.
   `foldName()` folds case and punctuation and nothing else.
   **A misspelling is the one near miss, and it is answered outside the
@@ -721,7 +731,7 @@ subscribes. That is what keeps the graph acyclic.
   match neither. It exists because a transposed pair of letters used to cost
   somebody a week of shifts, and because the answer is never silent:
   `resourceAssignments()` returns every name it placed that way in `near`, and
-  the Resources tab lists them with one click to record the spelling as an
+  the week plan lists them with one click to record the spelling as an
   alias, after which nothing is being inferred at all. Keep the two apart —
   the Map is exact, and the one function that corrects a spelling says so.
   `resourceNames()` is the other half: a cell is split on a comma, a slash, a
@@ -758,24 +768,37 @@ subscribes. That is what keeps the graph acyclic.
   checkbox away; what is not negotiable is that a narrowed list *says* it is
   narrowed, because one that does not reads as a list of everything and a
   fortnight out of view reads as a fortnight in which nothing happened.
-- **Resources is a third reading of the plan, not a second store of it.**
-  `ui/rc_resources.js` puts people down and days across and draws two things in
-  each cell — what the plan says and what the 4WLA asked for — because the
-  interesting case is the two disagreeing. Everything it writes is an
-  `rc_plan_entries` row, the same rows the week plan writes and the huddle
-  reads, so somebody assigned here is in tomorrow's meeting with their scope
-  against their name and no further wiring. That is the whole of "tied to the
-  huddle": one place a day is planned, three places it is read. Off-project
-  work belongs here too — a day in the office, a day on another project — and
-  `Office` and `Other project` are seeded categories for it: without somewhere
-  for those days to go the huddle shows a blank against a name with no way to
-  tell "nothing planned" from "nothing said". A span of days becomes one row per
-  day, and days already planned, on leave or not worked are skipped and counted
-  rather than doubled — nothing here supersedes anything, which is what the week
-  plan's cell is for.
+- **The week plan is one tab, and it used to be two.** "Week plan" drew the
+  team's week from the plan's side; "Resources" drew the same rows per person
+  with what the 4WLA asked for beside them. People down and days across in both
+  cases, over the same `rc_plan_entries`, through the same `assignmentIndex()` —
+  the same table with a different subtitle, and each one missing something the
+  other had, so whichever you opened the answer you wanted was on the other.
+  `ui/rc_week.js` is the merge and `ui/rc_resources.js` is gone. It carries every
+  load-bearing part of either: every task on a day rather than the first of them;
+  what the sheet asked for where a stored entry disagrees with it (the one case
+  worth drawing twice, since agreeing is now the normal case); the huddle's
+  recorded outcome against each task, read-only, because the meeting is an
+  administrator's screen and without this a member could not see what was said
+  about their own work; the can-be-staffed row that stops work being promised for
+  a day nobody can cover; and the names and places the registers cannot resolve.
+  Everything it writes is an `rc_plan_entries` row, the same rows the huddle
+  reads and the reports group by. Off-project work belongs here too — a day in
+  the office, a day on another project — and `Office` and `Other project` are
+  seeded categories for it: without somewhere for those days to go the huddle
+  shows a blank against a name with no way to tell "nothing planned" from
+  "nothing said". A span of days becomes one row per day, and days already
+  planned, on leave or not worked are skipped and counted rather than doubled.
+- **Today is a column, not a hairline.** A week grid is read by running a finger
+  down a day and the day anybody is nearly always looking for is this one. It was
+  a two-pixel rule on the left edge of the cells, which is invisible in a table
+  that has borders anyway — so the whole column is washed in `--info-light` with
+  the word in the heading. A wash rather than a colour: the cells carry status
+  badges and an outcome of their own, and anything stronger competes with the
+  content it is supposed to be pointing at.
 - **The workbook is the assumption, so only a hand-typed day is flagged.**
   `manualEntry()` badges a *stored* `rc_plan_entries` row "Manual" in the week
-  plan, the Resources tab and the huddle; a derived day carries nothing. It ran
+  plan and the huddle; a derived day carries nothing. It ran
   the other way round — `fromSheet()` badged every derived day "From 4WLA" —
   which put a badge on nearly every cell on the screen, and a badge on
   everything says nothing. What a reader should stop on is the exception: a day
@@ -786,7 +809,7 @@ subscribes. That is what keeps the graph acyclic.
   beside the plan, which stopped being useful the moment the ask became the plan:
   the only case left worth drawing twice is a stored entry that *disagrees* with
   what the sheet asks, which is a decision taken against the workbook and the
-  whole reason the Resources view exists.
+  whole reason the week plan draws both.
 - **The huddle reads the same index, so half the team stops reading as unplanned.**
   `planFor()` is `assignmentIndex().at`, so "Was planned" is populated from the
   4WLA wherever nobody stored a row — before that the meeting asked half the team
@@ -815,40 +838,98 @@ subscribes. That is what keeps the graph acyclic.
   — and the sections they cannot read are not offered, since a section that
   comes back empty is a door onto a wall. The PDF export *is* theirs: it is a
   drawing of what they can already see.
-- **A member plans their own days.** `rc_plan_entries` checks
-  `rc_can_act_for(person_id)`, the rule an outcome already followed, and
-  `rc_supersede_plan()` asks the same question of the row it is revising —
-  whoever may plan a day may correct it, or writing one somebody cannot fix is
-  the "no way back" trap this schema avoids everywhere else. In Resources the
-  person select holds the one name they could write and the per-day button
-  appears on their row only; the week plan's cell is clickable on their own row
-  for the same reason. A viewer plans nobody, including themselves, because
-  `rc_can_act_for()` is false for them.
-- **Reports and Organisation are an administrator's, and the tabs say so.** The
-  KPIs are a different audience and a different permission; the roster, the
-  locations and the accounts are the calendar's administration rather than its
-  use. Both are restricted in the policies — hiding the tab only stops offering
-  a door onto a wall, which is the same thing `rc_effort`'s `rc_is_admin()`
-  already did to anybody who reached the view directly.
+- **A member plans their own days, and takes them back.** `rc_plan_entries`
+  checks `rc_can_act_for(person_id)`, the rule an outcome already followed, and
+  `rc_supersede_plan()` and `rc_withdraw_plan()` ask the same question of the row
+  they are changing — whoever may plan a day may correct it and remove it, or
+  writing one somebody cannot fix is the "no way back" trap this schema avoids
+  everywhere else. In the week plan the person select holds the one name they
+  could write and the per-task Edit and Delete buttons appear on their own row
+  only. A viewer plans nobody, including themselves, because `rc_can_act_for()`
+  is false for them.
+  **"Delete" is a write.** There is no DELETE grant on `rc_plan_entries` and
+  there is not going to be: a plan that changed the evening before the shift is
+  what a claim is built from, and a row that can be removed is a record that can
+  be edited. So `rc_withdraw_plan()` writes a tombstone superseding the original
+  and carrying `withdrawn`, and `rc_plan_current` drops the pair — the day leaves
+  the schedule while the table still says it was planned and then withdrawn, by
+  whom and when.
+- **A member reads the plan and never writes it.** The timeline holds the P6
+  narrative and is maintained by whoever runs the project; the calendar's members
+  are the field team. They were read-only in practice, because the plan lives in
+  a folder and somebody else usually held the pen — which is not the same thing,
+  because the pen is a *turn*: "Take over editing" was on screen and a member who
+  pressed it got the plan. `core/access.js` is a leaf holding one boolean and a
+  reason, `main.js` states it from the calendar's role (the one module that may
+  see both, because the plan's storage path must never import `core/rc.js`), and
+  `core/store.js` refuses every edit while `core/filestore.js` refuses to hand
+  the pen over. The interface then stops offering it, in that order of
+  importance. Absent is editable: local mode, a build with no calendar and every
+  test suite never call `lockPlan()` at all.
+- **A reader's view is their own.** The filter, the filter mode and which
+  baseline is being compared against were `doc.settings`, which meant they
+  travelled in the plan — one person narrowing the view narrowed it for whoever
+  opened the file next — and on the read-only side they did not work at all: the
+  only way to record the choice was an edit to a plan they may not edit, so
+  selecting a baseline was refused with a notification about read-only mode. They
+  still live on `doc.settings`, because the renderer, the packer and every
+  exporter read them from there and a second answer would be a second place to
+  look; what changed is who owns the value. `VIEW_PREFERENCES` in `core/store.js`
+  routes them through `editQuiet` — ungated, out of history, never marking the
+  plan unsaved — and `persistView()` / `restoreAccountView()` remember them per
+  account and per plan in `core/access.js`. That is localStorage, so it is per
+  browser profile too: the honest limitation, given there is no server to keep it
+  on and the plan is the one place it must not go.
+- **Reports, Organisation and the Daily huddle are an administrator's, and the
+  tabs say so.** The KPIs are a different audience and a different permission;
+  the roster, the locations and the accounts are the calendar's administration
+  rather than its use. Reports and Organisation are restricted in the policies —
+  hiding the tab only stops offering a door onto a wall, which is the same thing
+  `rc_effort`'s `rc_is_admin()` already did to anybody who reached the view
+  directly. **The huddle is a different argument**: a member could use it, and
+  there is nothing there for them to use. It is the meeting — it asks a whole
+  team in turn how yesterday went, and it is the one path an outcome is recorded
+  through. What a member needs out of it is the status and the note recorded
+  against their own work, and that is drawn in the week plan beside the rest of
+  their week, read-only, because there must be one recording path and not two
+  that can disagree on screen.
 - **A day is a list of tasks, not a task.** A shift is routinely two jobs — a
   test to witness in the morning and a cable pull after it — and a day that
   could hold one is how somebody ends up with one of the three things they were
   asked for. `assignmentIndex()` answers `on(person, iso)` with every entry, and
   `at()` with the first for the one caller that needs a single row: an outcome
   points at one plan entry and a carry carries one chain. The week plan, the
-  Resources cell, the huddle's "Was planned" and the digest all draw the list;
+  week plan's cell, the huddle's "Was planned" and the digest all draw the list;
   `assign()` adds to a day rather than skipping it, and the derived side emits
   every look-ahead row naming somebody that day rather than the first with a
   count beside it.
-- **There is one place a day is planned.** The week plan's "+" opened a dialog
-  to pick a look-ahead row and write it down — a second place, and one that
-  outlived the change making the 4WLA *be* the plan: everything the sheet names
-  is already somebody's plan without anybody pressing anything, so the button
-  only ever wrote down what the sheet already said, or invented a day it said
-  nothing about. An empty day now says "—", planning a day the sheet has never
-  heard of is Resources' job, and clicking a planned day still changes it —
-  which for a derived day writes the first row, and is labelled "Override the
-  sheet" because that is what it does.
+- **There is one place a day is planned.** It was two: the old week plan's "+"
+  opened a dialog to pick a look-ahead row and write it down, which outlived the
+  change making the 4WLA *be* the plan — everything the sheet names is already
+  somebody's plan without anybody pressing anything, so the button only ever
+  wrote down what the sheet already said, or invented a day it said nothing
+  about. Now the merged week plan is that one place: "+ task" plans a day the
+  sheet has never heard of, and a drawn task carries "Edit" or, on a derived day,
+  "Override" — labelled that because writing the first stored row against a day
+  the sheet is asserting is a decision taken against the workbook. Per task
+  rather than per cell, since a cell routinely holds two.
+- **When the sheet moves a task, the task moves.** A stored entry carrying a
+  `lookahead_row_id` is somebody having confirmed or overridden what that row
+  said; when a later read puts a different name on the same row for the same
+  day, the work has moved, and leaving the entry where it was is how somebody
+  turns up for a shift that is not theirs while the person who now has it has a
+  blank against their name. `reassignments()` in `core/lookahead.js` derives it,
+  with the name lookup **injected** for the reason `rowsFrom()` takes `locate` —
+  so the whole thing is tested with no browser and no network. It refuses to
+  decide unless it is certain: the row has to name somebody on that day (the
+  sheet going quiet is not a reassignment, and a task cannot move to nobody),
+  exactly one person, every name on the day resolved, and somebody other than
+  whoever has it. `rc_reassign_plan()` does the write as a supersede carrying
+  `reassigned_from`, so the outgoing row stays and the week plan badges the new
+  one "Reassigned from Dana" — the thing worth knowing is that it *moved*, and
+  once the sheet has moved on there is nothing left to derive that from. Applied
+  at **ingest**, not at paint time: it is a write, and that is the one moment
+  somebody deliberately asked the sheet what it says now.
 - **Being scheduled is a different fact from what somebody may do.**
   `rc_people.scheduled` is what the huddle and the week plan filter on
   (`listPeople({ scheduledOnly: true })`), never the role. A manager
@@ -910,6 +991,26 @@ subscribes. That is what keeps the graph acyclic.
   scheduled roster: whoever chases a released possession is usually the manager,
   who is stood down from the meeting precisely because they take no work from
   it.
+- **Asking for leave is a member's; answering is an administrator's.** Booking
+  was administrators-only, which made the commonest thing anybody wants from
+  this module something they had to get somebody else to type — so it went into
+  the 4WLA instead, or nowhere, and "the sheet says they are off and nothing is
+  booked" became the normal case. A member now inserts their own `rc_leave` row
+  and it lands as `requested`; the *status is the permission*, and the policies
+  are written on exactly that — a member's insert is pinned to `requested` for
+  their own person id, and the only status their update can write is
+  `cancelled`, so a request cannot approve itself and asking is still something
+  you can take back. There is no second table: a separate list of requests would
+  be a second answer to "is Dana off on Tuesday", and approving one changes a
+  status rather than copying a row. **A request is not leave yet** —
+  `availability()` returns it as `asked` alongside an unchanged state, because a
+  member asking must not take themselves out of the schedule before anybody has
+  decided. The PTO tab stands the open ones up in a section of their own, over
+  the whole register rather than the four weeks on screen (a request for October
+  made today is a thing to answer today), and the count is on the calendar's
+  chrome — a request nobody is told about is a request that sits there. Nothing
+  is written into the 4WLA by approving one: the sheet is somebody's to edit when
+  the time comes, and the record is then what it agrees with.
 - **Two families of status, never averaged.** Completed / partial / carried are
   what somebody did; blocked / reassigned are what was done to them. A
   possession released late is not underperformance, and folding it in would
@@ -1020,7 +1121,7 @@ subscribes. That is what keeps the graph acyclic.
   registered — "W30", "T12" — recorded no place at all, and with nothing kept
   there was nothing on any screen for anybody to map. It is now kept, and an
   unresolved spelling is exactly like an unmapped colour or an unmatched name:
-  listed on the Resources tab and one click from "Add as a location" or "That is
+  listed on the week plan and one click from "Add as a location" or "That is
   a place we have", which writes `rc_location_alias`. `rc_resolve_location()`
   also matches `rc_locations.code`, because the code is what that column is
   actually filled in with, and `locationRegister()` in `ui/rc_util.js` folds
@@ -1033,7 +1134,7 @@ subscribes. That is what keeps the graph acyclic.
   that column carries no place, and the grid on screen says exactly where it is.
   It fills gaps and overrules nothing: a stored `location_id` is a spelling the
   register resolved when the row was written. Between the two grafts, a derived
-  day reaches the week plan, the Resources tab and the huddle with both a person
+  day reaches the week plan and the huddle with both a person
   and a place against it — which is what makes recording an outcome on one file
   it at that place in `rc_actuals` rather than nowhere.
 - **A read that started recording the location is not a read where everything
@@ -1215,7 +1316,7 @@ subscribes. That is what keeps the graph acyclic.
   palette, context menus, legend, filters and CSV export all pick it up. Add a
   `build<Shape>` branch in `timeline/renderer.js` only if it needs a new shape.
 - **A new calendar tab**: add it to `TABS` and `RENDERERS` in `ui/rc.js`, and
-  give it a module beside `ui/rc_resources.js` that imports `ui/rc_util.js` for
+  give it a module beside `ui/rc_week.js` that imports `ui/rc_util.js` for
   the shared reading — never a second copy of `assignmentIndex()` or a second
   register, which is the whole reason that module exists.
 - **A new dock pane**: add it to `PANES`, `TITLES` and `RENDERERS` in
@@ -1258,17 +1359,17 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         # 136 checks — the parser, the rows it derives, the
+node tools/test_lookahead.js         # 145 checks — the parser, the rows it derives, the
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
 node tools/smoke.js                  # 264 checks — the application, local mode
-node tools/smoke_calendar.js         # 285 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 307 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 285 checks — both permission models, and that
+node tools/test_sql.js               # 304 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result

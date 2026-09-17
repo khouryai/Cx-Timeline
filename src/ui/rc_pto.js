@@ -114,10 +114,17 @@ export async function render(root) {
       text: 'This week',
       onClick: () => { weekOf = null; redraw(); },
     }),
-    admin ? el('button', {
+    /* Asking is a member's; answering is an administrator's.
+       It was administrators-only, which made the commonest thing anybody wants
+       from this module a thing they had to get somebody else to type — so it
+       went into the 4WLA instead, or nowhere at all, and "the sheet says they
+       are off and nothing is booked" became the normal case. A member's press
+       writes the same single `rc_leave` row with `status: 'requested'`; a second
+       table for requests would be a second answer to "is Dana off on Tuesday". */
+    rc.canWrite() ? el('button', {
       class: 'cx-btn mini primary',
-      text: 'Book leave',
-      onClick: () => bookLeave({ people, kinds, redraw }),
+      text: admin ? 'Book leave' : 'Request leave',
+      onClick: () => bookLeave({ people, kinds, redraw, admin }),
     }) : null,
   ].filter(Boolean)));
 
@@ -212,6 +219,20 @@ export async function render(root) {
         });
       }
 
+      /* Asked for and not answered. Hatched rather than filled, because it is
+         not leave yet — the day is still staffable and the administrator still
+         has a decision to make. Drawn at all because a request nobody can see
+         on the calendar is a request that gets scheduled straight over. */
+      if (state.asked) {
+        classes.push('rc-pto-asked');
+        return el('td', {
+          class: classes.join(' '),
+          'data-label': dayLabel(iso),
+          title: `${person.name} has asked for this day off and nobody has answered yet. `
+            + 'It is not leave until somebody does, so the day can still be staffed.',
+        });
+      }
+
       if (state.state === 'non-working') classes.push('rc-pto-off');
       return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) });
     });
@@ -234,6 +255,7 @@ export async function render(root) {
      whether the day can be clicked to book it. */
   host.appendChild(el('div', { class: 'rc-pto-key' }, [
     key('rc-pto-booked', 'PTO — booked or on the 4WLA'),
+    key('rc-pto-asked', 'Asked for, not answered'),
     key('rc-pto-elsewhere', 'Off the project, not off work'),
   ]));
 
@@ -274,11 +296,58 @@ export async function render(root) {
     }));
   }
 
+  /* ── Waiting on an answer ─────────────────────────────────────────────── */
+
+  /* The point of a member being able to ask is that somebody answers.
+     So the requests are a section of their own, above the record and not
+     buried in it, and it is the *whole* register rather than the four weeks on
+     screen: a request for October made today is a thing to answer today, and a
+     window that only covered the weeks in view would hide it until it was too
+     late to matter. An administrator answers here; the person who asked can
+     withdraw while nobody has. */
+  const pending = await rc.pendingLeave().catch(() => []);
+  if (pending.length) {
+    const peopleById = byId(people);
+    host.appendChild(el('div', { style: 'height:20px' }));
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: `Waiting on an answer (${pending.length})` }),
+    ]));
+    host.appendChild(el('div', { class: 'rc-scroll rc-pto-asks' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [el('tr', {}, [
+          el('th', { text: 'Person' }), el('th', { text: 'From' }), el('th', { text: 'To' }),
+          el('th', { text: 'Kind' }), el('th', { text: 'Asked' }), el('th', { text: '' }),
+        ])]),
+        el('tbody', {}, pending.map((l) => el('tr', {}, [
+          el('td', {}, [
+            el('div', { text: peopleById.get(l.person_id)?.name || '—' }),
+            l.note ? el('div', { class: 'rc-hint', text: l.note }) : null,
+          ].filter(Boolean)),
+          el('td', { text: dayLabel(l.start_date, 'medium') }),
+          el('td', { text: dayLabel(l.end_date, 'medium') }),
+          el('td', { text: kindsById.get(l.kind_id)?.name || '—' }),
+          el('td', { class: 'rc-hint', text: (l.created_at || '').slice(0, 10) }),
+          el('td', {}, answerButtons(l, redraw, admin)),
+        ]))),
+      ]),
+    ]));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: admin
+        ? 'Approving one makes it leave everywhere at once — the calendar above, the week plan, '
+          + 'the huddle — because it is the same row the whole time and the status is the only '
+          + 'thing that changes. Nothing is copied into the 4WLA by this: put it on the sheet '
+          + 'when the time comes, and the PTO row will then agree with the record.'
+        : 'Yours are here until somebody answers them. Withdrawing one is the only change you '
+          + 'can make to it, which is what stops a request approving itself.',
+    }));
+  }
+
   /* ── What is booked ───────────────────────────────────────────────────── */
 
   const booked = leave
     .filter((l) => l.status !== 'cancelled' && l.status !== 'declined')
-    .sort((a, b) => a.start_date.localeCompare(b.start_date));
+    .sort((a_, b_) => a_.start_date.localeCompare(b_.start_date));
 
   host.appendChild(el('div', { style: 'height:20px' }));
   host.appendChild(el('div', { class: 'rc-section-head' }, [
@@ -304,8 +373,9 @@ export async function render(root) {
           el('td', { text: dayLabel(l.start_date, 'medium') }),
           el('td', { text: dayLabel(l.end_date, 'medium') }),
           el('td', { text: kindsById.get(l.kind_id)?.name || '—' }),
-          el('td', {}, [badge(l.status === 'approved' ? 'Approved' : l.status,
-            l.status === 'approved' ? 'good' : 'warn')]),
+          el('td', {}, [badge(l.status === 'approved' ? 'Approved'
+            : l.status === 'requested' ? 'Requested' : l.status,
+          l.status === 'approved' ? 'good' : 'warn')]),
           el('td', { class: 'rc-hint', text: l.note || '' }),
         ]))),
       ]),
@@ -319,6 +389,59 @@ export async function render(root) {
       + 'cancelled leave and every kind, is in Organisation → Leave; this is the four weeks '
       + 'anybody is actually staffing.',
   }));
+}
+
+/**
+ * What can be done about a request, by whoever is looking at it.
+ *
+ * An administrator answers it: approve or decline, one update either way. The
+ * person who asked can withdraw it while nobody has answered, and that is the
+ * only change they can make — the update policy pins a member to writing
+ * `cancelled`, which is what stops a request approving itself. Anybody else gets
+ * nothing, because there is nothing for them to do.
+ *
+ * Declining rather than deleting: "we said no on the 4th" is a thing the record
+ * should be able to say, and a row that disappears cannot say it.
+ */
+function answerButtons(row, redraw, admin) {
+  const answer = async (status, said) => {
+    try {
+      await rc.updateLeave(row.id, { status });
+      notifyChanged('leave');
+      toast({ tone: 'good', message: said });
+      redraw();
+    } catch (err) {
+      toast({ tone: 'bad', message: err?.message || String(err) });
+    }
+  };
+
+  if (admin) {
+    return [
+      el('button', {
+        class: 'cx-btn mini primary',
+        text: 'Approve',
+        title: 'It becomes leave everywhere at once — the same row, with the status changed.',
+        onClick: () => answer('approved', 'Approved.'),
+      }),
+      el('button', {
+        class: 'cx-btn mini ghost',
+        text: 'Decline',
+        title: 'Stays on the record as declined rather than disappearing.',
+        onClick: () => answer('declined', 'Declined, and on the record as declined.'),
+      }),
+    ];
+  }
+  if (row.person_id === rc.me()?.id) {
+    return [
+      el('button', {
+        class: 'cx-btn mini ghost',
+        text: 'Withdraw',
+        title: 'Takes the question back. Possible only while nobody has answered it.',
+        onClick: () => answer('cancelled', 'Withdrawn.'),
+      }),
+    ];
+  }
+  return [];
 }
 
 /** One swatch and its meaning. The key is four cells, so it is drawn as cells. */
@@ -337,10 +460,16 @@ function key(klass, label) {
  * when it is opened from a day on the calendar, so turning what the workbook
  * says into a record is a confirmation rather than a retype.
  */
-function bookLeave({ people, kinds, redraw, person = null, from = '', to = '' }) {
+function bookLeave({ people, kinds, redraw, admin = rc.isAdmin(), person = null, from = '', to = '' }) {
+  /* A member asks for their own days and nobody else's, which is what the
+     insert policy checks — so the select holds the one name they could write
+     rather than offering a list the database would refuse. */
+  const mine = rc.me()?.id || null;
+  const canAsk = admin ? people : people.filter((p) => p.id === mine);
   const who = selectInput({
-    value: person?.id || people[0]?.id,
-    options: people.map((p) => ({ value: p.id, label: p.name })),
+    value: person?.id || canAsk[0]?.id,
+    options: canAsk.map((p) => ({ value: p.id, label: p.name })),
+    disabled: canAsk.length <= 1,
   });
   const start = el('input', { type: 'date', class: 'cx-input', value: from });
   const end = el('input', { type: 'date', class: 'cx-input', value: to });
@@ -352,7 +481,9 @@ function bookLeave({ people, kinds, redraw, person = null, from = '', to = '' })
   const note = textInput({ placeholder: 'Optional', value: person && from ? 'From the 4WLA' : '' });
 
   formModal({
-    title: person ? `Book leave for ${person.name}` : 'Book leave',
+    title: admin
+      ? (person ? `Book leave for ${person.name}` : 'Book leave')
+      : 'Request leave',
     body: el('div', { class: 'cx-form' }, [
       field('Person', who),
       field('From', start),
@@ -361,23 +492,35 @@ function bookLeave({ people, kinds, redraw, person = null, from = '', to = '' })
       field('Note', note),
       el('p', {
         class: 'rc-hint',
-        text: 'Everything already reads the 4WLA’s PTO row as leave. Booking it makes a record '
-          + 'that survives somebody editing the sheet, and gives the day a kind and a status.',
+        text: admin
+          ? 'Everything already reads the 4WLA’s PTO row as leave. Booking it makes a record '
+            + 'that survives somebody editing the sheet, and gives the day a kind and a status.'
+          : 'This goes up as a request and shows as one until an administrator answers it. It is '
+            + 'the same row either way — there is no separate list of requests, because that '
+            + 'would be a second answer to whether you are off. You can withdraw it while it is '
+            + 'still unanswered.',
       }),
     ]),
-    confirmLabel: 'Book',
+    confirmLabel: admin ? 'Book' : 'Request it',
     onConfirm: async () => {
       if (!start.value || !end.value) throw new Error('Both dates are needed.');
       if (end.value < start.value) throw new Error('The end is before the start.');
-      await rc.addLeave({
+      const row = {
         person_id: who.value,
         start_date: start.value,
         end_date: end.value,
         kind_id: kind.value || null,
         note: note.value.trim() || null,
-      });
+      };
+      if (admin) await rc.addLeave(row);
+      else await rc.requestLeave(row);
       notifyChanged('leave');
-      toast({ tone: 'good', message: 'Leave booked.' });
+      toast({
+        tone: 'good',
+        message: admin
+          ? 'Leave booked.'
+          : 'Asked for. It shows as a request until an administrator answers it.',
+      });
       redraw();
     },
   });

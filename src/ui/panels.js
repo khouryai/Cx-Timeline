@@ -30,6 +30,7 @@ import * as store from '../core/store.js';
 import { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } from '../core/storage.js';
 import * as cloud from '../core/cloud.js';
 import * as filestore from '../core/filestore.js';
+import * as access from '../core/access.js';
 import { search, summarise, facet, filterPredicate } from '../core/query.js';
 import { criticalPath, compareBaseline, projectHealth, objectHealth, slipByLane, linkViolations, evaluateLink } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
@@ -1112,7 +1113,15 @@ function sharedFolderSection() {
         ]),
       ])
     );
-    if (!editing) rows.push(wideBtn('Take over editing', 'refresh', () => cmd.takeOverEditing()));
+    /* The pen is a turn among people who can write. An account the calendar
+       says may not edit the plan has no turn to take, so the button is not
+       offered and the reason is said instead — `filestore.takeOver()` would
+       refuse it anyway, and a button that always refuses is worse than none. */
+    if (!editing && access.planLocked()) {
+      rows.push(el('div', { class: 'cx-hint', text: access.lockReason() }));
+    } else if (!editing) {
+      rows.push(wideBtn('Take over editing', 'refresh', () => cmd.takeOverEditing()));
+    }
     rows.push(
       wideBtn('Reload from the folder', 'download', () => cmd.reloadFromFolder()),
       wideBtn('Disconnect', 'x', () => cmd.disconnectFolder())

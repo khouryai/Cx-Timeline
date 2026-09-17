@@ -17,6 +17,7 @@ import { el, clear } from '../core/util.js';
 import { on, emit, EV } from '../core/events.js';
 import * as cloud from '../core/cloud.js';
 import * as filestore from '../core/filestore.js';
+import * as access from '../core/access.js';
 import { icon } from './icons.js';
 import { fmtDate } from '../core/dates.js';
 import {
@@ -244,12 +245,18 @@ function gateLink(text, onClick) {
  */
 export function installAccessMode() {
   const apply = () => {
-    // Two things can make a session read-only, and they are never both live:
-    // a viewer role on a hosted project, or a colleague holding the pen on a
-    // plan in a shared folder. Either way the interface says the same thing —
-    // only the reason differs.
-    const viewingFolder = filestore.isViewer();
-    const readOnly = cloud.isReadOnly() || viewingFolder;
+    /* Three things can make a session read-only, and the interface says the
+       same thing for all of them — only the reason differs, and only the reason
+       decides whether there is anything the reader can do about it.
+
+       A viewer role on a hosted project: ask the owner. A colleague holding the
+       pen on a plan in a shared folder: wait, ask, or take it. And an account
+       the calendar says may not edit the plan at all, which outranks the other
+       two — there is no pen to ask for and nobody to ask, so the banner says
+       why and offers nothing. */
+    const locked = access.planLocked();
+    const viewingFolder = !locked && filestore.isViewer();
+    const readOnly = locked || cloud.isReadOnly() || viewingFolder;
     document.body.classList.toggle('read-only', readOnly);
     renderBanner(readOnly, viewingFolder ? filestore.state() : null);
   };
@@ -268,7 +275,9 @@ export function installAccessMode() {
     toast({
       tone: 'warn',
       title: 'Read-only',
-      message: 'You have view access to this project. Ask the owner for edit access to make changes.',
+      message: access.planLocked()
+        ? access.lockReason()
+        : 'You have view access to this project. Ask the owner for edit access to make changes.',
     });
   });
 
@@ -308,9 +317,11 @@ function renderBanner(readOnly, folder = null) {
   const idle = folder && Number.isFinite(folder.holderIdleMs)
     ? ` Last saved ${since(folder.holderIdleMs)}.`
     : '';
-  const message = holder
-    ? `Read-only — ${holder} has this plan open.${idle}`
-    : 'Read-only — you have view access to this project.';
+  const message = access.planLocked()
+    ? `Read-only — ${access.lockReason()}`
+    : holder
+      ? `Read-only — ${holder} has this plan open.${idle}`
+      : 'Read-only — you have view access to this project.';
 
   const kids = [
     el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),
