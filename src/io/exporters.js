@@ -11,7 +11,10 @@
 
 import { download, slug, stripHtml, bytes } from '../core/util.js';
 import { toISO, fmtDate } from '../core/dates.js';
-import { TYPES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES } from '../core/model.js';
+import {
+  TYPES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES,
+  comparedRange,
+} from '../core/model.js';
 import { getDoc, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
 import { filterPredicate } from '../core/query.js';
 import { compareBaseline, criticalPath } from '../core/analysis.js';
@@ -160,8 +163,18 @@ export function exportBaselineCsv() {
   }
   const { rows: variance } = compareBaseline(doc, baseline);
   const laneNames = new Map(doc.lanes.map((l) => [l.id, l.name]));
-  const rows = [['title', 'lane', 'change', 'baseline_start', 'baseline_finish', 'current_start', 'current_finish', 'start_shift_days', 'finish_shift_days', 'duration_change_days', 'reason']];
+  /* `compared_*` is what the shift columns were measured against, and
+     `measured_against` says which it is. The two used to be one pair of columns
+     headed "current", which was true while the comparison only ever read the
+     schedule and became a quiet lie the moment it started preferring recorded
+     dates: a reader could not tell a slip that had happened from one that is
+     still only forecast, and those are different conversations. The scheduled
+     dates stay, because a variance report that dropped the plan could not be
+     reconciled against the plan. */
+  const rows = [['title', 'lane', 'change', 'baseline_start', 'baseline_finish', 'scheduled_start', 'scheduled_finish', 'actual_start', 'actual_finish', 'compared_start', 'compared_finish', 'measured_against', 'start_shift_days', 'finish_shift_days', 'duration_change_days', 'reason']];
   for (const row of variance) {
+    const hasDuration = row.current ? !!TYPES[row.current.type]?.duration : false;
+    const compared = row.current ? comparedRange(row.current) : null;
     rows.push([
       row.title,
       laneNames.get(row.current?.lane) || '',
@@ -169,7 +182,12 @@ export function exportBaselineCsv() {
       row.baseline ? toISO(row.baseline.start) : '',
       row.baseline?.end ? toISO(row.baseline.end) : '',
       row.current ? toISO(row.current.start) : '',
-      row.current && TYPES[row.current.type]?.duration ? toISO(row.current.end) : '',
+      row.current && hasDuration ? toISO(row.current.end) : '',
+      row.current?.data?.actualStart || '',
+      row.current && hasDuration ? (row.current.data?.actualEnd || '') : '',
+      compared ? toISO(compared.start) : '',
+      compared && hasDuration ? toISO(compared.end) : '',
+      row.actual ? 'actual' : 'scheduled',
       row.startShift,
       row.endShift,
       row.durationChange,

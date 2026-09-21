@@ -16,7 +16,10 @@
 
 import { clamp, withAlpha, readableInk } from '../core/util.js';
 import { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } from '../core/dates.js';
-import { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot, delayReason, visibleNote } from '../core/model.js';
+import {
+  TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays,
+  baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange,
+} from '../core/model.js';
 import { criticalPath, linkViolations } from '../core/analysis.js';
 import { fontString, textWidth, wrapText, fitWidth } from '../timeline/text.js';
 
@@ -36,6 +39,8 @@ const M = {
   outsideGap: 5,
   outsideMaxW: 210,
   minInsideW: 44,
+  actualH: 4,
+  actualGap: 2,
   ghostH: 7,
   ghostGap: 2,
   goneH: 12,
@@ -280,6 +285,10 @@ export function buildScene(doc, opts = {}) {
         ? exportGhost(obj, comparison.byId.get(obj.id), barWidth, msToX, pxPerDay, comparison.baseline.id)
         : null;
       const note = opts.showNotes === false ? null : exportNote(obj, barWidth, hasDuration);
+      /* What actually happened, where it differs from the plan. Measured with
+         everything else and drawn whether or not the export is comparing: it is
+         the object's own dates, not another snapshot's claim about them. */
+      const actual = exportActual(obj, barWidth, msToX, pxPerDay);
       const height = hasDuration
         ? Math.max(M.rowH, label.height + 5)
         : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
@@ -289,7 +298,11 @@ export function buildScene(doc, opts = {}) {
         barWidth,
         ghost,
         note,
-        height: height + (note ? note.height + M.noteGap : 0) + exportGhostTier(ghost),
+        actual,
+        height: height
+          + (actual ? M.actualH + M.actualGap : 0)
+          + (note ? note.height + M.noteGap : 0)
+          + exportGhostTier(ghost),
       };
     });
 
@@ -461,8 +474,14 @@ export function buildScene(doc, opts = {}) {
         settings: { ...doc.settings, showProgress: opts.showProgress !== false && doc.settings.showProgress },
       });
       if (rect) {
-        // The note goes in the band reserved under the object, and the ghost —
-        // which stacks under that — is told where the floor now is.
+        /* The band under the object, in the order the canvas uses: what
+           actually happened, then the note, then a ghost that had to stack.
+           Each floor advances `rect.bottom`, so the next one down is told where
+           the floor now is — the same arithmetic the screen does with tiers. */
+        if (item.actual) {
+          drawActual(items, item.actual, rect, palette);
+          rect.bottom += M.actualH + M.actualGap;
+        }
         if (item.note) {
           const noteTop = rect.bottom + M.noteGap;
           items.push({ type: 'rect', x: rect.x, y: noteTop, w: 1.2, h: item.note.height, fill: palette.textSubtle });
@@ -734,6 +753,12 @@ function packRowsForExport(measured, msToX) {
       from = Math.min(from, item.ghost.from);
       to = Math.max(to, item.ghost.to);
     }
+    // A recorded actual span reaches wherever the work actually ran, and
+    // carries a day badge over the edge that moved.
+    if (item.actual) {
+      from = Math.min(from, item.actual.from);
+      to = Math.max(to, item.actual.to);
+    }
     if (item.note) {
       to = Math.max(to, (hasDuration ? startX : startX - M.pointR) + item.note.width + M.notePadX * 2);
     }
@@ -778,6 +803,103 @@ function comparisonRows(doc, opts) {
 }
 
 /**
+ * An object's recorded actual span in an exported drawing, measured the way the
+ * canvas measures it — a slim solid bar on its own floor directly under the
+ * scheduled one, wherever a recorded date differs from the plan.
+ *
+ * Null when nothing was recorded, when it matched the plan exactly, or for a
+ * band or container: those are lane-tall backdrops with no "under the bar" to
+ * hang anything in.
+ */
+function exportActual(obj, barWidth, msToX, pxPerDay) {
+  const def = TYPES[obj.type] || TYPES.activity;
+  const hasDuration = !!def.duration;
+  if (def.shape === 'band' || def.shape === 'container') return null;
+
+  const range = actualRange(obj);
+  if (!range) return null;
+
+  const startShift = Math.round((range.start - obj.start) / MS_DAY);
+  const endShift = hasDuration ? Math.round((range.end - obj.end) / MS_DAY) : startShift;
+  if (!startShift && !endShift) return null;
+
+  const x = hasDuration ? msToX(range.start) : msToX(range.start) - M.pointR;
+  const w = hasDuration
+    ? Math.max(3, ((range.end - range.start) / MS_DAY) * pxPerDay)
+    : M.pointR * 2;
+  const barLeft = hasDuration ? msToX(obj.start) : msToX(obj.start) - M.pointR;
+  const barRight = barLeft + (hasDuration ? barWidth : M.pointR * 2);
+
+  const atFinish = hasDuration && endShift !== 0;
+  const fromX = atFinish ? barRight : barLeft;
+  const toX = atFinish ? x + w : x;
+  const mid = (fromX + toX) / 2;
+
+  return {
+    startShift,
+    endShift,
+    atFinish,
+    hasEnd: range.hasEnd,
+    x,
+    w,
+    from: Math.min(x, mid - M.shiftBadgeW / 2),
+    to: Math.max(x + w, mid + M.shiftBadgeW / 2),
+  };
+}
+
+/**
+ * Draw one, with the arrow between the scheduled edge and the one actually hit.
+ *
+ * Solid rather than striped, for the reason the canvas draws it solid: a ghost
+ * is a claim another snapshot makes about this bar, and this is the bar.
+ */
+function drawActual(items, actual, rect, palette) {
+  const shift = actual.atFinish ? actual.endShift : actual.startShift;
+  const ink = shift > 0 ? palette.bad : shift < 0 ? palette.good : palette.warn;
+  const y = rect.bottom + M.actualGap;
+
+  items.push({
+    type: 'rect',
+    x: actual.x,
+    y,
+    w: Math.max(actual.w, 1.5),
+    h: M.actualH,
+    radius: 1.5,
+    // A finish nobody has recorded yet is drawn hollow: "started, not
+    // finished" is a different state from "finished on the day it was planned
+    // to", and a solid bar would read as the second.
+    fill: actual.hasEnd ? ink : withAlpha(ink, 0.25),
+    stroke: ink,
+    strokeWidth: 0.6,
+  });
+
+  if (!shift) return;
+  const fromX = actual.atFinish ? rect.right : rect.x;
+  const toX = actual.atFinish ? actual.x + actual.w : actual.x;
+  const midY = y + M.actualH / 2;
+  if (Math.abs(toX - fromX) > 1) {
+    const dir = toX >= fromX ? 1 : -1;
+    items.push({ type: 'line', x1: fromX, y1: midY, x2: toX, y2: midY, stroke: ink, strokeWidth: 1.1 });
+    items.push({
+      type: 'polygon',
+      points: [[toX, midY], [toX - 4 * dir, midY - 2.6], [toX - 4 * dir, midY + 2.6]],
+      fill: ink,
+    });
+  }
+  items.push({
+    type: 'text',
+    x: (fromX + toX) / 2,
+    y: midY - 3,
+    text: `${shift > 0 ? '+' : '\u2212'}${Math.abs(shift)}d`,
+    size: 6,
+    weight: 700,
+    fill: ink,
+    anchor: 'middle',
+    family: 'mono',
+  });
+}
+
+/**
  * An object's ghost in an exported drawing, measured the way the canvas
  * measures it: behind the bar while the two cover different dates, in a tier of
  * its own below the bar the moment they do not. Printed at whatever density the
@@ -789,18 +911,25 @@ function exportGhost(obj, snap, barWidth, msToX, pxPerDay, baselineId) {
   const hasDuration = !!def.duration;
 
   const snapEnd = hasDuration ? (snap.end ?? snap.start) : snap.start;
-  const startShift = Math.round((obj.start - snap.start) / MS_DAY);
-  const endShift = hasDuration ? Math.round((obj.end - snapEnd) / MS_DAY) : startShift;
+  // Against what actually happened where anybody recorded it, and against the
+  // schedule where nobody did — the same reading the canvas and the variance
+  // pane make, from the same function.
+  const now = comparedRange(obj);
+  const startShift = Math.round((now.start - snap.start) / MS_DAY);
+  const endShift = hasDuration ? Math.round((now.end - snapEnd) / MS_DAY) : startShift;
   if (!startShift && !endShift) return null;
 
   const x = hasDuration ? msToX(snap.start) : msToX(snap.start) - M.pointR;
   const w = hasDuration ? Math.max(3, ((snapEnd - snap.start) / MS_DAY) * pxPerDay) : M.pointR * 2;
   const barLeft = hasDuration ? msToX(obj.start) : msToX(obj.start) - M.pointR;
   const barRight = barLeft + (hasDuration ? barWidth : M.pointR * 2);
+  // Where the arrow lands: the actual edges once something has been recorded.
+  const toStart = hasDuration ? msToX(now.start) : msToX(now.start) - M.pointR;
+  const toEnd = hasDuration ? msToX(now.end) : toStart + M.pointR * 2;
 
   const reshaped = endShift === 0;
   const fromX = reshaped ? x : x + w;
-  const toX = reshaped ? barLeft : barRight;
+  const toX = reshaped ? toStart : toEnd;
   const mid = (fromX + toX) / 2;
   const canStack = hasDuration && def.shape !== 'band' && def.shape !== 'container';
   const stacked = canStack && x < barRight + M.ghostGap && x + w > barLeft - M.ghostGap;
@@ -812,6 +941,8 @@ function exportGhost(obj, snap, barWidth, msToX, pxPerDay, baselineId) {
     snap,
     startShift,
     endShift,
+    toStart,
+    toEnd,
     x,
     w,
     stacked,
@@ -949,7 +1080,7 @@ function drawBaseline(items, { rectsById, goneRects, palette }) {
     // ghost's own centre line, so a stacked ghost still points at its bar.
     const reshaped = endShift === 0;
     const fromX = reshaped ? gx : gx + gw;
-    const toX = reshaped ? rect.x : rect.right;
+    const toX = reshaped ? ghost.toStart : ghost.toEnd;
     const shift = reshaped ? startShift : endShift;
     const y = gy + gh / 2;
     if (Math.abs(toX - fromX) > 1) {

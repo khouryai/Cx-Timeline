@@ -10,7 +10,9 @@
  */
 
 import { MS_DAY, daysBetween, workingDaysBetween } from './dates.js';
-import { TYPES, LINK_TYPES, effectiveToday, baselineSnapshot, delayReason } from './model.js';
+import {
+  TYPES, LINK_TYPES, effectiveToday, baselineSnapshot, delayReason, comparedRange,
+} from './model.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
    Memoisation
@@ -354,10 +356,19 @@ export function compareBaseline(doc, baseline) {
       continue;
     }
     const hasDuration = !!TYPES[obj.type]?.duration;
-    const startShift = daysBetween(snap.start, obj.start);
-    const endShift = hasDuration ? daysBetween(snap.end ?? snap.start, obj.end) : startShift;
+    /* Measured against what actually happened where anybody has recorded it,
+       and against the schedule where nobody has. A baseline is a question about
+       delivery, and "we planned to finish on the 4th and we did finish on the
+       11th" is the answer — comparing against a scheduled finish that has
+       already been overtaken reports the plan's own optimism as though it were
+       a fact. `comparedRange()` is the single place that decides, so the pane,
+       the CSV, the canvas and the exported drawing cannot disagree by days
+       about the one number a review is about. */
+    const now = comparedRange(obj);
+    const startShift = daysBetween(snap.start, now.start);
+    const endShift = hasDuration ? daysBetween(snap.end ?? snap.start, now.end) : startShift;
     const baseDuration = hasDuration ? daysBetween(snap.start, snap.end ?? snap.start) : 0;
-    const nowDuration = hasDuration ? daysBetween(obj.start, obj.end) : 0;
+    const nowDuration = hasDuration ? daysBetween(now.start, now.end) : 0;
 
     if (startShift === 0 && endShift === 0 && baseDuration === nowDuration) continue;
 
@@ -369,6 +380,11 @@ export function compareBaseline(doc, baseline) {
       change: endShift > 0 ? 'slip' : endShift < 0 ? 'ahead' : 'reshaped',
       startShift,
       endShift,
+      /* Whether the row is reporting what happened or what is still planned.
+         The same number means different things — one is a fact and the other is
+         a forecast — and a variance report that ran the two together is one
+         nobody can act on. */
+      actual: now.actual,
       durationChange: nowDuration - baseDuration,
       // What the planner wrote into the striped area on the canvas. The only
       // part of a variance row that is not derived, and the part a review asks
@@ -389,6 +405,7 @@ export function compareBaseline(doc, baseline) {
       change: 'added',
       startShift: 0,
       endShift: 0,
+      actual: comparedRange(obj).actual,
       durationChange: TYPES[obj.type]?.duration ? daysBetween(obj.start, obj.end) : 0,
       baseline: null,
       current: obj,

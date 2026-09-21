@@ -39,7 +39,7 @@ export const TYPES = {
     accent: 'var(--type-activity)',
     defaultDays: 14,
     progress: true,
-    fields: ['owner', 'subsystem', 'area', 'status', 'progress'],
+    fields: ['owner', 'subsystem', 'area', 'actualStart', 'actualEnd', 'status', 'progress'],
   },
   milestone: {
     label: 'Milestone',
@@ -50,7 +50,7 @@ export const TYPES = {
     accent: 'var(--type-milestone)',
     defaultDays: 0,
     progress: false,
-    fields: ['owner', 'subsystem', 'status'],
+    fields: ['owner', 'subsystem', 'actualStart', 'status'],
   },
   release: {
     label: 'Software Release',
@@ -61,7 +61,7 @@ export const TYPES = {
     accent: 'var(--type-release)',
     defaultDays: 0,
     progress: false,
-    fields: ['version', 'releaseNumber', 'buildNumber', 'owner', 'subsystem', 'status', 'approval'],
+    fields: ['version', 'releaseNumber', 'buildNumber', 'owner', 'subsystem', 'actualStart', 'status', 'approval'],
   },
   campaign: {
     label: 'Commissioning Campaign',
@@ -83,7 +83,7 @@ export const TYPES = {
     accent: 'var(--type-activity)',
     defaultDays: 10,
     progress: true,
-    fields: ['testKind', 'subsystem', 'area', 'owner', 'progress', 'status'],
+    fields: ['testKind', 'subsystem', 'area', 'owner', 'actualStart', 'actualEnd', 'progress', 'status'],
   },
   freeze: {
     label: 'Freeze Period',
@@ -94,7 +94,7 @@ export const TYPES = {
     accent: 'var(--type-freeze)',
     defaultDays: 7,
     progress: false,
-    fields: ['owner', 'status'],
+    fields: ['owner', 'actualStart', 'actualEnd', 'status'],
   },
   outage: {
     label: 'Outage',
@@ -105,7 +105,7 @@ export const TYPES = {
     accent: 'var(--type-outage)',
     defaultDays: 2,
     progress: false,
-    fields: ['area', 'owner', 'status'],
+    fields: ['area', 'owner', 'actualStart', 'actualEnd', 'status'],
   },
   maintenance: {
     label: 'Maintenance Window',
@@ -116,7 +116,7 @@ export const TYPES = {
     accent: 'var(--type-outage)',
     defaultDays: 1,
     progress: false,
-    fields: ['area', 'owner', 'status'],
+    fields: ['area', 'owner', 'actualStart', 'actualEnd', 'status'],
   },
   customer: {
     label: 'Customer Activity',
@@ -127,7 +127,7 @@ export const TYPES = {
     accent: 'var(--type-campaign)',
     defaultDays: 5,
     progress: true,
-    fields: ['owner', 'area', 'status', 'progress'],
+    fields: ['owner', 'area', 'actualStart', 'actualEnd', 'status', 'progress'],
   },
   risk: {
     label: 'Risk',
@@ -1028,8 +1028,14 @@ export function makeStarterProject() {
     makeObject({ type: 'activity', lane: lane(2), start: D(6), end: D(46), title: 'ATS Integration Testing', subsystem: 'ats', status: 'inprogress', progress: 68, owner: 'L. Fontaine' }),
     makeObject({ type: 'activity', lane: lane(3), start: D(20), end: D(70), title: 'IXL Static Testing', subsystem: 'ixl', status: 'inprogress', progress: 35, owner: 'D. Vasquez' }),
     makeObject({ type: 'activity', lane: lane(4), start: D(30), end: D(64), title: 'SCADA Interface Verification', subsystem: 'scada', status: 'planned', progress: 0, owner: 'R. Bianchi' }),
-    makeObject({ type: 'activity', lane: lane(5), start: D(0), end: D(40), title: 'Radio Coverage Survey', subsystem: 'comms', status: 'inprogress', progress: 80, owner: 'S. Njoroge' }),
-    makeObject({ type: 'activity', lane: lane(6), start: D(24), end: D(88), title: 'Wayside Equipment Installation', subsystem: 'wayside', status: 'inprogress', progress: 45, owner: 'P. Lindqvist' }),
+    /* Started four days late and still running: the actual bar under this one
+       shows the slipped start, fades where no finish has been reported, and is
+       what a baseline is compared against. A sample plan where nothing had ever
+       been reported on would never show the feature at all. */
+    makeObject({ type: 'activity', lane: lane(5), start: D(0), end: D(40), title: 'Radio Coverage Survey', subsystem: 'comms', status: 'inprogress', progress: 80, owner: 'S. Njoroge', data: { actualStart: toISO(D(4)) } }),
+    // Started on time and overran by a week — the other half of the same story,
+    // and the case a review actually opens on.
+    makeObject({ type: 'activity', lane: lane(6), start: D(24), end: D(88), title: 'Wayside Equipment Installation', subsystem: 'wayside', status: 'inprogress', progress: 45, owner: 'P. Lindqvist', data: { actualStart: toISO(D(24)), actualEnd: toISO(D(95)) } }),
     makeObject({ type: 'activity', lane: lane(7), start: D(44), end: D(92), title: 'Onboard Retrofit — Fleet A', subsystem: 'vehicle', status: 'planned', progress: 0, owner: 'K. Ibrahim' }),
     // Dates satisfy every dependency below: the campaign starts after its
     // latest predecessor (Wayside installation, D88) finishes. A shipped
@@ -1407,6 +1413,73 @@ export function objectColor(obj, lane) {
 export function objectRange(obj) {
   const hasDuration = TYPES[obj.type]?.duration;
   return { start: obj.start, end: hasDuration ? Math.max(obj.end, obj.start + MS_DAY) : obj.start };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   What actually happened
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The dates somebody recorded against an object, or null.
+ *
+ * `data.actualStart` and `data.actualEnd` have been on the model and in the
+ * CSV for as long as the inspector has had fields for them, and nothing ever
+ * drew them or compared against them — so a campaign that started a fortnight
+ * late looked exactly like one that started on time, and the two dates a
+ * commissioning manager cares about most were the two nothing on the canvas
+ * knew.
+ *
+ * Either may be missing and that is the normal case: work starts before it
+ * finishes, so a bar in progress has a start and no finish. The missing end
+ * falls back to the scheduled one, which is the honest reading — "it started on
+ * the 4th and is still planned to finish on the 20th". A point object has no
+ * finish at all, so its actual date is both edges.
+ *
+ * Null when neither is set, because "no actual dates" and "actual dates that
+ * happen to match the plan" are different facts and only the second is worth
+ * drawing.
+ */
+export function actualRange(obj) {
+  const hasDuration = !!TYPES[obj.type]?.duration;
+  const start = toMs(obj?.data?.actualStart);
+  const end = hasDuration ? toMs(obj?.data?.actualEnd) : NaN;
+  const hasStart = Number.isFinite(start);
+  const hasEnd = Number.isFinite(end);
+  if (!hasStart && !hasEnd) return null;
+
+  const from = hasStart ? start : obj.start;
+  const to = hasDuration ? (hasEnd ? end : obj.end) : from;
+  return {
+    start: from,
+    // A finish before its start is somebody mid-typing into a date field, not
+    // a fact about the work. Clamped rather than refused: refusing would empty
+    // the bar while they are still keying the year.
+    end: Math.max(to, from),
+    hasStart,
+    hasEnd,
+  };
+}
+
+/**
+ * Where the object *is*, for anything comparing it against a baseline.
+ *
+ * The actual dates where they have been recorded, the scheduled ones where
+ * they have not. That is the whole of "compare against the actual dates, not
+ * the scheduled ones, where they are available" — and it is one function
+ * because the variance pane, the CSV, the packer, the renderer and the exported
+ * drawing all have to measure the same movement or they will disagree by days
+ * on the one number a review is about.
+ *
+ * `actual` says which answer came back, so a caller can label a variance as
+ * what happened rather than what is still planned.
+ */
+export function comparedRange(obj) {
+  const hasDuration = !!TYPES[obj.type]?.duration;
+  const actual = actualRange(obj);
+  if (!actual) {
+    return { start: obj.start, end: hasDuration ? obj.end : obj.start, actual: false };
+  }
+  return { start: actual.start, end: actual.end, actual: true };
 }
 
 /** Extent of the whole project, padded, for fit-to-window and the minimap. */

@@ -531,7 +531,7 @@ npm run build:dist    # what Cloudflare runs
 npm run build:desktop # assemble the frontend the Windows installer contains
 
 npm test              # every suite below except the Rust one
-npm run test:smoke    # 264 checks — the application, local mode
+npm run test:smoke    # 273 checks — the application, local mode
 npm run test:lookahead # 145 checks — the look-ahead parser, no browser
 npm run test:calendar # 307 checks — the resource calendar, and its isolation
 npm run test:folder   #  89 checks — the shared folder, in a browser

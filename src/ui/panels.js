@@ -735,9 +735,22 @@ function paneBaselines(root) {
     );
   }
   root.appendChild(section(`Variance (${rows.length})`, [varianceList]));
-  root.appendChild(el('div', { class: 'cx-hint', text: 'Click the striped baseline area on the timeline to write why something moved.' }));
+  root.appendChild(el('div', {
+    class: 'cx-hint',
+    text: 'Click the striped baseline area on the timeline to write why something moved. A row '
+      + 'marked "actual" was measured against the dates somebody recorded rather than against the '
+      + 'schedule — it has happened, rather than being forecast to.',
+  }));
 }
 
+/**
+ * One variance row, in words.
+ *
+ * It says whether the numbers were measured against recorded dates or against
+ * the schedule, because the same "+7d" means two different things: one has
+ * happened and one is a forecast, and a review that reads them alike acts on
+ * the wrong half of the list.
+ */
 function varianceText(row) {
   if (row.change === 'added') return 'Added since baseline';
   if (row.change === 'removed') return 'Removed since baseline';
@@ -745,7 +758,8 @@ function varianceText(row) {
   if (row.startShift) parts.push(`start ${row.startShift > 0 ? '+' : ''}${row.startShift}d`);
   if (row.endShift) parts.push(`finish ${row.endShift > 0 ? '+' : ''}${row.endShift}d`);
   if (row.durationChange) parts.push(`duration ${row.durationChange > 0 ? '+' : ''}${row.durationChange}d`);
-  return parts.join(' · ') || 'Reshaped';
+  const said = parts.join(' · ') || 'Reshaped';
+  return row.actual ? `${said} · actual` : said;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

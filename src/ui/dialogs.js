@@ -241,13 +241,21 @@ function buildDetails(pane, obj, def) {
     );
   }
 
-  if (has('actualStart')) {
+  // A point object has no finish to record, so it gets one field and the word
+  // for it — "Actual finish" against a milestone is a question with no answer.
+  if (has('actualStart') && has('actualEnd')) {
     extra.push(
       el('div', { class: 'cx-row' }, [
         field('Actual start', textInput({ type: 'date', value: data.actualStart || '', onChange: (v) => setData('actualStart', v, 'Set actual start') })),
         field('Actual finish', textInput({ type: 'date', value: data.actualEnd || '', onChange: (v) => setData('actualEnd', v, 'Set actual finish') })),
       ])
     );
+  } else if (has('actualStart')) {
+    extra.push(field('Actual date', textInput({
+      type: 'date',
+      value: data.actualStart || '',
+      onChange: (v) => setData('actualStart', v, 'Set actual date'),
+    })));
   }
 
   if (has('severity')) {

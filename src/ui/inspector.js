@@ -509,7 +509,13 @@ function detailFields(obj, def) {
     })));
   }
 
-  if (has('actualStart') || has('actualEnd')) {
+  /* What actually happened, beside what was planned.
+     A point object has no finish to record, so it gets one field and the word
+     for it — "Actual finish" against a milestone is a question with no answer.
+     Either date on its own is a normal state: work starts before it ends, so a
+     bar in progress has a start and nothing else, and the drawing says exactly
+     that. */
+  if (has('actualStart') && has('actualEnd')) {
     out.push(
       el('div', { class: 'cx-row' }, [
         field('Actual start', textInput({
@@ -524,6 +530,18 @@ function detailFields(obj, def) {
         })),
       ])
     );
+    out.push(el('p', {
+      class: 'cx-hint',
+      text: 'Recorded dates are drawn under the bar wherever they differ from the plan, and a '
+        + 'baseline is compared against them rather than against the schedule.',
+    }));
+  } else if (has('actualStart')) {
+    out.push(field('Actual date', textInput({
+      type: 'date',
+      value: data.actualStart ? toISO(toMs(data.actualStart)) : '',
+      onChange: (v) => setData('actualStart', v, 'Set actual date'),
+    }), 'When it actually happened. Drawn under the marker where it differs from the plan, and '
+      + 'what a baseline is compared against.'));
   }
 
   if (has('severity')) {

@@ -24,7 +24,9 @@
 
 import { clamp } from '../core/util.js';
 import { MS_DAY, daysBetween } from '../core/dates.js';
-import { TYPES, objectRange, baselineSnapshot, delayReason, visibleNote } from '../core/model.js';
+import {
+  TYPES, objectRange, baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange,
+} from '../core/model.js';
 import { getDoc, orderedLanes, getLane, activeBaseline } from '../core/store.js';
 import { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } from './viewport.js';
 import { fontString, textWidth, wrapText, fitWidth } from './text.js';
@@ -58,6 +60,9 @@ const ICON_W = 18;
 /** Space the percentage readout takes inside a bar label. */
 const PCT_W = 30;
 /** Height of a baseline ghost that has to stack below its own bar. */
+/** The slim bar a recorded actual span gets, on its own floor under the bar. */
+const ACTUAL_HEIGHT = 7;
+const ACTUAL_GAP = 3;
 const GHOST_HEIGHT = 11;
 /** Gap between a bar and the ghost stacked under it. */
 const GHOST_GAP = 3;
@@ -258,12 +263,25 @@ function measureNote(obj, barWidth, hasDuration) {
  * Read by the packer and by `objectRect`, so both agree on where the bars stop
  * and every piece knows which floor it is standing on.
  */
-function bottomTier(note, ghost) {
-  return noteTier(note) + ghostTier(ghost);
+function bottomTier(note, ghost, actual) {
+  return actualTier(actual) + noteTier(note) + ghostTier(ghost);
 }
 
 function noteTier(note) {
   return note ? note.height + NOTE_GAP : 0;
+}
+
+/**
+ * The floor a recorded actual span takes, directly under the bar.
+ *
+ * First in the band, and above the note and the ghost, because it is the same
+ * object's own dates: the pair has to read as one thing that was planned there
+ * and happened here. Everything else in the band is commentary — prose somebody
+ * wrote, or another baseline's claim — and commentary belongs further from the
+ * bar than the fact.
+ */
+function actualTier(actual) {
+  return actual ? ACTUAL_HEIGHT + ACTUAL_GAP : 0;
 }
 
 function ghostTier(ghost) {
@@ -276,11 +294,12 @@ function ghostTier(ghost) {
 }
 
 /** Height one object needs on its packed row: label, note and ghost included. */
-function rowHeightFor(obj, label, ghost = null, note = null) {
+function rowHeightFor(obj, label, ghost = null, note = null, actual = null) {
   const def = TYPES[obj.type] || TYPES.activity;
-  // Its note, a ghost that has to stack, and a reason written under that ghost
-  // each take a floor of the band along the bottom of the row.
-  const tier = bottomTier(note, ghost);
+  // A recorded actual span, its note, a ghost that has to stack, and a reason
+  // written under that ghost each take a floor of the band along the bottom of
+  // the row.
+  const tier = bottomTier(note, ghost, actual);
 
   if (!def.duration) {
     return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove) + tier;
@@ -355,6 +374,72 @@ function measureReason(text, ghostWidth, stacked) {
 }
 
 /**
+ * Where an object's recorded actual span goes, and how much room it needs.
+ *
+ * Null unless somebody has recorded a date *and* it differs from the plan.
+ * Both halves matter: a bar nobody has reported on has nothing to draw, and one
+ * that ran exactly to plan has nothing worth drawing — a second bar identical
+ * to the first says only that the reader should look twice.
+ *
+ * It is a slim bar on its own floor directly under the scheduled one, rather
+ * than a ghost behind it, because the two nearly always overlap: work usually
+ * starts within days of when it was meant to, and two bars sharing a height at
+ * nearly the same dates is a smear rather than a comparison. Below, they read
+ * as a pair — planned there, happened here — which is how every schedule
+ * drawn on paper has shown this.
+ *
+ * `from`/`to` is the span it occupies including its day badge, so `packRows()`
+ * reserves it and a late finish pushes the next object onto another row rather
+ * than printing underneath it.
+ */
+function measureActual(obj, barWidth) {
+  const def = TYPES[obj.type] || TYPES.activity;
+  const hasDuration = !!def.duration;
+  // A band is a lane-tall backdrop and a container holds other objects: there
+  // is no "under the bar" for either, and a slim bar there would read as an
+  // object of its own rather than as one of these.
+  if (def.shape === 'band' || def.shape === 'container') return null;
+
+  const range = actualRange(obj);
+  if (!range) return null;
+
+  const startShift = daysBetween(obj.start, range.start);
+  const endShift = hasDuration ? daysBetween(obj.end, range.end) : startShift;
+  if (!startShift && !endShift) return null;
+
+  const left = hasDuration ? msToPx(range.start) : msToPx(range.start) - POINT_SIZE / 2;
+  const width = hasDuration
+    ? Math.max(4, durationToPx(Math.max(range.end - range.start, 0)))
+    : POINT_SIZE;
+  const barLeft = hasDuration ? msToPx(obj.start) : msToPx(obj.start) - POINT_SIZE / 2;
+  const barRight = barLeft + (hasDuration ? barWidth : POINT_SIZE);
+
+  /* The badge sits over the edge that moved, and the arrow runs to the
+     scheduled edge it moved from — the finish where there is one, the start
+     where a bar has only been started, and the single date on a point object.
+     Measured at the finish edges by preference because that is the movement a
+     review asks about. */
+  const atFinish = hasDuration && endShift !== 0;
+  const fromX = atFinish ? barRight : barLeft;
+  const toX = atFinish ? left + width : left;
+  const mid = (fromX + toX) / 2;
+
+  return {
+    startShift,
+    endShift,
+    startMs: range.start,
+    endMs: range.end,
+    hasStart: range.hasStart,
+    hasEnd: range.hasEnd,
+    atFinish,
+    left,
+    width,
+    from: Math.min(left, mid - SHIFT_BADGE_W / 2),
+    to: Math.max(left + width, mid + SHIFT_BADGE_W / 2),
+  };
+}
+
+/**
  * Where an object's baseline ghost goes and how much room it needs.
  *
  * `stacked` is the answer to the overlap question. While the ghost and the
@@ -377,8 +462,13 @@ function measureGhost(obj, snap, barWidth, baselineId = null) {
 
   const snapStart = snap.start;
   const snapEnd = hasDuration ? (snap.end ?? snap.start) : snap.start;
-  const startShift = daysBetween(snapStart, obj.start);
-  const endShift = hasDuration ? daysBetween(snapEnd, obj.end) : startShift;
+  /* Against what actually happened where anybody has recorded it, and against
+     the schedule where nobody has — the same reading `compareBaseline()` makes,
+     from the same function, so the arrow on the canvas and the number in the
+     variance pane are the same number. */
+  const now = comparedRange(obj);
+  const startShift = daysBetween(snapStart, now.start);
+  const endShift = hasDuration ? daysBetween(snapEnd, now.end) : startShift;
   // Nothing moved: there is no ghost to draw and nothing to reserve.
   if (!startShift && !endShift) return null;
 
@@ -386,12 +476,18 @@ function measureGhost(obj, snap, barWidth, baselineId = null) {
   const width = hasDuration ? Math.max(4, durationToPx(Math.max(snapEnd - snapStart, 0))) : POINT_SIZE;
   const barLeft = hasDuration ? msToPx(obj.start) : msToPx(obj.start) - POINT_SIZE / 2;
   const barRight = barLeft + (hasDuration ? barWidth : POINT_SIZE);
+  /* Where the arrow lands. The scheduled edges while nothing has been
+     recorded, and the actual ones once something has — so an arrow that says
+     "+7d" ends at the bar the +7 was measured to, rather than pointing at a
+     scheduled finish the work has already overrun. */
+  const toStart = hasDuration ? msToPx(now.start) : msToPx(now.start) - POINT_SIZE / 2;
+  const toEnd = hasDuration ? msToPx(now.end) : toStart + POINT_SIZE;
 
   // A reshape (same finish, different start) is measured at the start edges
   // instead, or the arrow would have no length. Mirrors the renderer.
   const reshaped = endShift === 0;
   const fromX = reshaped ? left : left + width;
-  const toX = reshaped ? barLeft : barRight;
+  const toX = reshaped ? toStart : toEnd;
   const mid = (fromX + toX) / 2;
 
   // Bands and containers are lane-tall backdrops with nothing to stack under,
@@ -410,6 +506,12 @@ function measureGhost(obj, snap, barWidth, baselineId = null) {
     endShift,
     startMs: snapStart,
     endMs: snapEnd,
+    // The x the arrow points at, carried rather than re-derived: the renderer
+    // would otherwise have to ask the model for the actual dates a second time
+    // and could answer differently.
+    toStart,
+    toEnd,
+    actual: now.actual,
     left,
     width,
     stacked,
@@ -480,7 +582,7 @@ export function packRows(entries, { minGapPx = 6 } = {}) {
   const assigned = new Map();
 
   for (const entry of sorted) {
-    const { obj, label, barWidth, ghost, note } = entry;
+    const { obj, label, barWidth, ghost, note, actual } = entry;
     const startPx = msToPx(obj.start);
     const hasDuration = !!TYPES[obj.type]?.duration;
 
@@ -490,6 +592,14 @@ export function packRows(entries, { minGapPx = 6 } = {}) {
     if (ghost) {
       from = Math.min(from, ghost.from);
       to = Math.max(to, ghost.to);
+    }
+    /* A recorded actual span reaches wherever the work actually ran — which for
+       a late finish is well past the bar — and it carries a day badge over the
+       edge that moved. Reserved like the ghost, so a bar that overran pushes
+       its neighbour onto another row instead of printing under it. */
+    if (actual) {
+      from = Math.min(from, actual.from);
+      to = Math.max(to, actual.to);
     }
     // A note wrapped wider than the bar it belongs to still may not be printed
     // over its neighbour, so the packer reserves what it actually occupies.
@@ -584,7 +694,14 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
       const label = measureLabel(obj, barWidth);
       const ghost = snapshot ? measureGhost(obj, snapshot.get(obj.id), barWidth, baselineId) : null;
       const note = doc.settings.showNotes === false ? null : measureNote(obj, barWidth, hasDuration);
-      return { obj, label, barWidth, ghost, note, height: rowHeightFor(obj, label, ghost, note) };
+      /* What actually happened, where it differs from what was planned. Drawn
+         whether or not a baseline is on: it is this object's own dates, not a
+         comparison against anything else. */
+      const actual = measureActual(obj, barWidth);
+      return {
+        obj, label, barWidth, ghost, note, actual,
+        height: rowHeightFor(obj, label, ghost, note, actual),
+      };
     });
 
     // Outlines for what the baseline had and the plan has not. They pack with
@@ -610,7 +727,7 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
     if (!collapsed) {
       for (const entry of packable) {
         const row = assigned.get(entry.obj.id) || 0;
-        const tier = bottomTier(entry.note, entry.ghost);
+        const tier = bottomTier(entry.note, entry.ghost, entry.actual);
         rowContent[row] = Math.max(rowContent[row], entry.height - tier);
         rowTiers[row] = Math.max(rowTiers[row], tier);
       }
@@ -648,11 +765,22 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
     y += height;
 
     for (const item of measured) {
-      // A ghost can reach well outside its own object's dates, and the pair has
-      // to appear and leave together, so the span tested is both of them.
-      const from = Math.min(item.obj.start, item.ghost ? item.ghost.startMs : item.obj.start);
+      /* A ghost, and a recorded actual span, can each reach well outside the
+         object's own dates, and the set has to appear and leave together — so
+         the span tested is all of them. Scrolled off on the strength of its
+         scheduled dates alone, a bar that finished a month late would take its
+         own actual bar off the screen with it. */
       const liveEnd = TYPES[item.obj.type]?.duration ? item.obj.end : item.obj.start;
-      const to = Math.max(liveEnd, item.ghost ? item.ghost.endMs : liveEnd);
+      const from = Math.min(
+        item.obj.start,
+        item.ghost ? item.ghost.startMs : item.obj.start,
+        item.actual ? item.actual.startMs : item.obj.start
+      );
+      const to = Math.max(
+        liveEnd,
+        item.ghost ? item.ghost.endMs : liveEnd,
+        item.actual ? item.actual.endMs : liveEnd
+      );
       const visible =
         includeOffscreen ||
         rangeVisible(from - pxToDuration(item.label.extraLeft), to + pxToDuration(item.label.extraRight), 400);
@@ -731,11 +859,18 @@ export function objectRect(obj, laneEntry, row, measured, collapsed = false) {
   const stacked = !!(measured.ghost && measured.ghost.stacked) && !collapsed;
   const tier = collapsed ? 0 : (laneEntry.rowTiers?.[row] ?? 0);
   const rowH = Math.max(ROW_HEIGHT, fullRowH - tier);
-  // The band below the row is shared by everything this object hangs under
-  // itself, in a fixed order: the note it shows, then a ghost that had to drop
-  // out of the bar's way, then the reason written on that ghost. Each object
-  // measures its own floor, and the packer has kept them horizontally apart.
+  /* The band below the row is shared by everything this object hangs under
+     itself, in a fixed order: what actually happened first, then the note it
+     shows, then a ghost that had to drop out of the bar's way, then the reason
+     written on that ghost. Each object measures its own floor, and the packer
+     has kept them horizontally apart.
+     The actual span goes first because it is the same object's own dates — the
+     pair has to read as one thing that was planned there and happened here.
+     Everything under it is commentary: prose somebody wrote, or another
+     baseline's claim. */
   const note = collapsed ? null : measured.note;
+  const actual = collapsed ? null : measured.actual;
+  const actualFloor = actualTier(actual);
 
   let width;
   let left;
@@ -782,7 +917,28 @@ export function objectRect(obj, laneEntry, row, measured, collapsed = false) {
      * row when they are not. Null unless the document is comparing.
      */
     ghost: measured.ghost
-      ? placedGhost(measured.ghost, { stacked, top, height, rowTop, rowH: rowH + noteTier(note), collapsed })
+      ? placedGhost(measured.ghost, {
+        stacked,
+        top,
+        height,
+        rowTop,
+        rowH: rowH + actualFloor + noteTier(note),
+        collapsed,
+      })
+      : null,
+    /**
+     * What actually happened, on its own floor directly under the bar — or null
+     * where nothing was recorded, where it matched the plan exactly, or in a
+     * collapsed lane, which has no band to hang anything in.
+     */
+    actual: actual
+      ? {
+        ...actual,
+        x: actual.left,
+        y: rowTop + rowH + ACTUAL_GAP,
+        w: actual.width,
+        h: ACTUAL_HEIGHT,
+      }
       : null,
     /**
      * The note drawn under this object, in the same coordinates as the bar, or
@@ -792,7 +948,7 @@ export function objectRect(obj, laneEntry, row, measured, collapsed = false) {
       ? {
           ...note,
           x: hasDuration ? x : x - POINT_SIZE / 2,
-          y: rowTop + rowH + NOTE_GAP,
+          y: rowTop + rowH + actualFloor + NOTE_GAP,
           w: note.width + NOTE_PAD_X * 2,
           h: note.height,
         }

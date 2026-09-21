@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 57   Built: 2026-09-17T20:21:03.611Z
+ * Modules: 57   Built: 2026-09-21T16:11:01.025Z
  */
 (function () {
   'use strict';
@@ -1218,7 +1218,7 @@ __mods["core/model.js"] = function (__x, __req) {
       accent: 'var(--type-activity)',
       defaultDays: 14,
       progress: true,
-      fields: ['owner', 'subsystem', 'area', 'status', 'progress'],
+      fields: ['owner', 'subsystem', 'area', 'actualStart', 'actualEnd', 'status', 'progress'],
     },
     milestone: {
       label: 'Milestone',
@@ -1229,7 +1229,7 @@ __mods["core/model.js"] = function (__x, __req) {
       accent: 'var(--type-milestone)',
       defaultDays: 0,
       progress: false,
-      fields: ['owner', 'subsystem', 'status'],
+      fields: ['owner', 'subsystem', 'actualStart', 'status'],
     },
     release: {
       label: 'Software Release',
@@ -1240,7 +1240,7 @@ __mods["core/model.js"] = function (__x, __req) {
       accent: 'var(--type-release)',
       defaultDays: 0,
       progress: false,
-      fields: ['version', 'releaseNumber', 'buildNumber', 'owner', 'subsystem', 'status', 'approval'],
+      fields: ['version', 'releaseNumber', 'buildNumber', 'owner', 'subsystem', 'actualStart', 'status', 'approval'],
     },
     campaign: {
       label: 'Commissioning Campaign',
@@ -1262,7 +1262,7 @@ __mods["core/model.js"] = function (__x, __req) {
       accent: 'var(--type-activity)',
       defaultDays: 10,
       progress: true,
-      fields: ['testKind', 'subsystem', 'area', 'owner', 'progress', 'status'],
+      fields: ['testKind', 'subsystem', 'area', 'owner', 'actualStart', 'actualEnd', 'progress', 'status'],
     },
     freeze: {
       label: 'Freeze Period',
@@ -1273,7 +1273,7 @@ __mods["core/model.js"] = function (__x, __req) {
       accent: 'var(--type-freeze)',
       defaultDays: 7,
       progress: false,
-      fields: ['owner', 'status'],
+      fields: ['owner', 'actualStart', 'actualEnd', 'status'],
     },
     outage: {
       label: 'Outage',
@@ -1284,7 +1284,7 @@ __mods["core/model.js"] = function (__x, __req) {
       accent: 'var(--type-outage)',
       defaultDays: 2,
       progress: false,
-      fields: ['area', 'owner', 'status'],
+      fields: ['area', 'owner', 'actualStart', 'actualEnd', 'status'],
     },
     maintenance: {
       label: 'Maintenance Window',
@@ -1295,7 +1295,7 @@ __mods["core/model.js"] = function (__x, __req) {
       accent: 'var(--type-outage)',
       defaultDays: 1,
       progress: false,
-      fields: ['area', 'owner', 'status'],
+      fields: ['area', 'owner', 'actualStart', 'actualEnd', 'status'],
     },
     customer: {
       label: 'Customer Activity',
@@ -1306,7 +1306,7 @@ __mods["core/model.js"] = function (__x, __req) {
       accent: 'var(--type-campaign)',
       defaultDays: 5,
       progress: true,
-      fields: ['owner', 'area', 'status', 'progress'],
+      fields: ['owner', 'area', 'actualStart', 'actualEnd', 'status', 'progress'],
     },
     risk: {
       label: 'Risk',
@@ -2207,8 +2207,14 @@ __mods["core/model.js"] = function (__x, __req) {
       makeObject({ type: 'activity', lane: lane(2), start: D(6), end: D(46), title: 'ATS Integration Testing', subsystem: 'ats', status: 'inprogress', progress: 68, owner: 'L. Fontaine' }),
       makeObject({ type: 'activity', lane: lane(3), start: D(20), end: D(70), title: 'IXL Static Testing', subsystem: 'ixl', status: 'inprogress', progress: 35, owner: 'D. Vasquez' }),
       makeObject({ type: 'activity', lane: lane(4), start: D(30), end: D(64), title: 'SCADA Interface Verification', subsystem: 'scada', status: 'planned', progress: 0, owner: 'R. Bianchi' }),
-      makeObject({ type: 'activity', lane: lane(5), start: D(0), end: D(40), title: 'Radio Coverage Survey', subsystem: 'comms', status: 'inprogress', progress: 80, owner: 'S. Njoroge' }),
-      makeObject({ type: 'activity', lane: lane(6), start: D(24), end: D(88), title: 'Wayside Equipment Installation', subsystem: 'wayside', status: 'inprogress', progress: 45, owner: 'P. Lindqvist' }),
+      /* Started four days late and still running: the actual bar under this one
+         shows the slipped start, fades where no finish has been reported, and is
+         what a baseline is compared against. A sample plan where nothing had ever
+         been reported on would never show the feature at all. */
+      makeObject({ type: 'activity', lane: lane(5), start: D(0), end: D(40), title: 'Radio Coverage Survey', subsystem: 'comms', status: 'inprogress', progress: 80, owner: 'S. Njoroge', data: { actualStart: toISO(D(4)) } }),
+      // Started on time and overran by a week — the other half of the same story,
+      // and the case a review actually opens on.
+      makeObject({ type: 'activity', lane: lane(6), start: D(24), end: D(88), title: 'Wayside Equipment Installation', subsystem: 'wayside', status: 'inprogress', progress: 45, owner: 'P. Lindqvist', data: { actualStart: toISO(D(24)), actualEnd: toISO(D(95)) } }),
       makeObject({ type: 'activity', lane: lane(7), start: D(44), end: D(92), title: 'Onboard Retrofit — Fleet A', subsystem: 'vehicle', status: 'planned', progress: 0, owner: 'K. Ibrahim' }),
       // Dates satisfy every dependency below: the campaign starts after its
       // latest predecessor (Wayside installation, D88) finishes. A shipped
@@ -2588,6 +2594,73 @@ __mods["core/model.js"] = function (__x, __req) {
     return { start: obj.start, end: hasDuration ? Math.max(obj.end, obj.start + MS_DAY) : obj.start };
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     What actually happened
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The dates somebody recorded against an object, or null.
+   *
+   * `data.actualStart` and `data.actualEnd` have been on the model and in the
+   * CSV for as long as the inspector has had fields for them, and nothing ever
+   * drew them or compared against them — so a campaign that started a fortnight
+   * late looked exactly like one that started on time, and the two dates a
+   * commissioning manager cares about most were the two nothing on the canvas
+   * knew.
+   *
+   * Either may be missing and that is the normal case: work starts before it
+   * finishes, so a bar in progress has a start and no finish. The missing end
+   * falls back to the scheduled one, which is the honest reading — "it started on
+   * the 4th and is still planned to finish on the 20th". A point object has no
+   * finish at all, so its actual date is both edges.
+   *
+   * Null when neither is set, because "no actual dates" and "actual dates that
+   * happen to match the plan" are different facts and only the second is worth
+   * drawing.
+   */
+  function actualRange(obj) {
+    const hasDuration = !!TYPES[obj.type]?.duration;
+    const start = toMs(obj?.data?.actualStart);
+    const end = hasDuration ? toMs(obj?.data?.actualEnd) : NaN;
+    const hasStart = Number.isFinite(start);
+    const hasEnd = Number.isFinite(end);
+    if (!hasStart && !hasEnd) return null;
+
+    const from = hasStart ? start : obj.start;
+    const to = hasDuration ? (hasEnd ? end : obj.end) : from;
+    return {
+      start: from,
+      // A finish before its start is somebody mid-typing into a date field, not
+      // a fact about the work. Clamped rather than refused: refusing would empty
+      // the bar while they are still keying the year.
+      end: Math.max(to, from),
+      hasStart,
+      hasEnd,
+    };
+  }
+
+  /**
+   * Where the object *is*, for anything comparing it against a baseline.
+   *
+   * The actual dates where they have been recorded, the scheduled ones where
+   * they have not. That is the whole of "compare against the actual dates, not
+   * the scheduled ones, where they are available" — and it is one function
+   * because the variance pane, the CSV, the packer, the renderer and the exported
+   * drawing all have to measure the same movement or they will disagree by days
+   * on the one number a review is about.
+   *
+   * `actual` says which answer came back, so a caller can label a variance as
+   * what happened rather than what is still planned.
+   */
+  function comparedRange(obj) {
+    const hasDuration = !!TYPES[obj.type]?.duration;
+    const actual = actualRange(obj);
+    if (!actual) {
+      return { start: obj.start, end: hasDuration ? obj.end : obj.start, actual: false };
+    }
+    return { start: actual.start, end: actual.end, actual: true };
+  }
+
   /** Extent of the whole project, padded, for fit-to-window and the minimap. */
   function projectExtent(doc) {
     if (!doc.objects.length) {
@@ -2688,6 +2761,8 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "noteText", { get: () => noteText, enumerable: true });
   Object.defineProperty(__x, "objectColor", { get: () => objectColor, enumerable: true });
   Object.defineProperty(__x, "objectRange", { get: () => objectRange, enumerable: true });
+  Object.defineProperty(__x, "actualRange", { get: () => actualRange, enumerable: true });
+  Object.defineProperty(__x, "comparedRange", { get: () => comparedRange, enumerable: true });
   Object.defineProperty(__x, "projectExtent", { get: () => projectExtent, enumerable: true });
   Object.defineProperty(__x, "ownersOf", { get: () => ownersOf, enumerable: true });
   Object.defineProperty(__x, "areasOf", { get: () => areasOf, enumerable: true });
@@ -8328,7 +8403,9 @@ __mods["core/analysis.js"] = function (__x, __req) {
    */
 
   const { MS_DAY, daysBetween, workingDaysBetween } = __req("core/dates.js");
-  const { TYPES, LINK_TYPES, effectiveToday, baselineSnapshot, delayReason } = __req("core/model.js");
+  const { TYPES, LINK_TYPES, effectiveToday, baselineSnapshot, delayReason, comparedRange } = __req("core/model.js");
+
+
 
   /* ══════════════════════════════════════════════════════════════════════════
      Memoisation
@@ -8672,10 +8749,19 @@ __mods["core/analysis.js"] = function (__x, __req) {
         continue;
       }
       const hasDuration = !!TYPES[obj.type]?.duration;
-      const startShift = daysBetween(snap.start, obj.start);
-      const endShift = hasDuration ? daysBetween(snap.end ?? snap.start, obj.end) : startShift;
+      /* Measured against what actually happened where anybody has recorded it,
+         and against the schedule where nobody has. A baseline is a question about
+         delivery, and "we planned to finish on the 4th and we did finish on the
+         11th" is the answer — comparing against a scheduled finish that has
+         already been overtaken reports the plan's own optimism as though it were
+         a fact. `comparedRange()` is the single place that decides, so the pane,
+         the CSV, the canvas and the exported drawing cannot disagree by days
+         about the one number a review is about. */
+      const now = comparedRange(obj);
+      const startShift = daysBetween(snap.start, now.start);
+      const endShift = hasDuration ? daysBetween(snap.end ?? snap.start, now.end) : startShift;
       const baseDuration = hasDuration ? daysBetween(snap.start, snap.end ?? snap.start) : 0;
-      const nowDuration = hasDuration ? daysBetween(obj.start, obj.end) : 0;
+      const nowDuration = hasDuration ? daysBetween(now.start, now.end) : 0;
 
       if (startShift === 0 && endShift === 0 && baseDuration === nowDuration) continue;
 
@@ -8687,6 +8773,11 @@ __mods["core/analysis.js"] = function (__x, __req) {
         change: endShift > 0 ? 'slip' : endShift < 0 ? 'ahead' : 'reshaped',
         startShift,
         endShift,
+        /* Whether the row is reporting what happened or what is still planned.
+           The same number means different things — one is a fact and the other is
+           a forecast — and a variance report that ran the two together is one
+           nobody can act on. */
+        actual: now.actual,
         durationChange: nowDuration - baseDuration,
         // What the planner wrote into the striped area on the canvas. The only
         // part of a variance row that is not derived, and the part a review asks
@@ -8707,6 +8798,7 @@ __mods["core/analysis.js"] = function (__x, __req) {
         change: 'added',
         startShift: 0,
         endShift: 0,
+        actual: comparedRange(obj).actual,
         durationChange: TYPES[obj.type]?.duration ? daysBetween(obj.start, obj.end) : 0,
         baseline: null,
         current: obj,
@@ -9618,7 +9710,9 @@ __mods["timeline/layout.js"] = function (__x, __req) {
 
   const { clamp } = __req("core/util.js");
   const { MS_DAY, daysBetween } = __req("core/dates.js");
-  const { TYPES, objectRange, baselineSnapshot, delayReason, visibleNote } = __req("core/model.js");
+  const { TYPES, objectRange, baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange } = __req("core/model.js");
+
+
   const { getDoc, orderedLanes, getLane, activeBaseline } = __req("core/store.js");
   const { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } = __req("timeline/viewport.js");
   const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
@@ -9652,6 +9746,9 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   /** Space the percentage readout takes inside a bar label. */
   const PCT_W = 30;
   /** Height of a baseline ghost that has to stack below its own bar. */
+  /** The slim bar a recorded actual span gets, on its own floor under the bar. */
+  const ACTUAL_HEIGHT = 7;
+  const ACTUAL_GAP = 3;
   const GHOST_HEIGHT = 11;
   /** Gap between a bar and the ghost stacked under it. */
   const GHOST_GAP = 3;
@@ -9852,12 +9949,25 @@ __mods["timeline/layout.js"] = function (__x, __req) {
    * Read by the packer and by `objectRect`, so both agree on where the bars stop
    * and every piece knows which floor it is standing on.
    */
-  function bottomTier(note, ghost) {
-    return noteTier(note) + ghostTier(ghost);
+  function bottomTier(note, ghost, actual) {
+    return actualTier(actual) + noteTier(note) + ghostTier(ghost);
   }
 
   function noteTier(note) {
     return note ? note.height + NOTE_GAP : 0;
+  }
+
+  /**
+   * The floor a recorded actual span takes, directly under the bar.
+   *
+   * First in the band, and above the note and the ghost, because it is the same
+   * object's own dates: the pair has to read as one thing that was planned there
+   * and happened here. Everything else in the band is commentary — prose somebody
+   * wrote, or another baseline's claim — and commentary belongs further from the
+   * bar than the fact.
+   */
+  function actualTier(actual) {
+    return actual ? ACTUAL_HEIGHT + ACTUAL_GAP : 0;
   }
 
   function ghostTier(ghost) {
@@ -9870,11 +9980,12 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   }
 
   /** Height one object needs on its packed row: label, note and ghost included. */
-  function rowHeightFor(obj, label, ghost = null, note = null) {
+  function rowHeightFor(obj, label, ghost = null, note = null, actual = null) {
     const def = TYPES[obj.type] || TYPES.activity;
-    // Its note, a ghost that has to stack, and a reason written under that ghost
-    // each take a floor of the band along the bottom of the row.
-    const tier = bottomTier(note, ghost);
+    // A recorded actual span, its note, a ghost that has to stack, and a reason
+    // written under that ghost each take a floor of the band along the bottom of
+    // the row.
+    const tier = bottomTier(note, ghost, actual);
 
     if (!def.duration) {
       return Math.max(ROW_HEIGHT, POINT_SIZE + label.extraBelow + label.extraAbove) + tier;
@@ -9949,6 +10060,72 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   }
 
   /**
+   * Where an object's recorded actual span goes, and how much room it needs.
+   *
+   * Null unless somebody has recorded a date *and* it differs from the plan.
+   * Both halves matter: a bar nobody has reported on has nothing to draw, and one
+   * that ran exactly to plan has nothing worth drawing — a second bar identical
+   * to the first says only that the reader should look twice.
+   *
+   * It is a slim bar on its own floor directly under the scheduled one, rather
+   * than a ghost behind it, because the two nearly always overlap: work usually
+   * starts within days of when it was meant to, and two bars sharing a height at
+   * nearly the same dates is a smear rather than a comparison. Below, they read
+   * as a pair — planned there, happened here — which is how every schedule
+   * drawn on paper has shown this.
+   *
+   * `from`/`to` is the span it occupies including its day badge, so `packRows()`
+   * reserves it and a late finish pushes the next object onto another row rather
+   * than printing underneath it.
+   */
+  function measureActual(obj, barWidth) {
+    const def = TYPES[obj.type] || TYPES.activity;
+    const hasDuration = !!def.duration;
+    // A band is a lane-tall backdrop and a container holds other objects: there
+    // is no "under the bar" for either, and a slim bar there would read as an
+    // object of its own rather than as one of these.
+    if (def.shape === 'band' || def.shape === 'container') return null;
+
+    const range = actualRange(obj);
+    if (!range) return null;
+
+    const startShift = daysBetween(obj.start, range.start);
+    const endShift = hasDuration ? daysBetween(obj.end, range.end) : startShift;
+    if (!startShift && !endShift) return null;
+
+    const left = hasDuration ? msToPx(range.start) : msToPx(range.start) - POINT_SIZE / 2;
+    const width = hasDuration
+      ? Math.max(4, durationToPx(Math.max(range.end - range.start, 0)))
+      : POINT_SIZE;
+    const barLeft = hasDuration ? msToPx(obj.start) : msToPx(obj.start) - POINT_SIZE / 2;
+    const barRight = barLeft + (hasDuration ? barWidth : POINT_SIZE);
+
+    /* The badge sits over the edge that moved, and the arrow runs to the
+       scheduled edge it moved from — the finish where there is one, the start
+       where a bar has only been started, and the single date on a point object.
+       Measured at the finish edges by preference because that is the movement a
+       review asks about. */
+    const atFinish = hasDuration && endShift !== 0;
+    const fromX = atFinish ? barRight : barLeft;
+    const toX = atFinish ? left + width : left;
+    const mid = (fromX + toX) / 2;
+
+    return {
+      startShift,
+      endShift,
+      startMs: range.start,
+      endMs: range.end,
+      hasStart: range.hasStart,
+      hasEnd: range.hasEnd,
+      atFinish,
+      left,
+      width,
+      from: Math.min(left, mid - SHIFT_BADGE_W / 2),
+      to: Math.max(left + width, mid + SHIFT_BADGE_W / 2),
+    };
+  }
+
+  /**
    * Where an object's baseline ghost goes and how much room it needs.
    *
    * `stacked` is the answer to the overlap question. While the ghost and the
@@ -9971,8 +10148,13 @@ __mods["timeline/layout.js"] = function (__x, __req) {
 
     const snapStart = snap.start;
     const snapEnd = hasDuration ? (snap.end ?? snap.start) : snap.start;
-    const startShift = daysBetween(snapStart, obj.start);
-    const endShift = hasDuration ? daysBetween(snapEnd, obj.end) : startShift;
+    /* Against what actually happened where anybody has recorded it, and against
+       the schedule where nobody has — the same reading `compareBaseline()` makes,
+       from the same function, so the arrow on the canvas and the number in the
+       variance pane are the same number. */
+    const now = comparedRange(obj);
+    const startShift = daysBetween(snapStart, now.start);
+    const endShift = hasDuration ? daysBetween(snapEnd, now.end) : startShift;
     // Nothing moved: there is no ghost to draw and nothing to reserve.
     if (!startShift && !endShift) return null;
 
@@ -9980,12 +10162,18 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     const width = hasDuration ? Math.max(4, durationToPx(Math.max(snapEnd - snapStart, 0))) : POINT_SIZE;
     const barLeft = hasDuration ? msToPx(obj.start) : msToPx(obj.start) - POINT_SIZE / 2;
     const barRight = barLeft + (hasDuration ? barWidth : POINT_SIZE);
+    /* Where the arrow lands. The scheduled edges while nothing has been
+       recorded, and the actual ones once something has — so an arrow that says
+       "+7d" ends at the bar the +7 was measured to, rather than pointing at a
+       scheduled finish the work has already overrun. */
+    const toStart = hasDuration ? msToPx(now.start) : msToPx(now.start) - POINT_SIZE / 2;
+    const toEnd = hasDuration ? msToPx(now.end) : toStart + POINT_SIZE;
 
     // A reshape (same finish, different start) is measured at the start edges
     // instead, or the arrow would have no length. Mirrors the renderer.
     const reshaped = endShift === 0;
     const fromX = reshaped ? left : left + width;
-    const toX = reshaped ? barLeft : barRight;
+    const toX = reshaped ? toStart : toEnd;
     const mid = (fromX + toX) / 2;
 
     // Bands and containers are lane-tall backdrops with nothing to stack under,
@@ -10004,6 +10192,12 @@ __mods["timeline/layout.js"] = function (__x, __req) {
       endShift,
       startMs: snapStart,
       endMs: snapEnd,
+      // The x the arrow points at, carried rather than re-derived: the renderer
+      // would otherwise have to ask the model for the actual dates a second time
+      // and could answer differently.
+      toStart,
+      toEnd,
+      actual: now.actual,
       left,
       width,
       stacked,
@@ -10074,7 +10268,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     const assigned = new Map();
 
     for (const entry of sorted) {
-      const { obj, label, barWidth, ghost, note } = entry;
+      const { obj, label, barWidth, ghost, note, actual } = entry;
       const startPx = msToPx(obj.start);
       const hasDuration = !!TYPES[obj.type]?.duration;
 
@@ -10084,6 +10278,14 @@ __mods["timeline/layout.js"] = function (__x, __req) {
       if (ghost) {
         from = Math.min(from, ghost.from);
         to = Math.max(to, ghost.to);
+      }
+      /* A recorded actual span reaches wherever the work actually ran — which for
+         a late finish is well past the bar — and it carries a day badge over the
+         edge that moved. Reserved like the ghost, so a bar that overran pushes
+         its neighbour onto another row instead of printing under it. */
+      if (actual) {
+        from = Math.min(from, actual.from);
+        to = Math.max(to, actual.to);
       }
       // A note wrapped wider than the bar it belongs to still may not be printed
       // over its neighbour, so the packer reserves what it actually occupies.
@@ -10178,7 +10380,14 @@ __mods["timeline/layout.js"] = function (__x, __req) {
         const label = measureLabel(obj, barWidth);
         const ghost = snapshot ? measureGhost(obj, snapshot.get(obj.id), barWidth, baselineId) : null;
         const note = doc.settings.showNotes === false ? null : measureNote(obj, barWidth, hasDuration);
-        return { obj, label, barWidth, ghost, note, height: rowHeightFor(obj, label, ghost, note) };
+        /* What actually happened, where it differs from what was planned. Drawn
+           whether or not a baseline is on: it is this object's own dates, not a
+           comparison against anything else. */
+        const actual = measureActual(obj, barWidth);
+        return {
+          obj, label, barWidth, ghost, note, actual,
+          height: rowHeightFor(obj, label, ghost, note, actual),
+        };
       });
 
       // Outlines for what the baseline had and the plan has not. They pack with
@@ -10204,7 +10413,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
       if (!collapsed) {
         for (const entry of packable) {
           const row = assigned.get(entry.obj.id) || 0;
-          const tier = bottomTier(entry.note, entry.ghost);
+          const tier = bottomTier(entry.note, entry.ghost, entry.actual);
           rowContent[row] = Math.max(rowContent[row], entry.height - tier);
           rowTiers[row] = Math.max(rowTiers[row], tier);
         }
@@ -10242,11 +10451,22 @@ __mods["timeline/layout.js"] = function (__x, __req) {
       y += height;
 
       for (const item of measured) {
-        // A ghost can reach well outside its own object's dates, and the pair has
-        // to appear and leave together, so the span tested is both of them.
-        const from = Math.min(item.obj.start, item.ghost ? item.ghost.startMs : item.obj.start);
+        /* A ghost, and a recorded actual span, can each reach well outside the
+           object's own dates, and the set has to appear and leave together — so
+           the span tested is all of them. Scrolled off on the strength of its
+           scheduled dates alone, a bar that finished a month late would take its
+           own actual bar off the screen with it. */
         const liveEnd = TYPES[item.obj.type]?.duration ? item.obj.end : item.obj.start;
-        const to = Math.max(liveEnd, item.ghost ? item.ghost.endMs : liveEnd);
+        const from = Math.min(
+          item.obj.start,
+          item.ghost ? item.ghost.startMs : item.obj.start,
+          item.actual ? item.actual.startMs : item.obj.start
+        );
+        const to = Math.max(
+          liveEnd,
+          item.ghost ? item.ghost.endMs : liveEnd,
+          item.actual ? item.actual.endMs : liveEnd
+        );
         const visible =
           includeOffscreen ||
           rangeVisible(from - pxToDuration(item.label.extraLeft), to + pxToDuration(item.label.extraRight), 400);
@@ -10325,11 +10545,18 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     const stacked = !!(measured.ghost && measured.ghost.stacked) && !collapsed;
     const tier = collapsed ? 0 : (laneEntry.rowTiers?.[row] ?? 0);
     const rowH = Math.max(ROW_HEIGHT, fullRowH - tier);
-    // The band below the row is shared by everything this object hangs under
-    // itself, in a fixed order: the note it shows, then a ghost that had to drop
-    // out of the bar's way, then the reason written on that ghost. Each object
-    // measures its own floor, and the packer has kept them horizontally apart.
+    /* The band below the row is shared by everything this object hangs under
+       itself, in a fixed order: what actually happened first, then the note it
+       shows, then a ghost that had to drop out of the bar's way, then the reason
+       written on that ghost. Each object measures its own floor, and the packer
+       has kept them horizontally apart.
+       The actual span goes first because it is the same object's own dates — the
+       pair has to read as one thing that was planned there and happened here.
+       Everything under it is commentary: prose somebody wrote, or another
+       baseline's claim. */
     const note = collapsed ? null : measured.note;
+    const actual = collapsed ? null : measured.actual;
+    const actualFloor = actualTier(actual);
 
     let width;
     let left;
@@ -10376,7 +10603,28 @@ __mods["timeline/layout.js"] = function (__x, __req) {
        * row when they are not. Null unless the document is comparing.
        */
       ghost: measured.ghost
-        ? placedGhost(measured.ghost, { stacked, top, height, rowTop, rowH: rowH + noteTier(note), collapsed })
+        ? placedGhost(measured.ghost, {
+          stacked,
+          top,
+          height,
+          rowTop,
+          rowH: rowH + actualFloor + noteTier(note),
+          collapsed,
+        })
+        : null,
+      /**
+       * What actually happened, on its own floor directly under the bar — or null
+       * where nothing was recorded, where it matched the plan exactly, or in a
+       * collapsed lane, which has no band to hang anything in.
+       */
+      actual: actual
+        ? {
+          ...actual,
+          x: actual.left,
+          y: rowTop + rowH + ACTUAL_GAP,
+          w: actual.width,
+          h: ACTUAL_HEIGHT,
+        }
         : null,
       /**
        * The note drawn under this object, in the same coordinates as the bar, or
@@ -10386,7 +10634,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
         ? {
             ...note,
             x: hasDuration ? x : x - POINT_SIZE / 2,
-            y: rowTop + rowH + NOTE_GAP,
+            y: rowTop + rowH + actualFloor + NOTE_GAP,
             w: note.width + NOTE_PAD_X * 2,
             h: note.height,
           }
@@ -11233,6 +11481,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     renderLaneRows(layout);
     renderObjects(layout, settings, upstream);
     renderNotes(layout);
+    renderActuals(layout);
     renderBaseline(layout, settings);
     renderLinks(doc, layout, settings, upstream);
     renderToday(doc, settings, layout);
@@ -12084,6 +12333,102 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     dom.overlay.appendChild(fragment);
   }
 
+  /**
+   * What actually happened, under what was planned.
+   *
+   * Drawn whenever somebody has recorded a date that differs from the plan, and
+   * with no baseline involved: these are the object's *own* dates, and it is a
+   * different question from how the plan compares to a frozen copy of itself.
+   * They were on the model and in the CSV for as long as the inspector has had
+   * fields for them, and nothing ever drew them — so a campaign that started a
+   * fortnight late looked exactly like one that started on time.
+   *
+   * Everything here was measured and packed by `computeLayout`, so nothing below
+   * has to ask whether it fits: `rect.actual` is a slim bar on its own floor
+   * directly under the scheduled one, with the arrow running between the two
+   * edges that moved. Nothing is placed from `data.actualStart` at paint time —
+   * that would be the one thing on the canvas nothing else knows is there.
+   */
+  function renderActuals(layout) {
+    dom.overlay.querySelectorAll('.tl-actual, .tl-actual-shift').forEach((n) => n.remove());
+
+    const fragment = document.createDocumentFragment();
+    for (const rect of layout.rects) {
+      const actual = rect.actual;
+      if (!actual) continue;
+
+      // Late is the case a review is about, so it is the one that gets the
+      // warning colour; finishing early is good news and says so.
+      const shift = actual.atFinish ? actual.endShift : actual.startShift;
+      const tone = shift > 0 ? 'late' : shift < 0 ? 'early' : 'shifted';
+
+      fragment.appendChild(el('div', {
+        class: `tl-actual ${tone}${actual.hasEnd ? '' : ' open'}`,
+        dataset: { objId: rect.obj.id },
+        style: {
+          left: `${actual.x}px`,
+          top: `${actual.y}px`,
+          width: `${Math.max(actual.w, 2)}px`,
+          height: `${actual.h}px`,
+        },
+        title: actualTitle(rect.obj, actual, rect.hasDuration),
+      }));
+
+      /* The arrow runs from the scheduled edge to the one that was actually hit.
+         It rides the actual bar's own centre line, so the pair reads downwards
+         from the bar it belongs to. */
+      if (shift) {
+        const fromX = actual.atFinish ? rect.right : rect.x;
+        const toX = actual.atFinish ? actual.x + actual.w : actual.x;
+        fragment.appendChild(actualArrow(fromX, toX, actual.y + actual.h / 2, shift, tone));
+      }
+    }
+    dom.overlay.appendChild(fragment);
+  }
+
+  /**
+   * The same arrow the comparison draws, in its own class so the two can be
+   * styled apart. A shared one would have meant a `kind` argument threaded
+   * through every call for the sake of one word in a class name.
+   */
+  function actualArrow(fromX, toX, y, days, tone) {
+    const left = Math.min(fromX, toX);
+    const width = Math.abs(toX - fromX);
+    const label = `${days > 0 ? '+' : '−'}${Math.abs(days)}d`;
+
+    return el('div', {
+      class: `tl-actual-shift ${tone} ${toX >= fromX ? 'right' : 'left'}`,
+      style: { left: `${left}px`, top: `${y}px`, width: `${Math.max(width, 1)}px` },
+    }, [
+      el('span', { class: 'sh-line' }),
+      el('span', { class: 'sh-head' }),
+      el('span', { class: 'sh-days', text: label }),
+    ]);
+  }
+
+  /**
+   * What the bar under a bar is saying, in words.
+   *
+   * It names the recorded dates and how far each edge moved, and it says when a
+   * finish has not been recorded yet — "started, not finished" is a different
+   * state from "finished on the day it was planned to", and a bar drawn without
+   * that sentence would read as the second.
+   */
+  function actualTitle(obj, actual, hasDuration) {
+    const dates = hasDuration
+      ? `${fmtDate(actual.startMs, 'medium')} → ${actual.hasEnd ? fmtDate(actual.endMs, 'medium') : 'not finished'}`
+      : fmtDate(actual.startMs, 'medium');
+    const moved = [
+      actual.startShift
+        ? `started ${Math.abs(actual.startShift)}d ${actual.startShift > 0 ? 'late' : 'early'}`
+        : null,
+      hasDuration && actual.hasEnd && actual.endShift
+        ? `finished ${Math.abs(actual.endShift)}d ${actual.endShift > 0 ? 'late' : 'early'}`
+        : null,
+    ].filter(Boolean).join(', ');
+    return `Actual: ${dates}${moved ? ` — ${moved}` : ''}`;
+  }
+
   function renderBaseline(layout, settings) {
     dom.overlay
       .querySelectorAll('.tl-baseline, .tl-shift, .tl-baseline-gone, .tl-baseline-reason')
@@ -12124,7 +12469,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
           width: `${ghost.w}px`,
           height: `${ghost.h}px`,
         },
-        title: `${baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration)}\n${
+        title: `${baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration, ghost.actual)}\n${
           reason ? `Reason: ${reason.text}\nClick to edit it.` : 'Click to write the reason for this change.'
         }`,
       });
@@ -12139,13 +12484,16 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
         fragment.appendChild(reasonNote(rect.obj, reason, tone));
       }
 
-      // The arrow runs between the two finish edges, which is the movement the
-      // reader cares about. A reshape (same finish, different start) gets the
-      // start edges instead, or there would be nothing to draw. It rides the
-      // ghost's own centre line, so a stacked ghost still points at its bar.
+      /* The arrow runs between the two finish edges, which is the movement the
+         reader cares about. A reshape (same finish, different start) gets the
+         start edges instead, or there would be nothing to draw. It rides the
+         ghost's own centre line, so a stacked ghost still points at its bar.
+         Where it lands was decided in layout: the scheduled edge while nothing
+         has been recorded, the actual one once something has, so an arrow saying
+         "+7d" ends at the bar the +7 was measured to. */
       const shift = tone === 'reshaped' ? startShift : endShift;
       const fromX = tone === 'reshaped' ? ghost.x : ghost.x + ghost.w;
-      const toX = tone === 'reshaped' ? rect.x : rect.right;
+      const toX = tone === 'reshaped' ? ghost.toStart : ghost.toEnd;
       if (shift) {
         fragment.appendChild(shiftArrow(fromX, toX, ghost.y + ghost.h / 2, shift, tone));
       }
@@ -12253,15 +12601,29 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     ]);
   }
 
-  function baselineTitle(obj, snap, startShift, endShift, hasDuration) {
+  /**
+   * What the ghost is saying, in words.
+   *
+   * The tense follows what the comparison measured. Against recorded dates it is
+   * a fact — "started 7d late" — and against the schedule it is still a forecast
+   * — "starts 7d later". The same number means different things and a tooltip
+   * that ran the two together is one nobody can act on.
+   */
+  function baselineTitle(obj, snap, startShift, endShift, hasDuration, actual = false) {
     const was = hasDuration
       ? `${fmtDate(snap.start, 'medium')} → ${fmtDate(snap.end ?? snap.start, 'medium')}`
       : fmtDate(snap.start, 'medium');
+    const started = actual ? 'started' : 'starts';
+    const finished = actual ? 'finished' : 'finishes';
+    const late = actual ? 'late' : 'later';
+    const early = actual ? 'early' : 'earlier';
     const moved = [
-      startShift ? `starts ${Math.abs(startShift)}d ${startShift > 0 ? 'later' : 'earlier'}` : null,
-      hasDuration && endShift ? `finishes ${Math.abs(endShift)}d ${endShift > 0 ? 'later' : 'earlier'}` : null,
+      startShift ? `${started} ${Math.abs(startShift)}d ${startShift > 0 ? late : early}` : null,
+      hasDuration && endShift
+        ? `${finished} ${Math.abs(endShift)}d ${endShift > 0 ? late : early}`
+        : null,
     ].filter(Boolean).join(', ');
-    return `Baseline: ${was}${moved ? ` — now ${moved}` : ''}`;
+    return `Baseline: ${was}${moved ? ` — ${actual ? 'actually ' : 'now '}${moved}` : ''}`;
   }
 
   /* ── Connectors ────────────────────────────────────────────────────────── */
@@ -20724,13 +21086,21 @@ __mods["ui/dialogs.js"] = function (__x, __req) {
       );
     }
 
-    if (has('actualStart')) {
+    // A point object has no finish to record, so it gets one field and the word
+    // for it — "Actual finish" against a milestone is a question with no answer.
+    if (has('actualStart') && has('actualEnd')) {
       extra.push(
         el('div', { class: 'cx-row' }, [
           field('Actual start', textInput({ type: 'date', value: data.actualStart || '', onChange: (v) => setData('actualStart', v, 'Set actual start') })),
           field('Actual finish', textInput({ type: 'date', value: data.actualEnd || '', onChange: (v) => setData('actualEnd', v, 'Set actual finish') })),
         ])
       );
+    } else if (has('actualStart')) {
+      extra.push(field('Actual date', textInput({
+        type: 'date',
+        value: data.actualStart || '',
+        onChange: (v) => setData('actualStart', v, 'Set actual date'),
+      })));
     }
 
     if (has('severity')) {
@@ -20903,7 +21273,10 @@ __mods["io/scene.js"] = function (__x, __req) {
 
   const { clamp, withAlpha, readableInk } = __req("core/util.js");
   const { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } = __req("core/dates.js");
-  const { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot, delayReason, visibleNote } = __req("core/model.js");
+  const { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange } = __req("core/model.js");
+
+
+
   const { criticalPath, linkViolations } = __req("core/analysis.js");
   const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
 
@@ -20923,6 +21296,8 @@ __mods["io/scene.js"] = function (__x, __req) {
     outsideGap: 5,
     outsideMaxW: 210,
     minInsideW: 44,
+    actualH: 4,
+    actualGap: 2,
     ghostH: 7,
     ghostGap: 2,
     goneH: 12,
@@ -21167,6 +21542,10 @@ __mods["io/scene.js"] = function (__x, __req) {
           ? exportGhost(obj, comparison.byId.get(obj.id), barWidth, msToX, pxPerDay, comparison.baseline.id)
           : null;
         const note = opts.showNotes === false ? null : exportNote(obj, barWidth, hasDuration);
+        /* What actually happened, where it differs from the plan. Measured with
+           everything else and drawn whether or not the export is comparing: it is
+           the object's own dates, not another snapshot's claim about them. */
+        const actual = exportActual(obj, barWidth, msToX, pxPerDay);
         const height = hasDuration
           ? Math.max(M.rowH, label.height + 5)
           : Math.max(M.rowH, M.pointR * 2 + label.extraVert);
@@ -21176,7 +21555,11 @@ __mods["io/scene.js"] = function (__x, __req) {
           barWidth,
           ghost,
           note,
-          height: height + (note ? note.height + M.noteGap : 0) + exportGhostTier(ghost),
+          actual,
+          height: height
+            + (actual ? M.actualH + M.actualGap : 0)
+            + (note ? note.height + M.noteGap : 0)
+            + exportGhostTier(ghost),
         };
       });
 
@@ -21348,8 +21731,14 @@ __mods["io/scene.js"] = function (__x, __req) {
           settings: { ...doc.settings, showProgress: opts.showProgress !== false && doc.settings.showProgress },
         });
         if (rect) {
-          // The note goes in the band reserved under the object, and the ghost —
-          // which stacks under that — is told where the floor now is.
+          /* The band under the object, in the order the canvas uses: what
+             actually happened, then the note, then a ghost that had to stack.
+             Each floor advances `rect.bottom`, so the next one down is told where
+             the floor now is — the same arithmetic the screen does with tiers. */
+          if (item.actual) {
+            drawActual(items, item.actual, rect, palette);
+            rect.bottom += M.actualH + M.actualGap;
+          }
           if (item.note) {
             const noteTop = rect.bottom + M.noteGap;
             items.push({ type: 'rect', x: rect.x, y: noteTop, w: 1.2, h: item.note.height, fill: palette.textSubtle });
@@ -21621,6 +22010,12 @@ __mods["io/scene.js"] = function (__x, __req) {
         from = Math.min(from, item.ghost.from);
         to = Math.max(to, item.ghost.to);
       }
+      // A recorded actual span reaches wherever the work actually ran, and
+      // carries a day badge over the edge that moved.
+      if (item.actual) {
+        from = Math.min(from, item.actual.from);
+        to = Math.max(to, item.actual.to);
+      }
       if (item.note) {
         to = Math.max(to, (hasDuration ? startX : startX - M.pointR) + item.note.width + M.notePadX * 2);
       }
@@ -21665,6 +22060,103 @@ __mods["io/scene.js"] = function (__x, __req) {
   }
 
   /**
+   * An object's recorded actual span in an exported drawing, measured the way the
+   * canvas measures it — a slim solid bar on its own floor directly under the
+   * scheduled one, wherever a recorded date differs from the plan.
+   *
+   * Null when nothing was recorded, when it matched the plan exactly, or for a
+   * band or container: those are lane-tall backdrops with no "under the bar" to
+   * hang anything in.
+   */
+  function exportActual(obj, barWidth, msToX, pxPerDay) {
+    const def = TYPES[obj.type] || TYPES.activity;
+    const hasDuration = !!def.duration;
+    if (def.shape === 'band' || def.shape === 'container') return null;
+
+    const range = actualRange(obj);
+    if (!range) return null;
+
+    const startShift = Math.round((range.start - obj.start) / MS_DAY);
+    const endShift = hasDuration ? Math.round((range.end - obj.end) / MS_DAY) : startShift;
+    if (!startShift && !endShift) return null;
+
+    const x = hasDuration ? msToX(range.start) : msToX(range.start) - M.pointR;
+    const w = hasDuration
+      ? Math.max(3, ((range.end - range.start) / MS_DAY) * pxPerDay)
+      : M.pointR * 2;
+    const barLeft = hasDuration ? msToX(obj.start) : msToX(obj.start) - M.pointR;
+    const barRight = barLeft + (hasDuration ? barWidth : M.pointR * 2);
+
+    const atFinish = hasDuration && endShift !== 0;
+    const fromX = atFinish ? barRight : barLeft;
+    const toX = atFinish ? x + w : x;
+    const mid = (fromX + toX) / 2;
+
+    return {
+      startShift,
+      endShift,
+      atFinish,
+      hasEnd: range.hasEnd,
+      x,
+      w,
+      from: Math.min(x, mid - M.shiftBadgeW / 2),
+      to: Math.max(x + w, mid + M.shiftBadgeW / 2),
+    };
+  }
+
+  /**
+   * Draw one, with the arrow between the scheduled edge and the one actually hit.
+   *
+   * Solid rather than striped, for the reason the canvas draws it solid: a ghost
+   * is a claim another snapshot makes about this bar, and this is the bar.
+   */
+  function drawActual(items, actual, rect, palette) {
+    const shift = actual.atFinish ? actual.endShift : actual.startShift;
+    const ink = shift > 0 ? palette.bad : shift < 0 ? palette.good : palette.warn;
+    const y = rect.bottom + M.actualGap;
+
+    items.push({
+      type: 'rect',
+      x: actual.x,
+      y,
+      w: Math.max(actual.w, 1.5),
+      h: M.actualH,
+      radius: 1.5,
+      // A finish nobody has recorded yet is drawn hollow: "started, not
+      // finished" is a different state from "finished on the day it was planned
+      // to", and a solid bar would read as the second.
+      fill: actual.hasEnd ? ink : withAlpha(ink, 0.25),
+      stroke: ink,
+      strokeWidth: 0.6,
+    });
+
+    if (!shift) return;
+    const fromX = actual.atFinish ? rect.right : rect.x;
+    const toX = actual.atFinish ? actual.x + actual.w : actual.x;
+    const midY = y + M.actualH / 2;
+    if (Math.abs(toX - fromX) > 1) {
+      const dir = toX >= fromX ? 1 : -1;
+      items.push({ type: 'line', x1: fromX, y1: midY, x2: toX, y2: midY, stroke: ink, strokeWidth: 1.1 });
+      items.push({
+        type: 'polygon',
+        points: [[toX, midY], [toX - 4 * dir, midY - 2.6], [toX - 4 * dir, midY + 2.6]],
+        fill: ink,
+      });
+    }
+    items.push({
+      type: 'text',
+      x: (fromX + toX) / 2,
+      y: midY - 3,
+      text: `${shift > 0 ? '+' : '\u2212'}${Math.abs(shift)}d`,
+      size: 6,
+      weight: 700,
+      fill: ink,
+      anchor: 'middle',
+      family: 'mono',
+    });
+  }
+
+  /**
    * An object's ghost in an exported drawing, measured the way the canvas
    * measures it: behind the bar while the two cover different dates, in a tier of
    * its own below the bar the moment they do not. Printed at whatever density the
@@ -21676,18 +22168,25 @@ __mods["io/scene.js"] = function (__x, __req) {
     const hasDuration = !!def.duration;
 
     const snapEnd = hasDuration ? (snap.end ?? snap.start) : snap.start;
-    const startShift = Math.round((obj.start - snap.start) / MS_DAY);
-    const endShift = hasDuration ? Math.round((obj.end - snapEnd) / MS_DAY) : startShift;
+    // Against what actually happened where anybody recorded it, and against the
+    // schedule where nobody did — the same reading the canvas and the variance
+    // pane make, from the same function.
+    const now = comparedRange(obj);
+    const startShift = Math.round((now.start - snap.start) / MS_DAY);
+    const endShift = hasDuration ? Math.round((now.end - snapEnd) / MS_DAY) : startShift;
     if (!startShift && !endShift) return null;
 
     const x = hasDuration ? msToX(snap.start) : msToX(snap.start) - M.pointR;
     const w = hasDuration ? Math.max(3, ((snapEnd - snap.start) / MS_DAY) * pxPerDay) : M.pointR * 2;
     const barLeft = hasDuration ? msToX(obj.start) : msToX(obj.start) - M.pointR;
     const barRight = barLeft + (hasDuration ? barWidth : M.pointR * 2);
+    // Where the arrow lands: the actual edges once something has been recorded.
+    const toStart = hasDuration ? msToX(now.start) : msToX(now.start) - M.pointR;
+    const toEnd = hasDuration ? msToX(now.end) : toStart + M.pointR * 2;
 
     const reshaped = endShift === 0;
     const fromX = reshaped ? x : x + w;
-    const toX = reshaped ? barLeft : barRight;
+    const toX = reshaped ? toStart : toEnd;
     const mid = (fromX + toX) / 2;
     const canStack = hasDuration && def.shape !== 'band' && def.shape !== 'container';
     const stacked = canStack && x < barRight + M.ghostGap && x + w > barLeft - M.ghostGap;
@@ -21699,6 +22198,8 @@ __mods["io/scene.js"] = function (__x, __req) {
       snap,
       startShift,
       endShift,
+      toStart,
+      toEnd,
       x,
       w,
       stacked,
@@ -21836,7 +22337,7 @@ __mods["io/scene.js"] = function (__x, __req) {
       // ghost's own centre line, so a stacked ghost still points at its bar.
       const reshaped = endShift === 0;
       const fromX = reshaped ? gx : gx + gw;
-      const toX = reshaped ? rect.x : rect.right;
+      const toX = reshaped ? ghost.toStart : ghost.toEnd;
       const shift = reshaped ? startShift : endShift;
       const y = gy + gh / 2;
       if (Math.abs(toX - fromX) > 1) {
@@ -22758,7 +23259,10 @@ __mods["io/exporters.js"] = function (__x, __req) {
 
   const { download, slug, stripHtml, bytes } = __req("core/util.js");
   const { toISO, fmtDate } = __req("core/dates.js");
-  const { TYPES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES } = __req("core/model.js");
+  const { TYPES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES, comparedRange } = __req("core/model.js");
+
+
+
   const { getDoc, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
   const { filterPredicate } = __req("core/query.js");
   const { compareBaseline, criticalPath } = __req("core/analysis.js");
@@ -22907,8 +23411,18 @@ __mods["io/exporters.js"] = function (__x, __req) {
     }
     const { rows: variance } = compareBaseline(doc, baseline);
     const laneNames = new Map(doc.lanes.map((l) => [l.id, l.name]));
-    const rows = [['title', 'lane', 'change', 'baseline_start', 'baseline_finish', 'current_start', 'current_finish', 'start_shift_days', 'finish_shift_days', 'duration_change_days', 'reason']];
+    /* `compared_*` is what the shift columns were measured against, and
+       `measured_against` says which it is. The two used to be one pair of columns
+       headed "current", which was true while the comparison only ever read the
+       schedule and became a quiet lie the moment it started preferring recorded
+       dates: a reader could not tell a slip that had happened from one that is
+       still only forecast, and those are different conversations. The scheduled
+       dates stay, because a variance report that dropped the plan could not be
+       reconciled against the plan. */
+    const rows = [['title', 'lane', 'change', 'baseline_start', 'baseline_finish', 'scheduled_start', 'scheduled_finish', 'actual_start', 'actual_finish', 'compared_start', 'compared_finish', 'measured_against', 'start_shift_days', 'finish_shift_days', 'duration_change_days', 'reason']];
     for (const row of variance) {
+      const hasDuration = row.current ? !!TYPES[row.current.type]?.duration : false;
+      const compared = row.current ? comparedRange(row.current) : null;
       rows.push([
         row.title,
         laneNames.get(row.current?.lane) || '',
@@ -22916,7 +23430,12 @@ __mods["io/exporters.js"] = function (__x, __req) {
         row.baseline ? toISO(row.baseline.start) : '',
         row.baseline?.end ? toISO(row.baseline.end) : '',
         row.current ? toISO(row.current.start) : '',
-        row.current && TYPES[row.current.type]?.duration ? toISO(row.current.end) : '',
+        row.current && hasDuration ? toISO(row.current.end) : '',
+        row.current?.data?.actualStart || '',
+        row.current && hasDuration ? (row.current.data?.actualEnd || '') : '',
+        compared ? toISO(compared.start) : '',
+        compared && hasDuration ? toISO(compared.end) : '',
+        row.actual ? 'actual' : 'scheduled',
         row.startShift,
         row.endShift,
         row.durationChange,
@@ -23920,9 +24439,22 @@ __mods["ui/panels.js"] = function (__x, __req) {
       );
     }
     root.appendChild(section(`Variance (${rows.length})`, [varianceList]));
-    root.appendChild(el('div', { class: 'cx-hint', text: 'Click the striped baseline area on the timeline to write why something moved.' }));
+    root.appendChild(el('div', {
+      class: 'cx-hint',
+      text: 'Click the striped baseline area on the timeline to write why something moved. A row '
+        + 'marked "actual" was measured against the dates somebody recorded rather than against the '
+        + 'schedule — it has happened, rather than being forecast to.',
+    }));
   }
 
+  /**
+   * One variance row, in words.
+   *
+   * It says whether the numbers were measured against recorded dates or against
+   * the schedule, because the same "+7d" means two different things: one has
+   * happened and one is a forecast, and a review that reads them alike acts on
+   * the wrong half of the list.
+   */
   function varianceText(row) {
     if (row.change === 'added') return 'Added since baseline';
     if (row.change === 'removed') return 'Removed since baseline';
@@ -23930,7 +24462,8 @@ __mods["ui/panels.js"] = function (__x, __req) {
     if (row.startShift) parts.push(`start ${row.startShift > 0 ? '+' : ''}${row.startShift}d`);
     if (row.endShift) parts.push(`finish ${row.endShift > 0 ? '+' : ''}${row.endShift}d`);
     if (row.durationChange) parts.push(`duration ${row.durationChange > 0 ? '+' : ''}${row.durationChange}d`);
-    return parts.join(' · ') || 'Reshaped';
+    const said = parts.join(' · ') || 'Reshaped';
+    return row.actual ? `${said} · actual` : said;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -26576,7 +27109,13 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       })));
     }
 
-    if (has('actualStart') || has('actualEnd')) {
+    /* What actually happened, beside what was planned.
+       A point object has no finish to record, so it gets one field and the word
+       for it — "Actual finish" against a milestone is a question with no answer.
+       Either date on its own is a normal state: work starts before it ends, so a
+       bar in progress has a start and nothing else, and the drawing says exactly
+       that. */
+    if (has('actualStart') && has('actualEnd')) {
       out.push(
         el('div', { class: 'cx-row' }, [
           field('Actual start', textInput({
@@ -26591,6 +27130,18 @@ __mods["ui/inspector.js"] = function (__x, __req) {
           })),
         ])
       );
+      out.push(el('p', {
+        class: 'cx-hint',
+        text: 'Recorded dates are drawn under the bar wherever they differ from the plan, and a '
+          + 'baseline is compared against them rather than against the schedule.',
+      }));
+    } else if (has('actualStart')) {
+      out.push(field('Actual date', textInput({
+        type: 'date',
+        value: data.actualStart ? toISO(toMs(data.actualStart)) : '',
+        onChange: (v) => setData('actualStart', v, 'Set actual date'),
+      }), 'When it actually happened. Drawn under the marker where it differs from the plan, and '
+        + 'what a baseline is compared against.'));
     }
 
     if (has('severity')) {

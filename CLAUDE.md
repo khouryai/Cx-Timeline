@@ -167,6 +167,41 @@ subscribes. That is what keeps the graph acyclic.
   a banner naming the baseline. `io/scene.js` draws the same, so an exported
   PDF is the drawing on screen. All of it but the reason is derived per frame
   from the snapshot — there is no comparison state to go stale.
+- **What actually happened is drawn, and it is what a baseline is compared
+  against.** `data.actualStart` and `data.actualEnd` were on the model, in the
+  inspector and in the CSV for as long as the type registry has had fields for
+  them, and *nothing drew them and nothing compared against them* — so a
+  campaign that started a fortnight late looked exactly like one that started on
+  time, and the two dates a commissioning manager cares about most were the two
+  nothing on the canvas knew. Every type that does work now carries them; a
+  point object carries `actualStart` alone, because "actual finish" against a
+  milestone is a question with no answer.
+  Read them with `actualRange(obj)`, which answers the recorded dates or null —
+  a missing finish falls back to the scheduled one, because work starts before
+  it ends and "it began on the 4th and is still due on the 20th" is the honest
+  reading of a bar in progress. Null when *neither* is set, because "nothing
+  reported" and "reported, and it matched the plan" are different facts and only
+  the second is worth drawing.
+  **`comparedRange(obj)` is where every comparison starts**: the actual dates
+  where they exist, the scheduled ones where they do not. `compareBaseline()`,
+  `measureGhost()`, the renderer, the variance CSV and `io/scene.js` all read
+  it, so the arrow on the canvas and the number in the pane are the same number.
+  A baseline asks about delivery — "we planned to finish on the 4th and we did
+  finish on the 11th" — and comparing against a scheduled finish the work has
+  already overrun reports the plan's own optimism as though it were a fact.
+  Which of the two answered is carried as `actual` and *said*: the pane tags the
+  row, the tooltip switches tense ("finished 7d late" against "finishes 7d
+  later"), and the CSV carries `measured_against` beside both pairs of dates. The
+  same number means a fact or a forecast, and a review that reads them alike
+  acts on the wrong half of the list.
+  It is drawn as a slim solid bar on its **own floor directly under the
+  scheduled one** — measured by `measureActual()`, packed like everything else,
+  never placed from `data.actualStart` at paint time. Below rather than behind,
+  because the two nearly always overlap and two bars sharing a height at nearly
+  the same dates is a smear rather than a comparison; solid rather than striped,
+  because a ghost is another snapshot's claim about this bar and this is the bar.
+  A finish nobody has reported fades out instead of ending square, or "started,
+  not finished" would read as "finished exactly on time".
 - **A note written on an object is shown on the timeline.** Writing one *is*
   the request to see it: `data.showNotes` is only ever `false`, set by the
   switch in the inspector's Notes section, and `settings.showNotes` hides the
@@ -175,9 +210,12 @@ subscribes. That is what keeps the graph acyclic.
   its object, drawn whole over as many lines as it takes, and printed by
   `io/scene.js`. It is never shortened: a note too long for its row is a note
   to switch off, which is what the switch is for. It shares the band below the
-  row with the comparison, in a fixed order set by `bottomTier()` — the note
-  first, then a stacked ghost, then the reason on that ghost — so each object
-  knows which floor it is standing on.
+  row with the comparison, in a fixed order set by `bottomTier()` — what
+  actually happened first, then the note, then a stacked ghost, then the reason
+  on that ghost — so each object knows which floor it is standing on. The actual
+  span comes first because it is the same object's own dates and the pair has to
+  read as one thing that was planned there and happened here; everything under
+  it is commentary, and commentary belongs further from the bar than the fact.
 - **The reason a bar moved is the one part of a comparison that is stored.**
   Everything else about a baseline is derived; why it slipped cannot be, so it
   lives on the object in `data.delayReasons`, keyed by baseline id — a plan is
@@ -203,10 +241,11 @@ subscribes. That is what keeps the graph acyclic.
   share a height, so it drops to a slim tier along the bottom of the row
   (`rect.ghost.stacked`) and the row grows. That test is in pixels, so zooming
   out until a gap closes splits them and zooming back in re-joins them. The
-  renderer and `io/scene.js` only draw what they are handed — `rect.ghost` and
-  `layout.removed` — and neither works out a position of its own. Never place a
-  comparison rectangle from the snapshot at paint time: it will be the one
-  thing on the canvas nothing else knows is there.
+  renderer and `io/scene.js` only draw what they are handed — `rect.ghost`,
+  `rect.actual` and `layout.removed` — and none of them works out a position of
+  its own. Never place a comparison rectangle from the snapshot, or an actual
+  span from `data.actualStart`, at paint time: it will be the one thing on the
+  canvas nothing else knows is there.
 - **A P6 baseline is derived; a taken baseline is frozen.** Both live in
   `doc.baselines`, but a P6 one carries `source: 'p6'` and **no rows** — the
   comparison has to follow whatever is linked right now, so
@@ -1362,7 +1401,7 @@ node tools/test_dist.js              #  41 checks — every deployment shape, an
 node tools/test_lookahead.js         # 145 checks — the parser, the rows it derives, the
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
-node tools/smoke.js                  # 264 checks — the application, local mode
+node tools/smoke.js                  # 273 checks — the application, local mode
 node tools/smoke_calendar.js         # 307 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
@@ -1378,8 +1417,9 @@ node tools/smoke.js --shot out.png   # …and eyeball the result
 `smoke.js` boots the real application in Chromium and checks rendering,
 selection, typing into panel fields without losing focus, snapping, undo/redo,
 zoom, the dropdown vocabularies, filter dim/hide, the predecessor highlight and
-its one-shot flash, several dependencies between one pair of bars, baseline
-comparison — down to measuring, at five zooms, that no ghost, and no reason
+its one-shot flash, several dependencies between one pair of bars, the span a
+bar was actually worked over and the arrow measuring how far its edges moved,
+baseline comparison — down to measuring, at five zooms, that no ghost, and no reason
 written on one, is drawn over a bar or over another ghost — all seventeen dock panes,
 all five themes, every exporter (including PDF header validation) and reload
 persistence. **Any console error fails the run.**

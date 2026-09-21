@@ -1025,6 +1025,76 @@ async function main() {
   await filterText.fill('');
   await page.waitForTimeout(600);
 
+  /* ── What actually happened ─────────────────────────────────────────────
+     `data.actualStart` and `data.actualEnd` were on the model and in the CSV
+     for as long as the inspector has had fields for them, and nothing ever
+     drew them: a campaign that started a fortnight late looked exactly like one
+     that started on time. The starter plan reports on two activities — one
+     started late and still running, one that overran — so both halves of the
+     drawing have something to be. */
+  console.log('\nWhat actually happened');
+  await page.keyboard.press('Control+0');
+  await page.waitForTimeout(700);
+
+  /* The starter plan reports on two activities, but the sections above have
+     dragged and retyped their way across the canvas, so the size of any one
+     gap is no longer something to assert. What is recorded here is recorded
+     now, through the inspector, against the dates the bar actually has —
+     which is also the round trip a reader takes to put a date in. */
+  const wayside = page.locator('.tl-obj[data-label^="Wayside Retrofit Alpha"]').first();
+  await wayside.click();
+  await page.waitForTimeout(400);
+  const finishBox = page.locator('#inspector .cx-field', { has: page.locator('.cx-label', { hasText: /^Finish$/ }) })
+    .locator('input[type="date"]').first();
+  const scheduledFinish = await finishBox.inputValue();
+  const overran = new Date(`${scheduledFinish}T00:00:00Z`);
+  overran.setUTCDate(overran.getUTCDate() + 7);
+  const actualFinishBox = page.locator('#inspector .cx-field', { has: page.locator('.cx-label', { hasText: /^Actual finish$/ }) })
+    .locator('input[type="date"]').first();
+  check('the inspector offers a place to record what happened',
+    (await actualFinishBox.count()) === 1);
+  await actualFinishBox.fill(overran.toISOString().slice(0, 10));
+  await actualFinishBox.evaluate((n) => n.blur());
+  await page.waitForTimeout(700);
+
+  const actualState = () => page.evaluate(() => ({
+    bars: document.querySelectorAll('.tl-actual').length,
+    open: document.querySelectorAll('.tl-actual.open').length,
+    late: document.querySelectorAll('.tl-actual.late').length,
+    arrows: document.querySelectorAll('.tl-actual-shift').length,
+    days: [...document.querySelectorAll('.tl-actual-shift .sh-days')].map((n) => n.textContent),
+    titles: [...document.querySelectorAll('.tl-actual')].map((n) => n.getAttribute('title')),
+  }));
+  const actuals = await actualState();
+  check('a recorded date is drawn under the bar it belongs to',
+    actuals.bars >= 2, `${actuals.bars} actual bar(s)`);
+  check('and an arrow measures how far the edge moved',
+    actuals.arrows >= 2 && actuals.days.every((d) => /^[+\u2212]\d+d$/.test(d)),
+    actuals.days.join(' '));
+  /* "Started, not finished" is a different state from "finished on the day it
+     was planned to", and a bar drawn the same way would read as the second. */
+  check('a finish nobody has reported is drawn as unfinished',
+    actuals.open >= 1 && actuals.titles.some((t) => /not finished/.test(t || '')),
+    actuals.titles.join(' | ').slice(0, 140));
+  check('and an overrun is drawn as late',
+    actuals.late >= 1 && actuals.titles.some((t) => /finished 7d late/.test(t || '')),
+    actuals.titles.join(' | ').slice(0, 140));
+
+  /* It is the object's own dates, so it must be packed rather than painted
+     over: a bar that overran must not have its actual span printed across
+     whatever sits under it. The rule the ghosts follow, for the same reason. */
+  const actualOverlap = await page.evaluate(() => {
+    const box = (n) => { const r = n.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom }; };
+    const bars = [...document.querySelectorAll('.tl-obj')].map(box);
+    const over = (a, b) => a.l < b.r - 1 && a.r > b.l + 1 && a.t < b.b - 1 && a.b > b.t + 1;
+    let hits = 0;
+    for (const actual of [...document.querySelectorAll('.tl-actual')].map(box)) {
+      for (const bar of bars) if (over(actual, bar)) hits++;
+    }
+    return hits;
+  });
+  check('and it is packed, never printed over a bar', actualOverlap === 0, `${actualOverlap} overlap(s)`);
+
   console.log('\nBaseline comparison');
   // A baseline is only worth having if the difference is visible, so this
   // checks the drawing, not just that the data compared.
@@ -1046,7 +1116,25 @@ async function main() {
     days: [...document.querySelectorAll('.tl-shift .sh-days')].map((n) => n.textContent),
   }));
 
-  check('nothing is drawn while the plan matches its baseline', (await baselineState()).ghosts === 0);
+  /* A baseline freezes the schedule, so nothing is drawn against a bar that
+     has only a schedule. The bars that *reported* are the exception, and they
+     are the point: a baseline is compared against what happened where anybody
+     said what happened, so those show a difference the moment the baseline is
+     taken rather than at the next time somebody drags something. */
+  const fresh = await page.evaluate(() => {
+    const ghosted = new Set([...document.querySelectorAll('.tl-baseline')]
+      .map((n) => n.getAttribute('data-reason-for')));
+    const reported = new Set([...document.querySelectorAll('.tl-actual')]
+      .map((n) => n.getAttribute('data-obj-id')));
+    return {
+      ghosts: ghosted.size,
+      reported: reported.size,
+      onlyReported: [...ghosted].every((id) => reported.has(id)),
+    };
+  });
+  check('only what was reported differs from a baseline just taken',
+    fresh.ghosts > 0 && fresh.onlyReported && fresh.ghosts === fresh.reported,
+    `${fresh.ghosts} ghost(s) against ${fresh.reported} reported bar(s)`);
 
   // Move one bar later and another earlier, then delete a third. Earlier
   // sections rename bars, so these are picked by position rather than by
@@ -1083,6 +1171,30 @@ async function main() {
   check('objects removed since the baseline still appear', moved.gone >= 1, `${moved.gone}`);
   check('the banner names the baseline and counts the changes',
     /baseline/i.test(moved.banner) && /slipped/i.test(moved.banner), moved.banner.replace(/\n/g, ' '));
+
+  /* ── And it is measured against what happened, not against the plan ──────
+     A baseline asks about delivery. "We planned to finish on the 4th and we
+     did finish on the 11th" is the answer; comparing against a scheduled
+     finish the work has already overrun reports the plan's own optimism as
+     though it were a fact. The starter plan reports an overrun on one
+     activity, so the comparison has a recorded date to prefer — and its
+     tooltip says so in the past tense, because a fact and a forecast carrying
+     the same number is how a review acts on the wrong half of the list. */
+  const againstActual = await page.evaluate(() => {
+    const said = [...document.querySelectorAll('.tl-baseline')].map((n) => n.getAttribute('title') || '');
+    return {
+      any: said.some((t) => /actually /.test(t)),
+      tense: said.some((t) => /finished \d+d (late|early)/.test(t)),
+      forecast: said.some((t) => /finishes \d+d (later|earlier)/.test(t)),
+    };
+  });
+  check('a comparison prefers a recorded date to the schedule',
+    againstActual.any && againstActual.tense, JSON.stringify(againstActual));
+  check('and still speaks of a bar nobody reported on as a forecast',
+    againstActual.forecast, JSON.stringify(againstActual));
+  check('the variance pane says which rows were measured against what',
+    /actual/.test(await page.locator('#dock').innerText()),
+    (await page.locator('#dock').innerText()).split('\n').find((l) => /actual/.test(l)) || '');
 
   // A ghost is a rectangle on the canvas like any other, so it is packed like
   // one: it may not land on a bar, and two of them may not land on each other.

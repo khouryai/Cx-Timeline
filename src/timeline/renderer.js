@@ -162,6 +162,7 @@ export function renderNow() {
   renderLaneRows(layout);
   renderObjects(layout, settings, upstream);
   renderNotes(layout);
+  renderActuals(layout);
   renderBaseline(layout, settings);
   renderLinks(doc, layout, settings, upstream);
   renderToday(doc, settings, layout);
@@ -1013,6 +1014,102 @@ function renderNotes(layout) {
   dom.overlay.appendChild(fragment);
 }
 
+/**
+ * What actually happened, under what was planned.
+ *
+ * Drawn whenever somebody has recorded a date that differs from the plan, and
+ * with no baseline involved: these are the object's *own* dates, and it is a
+ * different question from how the plan compares to a frozen copy of itself.
+ * They were on the model and in the CSV for as long as the inspector has had
+ * fields for them, and nothing ever drew them — so a campaign that started a
+ * fortnight late looked exactly like one that started on time.
+ *
+ * Everything here was measured and packed by `computeLayout`, so nothing below
+ * has to ask whether it fits: `rect.actual` is a slim bar on its own floor
+ * directly under the scheduled one, with the arrow running between the two
+ * edges that moved. Nothing is placed from `data.actualStart` at paint time —
+ * that would be the one thing on the canvas nothing else knows is there.
+ */
+function renderActuals(layout) {
+  dom.overlay.querySelectorAll('.tl-actual, .tl-actual-shift').forEach((n) => n.remove());
+
+  const fragment = document.createDocumentFragment();
+  for (const rect of layout.rects) {
+    const actual = rect.actual;
+    if (!actual) continue;
+
+    // Late is the case a review is about, so it is the one that gets the
+    // warning colour; finishing early is good news and says so.
+    const shift = actual.atFinish ? actual.endShift : actual.startShift;
+    const tone = shift > 0 ? 'late' : shift < 0 ? 'early' : 'shifted';
+
+    fragment.appendChild(el('div', {
+      class: `tl-actual ${tone}${actual.hasEnd ? '' : ' open'}`,
+      dataset: { objId: rect.obj.id },
+      style: {
+        left: `${actual.x}px`,
+        top: `${actual.y}px`,
+        width: `${Math.max(actual.w, 2)}px`,
+        height: `${actual.h}px`,
+      },
+      title: actualTitle(rect.obj, actual, rect.hasDuration),
+    }));
+
+    /* The arrow runs from the scheduled edge to the one that was actually hit.
+       It rides the actual bar's own centre line, so the pair reads downwards
+       from the bar it belongs to. */
+    if (shift) {
+      const fromX = actual.atFinish ? rect.right : rect.x;
+      const toX = actual.atFinish ? actual.x + actual.w : actual.x;
+      fragment.appendChild(actualArrow(fromX, toX, actual.y + actual.h / 2, shift, tone));
+    }
+  }
+  dom.overlay.appendChild(fragment);
+}
+
+/**
+ * The same arrow the comparison draws, in its own class so the two can be
+ * styled apart. A shared one would have meant a `kind` argument threaded
+ * through every call for the sake of one word in a class name.
+ */
+function actualArrow(fromX, toX, y, days, tone) {
+  const left = Math.min(fromX, toX);
+  const width = Math.abs(toX - fromX);
+  const label = `${days > 0 ? '+' : '−'}${Math.abs(days)}d`;
+
+  return el('div', {
+    class: `tl-actual-shift ${tone} ${toX >= fromX ? 'right' : 'left'}`,
+    style: { left: `${left}px`, top: `${y}px`, width: `${Math.max(width, 1)}px` },
+  }, [
+    el('span', { class: 'sh-line' }),
+    el('span', { class: 'sh-head' }),
+    el('span', { class: 'sh-days', text: label }),
+  ]);
+}
+
+/**
+ * What the bar under a bar is saying, in words.
+ *
+ * It names the recorded dates and how far each edge moved, and it says when a
+ * finish has not been recorded yet — "started, not finished" is a different
+ * state from "finished on the day it was planned to", and a bar drawn without
+ * that sentence would read as the second.
+ */
+function actualTitle(obj, actual, hasDuration) {
+  const dates = hasDuration
+    ? `${fmtDate(actual.startMs, 'medium')} → ${actual.hasEnd ? fmtDate(actual.endMs, 'medium') : 'not finished'}`
+    : fmtDate(actual.startMs, 'medium');
+  const moved = [
+    actual.startShift
+      ? `started ${Math.abs(actual.startShift)}d ${actual.startShift > 0 ? 'late' : 'early'}`
+      : null,
+    hasDuration && actual.hasEnd && actual.endShift
+      ? `finished ${Math.abs(actual.endShift)}d ${actual.endShift > 0 ? 'late' : 'early'}`
+      : null,
+  ].filter(Boolean).join(', ');
+  return `Actual: ${dates}${moved ? ` — ${moved}` : ''}`;
+}
+
 function renderBaseline(layout, settings) {
   dom.overlay
     .querySelectorAll('.tl-baseline, .tl-shift, .tl-baseline-gone, .tl-baseline-reason')
@@ -1053,7 +1150,7 @@ function renderBaseline(layout, settings) {
         width: `${ghost.w}px`,
         height: `${ghost.h}px`,
       },
-      title: `${baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration)}\n${
+      title: `${baselineTitle(rect.obj, snap, startShift, endShift, rect.hasDuration, ghost.actual)}\n${
         reason ? `Reason: ${reason.text}\nClick to edit it.` : 'Click to write the reason for this change.'
       }`,
     });
@@ -1068,13 +1165,16 @@ function renderBaseline(layout, settings) {
       fragment.appendChild(reasonNote(rect.obj, reason, tone));
     }
 
-    // The arrow runs between the two finish edges, which is the movement the
-    // reader cares about. A reshape (same finish, different start) gets the
-    // start edges instead, or there would be nothing to draw. It rides the
-    // ghost's own centre line, so a stacked ghost still points at its bar.
+    /* The arrow runs between the two finish edges, which is the movement the
+       reader cares about. A reshape (same finish, different start) gets the
+       start edges instead, or there would be nothing to draw. It rides the
+       ghost's own centre line, so a stacked ghost still points at its bar.
+       Where it lands was decided in layout: the scheduled edge while nothing
+       has been recorded, the actual one once something has, so an arrow saying
+       "+7d" ends at the bar the +7 was measured to. */
     const shift = tone === 'reshaped' ? startShift : endShift;
     const fromX = tone === 'reshaped' ? ghost.x : ghost.x + ghost.w;
-    const toX = tone === 'reshaped' ? rect.x : rect.right;
+    const toX = tone === 'reshaped' ? ghost.toStart : ghost.toEnd;
     if (shift) {
       fragment.appendChild(shiftArrow(fromX, toX, ghost.y + ghost.h / 2, shift, tone));
     }
@@ -1182,15 +1282,29 @@ function shiftArrow(fromX, toX, y, days, tone) {
   ]);
 }
 
-function baselineTitle(obj, snap, startShift, endShift, hasDuration) {
+/**
+ * What the ghost is saying, in words.
+ *
+ * The tense follows what the comparison measured. Against recorded dates it is
+ * a fact — "started 7d late" — and against the schedule it is still a forecast
+ * — "starts 7d later". The same number means different things and a tooltip
+ * that ran the two together is one nobody can act on.
+ */
+function baselineTitle(obj, snap, startShift, endShift, hasDuration, actual = false) {
   const was = hasDuration
     ? `${fmtDate(snap.start, 'medium')} → ${fmtDate(snap.end ?? snap.start, 'medium')}`
     : fmtDate(snap.start, 'medium');
+  const started = actual ? 'started' : 'starts';
+  const finished = actual ? 'finished' : 'finishes';
+  const late = actual ? 'late' : 'later';
+  const early = actual ? 'early' : 'earlier';
   const moved = [
-    startShift ? `starts ${Math.abs(startShift)}d ${startShift > 0 ? 'later' : 'earlier'}` : null,
-    hasDuration && endShift ? `finishes ${Math.abs(endShift)}d ${endShift > 0 ? 'later' : 'earlier'}` : null,
+    startShift ? `${started} ${Math.abs(startShift)}d ${startShift > 0 ? late : early}` : null,
+    hasDuration && endShift
+      ? `${finished} ${Math.abs(endShift)}d ${endShift > 0 ? late : early}`
+      : null,
   ].filter(Boolean).join(', ');
-  return `Baseline: ${was}${moved ? ` — now ${moved}` : ''}`;
+  return `Baseline: ${was}${moved ? ` — ${actual ? 'actually ' : 'now '}${moved}` : ''}`;
 }
 
 /* ── Connectors ────────────────────────────────────────────────────────── */
