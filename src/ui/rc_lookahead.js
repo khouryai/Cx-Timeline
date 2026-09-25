@@ -26,11 +26,11 @@ import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
 import { saveFile } from '../io/exporters.js';
 import {
   keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
-  reassignments, ABSENCE_LABELS,
+  reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes,
 } from '../core/lookahead.js';
 import { icon } from './icons.js';
 import {
-  selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog,
+  selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat,
 } from './components.js';
 import {
   notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
@@ -44,7 +44,7 @@ const SAR_INBOX = 'sars/inbox';
 /** Where a recorded SAR is filed, under the week it authorised. */
 const SAR_ARCHIVE = 'sars';
 
-const SECTIONS = ['calendar', 'changes', 'snapshots', 'legend', 'sars'];
+const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'sars'];
 let section = 'calendar';
 
 /** Free text filter on the calendar, kept across a redraw of the section. */
@@ -102,7 +102,7 @@ export async function render(root) {
       class: 'rc-tab',
       type: 'button',
       text: {
-        calendar: 'Calendar', changes: 'Changes', snapshots: 'Snapshots',
+        calendar: 'Calendar', cancellations: 'Cancellations', changes: 'Changes', snapshots: 'Snapshots',
         legend: 'Legend', sars: 'Site access',
       }[id],
       'aria-pressed': String(id === section),
@@ -115,6 +115,7 @@ export async function render(root) {
   root.appendChild(host);
 
   if (section === 'calendar') await renderCalendar(host);
+  else if (section === 'cancellations') await renderCancellations(host);
   else if (section === 'changes') await renderChanges(host);
   else if (section === 'snapshots') await renderSnapshots(host);
   else if (section === 'legend') await renderLegend(host);
@@ -1788,6 +1789,212 @@ async function renderChanges(host) {
         + 'match on — so it is offered rather than assumed.',
     }));
   }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Cancellations
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Whose cancellation it can be. The contract's three answers, as the schema checks them. */
+const CANCEL_PARTIES = ['BART', 'Hitachi', 'Other'];
+const PARTY_TONE = { BART: 'warn', Hitachi: 'bad', Other: 'neutral' };
+
+/** The first day the log reaches back to, when somebody has changed it on screen. */
+let cancellationsFrom = null;
+let cancellationsUnansweredOnly = false;
+
+/**
+ * Every red run the look-ahead has shown, since the log's start, with whose it
+ * was and why.
+ *
+ * The events are derived — `rc_cancelled_days` reads the rows every ingest
+ * already wrote, and `cancellationEvents()` joins side-by-side days on one
+ * activity into one event — so a week cancelled on the sheet is one line here
+ * however many reads showed it, and a week that was red and later turned back
+ * is still here, because it was cancelled when those reads were taken. What is
+ * stored is only the judgement: a party (BART, Hitachi or Other) and a reason,
+ * append-only, corrected by superseding.
+ *
+ * This is the whole history rather than the Changes list's per-day
+ * transitions, which only catch a cell turning red *between* two reads — a
+ * cell already red the first time the sheet was read was never an event there.
+ */
+async function renderCancellations(host) {
+  const settings = await rc.listSettings().catch(() => []);
+  const configured = settings.find((x) => x.key === 'cancellation_log_from')?.value;
+  const from = cancellationsFrom || configured || `${new Date().getUTCFullYear()}-09-01`;
+
+  const [days, notes] = await Promise.all([
+    rc.listCancelledDays(from).catch((err) => { toast({ tone: 'bad', title: 'Could not read the cancellations', message: err.message }); return []; }),
+    rc.listCancellationNotes().catch(() => []),
+  ]);
+  const events = attachCancellationNotes(cancellationEvents(days, { from }), notes);
+
+  const fromInput = el('input', {
+    type: 'date', class: 'cx-input mini', value: from, 'aria-label': 'Log starts on', style: 'width:150px',
+  });
+  fromInput.addEventListener('change', () => {
+    if (!fromInput.value) return;
+    cancellationsFrom = fromInput.value;
+    notifyChanged('cancellations');
+  });
+
+  host.appendChild(el('div', { class: 'rc-section-head' }, [
+    el('h3', { text: 'Cancellation log' }),
+    el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end' }, [
+      el('span', { class: 'rc-hint', style: 'margin:0;white-space:nowrap', text: 'From' }),
+      fromInput,
+      events.length
+        ? el('button', {
+          class: 'cx-btn mini',
+          html: `${icon('download', { size: 12 })}<span>CSV</span>`,
+          onClick: () => saveFile(`cancellations-${todayISO()}.csv`, cancellationCsv(events), 'text/csv', 'Cancellation log'),
+        })
+        : null,
+      checkNowButton(),
+    ].filter(Boolean)),
+  ]));
+
+  host.appendChild(el('p', {
+    class: 'rc-hint',
+    text: 'Every run of red cells any read of the look-ahead has shown since '
+      + `${dayLabel(from)}. Cells side by side on one activity are one event. A cancellation `
+      + 'stays in the log after the sheet moves on — it was red when those reads were taken.',
+  }));
+
+  if (!events.length) {
+    host.appendChild(emptyState({
+      iconName: 'calendar',
+      title: 'No cancellations',
+      message: `No read of the look-ahead since ${dayLabel(from)} has a cell painted in the colour the Legend calls a cancellation.`,
+    }));
+    return;
+  }
+
+  const tally = { BART: 0, Hitachi: 0, Other: 0 };
+  let open = 0;
+  let dayCount = 0;
+  for (const e of events) {
+    dayCount += e.days;
+    if (e.note) tally[e.note.party] = (tally[e.note.party] || 0) + 1;
+    else open++;
+  }
+  host.appendChild(el('div', { class: 'cx-chipstats', style: 'margin:0 0 12px' }, [
+    chipStat('Events', events.length, 'info'),
+    chipStat('Days', dayCount, 'muted'),
+    ...CANCEL_PARTIES.map((p) => chipStat(p, tally[p], tally[p] ? PARTY_TONE[p] : 'muted')),
+    chipStat('No reason yet', open, open ? 'bad' : 'muted'),
+  ]));
+
+  host.appendChild(checkbox({
+    label: 'Only the ones with no reason yet',
+    checked: cancellationsUnansweredOnly,
+    onChange: (on) => { cancellationsUnansweredOnly = on; notifyChanged('cancellations'); },
+  }));
+
+  const shown = cancellationsUnansweredOnly ? events.filter((e) => !e.note) : events;
+  const rows = shown.map((e) => el('tr', { class: 'rc-cancel-row', dataset: { start: e.start, label: e.label } }, [
+    el('td', {}, [
+      el('div', { class: 'rc-cancel-cells', 'aria-hidden': 'true' },
+        [...Array(Math.min(e.days, 14))].map(() => el('span', { class: 'rc-cancel-cell' }))),
+    ]),
+    el('td', {}, [
+      el('div', { text: e.label || '—' }),
+      e.location ? el('div', { class: 'rc-hint', text: e.location }) : null,
+    ].filter(Boolean)),
+    el('td', { text: e.start === e.end ? dayLabel(e.start) : `${dayLabel(e.start)} – ${dayLabel(e.end)}` }),
+    el('td', { text: `${e.days} day${e.days === 1 ? '' : 's'}` }),
+    el('td', {
+      class: 'rc-hint',
+      title: 'How many reads of the sheet showed any of these days red, and when it was first seen',
+      text: `${e.reads} read${e.reads === 1 ? '' : 's'}${e.firstSeen ? ` · first ${dayLabel(String(e.firstSeen).slice(0, 10))}` : ''}`,
+    }),
+    el('td', {}, [e.note ? badge(e.note.party, PARTY_TONE[e.note.party] || 'neutral') : el('span', { class: 'rc-hint', text: '—' })]),
+    el('td', {}, [
+      e.note?.reason ? el('div', { text: e.note.reason }) : null,
+      e.history.length > 1
+        ? el('div', { class: 'rc-hint', text: `Corrected ${e.history.length - 1} time(s)`, title: e.history.map((n) => `${n.party}: ${n.reason || ''}`).join('\n') })
+        : null,
+    ].filter(Boolean)),
+    el('td', {}, [
+      el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, [
+        el('button', {
+          class: 'cx-btn mini' + (e.note ? ' ghost' : ' primary'),
+          text: e.note ? 'Correct' : 'Add reason',
+          title: e.note ? 'A correction is a new entry that supersedes this one. Nothing is edited away.' : '',
+          onClick: () => recordCancellation(e),
+        }),
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: 'Show cells',
+          title: 'Open the calendar on this activity, over the whole sheet',
+          onClick: () => {
+            calendarFilter = e.label;
+            calendarWeeks = 0;
+            showQuietRows = true;
+            section = 'calendar';
+            notifyChanged('cancellations');
+          },
+        }),
+      ]),
+    ]),
+  ]));
+
+  host.appendChild(table(['', 'Activity', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
+}
+
+/** Say whose it was and why — or correct what was said. */
+function recordCancellation(event) {
+  const current = event.note;
+  const party = selectInput({
+    value: current?.party || CANCEL_PARTIES[0],
+    options: CANCEL_PARTIES,
+  });
+  const reason = el('textarea', { class: 'cx-input', rows: 3, placeholder: 'Why it was cancelled' });
+  reason.value = current?.reason || '';
+
+  formModal({
+    title: current ? 'Correct the cancellation' : 'Why was this cancelled?',
+    body: el('div', { class: 'cx-form' }, [
+      el('p', {
+        class: 'rc-hint',
+        text: `${event.label}${event.location ? ` at ${event.location}` : ''}, `
+          + `${event.start === event.end ? dayLabel(event.start) : `${dayLabel(event.start)} – ${dayLabel(event.end)}`}. `
+          + 'This is the record a claim gets challenged on, so it is attributed and dated and cannot '
+          + 'be edited afterwards — a correction is a new entry that supersedes this one.',
+      }),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Responsible party' }), party]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Reason' }), reason]),
+    ]),
+    confirmLabel: current ? 'Record correction' : 'Record',
+    onConfirm: async () => {
+      const said = reason.value.trim();
+      // A correction that says what is already said writes nothing.
+      if (current && current.party === party.value && (current.reason || '') === said) return;
+      await rc.addCancellationNote({
+        raw_label: event.label,
+        raw_location: event.location,
+        start_date: event.start,
+        end_date: event.end,
+        party: party.value,
+        reason: said || null,
+        supersedes_id: current?.id || null,
+      });
+      notifyChanged('cancellations');
+    },
+  });
+}
+
+function cancellationCsv(events) {
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lines = [['activity', 'location', 'start', 'end', 'days', 'reads', 'first_seen', 'last_seen', 'responsible', 'reason', 'recorded_at'].join(',')];
+  for (const e of events) {
+    lines.push([
+      e.label, e.location, e.start, e.end, e.days, e.reads,
+      e.firstSeen || '', e.lastSeen || '', e.note?.party || '', e.note?.reason || '', e.note?.created_at || '',
+    ].map(q).join(','));
+  }
+  return lines.join('\n') + '\n';
 }
 
 /**

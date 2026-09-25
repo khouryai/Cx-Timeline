@@ -843,6 +843,28 @@ subscribes. That is what keeps the graph acyclic.
   checkbox away; what is not negotiable is that a narrowed list *says* it is
   narrowed, because one that does not reads as a list of everything and a
   fortnight out of view reads as a fortnight in which nothing happened.
+- **Every red run is a cancellation, and the log is derived from every read.**
+  Calendar → Look-ahead → Cancellations lists each run of cells painted in the
+  cancellation colour since `rc_settings.cancellation_log_from` (seeded
+  `2026-09-01`). Nothing about the cancellations is stored: `rc_cancelled_days`
+  is a `security_invoker` view over the `cells` every ingest already writes to
+  `rc_lookahead_rows` — a day counts when its meaning matches /cancel/ (the rule
+  `ingest()` uses to find the meaning) or when it was stored as the bare `#hex` of
+  a legend entry that does, which is how a day read before red was mapped comes
+  back — and `cancellationEvents()` in `core/lookahead.js` joins consecutive days
+  on one activity and location into one event, so a cancelled week is one line.
+  It reads every snapshot, not the latest, so a week that has rolled off the
+  sheet or turned back from red is still there: it *was* cancelled when those
+  reads were taken. This is a different question from the Changes list's
+  `cancellation` events, which only catch a cell turning red *between* two reads
+  — a cell already red the first time the sheet was read was never an event
+  there. What is stored is the judgement: `rc_cancellation_notes`, a party
+  checked to BART / Hitachi / Other and a reason, append-only and admin-only
+  like `rc_change_annotations`, corrected by a row carrying `supersedes_id`. A
+  note is keyed on the activity and the dates it was made about rather than on
+  an event id — the event has none, and a week cancelled on Monday grows to a
+  fortnight by Wednesday — so `attachCancellationNotes()` gives it to the event
+  on the same activity whose days it overlaps, newest uncorrected note first.
 - **The week plan is one tab, and it used to be two.** "Week plan" drew the
   team's week from the plan's side; "Resources" drew the same rows per person
   with what the 4WLA asked for beside them. People down and days across in both
@@ -1434,17 +1456,17 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         # 174 checks — the parser, the rows it derives, the
+node tools/test_lookahead.js         # 186 checks — the parser, the rows it derives, the
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
 node tools/smoke.js                  # 294 checks — the application, local mode
-node tools/smoke_calendar.js         # 313 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 325 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 304 checks — both permission models, and that
+node tools/test_sql.js               # 315 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result

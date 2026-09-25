@@ -1202,3 +1202,102 @@ function counterId() {
   let n = 0;
   return () => `la_${++n}`;
 }
+
+/* ── The cancellation log ──────────────────────────────────────────────── */
+
+/**
+ * Red days, as cancellation events.
+ *
+ * `days` is what `rc_cancelled_days` returns: one row per activity, location
+ * and day that any read showed as cancelled. Cells side by side on one activity
+ * are one event — a cancelled week is one thing that happened, not five — so
+ * consecutive days on the same activity and location are joined, and a gap of a
+ * single uncancelled day starts a new event. Days before `from` are left out.
+ *
+ * Returns events oldest first: `{ key, label, location, locationId, start, end,
+ * days, firstSeen, lastSeen, reads }`, with `start` and `end` as ISO dates, both
+ * inclusive, because that is how a person reads "cancelled 7–11 September".
+ */
+export function cancellationEvents(days, { from = null } = {}) {
+  const groups = new Map();
+  for (const d of days || []) {
+    const day = String(d.day || '').slice(0, 10);
+    if (!day || (from && day < from)) continue;
+    const key = `${suggestionKey(d.raw_label)}|${suggestionKey(d.raw_location)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ ...d, day });
+  }
+
+  const out = [];
+  for (const [key, list] of groups) {
+    list.sort((a, b) => a.day.localeCompare(b.day));
+    let event = null;
+    for (const d of list) {
+      if (event && isoMs(d.day) - isoMs(event.end) === 86400000) {
+        event.end = d.day;
+        event.days++;
+        event.firstSeen = earlier(event.firstSeen, d.first_seen);
+        event.lastSeen = later(event.lastSeen, d.last_seen);
+        event.reads = Math.max(event.reads, d.reads || 0);
+        event.locationId = event.locationId || d.location_id || null;
+        continue;
+      }
+      if (event) out.push(event);
+      event = {
+        key,
+        label: d.raw_label || '',
+        location: d.raw_location || '',
+        locationId: d.location_id || null,
+        start: d.day,
+        end: d.day,
+        days: 1,
+        firstSeen: d.first_seen || null,
+        lastSeen: d.last_seen || null,
+        reads: d.reads || 0,
+      };
+    }
+    if (event) out.push(event);
+  }
+  return out.sort((a, b) => a.start.localeCompare(b.start) || a.label.localeCompare(b.label));
+}
+
+function earlier(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  return String(a) < String(b) ? a : b;
+}
+
+function later(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  return String(a) > String(b) ? a : b;
+}
+
+/**
+ * Put each event beside what somebody said about it.
+ *
+ * A note is kept against the activity and the dates it was made about, not an
+ * event id — the event has none, and the sheet keeps moving: a week cancelled on
+ * Monday grows to a fortnight by Wednesday, and Monday's reason has to follow
+ * it. So a note belongs to the event on the same activity and location whose
+ * days it overlaps. Only notes nobody has superseded count; the newest of those
+ * is the answer, and every note that touched the event is kept as its history.
+ *
+ * Returns the events, each with `note` (or null) and `history`.
+ */
+export function attachCancellationNotes(events, notes) {
+  const superseded = new Set((notes || []).map((n) => n.supersedes_id).filter(Boolean));
+  const byKey = new Map();
+  for (const n of notes || []) {
+    const key = `${suggestionKey(n.raw_label)}|${suggestionKey(n.raw_location)}`;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(n);
+  }
+  return events.map((event) => {
+    const touching = (byKey.get(event.key) || [])
+      .filter((n) => String(n.start_date) <= event.end && String(n.end_date) >= event.start)
+      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+    const current = touching.filter((n) => !superseded.has(n.id));
+    return { ...event, note: current[current.length - 1] || null, history: touching };
+  });
+}

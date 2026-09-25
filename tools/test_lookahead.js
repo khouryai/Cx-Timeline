@@ -1111,6 +1111,58 @@ const reworded = cls.reconcileSuggestions(r1.activities, shaded.runs.map((r) => 
 check('a reworded row is a new suggestion, never a guess', reworded.added.length === shaded.runs.length);
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   The cancellation log
+   ═══════════════════════════════════════════════════════════════════════ */
+
+console.log('\nThe cancellation log');
+{
+  const red = (label, location, day, reads = 1, seen = '2026-09-07T08:00:00Z') => ({
+    raw_label: label, raw_location: location, location_id: null, day,
+    first_seen: seen, last_seen: seen, reads,
+  });
+  const days = [
+    // A cancelled week: Monday to Friday, side by side.
+    ...['07', '08', '09', '10', '11'].map((d) => red('Cable pull', 'TPSS 12', `2026-09-${d}`)),
+    // The same activity again after a gap of one day: a second event.
+    red('Cable pull', 'TPSS 12', '2026-09-13'),
+    // Another activity on the same days is its own event.
+    red('IXL regression', 'TPSS 12', '2026-09-08', 3, '2026-09-01T08:00:00Z'),
+    // August, before the log starts.
+    red('Cable pull', 'TPSS 12', '2026-08-28'),
+    // The same words at another location is another activity.
+    red('Cable pull', 'Yard 3', '2026-09-09'),
+  ];
+  const events = cls.cancellationEvents(days, { from: '2026-09-01' });
+  const cable = events.filter((e) => e.label === 'Cable pull' && e.location === 'TPSS 12');
+
+  check('side-by-side red cells are one event', cable[0]?.start === '2026-09-07' && cable[0]?.end === '2026-09-11'
+    && cable[0]?.days === 5, JSON.stringify(cable[0] && [cable[0].start, cable[0].end, cable[0].days]));
+  check('a gap starts a new one', cable.length === 2 && cable[1].start === '2026-09-13');
+  check('another activity on the same days is its own event',
+    events.some((e) => e.label === 'IXL regression' && e.days === 1));
+  check('so is the same activity somewhere else', events.some((e) => e.location === 'Yard 3'));
+  check('nothing before the log starts', !events.some((e) => e.start < '2026-09-01'));
+  check('oldest first', events[0].start <= events[events.length - 1].start);
+  check('how many reads saw it travels with it', events.find((e) => e.label === 'IXL regression')?.reads === 3);
+
+  const notes = [
+    { id: 'n1', raw_label: 'Cable pull', raw_location: 'TPSS 12', start_date: '2026-09-07', end_date: '2026-09-08',
+      party: 'BART', reason: 'Possession withdrawn', created_at: '2026-09-08T09:00:00Z', supersedes_id: null },
+    { id: 'n2', raw_label: 'Cable pull', raw_location: 'TPSS 12', start_date: '2026-09-07', end_date: '2026-09-11',
+      party: 'Hitachi', reason: 'Crew reallocated', created_at: '2026-09-10T09:00:00Z', supersedes_id: 'n1' },
+  ];
+  const noted = cls.attachCancellationNotes(events, notes);
+  const week = noted.find((e) => e.start === '2026-09-07' && e.label === 'Cable pull');
+  check('a note made when the event was shorter still follows it', !!week?.note);
+  check('the correction is the answer, not the note it superseded', week?.note?.party === 'Hitachi');
+  check('and both are its history', week?.history.length === 2);
+  check('an event nobody has spoken for has no note',
+    noted.find((e) => e.start === '2026-09-13')?.note === null);
+  check('a note on one activity is not another\'s',
+    noted.find((e) => e.label === 'IXL regression')?.note === null);
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

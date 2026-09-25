@@ -395,7 +395,51 @@ function fakeSdk() {
          until somebody says otherwise. Getting from there to a usable
          calendar in one click is what the checks below are about. */
     ],
-    rc_settings: [{ key: 'lookahead_sheet', value: '4WLA' }],
+    rc_settings: [
+      { key: 'lookahead_sheet', value: '4WLA' },
+      // Relative, like every other date here, so the log has a start whatever
+      // day the suite runs on.
+      { key: 'cancellation_log_from', value: iso(-40) },
+    ],
+    /* Rows of earlier reads, as the cancellation view sees them. Kept apart
+       from `rc_lookahead_rows` so no other screen's reads or counts move: the
+       log is the only thing that looks back past the latest snapshot. A cancelled
+       week on one activity, the same activity red again after a gap, and a red
+       day from before the log starts. */
+    _earlierReads: [
+      { snapshot_id: 'old1', taken_at: `${iso(-21)}T08:00:00Z`, raw_label: 'Cable pull', raw_location: 'TPSS 12',
+        cells: Object.fromEntries([-20, -19, -18, -17, -16].map((d) => [iso(d), 'Cancellation'])) },
+      { snapshot_id: 'old2', taken_at: `${iso(-18)}T08:00:00Z`, raw_label: 'Cable pull', raw_location: 'TPSS 12',
+        cells: { [iso(-17)]: 'Cancellation', [iso(-16)]: 'Cancellation', [iso(-15)]: 'Day Shift', [iso(-13)]: '#FF0000' } },
+      { snapshot_id: 'old1', taken_at: `${iso(-50)}T08:00:00Z`, raw_label: 'IXL regression', raw_location: 'Yard 3',
+        cells: { [iso(-45)]: 'Cancellation' } },
+    ],
+    rc_cancellation_notes: [],
+    /* `rc_cancelled_days`, as the view computes it: one row per activity,
+       location and day any read showed as cancelled — by meaning, or by the bare
+       colour of a legend entry that means it. */
+    get rc_cancelled_days() {
+      const red = new Set(this.rc_legend.filter((l) => /cancel/i.test(l.meaning)).map((l) => `#${l.argb}`));
+      const taken = new Map(this.rc_lookahead_snapshots.map((x) => [x.id, x.taken_at]));
+      const out = new Map();
+      for (const r of [...this.rc_lookahead_rows, ...this._earlierReads]) {
+        for (const [day, value] of Object.entries(r.cells || {})) {
+          if (!/cancel/i.test(value) && !red.has(value)) continue;
+          const key = `${r.raw_label || ''}|${r.raw_location || ''}|${day}`;
+          const at = r.taken_at || taken.get(r.snapshot_id) || null;
+          const row = out.get(key) || {
+            raw_label: r.raw_label || '', raw_location: r.raw_location || '', location_id: r.location_id || null,
+            day, first_seen: at, last_seen: at, reads: 0, _snaps: new Set(),
+          };
+          row._snaps.add(r.snapshot_id);
+          row.reads = row._snaps.size;
+          if (at && (!row.first_seen || at < row.first_seen)) row.first_seen = at;
+          if (at && (!row.last_seen || at > row.last_seen)) row.last_seen = at;
+          out.set(key, row);
+        }
+      }
+      return [...out.values()].map(({ _snaps, ...row }) => row);
+    },
     rc_blockers: [],
     rc_blocker_updates: [],
     /* The view is what is true now; the tables keep how it got that way. The
@@ -2061,6 +2105,70 @@ async function main() {
   check('a change about a week months gone is not drawn by default',
     !/nobody is planning round now/.test(await page.locator('#rc-frame').innerText()));
 
+  /* ── The cancellation log ────────────────────────────────────────────
+     Every run of red cells any read has shown since the log's start, one event
+     per side-by-side run, with whose it was and why. */
+  console.log('\nThe cancellation log');
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Cancellations' }).click();
+  await page.waitForSelector('#rc-frame .rc-cancel-row', { timeout: 10000 });
+  const cancelRows = () => page.locator('#rc-frame .rc-cancel-row');
+  check('side-by-side red cells are one event, and a gap starts another',
+    (await cancelRows().count()) === 2, `${await cancelRows().count()} event(s)`);
+  check('a cancelled week reads as a week',
+    /5 days/.test(await cancelRows().first().innerText()), await cancelRows().first().innerText());
+  check('each red day is drawn as a cell',
+    (await cancelRows().first().locator('.rc-cancel-cell').count()) === 5);
+  check('nothing from before the log starts',
+    !/IXL regression/.test(await page.locator('#rc-frame').innerText()));
+  check('a day read before red was mapped still counts, once red means a cancellation',
+    /1 day/.test(await cancelRows().nth(1).innerText()));
+
+  await cancelRows().first().locator('button', { hasText: 'Add reason' }).click();
+  await page.waitForTimeout(300);
+  check('whose it was is BART, Hitachi or Other',
+    JSON.stringify(await page.locator('.cx-modal select option').allTextContents()) === JSON.stringify(['BART', 'Hitachi', 'Other']));
+  await page.locator('.cx-modal select').selectOption('BART');
+  await page.locator('.cx-modal textarea').fill('Possession withdrawn');
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(500);
+  const note1 = await page.evaluate(() => window.__rc.rows.rc_cancellation_notes.slice(-1)[0]);
+  check('the reason and the party are recorded against the whole run',
+    note1?.party === 'BART' && note1?.reason === 'Possession withdrawn'
+      && note1?.raw_label === 'Cable pull' && note1?.end_date > note1?.start_date,
+    JSON.stringify(note1));
+  check('and shown in the log',
+    /BART/.test(await cancelRows().first().innerText()) && /Possession withdrawn/.test(await cancelRows().first().innerText()));
+
+  await cancelRows().first().locator('button', { hasText: 'Correct' }).click();
+  await page.waitForTimeout(300);
+  await page.locator('.cx-modal select').selectOption('Hitachi');
+  await page.locator('.cx-modal textarea').fill('Our crew was reallocated');
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(500);
+  const notes = await page.evaluate(() => window.__rc.rows.rc_cancellation_notes);
+  check('a correction supersedes rather than edits',
+    notes.length === 2 && notes[1].supersedes_id === notes[0].id && notes[0].party === 'BART');
+  check('and the correction is what the log says',
+    /Hitachi/.test(await cancelRows().first().innerText()) && !/BART/.test(await cancelRows().first().innerText()));
+
+  await page.locator('#rc-frame .cx-check', { hasText: 'Only the ones with no reason yet' }).locator('input').check();
+  await page.waitForTimeout(400);
+  check('the ones still owed a reason can be listed alone', (await cancelRows().count()) === 1);
+  await page.locator('#rc-frame .cx-check', { hasText: 'Only the ones with no reason yet' }).locator('input').uncheck();
+  await page.waitForTimeout(400);
+
+  await cancelRows().first().locator('button', { hasText: 'Show cells' }).click();
+  // No grid to wait for: this fixture's latest read has no "Cable pull" row,
+  // so the filtered calendar is honestly empty.
+  await page.waitForTimeout(900);
+  check('and a cancellation opens the calendar on its own activity',
+    await page.locator('#rc-frame input').evaluateAll((els) => els.some((e) => e.value === 'Cable pull')));
+  // Back to the plain calendar for the checks that follow.
+  await page.locator('#rc-frame input').evaluateAll((els) => {
+    const box = els.find((e) => e.value === 'Cable pull');
+    if (box) { box.value = ''; box.dispatchEvent(new Event('input')); }
+  });
+
   /* ── The other half of the week plan ──────────────────────────────────
      Who is where, and whether that agrees with what the 4WLA asked for. This
      was its own tab, "Resources", and it is the same table: people down, days
@@ -2832,7 +2940,7 @@ async function main() {
   check('with no way to read the workbook again — that needs the folder',
     (await viewer.locator('#rc-frame button', { hasText: 'Check now' }).count()) === 0);
   check('and none of the register around it',
-    !/Changes/.test(vLa) && !/Snapshots/.test(vLa) && !/Site access/.test(vLa),
+    !/Changes/.test(vLa) && !/Snapshots/.test(vLa) && !/Site access/.test(vLa) && !/Cancellations/.test(vLa),
     vLa.split('\n').slice(0, 3).join(' | '));
   // But the export is theirs: it is a drawing of what they can already see.
   check('the calendar can still be printed, because it is what they can see',
