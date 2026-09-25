@@ -16,8 +16,15 @@ import { deepClone, deepEqual, uid } from './util.js';
 /** Collections diffed by entity id. */
 const COLLECTIONS = ['lanes', 'objects', 'links', 'baselines', 'groups', 'attachments'];
 
-/** Top-level fields diffed by value. */
-const FIELDS = ['name', 'description', 'client', 'project', 'settings', 'lists', 'laneOrder', 'meta'];
+/**
+ * Top-level fields diffed by value.
+ *
+ * The two registers are here because an import that changes nothing but the
+ * register is still an edit: left out, `diff()` found no change, so the import
+ * was neither undoable nor marked unsaved — a P6 re-import that moved dates
+ * and created no new baseline was simply not saved.
+ */
+const FIELDS = ['name', 'description', 'client', 'project', 'settings', 'lists', 'laneOrder', 'meta', 'p6', 'lookahead'];
 
 /* ── Diff ──────────────────────────────────────────────────────────────── */
 

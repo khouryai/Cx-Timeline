@@ -324,6 +324,105 @@ export const EXPECTED = {
   distinctVisibleColours: 4,
 };
 
+/* ══════════════════════════════════════════════════════════════════════════
+   A look-ahead with a calendar on it
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * A small four-week look-ahead the way the real one is laid out: a month band,
+ * day numbers and weekday letters across the top, the description and the
+ * location to their left, a Resource row under an activity, grey shading on
+ * the calendar that is layout rather than work, and the workbook's own key —
+ * a swatch row whose label sits in a hidden column.
+ *
+ * Fourteen days from Monday 7 September 2026. `shift` moves the first run of
+ * "IXL Regression" later by that many days, which is what a re-read of next
+ * week's file looks like to the timeline's suggestions.
+ *
+ * What it should read as, with the grey counted as work (a colour nobody has
+ * explained is), and without:
+ *
+ *   IXL Regression   Mon–Wed of week one, Mon–Tue of week two   2 runs
+ *   Cable pull       Thu–Fri of week one, swing shift            1 run
+ *   Only shading     grey Mon–Fri                                1 run, or none
+ */
+export function buildLookaheadWorkbook({ shift = 0 } = {}) {
+  const COLS = 'CDEFGHIJKLMNOP'.split('');
+  const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const str = (ref, v, style = 0) => `<c r="${ref}" t="inlineStr"${style ? ` s="${style}"` : ''}><is><t>${esc(v)}</t></is></c>`;
+  const num = (ref, v) => `<c r="${ref}"><v>${v}</v></c>`;
+  const fill = (ref, style) => `<c r="${ref}" s="${style}"/>`;
+  const YELLOW = 1;
+  const GREY = 2;
+  const ORANGE = 3;
+
+  const days = (row, marks) => marks.map(([i, style, text]) =>
+    (text ? str(`${COLS[i]}${row}`, text, style) : fill(`${COLS[i]}${row}`, style))).join('');
+
+  const letters = ['M', 'Tu', 'W', 'Th', 'F', 'Sa', 'Su'];
+  const firstRun = [0, 1, 2].map((i) => i + shift);
+
+  const rows = [
+    `<row r="1">${str('C1', 'SEPTEMBER')}</row>`,
+    `<row r="2">${COLS.map((c, i) => num(`${c}2`, 7 + i)).join('')}</row>`,
+    `<row r="3">${str('A3', 'Description of Work')}${str('B3', 'Location')}${COLS.map((c, i) => str(`${c}3`, letters[i % 7])).join('')}</row>`,
+    `<row r="4">${str('A4', 'IXL Regression')}${str('B4', 'TPSS 12')}${days(4, [
+      ...firstRun.map((i) => [i, YELLOW]), [5, GREY], [6, GREY], [7, YELLOW], [8, YELLOW],
+    ].filter(([i], n, all) => all.findIndex(([j]) => j === i) === n).sort((a, b) => a[0] - b[0]))}</row>`,
+    `<row r="5">${str('A5', 'Resource')}${days(5, [[firstRun[0], 0, 'Victor, Rosa'], [firstRun[1], 0, 'Victor']])}</row>`,
+    `<row r="6">${str('A6', 'Cable pull')}${str('B6', 'Yard 3')}${days(6, [[3, ORANGE], [4, ORANGE]])}</row>`,
+    `<row r="7">${str('A7', 'Only shading')}${str('B7', 'Yard 3')}${days(7, [0, 1, 2, 3, 4].map((i) => [i, GREY]))}</row>`,
+    `<row r="9">${days(9, [0, 1, 2, 3].map((i) => [i, ORANGE]))}${str('Q9', 'Highlight in Orange for Swing Shift')}</row>`,
+  ];
+
+  const sheet = `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<cols><col min="17" max="17" width="30" hidden="1" customWidth="1"/></cols>
+<sheetData>
+${rows.join('\n')}
+</sheetData>
+</worksheet>`;
+
+  const styles = `<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+<fills count="5">
+<fill><patternFill patternType="none"/></fill>
+<fill><patternFill patternType="gray125"/></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFD9D9D9"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFFFC000"/></patternFill></fill>
+</fills>
+<borders count="1"><border/></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="4">
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="0" fillId="2" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="0" fillId="3" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1"/>
+</cellXfs>
+</styleSheet>`;
+
+  const b = (x) => Buffer.from(x, 'utf8');
+  return writeZip([
+    { name: '[Content_Types].xml', data: b(CONTENT_TYPES) },
+    { name: '_rels/.rels', data: b(ROOT_RELS) },
+    { name: 'xl/workbook.xml', data: b(`<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets>
+<sheet name="Cover" sheetId="1" r:id="rId1"/>
+<sheet name="4WLA Sept" sheetId="2" r:id="rId2"/>
+</sheets>
+</workbook>`) },
+    { name: 'xl/_rels/workbook.xml.rels', data: b(WORKBOOK_RELS) },
+    { name: 'xl/worksheets/sheet1.xml', data: b(SHEET_COVER) },
+    { name: 'xl/worksheets/sheet2.xml', data: b(sheet) },
+    { name: 'xl/styles.xml', data: b(styles) },
+    { name: 'xl/sharedStrings.xml', data: b(SHARED_STRINGS) },
+    { name: 'xl/theme/theme1.xml', data: b(THEME) },
+  ]);
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const out = process.argv[2] || 'lookahead-sample.xlsx';
   fs.writeFileSync(out, buildWorkbook({ conditionalFormatting: process.argv.includes('--cf') }));

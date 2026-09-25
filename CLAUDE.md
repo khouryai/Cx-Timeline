@@ -107,7 +107,11 @@ core/filestore → core/desktop             the only module that knows the File
                                           System Access API, and the only caller
                                           of the desktop bridge
 core/model → core/query · core/history · core/analysis
-core/store → core/filestore · core/access    (only to ask whether a colleague
+core/store → core/filestore · core/access · core/lookahead
+                                             (the last only to reconcile one read
+                                              of the look-ahead against the last —
+                                              a leaf, no backend reachable from it;
+                                              the first two only to ask whether a colleague
                                               holds the pen, and whether this
                                               account may write at all — a
                                               read-only session refuses edits
@@ -268,6 +272,31 @@ subscribes. That is what keeps the graph acyclic.
   objects; it never moves a bar without being told to. An activity missing
   from a later file is flagged `missing`, never deleted — something on the
   timeline may point at it.
+- **The look-ahead reaches the timeline as suggestions, read from the file.**
+  `ui/lookahead.js` reads the 4WLA workbook itself — the calendar's own parser
+  (`parseSheet`, `readLegend`, `applyLegend`, `readGrid`), with no calendar
+  sign-in and nothing sent anywhere, so it works in file mode and in a desktop
+  build with no calendar keys. `suggestionsFrom()` in `core/lookahead.js` makes
+  one suggestion per **run of painted cells** on a described row — consecutive
+  day columns whose paint is `role === 'shift'`, adjacent *on the sheet* — and
+  `store.importLookahead()` writes them into `doc.lookahead`, the P6 register's
+  rule exactly: the import proposes, and placing, linking (`data.laIds`, a set),
+  following moved dates and dismissing are each a separate thing somebody
+  does. It lives in the plan rather than being re-read at paint time because
+  the plan travels: whoever opens the file next sees the same suggestions and
+  links without the workbook. The sheet has no IDs, so `reconcileSuggestions()`
+  matches a run on its row's words and then on overlapping or nearest dates
+  (within a fortnight), which is what lets a link and a dismissal survive the
+  sheet moving the work; a reworded row is a new suggestion, never a guess.
+  What the window rolled past is kept only when a bar is linked to it (`past`),
+  and a linked run the sheet dropped is flagged `missing`, never removed.
+  **Which fills are work is asked, not assumed**: the dialog lists every colour
+  on the calendar with its count and what the workbook's key calls it, an
+  unanswered colour counts as work (the calendar's rule), and the answer is
+  kept in `doc.lookahead.colors` so next week's file reads the same way.
+  `p6` and `lookahead` are in `FIELDS` in `core/history.js` — the P6 register
+  was not, so a re-import that only changed the register was neither undoable
+  nor saved.
 - **A document and a release are read for their state, not their kind.**
   `objectColor()` gives both the status colour rather than the type accent —
   nobody scanning a plan needs reminding that the thing shaped like a document
@@ -1398,10 +1427,10 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         # 145 checks — the parser, the rows it derives, the
+node tools/test_lookahead.js         # 169 checks — the parser, the rows it derives, the
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
-node tools/smoke.js                  # 273 checks — the application, local mode
+node tools/smoke.js                  # 292 checks — the application, local mode
 node tools/smoke_calendar.js         # 307 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
@@ -1420,7 +1449,7 @@ zoom, the dropdown vocabularies, filter dim/hide, the predecessor highlight and
 its one-shot flash, several dependencies between one pair of bars, the span a
 bar was actually worked over and the arrow measuring how far its edges moved,
 baseline comparison — down to measuring, at five zooms, that no ghost, and no reason
-written on one, is drawn over a bar or over another ghost — all seventeen dock panes,
+written on one, is drawn over a bar or over another ghost — all eighteen dock panes,
 all five themes, every exporter (including PDF header validation) and reload
 persistence. **Any console error fails the run.**
 

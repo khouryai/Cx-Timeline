@@ -13,7 +13,7 @@
 
 import path from 'node:path';
 import url from 'node:url';
-import { buildWorkbook, EXPECTED } from './fixtures/xlsx_fixture.js';
+import { buildWorkbook, buildLookaheadWorkbook, EXPECTED } from './fixtures/xlsx_fixture.js';
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 
@@ -1003,6 +1003,99 @@ check('the spacing in the cell does not decide whether a task moves',
     laRows: [laRow({ '2026-09-08': '  Victor  ' })],
     resolve,
   }).length === 1);
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Suggestions for the timeline
+   ═══════════════════════════════════════════════════════════════════════ */
+
+console.log('\nThe look-ahead as suggestions for the timeline');
+{
+
+/* Read the way the timeline's import reads it: straight off the file, with the
+   workbook's own key and whatever colours somebody has answered for. */
+function suggest(workbook, choices = {}) {
+  const buf = workbook.buffer.slice(workbook.byteOffset, workbook.byteOffset + workbook.byteLength);
+  const sheetGrid = la.parseSheet(buf, '4WLA Sept');
+  const key = la.readLegend(sheetGrid);
+  const hexes = new Set([...key.map((k) => k.argb.toUpperCase()), ...Object.keys(choices)]);
+  const legend = [...hexes].map((hex) => ({
+    argb: hex,
+    meaning: key.find((k) => k.argb.toUpperCase() === hex)?.meaning || 'Unlabelled colour',
+    role: choices[hex] || 'shift',
+  }));
+  const view = cls.readGrid(la.applyLegend(sheetGrid, legend), { anchorISO: '2026-09-09' });
+  return { view, runs: cls.suggestionsFrom(view), key };
+}
+const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+const runsOf = (runs, title) => runs.filter((r) => r.title === title);
+
+const first = suggest(buildLookaheadWorkbook());
+check('the workbook key names the swing shift', first.key.some((k) => /swing shift/i.test(k.meaning)));
+check('the calendar on the sheet is dated', first.view.days.every((d) => d.date) && first.view.days[0].date === '2026-09-07',
+  first.view.days[0]?.date);
+
+const ixl = runsOf(first.runs, 'IXL Regression');
+check('one suggestion per run of painted cells, not per row', ixl.length === 2, `${ixl.length} run(s)`);
+check('a run starts on its first painted day', iso(ixl[0]?.start) === '2026-09-07', iso(ixl[0]?.start));
+check('and ends the day after its last, like a bar', iso(ixl[0]?.end) === '2026-09-10', iso(ixl[0]?.end));
+// The second run is Sa–Tu while the weekend's grey still counts as work.
+check('its length is the painted days', ixl[0]?.days === 3 && ixl[1]?.days === 4, ixl.map((r) => r.days).join());
+check('the title comes from the description column, the location from its own',
+  ixl[0]?.location === 'TPSS 12' && runsOf(first.runs, 'Cable pull')[0]?.location === 'Yard 3');
+check('the Resource row names who is on the run it sits under',
+  ixl[0]?.resources.join(',') === 'Victor,Rosa' && ixl[1]?.resources.length === 0, ixl[0]?.resources.join(','));
+check('what the key calls a colour travels with the run',
+  runsOf(first.runs, 'Cable pull')[0]?.meanings.join() === 'Swing Shift');
+check('the key row itself suggests nothing', !first.runs.some((r) => !r.title));
+check('a colour nobody has answered for counts as work', runsOf(first.runs, 'Only shading').length === 1);
+
+const shaded = suggest(buildLookaheadWorkbook(), { D9D9D9: 'ignore' });
+check('and once somebody says it is shading, it suggests nothing', runsOf(shaded.runs, 'Only shading').length === 0);
+check('shading next to work does not lengthen the run',
+  runsOf(shaded.runs, 'IXL Regression').map((r) => r.days).join() === '3,2');
+
+const undated = { ...first.view, days: first.view.days.map((d) => ({ ...d, date: undefined })) };
+check('a calendar that could not be dated suggests nothing at all', cls.suggestionsFrom(undated).length === 0);
+
+// Reconciling one read of the sheet against the last.
+let n = 0;
+const makeId = () => `la_${++n}`;
+const r1 = cls.reconcileSuggestions({}, shaded.runs, { makeId });
+check('a first read adds every run', r1.added.length === shaded.runs.length && !r1.moved.length);
+
+const ixlFirst = Object.values(r1.activities).find((e) => e.title === 'IXL Regression' && e.days === 3);
+const later = suggest(buildLookaheadWorkbook({ shift: 1 }), { D9D9D9: 'ignore' });
+const r2 = cls.reconcileSuggestions(r1.activities, later.runs, {
+  makeId, linked: new Set([ixlFirst.id]), windowStart: Date.parse('2026-09-07T00:00:00Z'),
+});
+const moved = r2.moved.find((m) => m.id === ixlFirst.id);
+check('a run the sheet moved keeps its id, so its links survive', !!moved && r2.activities[ixlFirst.id]?.start === Date.parse('2026-09-08T00:00:00Z'));
+check('and says by how much', moved?.startShift === 1 && moved?.finishShift === 1, JSON.stringify(moved));
+check('and remembers where it was', r2.activities[ixlFirst.id]?.previous?.start === ixlFirst.start);
+check('nothing else is new or gone', r2.added.length === 0 && r2.missing.length === 0 && r2.retired === 0,
+  `${r2.added.length} added · ${r2.missing.length} missing · ${r2.retired} retired`);
+
+const dismissedId = Object.values(r1.activities).find((e) => e.title === 'Cable pull').id;
+const withNo = { ...r1.activities, [dismissedId]: { ...r1.activities[dismissedId], dismissed: true } };
+const r3 = cls.reconcileSuggestions(withNo, shaded.runs, { makeId });
+check('a dismissal survives the next read', r3.activities[dismissedId]?.dismissed === true);
+
+const gone = cls.reconcileSuggestions(r1.activities, [], {
+  makeId, linked: new Set([ixlFirst.id]), windowStart: Date.parse('2026-09-07T00:00:00Z'),
+});
+check('a linked run the sheet dropped is kept and flagged, never removed',
+  gone.activities[ixlFirst.id]?.missing === true && gone.missing.includes(ixlFirst.id));
+check('an unlinked one simply goes', Object.keys(gone.activities).length === 1 && gone.retired === r1.added.length - 1);
+
+const rolled = cls.reconcileSuggestions(r1.activities, [], {
+  makeId, linked: new Set([ixlFirst.id]), windowStart: Date.parse('2026-09-21T00:00:00Z'),
+});
+check('one the window rolled past is kept as past, not as gone',
+  rolled.activities[ixlFirst.id]?.past === true && rolled.activities[ixlFirst.id]?.missing === false && !rolled.missing.length);
+
+const reworded = cls.reconcileSuggestions(r1.activities, shaded.runs.map((r) => ({ ...r, key: `${r.key} (rev b)` })), { makeId });
+check('a reworded row is a new suggestion, never a guess', reworded.added.length === shaded.runs.length);
+}
 
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {

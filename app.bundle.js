@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 57   Built: 2026-09-21T16:11:01.025Z
+ * Modules: 58   Built: 2026-09-25T18:51:14.139Z
  */
 (function () {
   'use strict';
@@ -528,6 +528,7 @@ __mods["core/events.js"] = function (__x, __req) {
     DOC_REPLACED: 'doc:replaced', // wholesale swap (import, restore, new)
     LISTS_CHANGED: 'lists:changed', // { listId } — a dropdown vocabulary was edited
     P6_IMPORTED: 'p6:imported', // { kind, plan } — a Primavera export was applied
+    LOOKAHEAD_IMPORTED: 'lookahead:imported', // { report } — a look-ahead workbook was read into the register
 
     /* Persistence */
     SAVE_START: 'save:start',
@@ -1196,7 +1197,7 @@ __mods["core/model.js"] = function (__x, __req) {
 
 
   /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
-  const SCHEMA_VERSION = 5;
+  const SCHEMA_VERSION = 6;
 
   /* ══════════════════════════════════════════════════════════════════════════
      Object type registry
@@ -1967,6 +1968,150 @@ __mods["core/model.js"] = function (__x, __req) {
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
+     The look-ahead register
+
+     The four-week look-ahead, read straight from the workbook, as *suggestions*:
+     `doc.lookahead.activities` holds one entry per run of painted cells, and an
+     object points at the ones it stands for with `data.laIds` — a set, for the
+     reason `p6Ids` is one. It is the P6 register's rule exactly: an import writes
+     the register and proposes; it never puts a bar on the timeline or moves one
+     without being told to. Placing, linking and adopting dates are the three
+     ways of saying yes, and dismissing is the way of saying no.
+
+     It lives in the plan rather than being re-read from the calendar at paint
+     time, because the plan travels — a colleague opening the file from the
+     shared folder has no calendar sign-in, and must see the same suggestions and
+     the same links as whoever imported them.
+
+     `colors` remembers which fills somebody said are work and which are only
+     shading (`hex → 'shift' | 'ignore'`), so the next week's file is read the
+     way this week's was without asking again.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  function emptyLookahead() {
+    return {
+      activities: {},   // id → entry
+      imported: null,   // { importedAt, fileName, sheet, count, windowStart, windowEnd }
+      history: [],      // the last few imports, newest first
+      colors: {},       // hex → 'shift' | 'ignore'
+    };
+  }
+
+  /** The register, guaranteed to be the right shape. */
+  function lookaheadRegister(doc) {
+    const la = doc?.lookahead;
+    if (!la || typeof la !== 'object') return emptyLookahead();
+    return {
+      activities: la.activities && typeof la.activities === 'object' ? la.activities : {},
+      imported: la.imported || null,
+      history: Array.isArray(la.history) ? la.history : [],
+      colors: la.colors && typeof la.colors === 'object' ? la.colors : {},
+    };
+  }
+
+  function lookaheadActivity(doc, id) {
+    if (!id) return null;
+    return lookaheadRegister(doc).activities[String(id)] || null;
+  }
+
+  /** The look-ahead runs an object stands for. */
+  function laLinkedIds(obj) {
+    const ids = obj?.data?.laIds;
+    return Array.isArray(ids) ? ids.filter(Boolean) : [];
+  }
+
+  /** Every object linked to one look-ahead run. */
+  function laPlaced(doc, id) {
+    if (!id) return [];
+    return doc.objects.filter((o) => laLinkedIds(o).includes(id));
+  }
+
+  /** Every look-ahead id the plan currently references. */
+  function laPlacedIds(doc) {
+    const ids = new Set();
+    for (const obj of doc.objects) for (const id of laLinkedIds(obj)) ids.add(id);
+    return ids;
+  }
+
+  /**
+   * The span an object's linked runs cover: earliest start to latest finish,
+   * half-open like the bar itself — for the reason `p6RollUp()` rolls up.
+   */
+  function laRollUp(doc, obj) {
+    const register = lookaheadRegister(doc);
+    let start = null;
+    let end = null;
+    let count = 0;
+    let missing = 0;
+    for (const id of laLinkedIds(obj)) {
+      const entry = register.activities[id];
+      if (!entry) {
+        missing++;
+        continue;
+      }
+      start = start == null ? entry.start : Math.min(start, entry.start);
+      end = end == null ? entry.end : Math.max(end, entry.end);
+      count++;
+    }
+    if (!count) return null;
+    return { start, end, count, missing };
+  }
+
+  /** How far the bar differs from where the look-ahead has the work, in days. */
+  function laVariance(doc, obj) {
+    const dates = laRollUp(doc, obj);
+    if (!obj || !dates) return null;
+    const hasDuration = !!TYPES[obj.type]?.duration;
+    const startShift = Math.round((obj.start - dates.start) / MS_DAY);
+    const finishShift = hasDuration ? Math.round((obj.end - dates.end) / MS_DAY) : startShift;
+    return { startShift, finishShift, behind: finishShift > 0, differs: startShift !== 0 || finishShift !== 0 };
+  }
+
+  /** One entry in the look-ahead register, repaired to a known shape. */
+  function makeLookaheadEntry(props = {}) {
+    return {
+      id: String(props.id || '').trim(),
+      key: String(props.key || ''),
+      title: String(props.title || ''),
+      location: String(props.location || ''),
+      label: String(props.label || ''),
+      row: Number.isFinite(props.row) ? props.row : null,
+      start: Number.isFinite(props.start) ? props.start : null,
+      end: Number.isFinite(props.end) ? props.end : null,
+      days: Number.isFinite(props.days) ? props.days : 0,
+      meanings: Array.isArray(props.meanings) ? props.meanings.map(String) : [],
+      resources: Array.isArray(props.resources) ? props.resources.map(String) : [],
+      previous: props.previous && Number.isFinite(props.previous.start) ? props.previous : null,
+      order: Number.isFinite(props.order) ? props.order : 0,
+      missing: !!props.missing,     // inside the file's window, and no longer on it
+      past: !!props.past,           // the window has rolled past it
+      dismissed: !!props.dismissed, // somebody said no
+    };
+  }
+
+  function normaliseLookahead(doc) {
+    const raw = doc?.lookahead;
+    const out = emptyLookahead();
+    if (!raw || typeof raw !== 'object') return out;
+    out.imported = raw.imported || null;
+    out.history = Array.isArray(raw.history) ? raw.history.slice(0, 12) : [];
+    if (raw.colors && typeof raw.colors === 'object') {
+      for (const [hex, role] of Object.entries(raw.colors)) {
+        if (role === 'shift' || role === 'ignore') out.colors[String(hex).toUpperCase()] = role;
+      }
+    }
+    const source = raw.activities && typeof raw.activities === 'object' ? raw.activities : {};
+    for (const [key, value] of Object.entries(source)) {
+      if (!value || typeof value !== 'object') continue;
+      const entry = makeLookaheadEntry({ ...value, id: value.id || key });
+      // Without dates there is nothing to place or compare against.
+      if (!entry.id || entry.start == null || entry.end == null) continue;
+      out.activities[entry.id] = entry;
+    }
+    return out;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
      Factories
      ═══════════════════════════════════════════════════════════════════════ */
 
@@ -2151,6 +2296,7 @@ __mods["core/model.js"] = function (__x, __req) {
       settings: defaultSettings(),
       lists: defaultLists(),
       p6: emptyRegister(),
+      lookahead: emptyLookahead(),
       laneOrder: [],
       lanes: [],
       objects: [],
@@ -2309,6 +2455,14 @@ __mods["core/model.js"] = function (__x, __req) {
       doc.schema = 5;
       return doc;
     },
+
+    // v5 → v6: the look-ahead register. Nothing to convert — an older plan has
+    // simply never been shown a look-ahead.
+    (doc) => {
+      if (!doc.lookahead) doc.lookahead = emptyLookahead();
+      doc.schema = 6;
+      return doc;
+    },
   ];
 
   /**
@@ -2337,6 +2491,7 @@ __mods["core/model.js"] = function (__x, __req) {
     doc.settings = { ...defaultSettings(), ...(doc.settings || {}) };
     doc.lists = normaliseLists(doc);
     doc.p6 = normaliseRegister(doc);
+    doc.lookahead = normaliseLookahead(doc);
     doc.baselines = Array.isArray(doc.baselines) ? doc.baselines : [];
     doc.groups = Array.isArray(doc.groups) ? doc.groups : [];
     doc.attachments = Array.isArray(doc.attachments) ? doc.attachments : [];
@@ -2740,6 +2895,15 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "delayReason", { get: () => delayReason, enumerable: true });
   Object.defineProperty(__x, "makeP6Baseline", { get: () => makeP6Baseline, enumerable: true });
   Object.defineProperty(__x, "p6PlacedIds", { get: () => p6PlacedIds, enumerable: true });
+  Object.defineProperty(__x, "emptyLookahead", { get: () => emptyLookahead, enumerable: true });
+  Object.defineProperty(__x, "lookaheadRegister", { get: () => lookaheadRegister, enumerable: true });
+  Object.defineProperty(__x, "lookaheadActivity", { get: () => lookaheadActivity, enumerable: true });
+  Object.defineProperty(__x, "laLinkedIds", { get: () => laLinkedIds, enumerable: true });
+  Object.defineProperty(__x, "laPlaced", { get: () => laPlaced, enumerable: true });
+  Object.defineProperty(__x, "laPlacedIds", { get: () => laPlacedIds, enumerable: true });
+  Object.defineProperty(__x, "laRollUp", { get: () => laRollUp, enumerable: true });
+  Object.defineProperty(__x, "laVariance", { get: () => laVariance, enumerable: true });
+  Object.defineProperty(__x, "makeLookaheadEntry", { get: () => makeLookaheadEntry, enumerable: true });
   Object.defineProperty(__x, "defaultStyle", { get: () => defaultStyle, enumerable: true });
   Object.defineProperty(__x, "makeObject", { get: () => makeObject, enumerable: true });
   Object.defineProperty(__x, "makeLane", { get: () => makeLane, enumerable: true });
@@ -5811,8 +5975,15 @@ __mods["core/history.js"] = function (__x, __req) {
   /** Collections diffed by entity id. */
   const COLLECTIONS = ['lanes', 'objects', 'links', 'baselines', 'groups', 'attachments'];
 
-  /** Top-level fields diffed by value. */
-  const FIELDS = ['name', 'description', 'client', 'project', 'settings', 'lists', 'laneOrder', 'meta'];
+  /**
+   * Top-level fields diffed by value.
+   *
+   * The two registers are here because an import that changes nothing but the
+   * register is still an edit: left out, `diff()` found no change, so the import
+   * was neither undoable nor marked unsaved — a P6 re-import that moved dates
+   * and created no new baseline was simply not saved.
+   */
+  const FIELDS = ['name', 'description', 'client', 'project', 'settings', 'lists', 'laneOrder', 'meta', 'p6', 'lookahead'];
 
   /* ── Diff ──────────────────────────────────────────────────────────────── */
 
@@ -6094,6 +6265,1239 @@ __mods["core/history.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// core/lookahead.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/lookahead.js"] = function (__x, __req) {
+  /**
+   * Comparing two look-ahead snapshots.
+   *
+   * The look-ahead is the contractual source of truth and the resource calendar
+   * is the execution record; the difference between two snapshots is what a
+   * delay claim is eventually built from. So the rules here are about being
+   * *honest* rather than clever — the system logs what it can see and asks a
+   * person about what it cannot.
+   *
+   * Two rules do most of the work, and both exist because the obvious version
+   * produces numbers that flatter or damn the wrong party.
+   *
+   * **Only weeks in both snapshots are compared.** A four-week window rolls
+   * forward, so a week appearing at the far edge is not scope being added and a
+   * week dropping off the back is not scope being removed. Counting them as such
+   * would book a batch of phantom additions every single week, and would count
+   * finished work as deleted scope — inflating exactly the number you would most
+   * want to defend.
+   *
+   * **A crew moving site is not inferred.** When work finishes early and a team
+   * moves, one row disappears and another appears with the same resources. The
+   * activity text is not reliable enough to match on — the spec says so and it is
+   * right — so it is logged honestly as a removal and an addition, and a person
+   * can relink the pair afterwards. Guessing would be the one failure mode
+   * nobody could audit.
+   *
+   * **A Resource row belongs to the activity above it.** The workbook names who
+   * is on an activity by adding a row underneath whose description reads
+   * "Resource", with the names typed into the day cells; where and when are left
+   * blank because they are the line above's. So it is read as part of that
+   * activity rather than as one of its own — otherwise half the sheet is rows
+   * called "Resource" with no location — and a name is never matched to a person
+   * here. That happens against the roster, where an unmatched spelling can be
+   * shown to somebody instead of guessed at.
+   *
+   * Imports: nothing (leaf).
+   */
+
+  /* ── The Resource row ──────────────────────────────────────────────────── */
+
+  /**
+   * Is this what the workbook writes under an activity to name who is on it?
+   *
+   * The 4WLA carries a row directly beneath each activity whose description cell
+   * reads "Resource", and the day cells on it hold the names typed against that
+   * activity. It is recognised by that one word and nothing else — folded for
+   * case and punctuation, but not loosened any further. "Resource Names" is not
+   * it: a rule that matched anything containing the word would swallow an
+   * activity called "Resource mobilisation", and a row misread as a label is a
+   * row of work that vanishes off the calendar.
+   */
+  function isResourceLabel(text) {
+    return /^resources?$/.test(String(text ?? '').toLowerCase().replace(/[^a-z]/g, ''));
+  }
+
+  /**
+   * Which kind of absence a row's description names, or null.
+   *
+   * The workbook carries rows at the bottom that are not site work: "PTO",
+   * "Office" and "Other Group / Project", with names typed into the day cells the
+   * same way the Resource row carries them. They say where somebody is when they
+   * are not on the project — off, at their desk, or on another group's work —
+   * which is a fact about the person rather than about an activity, and it is the
+   * fact the week plan and the huddle are otherwise missing entirely: a blank
+   * against a name reads as "nobody planned this", when the sheet said exactly
+   * why. Only PTO means they were not working; the rest are days like any other,
+   * and they carry a category so the reports can group them.
+   *
+   * Strict for the reason `isResourceLabel()` is strict, and with the same two
+   * failures in mind. A row misread as a label is a row of work that vanishes off
+   * the calendar; a label misread as work is a row of names at no location that
+   * every report then counts as scope. So the spellings are enumerated rather than
+   * matched loosely — "Other" alone is not one of them, because it names nothing.
+   */
+  function absenceKind(text) {
+    const folded = String(text ?? '').toLowerCase().replace(/[^a-z]/g, '');
+    if (/^(pto|paidtimeoff|timeoff|vacation|annualleave|holiday)$/.test(folded)) return 'pto';
+    if (/^(office|officeday|inoffice|officebased)$/.test(folded)) return 'office';
+    if (/^other(group|project)/.test(folded)) return 'other';
+    return null;
+  }
+
+  /**
+   * The three facts about each kind, in one table.
+   *
+   * They were spread across three modules — the label here, whether it counts as
+   * leave inside `availability()`, and nothing at all about which category the
+   * day belongs to — and the first time a kind was added that was three places to
+   * remember. What each one *is*:
+   *
+   * **`leave`** decides whether the person was there at all. PTO is the only one:
+   * somebody in the office or on another group's project is working, they can be
+   * asked how the day went, and folding them into leave would put a person who
+   * was at their desk down as absent.
+   *
+   * **`category`** is the seeded `rc_categories` row the day belongs to, matched
+   * by name because that is what the schema seeds it as. A renamed category
+   * simply stops matching and the day arrives uncategorised — ungrouped in the
+   * reports rather than grouped wrongly, which is the right way for a
+   * name match to fail.
+   */
+  const ABSENCE_KINDS = {
+    pto:    { label: 'PTO',                   leave: true,  category: null },
+    office: { label: 'Office',                leave: false, category: 'Office' },
+    other:  { label: 'Other group / project', leave: false, category: 'Other project' },
+  };
+
+  /** What each kind is called on screen. One place, so three views cannot differ. */
+  const ABSENCE_LABELS = Object.fromEntries(
+    Object.entries(ABSENCE_KINDS).map(([kind, it]) => [kind, it.label])
+  );
+
+  /**
+   * The people named in one cell.
+   *
+   * Typed by hand, so the separator is whatever was to hand: a comma, a slash, a
+   * newline, an ampersand, a plus, the word "and", or simply two spaces where somebody
+   * pressed the bar twice. Nothing is matched to a person here — that is the
+   * roster's job, through the alias register — this only splits what was written.
+   *
+   * **Spacing is noise, not a name.** A cell reading `Victor ,Rosa` and one
+   * reading `Victor, Rosa` are the same two people, so each piece is trimmed and
+   * its own internal runs of whitespace are collapsed before it is handed on: a
+   * name carrying a stray double space would otherwise fold to a different string
+   * from the same name typed once, and match nobody for a reason no reader could
+   * see. A newline inside a cell is a separator rather than a space, because that
+   * is how a second name gets into one cell in Excel.
+   */
+  function resourceNames(text) {
+    return String(text ?? '')
+      /* "and" is tried before the two-space rule on purpose: an alternation is
+         read left to right, so `\s{2,}` would otherwise eat the spaces around a
+         spelled-out "and" and leave the word behind as a person. */
+      .split(/\s+and\s+|[,;/\n&+]|\s{2,}/i)
+      .map((s) => s.trim().replace(/\s+/g, ' '))
+      .filter(Boolean);
+  }
+
+  /**
+   * Stored days whose look-ahead row now names somebody else.
+   *
+   * The 4WLA's Resource row is the plan for the days it names, so a stored
+   * `rc_plan_entries` row carrying a `lookahead_row_id` is somebody having
+   * confirmed or overridden what that row said. When a later read of the sheet
+   * puts a different name on the same row for the same day, the work has moved —
+   * and until this existed the entry stayed against whoever it was first written
+   * for. The visible cost is somebody turning up for a shift that is not theirs
+   * any more while the person who now has it has a blank against their name.
+   *
+   * `resolve` is the name lookup, **injected** for the reason `rowsFrom()` takes
+   * `locate`: the register lives two layers up, this module is a leaf, and the
+   * whole pipeline has to be testable with no browser and no network. It answers
+   * a person id for a written name, or null.
+   *
+   * Returns `[{ entry, from, to }]`, and returns nothing at all unless it is
+   * certain:
+   *
+   * **The row has to say something about that day.** A day the sheet no longer
+   * names anybody on is not a reassignment — it is the sheet going quiet, which
+   * happens whenever an activity is rescheduled, and moving a task to nobody is
+   * not a thing that can be written.
+   *
+   * **It has to name exactly one person the roster knows.** Two names on a day is
+   * a crew, and a crew is not "this task moved to Victor" — it is several entries,
+   * which is a decision somebody takes rather than one this can derive. An
+   * unmatched spelling stops it too: those are reported and answered with an
+   * alias, and guessing here would be the near-miss matching the register refuses.
+   *
+   * **It has to be somebody else.** A re-read that changed nothing must produce
+   * nothing, or every ingest would supersede every linked entry with a revision
+   * saying the same thing. `rc_reassign_plan()` refuses that case as well, so it
+   * is checked on both sides on purpose.
+   */
+  function reassignments({ planRows, laRows, resolve }) {
+    const byRow = new Map();
+    for (const row of laRows || []) {
+      if (row?.id) byRow.set(row.id, row);
+    }
+
+    const out = [];
+    for (const entry of planRows || []) {
+      if (!entry?.id || !entry.lookahead_row_id) continue;
+      const row = byRow.get(entry.lookahead_row_id);
+      if (!row) continue;
+      const written = resourceNames(row.resources?.[entry.work_date] || '');
+      if (!written.length) continue;
+
+      const ids = new Set();
+      let unknown = false;
+      for (const name of written) {
+        const id = resolve ? resolve(name) : null;
+        if (id) ids.add(id);
+        else unknown = true;
+      }
+      // One person, and every name on the day accounted for. Anything else is a
+      // crew or a spelling nobody has mapped, and neither is a move.
+      if (unknown || ids.size !== 1) continue;
+      const [to] = [...ids];
+      if (to === entry.person_id) continue;
+      out.push({ entry, from: entry.person_id, to });
+    }
+    return out;
+  }
+
+  /**
+   * Every mark on an activity, the ones on its Resource row included.
+   *
+   * Whether a row has work on it is a question about the pair, not about the
+   * activity line alone: the workbook sometimes paints the shift on the Resource
+   * row instead. Both places that ask — `readGrid()` and the calendar's window —
+   * have to ask it the same way, which is why it is a function and not two loops.
+   */
+  function marksOf(activity) {
+    return activity?.resource ? [...activity.marks, ...activity.resource.marks] : (activity?.marks || []);
+  }
+
+  /* ── Row identity ──────────────────────────────────────────────────────── */
+
+  /**
+   * A key for a row that survives the file being edited.
+   *
+   * The look-ahead has no activity IDs — no P6 numbers, nothing stable — and its
+   * descriptions are not matchable. Location, week and subsystem are what remain,
+   * plus an ordinal to separate two rows that share all three.
+   *
+   * The ordinal is the weak part, and knowingly so: inserting a row in the middle
+   * of a group shifts everything below it and produces a false removed/added
+   * pair. That is tolerable only because the manual relink exists to fix it, and
+   * because the alternative — matching on text — would produce *wrong* answers
+   * rather than noisy ones.
+   */
+  function rowKey({ weekStart, location, subsystem = '', ordinal = 0 }) {
+    return [weekStart, String(location || '').trim(), String(subsystem || '').trim(), ordinal].join('|');
+  }
+
+  /** Assign ordinals within each (week, location, subsystem) group. */
+  function keyRows(rows) {
+    const seen = new Map();
+    return rows.map((row) => {
+      const group = [row.weekStart, row.location, row.subsystem || ''].join('|');
+      const ordinal = seen.get(group) || 0;
+      seen.set(group, ordinal + 1);
+      return { ...row, rowKey: rowKey({ ...row, ordinal }) };
+    });
+  }
+
+  /* ── Reading the grid as a calendar ────────────────────────────────────── */
+
+  const WEEKDAYS = ['M', 'TU', 'W', 'TH', 'F', 'SA', 'SU'];
+
+  const MONTH_NAMES = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
+    'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+
+  /**
+   * The one month a label names, or -1.
+   *
+   * A week straddling a boundary is labelled "August/September" in this
+   * workbook, and a label naming two months anchors nothing — it is skipped
+   * rather than resolved to the first of them.
+   */
+  function oneMonth(label) {
+    const text = String(label || '').toUpperCase();
+    const hits = new Set();
+    MONTH_NAMES.forEach((name, i) => {
+      if (text.includes(name) || new RegExp(`\\b${name.slice(0, 3)}\\b`).test(text)) hits.add(i);
+    });
+    return hits.size === 1 ? [...hits][0] : -1;
+  }
+
+  /**
+   * Give every day column a real date, or none of them one.
+   *
+   * The sheet carries months and day numbers and no year at all, so a year has
+   * to come from somewhere else. Two things supply it, and the second is what
+   * makes this safe to rely on rather than a guess:
+   *
+   * **The snapshot's own timestamp** says roughly when the window was current.
+   * The look-ahead is maintained four to six weeks out, so the window brackets
+   * the day it was read; that narrows the year to one of three candidates.
+   *
+   * **The weekday letters check the answer.** The sheet writes M, Tu, W beside
+   * every day, and only one of the candidate years makes those letters come out
+   * right — the same date is a different weekday in adjacent years. So the year
+   * is not inferred and hoped for, it is *verified* against something the file
+   * already says, and where the letters do not agree no dates are claimed at
+   * all and everything that depends on them stands down.
+   *
+   * Mutates `days`, adding `date` (an ISO string) where it can.
+   */
+  function datePlease(days, anchorISO) {
+    if (!days.length) return false;
+
+    /* Day numbers first: they are always present, and a drop from 30 to 1 is a
+       month boundary whether or not anybody labelled it. That matters because
+       the visible window often starts mid-month, with the label for that month
+       sitting in a column the workbook has hidden. */
+    const nums = [];
+    for (let i = 0; i < days.length; i++) {
+      const n = parseInt(String(days[i].day).replace(/\D/g, ''), 10);
+      nums.push(Number.isFinite(n) && n >= 1 && n <= 31 ? n : (nums[i - 1] || 0) + 1);
+    }
+
+    let anchorAt = -1;
+    let anchorMonth = -1;
+    for (let i = 0; i < days.length; i++) {
+      const m = oneMonth(days[i].label);
+      if (m >= 0) { anchorAt = i; anchorMonth = m; break; }
+    }
+    if (anchorAt < 0) return false;
+
+    const months = new Array(days.length).fill(-1);
+    months[anchorAt] = anchorMonth;
+    for (let i = anchorAt + 1; i < days.length; i++) {
+      months[i] = nums[i] < nums[i - 1] ? (months[i - 1] + 1) % 12 : months[i - 1];
+    }
+    for (let i = anchorAt - 1; i >= 0; i--) {
+      months[i] = nums[i] > nums[i + 1] ? (months[i + 1] + 11) % 12 : months[i + 1];
+    }
+
+    // Relative years: the axis only ever runs forwards, so a month going
+    // backwards is the turn of a year.
+    const rel = [0];
+    for (let i = 1; i < days.length; i++) rel.push(rel[i - 1] + (months[i] < months[i - 1] ? 1 : 0));
+
+    const anchorMs = Date.parse(`${String(anchorISO || '').slice(0, 10)}T00:00:00Z`);
+    const base = Number.isFinite(anchorMs)
+      ? new Date(anchorMs).getUTCFullYear()
+      : new Date().getUTCFullYear();
+
+    const LETTERS = ['SU', 'M', 'TU', 'W', 'TH', 'F', 'SA'];
+    let bestYear = null;
+    let bestScore = -1;
+    for (const year of [base - 1, base, base + 1]) {
+      let agree = 0;
+      for (let i = 0; i < days.length; i++) {
+        const ms = Date.UTC(year + rel[i], months[i], nums[i]);
+        if (LETTERS[new Date(ms).getUTCDay()] === String(days[i].weekday).trim().toUpperCase()) agree++;
+      }
+      // Closeness to the snapshot breaks a tie; the letters decide otherwise.
+      const mid = Date.UTC(year + rel[rel.length >> 1], months[days.length >> 1], nums[days.length >> 1]);
+      const near = Number.isFinite(anchorMs) ? 1 - Math.min(1, Math.abs(mid - anchorMs) / 3.2e10) : 0;
+      const score = agree + near;
+      if (score > bestScore) { bestScore = score; bestYear = year; }
+    }
+
+    // Below this the letters are not agreeing and the reading is wrong. Saying
+    // nothing is the only honest answer: a today line on the wrong column is
+    // worse than no today line.
+    const agreement = Math.floor(bestScore) / days.length;
+    if (agreement < 0.9) return false;
+
+    for (let i = 0; i < days.length; i++) {
+      days[i].date = new Date(Date.UTC(bestYear + rel[i], months[i], nums[i]))
+        .toISOString().slice(0, 10);
+      days[i].month = `${MONTH_NAMES[months[i]].slice(0, 3)} ${bestYear + rel[i]}`;
+    }
+    return true;
+  }
+
+  /**
+   * Turn a parsed sheet into something that can be drawn: days across the top,
+   * activities down the side.
+   *
+   * Everything here is *found* rather than configured, and that is the point.
+   * The look-ahead is a spreadsheet somebody maintains by hand: rows get
+   * inserted, the window scrolls, columns are hidden and unhidden as the weeks
+   * move. A layout pinned to "dates start at column H" would be wrong the first
+   * time anybody inserted a column, and wrong silently — the grid would still
+   * draw, against the wrong days.
+   *
+   * So the date axis is located by looking for the row of weekday letters, which
+   * is the one row on the sheet whose content cannot be mistaken for anything
+   * else. The day numbers sit directly above it and the month labels above
+   * those; the columns it occupies are the calendar, and everything to the left
+   * of them is what the activity *is*.
+   *
+   * No year is invented. The sheet does not carry one, and a date is not
+   * something to infer from a month name — the axis is drawn as the workbook
+   * writes it.
+   */
+  function readGrid(grid, { anchorISO = null } = {}) {
+    const rows = (grid?.rows || []).slice().sort((a, b) => a.row - b.row);
+    const empty = { days: [], meta: [], headings: [], activities: [], header: null };
+    if (!rows.length) return empty;
+
+    // The weekday row: the one where most values are M/Tu/W/Th/F/Sa/Su.
+    let header = null;
+    let best = 0;
+    for (const row of rows) {
+      const hits = row.cells.filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()));
+      if (hits.length > best && hits.length >= 7) {
+        best = hits.length;
+        header = row;
+      }
+    }
+    if (!header) return empty;
+
+    const dayCols = header.cells
+      .filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()))
+      .map((c) => c.col)
+      .sort((a, b) => a - b);
+    const dayCol = new Set(dayCols);
+    const firstDay = dayCols[0];
+
+    const at = (row, col) => row?.cells.find((c) => c.col === col);
+    const above = (n) => rows.filter((r) => r.row < header.row).slice(-n)[0] || null;
+    const numbers = above(1);
+    const months = above(2);
+
+    /* The month label is a merged cell, so only the leftmost column of each
+       block carries it. Carrying the last one forward is what merged means. */
+    let month = '';
+    const days = dayCols.map((col) => {
+      const label = String(at(months, col)?.value ?? '').trim();
+      if (label) month = label;
+      return {
+        col,
+        month,
+        // What the sheet actually wrote here, as opposed to what was carried
+        // across the merge. Only a real label can anchor the calendar.
+        label,
+        day: String(at(numbers, col)?.value ?? '').trim(),
+        weekday: String(at(header, col)?.value ?? '').trim(),
+        weekend: ['SA', 'SU'].includes(String(at(header, col)?.value ?? '').trim().toUpperCase()),
+      };
+    });
+
+    datePlease(days, anchorISO);
+
+    /* The activity columns are whatever is used to the left of the calendar.
+       Their headings are not reliably on any one row — this file labels some and
+       not others — so they are numbered by position and named where a heading
+       happens to exist above the first activity. */
+    const body = rows.filter((r) => r.row > header.row);
+    const metaCols = [...new Set(
+      body.flatMap((r) => r.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim()).map((c) => c.col))
+    )].sort((a, b) => a - b);
+
+    /* What the sheet calls each of those columns.
+       The nearest thing written in that column at or above the weekday row —
+       which is where a heading is, whichever row somebody put it on. It is worth
+       reading rather than guessing because one of these columns is the location,
+       and knowing *which* is the difference between recording where the work is
+       and recording nothing. Nothing depends on a heading existing: an unlabelled
+       column is '' and is treated as it always was. */
+    const headings = metaCols.map((col) => {
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i].row > header.row) continue;
+        const text = String(at(rows[i], col)?.value ?? '').trim();
+        if (text) return text;
+      }
+      return '';
+    });
+
+    const activities = [];
+    for (const row of body) {
+      const meta = metaCols.map((col) => String(at(row, col)?.value ?? '').trim());
+      const marks = row.cells
+        .filter((c) => dayCol.has(c.col) && (String(c.value ?? '').trim() || c.hex))
+        .map((c) => ({
+          col: c.col,
+          value: String(c.value ?? '').trim(),
+          hex: c.hex || null,
+          meaning: c.meaning || null,
+          role: c.role || (c.hex ? 'shift' : null),
+        }));
+
+      // A row with neither a description nor a mark is spacing, not work.
+      if (!meta.some(Boolean) && !marks.some((m) => m.value)) continue;
+
+      /* A heading is a row whose *activity* cells are painted.
+         That is a structural fact rather than a reading of the colour, and it is
+         what makes it reliable: the shading that runs along the day columns of
+         every row paints only the calendar, never the description beside it. So
+         a section title is recognised without anybody having to tell the legend
+         which of several near-identical greys means "divider".
+         Only the columns *left* of the calendar count. `!dayCol.has(col)` also
+         took in anything painted to the right of the last day — a totals column,
+         a trailing border — and one of those turns every row in the workbook
+         into a heading, which is how a whole file arrived on screen at once. */
+      const heading = row.cells.some((c) => c.col < firstDay && c.hex);
+
+      /* "PTO", "Office", "Other Group / Project": rows of names that are not
+         site work.
+         Unlike the Resource row they stand on their own — they sit at the bottom
+         of the sheet and belong to nobody above them, because what they say is
+         about the *person*, not about an activity. So they are emitted as rows in
+         their own right, marked with the kind, and everything downstream reads
+         `absence` to know this is not scope: `rowsFrom()` skips them so they can
+         never be counted as work added or removed, and the calendar draws them
+         with the names rather than with the activities. */
+      const absence = absenceKind(meta.find((value) => absenceKind(value)) || '');
+      if (!heading && absence) {
+        activities.push({
+          row: row.row, meta, marks, heading: false, highlighted: false,
+          named: true, resource: null, absence,
+        });
+        continue;
+      }
+
+      /* The Resource row the workbook writes under an activity.
+         It belongs to the activity above it rather than being one of its own: it
+         carries no work of its own, it inherits where and when from the line it
+         sits under, and drawn as a separate activity it would be a hundred and
+         forty rows of the word "Resource". Its day cells are the names.
+
+         **Directly above means the row directly above, on the sheet.** This used
+         to take whichever activity happened to have been pushed last, however far
+         up the sheet it was — so anything the parser stepped over on the way down
+         silently re-parented the names. A hidden row is the case that bit: the
+         workbook hides an activity, `parseSheet()` drops it before this ever sees
+         it, and the Resource row underneath attached itself to the activity above
+         the hidden one. Nothing on the calendar showed it, because the names were
+         drawn against the row they were typed on — but the derived plan booked
+         somebody onto an activity that is not in the 4WLA at all, which is exactly
+         how it was found. `above.row === row.row - 1` is the whole test: a gap in
+         the numbering means *something* was between them — hidden, skipped as
+         spacing, or a band — and there is no honest way to say whose names these
+         are.
+
+         An orphan is dropped rather than drawn. It is a label row whatever it is
+         attached to: pushed as an activity it would be the word "Resource" at no
+         location, counted as scope by every report, which is worse than the wrong
+         parent it replaces. */
+      if (!heading && meta.some(isResourceLabel)) {
+        const above = activities[activities.length - 1];
+        if (above && above.row === row.row - 1 && !above.heading && !above.absence) {
+          above.resource = {
+            row: row.row,
+            /* Where and when come from the activity above — that is what the
+               workbook means by leaving them blank on this row. Anything typed
+               here wins, so a resource working different hours can say so. */
+            meta: meta.map((value, i) => value || above.meta[i] || ''),
+            marks,
+            names: marks.filter((m) => m.value).map((m) => ({ col: m.col, names: resourceNames(m.value) })),
+          };
+          above.highlighted = marksOf(above).some((m) => m.hex && m.role === 'shift');
+        }
+        continue;
+      }
+
+      /* "Highlighted" means at least one day carries paint that is *work*.
+         Tested as `role === 'shift'` rather than `role !== 'ignore'`, which is
+         not the same question and got the answer wrong: a `divider` is the grey
+         the workbook paints its section bands in, and a row whose only colour is
+         a divider or a weekend band has nothing scheduled on it — but it read as
+         highlighted and survived into the grid.
+         An unmapped colour still counts, because `applyLegend()` gives it
+         `shift`: until somebody says what a colour is, the honest assumption is
+         that it might be work, and hiding it would bury the rows that most need
+         attention. */
+      const highlighted = marks.some((m) => m.hex && m.role === 'shift');
+
+      /* Whether anybody wrote down what this row *is*.
+         A row of paint with no description is not an activity — it is a band, a
+         spacer, or a fill somebody dragged too far — and putting it on the
+         calendar asks the reader to work out which. It is hidden with the
+         unscheduled rows rather than dropped, so the switch still brings it back. */
+      const named = meta.some(Boolean);
+
+      activities.push({ row: row.row, meta, marks, heading, highlighted, named, resource: null, absence: null });
+    }
+
+    return { days, meta: metaCols, headings, activities, header: header.row };
+  }
+
+  /**
+   * Who the sheet says is away, and on which day.
+   *
+   * One entry per day cell written on a "PTO" or "Other Group / Project" row:
+   * `{ kind, row, date, written }`, where `written` is the spelling that was
+   * typed. Nothing is matched to a person here — that is the register's job, the
+   * same as for the Resource row — and nothing is invented for a day the sheet
+   * left blank.
+   *
+   * Derived at paint time rather than stored, for the reason the whole 4WLA
+   * reading is: `rc_leave` is the record of leave somebody *booked*, and writing
+   * the workbook into it would make the sheet's authorship indistinguishable from
+   * a decision, go stale the moment somebody edited a cell, and need cancelling to
+   * correct something nobody ever booked.
+   */
+  function absencesFrom(view) {
+    const dayByCol = new Map((view?.days || []).map((d) => [d.col, d]));
+    const out = [];
+    for (const activity of view?.activities || []) {
+      if (!activity.absence) continue;
+      for (const mark of activity.marks) {
+        const written = String(mark.value || '').trim();
+        if (!written) continue;
+        const day = dayByCol.get(mark.col);
+        if (!day?.date) continue;
+        out.push({ kind: activity.absence, row: activity.row, date: day.date, written });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Which of the activity columns is the location, off the sheet's own heading.
+   *
+   * Found, like the date axis, rather than configured — for the same reason and
+   * with the same failure in mind: a column pinned by letter or by position is
+   * wrong the first time somebody inserts one, and wrong *silently*, because the
+   * rows still write and every one of them records the wrong place.
+   *
+   * The heading is what the workbook calls the column, so that is what is read.
+   * `-1` means it says nothing recognisable, and the caller falls back to asking
+   * the alias register which cell it knows — which is what this module did
+   * everywhere before, and still the only answer available on a sheet with no
+   * headings at all.
+   */
+  function locationColumnOf(view) {
+    const headings = view?.headings || [];
+    for (let i = 0; i < headings.length; i++) {
+      if (/\blocations?\b/i.test(headings[i])) return i;
+    }
+    // "Site" is the other word this project's sheets use for it. Deliberately a
+    // short list: a near miss here misfiles every row on the sheet at once.
+    for (let i = 0; i < headings.length; i++) {
+      if (/\bsite\b/i.test(headings[i])) return i;
+    }
+    return -1;
+  }
+
+  /**
+   * A read grid, as rows something else can point at.
+   *
+   * One row per activity per *week*, because that is the grain the look-ahead is
+   * maintained at and the grain a plan is made at. Two rules, both of which hold
+   * everywhere else in this module:
+   *
+   * **The location is read from the column the sheet keeps it in, and kept
+   * whether or not it resolves.** `locationColumnOf()` finds that column by its
+   * heading; `locate` — the alias register, injected so this stays testable
+   * without a network — turns the spelling into an id where it knows it. Nothing
+   * is matched on the description: the wording differs on the two sides and is
+   * not reliable enough to carry evidence, which is what the alias list is for.
+   *
+   * The text surviving an unresolved spelling is the part that was missing. The
+   * location used to be recorded *only* where the register already knew it, so a
+   * column full of "W30" and "Y10" was discarded on every deployment that had not
+   * registered them — and with nothing kept there was nothing for anybody to map,
+   * which is the one state this module is built to make impossible. An unresolved
+   * spelling is exactly like an unmapped colour or an unmatched name: shown, and
+   * one click from being answered.
+   *
+   * **A row with nothing scheduled that week is not a row.** The sheet carries
+   * activities for reference with no shift against them, and writing those would
+   * make the register mostly noise — and, worse, make every one of them look
+   * like scope the first time it *did* get a shift.
+   */
+  async function rowsFrom(view, {
+    snapshotId = null, locate = async () => null, locationColumn = null,
+  } = {}) {
+    if (!view?.days?.length) return [];
+
+    // Told which column, or read off the sheet's own heading. `null` is "work it
+    // out"; `-1` is "there is no heading", which is the register scan below.
+    const locCol = Number.isInteger(locationColumn) ? locationColumn : locationColumnOf(view);
+
+    const dayByCol = new Map(view.days.map((d) => [d.col, d]));
+    const out = [];
+    const ordinals = new Map();
+
+    for (const activity of view.activities) {
+      if (activity.heading) continue;
+      /* Not work, so not a row. Emitting one would put "PTO" in the register as an
+         activity at no location, and `classify()` would then book it as scope
+         added the first week it appeared and scope removed the week it did not. */
+      if (activity.absence) continue;
+
+      // Group this activity's marks by the week they fall in.
+      const weeks = new Map();
+      for (const mark of marksOf(activity)) {
+        if (!mark.hex || mark.role === 'ignore') continue;
+        const day = dayByCol.get(mark.col);
+        if (!day?.date) continue;
+        const week = mondayOf(day.date);
+        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
+        const bucket = weeks.get(week);
+        bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
+        if (mark.value) bucket.marks[day.date] = mark.value;
+      }
+      if (!weeks.size) continue;
+
+      /* Who the Resource row names, per day, in the words the workbook used.
+         Only into weeks that already have a shift in them: a name typed against a
+         day nobody is scheduled on is the same kind of stray as a colour on an
+         empty row, and writing it would invent a week of scope. Nothing is
+         matched to a person here — that happens against the roster, where an
+         unmatched name can be shown to somebody rather than guessed at. */
+      for (const mark of activity.resource?.marks || []) {
+        if (!mark.value) continue;
+        const day = dayByCol.get(mark.col);
+        const week = day?.date ? mondayOf(day.date) : null;
+        if (!week || !weeks.has(week)) continue;
+        weeks.get(week).resources[day.date] = mark.value;
+      }
+
+      /* Where the work is, from the column the sheet keeps it in.
+         **The text is kept whether or not it resolves.** It used to be recorded
+         only when the alias register already knew it, so a location column full of
+         "W30" and "Y10" was *discarded* on a deployment that had not registered
+         them yet — and with nothing kept there was nothing for anybody to map,
+         which is the one state this design is supposed to make impossible. An
+         unresolved spelling is exactly like an unmapped colour or an unmatched
+         name: shown, and one click from being answered. */
+      let locationId = null;
+      let rawLocation = null;
+      if (locCol >= 0) {
+        rawLocation = activity.meta[locCol] || null;
+        locationId = rawLocation ? await locate(rawLocation) : null;
+      } else {
+        // Nobody has said which column it is, so the register decides: the first
+        // cell it recognises is the location. Still never the *description* —
+        // that is matched on nothing, here or anywhere else in this module.
+        for (const value of activity.meta) {
+          const hit = await locate(value);
+          if (hit) { locationId = hit; rawLocation = value; break; }
+        }
+      }
+      const label = activity.meta.filter(Boolean).join(' · ');
+
+      for (const [week, bucket] of weeks) {
+        const groupKey = [week, rawLocation || '', ''].join('|');
+        const ordinal = ordinals.get(groupKey) || 0;
+        ordinals.set(groupKey, ordinal + 1);
+        out.push({
+          snapshot_id: snapshotId,
+          week_start: week,
+          sheet_row: activity.row,
+          row_key: rowKey({ weekStart: week, location: rawLocation || '', subsystem: '', ordinal }),
+          location_id: locationId,
+          raw_location: rawLocation,
+          raw_label: label,
+          cells: bucket.cells,
+          bart_marks: bucket.marks,
+          resources: bucket.resources,
+        });
+      }
+    }
+
+    return out;
+  }
+
+  /** The Monday of an ISO date's week, in UTC. A calendar date must not shift. */
+  function mondayOf(iso) {
+    const ms = Date.parse(`${iso}T00:00:00Z`);
+    const back = (new Date(ms).getUTCDay() + 6) % 7;
+    return new Date(ms - back * 86400000).toISOString().slice(0, 10);
+  }
+
+  /* ── The window ────────────────────────────────────────────────────────── */
+
+  /**
+   * The weeks a snapshot actually covers, read from the snapshot itself.
+   *
+   * Deliberately not a constant. The spec calls it a four-week look-ahead and
+   * says it is maintained four to six weeks out, so a hard-coded 4 would
+   * misclassify the sixth week every time it appeared.
+   */
+  function windowOf(rows) {
+    const weeks = [...new Set(rows.map((r) => r.weekStart))].sort();
+    return { weeks, first: weeks[0] || null, last: weeks[weeks.length - 1] || null };
+  }
+
+  /* ── Comparing ─────────────────────────────────────────────────────────── */
+
+  /**
+   * Classify the difference between two keyed snapshots.
+   *
+   * `before` and `after` are arrays of `{ rowKey, weekStart, location, subsystem,
+   * label, cells, marks }`, where `cells` maps a date to a shift meaning and
+   * `marks` holds BART's own resource requests.
+   *
+   * Returns a list of `{ kind, weekStart, rowKey, before, after }`.
+   *
+   * **A read that started recording the location is not a read where everything
+   * moved.** The row key is built from the week and the location, so the first read
+   * after the location began coming off the sheet's own column — rather than only
+   * where the alias register already knew the spelling — keys every row
+   * differently. Compared naively that is every row removed and every row added:
+   * a batch of phantom scope on the one screen somebody reads a year later, booked
+   * into the KPIs, over a change that is about the *keying* and not the work. It is
+   * the same judgement the window rule makes, and drawn as narrowly as it can be —
+   * one side recording no location at all, the other recording one, and not a
+   * single key in common. A crew genuinely moving site is still a removal and an
+   * addition, which is what `relinkCandidates()` is for.
+   */
+  function classify(before, after, { cancelledMeaning = 'cancelled' } = {}) {
+    const beforeWindow = windowOf(before);
+    const afterWindow = windowOf(after);
+
+    if (before.length && after.length) {
+      const keys = new Set(after.map((r) => r.rowKey));
+      const located = (rows) => rows.filter((r) => String(r.location || '').trim()).length;
+      const sided = located(before) === 0 !== (located(after) === 0);
+      if (sided && !before.some((r) => keys.has(r.rowKey))) return [];
+    }
+
+    // Only weeks present on both sides can be compared at all. Everything else
+    // is the window moving, which is recorded and kept out of the KPIs.
+    const shared = new Set(beforeWindow.weeks.filter((w) => afterWindow.weeks.includes(w)));
+
+    const events = [];
+    const beforeByKey = new Map(before.map((r) => [r.rowKey, r]));
+    const afterByKey = new Map(after.map((r) => [r.rowKey, r]));
+
+    /* Weeks entering and leaving the window. Not scope, and named so. */
+    for (const week of afterWindow.weeks) {
+      if (!beforeWindow.weeks.includes(week)) {
+        events.push({ kind: 'window_advanced', weekStart: week, rowKey: null, before: null, after: null });
+      }
+    }
+    for (const week of beforeWindow.weeks) {
+      if (!afterWindow.weeks.includes(week)) {
+        events.push({ kind: 'window_retired', weekStart: week, rowKey: null, before: null, after: null });
+      }
+    }
+
+    /* Rows added to, and removed from, a week that was already in view. */
+    for (const row of after) {
+      if (!shared.has(row.weekStart)) continue;
+      if (!beforeByKey.has(row.rowKey)) {
+        events.push({ kind: 'scope_added', weekStart: row.weekStart, rowKey: row.rowKey, before: null, after: row });
+      }
+    }
+    for (const row of before) {
+      if (!shared.has(row.weekStart)) continue;
+      if (!afterByKey.has(row.rowKey)) {
+        events.push({ kind: 'scope_removed', weekStart: row.weekStart, rowKey: row.rowKey, before: row, after: null });
+      }
+    }
+
+    /* Rows present on both sides: what changed inside them. */
+    for (const row of after) {
+      const prior = beforeByKey.get(row.rowKey);
+      if (!prior || !shared.has(row.weekStart)) continue;
+
+      const dates = [...new Set([...Object.keys(prior.cells || {}), ...Object.keys(row.cells || {})])].sort();
+      for (const date of dates) {
+        const was = (prior.cells || {})[date] || null;
+        const now = (row.cells || {})[date] || null;
+        if (was === now) continue;
+
+        // A shift turning red is a cancellation, and the colour alone cannot say
+        // whose. Whoever reviews it is asked; nothing is assumed.
+        const kind = now === cancelledMeaning && was && was !== cancelledMeaning
+          ? 'cancellation'
+          : 'shift_changed';
+
+        events.push({
+          kind,
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          date,
+          before: was,
+          after: now,
+          needsResponsibility: kind === 'cancellation',
+        });
+      }
+
+      // BART's own resource marks — an EIC added to an otherwise unchanged
+      // shift. The shift did not move, and the request still changed, so it is
+      // logged rather than folded into the row above.
+      const marksBefore = JSON.stringify(prior.marks || {});
+      const marksAfter = JSON.stringify(row.marks || {});
+      if (marksBefore !== marksAfter) {
+        events.push({
+          kind: 'resource_changed',
+          field: 'marks',
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          before: prior.marks || {},
+          after: row.marks || {},
+        });
+      }
+
+      /* And the Resource row underneath: who is on it.
+         The same kind as a mark changing rather than a kind of its own, because
+         it is the same fact — the request against this activity moved without the
+         shift moving — and a new kind would need the `rc_change_events` check
+         constraint widened in every project that already has one. `field` is what
+         tells the two apart when somebody reads the row back. */
+      const whoBefore = JSON.stringify(prior.resources || {});
+      const whoAfter = JSON.stringify(row.resources || {});
+      if (whoBefore !== whoAfter) {
+        events.push({
+          kind: 'resource_changed',
+          field: 'resources',
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          before: prior.resources || {},
+          after: row.resources || {},
+        });
+      }
+    }
+
+    return events;
+  }
+
+  /**
+   * Removals and additions in the same week that could be one crew moving site.
+   *
+   * Only ever a *suggestion*, surfaced for somebody to confirm. Work finishing
+   * early at one location and starting at another is not a cancellation, but the
+   * only evidence is that the same BART resources appear on both — and the
+   * activity text, which cannot be trusted. So the pairing is a human judgement
+   * by design, and the system's job is to make it easy rather than to guess.
+   */
+  function relinkCandidates(events) {
+    const removed = events.filter((e) => e.kind === 'scope_removed');
+    const added = events.filter((e) => e.kind === 'scope_added');
+    const out = [];
+
+    for (const gone of removed) {
+      for (const arrived of added) {
+        if (gone.weekStart !== arrived.weekStart) continue;
+        const a = JSON.stringify(gone.before?.marks || {});
+        const b = JSON.stringify(arrived.after?.marks || {});
+        if (a !== '{}' && a === b) {
+          out.push({ removed: gone, added: arrived, because: 'the same resources were requested' });
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Which events count toward the change KPIs.
+   *
+   * The window moving is real and recorded, and it is not a change of scope.
+   * Keeping the two apart is what stops the scope-added figure being meaningless
+   * within a month.
+   */
+  const KPI_KINDS = ['scope_added', 'scope_removed', 'cancellation', 'resource_changed', 'shift_changed'];
+
+  function countable(events) {
+    return events.filter((e) => KPI_KINDS.includes(e.kind));
+  }
+
+  /** A short, plain description of an event, for the change log. */
+  /**
+   * One line saying what an event was.
+   *
+   * Reads the *stored* shape: `before` and `after` are jsonb, because the table
+   * has no column for a date and a row-level change needs one. `sideOf()` in
+   * `ui/rc_lookahead.js` is what writes them, and the two have to agree — a
+   * mismatch here shows up as "undefined → undefined" on the one screen somebody
+   * reads a year later.
+   */
+  function describe(event) {
+    const day = event.date || event.after?.date || event.before?.date || 'a day';
+    switch (event.kind) {
+      case 'scope_added': return `Added: ${event.after?.label || event.rowKey}`;
+      case 'scope_removed': return `Removed: ${event.before?.label || event.rowKey}`;
+      case 'cancellation': return `Cancelled on ${day}: was ${event.before?.value ?? event.before}`;
+      case 'shift_changed':
+        return `${day}: ${event.before?.value || 'nothing'} → ${event.after?.value || 'nothing'}`;
+      case 'resource_changed': {
+        /* The *stored* shape decides which of the two this was: `sideOf()` writes
+           `{ resources }` for the Resource row and `{ marks }` for a mark on the
+           activity line. A row written before Resource rows existed carries only
+           the latter, and it still prints the sentence it always did rather than
+           "undefined → undefined" on the one screen somebody reads a year later. */
+        const who = (side) => {
+          const map = side?.resources;
+          if (!map || typeof map !== 'object') return null;
+          return [...new Set(Object.values(map).flatMap((v) => resourceNames(v)))].join(', ');
+        };
+        const was = who(event.before);
+        const now = who(event.after);
+        if (was === null && now === null) return 'BART resource request changed';
+        return `Resource: ${was || 'nobody'} → ${now || 'nobody'}`;
+      }
+      case 'window_advanced': return `Week ${event.weekStart} came into the window`;
+      case 'window_retired': return `Week ${event.weekStart} left the window`;
+      case 'location_shift': return 'Relinked as one crew moving site';
+      default: return event.kind;
+    }
+  }
+
+  /* ── Suggestions for the timeline ──────────────────────────────────────── */
+
+  /**
+   * The look-ahead as bars somebody might want on the plan.
+   *
+   * One suggestion per **run of painted cells**: consecutive day columns on one
+   * activity whose paint counts as work (`role === 'shift'`, the same test that
+   * decides whether a row is highlighted at all). Two runs on one row are two
+   * suggestions, because a gap in the paint is the workbook saying the work
+   * stops there — joining them would put a bar across the days nobody is on it.
+   * Adjacent means adjacent *on the sheet*: a weekend the workbook hides is not a
+   * gap, because nobody reading the sheet sees one there.
+   *
+   * Headings, absence rows and rows nobody described are not work and never
+   * suggest anything — the same three exclusions the calendar makes.
+   *
+   * Dates come back as UTC-midnight milliseconds, half-open like a bar on the
+   * timeline: `end` is the day *after* the last painted cell, so a single
+   * painted day is a one-day bar rather than a zero-width one. A sheet whose
+   * axis could not be dated (`datePlease()` refused it) suggests nothing, since
+   * a bar at a guessed date is worse than no bar.
+   */
+  function suggestionsFrom(view) {
+    const days = (view?.days || []).filter((d) => d.date);
+    if (!days.length || days.length !== (view?.days || []).length) return [];
+
+    const locCol = locationColumnOf(view);
+    const titleCol = titleColumnOf(view, locCol);
+    const out = [];
+
+    for (const activity of view.activities || []) {
+      if (activity.heading || activity.absence || !activity.named) continue;
+
+      const workAt = new Map();
+      for (const mark of marksOf(activity)) {
+        if (!mark.hex || mark.role !== 'shift') continue;
+        if (!workAt.has(mark.col)) workAt.set(mark.col, []);
+        workAt.get(mark.col).push(mark);
+      }
+      if (!workAt.size) continue;
+
+      const namesAt = new Map();
+      for (const entry of activity.resource?.names || []) namesAt.set(entry.col, entry.names);
+
+      const meta = activity.meta || [];
+      const location = locCol >= 0 ? (meta[locCol] || '') : '';
+      const title = (titleCol >= 0 ? meta[titleCol] : '') || longest(meta.filter((_, i) => i !== locCol)) || location;
+      const label = meta.filter(Boolean).join(' · ');
+
+      let run = null;
+      const close = () => {
+        if (!run) return;
+        out.push({
+          key: suggestionKey(label),
+          title,
+          location,
+          label,
+          row: activity.row,
+          start: isoMs(run.first),
+          end: isoMs(run.last) + 86400000,
+          days: run.count,
+          meanings: [...run.meanings],
+          resources: [...run.resources],
+        });
+        run = null;
+      };
+
+      for (const day of days) {
+        const marks = workAt.get(day.col);
+        if (!marks) {
+          close();
+          continue;
+        }
+        if (!run) run = { first: day.date, last: day.date, count: 0, meanings: new Set(), resources: new Set() };
+        run.last = day.date;
+        run.count++;
+        for (const mark of marks) run.meanings.add(mark.meaning || `#${mark.hex}`);
+        for (const name of namesAt.get(day.col) || []) run.resources.add(name);
+      }
+      close();
+    }
+
+    return out;
+  }
+
+  /**
+   * The column that says what the work *is*, off the sheet's own heading.
+   * Found like the location column is, and for the same reason; -1 when nothing
+   * is labelled, and the caller falls back to the longest description it has.
+   */
+  function titleColumnOf(view, locCol) {
+    const headings = view?.headings || [];
+    for (let i = 0; i < headings.length; i++) {
+      if (i !== locCol && /\b(descr|activit|task|scope)/i.test(headings[i])) return i;
+    }
+    return -1;
+  }
+
+  function longest(values) {
+    return values.reduce((best, v) => (String(v || '').length > best.length ? String(v) : best), '');
+  }
+
+  function isoMs(iso) {
+    return Date.parse(`${iso}T00:00:00Z`);
+  }
+
+  /**
+   * What identifies a suggestion from one read of the sheet to the next.
+   *
+   * The workbook has no IDs, so this is the activity's own words, folded for case
+   * and spacing — the only thing a row carries from one week to the next. It is
+   * a weak key and knowingly so, for the reason `rowKey()` is: rewording a row
+   * makes it a new suggestion and the old one gone, which is noisy but visible,
+   * where matching on anything looser would quietly move somebody's bar onto a
+   * different piece of work.
+   */
+  function suggestionKey(label) {
+    return String(label || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  /** How far apart two runs of one activity may start and still be one run moved. */
+  const SAME_RUN_DAYS = 14;
+
+  /**
+   * Bring a register of suggestions up to date with a new read of the sheet.
+   *
+   * `existing` is `{ id → entry }`, `incoming` what `suggestionsFrom()` returned.
+   * A run is matched to an entry with the same key — overlapping dates first, then
+   * the nearest start within a fortnight — so an entry keeps its id, and therefore
+   * its links and its dismissal, while the sheet moves its dates. What cannot be
+   * matched is new, and what is left over is one of two very different things:
+   *
+   * - **It ended before the file's window starts.** The window rolled past it;
+   *   nothing was removed. Kept (as `past`) only if a bar is linked to it —
+   *   otherwise it is a suggestion for work already over, and a register that
+   *   kept every one of them would grow by a sheet's worth every week.
+   * - **It is inside the window and the sheet no longer carries it.** Kept and
+   *   flagged `missing` when a bar points at it, never removed; an unlinked one
+   *   simply goes, because nothing depends on it.
+   *
+   * Pure, with the id generator and the linked set injected, so the whole thing
+   * is tested with no browser. Returns `{ activities, added, moved, unchanged,
+   * missing, retired }`, where the lists hold ids and `moved` carries the shift.
+   */
+  function reconcileSuggestions(existing, incoming, {
+    linked = new Set(), makeId = counterId(), windowStart = null,
+  } = {}) {
+    const before = Object.values(existing || {});
+    const byKey = new Map();
+    for (const entry of before) {
+      if (!byKey.has(entry.key)) byKey.set(entry.key, []);
+      byKey.get(entry.key).push(entry);
+    }
+
+    const pairs = [];
+    incoming.forEach((run, index) => {
+      for (const entry of byKey.get(run.key) || []) {
+        const overlap = run.start < entry.end && entry.start < run.end;
+        const apart = Math.abs(run.start - entry.start) / 86400000;
+        if (!overlap && apart > SAME_RUN_DAYS) continue;
+        pairs.push({ index, entry, overlap, apart, finish: Math.abs(run.end - entry.end) });
+      }
+    });
+    pairs.sort((a, b) => (b.overlap - a.overlap) || (a.apart - b.apart) || (a.finish - b.finish) || (a.index - b.index));
+
+    const takenRun = new Set();
+    const takenEntry = new Set();
+    const activities = {};
+    const report = { added: [], moved: [], unchanged: [], missing: [], retired: 0 };
+
+    for (const pair of pairs) {
+      if (takenRun.has(pair.index) || takenEntry.has(pair.entry.id)) continue;
+      takenRun.add(pair.index);
+      takenEntry.add(pair.entry.id);
+      const run = incoming[pair.index];
+      const entry = pair.entry;
+      const changed = run.start !== entry.start || run.end !== entry.end;
+      activities[entry.id] = {
+        ...entry,
+        ...run,
+        id: entry.id,
+        order: pair.index,
+        previous: changed ? { start: entry.start, end: entry.end } : null,
+        missing: false,
+        past: false,
+      };
+      if (changed) {
+        report.moved.push({
+          id: entry.id,
+          startShift: Math.round((run.start - entry.start) / 86400000),
+          finishShift: Math.round((run.end - entry.end) / 86400000),
+        });
+      } else {
+        report.unchanged.push(entry.id);
+      }
+    }
+
+    incoming.forEach((run, index) => {
+      if (takenRun.has(index)) return;
+      const id = makeId();
+      activities[id] = { ...run, id, order: index, previous: null, missing: false, past: false, dismissed: false };
+      report.added.push(id);
+    });
+
+    for (const entry of before) {
+      if (takenEntry.has(entry.id)) continue;
+      if (!linked.has(entry.id)) {
+        report.retired++;
+        continue;
+      }
+      const rolledOff = windowStart != null && entry.end <= windowStart;
+      activities[entry.id] = { ...entry, previous: null, missing: !rolledOff, past: rolledOff };
+      if (!rolledOff) report.missing.push(entry.id);
+    }
+
+    return { activities, ...report };
+  }
+
+  function counterId() {
+    let n = 0;
+    return () => `la_${++n}`;
+  }
+
+  Object.defineProperty(__x, "isResourceLabel", { get: () => isResourceLabel, enumerable: true });
+  Object.defineProperty(__x, "absenceKind", { get: () => absenceKind, enumerable: true });
+  Object.defineProperty(__x, "ABSENCE_KINDS", { get: () => ABSENCE_KINDS, enumerable: true });
+  Object.defineProperty(__x, "ABSENCE_LABELS", { get: () => ABSENCE_LABELS, enumerable: true });
+  Object.defineProperty(__x, "resourceNames", { get: () => resourceNames, enumerable: true });
+  Object.defineProperty(__x, "reassignments", { get: () => reassignments, enumerable: true });
+  Object.defineProperty(__x, "marksOf", { get: () => marksOf, enumerable: true });
+  Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
+  Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
+  Object.defineProperty(__x, "readGrid", { get: () => readGrid, enumerable: true });
+  Object.defineProperty(__x, "absencesFrom", { get: () => absencesFrom, enumerable: true });
+  Object.defineProperty(__x, "locationColumnOf", { get: () => locationColumnOf, enumerable: true });
+  Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
+  Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
+  Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
+  Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
+  Object.defineProperty(__x, "KPI_KINDS", { get: () => KPI_KINDS, enumerable: true });
+  Object.defineProperty(__x, "countable", { get: () => countable, enumerable: true });
+  Object.defineProperty(__x, "describe", { get: () => describe, enumerable: true });
+  Object.defineProperty(__x, "suggestionsFrom", { get: () => suggestionsFrom, enumerable: true });
+  Object.defineProperty(__x, "suggestionKey", { get: () => suggestionKey, enumerable: true });
+  Object.defineProperty(__x, "reconcileSuggestions", { get: () => reconcileSuggestions, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // core/store.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["core/store.js"] = function (__x, __req) {
@@ -6117,10 +7521,10 @@ __mods["core/store.js"] = function (__x, __req) {
    * is row-level security in Postgres, which refuses the same writes even if
    * this check were removed.
    *
-   * Imports: util, events, cloud, model, history.
+   * Imports: util, events, cloud, filestore, access, model, history, lookahead.
    */
 
-  const { deepClone, clamp } = __req("core/util.js");
+  const { deepClone, clamp, uid } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { isReadOnly } = __req("core/cloud.js");
   /* The other way a session can be read-only. `cloud.js` answers for a hosted
@@ -6131,7 +7535,9 @@ __mods["core/store.js"] = function (__x, __req) {
      saved without ever having been written anywhere. */
   const { isViewer: folderViewer } = __req("core/filestore.js");
   const { planLocked, readView, writeView } = __req("core/access.js");
-  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, isDerivedBaseline, syncDurationBasis } = __req("core/model.js");
+  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, isDerivedBaseline, syncDurationBasis, emptyLookahead, lookaheadRegister, lookaheadActivity, makeLookaheadEntry, laLinkedIds, laPlacedIds, laRollUp } = __req("core/model.js");
+
+
 
 
 
@@ -6139,6 +7545,9 @@ __mods["core/store.js"] = function (__x, __req) {
 
 
   const { History, diff, apply } = __req("core/history.js");
+  /* A leaf: only the pure reconciliation of one read of the sheet against the
+     last. Nothing that knows the calendar's backend is reachable from here. */
+  const { reconcileSuggestions } = __req("core/lookahead.js");
 
   /* ── Private state ─────────────────────────────────────────────────────── */
 
@@ -7441,6 +8850,176 @@ __mods["core/store.js"] = function (__x, __req) {
     reindex();
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     The look-ahead register
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  function getLookaheadActivity(id) {
+    return lookaheadActivity(doc, id);
+  }
+
+  /**
+   * Write one read of the look-ahead into the register.
+   *
+   * The register only — no object is placed, moved or unlinked here, whatever
+   * the file says. Returns the reconciliation so the caller can say what moved
+   * and offer the bars that follow it; `null` when the store refused the write.
+   *
+   * @param {Array}  runs  what `suggestionsFrom()` read
+   * @param {object} meta  { fileName, sheet, colors, windowStart, windowEnd }
+   */
+  function importLookahead(runs, meta = {}) {
+    let report = null;
+    edit('Import the look-ahead', (d) => {
+      const register = d.lookahead && typeof d.lookahead === 'object' ? d.lookahead : emptyLookahead();
+      const linked = new Set();
+      for (const obj of d.objects) for (const id of laLinkedIds(obj)) linked.add(id);
+
+      report = reconcileSuggestions(register.activities || {}, runs, {
+        linked,
+        makeId: () => uid('la'),
+        windowStart: meta.windowStart ?? null,
+      });
+
+      const activities = {};
+      for (const [id, entry] of Object.entries(report.activities)) activities[id] = makeLookaheadEntry(entry);
+
+      const stamp = {
+        importedAt: Date.now(),
+        fileName: meta.fileName || '',
+        sheet: meta.sheet || '',
+        count: runs.length,
+        windowStart: meta.windowStart ?? null,
+        windowEnd: meta.windowEnd ?? null,
+      };
+      d.lookahead = {
+        activities,
+        imported: stamp,
+        history: [stamp, ...(register.history || [])].slice(0, 12),
+        colors: { ...(register.colors || {}), ...(meta.colors || {}) },
+      };
+    });
+    // A refused write never ran the mutator, so the report is still null; an
+    // identical re-read changes nothing and is still a successful import.
+    return report;
+  }
+
+  /** Forget every suggestion that no bar points at. Linked ones stay. */
+  function clearLookahead() {
+    return edit('Clear the look-ahead', (d) => {
+      const register = lookaheadRegister(d);
+      const linked = laPlacedIds(d);
+      const activities = {};
+      for (const [id, entry] of Object.entries(register.activities)) if (linked.has(id)) activities[id] = entry;
+      d.lookahead = { ...register, activities };
+    });
+  }
+
+  /**
+   * Put look-ahead runs on the timeline, one bar each, in one edit.
+   *
+   * Like a placed P6 activity, the dates are the starting point and yours from
+   * then on: the link records where they came from, it does not tie them.
+   * Returns the new object ids.
+   */
+  function placeLookahead(ids, { lane = null } = {}) {
+    const laneId = lane || doc.laneOrder[0] || doc.lanes[0]?.id || null;
+    const objects = [];
+    for (const id of [].concat(ids)) {
+      const entry = lookaheadActivity(doc, id);
+      if (!entry) continue;
+      objects.push(makeObject({
+        type: 'activity',
+        lane: laneId,
+        title: entry.title || entry.label || 'Look-ahead activity',
+        subtitle: entry.location || '',
+        area: entry.location || '',
+        start: entry.start,
+        end: entry.end,
+        data: { laIds: [id] },
+      }));
+    }
+    if (!objects.length) return [];
+    const ok = edit(objects.length === 1 ? 'Add from the look-ahead' : `Add ${objects.length} from the look-ahead`, (d) => {
+      d.objects.push(...objects);
+      // Placing is saying yes, so a suggestion somebody had dismissed is not
+      // dismissed any more.
+      const register = lookaheadRegister(d);
+      for (const obj of objects) {
+        const entry = register.activities[obj.data.laIds[0]];
+        if (entry) entry.dismissed = false;
+      }
+    });
+    return ok ? objects.map((o) => o.id) : [];
+  }
+
+  /** Add a run to what an object stands for. Additive, as with P6. */
+  function linkLookahead(objectId, id) {
+    if (!id) return false;
+    return edit('Link to the look-ahead', (d) => {
+      const object = d.objects.find((o) => o.id === objectId);
+      if (!object) return false;
+      const ids = laLinkedIds(object);
+      if (ids.includes(id)) return false;
+      object.data = { ...(object.data || {}), laIds: [...ids, id] };
+      const entry = lookaheadRegister(d).activities[id];
+      if (entry) entry.dismissed = false;
+    });
+  }
+
+  /** Stop an object standing for one run, or for all of them. */
+  function unlinkLookahead(objectId, id = null) {
+    return edit('Unlink from the look-ahead', (d) => {
+      const object = d.objects.find((o) => o.id === objectId);
+      if (!object?.data) return false;
+      const ids = laLinkedIds(object);
+      const next = id ? ids.filter((x) => x !== id) : [];
+      if (next.length === ids.length) return false;
+      object.data = { ...object.data, laIds: next };
+    });
+  }
+
+  /**
+   * Say no to suggestions, or take the no back. A dismissed run stays in the
+   * register so the next import still recognises it and does not ask again.
+   */
+  function dismissLookahead(ids, dismissed = true) {
+    const wanted = new Set([].concat(ids));
+    return edit(dismissed ? 'Dismiss look-ahead suggestions' : 'Restore look-ahead suggestions', (d) => {
+      const register = lookaheadRegister(d);
+      let touched = 0;
+      for (const id of wanted) {
+        const entry = register.activities[id];
+        if (!entry || entry.dismissed === dismissed) continue;
+        entry.dismissed = dismissed;
+        touched++;
+      }
+      if (!touched) return false;
+    });
+  }
+
+  /**
+   * Move linked bars onto the look-ahead's dates — the "accept" half of an
+   * import. Only the objects linked to one of the named runs follow.
+   */
+  function adoptLookaheadDates(ids) {
+    const wanted = new Set([].concat(ids));
+    if (!wanted.size) return false;
+    return edit('Adopt look-ahead dates', (d) => {
+      let touched = 0;
+      for (const object of d.objects) {
+        if (!laLinkedIds(object).some((id) => wanted.has(id))) continue;
+        const dates = laRollUp(d, object);
+        if (!dates) continue;
+        object.start = dates.start;
+        object.end = TYPES[object.type]?.duration ? dates.end : dates.start;
+        object.modified = Date.now();
+        touched++;
+      }
+      if (!touched) return false;
+    });
+  }
+
   Object.defineProperty(__x, "isDocReadOnly", { get: () => isDocReadOnly, enumerable: true });
   Object.defineProperty(__x, "getDoc", { get: () => getDoc, enumerable: true });
   Object.defineProperty(__x, "getSettings", { get: () => getSettings, enumerable: true });
@@ -7535,6 +9114,14 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "ungroupObjects", { get: () => ungroupObjects, enumerable: true });
   Object.defineProperty(__x, "expandGroupSelection", { get: () => expandGroupSelection, enumerable: true });
   Object.defineProperty(__x, "__resetForTests", { get: () => __resetForTests, enumerable: true });
+  Object.defineProperty(__x, "getLookaheadActivity", { get: () => getLookaheadActivity, enumerable: true });
+  Object.defineProperty(__x, "importLookahead", { get: () => importLookahead, enumerable: true });
+  Object.defineProperty(__x, "clearLookahead", { get: () => clearLookahead, enumerable: true });
+  Object.defineProperty(__x, "placeLookahead", { get: () => placeLookahead, enumerable: true });
+  Object.defineProperty(__x, "linkLookahead", { get: () => linkLookahead, enumerable: true });
+  Object.defineProperty(__x, "unlinkLookahead", { get: () => unlinkLookahead, enumerable: true });
+  Object.defineProperty(__x, "dismissLookahead", { get: () => dismissLookahead, enumerable: true });
+  Object.defineProperty(__x, "adoptLookaheadDates", { get: () => adoptLookaheadDates, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -20267,6 +21854,1399 @@ __mods["ui/p6.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// io/lookahead.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["io/lookahead.js"] = function (__x, __req) {
+  /**
+   * Reading the four-week look-ahead.
+   *
+   * The look-ahead is an Excel workbook the deputy edits in place, and it encodes
+   * shift access in **cell fill colour** against a fixed legend. So this is not
+   * an importer in the usual sense: the values matter far less than the colours,
+   * and almost everything that can go wrong is invisible in a spreadsheet you
+   * open by hand.
+   *
+   * Four rules, each of which exists because of a specific way it breaks:
+   *
+   * **One sheet, chosen by name.** The workbook is large and the four-week grid
+   * is one tab among several. `readXlsx()` in `io/importers.js` takes whichever
+   * sheet is first, which would silently read a cover page. A missing sheet is an
+   * error here, never a fall back to sheet one.
+   *
+   * **Visible rows and columns only.** Rows are hidden by hand and by autofilter,
+   * both as `hidden="1"`. A hidden *column* matters more than a hidden row: with
+   * one column per day, dropping one removes a day from the week and nothing
+   * about the result looks wrong.
+   *
+   * **The real row number travels with the row.** Blank and absent rows mean the
+   * nth row in the file is not row n, so an array index is not an identity. Row
+   * identity is what change classification rests on.
+   *
+   * **A colour that is not in the legend is never guessed.** It goes to an
+   * unknown bucket for somebody to map. The legend is stable in practice, and
+   * relying on that would still be wrong, because the failure is silent and lands
+   * in evidence.
+   *
+   * Imports: inflate, dates (leaves).
+   */
+
+  const { inflateRaw } = __req("io/inflate.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     ZIP
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Read the container into `name -> Uint8Array`, via the central directory. */
+  function readZip(buffer) {
+    const view = new DataView(buffer);
+    const bytes = new Uint8Array(buffer);
+
+    let eocd = -1;
+    for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66000); i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) throw new Error('That file is not a .xlsx (no ZIP directory found).');
+
+    const count = view.getUint16(eocd + 10, true);
+    let at = view.getUint32(eocd + 16, true);
+
+    const out = new Map();
+    for (let i = 0; i < count; i++) {
+      if (view.getUint32(at, true) !== 0x02014b50) break;
+      const method = view.getUint16(at + 10, true);
+      const compressed = view.getUint32(at + 20, true);
+      const nameLen = view.getUint16(at + 28, true);
+      const extraLen = view.getUint16(at + 30, true);
+      const commentLen = view.getUint16(at + 32, true);
+      const localAt = view.getUint32(at + 42, true);
+      const name = new TextDecoder().decode(bytes.subarray(at + 46, at + 46 + nameLen));
+
+      // The local header repeats the name and carries its own extra field, whose
+      // length routinely differs from the one in the directory.
+      const localNameLen = view.getUint16(localAt + 26, true);
+      const localExtraLen = view.getUint16(localAt + 28, true);
+      const start = localAt + 30 + localNameLen + localExtraLen;
+      const raw = bytes.subarray(start, start + compressed);
+      out.set(name, method === 0 ? raw : inflateRaw(raw));
+
+      at += 46 + nameLen + extraLen + commentLen;
+    }
+    return out;
+  }
+
+  function partText(files, name) {
+    const part = files.get(name);
+    return part ? new TextDecoder().decode(part) : '';
+  }
+
+  function decodeXml(s) {
+    return String(s)
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+      .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d))
+      .replace(/&amp;/g, '&');
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Colour
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The legacy 56-entry palette an `indexed="n"` fill refers to.
+   *
+   * Excel still writes these for anything inherited from an older workbook, so a
+   * parser that only understands `rgb=` sees nothing at all on exactly those
+   * cells — and a blank cell reads as "no shift booked", which is a different
+   * fact entirely.
+   */
+  const INDEXED = [
+    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
+    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
+    '800000', '008000', '000080', '808000', '800080', '008080', 'C0C0C0', '808080',
+    '9999FF', '993366', 'FFFFCC', 'CCFFFF', '660066', 'FF8080', '0066CC', 'CCCCFF',
+    '000080', 'FF00FF', 'FFFF00', '00FFFF', '800080', '800000', '008080', '0000FF',
+    '00CCFF', 'CCFFFF', 'CCFFCC', 'FFFF99', '99CCFF', 'FF99CC', 'CC99FF', 'FFCC99',
+    '3366FF', '33CCCC', '99CC00', 'FFCC00', 'FF9900', 'FF6600', '666699', '969696',
+    '003366', '339966', '003300', '333300', '993300', '993366', '333399', '333333',
+  ];
+
+  /** `theme="n"` indexes the scheme with the dark/light pairs swapped. */
+  const THEME_ORDER = ['lt1', 'dk1', 'lt2', 'dk2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hlink', 'folHlink'];
+
+  function readTheme(xml) {
+    const scheme = /<a:clrScheme[^>]*>([\s\S]*?)<\/a:clrScheme>/.exec(xml)?.[1] || '';
+    const colors = {};
+    for (const m of scheme.matchAll(/<a:(\w+)>([\s\S]*?)<\/a:\1>/g)) {
+      const [, key, body] = m;
+      const srgb = /<a:srgbClr val="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
+      const sys = /<a:sysClr[^>]*lastClr="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
+      if (srgb || sys) colors[key] = (srgb || sys).toUpperCase();
+    }
+    return THEME_ORDER.map((key) => colors[key] || null);
+  }
+
+  /**
+   * Apply an OOXML tint, in HLS as the specification requires.
+   *
+   * Doing it in RGB gives a near miss, and a near miss against a legend keyed on
+   * exact colours is a lookup that fails. Accent 1 at -0.25 has to come out
+   * #2F5597 — what Excel calls "Blue, Accent 1, Darker 25%".
+   */
+  function applyTint(hex, tint) {
+    if (!tint) return hex;
+    const r = parseInt(hex.slice(0, 2), 16) / 255;
+    const g = parseInt(hex.slice(2, 4), 16) / 255;
+    const b = parseInt(hex.slice(4, 6), 16) / 255;
+
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    let lum = (max + min) / 2;
+    let hue = 0;
+    let sat = 0;
+    if (max !== min) {
+      const d = max - min;
+      sat = lum > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) hue = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+      else if (max === g) hue = ((b - r) / d + 2) / 6;
+      else hue = ((r - g) / d + 4) / 6;
+    }
+
+    lum = tint < 0 ? lum * (1 + tint) : lum * (1 - tint) + tint;
+    lum = Math.min(1, Math.max(0, lum));
+
+    const toRgb = (p, q, t) => {
+      let u = t;
+      if (u < 0) u += 1;
+      if (u > 1) u -= 1;
+      if (u < 1 / 6) return p + (q - p) * 6 * u;
+      if (u < 1 / 2) return q;
+      if (u < 2 / 3) return p + (q - p) * (2 / 3 - u) * 6;
+      return p;
+    };
+
+    let out;
+    if (sat === 0) out = [lum, lum, lum];
+    else {
+      const q = lum < 0.5 ? lum * (1 + sat) : lum + sat - lum * sat;
+      const p = 2 * lum - q;
+      out = [toRgb(p, q, hue + 1 / 3), toRgb(p, q, hue), toRgb(p, q, hue - 1 / 3)];
+    }
+    return out.map((v) => Math.round(v * 255).toString(16).padStart(2, '0').toUpperCase()).join('');
+  }
+
+  /**
+   * `styleIndex -> { hex, source }` for every cell format in the workbook.
+   *
+   * The chain is `cellXfs[s].fillId -> fills[id].patternFill.fgColor`, and the
+   * colour at the end arrives in one of three notations. Resolving all three to
+   * one hex is what lets the legend be keyed on the colour rather than on how it
+   * happened to be written.
+   */
+  function readFills(stylesXml, theme) {
+    const fillsBlock = /<fills[^>]*>([\s\S]*?)<\/fills>/.exec(stylesXml)?.[1] || '';
+    const fills = (fillsBlock.match(/<fill>[\s\S]*?<\/fill>/g) || []).map((fill) => {
+      const pattern = /patternType="(\w+)"/.exec(fill)?.[1] || 'none';
+      if (pattern === 'none') return { hex: null, source: 'none' };
+
+      const fg = /<fgColor([^>]*)\/>/.exec(fill)?.[1] || '';
+      const tint = parseFloat(/tint="(-?[\d.]+)"/.exec(fg)?.[1] || '0') || 0;
+
+      const rgb = /rgb="([0-9A-Fa-f]{6,8})"/.exec(fg)?.[1];
+      if (rgb) {
+        const base = (rgb.length === 8 ? rgb.slice(2) : rgb).toUpperCase();
+        return { hex: applyTint(base, tint), source: 'rgb' };
+      }
+
+      const themed = /theme="(\d+)"/.exec(fg)?.[1];
+      if (themed != null) {
+        const base = theme[parseInt(themed, 10)] || null;
+        return { hex: base ? applyTint(base, tint) : null, source: `theme:${themed}` };
+      }
+
+      const indexed = /indexed="(\d+)"/.exec(fg)?.[1];
+      if (indexed != null) {
+        const base = INDEXED[parseInt(indexed, 10)] || null;
+        return { hex: base ? applyTint(base, tint) : null, source: `indexed:${indexed}` };
+      }
+
+      return { hex: null, source: 'unresolved' };
+    });
+
+    /* White is not a highlight.
+       An explicit white fill and no fill at all are the same thing to anybody
+       looking at the sheet — a highlight nobody can see is not one — and Excel
+       writes white fills into all sorts of default styling. Reading them as
+       colours put hundreds of cells into the unmapped bucket and asked somebody
+       to explain the absence of a highlight. */
+    const plain = fills.map((f) => (f.hex === 'FFFFFF' ? { hex: null, source: 'none' } : f));
+
+    const xfsBlock = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] || '';
+    const xfs = xfsBlock.match(/<xf[\s\S]*?(?:\/>|<\/xf>)/g) || [];
+    return xfs.map((xf) => {
+      const fillId = parseInt(/fillId="(\d+)"/.exec(xf)?.[1] ?? '0', 10);
+      return plain[fillId] || { hex: null, source: 'none' };
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The sheet
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Rows and cells, matched as either a self-closing tag or an open/close pair.
+   *
+   * The obvious `/<row[\s\S]*?(?:\/>|<\/row>)/` is wrong here, and wrong in a way
+   * that only shows up on a sheet like this one. A cell carrying a fill but no
+   * value is written `<c r="D2" s="1"/>`, and a lazy match stops at that first
+   * `/>` — truncating the row and dropping every cell after it. A workbook full
+   * of *values* never hits it, because those cells close with `</c>`. A workbook
+   * full of *colours* hits it on nearly every row.
+   */
+  const ROW_RE = /<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g;
+  const CELL_RE = /<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g;
+
+  /** 'A' -> 1, 'AA' -> 27. One-based, matching how a spreadsheet talks. */
+  function colNumber(letters) {
+    let n = 0;
+    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n;
+  }
+
+
+  /** Every sheet in the workbook, with its hidden state and its part path. */
+  function readSheets(files) {
+    const workbook = partText(files, 'xl/workbook.xml');
+    const rels = partText(files, 'xl/_rels/workbook.xml.rels');
+    const sheets = [];
+
+    for (const m of workbook.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+      const attrs = m[1];
+      const rid = /r:id="([^"]+)"/.exec(attrs)?.[1] || '';
+      let zipPath = '';
+      if (rid) {
+        const rel = new RegExp(`<Relationship[^>]*Id="${rid}"[^>]*Target="([^"]+)"`).exec(rels);
+        if (rel) {
+          const target = rel[1].replace(/^\/?xl\//, '').replace(/^\//, '');
+          if (files.has(`xl/${target}`)) zipPath = `xl/${target}`;
+        }
+      }
+      sheets.push({
+        name: decodeXml(/name="([^"]*)"/.exec(attrs)?.[1] || ''),
+        state: /state="(\w+)"/.exec(attrs)?.[1] || 'visible',
+        zipPath,
+      });
+    }
+    return sheets;
+  }
+
+  /**
+   * Parse one named sheet into a grid of visible cells.
+   *
+   * Returns `{ sheet, rows, hiddenRows, hiddenColumns, merges, conditional }`.
+   * Each row is `{ row, cells: [{ col, ref, value, hex, source }] }` where `row`
+   * is the **spreadsheet** row number.
+   */
+  function parseSheet(buffer, sheetName) {
+    const files = readZip(buffer);
+    const sheets = readSheets(files);
+
+    const chosen = sheets.find((s) => s.name === sheetName);
+    if (!chosen) {
+      // Never fall back to the first sheet. Reading a cover page and reporting a
+      // week of no work would be worse than reporting nothing at all.
+      throw new Error(
+        `The workbook has no sheet called "${sheetName}". It has: ${sheets.map((s) => s.name).join(', ')}.`
+      );
+    }
+    if (!chosen.zipPath) throw new Error(`"${sheetName}" has no readable worksheet part.`);
+    if (chosen.state !== 'visible') {
+      // A hidden sheet under the configured name almost always means the name is
+      // stale and the live grid has moved to another tab.
+      throw new Error(`"${sheetName}" is hidden in the workbook — check which tab the look-ahead is on now.`);
+    }
+
+    const sharedStrings = [];
+    for (const si of partText(files, 'xl/sharedStrings.xml').match(/<si>[\s\S]*?<\/si>/g) || []) {
+      const parts = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
+      sharedStrings.push(parts.map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join(''));
+    }
+
+    const theme = readTheme(partText(files, 'xl/theme/theme1.xml'));
+    const styleFills = readFills(partText(files, 'xl/styles.xml'), theme);
+    const xml = new TextDecoder().decode(files.get(chosen.zipPath));
+
+    /* Hidden columns. One column per day, so a hidden one silently removes a day
+       from the week — and unlike a missing row, nothing about the result looks
+       wrong. */
+    const hiddenColumns = new Set();
+    const colsBlock = /<cols[^>]*>([\s\S]*?)<\/cols>/.exec(xml)?.[1] || '';
+    for (const m of colsBlock.matchAll(/<col\b([^>]*)\/?>/g)) {
+      if (!/hidden="1"/.test(m[1])) continue;
+      const min = parseInt(/min="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
+      const max = parseInt(/max="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
+      for (let c = min; c <= max; c++) hiddenColumns.add(c);
+    }
+
+    const merges = [];
+    const mergeBlock = /<mergeCells[^>]*>([\s\S]*?)<\/mergeCells>/.exec(xml)?.[1] || '';
+    for (const m of mergeBlock.matchAll(/<mergeCell[^>]*ref="([^"]+)"/g)) merges.push(m[1]);
+
+    /* Conditional formatting is reported, not evaluated. A colour that comes
+       from a rule is not in the cell's style at all, so if the grid is painted
+       that way this parser would see an empty sheet — and saying so is the only
+       honest thing to do about it. */
+    const conditional = [];
+    for (const m of xml.matchAll(/<conditionalFormatting[^>]*sqref="([^"]+)"/g)) conditional.push(m[1]);
+
+    const rows = [];
+    let hiddenRows = 0;
+
+    for (const rowXml of xml.match(ROW_RE) || []) {
+      const head = /<row\b([^>]*)>/.exec(rowXml)?.[1] || rowXml;
+      if (/hidden="1"/.test(head)) {
+        hiddenRows++;
+        continue;
+      }
+      const rowNumber = parseInt(/\br="(\d+)"/.exec(head)?.[1] ?? '0', 10);
+
+      const cells = [];
+      /* Text from *hidden* columns is kept for one narrow purpose and no other:
+         the legend key is written in a hidden column beside a row of coloured
+         swatches, so dropping it the way every other hidden cell is dropped
+         would throw away the one thing that says what the colours mean. It never
+         becomes a cell of the grid — only this label. */
+      let label = '';
+
+      for (const cellXml of rowXml.match(CELL_RE) || []) {
+        const ref = /\br="([A-Z]+)(\d+)"/.exec(cellXml);
+        if (!ref) continue;
+        const col = colNumber(ref[1]);
+
+        const type = /\bt="([^"]+)"/.exec(cellXml)?.[1];
+        let value = '';
+        if (type === 'inlineStr') {
+          value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [])
+            .map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join('');
+        } else {
+          const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
+          if (raw != null) value = type === 's' ? (sharedStrings[parseInt(raw, 10)] ?? '') : decodeXml(raw);
+        }
+
+        if (hiddenColumns.has(col)) {
+          if (!label && String(value).trim()) label = String(value).trim();
+          continue;
+        }
+
+        const styleIndex = parseInt(/\bs="(\d+)"/.exec(cellXml)?.[1] ?? '-1', 10);
+        const fill = styleIndex >= 0 ? styleFills[styleIndex] : null;
+
+        cells.push({
+          col,
+          ref: `${ref[1]}${ref[2]}`,
+          value,
+          hex: fill?.hex || null,
+          source: fill?.source || 'none',
+        });
+      }
+
+      // A row with no visible cells at all is not a row of the grid.
+      if (cells.length) rows.push({ row: rowNumber, cells, label });
+    }
+
+    return {
+      sheet: chosen.name,
+      sheets: sheets.map((s) => ({ name: s.name, state: s.state })),
+      rows,
+      hiddenRows,
+      hiddenColumns: [...hiddenColumns],
+      merges,
+      conditional,
+    };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The legend
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The legend the workbook writes down about itself.
+   *
+   * BART's look-ahead carries its own key: a short block of rows near the bottom
+   * where the whole row is painted one colour and a label beside it reads
+   * "Highlight in Orange for Swing Shift". That is the authors' own statement of
+   * what the colours mean, so reading it is not guessing — it is the one place
+   * in this pipeline where a meaning can be taken from the file rather than
+   * typed by somebody.
+   *
+   * It stays deliberately strict. A row qualifies only when every visible cell
+   * on it carries the *same* fill and none of them holds a value: a swatch, in
+   * other words, and not a row of work that happens to be highlighted. Anything
+   * that does not match that shape is simply not returned, and the colours it
+   * used go on to the `unknown` bucket to be mapped by hand — which is the same
+   * answer this module gives everywhere else it cannot be certain.
+   */
+  function readLegend(grid) {
+    const out = [];
+    const seen = new Set();
+
+    for (const row of grid.rows || []) {
+      const cells = row.cells || [];
+      if (cells.length < 2) continue;
+      if (cells.some((c) => String(c.value ?? '').trim())) continue;
+      if (cells.some((c) => !c.hex)) continue;
+      if (new Set(cells.map((c) => c.hex)).size !== 1) continue;
+
+      const label = String(row.label || '').trim();
+      if (!label) continue;
+
+      // "Highlight in Orange for Swing Shift" → "Swing Shift". The colour word
+      // in the sentence is thrown away on purpose: the swatch is the colour, and
+      // where the two disagree the swatch is the one that was painted.
+      const phrased = /^\s*highlight\s+in\s+\S+\s+for\s+(.+?)\s*$/i.exec(label);
+      const meaning = (phrased ? phrased[1] : label).trim();
+      if (!meaning) continue;
+
+      const argb = cells[0].hex;
+      if (seen.has(argb)) continue;
+      seen.add(argb);
+      out.push({ argb, meaning, row: row.row });
+    }
+
+    return out;
+  }
+
+  /**
+   * Turn a parsed grid into shifts, against the legend.
+   *
+   * `legend` is `[{ argb, meaning }]`. A colour that is not in it is collected in
+   * `unknown` rather than defaulted to anything — the legend is stable in
+   * practice and relying on that would still be wrong, because one stray shade
+   * from Excel's recent-colours picker would misclassify a shift with nothing on
+   * screen to show it happened, and the result lands in evidence.
+   */
+  /**
+   * Whether a cell's fill is dark enough that text on it has to go white.
+   *
+   * Perceived lightness, not average: the eye weighs green far more than blue,
+   * and an average makes BART's mid-blue shifts read as light when the label on
+   * them is invisible.
+   *
+   * Here rather than in the renderer because *two* things draw these cells — the
+   * grid on screen and the PDF export — and the moment they answer this
+   * differently the printed calendar has white text on a pale cell somewhere,
+   * which nobody notices until it is in front of a client.
+   */
+  function isDark(hex) {
+    const n = parseInt(String(hex).slice(-6), 16);
+    if (Number.isNaN(n)) return false;
+    const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    return (0.299 * r + 0.587 * g + 0.114 * b) < 140;
+  }
+
+  /**
+   * One entry per colour: the one in force.
+   *
+   * `rc_legend` is *versioned* — `unique (valid_from, argb)` — so a colour that
+   * has been re-mapped has a row per date, and only the newest of them is what it
+   * means now. Choosing that has to happen here rather than being left to how the
+   * caller sorted its array, and it did not: this was
+   *
+   *     new Map(legend.map((l) => [l.argb, …]))
+   *
+   * which silently took whichever row came *last*. `listLegend()` hands them over
+   * newest first — its own comment says "a caller taking the first entry for a
+   * colour gets the one in force" — so last meant **oldest**, and every correction
+   * anybody ever made was discarded in favour of the first thing that colour was
+   * ever called.
+   *
+   * The symptom was the worst kind: pressing "Just shading" on the grey a workbook
+   * shades its layout with inserted a row saying `ignore`, the lookup kept reading
+   * the older `shift` row, and all those rows stayed on the calendar. And because
+   * the older row carries a meaning the colour was no longer *unmapped*, so the
+   * button that would have fixed it disappeared. Pressing it again only added
+   * another row it would also ignore.
+   *
+   * A missing `valid_from` sorts oldest, so the shorter `{ argb, meaning, role }`
+   * shape the ingest path passes still resolves. A future-dated row wins on the
+   * calendar the moment it exists, which is consistent with the legend being
+   * re-applied at paint time rather than frozen into a snapshot.
+   */
+  function inForce(legend) {
+    const best = new Map();
+    for (const entry of legend || []) {
+      const key = String(entry.argb).toUpperCase();
+      const held = best.get(key);
+      if (held && String(held.valid_from || '') >= String(entry.valid_from || '')) continue;
+      best.set(key, {
+        valid_from: entry.valid_from || '',
+        meaning: entry.meaning,
+        role: entry.role || 'shift',
+      });
+    }
+    return best;
+  }
+
+  function applyLegend(grid, legend) {
+    const byColour = inForce(legend);
+    const unknown = new Map();
+
+    const rows = grid.rows.map((row) => ({
+      row: row.row,
+      label: row.label || '',
+      cells: row.cells.map((cell) => {
+        if (!cell.hex) return { ...cell, meaning: null, role: null };
+        const entry = byColour.get(cell.hex);
+        const meaning = entry?.meaning || null;
+        if (!meaning) {
+          const seen = unknown.get(cell.hex) || { hex: cell.hex, count: 0, samples: [] };
+          seen.count++;
+          if (seen.samples.length < 4) seen.samples.push(cell.ref);
+          unknown.set(cell.hex, seen);
+        }
+        // An unmapped colour is left as a shift on purpose: it may well be one,
+        // and treating the unexplained as ignorable would hide the rows that
+        // most need somebody to look at them.
+        return { ...cell, meaning, role: entry?.role || 'shift' };
+      }),
+    }));
+
+    return { ...grid, rows, unknown: [...unknown.values()].sort((a, b) => b.count - a.count) };
+  }
+
+  Object.defineProperty(__x, "readZip", { get: () => readZip, enumerable: true });
+  Object.defineProperty(__x, "readTheme", { get: () => readTheme, enumerable: true });
+  Object.defineProperty(__x, "applyTint", { get: () => applyTint, enumerable: true });
+  Object.defineProperty(__x, "readFills", { get: () => readFills, enumerable: true });
+  Object.defineProperty(__x, "colNumber", { get: () => colNumber, enumerable: true });
+  Object.defineProperty(__x, "readSheets", { get: () => readSheets, enumerable: true });
+  Object.defineProperty(__x, "parseSheet", { get: () => parseSheet, enumerable: true });
+  Object.defineProperty(__x, "readLegend", { get: () => readLegend, enumerable: true });
+  Object.defineProperty(__x, "isDark", { get: () => isDark, enumerable: true });
+  Object.defineProperty(__x, "applyLegend", { get: () => applyLegend, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/lookahead.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/lookahead.js"] = function (__x, __req) {
+  /**
+   * The look-ahead, as suggestions for the timeline.
+   *
+   * The four-week look-ahead workbook, read straight from the file — the same
+   * parser the resource calendar uses, and no calendar sign-in, no backend and
+   * no network: the plan still has none of those. Each run of painted cells on
+   * an activity becomes one suggestion in `doc.lookahead`, and nothing reaches
+   * the timeline until somebody says so:
+   *
+   *   Place    a new bar on the run's dates, linked to it
+   *   Link     an existing bar now stands for it too
+   *   Follow   linked bars move onto the dates the latest read gives
+   *   Dismiss  no — and the next import remembers the answer
+   *
+   * The colours are the part the file cannot settle on its own. A workbook
+   * shades its layout grey as well as painting its shifts, and reading the
+   * shading as work turns every row into a bar on every day. So the import
+   * dialog lists every fill on the calendar with how many cells carry it and
+   * what the workbook's own key calls it, and somebody ticks which are work.
+   * The answer is stored in the plan, so next week's file reads the same way.
+   * A colour nobody has answered for counts as work, which is the calendar's
+   * rule too: until somebody says otherwise it might be.
+   *
+   * Imports: util, events, dates, model, store, renderer, core/lookahead,
+   *          io/lookahead, commands, icons, components.
+   */
+
+  const { el, clear, debounce, fold } = __req("core/util.js");
+  const { on, emit, EV } = __req("core/events.js");
+  const { fmtDate, fmtTimestamp, MS_DAY } = __req("core/dates.js");
+  const { TYPES, lookaheadRegister, laLinkedIds, laPlaced, laPlacedIds, laVariance, statusOf } = __req("core/model.js");
+
+
+
+
+
+
+
+
+  const store = __req("core/store.js");
+  const renderer = __req("timeline/renderer.js");
+  const { readGrid, marksOf, suggestionsFrom, reconcileSuggestions } = __req("core/lookahead.js");
+  const { readZip, readSheets, parseSheet, readLegend, applyLegend } = __req("io/lookahead.js");
+  const cmd = __req("ui/commands.js");
+  const { icon } = __req("ui/icons.js");
+  const { openModal, openPicker, field, textInput, selectInput, segmented, checkbox, emptyState, badge, chipStat, toast, confirmDialog, skeleton } = __req("ui/components.js");
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The pane
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Filter state, kept between renders so a rebuild does not lose your place. */
+  const view = { text: '', show: 'suggested' };
+
+  /**
+   * The rows container on screen. Searching redraws the rows only, never the
+   * search box — the trap `ui/p6.js` documents, and for the same reason.
+   */
+  let listEl = null;
+  let bulkEl = null;
+
+  function paneLookahead(root) {
+    const doc = store.getDoc();
+    const register = lookaheadRegister(doc);
+    const entries = Object.values(register.activities);
+
+    root.appendChild(importBar(register));
+
+    if (!entries.length) {
+      root.appendChild(
+        emptyState({
+          iconName: 'calendar',
+          title: 'No look-ahead imported',
+          message: 'Import the four-week look-ahead workbook. Each run of painted cells becomes a suggestion, and nothing goes on the timeline until you place it.',
+        })
+      );
+      return;
+    }
+
+    root.appendChild(summary(doc, entries));
+    root.appendChild(controls());
+
+    bulkEl = el('div', { style: { marginBottom: '8px' } });
+    listEl = el('div', { class: 'cx-list' });
+    root.append(bulkEl, listEl);
+    renderRows();
+  }
+
+  function refilter() {
+    if (!listEl || !listEl.isConnected) {
+      refresh();
+      return;
+    }
+    renderRows();
+  }
+
+  /* ── Import ────────────────────────────────────────────────────────────── */
+
+  function importBar(register) {
+    const stamp = register.imported;
+    const span = stamp?.windowStart != null
+      ? `${fmtDate(stamp.windowStart, 'numeric')} → ${fmtDate(stamp.windowEnd - MS_DAY, 'numeric')}`
+      : null;
+
+    return el('div', { style: { marginBottom: '12px' } }, [
+      el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '9px' } }, [
+        el('button', {
+          class: 'cx-btn mini primary',
+          html: icon('upload', { size: 12 }) + '<span>Import look-ahead</span>',
+          onClick: () => openLookaheadImport(),
+        }),
+        Object.keys(register.activities).length
+          ? el('button', {
+              class: 'cx-btn mini ghost',
+              html: icon('trash', { size: 12 }) + '<span>Clear suggestions</span>',
+              title: 'Forget every suggestion no bar is linked to',
+              onClick: () => clearUnlinked(),
+            })
+          : null,
+      ].filter(Boolean)),
+      el('div', { class: 'p6-stamps' }, [
+        el('div', { class: 'p6-stamp' }, [
+          el('span', { class: 'p6-stamp-label', text: 'Last read' }),
+          stamp
+            ? el('span', { class: 'p6-stamp-value', text: fmtTimestamp(stamp.importedAt), title: [stamp.fileName, stamp.sheet].filter(Boolean).join(' · ') })
+            : el('span', { class: 'p6-stamp-value none', text: 'not imported' }),
+        ]),
+        span
+          ? el('div', { class: 'p6-stamp' }, [
+              el('span', { class: 'p6-stamp-label', text: 'Window' }),
+              el('span', { class: 'p6-stamp-value', text: span }),
+            ])
+          : null,
+      ].filter(Boolean)),
+    ]);
+  }
+
+  /**
+   * Read a workbook: every visible sheet that has a calendar on it.
+   *
+   * The calendar finds its sheet by a name kept in its database; a file picked
+   * off a disk has no such setting, so the sheet is *found* — the one whose
+   * weekday row `readGrid()` recognises. Where several qualify the dialog asks,
+   * starting from whichever was used last time.
+   */
+  async function readWorkbook(file) {
+    const buffer = await file.arrayBuffer();
+    const names = readSheets(readZip(buffer))
+      .filter((s) => s.state === 'visible' && s.zipPath)
+      .map((s) => s.name);
+
+    const sheets = [];
+    for (const name of names) {
+      try {
+        const grid = parseSheet(buffer, name);
+        if (readGrid(grid).days.length) sheets.push({ name, grid });
+      } catch {
+        // A sheet that will not parse is not the calendar; the others may be.
+      }
+    }
+    return sheets;
+  }
+
+  /**
+   * Read one sheet as suggestions, against the colours somebody has answered for.
+   *
+   * `choices` is `hex → 'shift' | 'ignore'`. The workbook's own key names the
+   * colours it explains; a choice beats it, and a colour neither mentions counts
+   * as work — `applyLegend()`'s rule, unchanged.
+   */
+  function derive(grid, choices, anchorISO) {
+    const key = new Map(readLegend(grid).map((k) => [String(k.argb).toUpperCase(), k.meaning]));
+    const hexes = new Set([...key.keys(), ...Object.keys(choices)]);
+    const legend = [...hexes].map((hex) => ({
+      argb: hex,
+      meaning: key.get(hex) || 'Unlabelled colour',
+      role: choices[hex] || 'shift',
+    }));
+
+    const parsed = readGrid(applyLegend(grid, legend), { anchorISO });
+    const dated = parsed.days.length > 0 && parsed.days.every((d) => d.date);
+
+    // Every fill on a row that could be work, with how many cells carry it.
+    const colours = new Map();
+    for (const activity of parsed.activities) {
+      if (activity.heading || activity.absence || !activity.named) continue;
+      for (const mark of marksOf(activity)) {
+        if (!mark.hex) continue;
+        const hex = String(mark.hex).toUpperCase();
+        const seen = colours.get(hex) || { hex, count: 0, meaning: key.get(hex) || '', role: choices[hex] || 'shift' };
+        seen.count++;
+        colours.set(hex, seen);
+      }
+    }
+
+    const days = parsed.days;
+    return {
+      view: parsed,
+      dated,
+      runs: dated ? suggestionsFrom(parsed) : [],
+      colours: [...colours.values()].sort((a, b) => b.count - a.count),
+      windowStart: dated ? Date.parse(`${days[0].date}T00:00:00Z`) : null,
+      windowEnd: dated ? Date.parse(`${days[days.length - 1].date}T00:00:00Z`) + MS_DAY : null,
+    };
+  }
+
+  /**
+   * The import dialog.
+   *
+   * Nothing is written until the reading has been shown — what it found, what is
+   * new, what moved, and which bars on the timeline that affects. Placing and
+   * moving bars are separate steps after it.
+   */
+  function openLookaheadImport() {
+    let file = null;
+    let sheets = [];
+    let sheetName = '';
+    let derived = null;
+    const register = lookaheadRegister(store.getDoc());
+    const choices = { ...register.colors };
+
+    const status = el('div', { class: 'cx-hint', style: { minHeight: '18px' } });
+    const preview = el('div');
+    const input = el('input', {
+      type: 'file',
+      accept: '.xlsx,.xlsm',
+      style: { display: 'none' },
+      onChange: async (e) => {
+        file = e.target.files?.[0];
+        if (file) await read();
+      },
+    });
+
+    const anchorISO = () => new Date(file?.lastModified || Date.now()).toISOString().slice(0, 10);
+
+    async function read() {
+      clear(preview);
+      preview.appendChild(skeleton(2));
+      status.textContent = `Reading ${file.name}…`;
+      try {
+        sheets = await readWorkbook(file);
+        if (!sheets.length) throw new Error('none of its visible sheets has a row of weekday letters (M, Tu, W…) to read a calendar from.');
+        const last = register.imported?.sheet;
+        sheetName = sheets.some((s) => s.name === last) ? last : sheets[0].name;
+        rederive();
+      } catch (err) {
+        sheets = [];
+        derived = null;
+        clear(preview);
+        status.textContent = '';
+        preview.appendChild(el('div', { class: 'cx-gate-msg bad', text: `Could not read the file: ${err.message}` }));
+      }
+    }
+
+    function rederive() {
+      const sheet = sheets.find((s) => s.name === sheetName);
+      derived = sheet ? derive(sheet.grid, choices, anchorISO()) : null;
+      renderPreview();
+    }
+
+    function renderPreview() {
+      clear(preview);
+      status.textContent = '';
+      if (!derived) return;
+
+      if (sheets.length > 1) {
+        preview.appendChild(field('Sheet', selectInput({
+          value: sheetName,
+          options: sheets.map((s) => s.name),
+          onChange: (v) => { sheetName = v; rederive(); },
+        }), 'Every visible sheet with a calendar on it.'));
+      }
+
+      if (!derived.dated) {
+        preview.appendChild(el('div', { class: 'cx-gate-msg bad', text:
+          'The calendar on this sheet could not be dated: its weekday letters do not agree with any year near when the file was saved. Nothing would be placed at a guessed date, so there is nothing to import.' }));
+        return;
+      }
+
+      const doc = store.getDoc();
+      const linked = laPlacedIds(doc);
+      const plan = reconcileSuggestions(lookaheadRegister(doc).activities, derived.runs, {
+        linked, windowStart: derived.windowStart,
+      });
+      const affected = plan.moved.filter((m) => linked.has(m.id)).length;
+
+      preview.append(
+        el('div', { class: 'cx-chipstats', style: { marginBottom: '10px' } }, [
+          chipStat('Runs', derived.runs.length, 'info'),
+          chipStat('New', plan.added.length, plan.added.length ? 'good' : 'muted'),
+          chipStat('Moved', plan.moved.length, plan.moved.length ? 'warn' : 'muted'),
+          chipStat('Unchanged', plan.unchanged.length, 'muted'),
+          plan.missing.length ? chipStat('Gone', plan.missing.length, 'bad') : null,
+        ].filter(Boolean)),
+        el('div', { class: 'cx-hint', text:
+          `${fmtDate(derived.windowStart, 'medium')} → ${fmtDate(derived.windowEnd - MS_DAY, 'medium')}. One suggestion per run of painted cells on a described row.` })
+      );
+
+      if (affected) {
+        preview.appendChild(el('div', { class: 'cx-gate-msg', style: { borderColor: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 12%, transparent)', marginTop: '9px' },
+          text: `${affected} of the runs that moved have bars on your timeline. After importing you can choose which of them follow.` }));
+      }
+      if (plan.missing.length) {
+        preview.appendChild(el('div', { class: 'cx-gate-msg bad', style: { marginTop: '9px' },
+          text: `${plan.missing.length} run(s) your bars are linked to are no longer on the sheet — they will be marked, not removed.` }));
+      }
+
+      preview.appendChild(colourList());
+
+      const sample = derived.runs.slice(0, 4);
+      if (sample.length) {
+        preview.appendChild(el('div', { style: { marginTop: '11px' } }, [
+          el('div', { class: 'cx-section-label', text: 'First runs' }),
+          el('div', { class: 'cx-list' }, sample.map((run) =>
+            el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+              el('div', { class: 'lr-main' }, [
+                el('div', { class: 'lr-title', text: run.title }),
+                el('div', { class: 'lr-meta', text: runMeta(run) }),
+              ]),
+            ])
+          )),
+        ]));
+      }
+    }
+
+    /** Which fills are work — the one question the file cannot answer itself. */
+    function colourList() {
+      if (!derived.colours.length) return el('div');
+      return el('div', { style: { marginTop: '11px' } }, [
+        el('div', { class: 'cx-section-label', text: 'Colours on the calendar' }),
+        el('div', { class: 'cx-hint', style: { marginBottom: '6px' }, text:
+          'Tick the fills that mean work. Shading that only lays the sheet out is not. Your answer is kept with the plan for the next import.' }),
+        el('div', { class: 'cx-list' }, derived.colours.map((c) =>
+          el('div', { class: 'cx-listrow la-colour', dataset: { hex: c.hex }, style: { cursor: 'default' } }, [
+            checkbox({
+              label: '',
+              checked: c.role === 'shift',
+              onChange: (v) => {
+                choices[c.hex] = v ? 'shift' : 'ignore';
+                rederive();
+              },
+            }),
+            el('span', { class: 'la-swatch', style: `background:#${c.hex.slice(-6)}` }),
+            el('div', { class: 'lr-main' }, [
+              el('div', { class: 'lr-title', text: c.meaning || 'Not in the workbook’s key' }),
+              el('div', { class: 'lr-meta', text: `${c.count} cell${c.count === 1 ? '' : 's'} · #${c.hex.slice(-6)}` }),
+            ]),
+          ])
+        )),
+      ]);
+    }
+
+    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+      el('button', {
+        class: 'cx-btn mini',
+        style: { justifyContent: 'flex-start' },
+        html: icon('upload', { size: 12 }) + '<span>Choose the look-ahead workbook…</span>',
+        onClick: () => input.click(),
+      }),
+      input,
+      status,
+      preview,
+    ]);
+
+    return openModal({
+      title: 'Import the look-ahead',
+      subtitle: 'Read from the .xlsx itself. Suggestions only — nothing is placed or moved until you say so.',
+      size: 'wide',
+      body,
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Import',
+          kind: 'primary',
+          onClick: () => {
+            if (!derived?.dated) {
+              toast({ tone: 'warn', title: 'Nothing to import', message: 'Choose a look-ahead workbook first.' });
+              return false;
+            }
+            // Only the colours this sheet carries are remembered; the rest of
+            // `choices` is what was already stored.
+            const colors = {};
+            for (const c of derived.colours) colors[c.hex] = choices[c.hex] || 'shift';
+
+            const report = store.importLookahead(derived.runs, {
+              fileName: file?.name || '',
+              sheet: sheetName,
+              colors,
+              windowStart: derived.windowStart,
+              windowEnd: derived.windowEnd,
+            });
+            if (!report) return false;
+            renderer.requestRender();
+            refresh();
+            emit(EV.LOOKAHEAD_IMPORTED, { report });
+            toast({
+              tone: 'good',
+              title: 'Look-ahead imported',
+              message: `${derived.runs.length} runs · ${report.added.length} new · ${report.moved.length} moved.`,
+            });
+            const linked = laPlacedIds(store.getDoc());
+            const follow = report.moved.filter((m) => linked.has(m.id));
+            if (follow.length) setTimeout(() => openFollowDialog(follow), 350);
+            return undefined;
+          },
+        },
+      ],
+    });
+  }
+
+  /**
+   * After an import: which linked bars should follow the dates the sheet moved.
+   * Defaulted to none — the plan is yours, and the sheet only proposes.
+   */
+  function openFollowDialog(moved) {
+    const chosen = new Set();
+    const rows = el('div', { class: 'cx-list' });
+
+    for (const item of moved) {
+      const entry = store.getLookaheadActivity(item.id);
+      if (!entry) continue;
+      rows.appendChild(
+        el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+          checkbox({ label: '', checked: false, onChange: (v) => (v ? chosen.add(item.id) : chosen.delete(item.id)) }),
+          el('div', { class: 'lr-main' }, [
+            el('div', { class: 'lr-title', text: entry.title }),
+            el('div', { class: 'lr-meta', text: runMeta(entry) }),
+          ]),
+          badge(shiftLabel(item.finishShift), item.finishShift > 0 ? 'bad' : 'good'),
+        ])
+      );
+    }
+
+    openModal({
+      title: 'Follow the look-ahead?',
+      subtitle: `${moved.length} run(s) your bars stand for moved on the sheet. Your dates are unchanged unless you say so.`,
+      size: 'wide',
+      body: rows,
+      actions: [
+        { label: 'Keep my dates' },
+        {
+          label: 'Apply to selected',
+          kind: 'primary',
+          onClick: () => {
+            if (!chosen.size) return;
+            store.adoptLookaheadDates([...chosen]);
+            renderer.requestRender();
+            refresh();
+            toast({ tone: 'good', title: 'Dates updated', message: `Bars linked to ${chosen.size} run(s) moved onto the look-ahead.` });
+          },
+        },
+      ],
+    });
+  }
+
+  /* ── Summary and controls ──────────────────────────────────────────────── */
+
+  function stateOf(doc, entry) {
+    if (laPlaced(doc, entry.id).length) return 'placed';
+    if (entry.dismissed) return 'dismissed';
+    if (entry.past || entry.missing) return 'gone';
+    return 'suggested';
+  }
+
+  function summary(doc, entries) {
+    const counts = { suggested: 0, placed: 0, dismissed: 0, gone: 0 };
+    let moved = 0;
+    for (const entry of entries) {
+      const state = stateOf(doc, entry);
+      counts[state]++;
+      if (state === 'placed' && entry.previous) moved++;
+    }
+    return el('div', { class: 'cx-chipstats', style: { marginBottom: '11px' } }, [
+      chipStat('Suggested', counts.suggested, counts.suggested ? 'info' : 'muted'),
+      chipStat('On timeline', counts.placed, counts.placed ? 'good' : 'muted'),
+      moved ? chipStat('Moved', moved, 'warn') : null,
+      counts.dismissed ? chipStat('Dismissed', counts.dismissed, 'muted') : null,
+    ].filter(Boolean));
+  }
+
+  function controls() {
+    const search = textInput({
+      value: view.text,
+      placeholder: 'Activity, location or name…',
+      onInput: debounce((v) => {
+        view.text = v;
+        refilter();
+      }, 160),
+    });
+    search.setAttribute('aria-label', 'Search the look-ahead');
+
+    return el('div', { style: { marginBottom: '10px' } }, [
+      field('Find', search),
+      segmented({
+        value: view.show,
+        stretch: true,
+        options: [
+          { value: 'suggested', label: 'Suggested' },
+          { value: 'placed', label: 'On timeline' },
+          { value: 'dismissed', label: 'Dismissed' },
+          { value: 'all', label: 'All' },
+        ],
+        onChange: (v) => {
+          view.show = v;
+          refilter();
+        },
+      }),
+    ]);
+  }
+
+  /* ── Rows ──────────────────────────────────────────────────────────────── */
+
+  function shownEntries(doc) {
+    const needle = fold(view.text);
+    return Object.values(lookaheadRegister(doc).activities)
+      .filter((entry) => {
+        if (needle && !fold(`${entry.label} ${entry.resources.join(' ')}`).includes(needle)) return false;
+        return view.show === 'all' || stateOf(doc, entry) === view.show;
+      })
+      .sort((a, b) => (a.start - b.start) || (a.order - b.order));
+  }
+
+  function renderRows() {
+    const doc = store.getDoc();
+    const shown = shownEntries(doc);
+    clear(listEl);
+    clear(bulkEl);
+
+    const placeable = shown.filter((e) => stateOf(doc, e) === 'suggested');
+    if (placeable.length > 1) {
+      bulkEl.append(
+        el('button', {
+          class: 'cx-btn mini',
+          html: icon('plus', { size: 12 }) + `<span>Place all ${placeable.length} shown…</span>`,
+          onClick: () => place(placeable.map((e) => e.id)),
+        }),
+        el('button', {
+          class: 'cx-btn mini ghost',
+          style: { marginLeft: '6px' },
+          html: icon('ban', { size: 12 }) + `<span>Dismiss all ${placeable.length}</span>`,
+          onClick: () => {
+            store.dismissLookahead(placeable.map((e) => e.id), true);
+            refresh();
+          },
+        })
+      );
+    }
+
+    if (!shown.length) {
+      listEl.appendChild(emptyState({
+        iconName: 'search',
+        title: 'Nothing here',
+        message: view.show === 'suggested' ? 'Every run on the sheet is placed, linked or dismissed.' : 'Try a different search or filter.',
+      }));
+      return;
+    }
+
+    const LIMIT = 300;
+    for (const entry of shown.slice(0, LIMIT)) listEl.appendChild(entryRow(doc, entry));
+    if (shown.length > LIMIT) {
+      listEl.appendChild(el('div', { class: 'cx-hint', style: { padding: '8px 4px' },
+        text: `Showing the first ${LIMIT} of ${shown.length}. Narrow the search to see the rest.` }));
+    }
+  }
+
+  function runMeta(run) {
+    return [
+      run.location || null,
+      `${fmtDate(run.start, 'numeric')} → ${fmtDate(run.end - MS_DAY, 'numeric')}`,
+      `${run.days} day${run.days === 1 ? '' : 's'}`,
+      run.resources?.length ? run.resources.join(', ') : null,
+      // Only what the key *names*: an unlabelled fill's hex says nothing here.
+      (run.meanings || []).filter((m) => !m.startsWith('#')).join(' / ') || null,
+    ].filter(Boolean).join(' · ');
+  }
+
+  function entryRow(doc, entry) {
+    const objects = laPlaced(doc, entry.id);
+    const placed = objects.length > 0;
+    const variance = placed ? laVariance(doc, objects[0]) : null;
+    const moved = entry.previous ? Math.round((entry.end - entry.previous.end) / MS_DAY) : null;
+
+    const row = el('div', {
+      class: 'p6-row la-row' + (placed ? ' placed' : ''),
+      dataset: { la: entry.id },
+      draggable: 'true',
+      title: 'Drag onto the timeline to place it, or onto an existing bar to link them',
+      onClick: () => (placed ? cmd.revealObject(objects[0].id) : place([entry.id])),
+    }, [
+      el('span', {
+        class: 'p6-mark',
+        style: { background: placed ? 'var(--good)' : 'var(--text-subtle)' },
+        title: placed ? 'On the timeline' : 'Not placed',
+      }),
+      el('div', { class: 'p6-name', text: entry.title, title: entry.label }),
+      el('div', { class: 'p6-acts' }, [
+        placed
+          ? el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Show on the timeline',
+              'aria-label': `Show ${entry.title} on the timeline`,
+              html: icon('target', { size: 11 }),
+              onClick: (e) => { e.stopPropagation(); cmd.revealObject(objects[0].id); },
+            })
+          : el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Add to the timeline',
+              'aria-label': `Add ${entry.title} to the timeline`,
+              html: icon('plus', { size: 11 }),
+              onClick: (e) => { e.stopPropagation(); place([entry.id]); },
+            }),
+        el('button', {
+          class: 'cx-btn icon mini ghost',
+          title: placed ? 'Unlink' : 'Link to an existing object',
+          'aria-label': placed ? `Unlink ${entry.title}` : `Link ${entry.title} to an object`,
+          html: icon(placed ? 'unlink' : 'link', { size: 11 }),
+          onClick: (e) => {
+            e.stopPropagation();
+            if (placed) unlink(objects, entry);
+            else openLinkPicker(entry);
+          },
+        }),
+        placed
+          ? null
+          : el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: entry.dismissed ? 'Restore the suggestion' : 'Dismiss the suggestion',
+              'aria-label': entry.dismissed ? `Restore ${entry.title}` : `Dismiss ${entry.title}`,
+              html: icon(entry.dismissed ? 'undo' : 'ban', { size: 11 }),
+              onClick: (e) => {
+                e.stopPropagation();
+                store.dismissLookahead([entry.id], !entry.dismissed);
+                refresh();
+              },
+            }),
+      ].filter(Boolean)),
+      el('div', { class: 'p6-meta', text: runMeta(entry) }),
+      el('div', { class: 'p6-badges' }, [
+        entry.missing ? badge('Gone from the sheet', 'bad') : null,
+        entry.past ? badge('Before this window', 'muted') : null,
+        moved ? badge(`sheet ${shiftLabel(moved)}`, moved > 0 ? 'bad' : 'good') : null,
+        variance?.differs ? badge(`you ${shiftLabel(variance.finishShift)}`, variance.behind ? 'warn' : 'info') : null,
+        objects.length > 1 ? badge(`${objects.length} bars`, 'info') : null,
+        entry.dismissed ? badge('Dismissed', 'muted') : null,
+        placed && objects[0].status ? badge(statusOf(objects[0].status).label, statusOf(objects[0].status).tone) : null,
+      ].filter(Boolean)),
+    ]);
+
+    row.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData(LA_MIME, entry.id);
+      e.dataTransfer.setData('text/plain', entry.title);
+      e.dataTransfer.effectAllowed = 'copyLink';
+      row.classList.add('dragging');
+    });
+    row.addEventListener('dragend', () => row.classList.remove('dragging'));
+
+    return row;
+  }
+
+  /* ── Actions ───────────────────────────────────────────────────────────── */
+
+  function place(ids) {
+    const lanes = store.orderedLanes();
+    if (!lanes.length) {
+      toast({ tone: 'warn', title: 'No lanes', message: 'Add a lane before placing activities.' });
+      return;
+    }
+    let laneId = lanes[0].id;
+    openModal({
+      title: ids.length === 1 ? 'Add to the timeline' : `Add ${ids.length} to the timeline`,
+      subtitle: 'The look-ahead dates are the starting point, and yours to change from then on.',
+      body: field('Lane', selectInput({
+        value: laneId,
+        options: lanes.map((l) => ({ value: l.id, label: l.name })),
+        onChange: (v) => { laneId = v; },
+      })),
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Add',
+          kind: 'primary',
+          onClick: () => {
+            const added = store.placeLookahead(ids, { lane: laneId });
+            if (!added.length) return;
+            renderer.requestRender();
+            if (added.length === 1) cmd.revealObject(added[0]);
+            refresh();
+            toast({ tone: 'good', title: added.length === 1 ? 'Added' : `${added.length} added`, message: 'Placed on the look-ahead dates.' });
+          },
+        },
+      ],
+    });
+  }
+
+  async function unlink(objects, entry) {
+    const ok = await confirmDialog({
+      title: 'Unlink from the look-ahead?',
+      message: `${objects.length} object(s) keep their dates and their place on the timeline. Only the link to “${entry.title}” goes, and it becomes a suggestion again.`,
+      confirmLabel: 'Unlink',
+    });
+    if (!ok) return;
+    for (const object of objects) store.unlinkLookahead(object.id, entry.id);
+    renderer.requestRender();
+    refresh();
+  }
+
+  function openLinkPicker(entry) {
+    const doc = store.getDoc();
+    const lanes = new Map(doc.lanes.map((l) => [l.id, l.name]));
+    const candidates = doc.objects
+      .filter((o) => TYPES[o.type] && !laLinkedIds(o).includes(entry.id))
+      .sort((a, b) => Math.abs(a.start - entry.start) - Math.abs(b.start - entry.start));
+
+    if (!candidates.length) {
+      toast({ tone: 'warn', title: 'Nothing to link to', message: 'There is no object on the timeline to link.' });
+      return;
+    }
+
+    openPicker({
+      title: 'Link to an existing object',
+      subtitle: `${entry.title} — the object keeps its own dates; linking records what it stands for.`,
+      placeholder: 'Search by title or lane…',
+      items: candidates.map((o) => ({
+        value: o.id,
+        label: o.title,
+        meta: `${lanes.get(o.lane) || 'no lane'} · ${fmtDate(o.start, 'numeric')}`,
+      })),
+      empty: 'No object matches.',
+      onPick: (objectId) => {
+        if (!objectId) return;
+        store.linkLookahead(objectId, entry.id);
+        renderer.requestRender();
+        refresh();
+        toast({ tone: 'good', title: 'Linked', message: 'That object now stands for this run of the look-ahead.' });
+      },
+    });
+  }
+
+  async function clearUnlinked() {
+    const ok = await confirmDialog({
+      title: 'Clear the suggestions?',
+      message: 'Every run no bar is linked to is forgotten, dismissed ones included. Linked runs stay, and the next import brings the rest back.',
+      confirmLabel: 'Clear',
+    });
+    if (!ok) return;
+    store.clearLookahead();
+    refresh();
+  }
+
+  /* ── Dropping onto the canvas ──────────────────────────────────────────── */
+
+  /** The type carried on a dragged suggestion. */
+  const LA_MIME = 'application/x-cx-lookahead';
+
+  /** Onto a bar links the two; onto an empty lane places a new bar there. */
+  function installLookaheadDrops() {
+    on('canvas:drop', ({ data, objectId, laneId }) => {
+      const id = data?.[LA_MIME];
+      if (!id) return;
+      const entry = store.getLookaheadActivity(id);
+      if (!entry) return;
+
+      if (objectId) {
+        if (laLinkedIds(store.getObject(objectId)).includes(id)) {
+          toast({ tone: 'info', title: 'Already linked', message: 'That bar already stands for this run.' });
+          return;
+        }
+        store.linkLookahead(objectId, id);
+        renderer.requestRender();
+        refresh();
+        toast({ tone: 'good', title: 'Linked', message: `${store.getObject(objectId)?.title || 'That bar'} now stands for ${entry.title}.` });
+        return;
+      }
+
+      const [added] = store.placeLookahead([id], { lane: laneId });
+      if (!added) return;
+      cmd.revealObject(added);
+      refresh();
+      toast({ tone: 'good', title: 'Added', message: 'Placed on the look-ahead dates, and yours from here.' });
+    });
+  }
+
+  /* ── Helpers ───────────────────────────────────────────────────────────── */
+
+  function shiftLabel(days) {
+    if (days == null) return '—';
+    if (days === 0) return 'on plan';
+    return `${days > 0 ? '+' : '−'}${Math.abs(days)}d`;
+  }
+
+  function refresh() {
+    emit(EV.PANE_REFRESH, { pane: 'lookahead' });
+  }
+
+  Object.defineProperty(__x, "paneLookahead", { get: () => paneLookahead, enumerable: true });
+  Object.defineProperty(__x, "openLookaheadImport", { get: () => openLookaheadImport, enumerable: true });
+  Object.defineProperty(__x, "LA_MIME", { get: () => LA_MIME, enumerable: true });
+  Object.defineProperty(__x, "installLookaheadDrops", { get: () => installLookaheadDrops, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/notes.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/notes.js"] = function (__x, __req) {
@@ -23764,6 +26744,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const { listEditor } = __req("ui/lists.js");
   const { openShareDialog, paneTeam } = __req("ui/auth.js");
   const { paneP6 } = __req("ui/p6.js");
+  const { paneLookahead } = __req("ui/lookahead.js");
   const { openObjectDialog, openLaneDialog } = __req("ui/dialogs.js");
   const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
   const exporters = __req("io/exporters.js");
@@ -23771,7 +26752,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const { pickFiles } = __req("core/util.js");
 
   const PANES = [
-    'projects', 'team', 'p6', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
+    'projects', 'team', 'p6', 'lookahead', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
     'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
     'settings',
   ];
@@ -23892,6 +26873,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
     projects: paneProjects,
     team: paneTeam,
     p6: paneP6,
+    lookahead: paneLookahead,
     lanes: paneLanes,
     palette: panePalette,
     outline: paneOutline,
@@ -23911,7 +26893,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   };
 
   const TITLES = {
-    projects: 'Projects', team: 'Team & access', p6: 'P6 schedule',
+    projects: 'Projects', team: 'Team & access', p6: 'P6 schedule', lookahead: 'Look-ahead',
     lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
     campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
     baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',
@@ -26002,6 +28984,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
         { pane: 'links', label: 'Dependencies', icon: 'link' },
         { pane: 'baselines', label: 'Baselines', icon: 'bookmark' },
         { pane: 'p6', label: 'P6 Schedule', icon: 'table' },
+        { pane: 'lookahead', label: 'Look-ahead', icon: 'calendar' },
       ],
     },
     {
@@ -26613,7 +29596,11 @@ __mods["ui/inspector.js"] = function (__x, __req) {
   const { el, clear, debounce, clamp, escapeHtml } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } = __req("core/dates.js");
-  const { TYPES, listOptions, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, LINK_TYPES, CONNECTOR_STYLES, durationDays, endForDuration, countsWorkingDays, remainingDays, statusOf, effectiveToday, isDerivedBaseline, delayReason, notesShown } = __req("core/model.js");
+  const { TYPES, listOptions, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, lookaheadRegister, laLinkedIds, laRollUp, laVariance, LINK_TYPES, CONNECTOR_STYLES, durationDays, endForDuration, countsWorkingDays, remainingDays, statusOf, effectiveToday, isDerivedBaseline, delayReason, notesShown } = __req("core/model.js");
+
+
+
+
 
 
 
@@ -26807,6 +29794,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       sectionOf('attachments', 'Attachments', [attachmentList(obj.id).root]),
       sectionOf('links', 'Dependencies', linkFields(obj)),
       sectionOf('p6', 'P6', p6Fields(obj)),
+      sectionOf('lookahead', 'Look-ahead', lookaheadFields(obj)),
       sectionOf('appearance', 'Appearance', appearanceFields(obj)),
       sectionOf('text', 'Text', textFields(obj)),
       sectionOf('arrange', 'Arrange', arrangeFields(obj)),
@@ -27406,6 +30394,62 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       out.push(el('div', { class: 'cx-hint', text: 'Sitting exactly where the baseline had it.' }));
     }
 
+    return out;
+  }
+
+  /* ── Look-ahead ────────────────────────────────────────────────────────── */
+
+  /**
+   * The look-ahead runs this bar stands for. Shown only once something is
+   * linked: unlike P6 there is no picker here, because a run is found by its
+   * dates and its words in the Look-ahead pane, not by an ID somebody knows.
+   */
+  function lookaheadFields(obj) {
+    const linked = laLinkedIds(obj);
+    if (!linked.length) return null;
+    const doc = store.getDoc();
+    const register = lookaheadRegister(doc);
+    const rollUp = laRollUp(doc, obj);
+    const variance = laVariance(doc, obj);
+
+    const out = [
+      el('div', { class: 'p6-links' }, linked.map((id) => {
+        const entry = register.activities[id];
+        return el('div', { class: 'p6-chip' + (entry ? '' : ' unknown'), dataset: { la: id } }, [
+          el('span', { class: 'p6-chip-name', text: entry ? entry.title : 'no longer in the register', title: entry?.label || '' }),
+          entry ? el('span', { class: 'p6-dates', text: `${fmtDate(entry.start, 'numeric')} → ${fmtDate(entry.end - MS_DAY, 'numeric')}` }) : null,
+          el('button', {
+            class: 'cx-btn icon mini ghost',
+            title: 'Stop standing for this run',
+            'aria-label': `Unlink ${entry?.title || id}`,
+            html: icon('x', { size: 10 }),
+            onClick: () => {
+              store.unlinkLookahead(obj.id, id);
+              renderer.requestRender();
+              render();
+            },
+          }),
+        ].filter(Boolean));
+      })),
+    ];
+
+    if (rollUp) {
+      out.push(el('div', { class: 'cx-chipstats', style: { marginTop: '4px' } }, [
+        chipStat('Sheet span', `${fmtDate(rollUp.start, 'numeric')} → ${fmtDate(rollUp.end - MS_DAY, 'numeric')}`, 'muted'),
+        variance ? chipStat('You', shift(variance.finishShift), !variance.differs ? 'muted' : variance.behind ? 'warn' : 'info') : null,
+      ].filter(Boolean)));
+    }
+    if (variance?.differs) {
+      out.push(el('button', {
+        class: 'cx-btn mini',
+        html: icon('target', { size: 12 }) + '<span>Move onto the look-ahead dates</span>',
+        onClick: () => {
+          store.adoptLookaheadDates(linked);
+          renderer.requestRender();
+          render();
+        },
+      }));
+    }
     return out;
   }
 
@@ -28822,1588 +31866,6 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "installShortcuts", { get: () => installShortcuts, enumerable: true });
   Object.defineProperty(__x, "MOD_LABEL", { get: () => MOD_LABEL, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
-// core/lookahead.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["core/lookahead.js"] = function (__x, __req) {
-  /**
-   * Comparing two look-ahead snapshots.
-   *
-   * The look-ahead is the contractual source of truth and the resource calendar
-   * is the execution record; the difference between two snapshots is what a
-   * delay claim is eventually built from. So the rules here are about being
-   * *honest* rather than clever — the system logs what it can see and asks a
-   * person about what it cannot.
-   *
-   * Two rules do most of the work, and both exist because the obvious version
-   * produces numbers that flatter or damn the wrong party.
-   *
-   * **Only weeks in both snapshots are compared.** A four-week window rolls
-   * forward, so a week appearing at the far edge is not scope being added and a
-   * week dropping off the back is not scope being removed. Counting them as such
-   * would book a batch of phantom additions every single week, and would count
-   * finished work as deleted scope — inflating exactly the number you would most
-   * want to defend.
-   *
-   * **A crew moving site is not inferred.** When work finishes early and a team
-   * moves, one row disappears and another appears with the same resources. The
-   * activity text is not reliable enough to match on — the spec says so and it is
-   * right — so it is logged honestly as a removal and an addition, and a person
-   * can relink the pair afterwards. Guessing would be the one failure mode
-   * nobody could audit.
-   *
-   * **A Resource row belongs to the activity above it.** The workbook names who
-   * is on an activity by adding a row underneath whose description reads
-   * "Resource", with the names typed into the day cells; where and when are left
-   * blank because they are the line above's. So it is read as part of that
-   * activity rather than as one of its own — otherwise half the sheet is rows
-   * called "Resource" with no location — and a name is never matched to a person
-   * here. That happens against the roster, where an unmatched spelling can be
-   * shown to somebody instead of guessed at.
-   *
-   * Imports: nothing (leaf).
-   */
-
-  /* ── The Resource row ──────────────────────────────────────────────────── */
-
-  /**
-   * Is this what the workbook writes under an activity to name who is on it?
-   *
-   * The 4WLA carries a row directly beneath each activity whose description cell
-   * reads "Resource", and the day cells on it hold the names typed against that
-   * activity. It is recognised by that one word and nothing else — folded for
-   * case and punctuation, but not loosened any further. "Resource Names" is not
-   * it: a rule that matched anything containing the word would swallow an
-   * activity called "Resource mobilisation", and a row misread as a label is a
-   * row of work that vanishes off the calendar.
-   */
-  function isResourceLabel(text) {
-    return /^resources?$/.test(String(text ?? '').toLowerCase().replace(/[^a-z]/g, ''));
-  }
-
-  /**
-   * Which kind of absence a row's description names, or null.
-   *
-   * The workbook carries rows at the bottom that are not site work: "PTO",
-   * "Office" and "Other Group / Project", with names typed into the day cells the
-   * same way the Resource row carries them. They say where somebody is when they
-   * are not on the project — off, at their desk, or on another group's work —
-   * which is a fact about the person rather than about an activity, and it is the
-   * fact the week plan and the huddle are otherwise missing entirely: a blank
-   * against a name reads as "nobody planned this", when the sheet said exactly
-   * why. Only PTO means they were not working; the rest are days like any other,
-   * and they carry a category so the reports can group them.
-   *
-   * Strict for the reason `isResourceLabel()` is strict, and with the same two
-   * failures in mind. A row misread as a label is a row of work that vanishes off
-   * the calendar; a label misread as work is a row of names at no location that
-   * every report then counts as scope. So the spellings are enumerated rather than
-   * matched loosely — "Other" alone is not one of them, because it names nothing.
-   */
-  function absenceKind(text) {
-    const folded = String(text ?? '').toLowerCase().replace(/[^a-z]/g, '');
-    if (/^(pto|paidtimeoff|timeoff|vacation|annualleave|holiday)$/.test(folded)) return 'pto';
-    if (/^(office|officeday|inoffice|officebased)$/.test(folded)) return 'office';
-    if (/^other(group|project)/.test(folded)) return 'other';
-    return null;
-  }
-
-  /**
-   * The three facts about each kind, in one table.
-   *
-   * They were spread across three modules — the label here, whether it counts as
-   * leave inside `availability()`, and nothing at all about which category the
-   * day belongs to — and the first time a kind was added that was three places to
-   * remember. What each one *is*:
-   *
-   * **`leave`** decides whether the person was there at all. PTO is the only one:
-   * somebody in the office or on another group's project is working, they can be
-   * asked how the day went, and folding them into leave would put a person who
-   * was at their desk down as absent.
-   *
-   * **`category`** is the seeded `rc_categories` row the day belongs to, matched
-   * by name because that is what the schema seeds it as. A renamed category
-   * simply stops matching and the day arrives uncategorised — ungrouped in the
-   * reports rather than grouped wrongly, which is the right way for a
-   * name match to fail.
-   */
-  const ABSENCE_KINDS = {
-    pto:    { label: 'PTO',                   leave: true,  category: null },
-    office: { label: 'Office',                leave: false, category: 'Office' },
-    other:  { label: 'Other group / project', leave: false, category: 'Other project' },
-  };
-
-  /** What each kind is called on screen. One place, so three views cannot differ. */
-  const ABSENCE_LABELS = Object.fromEntries(
-    Object.entries(ABSENCE_KINDS).map(([kind, it]) => [kind, it.label])
-  );
-
-  /**
-   * The people named in one cell.
-   *
-   * Typed by hand, so the separator is whatever was to hand: a comma, a slash, a
-   * newline, an ampersand, a plus, the word "and", or simply two spaces where somebody
-   * pressed the bar twice. Nothing is matched to a person here — that is the
-   * roster's job, through the alias register — this only splits what was written.
-   *
-   * **Spacing is noise, not a name.** A cell reading `Victor ,Rosa` and one
-   * reading `Victor, Rosa` are the same two people, so each piece is trimmed and
-   * its own internal runs of whitespace are collapsed before it is handed on: a
-   * name carrying a stray double space would otherwise fold to a different string
-   * from the same name typed once, and match nobody for a reason no reader could
-   * see. A newline inside a cell is a separator rather than a space, because that
-   * is how a second name gets into one cell in Excel.
-   */
-  function resourceNames(text) {
-    return String(text ?? '')
-      /* "and" is tried before the two-space rule on purpose: an alternation is
-         read left to right, so `\s{2,}` would otherwise eat the spaces around a
-         spelled-out "and" and leave the word behind as a person. */
-      .split(/\s+and\s+|[,;/\n&+]|\s{2,}/i)
-      .map((s) => s.trim().replace(/\s+/g, ' '))
-      .filter(Boolean);
-  }
-
-  /**
-   * Stored days whose look-ahead row now names somebody else.
-   *
-   * The 4WLA's Resource row is the plan for the days it names, so a stored
-   * `rc_plan_entries` row carrying a `lookahead_row_id` is somebody having
-   * confirmed or overridden what that row said. When a later read of the sheet
-   * puts a different name on the same row for the same day, the work has moved —
-   * and until this existed the entry stayed against whoever it was first written
-   * for. The visible cost is somebody turning up for a shift that is not theirs
-   * any more while the person who now has it has a blank against their name.
-   *
-   * `resolve` is the name lookup, **injected** for the reason `rowsFrom()` takes
-   * `locate`: the register lives two layers up, this module is a leaf, and the
-   * whole pipeline has to be testable with no browser and no network. It answers
-   * a person id for a written name, or null.
-   *
-   * Returns `[{ entry, from, to }]`, and returns nothing at all unless it is
-   * certain:
-   *
-   * **The row has to say something about that day.** A day the sheet no longer
-   * names anybody on is not a reassignment — it is the sheet going quiet, which
-   * happens whenever an activity is rescheduled, and moving a task to nobody is
-   * not a thing that can be written.
-   *
-   * **It has to name exactly one person the roster knows.** Two names on a day is
-   * a crew, and a crew is not "this task moved to Victor" — it is several entries,
-   * which is a decision somebody takes rather than one this can derive. An
-   * unmatched spelling stops it too: those are reported and answered with an
-   * alias, and guessing here would be the near-miss matching the register refuses.
-   *
-   * **It has to be somebody else.** A re-read that changed nothing must produce
-   * nothing, or every ingest would supersede every linked entry with a revision
-   * saying the same thing. `rc_reassign_plan()` refuses that case as well, so it
-   * is checked on both sides on purpose.
-   */
-  function reassignments({ planRows, laRows, resolve }) {
-    const byRow = new Map();
-    for (const row of laRows || []) {
-      if (row?.id) byRow.set(row.id, row);
-    }
-
-    const out = [];
-    for (const entry of planRows || []) {
-      if (!entry?.id || !entry.lookahead_row_id) continue;
-      const row = byRow.get(entry.lookahead_row_id);
-      if (!row) continue;
-      const written = resourceNames(row.resources?.[entry.work_date] || '');
-      if (!written.length) continue;
-
-      const ids = new Set();
-      let unknown = false;
-      for (const name of written) {
-        const id = resolve ? resolve(name) : null;
-        if (id) ids.add(id);
-        else unknown = true;
-      }
-      // One person, and every name on the day accounted for. Anything else is a
-      // crew or a spelling nobody has mapped, and neither is a move.
-      if (unknown || ids.size !== 1) continue;
-      const [to] = [...ids];
-      if (to === entry.person_id) continue;
-      out.push({ entry, from: entry.person_id, to });
-    }
-    return out;
-  }
-
-  /**
-   * Every mark on an activity, the ones on its Resource row included.
-   *
-   * Whether a row has work on it is a question about the pair, not about the
-   * activity line alone: the workbook sometimes paints the shift on the Resource
-   * row instead. Both places that ask — `readGrid()` and the calendar's window —
-   * have to ask it the same way, which is why it is a function and not two loops.
-   */
-  function marksOf(activity) {
-    return activity?.resource ? [...activity.marks, ...activity.resource.marks] : (activity?.marks || []);
-  }
-
-  /* ── Row identity ──────────────────────────────────────────────────────── */
-
-  /**
-   * A key for a row that survives the file being edited.
-   *
-   * The look-ahead has no activity IDs — no P6 numbers, nothing stable — and its
-   * descriptions are not matchable. Location, week and subsystem are what remain,
-   * plus an ordinal to separate two rows that share all three.
-   *
-   * The ordinal is the weak part, and knowingly so: inserting a row in the middle
-   * of a group shifts everything below it and produces a false removed/added
-   * pair. That is tolerable only because the manual relink exists to fix it, and
-   * because the alternative — matching on text — would produce *wrong* answers
-   * rather than noisy ones.
-   */
-  function rowKey({ weekStart, location, subsystem = '', ordinal = 0 }) {
-    return [weekStart, String(location || '').trim(), String(subsystem || '').trim(), ordinal].join('|');
-  }
-
-  /** Assign ordinals within each (week, location, subsystem) group. */
-  function keyRows(rows) {
-    const seen = new Map();
-    return rows.map((row) => {
-      const group = [row.weekStart, row.location, row.subsystem || ''].join('|');
-      const ordinal = seen.get(group) || 0;
-      seen.set(group, ordinal + 1);
-      return { ...row, rowKey: rowKey({ ...row, ordinal }) };
-    });
-  }
-
-  /* ── Reading the grid as a calendar ────────────────────────────────────── */
-
-  const WEEKDAYS = ['M', 'TU', 'W', 'TH', 'F', 'SA', 'SU'];
-
-  const MONTH_NAMES = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
-    'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
-
-  /**
-   * The one month a label names, or -1.
-   *
-   * A week straddling a boundary is labelled "August/September" in this
-   * workbook, and a label naming two months anchors nothing — it is skipped
-   * rather than resolved to the first of them.
-   */
-  function oneMonth(label) {
-    const text = String(label || '').toUpperCase();
-    const hits = new Set();
-    MONTH_NAMES.forEach((name, i) => {
-      if (text.includes(name) || new RegExp(`\\b${name.slice(0, 3)}\\b`).test(text)) hits.add(i);
-    });
-    return hits.size === 1 ? [...hits][0] : -1;
-  }
-
-  /**
-   * Give every day column a real date, or none of them one.
-   *
-   * The sheet carries months and day numbers and no year at all, so a year has
-   * to come from somewhere else. Two things supply it, and the second is what
-   * makes this safe to rely on rather than a guess:
-   *
-   * **The snapshot's own timestamp** says roughly when the window was current.
-   * The look-ahead is maintained four to six weeks out, so the window brackets
-   * the day it was read; that narrows the year to one of three candidates.
-   *
-   * **The weekday letters check the answer.** The sheet writes M, Tu, W beside
-   * every day, and only one of the candidate years makes those letters come out
-   * right — the same date is a different weekday in adjacent years. So the year
-   * is not inferred and hoped for, it is *verified* against something the file
-   * already says, and where the letters do not agree no dates are claimed at
-   * all and everything that depends on them stands down.
-   *
-   * Mutates `days`, adding `date` (an ISO string) where it can.
-   */
-  function datePlease(days, anchorISO) {
-    if (!days.length) return false;
-
-    /* Day numbers first: they are always present, and a drop from 30 to 1 is a
-       month boundary whether or not anybody labelled it. That matters because
-       the visible window often starts mid-month, with the label for that month
-       sitting in a column the workbook has hidden. */
-    const nums = [];
-    for (let i = 0; i < days.length; i++) {
-      const n = parseInt(String(days[i].day).replace(/\D/g, ''), 10);
-      nums.push(Number.isFinite(n) && n >= 1 && n <= 31 ? n : (nums[i - 1] || 0) + 1);
-    }
-
-    let anchorAt = -1;
-    let anchorMonth = -1;
-    for (let i = 0; i < days.length; i++) {
-      const m = oneMonth(days[i].label);
-      if (m >= 0) { anchorAt = i; anchorMonth = m; break; }
-    }
-    if (anchorAt < 0) return false;
-
-    const months = new Array(days.length).fill(-1);
-    months[anchorAt] = anchorMonth;
-    for (let i = anchorAt + 1; i < days.length; i++) {
-      months[i] = nums[i] < nums[i - 1] ? (months[i - 1] + 1) % 12 : months[i - 1];
-    }
-    for (let i = anchorAt - 1; i >= 0; i--) {
-      months[i] = nums[i] > nums[i + 1] ? (months[i + 1] + 11) % 12 : months[i + 1];
-    }
-
-    // Relative years: the axis only ever runs forwards, so a month going
-    // backwards is the turn of a year.
-    const rel = [0];
-    for (let i = 1; i < days.length; i++) rel.push(rel[i - 1] + (months[i] < months[i - 1] ? 1 : 0));
-
-    const anchorMs = Date.parse(`${String(anchorISO || '').slice(0, 10)}T00:00:00Z`);
-    const base = Number.isFinite(anchorMs)
-      ? new Date(anchorMs).getUTCFullYear()
-      : new Date().getUTCFullYear();
-
-    const LETTERS = ['SU', 'M', 'TU', 'W', 'TH', 'F', 'SA'];
-    let bestYear = null;
-    let bestScore = -1;
-    for (const year of [base - 1, base, base + 1]) {
-      let agree = 0;
-      for (let i = 0; i < days.length; i++) {
-        const ms = Date.UTC(year + rel[i], months[i], nums[i]);
-        if (LETTERS[new Date(ms).getUTCDay()] === String(days[i].weekday).trim().toUpperCase()) agree++;
-      }
-      // Closeness to the snapshot breaks a tie; the letters decide otherwise.
-      const mid = Date.UTC(year + rel[rel.length >> 1], months[days.length >> 1], nums[days.length >> 1]);
-      const near = Number.isFinite(anchorMs) ? 1 - Math.min(1, Math.abs(mid - anchorMs) / 3.2e10) : 0;
-      const score = agree + near;
-      if (score > bestScore) { bestScore = score; bestYear = year; }
-    }
-
-    // Below this the letters are not agreeing and the reading is wrong. Saying
-    // nothing is the only honest answer: a today line on the wrong column is
-    // worse than no today line.
-    const agreement = Math.floor(bestScore) / days.length;
-    if (agreement < 0.9) return false;
-
-    for (let i = 0; i < days.length; i++) {
-      days[i].date = new Date(Date.UTC(bestYear + rel[i], months[i], nums[i]))
-        .toISOString().slice(0, 10);
-      days[i].month = `${MONTH_NAMES[months[i]].slice(0, 3)} ${bestYear + rel[i]}`;
-    }
-    return true;
-  }
-
-  /**
-   * Turn a parsed sheet into something that can be drawn: days across the top,
-   * activities down the side.
-   *
-   * Everything here is *found* rather than configured, and that is the point.
-   * The look-ahead is a spreadsheet somebody maintains by hand: rows get
-   * inserted, the window scrolls, columns are hidden and unhidden as the weeks
-   * move. A layout pinned to "dates start at column H" would be wrong the first
-   * time anybody inserted a column, and wrong silently — the grid would still
-   * draw, against the wrong days.
-   *
-   * So the date axis is located by looking for the row of weekday letters, which
-   * is the one row on the sheet whose content cannot be mistaken for anything
-   * else. The day numbers sit directly above it and the month labels above
-   * those; the columns it occupies are the calendar, and everything to the left
-   * of them is what the activity *is*.
-   *
-   * No year is invented. The sheet does not carry one, and a date is not
-   * something to infer from a month name — the axis is drawn as the workbook
-   * writes it.
-   */
-  function readGrid(grid, { anchorISO = null } = {}) {
-    const rows = (grid?.rows || []).slice().sort((a, b) => a.row - b.row);
-    const empty = { days: [], meta: [], headings: [], activities: [], header: null };
-    if (!rows.length) return empty;
-
-    // The weekday row: the one where most values are M/Tu/W/Th/F/Sa/Su.
-    let header = null;
-    let best = 0;
-    for (const row of rows) {
-      const hits = row.cells.filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()));
-      if (hits.length > best && hits.length >= 7) {
-        best = hits.length;
-        header = row;
-      }
-    }
-    if (!header) return empty;
-
-    const dayCols = header.cells
-      .filter((c) => WEEKDAYS.includes(String(c.value ?? '').trim().toUpperCase()))
-      .map((c) => c.col)
-      .sort((a, b) => a - b);
-    const dayCol = new Set(dayCols);
-    const firstDay = dayCols[0];
-
-    const at = (row, col) => row?.cells.find((c) => c.col === col);
-    const above = (n) => rows.filter((r) => r.row < header.row).slice(-n)[0] || null;
-    const numbers = above(1);
-    const months = above(2);
-
-    /* The month label is a merged cell, so only the leftmost column of each
-       block carries it. Carrying the last one forward is what merged means. */
-    let month = '';
-    const days = dayCols.map((col) => {
-      const label = String(at(months, col)?.value ?? '').trim();
-      if (label) month = label;
-      return {
-        col,
-        month,
-        // What the sheet actually wrote here, as opposed to what was carried
-        // across the merge. Only a real label can anchor the calendar.
-        label,
-        day: String(at(numbers, col)?.value ?? '').trim(),
-        weekday: String(at(header, col)?.value ?? '').trim(),
-        weekend: ['SA', 'SU'].includes(String(at(header, col)?.value ?? '').trim().toUpperCase()),
-      };
-    });
-
-    datePlease(days, anchorISO);
-
-    /* The activity columns are whatever is used to the left of the calendar.
-       Their headings are not reliably on any one row — this file labels some and
-       not others — so they are numbered by position and named where a heading
-       happens to exist above the first activity. */
-    const body = rows.filter((r) => r.row > header.row);
-    const metaCols = [...new Set(
-      body.flatMap((r) => r.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim()).map((c) => c.col))
-    )].sort((a, b) => a - b);
-
-    /* What the sheet calls each of those columns.
-       The nearest thing written in that column at or above the weekday row —
-       which is where a heading is, whichever row somebody put it on. It is worth
-       reading rather than guessing because one of these columns is the location,
-       and knowing *which* is the difference between recording where the work is
-       and recording nothing. Nothing depends on a heading existing: an unlabelled
-       column is '' and is treated as it always was. */
-    const headings = metaCols.map((col) => {
-      for (let i = rows.length - 1; i >= 0; i--) {
-        if (rows[i].row > header.row) continue;
-        const text = String(at(rows[i], col)?.value ?? '').trim();
-        if (text) return text;
-      }
-      return '';
-    });
-
-    const activities = [];
-    for (const row of body) {
-      const meta = metaCols.map((col) => String(at(row, col)?.value ?? '').trim());
-      const marks = row.cells
-        .filter((c) => dayCol.has(c.col) && (String(c.value ?? '').trim() || c.hex))
-        .map((c) => ({
-          col: c.col,
-          value: String(c.value ?? '').trim(),
-          hex: c.hex || null,
-          meaning: c.meaning || null,
-          role: c.role || (c.hex ? 'shift' : null),
-        }));
-
-      // A row with neither a description nor a mark is spacing, not work.
-      if (!meta.some(Boolean) && !marks.some((m) => m.value)) continue;
-
-      /* A heading is a row whose *activity* cells are painted.
-         That is a structural fact rather than a reading of the colour, and it is
-         what makes it reliable: the shading that runs along the day columns of
-         every row paints only the calendar, never the description beside it. So
-         a section title is recognised without anybody having to tell the legend
-         which of several near-identical greys means "divider".
-         Only the columns *left* of the calendar count. `!dayCol.has(col)` also
-         took in anything painted to the right of the last day — a totals column,
-         a trailing border — and one of those turns every row in the workbook
-         into a heading, which is how a whole file arrived on screen at once. */
-      const heading = row.cells.some((c) => c.col < firstDay && c.hex);
-
-      /* "PTO", "Office", "Other Group / Project": rows of names that are not
-         site work.
-         Unlike the Resource row they stand on their own — they sit at the bottom
-         of the sheet and belong to nobody above them, because what they say is
-         about the *person*, not about an activity. So they are emitted as rows in
-         their own right, marked with the kind, and everything downstream reads
-         `absence` to know this is not scope: `rowsFrom()` skips them so they can
-         never be counted as work added or removed, and the calendar draws them
-         with the names rather than with the activities. */
-      const absence = absenceKind(meta.find((value) => absenceKind(value)) || '');
-      if (!heading && absence) {
-        activities.push({
-          row: row.row, meta, marks, heading: false, highlighted: false,
-          named: true, resource: null, absence,
-        });
-        continue;
-      }
-
-      /* The Resource row the workbook writes under an activity.
-         It belongs to the activity above it rather than being one of its own: it
-         carries no work of its own, it inherits where and when from the line it
-         sits under, and drawn as a separate activity it would be a hundred and
-         forty rows of the word "Resource". Its day cells are the names.
-
-         **Directly above means the row directly above, on the sheet.** This used
-         to take whichever activity happened to have been pushed last, however far
-         up the sheet it was — so anything the parser stepped over on the way down
-         silently re-parented the names. A hidden row is the case that bit: the
-         workbook hides an activity, `parseSheet()` drops it before this ever sees
-         it, and the Resource row underneath attached itself to the activity above
-         the hidden one. Nothing on the calendar showed it, because the names were
-         drawn against the row they were typed on — but the derived plan booked
-         somebody onto an activity that is not in the 4WLA at all, which is exactly
-         how it was found. `above.row === row.row - 1` is the whole test: a gap in
-         the numbering means *something* was between them — hidden, skipped as
-         spacing, or a band — and there is no honest way to say whose names these
-         are.
-
-         An orphan is dropped rather than drawn. It is a label row whatever it is
-         attached to: pushed as an activity it would be the word "Resource" at no
-         location, counted as scope by every report, which is worse than the wrong
-         parent it replaces. */
-      if (!heading && meta.some(isResourceLabel)) {
-        const above = activities[activities.length - 1];
-        if (above && above.row === row.row - 1 && !above.heading && !above.absence) {
-          above.resource = {
-            row: row.row,
-            /* Where and when come from the activity above — that is what the
-               workbook means by leaving them blank on this row. Anything typed
-               here wins, so a resource working different hours can say so. */
-            meta: meta.map((value, i) => value || above.meta[i] || ''),
-            marks,
-            names: marks.filter((m) => m.value).map((m) => ({ col: m.col, names: resourceNames(m.value) })),
-          };
-          above.highlighted = marksOf(above).some((m) => m.hex && m.role === 'shift');
-        }
-        continue;
-      }
-
-      /* "Highlighted" means at least one day carries paint that is *work*.
-         Tested as `role === 'shift'` rather than `role !== 'ignore'`, which is
-         not the same question and got the answer wrong: a `divider` is the grey
-         the workbook paints its section bands in, and a row whose only colour is
-         a divider or a weekend band has nothing scheduled on it — but it read as
-         highlighted and survived into the grid.
-         An unmapped colour still counts, because `applyLegend()` gives it
-         `shift`: until somebody says what a colour is, the honest assumption is
-         that it might be work, and hiding it would bury the rows that most need
-         attention. */
-      const highlighted = marks.some((m) => m.hex && m.role === 'shift');
-
-      /* Whether anybody wrote down what this row *is*.
-         A row of paint with no description is not an activity — it is a band, a
-         spacer, or a fill somebody dragged too far — and putting it on the
-         calendar asks the reader to work out which. It is hidden with the
-         unscheduled rows rather than dropped, so the switch still brings it back. */
-      const named = meta.some(Boolean);
-
-      activities.push({ row: row.row, meta, marks, heading, highlighted, named, resource: null, absence: null });
-    }
-
-    return { days, meta: metaCols, headings, activities, header: header.row };
-  }
-
-  /**
-   * Who the sheet says is away, and on which day.
-   *
-   * One entry per day cell written on a "PTO" or "Other Group / Project" row:
-   * `{ kind, row, date, written }`, where `written` is the spelling that was
-   * typed. Nothing is matched to a person here — that is the register's job, the
-   * same as for the Resource row — and nothing is invented for a day the sheet
-   * left blank.
-   *
-   * Derived at paint time rather than stored, for the reason the whole 4WLA
-   * reading is: `rc_leave` is the record of leave somebody *booked*, and writing
-   * the workbook into it would make the sheet's authorship indistinguishable from
-   * a decision, go stale the moment somebody edited a cell, and need cancelling to
-   * correct something nobody ever booked.
-   */
-  function absencesFrom(view) {
-    const dayByCol = new Map((view?.days || []).map((d) => [d.col, d]));
-    const out = [];
-    for (const activity of view?.activities || []) {
-      if (!activity.absence) continue;
-      for (const mark of activity.marks) {
-        const written = String(mark.value || '').trim();
-        if (!written) continue;
-        const day = dayByCol.get(mark.col);
-        if (!day?.date) continue;
-        out.push({ kind: activity.absence, row: activity.row, date: day.date, written });
-      }
-    }
-    return out;
-  }
-
-  /**
-   * Which of the activity columns is the location, off the sheet's own heading.
-   *
-   * Found, like the date axis, rather than configured — for the same reason and
-   * with the same failure in mind: a column pinned by letter or by position is
-   * wrong the first time somebody inserts one, and wrong *silently*, because the
-   * rows still write and every one of them records the wrong place.
-   *
-   * The heading is what the workbook calls the column, so that is what is read.
-   * `-1` means it says nothing recognisable, and the caller falls back to asking
-   * the alias register which cell it knows — which is what this module did
-   * everywhere before, and still the only answer available on a sheet with no
-   * headings at all.
-   */
-  function locationColumnOf(view) {
-    const headings = view?.headings || [];
-    for (let i = 0; i < headings.length; i++) {
-      if (/\blocations?\b/i.test(headings[i])) return i;
-    }
-    // "Site" is the other word this project's sheets use for it. Deliberately a
-    // short list: a near miss here misfiles every row on the sheet at once.
-    for (let i = 0; i < headings.length; i++) {
-      if (/\bsite\b/i.test(headings[i])) return i;
-    }
-    return -1;
-  }
-
-  /**
-   * A read grid, as rows something else can point at.
-   *
-   * One row per activity per *week*, because that is the grain the look-ahead is
-   * maintained at and the grain a plan is made at. Two rules, both of which hold
-   * everywhere else in this module:
-   *
-   * **The location is read from the column the sheet keeps it in, and kept
-   * whether or not it resolves.** `locationColumnOf()` finds that column by its
-   * heading; `locate` — the alias register, injected so this stays testable
-   * without a network — turns the spelling into an id where it knows it. Nothing
-   * is matched on the description: the wording differs on the two sides and is
-   * not reliable enough to carry evidence, which is what the alias list is for.
-   *
-   * The text surviving an unresolved spelling is the part that was missing. The
-   * location used to be recorded *only* where the register already knew it, so a
-   * column full of "W30" and "Y10" was discarded on every deployment that had not
-   * registered them — and with nothing kept there was nothing for anybody to map,
-   * which is the one state this module is built to make impossible. An unresolved
-   * spelling is exactly like an unmapped colour or an unmatched name: shown, and
-   * one click from being answered.
-   *
-   * **A row with nothing scheduled that week is not a row.** The sheet carries
-   * activities for reference with no shift against them, and writing those would
-   * make the register mostly noise — and, worse, make every one of them look
-   * like scope the first time it *did* get a shift.
-   */
-  async function rowsFrom(view, {
-    snapshotId = null, locate = async () => null, locationColumn = null,
-  } = {}) {
-    if (!view?.days?.length) return [];
-
-    // Told which column, or read off the sheet's own heading. `null` is "work it
-    // out"; `-1` is "there is no heading", which is the register scan below.
-    const locCol = Number.isInteger(locationColumn) ? locationColumn : locationColumnOf(view);
-
-    const dayByCol = new Map(view.days.map((d) => [d.col, d]));
-    const out = [];
-    const ordinals = new Map();
-
-    for (const activity of view.activities) {
-      if (activity.heading) continue;
-      /* Not work, so not a row. Emitting one would put "PTO" in the register as an
-         activity at no location, and `classify()` would then book it as scope
-         added the first week it appeared and scope removed the week it did not. */
-      if (activity.absence) continue;
-
-      // Group this activity's marks by the week they fall in.
-      const weeks = new Map();
-      for (const mark of marksOf(activity)) {
-        if (!mark.hex || mark.role === 'ignore') continue;
-        const day = dayByCol.get(mark.col);
-        if (!day?.date) continue;
-        const week = mondayOf(day.date);
-        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
-        const bucket = weeks.get(week);
-        bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
-        if (mark.value) bucket.marks[day.date] = mark.value;
-      }
-      if (!weeks.size) continue;
-
-      /* Who the Resource row names, per day, in the words the workbook used.
-         Only into weeks that already have a shift in them: a name typed against a
-         day nobody is scheduled on is the same kind of stray as a colour on an
-         empty row, and writing it would invent a week of scope. Nothing is
-         matched to a person here — that happens against the roster, where an
-         unmatched name can be shown to somebody rather than guessed at. */
-      for (const mark of activity.resource?.marks || []) {
-        if (!mark.value) continue;
-        const day = dayByCol.get(mark.col);
-        const week = day?.date ? mondayOf(day.date) : null;
-        if (!week || !weeks.has(week)) continue;
-        weeks.get(week).resources[day.date] = mark.value;
-      }
-
-      /* Where the work is, from the column the sheet keeps it in.
-         **The text is kept whether or not it resolves.** It used to be recorded
-         only when the alias register already knew it, so a location column full of
-         "W30" and "Y10" was *discarded* on a deployment that had not registered
-         them yet — and with nothing kept there was nothing for anybody to map,
-         which is the one state this design is supposed to make impossible. An
-         unresolved spelling is exactly like an unmapped colour or an unmatched
-         name: shown, and one click from being answered. */
-      let locationId = null;
-      let rawLocation = null;
-      if (locCol >= 0) {
-        rawLocation = activity.meta[locCol] || null;
-        locationId = rawLocation ? await locate(rawLocation) : null;
-      } else {
-        // Nobody has said which column it is, so the register decides: the first
-        // cell it recognises is the location. Still never the *description* —
-        // that is matched on nothing, here or anywhere else in this module.
-        for (const value of activity.meta) {
-          const hit = await locate(value);
-          if (hit) { locationId = hit; rawLocation = value; break; }
-        }
-      }
-      const label = activity.meta.filter(Boolean).join(' · ');
-
-      for (const [week, bucket] of weeks) {
-        const groupKey = [week, rawLocation || '', ''].join('|');
-        const ordinal = ordinals.get(groupKey) || 0;
-        ordinals.set(groupKey, ordinal + 1);
-        out.push({
-          snapshot_id: snapshotId,
-          week_start: week,
-          sheet_row: activity.row,
-          row_key: rowKey({ weekStart: week, location: rawLocation || '', subsystem: '', ordinal }),
-          location_id: locationId,
-          raw_location: rawLocation,
-          raw_label: label,
-          cells: bucket.cells,
-          bart_marks: bucket.marks,
-          resources: bucket.resources,
-        });
-      }
-    }
-
-    return out;
-  }
-
-  /** The Monday of an ISO date's week, in UTC. A calendar date must not shift. */
-  function mondayOf(iso) {
-    const ms = Date.parse(`${iso}T00:00:00Z`);
-    const back = (new Date(ms).getUTCDay() + 6) % 7;
-    return new Date(ms - back * 86400000).toISOString().slice(0, 10);
-  }
-
-  /* ── The window ────────────────────────────────────────────────────────── */
-
-  /**
-   * The weeks a snapshot actually covers, read from the snapshot itself.
-   *
-   * Deliberately not a constant. The spec calls it a four-week look-ahead and
-   * says it is maintained four to six weeks out, so a hard-coded 4 would
-   * misclassify the sixth week every time it appeared.
-   */
-  function windowOf(rows) {
-    const weeks = [...new Set(rows.map((r) => r.weekStart))].sort();
-    return { weeks, first: weeks[0] || null, last: weeks[weeks.length - 1] || null };
-  }
-
-  /* ── Comparing ─────────────────────────────────────────────────────────── */
-
-  /**
-   * Classify the difference between two keyed snapshots.
-   *
-   * `before` and `after` are arrays of `{ rowKey, weekStart, location, subsystem,
-   * label, cells, marks }`, where `cells` maps a date to a shift meaning and
-   * `marks` holds BART's own resource requests.
-   *
-   * Returns a list of `{ kind, weekStart, rowKey, before, after }`.
-   *
-   * **A read that started recording the location is not a read where everything
-   * moved.** The row key is built from the week and the location, so the first read
-   * after the location began coming off the sheet's own column — rather than only
-   * where the alias register already knew the spelling — keys every row
-   * differently. Compared naively that is every row removed and every row added:
-   * a batch of phantom scope on the one screen somebody reads a year later, booked
-   * into the KPIs, over a change that is about the *keying* and not the work. It is
-   * the same judgement the window rule makes, and drawn as narrowly as it can be —
-   * one side recording no location at all, the other recording one, and not a
-   * single key in common. A crew genuinely moving site is still a removal and an
-   * addition, which is what `relinkCandidates()` is for.
-   */
-  function classify(before, after, { cancelledMeaning = 'cancelled' } = {}) {
-    const beforeWindow = windowOf(before);
-    const afterWindow = windowOf(after);
-
-    if (before.length && after.length) {
-      const keys = new Set(after.map((r) => r.rowKey));
-      const located = (rows) => rows.filter((r) => String(r.location || '').trim()).length;
-      const sided = located(before) === 0 !== (located(after) === 0);
-      if (sided && !before.some((r) => keys.has(r.rowKey))) return [];
-    }
-
-    // Only weeks present on both sides can be compared at all. Everything else
-    // is the window moving, which is recorded and kept out of the KPIs.
-    const shared = new Set(beforeWindow.weeks.filter((w) => afterWindow.weeks.includes(w)));
-
-    const events = [];
-    const beforeByKey = new Map(before.map((r) => [r.rowKey, r]));
-    const afterByKey = new Map(after.map((r) => [r.rowKey, r]));
-
-    /* Weeks entering and leaving the window. Not scope, and named so. */
-    for (const week of afterWindow.weeks) {
-      if (!beforeWindow.weeks.includes(week)) {
-        events.push({ kind: 'window_advanced', weekStart: week, rowKey: null, before: null, after: null });
-      }
-    }
-    for (const week of beforeWindow.weeks) {
-      if (!afterWindow.weeks.includes(week)) {
-        events.push({ kind: 'window_retired', weekStart: week, rowKey: null, before: null, after: null });
-      }
-    }
-
-    /* Rows added to, and removed from, a week that was already in view. */
-    for (const row of after) {
-      if (!shared.has(row.weekStart)) continue;
-      if (!beforeByKey.has(row.rowKey)) {
-        events.push({ kind: 'scope_added', weekStart: row.weekStart, rowKey: row.rowKey, before: null, after: row });
-      }
-    }
-    for (const row of before) {
-      if (!shared.has(row.weekStart)) continue;
-      if (!afterByKey.has(row.rowKey)) {
-        events.push({ kind: 'scope_removed', weekStart: row.weekStart, rowKey: row.rowKey, before: row, after: null });
-      }
-    }
-
-    /* Rows present on both sides: what changed inside them. */
-    for (const row of after) {
-      const prior = beforeByKey.get(row.rowKey);
-      if (!prior || !shared.has(row.weekStart)) continue;
-
-      const dates = [...new Set([...Object.keys(prior.cells || {}), ...Object.keys(row.cells || {})])].sort();
-      for (const date of dates) {
-        const was = (prior.cells || {})[date] || null;
-        const now = (row.cells || {})[date] || null;
-        if (was === now) continue;
-
-        // A shift turning red is a cancellation, and the colour alone cannot say
-        // whose. Whoever reviews it is asked; nothing is assumed.
-        const kind = now === cancelledMeaning && was && was !== cancelledMeaning
-          ? 'cancellation'
-          : 'shift_changed';
-
-        events.push({
-          kind,
-          weekStart: row.weekStart,
-          rowKey: row.rowKey,
-          date,
-          before: was,
-          after: now,
-          needsResponsibility: kind === 'cancellation',
-        });
-      }
-
-      // BART's own resource marks — an EIC added to an otherwise unchanged
-      // shift. The shift did not move, and the request still changed, so it is
-      // logged rather than folded into the row above.
-      const marksBefore = JSON.stringify(prior.marks || {});
-      const marksAfter = JSON.stringify(row.marks || {});
-      if (marksBefore !== marksAfter) {
-        events.push({
-          kind: 'resource_changed',
-          field: 'marks',
-          weekStart: row.weekStart,
-          rowKey: row.rowKey,
-          before: prior.marks || {},
-          after: row.marks || {},
-        });
-      }
-
-      /* And the Resource row underneath: who is on it.
-         The same kind as a mark changing rather than a kind of its own, because
-         it is the same fact — the request against this activity moved without the
-         shift moving — and a new kind would need the `rc_change_events` check
-         constraint widened in every project that already has one. `field` is what
-         tells the two apart when somebody reads the row back. */
-      const whoBefore = JSON.stringify(prior.resources || {});
-      const whoAfter = JSON.stringify(row.resources || {});
-      if (whoBefore !== whoAfter) {
-        events.push({
-          kind: 'resource_changed',
-          field: 'resources',
-          weekStart: row.weekStart,
-          rowKey: row.rowKey,
-          before: prior.resources || {},
-          after: row.resources || {},
-        });
-      }
-    }
-
-    return events;
-  }
-
-  /**
-   * Removals and additions in the same week that could be one crew moving site.
-   *
-   * Only ever a *suggestion*, surfaced for somebody to confirm. Work finishing
-   * early at one location and starting at another is not a cancellation, but the
-   * only evidence is that the same BART resources appear on both — and the
-   * activity text, which cannot be trusted. So the pairing is a human judgement
-   * by design, and the system's job is to make it easy rather than to guess.
-   */
-  function relinkCandidates(events) {
-    const removed = events.filter((e) => e.kind === 'scope_removed');
-    const added = events.filter((e) => e.kind === 'scope_added');
-    const out = [];
-
-    for (const gone of removed) {
-      for (const arrived of added) {
-        if (gone.weekStart !== arrived.weekStart) continue;
-        const a = JSON.stringify(gone.before?.marks || {});
-        const b = JSON.stringify(arrived.after?.marks || {});
-        if (a !== '{}' && a === b) {
-          out.push({ removed: gone, added: arrived, because: 'the same resources were requested' });
-        }
-      }
-    }
-    return out;
-  }
-
-  /**
-   * Which events count toward the change KPIs.
-   *
-   * The window moving is real and recorded, and it is not a change of scope.
-   * Keeping the two apart is what stops the scope-added figure being meaningless
-   * within a month.
-   */
-  const KPI_KINDS = ['scope_added', 'scope_removed', 'cancellation', 'resource_changed', 'shift_changed'];
-
-  function countable(events) {
-    return events.filter((e) => KPI_KINDS.includes(e.kind));
-  }
-
-  /** A short, plain description of an event, for the change log. */
-  /**
-   * One line saying what an event was.
-   *
-   * Reads the *stored* shape: `before` and `after` are jsonb, because the table
-   * has no column for a date and a row-level change needs one. `sideOf()` in
-   * `ui/rc_lookahead.js` is what writes them, and the two have to agree — a
-   * mismatch here shows up as "undefined → undefined" on the one screen somebody
-   * reads a year later.
-   */
-  function describe(event) {
-    const day = event.date || event.after?.date || event.before?.date || 'a day';
-    switch (event.kind) {
-      case 'scope_added': return `Added: ${event.after?.label || event.rowKey}`;
-      case 'scope_removed': return `Removed: ${event.before?.label || event.rowKey}`;
-      case 'cancellation': return `Cancelled on ${day}: was ${event.before?.value ?? event.before}`;
-      case 'shift_changed':
-        return `${day}: ${event.before?.value || 'nothing'} → ${event.after?.value || 'nothing'}`;
-      case 'resource_changed': {
-        /* The *stored* shape decides which of the two this was: `sideOf()` writes
-           `{ resources }` for the Resource row and `{ marks }` for a mark on the
-           activity line. A row written before Resource rows existed carries only
-           the latter, and it still prints the sentence it always did rather than
-           "undefined → undefined" on the one screen somebody reads a year later. */
-        const who = (side) => {
-          const map = side?.resources;
-          if (!map || typeof map !== 'object') return null;
-          return [...new Set(Object.values(map).flatMap((v) => resourceNames(v)))].join(', ');
-        };
-        const was = who(event.before);
-        const now = who(event.after);
-        if (was === null && now === null) return 'BART resource request changed';
-        return `Resource: ${was || 'nobody'} → ${now || 'nobody'}`;
-      }
-      case 'window_advanced': return `Week ${event.weekStart} came into the window`;
-      case 'window_retired': return `Week ${event.weekStart} left the window`;
-      case 'location_shift': return 'Relinked as one crew moving site';
-      default: return event.kind;
-    }
-  }
-
-  Object.defineProperty(__x, "isResourceLabel", { get: () => isResourceLabel, enumerable: true });
-  Object.defineProperty(__x, "absenceKind", { get: () => absenceKind, enumerable: true });
-  Object.defineProperty(__x, "ABSENCE_KINDS", { get: () => ABSENCE_KINDS, enumerable: true });
-  Object.defineProperty(__x, "ABSENCE_LABELS", { get: () => ABSENCE_LABELS, enumerable: true });
-  Object.defineProperty(__x, "resourceNames", { get: () => resourceNames, enumerable: true });
-  Object.defineProperty(__x, "reassignments", { get: () => reassignments, enumerable: true });
-  Object.defineProperty(__x, "marksOf", { get: () => marksOf, enumerable: true });
-  Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
-  Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
-  Object.defineProperty(__x, "readGrid", { get: () => readGrid, enumerable: true });
-  Object.defineProperty(__x, "absencesFrom", { get: () => absencesFrom, enumerable: true });
-  Object.defineProperty(__x, "locationColumnOf", { get: () => locationColumnOf, enumerable: true });
-  Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
-  Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
-  Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
-  Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
-  Object.defineProperty(__x, "KPI_KINDS", { get: () => KPI_KINDS, enumerable: true });
-  Object.defineProperty(__x, "countable", { get: () => countable, enumerable: true });
-  Object.defineProperty(__x, "describe", { get: () => describe, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
-// io/lookahead.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["io/lookahead.js"] = function (__x, __req) {
-  /**
-   * Reading the four-week look-ahead.
-   *
-   * The look-ahead is an Excel workbook the deputy edits in place, and it encodes
-   * shift access in **cell fill colour** against a fixed legend. So this is not
-   * an importer in the usual sense: the values matter far less than the colours,
-   * and almost everything that can go wrong is invisible in a spreadsheet you
-   * open by hand.
-   *
-   * Four rules, each of which exists because of a specific way it breaks:
-   *
-   * **One sheet, chosen by name.** The workbook is large and the four-week grid
-   * is one tab among several. `readXlsx()` in `io/importers.js` takes whichever
-   * sheet is first, which would silently read a cover page. A missing sheet is an
-   * error here, never a fall back to sheet one.
-   *
-   * **Visible rows and columns only.** Rows are hidden by hand and by autofilter,
-   * both as `hidden="1"`. A hidden *column* matters more than a hidden row: with
-   * one column per day, dropping one removes a day from the week and nothing
-   * about the result looks wrong.
-   *
-   * **The real row number travels with the row.** Blank and absent rows mean the
-   * nth row in the file is not row n, so an array index is not an identity. Row
-   * identity is what change classification rests on.
-   *
-   * **A colour that is not in the legend is never guessed.** It goes to an
-   * unknown bucket for somebody to map. The legend is stable in practice, and
-   * relying on that would still be wrong, because the failure is silent and lands
-   * in evidence.
-   *
-   * Imports: inflate, dates (leaves).
-   */
-
-  const { inflateRaw } = __req("io/inflate.js");
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     ZIP
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /** Read the container into `name -> Uint8Array`, via the central directory. */
-  function readZip(buffer) {
-    const view = new DataView(buffer);
-    const bytes = new Uint8Array(buffer);
-
-    let eocd = -1;
-    for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66000); i--) {
-      if (view.getUint32(i, true) === 0x06054b50) {
-        eocd = i;
-        break;
-      }
-    }
-    if (eocd < 0) throw new Error('That file is not a .xlsx (no ZIP directory found).');
-
-    const count = view.getUint16(eocd + 10, true);
-    let at = view.getUint32(eocd + 16, true);
-
-    const out = new Map();
-    for (let i = 0; i < count; i++) {
-      if (view.getUint32(at, true) !== 0x02014b50) break;
-      const method = view.getUint16(at + 10, true);
-      const compressed = view.getUint32(at + 20, true);
-      const nameLen = view.getUint16(at + 28, true);
-      const extraLen = view.getUint16(at + 30, true);
-      const commentLen = view.getUint16(at + 32, true);
-      const localAt = view.getUint32(at + 42, true);
-      const name = new TextDecoder().decode(bytes.subarray(at + 46, at + 46 + nameLen));
-
-      // The local header repeats the name and carries its own extra field, whose
-      // length routinely differs from the one in the directory.
-      const localNameLen = view.getUint16(localAt + 26, true);
-      const localExtraLen = view.getUint16(localAt + 28, true);
-      const start = localAt + 30 + localNameLen + localExtraLen;
-      const raw = bytes.subarray(start, start + compressed);
-      out.set(name, method === 0 ? raw : inflateRaw(raw));
-
-      at += 46 + nameLen + extraLen + commentLen;
-    }
-    return out;
-  }
-
-  function partText(files, name) {
-    const part = files.get(name);
-    return part ? new TextDecoder().decode(part) : '';
-  }
-
-  function decodeXml(s) {
-    return String(s)
-      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
-      .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d))
-      .replace(/&amp;/g, '&');
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Colour
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * The legacy 56-entry palette an `indexed="n"` fill refers to.
-   *
-   * Excel still writes these for anything inherited from an older workbook, so a
-   * parser that only understands `rgb=` sees nothing at all on exactly those
-   * cells — and a blank cell reads as "no shift booked", which is a different
-   * fact entirely.
-   */
-  const INDEXED = [
-    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
-    '000000', 'FFFFFF', 'FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF',
-    '800000', '008000', '000080', '808000', '800080', '008080', 'C0C0C0', '808080',
-    '9999FF', '993366', 'FFFFCC', 'CCFFFF', '660066', 'FF8080', '0066CC', 'CCCCFF',
-    '000080', 'FF00FF', 'FFFF00', '00FFFF', '800080', '800000', '008080', '0000FF',
-    '00CCFF', 'CCFFFF', 'CCFFCC', 'FFFF99', '99CCFF', 'FF99CC', 'CC99FF', 'FFCC99',
-    '3366FF', '33CCCC', '99CC00', 'FFCC00', 'FF9900', 'FF6600', '666699', '969696',
-    '003366', '339966', '003300', '333300', '993300', '993366', '333399', '333333',
-  ];
-
-  /** `theme="n"` indexes the scheme with the dark/light pairs swapped. */
-  const THEME_ORDER = ['lt1', 'dk1', 'lt2', 'dk2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hlink', 'folHlink'];
-
-  function readTheme(xml) {
-    const scheme = /<a:clrScheme[^>]*>([\s\S]*?)<\/a:clrScheme>/.exec(xml)?.[1] || '';
-    const colors = {};
-    for (const m of scheme.matchAll(/<a:(\w+)>([\s\S]*?)<\/a:\1>/g)) {
-      const [, key, body] = m;
-      const srgb = /<a:srgbClr val="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
-      const sys = /<a:sysClr[^>]*lastClr="([0-9A-Fa-f]{6})"/.exec(body)?.[1];
-      if (srgb || sys) colors[key] = (srgb || sys).toUpperCase();
-    }
-    return THEME_ORDER.map((key) => colors[key] || null);
-  }
-
-  /**
-   * Apply an OOXML tint, in HLS as the specification requires.
-   *
-   * Doing it in RGB gives a near miss, and a near miss against a legend keyed on
-   * exact colours is a lookup that fails. Accent 1 at -0.25 has to come out
-   * #2F5597 — what Excel calls "Blue, Accent 1, Darker 25%".
-   */
-  function applyTint(hex, tint) {
-    if (!tint) return hex;
-    const r = parseInt(hex.slice(0, 2), 16) / 255;
-    const g = parseInt(hex.slice(2, 4), 16) / 255;
-    const b = parseInt(hex.slice(4, 6), 16) / 255;
-
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    let lum = (max + min) / 2;
-    let hue = 0;
-    let sat = 0;
-    if (max !== min) {
-      const d = max - min;
-      sat = lum > 0.5 ? d / (2 - max - min) : d / (max + min);
-      if (max === r) hue = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-      else if (max === g) hue = ((b - r) / d + 2) / 6;
-      else hue = ((r - g) / d + 4) / 6;
-    }
-
-    lum = tint < 0 ? lum * (1 + tint) : lum * (1 - tint) + tint;
-    lum = Math.min(1, Math.max(0, lum));
-
-    const toRgb = (p, q, t) => {
-      let u = t;
-      if (u < 0) u += 1;
-      if (u > 1) u -= 1;
-      if (u < 1 / 6) return p + (q - p) * 6 * u;
-      if (u < 1 / 2) return q;
-      if (u < 2 / 3) return p + (q - p) * (2 / 3 - u) * 6;
-      return p;
-    };
-
-    let out;
-    if (sat === 0) out = [lum, lum, lum];
-    else {
-      const q = lum < 0.5 ? lum * (1 + sat) : lum + sat - lum * sat;
-      const p = 2 * lum - q;
-      out = [toRgb(p, q, hue + 1 / 3), toRgb(p, q, hue), toRgb(p, q, hue - 1 / 3)];
-    }
-    return out.map((v) => Math.round(v * 255).toString(16).padStart(2, '0').toUpperCase()).join('');
-  }
-
-  /**
-   * `styleIndex -> { hex, source }` for every cell format in the workbook.
-   *
-   * The chain is `cellXfs[s].fillId -> fills[id].patternFill.fgColor`, and the
-   * colour at the end arrives in one of three notations. Resolving all three to
-   * one hex is what lets the legend be keyed on the colour rather than on how it
-   * happened to be written.
-   */
-  function readFills(stylesXml, theme) {
-    const fillsBlock = /<fills[^>]*>([\s\S]*?)<\/fills>/.exec(stylesXml)?.[1] || '';
-    const fills = (fillsBlock.match(/<fill>[\s\S]*?<\/fill>/g) || []).map((fill) => {
-      const pattern = /patternType="(\w+)"/.exec(fill)?.[1] || 'none';
-      if (pattern === 'none') return { hex: null, source: 'none' };
-
-      const fg = /<fgColor([^>]*)\/>/.exec(fill)?.[1] || '';
-      const tint = parseFloat(/tint="(-?[\d.]+)"/.exec(fg)?.[1] || '0') || 0;
-
-      const rgb = /rgb="([0-9A-Fa-f]{6,8})"/.exec(fg)?.[1];
-      if (rgb) {
-        const base = (rgb.length === 8 ? rgb.slice(2) : rgb).toUpperCase();
-        return { hex: applyTint(base, tint), source: 'rgb' };
-      }
-
-      const themed = /theme="(\d+)"/.exec(fg)?.[1];
-      if (themed != null) {
-        const base = theme[parseInt(themed, 10)] || null;
-        return { hex: base ? applyTint(base, tint) : null, source: `theme:${themed}` };
-      }
-
-      const indexed = /indexed="(\d+)"/.exec(fg)?.[1];
-      if (indexed != null) {
-        const base = INDEXED[parseInt(indexed, 10)] || null;
-        return { hex: base ? applyTint(base, tint) : null, source: `indexed:${indexed}` };
-      }
-
-      return { hex: null, source: 'unresolved' };
-    });
-
-    /* White is not a highlight.
-       An explicit white fill and no fill at all are the same thing to anybody
-       looking at the sheet — a highlight nobody can see is not one — and Excel
-       writes white fills into all sorts of default styling. Reading them as
-       colours put hundreds of cells into the unmapped bucket and asked somebody
-       to explain the absence of a highlight. */
-    const plain = fills.map((f) => (f.hex === 'FFFFFF' ? { hex: null, source: 'none' } : f));
-
-    const xfsBlock = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] || '';
-    const xfs = xfsBlock.match(/<xf[\s\S]*?(?:\/>|<\/xf>)/g) || [];
-    return xfs.map((xf) => {
-      const fillId = parseInt(/fillId="(\d+)"/.exec(xf)?.[1] ?? '0', 10);
-      return plain[fillId] || { hex: null, source: 'none' };
-    });
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The sheet
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Rows and cells, matched as either a self-closing tag or an open/close pair.
-   *
-   * The obvious `/<row[\s\S]*?(?:\/>|<\/row>)/` is wrong here, and wrong in a way
-   * that only shows up on a sheet like this one. A cell carrying a fill but no
-   * value is written `<c r="D2" s="1"/>`, and a lazy match stops at that first
-   * `/>` — truncating the row and dropping every cell after it. A workbook full
-   * of *values* never hits it, because those cells close with `</c>`. A workbook
-   * full of *colours* hits it on nearly every row.
-   */
-  const ROW_RE = /<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g;
-  const CELL_RE = /<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g;
-
-  /** 'A' -> 1, 'AA' -> 27. One-based, matching how a spreadsheet talks. */
-  function colNumber(letters) {
-    let n = 0;
-    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
-    return n;
-  }
-
-
-  /** Every sheet in the workbook, with its hidden state and its part path. */
-  function readSheets(files) {
-    const workbook = partText(files, 'xl/workbook.xml');
-    const rels = partText(files, 'xl/_rels/workbook.xml.rels');
-    const sheets = [];
-
-    for (const m of workbook.matchAll(/<sheet\b([^>]*)\/?>/g)) {
-      const attrs = m[1];
-      const rid = /r:id="([^"]+)"/.exec(attrs)?.[1] || '';
-      let zipPath = '';
-      if (rid) {
-        const rel = new RegExp(`<Relationship[^>]*Id="${rid}"[^>]*Target="([^"]+)"`).exec(rels);
-        if (rel) {
-          const target = rel[1].replace(/^\/?xl\//, '').replace(/^\//, '');
-          if (files.has(`xl/${target}`)) zipPath = `xl/${target}`;
-        }
-      }
-      sheets.push({
-        name: decodeXml(/name="([^"]*)"/.exec(attrs)?.[1] || ''),
-        state: /state="(\w+)"/.exec(attrs)?.[1] || 'visible',
-        zipPath,
-      });
-    }
-    return sheets;
-  }
-
-  /**
-   * Parse one named sheet into a grid of visible cells.
-   *
-   * Returns `{ sheet, rows, hiddenRows, hiddenColumns, merges, conditional }`.
-   * Each row is `{ row, cells: [{ col, ref, value, hex, source }] }` where `row`
-   * is the **spreadsheet** row number.
-   */
-  function parseSheet(buffer, sheetName) {
-    const files = readZip(buffer);
-    const sheets = readSheets(files);
-
-    const chosen = sheets.find((s) => s.name === sheetName);
-    if (!chosen) {
-      // Never fall back to the first sheet. Reading a cover page and reporting a
-      // week of no work would be worse than reporting nothing at all.
-      throw new Error(
-        `The workbook has no sheet called "${sheetName}". It has: ${sheets.map((s) => s.name).join(', ')}.`
-      );
-    }
-    if (!chosen.zipPath) throw new Error(`"${sheetName}" has no readable worksheet part.`);
-    if (chosen.state !== 'visible') {
-      // A hidden sheet under the configured name almost always means the name is
-      // stale and the live grid has moved to another tab.
-      throw new Error(`"${sheetName}" is hidden in the workbook — check which tab the look-ahead is on now.`);
-    }
-
-    const sharedStrings = [];
-    for (const si of partText(files, 'xl/sharedStrings.xml').match(/<si>[\s\S]*?<\/si>/g) || []) {
-      const parts = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
-      sharedStrings.push(parts.map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join(''));
-    }
-
-    const theme = readTheme(partText(files, 'xl/theme/theme1.xml'));
-    const styleFills = readFills(partText(files, 'xl/styles.xml'), theme);
-    const xml = new TextDecoder().decode(files.get(chosen.zipPath));
-
-    /* Hidden columns. One column per day, so a hidden one silently removes a day
-       from the week — and unlike a missing row, nothing about the result looks
-       wrong. */
-    const hiddenColumns = new Set();
-    const colsBlock = /<cols[^>]*>([\s\S]*?)<\/cols>/.exec(xml)?.[1] || '';
-    for (const m of colsBlock.matchAll(/<col\b([^>]*)\/?>/g)) {
-      if (!/hidden="1"/.test(m[1])) continue;
-      const min = parseInt(/min="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
-      const max = parseInt(/max="(\d+)"/.exec(m[1])?.[1] ?? '0', 10);
-      for (let c = min; c <= max; c++) hiddenColumns.add(c);
-    }
-
-    const merges = [];
-    const mergeBlock = /<mergeCells[^>]*>([\s\S]*?)<\/mergeCells>/.exec(xml)?.[1] || '';
-    for (const m of mergeBlock.matchAll(/<mergeCell[^>]*ref="([^"]+)"/g)) merges.push(m[1]);
-
-    /* Conditional formatting is reported, not evaluated. A colour that comes
-       from a rule is not in the cell's style at all, so if the grid is painted
-       that way this parser would see an empty sheet — and saying so is the only
-       honest thing to do about it. */
-    const conditional = [];
-    for (const m of xml.matchAll(/<conditionalFormatting[^>]*sqref="([^"]+)"/g)) conditional.push(m[1]);
-
-    const rows = [];
-    let hiddenRows = 0;
-
-    for (const rowXml of xml.match(ROW_RE) || []) {
-      const head = /<row\b([^>]*)>/.exec(rowXml)?.[1] || rowXml;
-      if (/hidden="1"/.test(head)) {
-        hiddenRows++;
-        continue;
-      }
-      const rowNumber = parseInt(/\br="(\d+)"/.exec(head)?.[1] ?? '0', 10);
-
-      const cells = [];
-      /* Text from *hidden* columns is kept for one narrow purpose and no other:
-         the legend key is written in a hidden column beside a row of coloured
-         swatches, so dropping it the way every other hidden cell is dropped
-         would throw away the one thing that says what the colours mean. It never
-         becomes a cell of the grid — only this label. */
-      let label = '';
-
-      for (const cellXml of rowXml.match(CELL_RE) || []) {
-        const ref = /\br="([A-Z]+)(\d+)"/.exec(cellXml);
-        if (!ref) continue;
-        const col = colNumber(ref[1]);
-
-        const type = /\bt="([^"]+)"/.exec(cellXml)?.[1];
-        let value = '';
-        if (type === 'inlineStr') {
-          value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [])
-            .map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join('');
-        } else {
-          const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
-          if (raw != null) value = type === 's' ? (sharedStrings[parseInt(raw, 10)] ?? '') : decodeXml(raw);
-        }
-
-        if (hiddenColumns.has(col)) {
-          if (!label && String(value).trim()) label = String(value).trim();
-          continue;
-        }
-
-        const styleIndex = parseInt(/\bs="(\d+)"/.exec(cellXml)?.[1] ?? '-1', 10);
-        const fill = styleIndex >= 0 ? styleFills[styleIndex] : null;
-
-        cells.push({
-          col,
-          ref: `${ref[1]}${ref[2]}`,
-          value,
-          hex: fill?.hex || null,
-          source: fill?.source || 'none',
-        });
-      }
-
-      // A row with no visible cells at all is not a row of the grid.
-      if (cells.length) rows.push({ row: rowNumber, cells, label });
-    }
-
-    return {
-      sheet: chosen.name,
-      sheets: sheets.map((s) => ({ name: s.name, state: s.state })),
-      rows,
-      hiddenRows,
-      hiddenColumns: [...hiddenColumns],
-      merges,
-      conditional,
-    };
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The legend
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * The legend the workbook writes down about itself.
-   *
-   * BART's look-ahead carries its own key: a short block of rows near the bottom
-   * where the whole row is painted one colour and a label beside it reads
-   * "Highlight in Orange for Swing Shift". That is the authors' own statement of
-   * what the colours mean, so reading it is not guessing — it is the one place
-   * in this pipeline where a meaning can be taken from the file rather than
-   * typed by somebody.
-   *
-   * It stays deliberately strict. A row qualifies only when every visible cell
-   * on it carries the *same* fill and none of them holds a value: a swatch, in
-   * other words, and not a row of work that happens to be highlighted. Anything
-   * that does not match that shape is simply not returned, and the colours it
-   * used go on to the `unknown` bucket to be mapped by hand — which is the same
-   * answer this module gives everywhere else it cannot be certain.
-   */
-  function readLegend(grid) {
-    const out = [];
-    const seen = new Set();
-
-    for (const row of grid.rows || []) {
-      const cells = row.cells || [];
-      if (cells.length < 2) continue;
-      if (cells.some((c) => String(c.value ?? '').trim())) continue;
-      if (cells.some((c) => !c.hex)) continue;
-      if (new Set(cells.map((c) => c.hex)).size !== 1) continue;
-
-      const label = String(row.label || '').trim();
-      if (!label) continue;
-
-      // "Highlight in Orange for Swing Shift" → "Swing Shift". The colour word
-      // in the sentence is thrown away on purpose: the swatch is the colour, and
-      // where the two disagree the swatch is the one that was painted.
-      const phrased = /^\s*highlight\s+in\s+\S+\s+for\s+(.+?)\s*$/i.exec(label);
-      const meaning = (phrased ? phrased[1] : label).trim();
-      if (!meaning) continue;
-
-      const argb = cells[0].hex;
-      if (seen.has(argb)) continue;
-      seen.add(argb);
-      out.push({ argb, meaning, row: row.row });
-    }
-
-    return out;
-  }
-
-  /**
-   * Turn a parsed grid into shifts, against the legend.
-   *
-   * `legend` is `[{ argb, meaning }]`. A colour that is not in it is collected in
-   * `unknown` rather than defaulted to anything — the legend is stable in
-   * practice and relying on that would still be wrong, because one stray shade
-   * from Excel's recent-colours picker would misclassify a shift with nothing on
-   * screen to show it happened, and the result lands in evidence.
-   */
-  /**
-   * Whether a cell's fill is dark enough that text on it has to go white.
-   *
-   * Perceived lightness, not average: the eye weighs green far more than blue,
-   * and an average makes BART's mid-blue shifts read as light when the label on
-   * them is invisible.
-   *
-   * Here rather than in the renderer because *two* things draw these cells — the
-   * grid on screen and the PDF export — and the moment they answer this
-   * differently the printed calendar has white text on a pale cell somewhere,
-   * which nobody notices until it is in front of a client.
-   */
-  function isDark(hex) {
-    const n = parseInt(String(hex).slice(-6), 16);
-    if (Number.isNaN(n)) return false;
-    const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-    return (0.299 * r + 0.587 * g + 0.114 * b) < 140;
-  }
-
-  /**
-   * One entry per colour: the one in force.
-   *
-   * `rc_legend` is *versioned* — `unique (valid_from, argb)` — so a colour that
-   * has been re-mapped has a row per date, and only the newest of them is what it
-   * means now. Choosing that has to happen here rather than being left to how the
-   * caller sorted its array, and it did not: this was
-   *
-   *     new Map(legend.map((l) => [l.argb, …]))
-   *
-   * which silently took whichever row came *last*. `listLegend()` hands them over
-   * newest first — its own comment says "a caller taking the first entry for a
-   * colour gets the one in force" — so last meant **oldest**, and every correction
-   * anybody ever made was discarded in favour of the first thing that colour was
-   * ever called.
-   *
-   * The symptom was the worst kind: pressing "Just shading" on the grey a workbook
-   * shades its layout with inserted a row saying `ignore`, the lookup kept reading
-   * the older `shift` row, and all those rows stayed on the calendar. And because
-   * the older row carries a meaning the colour was no longer *unmapped*, so the
-   * button that would have fixed it disappeared. Pressing it again only added
-   * another row it would also ignore.
-   *
-   * A missing `valid_from` sorts oldest, so the shorter `{ argb, meaning, role }`
-   * shape the ingest path passes still resolves. A future-dated row wins on the
-   * calendar the moment it exists, which is consistent with the legend being
-   * re-applied at paint time rather than frozen into a snapshot.
-   */
-  function inForce(legend) {
-    const best = new Map();
-    for (const entry of legend || []) {
-      const key = String(entry.argb).toUpperCase();
-      const held = best.get(key);
-      if (held && String(held.valid_from || '') >= String(entry.valid_from || '')) continue;
-      best.set(key, {
-        valid_from: entry.valid_from || '',
-        meaning: entry.meaning,
-        role: entry.role || 'shift',
-      });
-    }
-    return best;
-  }
-
-  function applyLegend(grid, legend) {
-    const byColour = inForce(legend);
-    const unknown = new Map();
-
-    const rows = grid.rows.map((row) => ({
-      row: row.row,
-      label: row.label || '',
-      cells: row.cells.map((cell) => {
-        if (!cell.hex) return { ...cell, meaning: null, role: null };
-        const entry = byColour.get(cell.hex);
-        const meaning = entry?.meaning || null;
-        if (!meaning) {
-          const seen = unknown.get(cell.hex) || { hex: cell.hex, count: 0, samples: [] };
-          seen.count++;
-          if (seen.samples.length < 4) seen.samples.push(cell.ref);
-          unknown.set(cell.hex, seen);
-        }
-        // An unmapped colour is left as a shift on purpose: it may well be one,
-        // and treating the unexplained as ignorable would hide the rows that
-        // most need somebody to look at them.
-        return { ...cell, meaning, role: entry?.role || 'shift' };
-      }),
-    }));
-
-    return { ...grid, rows, unknown: [...unknown.values()].sort((a, b) => b.count - a.count) };
-  }
-
-  Object.defineProperty(__x, "readZip", { get: () => readZip, enumerable: true });
-  Object.defineProperty(__x, "readTheme", { get: () => readTheme, enumerable: true });
-  Object.defineProperty(__x, "applyTint", { get: () => applyTint, enumerable: true });
-  Object.defineProperty(__x, "readFills", { get: () => readFills, enumerable: true });
-  Object.defineProperty(__x, "colNumber", { get: () => colNumber, enumerable: true });
-  Object.defineProperty(__x, "readSheets", { get: () => readSheets, enumerable: true });
-  Object.defineProperty(__x, "parseSheet", { get: () => parseSheet, enumerable: true });
-  Object.defineProperty(__x, "readLegend", { get: () => readLegend, enumerable: true });
-  Object.defineProperty(__x, "isDark", { get: () => isDark, enumerable: true });
-  Object.defineProperty(__x, "applyLegend", { get: () => applyLegend, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -39060,6 +40522,7 @@ __mods["main.js"] = function (__x, __req) {
   const { installMenus } = __req("ui/menus.js");
   const { requireSignIn, installAccessMode } = __req("ui/auth.js");
   const { installP6Drops } = __req("ui/p6.js");
+  const { installLookaheadDrops } = __req("ui/lookahead.js");
   const { installShortcuts } = __req("ui/shortcuts.js");
   const workspace = __req("ui/workspace.js");
   const rcUi = __req("ui/rc.js");
@@ -39158,6 +40621,7 @@ __mods["main.js"] = function (__x, __req) {
     installHoverPreview();
     installAccessMode();
     installP6Drops();
+    installLookaheadDrops();
     installConflictHandling();
     installFolderHandling();
     installDesktopShell();

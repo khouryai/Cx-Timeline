@@ -18,10 +18,10 @@
  * is row-level security in Postgres, which refuses the same writes even if
  * this check were removed.
  *
- * Imports: util, events, cloud, model, history.
+ * Imports: util, events, cloud, filestore, access, model, history, lookahead.
  */
 
-import { deepClone, clamp } from './util.js';
+import { deepClone, clamp, uid } from './util.js';
 import { emit, EV } from './events.js';
 import { isReadOnly } from './cloud.js';
 /* The other way a session can be read-only. `cloud.js` answers for a hosted
@@ -38,8 +38,13 @@ import {
   emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds,
   p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, isDerivedBaseline,
   syncDurationBasis,
+  emptyLookahead, lookaheadRegister, lookaheadActivity, makeLookaheadEntry, laLinkedIds,
+  laPlacedIds, laRollUp,
 } from './model.js';
 import { History, diff, apply } from './history.js';
+/* A leaf: only the pure reconciliation of one read of the sheet against the
+   last. Nothing that knows the calendar's backend is reachable from here. */
+import { reconcileSuggestions } from './lookahead.js';
 
 /* ── Private state ─────────────────────────────────────────────────────── */
 
@@ -1340,4 +1345,174 @@ export function __resetForTests(nextDoc) {
   previewBase = null;
   dirty = false;
   reindex();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The look-ahead register
+   ═══════════════════════════════════════════════════════════════════════ */
+
+export function getLookaheadActivity(id) {
+  return lookaheadActivity(doc, id);
+}
+
+/**
+ * Write one read of the look-ahead into the register.
+ *
+ * The register only — no object is placed, moved or unlinked here, whatever
+ * the file says. Returns the reconciliation so the caller can say what moved
+ * and offer the bars that follow it; `null` when the store refused the write.
+ *
+ * @param {Array}  runs  what `suggestionsFrom()` read
+ * @param {object} meta  { fileName, sheet, colors, windowStart, windowEnd }
+ */
+export function importLookahead(runs, meta = {}) {
+  let report = null;
+  edit('Import the look-ahead', (d) => {
+    const register = d.lookahead && typeof d.lookahead === 'object' ? d.lookahead : emptyLookahead();
+    const linked = new Set();
+    for (const obj of d.objects) for (const id of laLinkedIds(obj)) linked.add(id);
+
+    report = reconcileSuggestions(register.activities || {}, runs, {
+      linked,
+      makeId: () => uid('la'),
+      windowStart: meta.windowStart ?? null,
+    });
+
+    const activities = {};
+    for (const [id, entry] of Object.entries(report.activities)) activities[id] = makeLookaheadEntry(entry);
+
+    const stamp = {
+      importedAt: Date.now(),
+      fileName: meta.fileName || '',
+      sheet: meta.sheet || '',
+      count: runs.length,
+      windowStart: meta.windowStart ?? null,
+      windowEnd: meta.windowEnd ?? null,
+    };
+    d.lookahead = {
+      activities,
+      imported: stamp,
+      history: [stamp, ...(register.history || [])].slice(0, 12),
+      colors: { ...(register.colors || {}), ...(meta.colors || {}) },
+    };
+  });
+  // A refused write never ran the mutator, so the report is still null; an
+  // identical re-read changes nothing and is still a successful import.
+  return report;
+}
+
+/** Forget every suggestion that no bar points at. Linked ones stay. */
+export function clearLookahead() {
+  return edit('Clear the look-ahead', (d) => {
+    const register = lookaheadRegister(d);
+    const linked = laPlacedIds(d);
+    const activities = {};
+    for (const [id, entry] of Object.entries(register.activities)) if (linked.has(id)) activities[id] = entry;
+    d.lookahead = { ...register, activities };
+  });
+}
+
+/**
+ * Put look-ahead runs on the timeline, one bar each, in one edit.
+ *
+ * Like a placed P6 activity, the dates are the starting point and yours from
+ * then on: the link records where they came from, it does not tie them.
+ * Returns the new object ids.
+ */
+export function placeLookahead(ids, { lane = null } = {}) {
+  const laneId = lane || doc.laneOrder[0] || doc.lanes[0]?.id || null;
+  const objects = [];
+  for (const id of [].concat(ids)) {
+    const entry = lookaheadActivity(doc, id);
+    if (!entry) continue;
+    objects.push(makeObject({
+      type: 'activity',
+      lane: laneId,
+      title: entry.title || entry.label || 'Look-ahead activity',
+      subtitle: entry.location || '',
+      area: entry.location || '',
+      start: entry.start,
+      end: entry.end,
+      data: { laIds: [id] },
+    }));
+  }
+  if (!objects.length) return [];
+  const ok = edit(objects.length === 1 ? 'Add from the look-ahead' : `Add ${objects.length} from the look-ahead`, (d) => {
+    d.objects.push(...objects);
+    // Placing is saying yes, so a suggestion somebody had dismissed is not
+    // dismissed any more.
+    const register = lookaheadRegister(d);
+    for (const obj of objects) {
+      const entry = register.activities[obj.data.laIds[0]];
+      if (entry) entry.dismissed = false;
+    }
+  });
+  return ok ? objects.map((o) => o.id) : [];
+}
+
+/** Add a run to what an object stands for. Additive, as with P6. */
+export function linkLookahead(objectId, id) {
+  if (!id) return false;
+  return edit('Link to the look-ahead', (d) => {
+    const object = d.objects.find((o) => o.id === objectId);
+    if (!object) return false;
+    const ids = laLinkedIds(object);
+    if (ids.includes(id)) return false;
+    object.data = { ...(object.data || {}), laIds: [...ids, id] };
+    const entry = lookaheadRegister(d).activities[id];
+    if (entry) entry.dismissed = false;
+  });
+}
+
+/** Stop an object standing for one run, or for all of them. */
+export function unlinkLookahead(objectId, id = null) {
+  return edit('Unlink from the look-ahead', (d) => {
+    const object = d.objects.find((o) => o.id === objectId);
+    if (!object?.data) return false;
+    const ids = laLinkedIds(object);
+    const next = id ? ids.filter((x) => x !== id) : [];
+    if (next.length === ids.length) return false;
+    object.data = { ...object.data, laIds: next };
+  });
+}
+
+/**
+ * Say no to suggestions, or take the no back. A dismissed run stays in the
+ * register so the next import still recognises it and does not ask again.
+ */
+export function dismissLookahead(ids, dismissed = true) {
+  const wanted = new Set([].concat(ids));
+  return edit(dismissed ? 'Dismiss look-ahead suggestions' : 'Restore look-ahead suggestions', (d) => {
+    const register = lookaheadRegister(d);
+    let touched = 0;
+    for (const id of wanted) {
+      const entry = register.activities[id];
+      if (!entry || entry.dismissed === dismissed) continue;
+      entry.dismissed = dismissed;
+      touched++;
+    }
+    if (!touched) return false;
+  });
+}
+
+/**
+ * Move linked bars onto the look-ahead's dates — the "accept" half of an
+ * import. Only the objects linked to one of the named runs follow.
+ */
+export function adoptLookaheadDates(ids) {
+  const wanted = new Set([].concat(ids));
+  if (!wanted.size) return false;
+  return edit('Adopt look-ahead dates', (d) => {
+    let touched = 0;
+    for (const object of d.objects) {
+      if (!laLinkedIds(object).some((id) => wanted.has(id))) continue;
+      const dates = laRollUp(d, object);
+      if (!dates) continue;
+      object.start = dates.start;
+      object.end = TYPES[object.type]?.duration ? dates.end : dates.start;
+      object.modified = Date.now();
+      touched++;
+    }
+    if (!touched) return false;
+  });
 }

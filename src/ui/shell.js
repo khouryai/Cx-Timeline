@@ -49,6 +49,7 @@ const NAV = [
       { pane: 'links', label: 'Dependencies', icon: 'link' },
       { pane: 'baselines', label: 'Baselines', icon: 'bookmark' },
       { pane: 'p6', label: 'P6 Schedule', icon: 'table' },
+      { pane: 'lookahead', label: 'Look-ahead', icon: 'calendar' },
     ],
   },
   {

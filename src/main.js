@@ -37,6 +37,7 @@ import { buildLegend } from './ui/legend.js';
 import { installMenus } from './ui/menus.js';
 import { requireSignIn, installAccessMode } from './ui/auth.js';
 import { installP6Drops } from './ui/p6.js';
+import { installLookaheadDrops } from './ui/lookahead.js';
 import { installShortcuts } from './ui/shortcuts.js';
 import * as workspace from './ui/workspace.js';
 import * as rcUi from './ui/rc.js';
@@ -135,6 +136,7 @@ async function boot() {
   installHoverPreview();
   installAccessMode();
   installP6Drops();
+  installLookaheadDrops();
   installConflictHandling();
   installFolderHandling();
   installDesktopShell();

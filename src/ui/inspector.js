@@ -21,6 +21,10 @@ import {
   p6Register,
   p6LinkedIds,
   p6RollUp,
+  lookaheadRegister,
+  laLinkedIds,
+  laRollUp,
+  laVariance,
   LINK_TYPES,
   CONNECTOR_STYLES,
   durationDays,
@@ -207,6 +211,7 @@ function renderSingle(obj) {
     sectionOf('attachments', 'Attachments', [attachmentList(obj.id).root]),
     sectionOf('links', 'Dependencies', linkFields(obj)),
     sectionOf('p6', 'P6', p6Fields(obj)),
+    sectionOf('lookahead', 'Look-ahead', lookaheadFields(obj)),
     sectionOf('appearance', 'Appearance', appearanceFields(obj)),
     sectionOf('text', 'Text', textFields(obj)),
     sectionOf('arrange', 'Arrange', arrangeFields(obj)),
@@ -806,6 +811,62 @@ function baselineFields(obj) {
     out.push(el('div', { class: 'cx-hint', text: 'Sitting exactly where the baseline had it.' }));
   }
 
+  return out;
+}
+
+/* ── Look-ahead ────────────────────────────────────────────────────────── */
+
+/**
+ * The look-ahead runs this bar stands for. Shown only once something is
+ * linked: unlike P6 there is no picker here, because a run is found by its
+ * dates and its words in the Look-ahead pane, not by an ID somebody knows.
+ */
+function lookaheadFields(obj) {
+  const linked = laLinkedIds(obj);
+  if (!linked.length) return null;
+  const doc = store.getDoc();
+  const register = lookaheadRegister(doc);
+  const rollUp = laRollUp(doc, obj);
+  const variance = laVariance(doc, obj);
+
+  const out = [
+    el('div', { class: 'p6-links' }, linked.map((id) => {
+      const entry = register.activities[id];
+      return el('div', { class: 'p6-chip' + (entry ? '' : ' unknown'), dataset: { la: id } }, [
+        el('span', { class: 'p6-chip-name', text: entry ? entry.title : 'no longer in the register', title: entry?.label || '' }),
+        entry ? el('span', { class: 'p6-dates', text: `${fmtDate(entry.start, 'numeric')} → ${fmtDate(entry.end - MS_DAY, 'numeric')}` }) : null,
+        el('button', {
+          class: 'cx-btn icon mini ghost',
+          title: 'Stop standing for this run',
+          'aria-label': `Unlink ${entry?.title || id}`,
+          html: icon('x', { size: 10 }),
+          onClick: () => {
+            store.unlinkLookahead(obj.id, id);
+            renderer.requestRender();
+            render();
+          },
+        }),
+      ].filter(Boolean));
+    })),
+  ];
+
+  if (rollUp) {
+    out.push(el('div', { class: 'cx-chipstats', style: { marginTop: '4px' } }, [
+      chipStat('Sheet span', `${fmtDate(rollUp.start, 'numeric')} → ${fmtDate(rollUp.end - MS_DAY, 'numeric')}`, 'muted'),
+      variance ? chipStat('You', shift(variance.finishShift), !variance.differs ? 'muted' : variance.behind ? 'warn' : 'info') : null,
+    ].filter(Boolean)));
+  }
+  if (variance?.differs) {
+    out.push(el('button', {
+      class: 'cx-btn mini',
+      html: icon('target', { size: 12 }) + '<span>Move onto the look-ahead dates</span>',
+      onClick: () => {
+        store.adoptLookaheadDates(linked);
+        renderer.requestRender();
+        render();
+      },
+    }));
+  }
   return out;
 }
 
