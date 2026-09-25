@@ -339,8 +339,8 @@ export const EXPECTED = {
  * "IXL Regression" later by that many days, which is what a re-read of next
  * week's file looks like to the timeline's suggestions.
  *
- * What it should read as, with the grey counted as work (a colour nobody has
- * explained is), and without:
+ * The key names yellow (Day Shift) and orange (Swing Shift); the grey is in no
+ * key. What it should read as with the grey categorised as Work, and without:
  *
  *   IXL Regression   Mon–Wed of week one, Mon–Tue of week two   2 runs
  *   Cable pull       Thu–Fri of week one, swing shift            1 run
@@ -373,6 +373,7 @@ export function buildLookaheadWorkbook({ shift = 0 } = {}) {
     `<row r="6">${str('A6', 'Cable pull')}${str('B6', 'Yard 3')}${days(6, [[3, ORANGE], [4, ORANGE]])}</row>`,
     `<row r="7">${str('A7', 'Only shading')}${str('B7', 'Yard 3')}${days(7, [0, 1, 2, 3, 4].map((i) => [i, GREY]))}</row>`,
     `<row r="9">${days(9, [0, 1, 2, 3].map((i) => [i, ORANGE]))}${str('Q9', 'Highlight in Orange for Swing Shift')}</row>`,
+    `<row r="10">${days(10, [0, 1, 2, 3].map((i) => [i, YELLOW]))}${str('Q10', 'Highlight in Yellow for Day Shift')}</row>`,
   ];
 
   const sheet = `<?xml version="1.0" encoding="UTF-8"?>

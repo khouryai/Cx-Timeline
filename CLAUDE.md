@@ -290,10 +290,17 @@ subscribes. That is what keeps the graph acyclic.
   sheet moving the work; a reworded row is a new suggestion, never a guess.
   What the window rolled past is kept only when a bar is linked to it (`past`),
   and a linked run the sheet dropped is flagged `missing`, never removed.
-  **Which fills are work is asked, not assumed**: the dialog lists every colour
-  on the calendar with its count and what the workbook's key calls it, an
-  unanswered colour counts as work (the calendar's rule), and the answer is
-  kept in `doc.lookahead.colors` so next week's file reads the same way.
+  **Only a colour the legend categorises as Work is read** (`workOnlyLegend()`
+  in `io/lookahead.js`): Shading, a Section band and a colour no legend
+  mentions suggest nothing. That is deliberately the reverse of the calendar,
+  which *draws* an unexplained colour as possible work so somebody notices it —
+  a suggestion proposes dates for the plan, and a proposal from a colour nobody
+  categorised is a guess. The legend is the calendar's own register whenever
+  the calendar is signed in, read-only from here (it is changed in Calendar →
+  Legend, and only colours are fetched — nothing of the plan goes the other
+  way). With no calendar legend, `fileLegend()` starts the workbook's own key
+  as Work, the dialog categorises the rest, and the answers are kept in
+  `doc.lookahead.colors` so next week's file reads the same way.
   `p6` and `lookahead` are in `FIELDS` in `core/history.js` — the P6 register
   was not, so a re-import that only changed the register was neither undoable
   nor saved.
@@ -1427,11 +1434,11 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         # 169 checks — the parser, the rows it derives, the
+node tools/test_lookahead.js         # 174 checks — the parser, the rows it derives, the
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
-node tools/smoke.js                  # 292 checks — the application, local mode
-node tools/smoke_calendar.js         # 307 checks — the resource calendar, accounts, the
+node tools/smoke.js                  # 294 checks — the application, local mode
+node tools/smoke_calendar.js         # 313 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser

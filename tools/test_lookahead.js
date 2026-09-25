@@ -1011,25 +1011,21 @@ check('the spacing in the cell does not decide whether a task moves',
 console.log('\nThe look-ahead as suggestions for the timeline');
 {
 
-/* Read the way the timeline's import reads it: straight off the file, with the
-   workbook's own key and whatever colours somebody has answered for. */
-function suggest(workbook, choices = {}) {
+/* Read the way the timeline's import reads it: straight off the file, against
+   a legend — the workbook's own key plus what somebody categorised, or the
+   calendar's register — under which only Work colours count. */
+function suggest(workbook, choices = {}, legend = null) {
   const buf = workbook.buffer.slice(workbook.byteOffset, workbook.byteOffset + workbook.byteLength);
   const sheetGrid = la.parseSheet(buf, '4WLA Sept');
   const key = la.readLegend(sheetGrid);
-  const hexes = new Set([...key.map((k) => k.argb.toUpperCase()), ...Object.keys(choices)]);
-  const legend = [...hexes].map((hex) => ({
-    argb: hex,
-    meaning: key.find((k) => k.argb.toUpperCase() === hex)?.meaning || 'Unlabelled colour',
-    role: choices[hex] || 'shift',
-  }));
-  const view = cls.readGrid(la.applyLegend(sheetGrid, legend), { anchorISO: '2026-09-09' });
+  const full = la.workOnlyLegend(sheetGrid, legend || la.fileLegend(sheetGrid, choices));
+  const view = cls.readGrid(la.applyLegend(sheetGrid, full), { anchorISO: '2026-09-09' });
   return { view, runs: cls.suggestionsFrom(view), key };
 }
 const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
 const runsOf = (runs, title) => runs.filter((r) => r.title === title);
 
-const first = suggest(buildLookaheadWorkbook());
+const first = suggest(buildLookaheadWorkbook(), { D9D9D9: 'shift' });
 check('the workbook key names the swing shift', first.key.some((k) => /swing shift/i.test(k.meaning)));
 check('the calendar on the sheet is dated', first.view.days.every((d) => d.date) && first.view.days[0].date === '2026-09-07',
   first.view.days[0]?.date);
@@ -1046,11 +1042,29 @@ check('the Resource row names who is on the run it sits under',
   ixl[0]?.resources.join(',') === 'Victor,Rosa' && ixl[1]?.resources.length === 0, ixl[0]?.resources.join(','));
 check('what the key calls a colour travels with the run',
   runsOf(first.runs, 'Cable pull')[0]?.meanings.join() === 'Swing Shift');
-check('the key row itself suggests nothing', !first.runs.some((r) => !r.title));
-check('a colour nobody has answered for counts as work', runsOf(first.runs, 'Only shading').length === 1);
+check('the key rows themselves suggest nothing', !first.runs.some((r) => !r.title));
+check('a colour somebody categorised as Work is read', runsOf(first.runs, 'Only shading').length === 1);
 
-const shaded = suggest(buildLookaheadWorkbook(), { D9D9D9: 'ignore' });
-check('and once somebody says it is shading, it suggests nothing', runsOf(shaded.runs, 'Only shading').length === 0);
+const shaded = suggest(buildLookaheadWorkbook());
+check('a colour in no legend is not work, and suggests nothing', runsOf(shaded.runs, 'Only shading').length === 0);
+check('the workbook key\'s own colours start as Work',
+  runsOf(shaded.runs, 'IXL Regression').length === 2 && runsOf(shaded.runs, 'Cable pull').length === 1);
+check('categorising a key colour as Shading drops it',
+  runsOf(suggest(buildLookaheadWorkbook(), { FFC000: 'ignore' }).runs, 'Cable pull').length === 0);
+
+/* The calendar's register, versioned: the row in force decides, and a Section
+   band is no more work than Shading is. */
+const register = [
+  { argb: 'FFFF00', meaning: 'Day Shift', role: 'shift', valid_from: '2026-01-01' },
+  { argb: 'FFC000', meaning: 'Swing Shift', role: 'ignore', valid_from: '2026-06-01' },
+  { argb: 'FFC000', meaning: 'Swing Shift', role: 'shift', valid_from: '2026-01-01' },
+  { argb: 'D9D9D9', meaning: 'Band', role: 'divider', valid_from: '2026-01-01' },
+];
+const fromCalendar = suggest(buildLookaheadWorkbook(), {}, register);
+check('against the calendar legend, a colour re-categorised as Shading is not read',
+  runsOf(fromCalendar.runs, 'Cable pull').length === 0);
+check('nor is a Section band', runsOf(fromCalendar.runs, 'Only shading').length === 0);
+check('and Work still is', runsOf(fromCalendar.runs, 'IXL Regression').length === 2);
 check('shading next to work does not lengthen the run',
   runsOf(shaded.runs, 'IXL Regression').map((r) => r.days).join() === '3,2');
 
