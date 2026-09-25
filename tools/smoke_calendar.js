@@ -27,6 +27,7 @@
 
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
+import { buildLookaheadWorkbook } from './fixtures/xlsx_fixture.js';
 import path from 'node:path';
 import url from 'node:url';
 
@@ -2679,6 +2680,33 @@ async function main() {
 
   await page.locator('.ws-btn', { hasText: 'Timeline' }).click();
   await page.waitForTimeout(200);
+
+  /* The timeline's look-ahead import reads the calendar's Legend and nothing
+     else, and only a colour it categorises as Work becomes a suggestion. The
+     fixture paints in yellow (Day Shift here), orange (named by the workbook's
+     own key but not in this register) and grey (a Section band here). It runs
+     before the edits below, so the checks that follow also cover it: reading
+     the legend sends nothing of the plan. */
+  await page.locator('#sidenav .nav-link[data-pane="lookahead"]').click();
+  await page.waitForTimeout(300);
+  await page.locator('#dock .cx-btn', { hasText: /import look-ahead/i }).click();
+  await page.waitForTimeout(300);
+  await page.locator('.cx-modal input[type="file"]').setInputFiles({
+    name: '4WLA.xlsx', mimeType: 'application/octet-stream', buffer: buildLookaheadWorkbook(),
+  });
+  await page.waitForTimeout(900);
+  check('the timeline\'s look-ahead import is categorised by the calendar\'s Legend',
+    /calendar’s legend/i.test(await page.locator('.cx-modal .la-legend-source').innerText().catch(() => '')));
+  const laRuns = (await page.locator('.cx-modal .cx-chipstat').allTextContents()).find((c) => /^Runs/.test(c)) || '';
+  check('and only the colours it calls Work are imported', /^Runs2$/.test(laRuns), laRuns);
+  check('a colour the workbook names but the Legend does not is not work',
+    (await page.locator('.cx-modal .la-colour[data-hex="FFC000"][data-role="ignore"]').count()) === 1);
+  check('nor is a Section band', (await page.locator('.cx-modal .la-colour[data-hex="D9D9D9"][data-role="divider"]').count()) === 1);
+  check('and the categories are not editable from the timeline',
+    (await page.locator('.cx-modal .la-colour input[type="checkbox"]').count()) === 0);
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(600);
+  check('the Work runs arrive as suggestions', (await page.locator('#dock .la-row[data-la]').count()) === 2);
 
   // Edit the plan hard: create, move, rename, undo, redo. If any of it were
   // going to reach a backend, this is when.

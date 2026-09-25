@@ -515,7 +515,7 @@ export function isDark(hex) {
  * calendar the moment it exists, which is consistent with the legend being
  * re-applied at paint time rather than frozen into a snapshot.
  */
-function inForce(legend) {
+export function inForce(legend) {
   const best = new Map();
   for (const entry of legend || []) {
     const key = String(entry.argb).toUpperCase();
@@ -555,4 +555,51 @@ export function applyLegend(grid, legend) {
   }));
 
   return { ...grid, rows, unknown: [...unknown.values()].sort((a, b) => b.count - a.count) };
+}
+
+/**
+ * A legend under which only colours categorised as **Work** count.
+ *
+ * `applyLegend()` treats a colour it has never heard of as a shift, and for the
+ * calendar that is right: an unexplained colour might be work, and hiding it
+ * would bury the rows that most need looking at. Putting bars on a plan is a
+ * different act — a suggestion is a proposal to commit dates, and a proposal
+ * from a colour nobody has categorised is a guess. So every fill on the grid
+ * that `legend` does not mention is added here as `ignore`, and what reaches
+ * `role === 'shift'` is exactly what somebody categorised as Work. A Section
+ * band (`divider`) and Shading (`ignore`) are not work either way.
+ */
+export function workOnlyLegend(grid, legend) {
+  const known = inForce(legend);
+  const out = [...(legend || [])];
+  const added = new Set();
+  for (const row of grid?.rows || []) {
+    for (const cell of row.cells || []) {
+      if (!cell.hex) continue;
+      const hex = String(cell.hex).toUpperCase();
+      if (known.has(hex) || added.has(hex)) continue;
+      added.add(hex);
+      out.push({ argb: hex, meaning: '', role: 'ignore' });
+    }
+  }
+  return out;
+}
+
+/**
+ * The legend a workbook carries with it, for where there is no calendar legend.
+ *
+ * The workbook's own key ("Highlight in Orange for Swing Shift") names the
+ * colours it uses for work, so those start as Work; `choices` — what somebody
+ * categorised on this plan, `hex → 'shift' | 'ignore'` — overrides it and adds
+ * the colours the key never mentioned.
+ */
+export function fileLegend(grid, choices = {}) {
+  const out = readLegend(grid).map((k) => {
+    const hex = String(k.argb).toUpperCase();
+    return { argb: hex, meaning: k.meaning, role: choices[hex] || 'shift' };
+  });
+  for (const [hex, role] of Object.entries(choices || {})) {
+    if (!out.some((e) => e.argb === hex)) out.push({ argb: hex, meaning: '', role });
+  }
+  return out;
 }

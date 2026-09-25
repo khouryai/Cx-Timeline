@@ -1719,15 +1719,21 @@ async function main() {
   const runsChip = async () => (await page.locator('.cx-modal .cx-chipstat').allTextContents()).find((c) => /^Runs/.test(c)) || '';
 
   await openLaImport(0);
-  check('the sheet with the calendar is found, not the cover', /Runs4/.test(await runsChip()), await runsChip());
+  check('the sheet with the calendar is found, not the cover', /Runs3/.test(await runsChip()), await runsChip());
   check('every fill on the calendar is listed for somebody to answer',
     (await page.locator('.cx-modal .la-colour').count()) === 3, `${await page.locator('.cx-modal .la-colour').count()} colour(s)`);
   check('the workbook key names the colours it explains',
     /swing shift/i.test(await page.locator('.cx-modal .la-colour[data-hex="FFC000"]').innerText()));
 
+  check('a colour the legend does not call Work is not imported',
+    !(await page.locator('.cx-modal .la-colour[data-hex="D9D9D9"] input[type="checkbox"]').isChecked())
+      && /not in the legend/i.test(await page.locator('.cx-modal .la-colour[data-hex="D9D9D9"]').innerText()));
   await page.locator('.cx-modal .la-colour[data-hex="D9D9D9"] input[type="checkbox"]').click();
   await page.waitForTimeout(300);
-  check('saying the grey is only shading drops what it alone suggested', /Runs3/.test(await runsChip()), await runsChip());
+  check('categorising it as Work reads what it painted', /Runs4/.test(await runsChip()), await runsChip());
+  await page.locator('.cx-modal .la-colour[data-hex="D9D9D9"] input[type="checkbox"]').click();
+  await page.waitForTimeout(300);
+  check('and as Shading again drops it', /Runs3/.test(await runsChip()), await runsChip());
 
   await page.locator('.cx-modal-foot .cx-btn.primary').click();
   await page.waitForTimeout(1200);

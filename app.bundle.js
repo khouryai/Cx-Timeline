@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 58   Built: 2026-09-25T18:51:14.139Z
+ * Modules: 58   Built: 2026-09-25T20:18:14.284Z
  */
 (function () {
   'use strict';
@@ -22416,6 +22416,53 @@ __mods["io/lookahead.js"] = function (__x, __req) {
     return { ...grid, rows, unknown: [...unknown.values()].sort((a, b) => b.count - a.count) };
   }
 
+  /**
+   * A legend under which only colours categorised as **Work** count.
+   *
+   * `applyLegend()` treats a colour it has never heard of as a shift, and for the
+   * calendar that is right: an unexplained colour might be work, and hiding it
+   * would bury the rows that most need looking at. Putting bars on a plan is a
+   * different act — a suggestion is a proposal to commit dates, and a proposal
+   * from a colour nobody has categorised is a guess. So every fill on the grid
+   * that `legend` does not mention is added here as `ignore`, and what reaches
+   * `role === 'shift'` is exactly what somebody categorised as Work. A Section
+   * band (`divider`) and Shading (`ignore`) are not work either way.
+   */
+  function workOnlyLegend(grid, legend) {
+    const known = inForce(legend);
+    const out = [...(legend || [])];
+    const added = new Set();
+    for (const row of grid?.rows || []) {
+      for (const cell of row.cells || []) {
+        if (!cell.hex) continue;
+        const hex = String(cell.hex).toUpperCase();
+        if (known.has(hex) || added.has(hex)) continue;
+        added.add(hex);
+        out.push({ argb: hex, meaning: '', role: 'ignore' });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The legend a workbook carries with it, for where there is no calendar legend.
+   *
+   * The workbook's own key ("Highlight in Orange for Swing Shift") names the
+   * colours it uses for work, so those start as Work; `choices` — what somebody
+   * categorised on this plan, `hex → 'shift' | 'ignore'` — overrides it and adds
+   * the colours the key never mentioned.
+   */
+  function fileLegend(grid, choices = {}) {
+    const out = readLegend(grid).map((k) => {
+      const hex = String(k.argb).toUpperCase();
+      return { argb: hex, meaning: k.meaning, role: choices[hex] || 'shift' };
+    });
+    for (const [hex, role] of Object.entries(choices || {})) {
+      if (!out.some((e) => e.argb === hex)) out.push({ argb: hex, meaning: '', role });
+    }
+    return out;
+  }
+
   Object.defineProperty(__x, "readZip", { get: () => readZip, enumerable: true });
   Object.defineProperty(__x, "readTheme", { get: () => readTheme, enumerable: true });
   Object.defineProperty(__x, "applyTint", { get: () => applyTint, enumerable: true });
@@ -22425,7 +22472,10 @@ __mods["io/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "parseSheet", { get: () => parseSheet, enumerable: true });
   Object.defineProperty(__x, "readLegend", { get: () => readLegend, enumerable: true });
   Object.defineProperty(__x, "isDark", { get: () => isDark, enumerable: true });
+  Object.defineProperty(__x, "inForce", { get: () => inForce, enumerable: true });
   Object.defineProperty(__x, "applyLegend", { get: () => applyLegend, enumerable: true });
+  Object.defineProperty(__x, "workOnlyLegend", { get: () => workOnlyLegend, enumerable: true });
+  Object.defineProperty(__x, "fileLegend", { get: () => fileLegend, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -22446,17 +22496,24 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
    *   Follow   linked bars move onto the dates the latest read gives
    *   Dismiss  no — and the next import remembers the answer
    *
-   * The colours are the part the file cannot settle on its own. A workbook
-   * shades its layout grey as well as painting its shifts, and reading the
-   * shading as work turns every row into a bar on every day. So the import
-   * dialog lists every fill on the calendar with how many cells carry it and
-   * what the workbook's own key calls it, and somebody ticks which are work.
-   * The answer is stored in the plan, so next week's file reads the same way.
-   * A colour nobody has answered for counts as work, which is the calendar's
-   * rule too: until somebody says otherwise it might be.
+   * **Only cells painted in a colour the legend categorises as Work are read.**
+   * A workbook shades its layout grey as well as painting its shifts, and a
+   * suggestion is a proposal to commit dates to the plan — so Shading, a Section
+   * band and a colour nobody has categorised at all suggest nothing
+   * (`workOnlyLegend()`). That is deliberately stricter than the calendar, which
+   * *draws* an unexplained colour as possible work so somebody notices it.
+   *
+   * The legend is the calendar's own (Calendar → Legend) whenever the calendar is
+   * signed in: one answer to "is orange work", read and never written from here.
+   * Only the colours are fetched — nothing about the plan goes the other way.
+   * Where there is no calendar legend (local mode, a folder deployment, a desktop
+   * build without calendar keys, or a calendar that has never mapped a colour)
+   * the workbook's own key starts as Work and the dialog lets somebody categorise
+   * the rest, kept with the plan in `doc.lookahead.colors`.
    *
    * Imports: util, events, dates, model, store, renderer, core/lookahead,
-   *          io/lookahead, commands, icons, components.
+   *          io/lookahead, core/rc (the legend only), commands, icons,
+   *          components.
    */
 
   const { el, clear, debounce, fold } = __req("core/util.js");
@@ -22474,7 +22531,10 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
   const store = __req("core/store.js");
   const renderer = __req("timeline/renderer.js");
   const { readGrid, marksOf, suggestionsFrom, reconcileSuggestions } = __req("core/lookahead.js");
-  const { readZip, readSheets, parseSheet, readLegend, applyLegend } = __req("io/lookahead.js");
+  const { readZip, readSheets, parseSheet, applyLegend, inForce, workOnlyLegend, fileLegend } = __req("io/lookahead.js");
+
+
+  const rc = __req("core/rc.js");
   const cmd = __req("ui/commands.js");
   const { icon } = __req("ui/icons.js");
   const { openModal, openPicker, field, textInput, selectInput, segmented, checkbox, emptyState, badge, chipStat, toast, confirmDialog, skeleton } = __req("ui/components.js");
@@ -22610,22 +22670,18 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
   }
 
   /**
-   * Read one sheet as suggestions, against the colours somebody has answered for.
+   * Read one sheet as suggestions, against a legend.
    *
-   * `choices` is `hex → 'shift' | 'ignore'`. The workbook's own key names the
-   * colours it explains; a choice beats it, and a colour neither mentions counts
-   * as work — `applyLegend()`'s rule, unchanged.
+   * `legend` is `[{ argb, meaning, role }]` — the calendar's register or the
+   * workbook's own key — and only what it categorises as Work (`role ===
+   * 'shift'`) is read as a painted day; every other colour on the sheet is added
+   * as Shading by `workOnlyLegend()`.
    */
-  function derive(grid, choices, anchorISO) {
-    const key = new Map(readLegend(grid).map((k) => [String(k.argb).toUpperCase(), k.meaning]));
-    const hexes = new Set([...key.keys(), ...Object.keys(choices)]);
-    const legend = [...hexes].map((hex) => ({
-      argb: hex,
-      meaning: key.get(hex) || 'Unlabelled colour',
-      role: choices[hex] || 'shift',
-    }));
-
-    const parsed = readGrid(applyLegend(grid, legend), { anchorISO });
+  function derive(grid, legend, anchorISO) {
+    const full = workOnlyLegend(grid, legend);
+    const byColour = inForce(full);
+    const categorised = inForce(legend);
+    const parsed = readGrid(applyLegend(grid, full), { anchorISO });
     const dated = parsed.days.length > 0 && parsed.days.every((d) => d.date);
 
     // Every fill on a row that could be work, with how many cells carry it.
@@ -22635,7 +22691,14 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
       for (const mark of marksOf(activity)) {
         if (!mark.hex) continue;
         const hex = String(mark.hex).toUpperCase();
-        const seen = colours.get(hex) || { hex, count: 0, meaning: key.get(hex) || '', role: choices[hex] || 'shift' };
+        const entry = byColour.get(hex);
+        const seen = colours.get(hex) || {
+          hex,
+          count: 0,
+          meaning: entry?.meaning || '',
+          role: entry?.role || 'ignore',
+          known: categorised.has(hex),
+        };
         seen.count++;
         colours.set(hex, seen);
       }
@@ -22652,6 +22715,12 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
     };
   }
 
+  const CATEGORY = {
+    shift: ['Work', 'info'],
+    ignore: ['Shading', 'neutral'],
+    divider: ['Section band', 'neutral'],
+  };
+
   /**
    * The import dialog.
    *
@@ -22666,6 +22735,17 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
     let derived = null;
     const register = lookaheadRegister(store.getDoc());
     const choices = { ...register.colors };
+
+    /* The calendar's legend, when there is one to read. Fetched once, and only
+       the colours: `listLegend()` is a read, and nothing of the plan is sent. An
+       empty register or a refusal leaves `calendarLegend` null, which is the
+       workbook-key path below. */
+    let calendarLegend = null;
+    const legendRead = rc.isConfigured() && rc.isSignedIn()
+      ? rc.listLegend()
+          .then((rows) => { calendarLegend = rows?.length ? rows : null; })
+          .catch(() => { calendarLegend = null; })
+      : Promise.resolve();
 
     const status = el('div', { class: 'cx-hint', style: { minHeight: '18px' } });
     const preview = el('div');
@@ -22686,6 +22766,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
       preview.appendChild(skeleton(2));
       status.textContent = `Reading ${file.name}…`;
       try {
+        await legendRead;
         sheets = await readWorkbook(file);
         if (!sheets.length) throw new Error('none of its visible sheets has a row of weekday letters (M, Tu, W…) to read a calendar from.');
         const last = register.imported?.sheet;
@@ -22702,7 +22783,8 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
 
     function rederive() {
       const sheet = sheets.find((s) => s.name === sheetName);
-      derived = sheet ? derive(sheet.grid, choices, anchorISO()) : null;
+      const legend = calendarLegend || (sheet ? fileLegend(sheet.grid, choices) : []);
+      derived = sheet ? derive(sheet.grid, legend, anchorISO()) : null;
       renderPreview();
     }
 
@@ -22741,7 +22823,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
           plan.missing.length ? chipStat('Gone', plan.missing.length, 'bad') : null,
         ].filter(Boolean)),
         el('div', { class: 'cx-hint', text:
-          `${fmtDate(derived.windowStart, 'medium')} → ${fmtDate(derived.windowEnd - MS_DAY, 'medium')}. One suggestion per run of painted cells on a described row.` })
+          `${fmtDate(derived.windowStart, 'medium')} → ${fmtDate(derived.windowEnd - MS_DAY, 'medium')}. One suggestion per run of cells painted in a Work colour on a described row.` })
       );
 
       if (affected) {
@@ -22771,30 +22853,41 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
       }
     }
 
-    /** Which fills are work — the one question the file cannot answer itself. */
+    /**
+     * What each fill on the calendar is categorised as, and so whether it is read.
+     * Read-only against the calendar's legend — that is changed in Calendar →
+     * Legend, where it changes the calendar too. Against the workbook's key the
+     * categories are answered here and kept with the plan.
+     */
     function colourList() {
       if (!derived.colours.length) return el('div');
+      const fromCalendar = !!calendarLegend;
       return el('div', { style: { marginTop: '11px' } }, [
         el('div', { class: 'cx-section-label', text: 'Colours on the calendar' }),
-        el('div', { class: 'cx-hint', style: { marginBottom: '6px' }, text:
-          'Tick the fills that mean work. Shading that only lays the sheet out is not. Your answer is kept with the plan for the next import.' }),
-        el('div', { class: 'cx-list' }, derived.colours.map((c) =>
-          el('div', { class: 'cx-listrow la-colour', dataset: { hex: c.hex }, style: { cursor: 'default' } }, [
-            checkbox({
-              label: '',
-              checked: c.role === 'shift',
-              onChange: (v) => {
-                choices[c.hex] = v ? 'shift' : 'ignore';
-                rederive();
-              },
-            }),
+        el('div', { class: 'cx-hint la-legend-source', style: { marginBottom: '6px' }, text: fromCalendar
+          ? 'Categorised by the calendar’s Legend. Only Work colours are imported; change a colour’s category in Calendar → Legend and import again.'
+          : 'No calendar legend is available, so the workbook’s own key starts as Work and every other colour as Shading. Only Work colours are imported; your categories are kept with the plan.' }),
+        el('div', { class: 'cx-list' }, derived.colours.map((c) => {
+          const [word, tone] = c.known ? (CATEGORY[c.role] || CATEGORY.shift) : ['Not in the legend', 'neutral'];
+          return el('div', { class: 'cx-listrow la-colour', dataset: { hex: c.hex, role: c.role }, style: { cursor: 'default' } }, [
+            fromCalendar
+              ? null
+              : checkbox({
+                  label: 'Work',
+                  checked: c.role === 'shift',
+                  onChange: (v) => {
+                    choices[c.hex] = v ? 'shift' : 'ignore';
+                    rederive();
+                  },
+                }),
             el('span', { class: 'la-swatch', style: `background:#${c.hex.slice(-6)}` }),
             el('div', { class: 'lr-main' }, [
-              el('div', { class: 'lr-title', text: c.meaning || 'Not in the workbook’s key' }),
-              el('div', { class: 'lr-meta', text: `${c.count} cell${c.count === 1 ? '' : 's'} · #${c.hex.slice(-6)}` }),
+              el('div', { class: 'lr-title', text: c.meaning || (c.known ? word : 'Not in the legend') }),
+              el('div', { class: 'lr-meta', text: `${c.count} cell${c.count === 1 ? '' : 's'} · #${c.hex.slice(-6)}${c.role === 'shift' ? '' : ' · not imported'}` }),
             ]),
-          ])
-        )),
+            badge(word, tone),
+          ].filter(Boolean));
+        })),
       ]);
     }
 
@@ -22825,10 +22918,11 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
               toast({ tone: 'warn', title: 'Nothing to import', message: 'Choose a look-ahead workbook first.' });
               return false;
             }
-            // Only the colours this sheet carries are remembered; the rest of
-            // `choices` is what was already stored.
+            // Categories answered here are kept with the plan. Against the
+            // calendar's legend nothing is: that register is the answer, and a
+            // second copy in the plan would be a second answer to "is it work".
             const colors = {};
-            for (const c of derived.colours) colors[c.hex] = choices[c.hex] || 'shift';
+            if (!calendarLegend) for (const c of derived.colours) colors[c.hex] = c.role === 'shift' ? 'shift' : 'ignore';
 
             const report = store.importLookahead(derived.runs, {
               fileName: file?.name || '',
