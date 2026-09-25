@@ -60,6 +60,7 @@ import * as cmd from './commands.js';
 import { listEditor } from './lists.js';
 import { openShareDialog, paneTeam } from './auth.js';
 import { paneP6 } from './p6.js';
+import { paneLookahead } from './lookahead.js';
 import { openObjectDialog, openLaneDialog } from './dialogs.js';
 import { THEMES, applyTheme, getTheme } from './theme.js';
 import * as exporters from '../io/exporters.js';
@@ -67,7 +68,7 @@ import { importFile, buildDocFromRows } from '../io/importers.js';
 import { pickFiles } from '../core/util.js';
 
 export const PANES = [
-  'projects', 'team', 'p6', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
+  'projects', 'team', 'p6', 'lookahead', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
   'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
   'settings',
 ];
@@ -188,6 +189,7 @@ const RENDERERS = {
   projects: paneProjects,
   team: paneTeam,
   p6: paneP6,
+  lookahead: paneLookahead,
   lanes: paneLanes,
   palette: panePalette,
   outline: paneOutline,
@@ -207,7 +209,7 @@ const RENDERERS = {
 };
 
 const TITLES = {
-  projects: 'Projects', team: 'Team & access', p6: 'P6 schedule',
+  projects: 'Projects', team: 'Team & access', p6: 'P6 schedule', lookahead: 'Look-ahead',
   lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
   campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
   baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',

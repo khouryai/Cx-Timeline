@@ -17,7 +17,7 @@ import {
 } from './dates.js';
 
 /** Bump when the document shape changes; add a step to `MIGRATIONS`. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /* ══════════════════════════════════════════════════════════════════════════
    Object type registry
@@ -788,6 +788,150 @@ export function p6PlacedIds(doc) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   The look-ahead register
+
+   The four-week look-ahead, read straight from the workbook, as *suggestions*:
+   `doc.lookahead.activities` holds one entry per run of painted cells, and an
+   object points at the ones it stands for with `data.laIds` — a set, for the
+   reason `p6Ids` is one. It is the P6 register's rule exactly: an import writes
+   the register and proposes; it never puts a bar on the timeline or moves one
+   without being told to. Placing, linking and adopting dates are the three
+   ways of saying yes, and dismissing is the way of saying no.
+
+   It lives in the plan rather than being re-read from the calendar at paint
+   time, because the plan travels — a colleague opening the file from the
+   shared folder has no calendar sign-in, and must see the same suggestions and
+   the same links as whoever imported them.
+
+   `colors` remembers which fills somebody said are work and which are only
+   shading (`hex → 'shift' | 'ignore'`), so the next week's file is read the
+   way this week's was without asking again.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+export function emptyLookahead() {
+  return {
+    activities: {},   // id → entry
+    imported: null,   // { importedAt, fileName, sheet, count, windowStart, windowEnd }
+    history: [],      // the last few imports, newest first
+    colors: {},       // hex → 'shift' | 'ignore'
+  };
+}
+
+/** The register, guaranteed to be the right shape. */
+export function lookaheadRegister(doc) {
+  const la = doc?.lookahead;
+  if (!la || typeof la !== 'object') return emptyLookahead();
+  return {
+    activities: la.activities && typeof la.activities === 'object' ? la.activities : {},
+    imported: la.imported || null,
+    history: Array.isArray(la.history) ? la.history : [],
+    colors: la.colors && typeof la.colors === 'object' ? la.colors : {},
+  };
+}
+
+export function lookaheadActivity(doc, id) {
+  if (!id) return null;
+  return lookaheadRegister(doc).activities[String(id)] || null;
+}
+
+/** The look-ahead runs an object stands for. */
+export function laLinkedIds(obj) {
+  const ids = obj?.data?.laIds;
+  return Array.isArray(ids) ? ids.filter(Boolean) : [];
+}
+
+/** Every object linked to one look-ahead run. */
+export function laPlaced(doc, id) {
+  if (!id) return [];
+  return doc.objects.filter((o) => laLinkedIds(o).includes(id));
+}
+
+/** Every look-ahead id the plan currently references. */
+export function laPlacedIds(doc) {
+  const ids = new Set();
+  for (const obj of doc.objects) for (const id of laLinkedIds(obj)) ids.add(id);
+  return ids;
+}
+
+/**
+ * The span an object's linked runs cover: earliest start to latest finish,
+ * half-open like the bar itself — for the reason `p6RollUp()` rolls up.
+ */
+export function laRollUp(doc, obj) {
+  const register = lookaheadRegister(doc);
+  let start = null;
+  let end = null;
+  let count = 0;
+  let missing = 0;
+  for (const id of laLinkedIds(obj)) {
+    const entry = register.activities[id];
+    if (!entry) {
+      missing++;
+      continue;
+    }
+    start = start == null ? entry.start : Math.min(start, entry.start);
+    end = end == null ? entry.end : Math.max(end, entry.end);
+    count++;
+  }
+  if (!count) return null;
+  return { start, end, count, missing };
+}
+
+/** How far the bar differs from where the look-ahead has the work, in days. */
+export function laVariance(doc, obj) {
+  const dates = laRollUp(doc, obj);
+  if (!obj || !dates) return null;
+  const hasDuration = !!TYPES[obj.type]?.duration;
+  const startShift = Math.round((obj.start - dates.start) / MS_DAY);
+  const finishShift = hasDuration ? Math.round((obj.end - dates.end) / MS_DAY) : startShift;
+  return { startShift, finishShift, behind: finishShift > 0, differs: startShift !== 0 || finishShift !== 0 };
+}
+
+/** One entry in the look-ahead register, repaired to a known shape. */
+export function makeLookaheadEntry(props = {}) {
+  return {
+    id: String(props.id || '').trim(),
+    key: String(props.key || ''),
+    title: String(props.title || ''),
+    location: String(props.location || ''),
+    label: String(props.label || ''),
+    row: Number.isFinite(props.row) ? props.row : null,
+    start: Number.isFinite(props.start) ? props.start : null,
+    end: Number.isFinite(props.end) ? props.end : null,
+    days: Number.isFinite(props.days) ? props.days : 0,
+    meanings: Array.isArray(props.meanings) ? props.meanings.map(String) : [],
+    resources: Array.isArray(props.resources) ? props.resources.map(String) : [],
+    previous: props.previous && Number.isFinite(props.previous.start) ? props.previous : null,
+    order: Number.isFinite(props.order) ? props.order : 0,
+    missing: !!props.missing,     // inside the file's window, and no longer on it
+    past: !!props.past,           // the window has rolled past it
+    dismissed: !!props.dismissed, // somebody said no
+  };
+}
+
+function normaliseLookahead(doc) {
+  const raw = doc?.lookahead;
+  const out = emptyLookahead();
+  if (!raw || typeof raw !== 'object') return out;
+  out.imported = raw.imported || null;
+  out.history = Array.isArray(raw.history) ? raw.history.slice(0, 12) : [];
+  if (raw.colors && typeof raw.colors === 'object') {
+    for (const [hex, role] of Object.entries(raw.colors)) {
+      if (role === 'shift' || role === 'ignore') out.colors[String(hex).toUpperCase()] = role;
+    }
+  }
+  const source = raw.activities && typeof raw.activities === 'object' ? raw.activities : {};
+  for (const [key, value] of Object.entries(source)) {
+    if (!value || typeof value !== 'object') continue;
+    const entry = makeLookaheadEntry({ ...value, id: value.id || key });
+    // Without dates there is nothing to place or compare against.
+    if (!entry.id || entry.start == null || entry.end == null) continue;
+    out.activities[entry.id] = entry;
+  }
+  return out;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    Factories
    ═══════════════════════════════════════════════════════════════════════ */
 
@@ -972,6 +1116,7 @@ export function makeProject(name = 'Untitled Project') {
     settings: defaultSettings(),
     lists: defaultLists(),
     p6: emptyRegister(),
+    lookahead: emptyLookahead(),
     laneOrder: [],
     lanes: [],
     objects: [],
@@ -1130,6 +1275,14 @@ const MIGRATIONS = [
     doc.schema = 5;
     return doc;
   },
+
+  // v5 → v6: the look-ahead register. Nothing to convert — an older plan has
+  // simply never been shown a look-ahead.
+  (doc) => {
+    if (!doc.lookahead) doc.lookahead = emptyLookahead();
+    doc.schema = 6;
+    return doc;
+  },
 ];
 
 /**
@@ -1158,6 +1311,7 @@ export function normalise(input) {
   doc.settings = { ...defaultSettings(), ...(doc.settings || {}) };
   doc.lists = normaliseLists(doc);
   doc.p6 = normaliseRegister(doc);
+  doc.lookahead = normaliseLookahead(doc);
   doc.baselines = Array.isArray(doc.baselines) ? doc.baselines : [];
   doc.groups = Array.isArray(doc.groups) ? doc.groups : [];
   doc.attachments = Array.isArray(doc.attachments) ? doc.attachments : [];

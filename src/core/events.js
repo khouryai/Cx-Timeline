@@ -82,6 +82,7 @@ export const EV = {
   DOC_REPLACED: 'doc:replaced', // wholesale swap (import, restore, new)
   LISTS_CHANGED: 'lists:changed', // { listId } — a dropdown vocabulary was edited
   P6_IMPORTED: 'p6:imported', // { kind, plan } — a Primavera export was applied
+  LOOKAHEAD_IMPORTED: 'lookahead:imported', // { report } — a look-ahead workbook was read into the register
 
   /* Persistence */
   SAVE_START: 'save:start',

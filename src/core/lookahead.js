@@ -979,3 +979,226 @@ export function describe(event) {
     default: return event.kind;
   }
 }
+
+/* ── Suggestions for the timeline ──────────────────────────────────────── */
+
+/**
+ * The look-ahead as bars somebody might want on the plan.
+ *
+ * One suggestion per **run of painted cells**: consecutive day columns on one
+ * activity whose paint counts as work (`role === 'shift'`, the same test that
+ * decides whether a row is highlighted at all). Two runs on one row are two
+ * suggestions, because a gap in the paint is the workbook saying the work
+ * stops there — joining them would put a bar across the days nobody is on it.
+ * Adjacent means adjacent *on the sheet*: a weekend the workbook hides is not a
+ * gap, because nobody reading the sheet sees one there.
+ *
+ * Headings, absence rows and rows nobody described are not work and never
+ * suggest anything — the same three exclusions the calendar makes.
+ *
+ * Dates come back as UTC-midnight milliseconds, half-open like a bar on the
+ * timeline: `end` is the day *after* the last painted cell, so a single
+ * painted day is a one-day bar rather than a zero-width one. A sheet whose
+ * axis could not be dated (`datePlease()` refused it) suggests nothing, since
+ * a bar at a guessed date is worse than no bar.
+ */
+export function suggestionsFrom(view) {
+  const days = (view?.days || []).filter((d) => d.date);
+  if (!days.length || days.length !== (view?.days || []).length) return [];
+
+  const locCol = locationColumnOf(view);
+  const titleCol = titleColumnOf(view, locCol);
+  const out = [];
+
+  for (const activity of view.activities || []) {
+    if (activity.heading || activity.absence || !activity.named) continue;
+
+    const workAt = new Map();
+    for (const mark of marksOf(activity)) {
+      if (!mark.hex || mark.role !== 'shift') continue;
+      if (!workAt.has(mark.col)) workAt.set(mark.col, []);
+      workAt.get(mark.col).push(mark);
+    }
+    if (!workAt.size) continue;
+
+    const namesAt = new Map();
+    for (const entry of activity.resource?.names || []) namesAt.set(entry.col, entry.names);
+
+    const meta = activity.meta || [];
+    const location = locCol >= 0 ? (meta[locCol] || '') : '';
+    const title = (titleCol >= 0 ? meta[titleCol] : '') || longest(meta.filter((_, i) => i !== locCol)) || location;
+    const label = meta.filter(Boolean).join(' · ');
+
+    let run = null;
+    const close = () => {
+      if (!run) return;
+      out.push({
+        key: suggestionKey(label),
+        title,
+        location,
+        label,
+        row: activity.row,
+        start: isoMs(run.first),
+        end: isoMs(run.last) + 86400000,
+        days: run.count,
+        meanings: [...run.meanings],
+        resources: [...run.resources],
+      });
+      run = null;
+    };
+
+    for (const day of days) {
+      const marks = workAt.get(day.col);
+      if (!marks) {
+        close();
+        continue;
+      }
+      if (!run) run = { first: day.date, last: day.date, count: 0, meanings: new Set(), resources: new Set() };
+      run.last = day.date;
+      run.count++;
+      for (const mark of marks) run.meanings.add(mark.meaning || `#${mark.hex}`);
+      for (const name of namesAt.get(day.col) || []) run.resources.add(name);
+    }
+    close();
+  }
+
+  return out;
+}
+
+/**
+ * The column that says what the work *is*, off the sheet's own heading.
+ * Found like the location column is, and for the same reason; -1 when nothing
+ * is labelled, and the caller falls back to the longest description it has.
+ */
+function titleColumnOf(view, locCol) {
+  const headings = view?.headings || [];
+  for (let i = 0; i < headings.length; i++) {
+    if (i !== locCol && /\b(descr|activit|task|scope)/i.test(headings[i])) return i;
+  }
+  return -1;
+}
+
+function longest(values) {
+  return values.reduce((best, v) => (String(v || '').length > best.length ? String(v) : best), '');
+}
+
+function isoMs(iso) {
+  return Date.parse(`${iso}T00:00:00Z`);
+}
+
+/**
+ * What identifies a suggestion from one read of the sheet to the next.
+ *
+ * The workbook has no IDs, so this is the activity's own words, folded for case
+ * and spacing — the only thing a row carries from one week to the next. It is
+ * a weak key and knowingly so, for the reason `rowKey()` is: rewording a row
+ * makes it a new suggestion and the old one gone, which is noisy but visible,
+ * where matching on anything looser would quietly move somebody's bar onto a
+ * different piece of work.
+ */
+export function suggestionKey(label) {
+  return String(label || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/** How far apart two runs of one activity may start and still be one run moved. */
+const SAME_RUN_DAYS = 14;
+
+/**
+ * Bring a register of suggestions up to date with a new read of the sheet.
+ *
+ * `existing` is `{ id → entry }`, `incoming` what `suggestionsFrom()` returned.
+ * A run is matched to an entry with the same key — overlapping dates first, then
+ * the nearest start within a fortnight — so an entry keeps its id, and therefore
+ * its links and its dismissal, while the sheet moves its dates. What cannot be
+ * matched is new, and what is left over is one of two very different things:
+ *
+ * - **It ended before the file's window starts.** The window rolled past it;
+ *   nothing was removed. Kept (as `past`) only if a bar is linked to it —
+ *   otherwise it is a suggestion for work already over, and a register that
+ *   kept every one of them would grow by a sheet's worth every week.
+ * - **It is inside the window and the sheet no longer carries it.** Kept and
+ *   flagged `missing` when a bar points at it, never removed; an unlinked one
+ *   simply goes, because nothing depends on it.
+ *
+ * Pure, with the id generator and the linked set injected, so the whole thing
+ * is tested with no browser. Returns `{ activities, added, moved, unchanged,
+ * missing, retired }`, where the lists hold ids and `moved` carries the shift.
+ */
+export function reconcileSuggestions(existing, incoming, {
+  linked = new Set(), makeId = counterId(), windowStart = null,
+} = {}) {
+  const before = Object.values(existing || {});
+  const byKey = new Map();
+  for (const entry of before) {
+    if (!byKey.has(entry.key)) byKey.set(entry.key, []);
+    byKey.get(entry.key).push(entry);
+  }
+
+  const pairs = [];
+  incoming.forEach((run, index) => {
+    for (const entry of byKey.get(run.key) || []) {
+      const overlap = run.start < entry.end && entry.start < run.end;
+      const apart = Math.abs(run.start - entry.start) / 86400000;
+      if (!overlap && apart > SAME_RUN_DAYS) continue;
+      pairs.push({ index, entry, overlap, apart, finish: Math.abs(run.end - entry.end) });
+    }
+  });
+  pairs.sort((a, b) => (b.overlap - a.overlap) || (a.apart - b.apart) || (a.finish - b.finish) || (a.index - b.index));
+
+  const takenRun = new Set();
+  const takenEntry = new Set();
+  const activities = {};
+  const report = { added: [], moved: [], unchanged: [], missing: [], retired: 0 };
+
+  for (const pair of pairs) {
+    if (takenRun.has(pair.index) || takenEntry.has(pair.entry.id)) continue;
+    takenRun.add(pair.index);
+    takenEntry.add(pair.entry.id);
+    const run = incoming[pair.index];
+    const entry = pair.entry;
+    const changed = run.start !== entry.start || run.end !== entry.end;
+    activities[entry.id] = {
+      ...entry,
+      ...run,
+      id: entry.id,
+      order: pair.index,
+      previous: changed ? { start: entry.start, end: entry.end } : null,
+      missing: false,
+      past: false,
+    };
+    if (changed) {
+      report.moved.push({
+        id: entry.id,
+        startShift: Math.round((run.start - entry.start) / 86400000),
+        finishShift: Math.round((run.end - entry.end) / 86400000),
+      });
+    } else {
+      report.unchanged.push(entry.id);
+    }
+  }
+
+  incoming.forEach((run, index) => {
+    if (takenRun.has(index)) return;
+    const id = makeId();
+    activities[id] = { ...run, id, order: index, previous: null, missing: false, past: false, dismissed: false };
+    report.added.push(id);
+  });
+
+  for (const entry of before) {
+    if (takenEntry.has(entry.id)) continue;
+    if (!linked.has(entry.id)) {
+      report.retired++;
+      continue;
+    }
+    const rolledOff = windowStart != null && entry.end <= windowStart;
+    activities[entry.id] = { ...entry, previous: null, missing: !rolledOff, past: rolledOff };
+    if (!rolledOff) report.missing.push(entry.id);
+  }
+
+  return { activities, ...report };
+}
+
+function counterId() {
+  let n = 0;
+  return () => `la_${++n}`;
+}
