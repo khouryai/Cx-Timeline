@@ -584,6 +584,20 @@ export function listAnnotations(eventIds) {
   return select('rc_change_annotations', (q) => q.in('change_event_id', eventIds).order('created_at'));
 }
 
+/**
+ * Every day any read showed painted as a cancellation, from `fromISO` on.
+ * One row per activity, location and day — `cancellationEvents()` in
+ * `core/lookahead.js` joins side-by-side days into one event.
+ */
+export function listCancelledDays(fromISO) {
+  return select('rc_cancelled_days', (q) => q.gte('day', fromISO).order('day'));
+}
+
+/** What somebody said about a cancellation, every version. Newest last. */
+export function listCancellationNotes() {
+  return select('rc_cancellation_notes', (q) => q.order('created_at'));
+}
+
 export function listSars() {
   return select('rc_sars', (q) => q.is('superseded_by', null).order('week_start', { ascending: false }));
 }
@@ -871,6 +885,12 @@ export const addSarLinks = (rows) => insert('rc_sar_links', rows);
  * could be quietly rewritten a year later would be worth nothing.
  */
 export const addAnnotation = (row) => insert('rc_change_annotations', [row]).then((r) => r[0]);
+
+/**
+ * Record whose cancellation it was, and why. Append-only: a correction is a
+ * new row carrying `supersedes_id`, never an edit.
+ */
+export const addCancellationNote = (row) => insert('rc_cancellation_notes', [row]).then((r) => r[0]);
 
 /* ── Accounts ──────────────────────────────────────────────────────────── */
 

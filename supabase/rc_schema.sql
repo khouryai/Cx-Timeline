@@ -208,7 +208,11 @@ create table if not exists public.rc_settings (
 );
 
 insert into public.rc_settings (key, value) values
-  ('lookahead_sheet', '4WLA')
+  ('lookahead_sheet', '4WLA'),
+  -- The first day the cancellation log reaches back to. A field rather than a
+  -- constant for the reason the sheet name is one: when to start counting is
+  -- a decision about a contract, not about the code.
+  ('cancellation_log_from', '2026-09-01')
 on conflict (key) do nothing;
 
 -- ══════════════════════════════════════════════════════════════════════════
@@ -358,6 +362,42 @@ create table if not exists public.rc_change_annotations (
 );
 
 create index if not exists rc_annot_event_idx on public.rc_change_annotations (change_event_id);
+
+/*
+ * Why a run of red cells was cancelled, and whose doing it was.
+ *
+ * The cancellations themselves are not stored: `rc_cancelled_days` derives
+ * every red day from the rows already written for each read, and the interface
+ * joins side-by-side days into one event. What cannot be derived is the
+ * judgement, so that is the only thing here.
+ *
+ * A judgement is keyed on the activity and the dates it was made about rather
+ * than on an event id, because the event has none — and because the sheet
+ * keeps moving: a week cancelled on Monday grows to a fortnight on Wednesday,
+ * and the reason recorded on Monday has to follow it. The interface attaches a
+ * note to the event on the same activity whose days it overlaps.
+ *
+ * Append-only like every other judgement in this schema: a correction is a
+ * new row naming the one it supersedes, and there is no UPDATE or DELETE grant.
+ * The three parties are the contract's, in a check rather than a register,
+ * because "whose cancellation was it" has exactly those answers.
+ */
+create table if not exists public.rc_cancellation_notes (
+  id            uuid primary key default gen_random_uuid(),
+  raw_label     text not null,
+  raw_location  text not null default '',
+  start_date    date not null,
+  end_date      date not null,
+  party         text not null check (party in ('BART', 'Hitachi', 'Other')),
+  reason        text,
+  author        uuid not null default auth.uid() references auth.users(id),
+  created_at    timestamptz not null default now(),
+  supersedes_id uuid references public.rc_cancellation_notes(id),
+  check (end_date >= start_date)
+);
+
+create index if not exists rc_cancel_note_label_idx
+  on public.rc_cancellation_notes (raw_label, raw_location);
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Site Access Requests
@@ -660,6 +700,7 @@ alter table public.rc_lookahead_snapshots enable row level security;
 alter table public.rc_lookahead_rows     enable row level security;
 alter table public.rc_change_events      enable row level security;
 alter table public.rc_change_annotations enable row level security;
+alter table public.rc_cancellation_notes enable row level security;
 alter table public.rc_sars               enable row level security;
 alter table public.rc_sar_links          enable row level security;
 alter table public.rc_plan_entries       enable row level security;
@@ -796,6 +837,16 @@ create policy rc_change_annotations_read on public.rc_change_annotations
 -- be quietly rewritten a year later when it matters.
 drop policy if exists rc_change_annotations_insert on public.rc_change_annotations;
 create policy rc_change_annotations_insert on public.rc_change_annotations
+  for insert to authenticated
+  with check (public.rc_is_admin() and author = auth.uid());
+
+-- The cancellation log's judgements: the same rule, for the same reason.
+drop policy if exists rc_cancellation_notes_read on public.rc_cancellation_notes;
+create policy rc_cancellation_notes_read on public.rc_cancellation_notes
+  for select to authenticated using (public.rc_is_admin());
+
+drop policy if exists rc_cancellation_notes_insert on public.rc_cancellation_notes;
+create policy rc_cancellation_notes_insert on public.rc_cancellation_notes
   for insert to authenticated
   with check (public.rc_is_admin() and author = auth.uid());
 
@@ -1425,6 +1476,36 @@ create or replace view public.rc_lookahead_snapshot_meta with (security_invoker 
          jsonb_array_length(coalesce(s.grid -> 'unknown', '[]'::jsonb)) as unmapped_count
     from public.rc_lookahead_snapshots s;
 
+/*
+ * Every day any read of the look-ahead showed painted as a cancellation.
+ *
+ * Read off `rc_lookahead_rows.cells`, which every ingest already writes (date →
+ * what the colour means), so no grid is re-parsed and nothing new is stored. A
+ * day is cancelled when its meaning says so — the legend's word, matched the
+ * way `ingest()` finds the cancellation meaning — or when it was stored as the
+ * bare colour of a legend entry that says so, which is how a day read before
+ * red was mapped comes back.
+ *
+ * One row per activity, location and day however many reads saw it, with the
+ * first and last read that did: a day that stopped being red is still in the
+ * log, because it *was* cancelled when those reads were taken. `security_invoker`
+ * so the rows' own policies decide who sees it.
+ */
+create or replace view public.rc_cancelled_days with (security_invoker = true) as
+  select coalesce(r.raw_label, '')    as raw_label,
+         coalesce(r.raw_location, '') as raw_location,
+         (array_agg(r.location_id) filter (where r.location_id is not null))[1] as location_id,
+         d.key::date                  as day,
+         min(s.taken_at)              as first_seen,
+         max(s.taken_at)              as last_seen,
+         count(distinct r.snapshot_id) as reads
+    from public.rc_lookahead_rows r
+    join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
+    cross join lateral jsonb_each_text(r.cells) d
+   where d.value ilike '%cancel%'
+      or d.value in (select '#' || l.argb from public.rc_legend l where l.meaning ilike '%cancel%')
+   group by 1, 2, d.key;
+
 -- ══════════════════════════════════════════════════════════════════════════
 -- Deleting a reference row, where deleting it is honest
 --
@@ -1985,17 +2066,21 @@ $$;
 revoke all on public.rc_plan_entries       from public, anon, authenticated;
 revoke all on public.rc_actuals            from public, anon, authenticated;
 revoke all on public.rc_change_annotations from public, anon, authenticated;
+revoke all on public.rc_cancellation_notes from public, anon, authenticated;
 
 grant select, insert on public.rc_plan_entries       to authenticated;
 grant select, insert on public.rc_actuals            to authenticated;
 grant select, insert on public.rc_change_annotations to authenticated;
+grant select, insert on public.rc_cancellation_notes to authenticated;
 
 revoke all on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
               public.rc_rows_without_sar, public.rc_sars_without_rows,
-              public.rc_lookahead_snapshot_meta, public.rc_actuals_current from public, anon;
+              public.rc_lookahead_snapshot_meta, public.rc_actuals_current,
+              public.rc_cancelled_days from public, anon;
 grant select on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
                 public.rc_rows_without_sar, public.rc_sars_without_rows,
-                public.rc_lookahead_snapshot_meta, public.rc_actuals_current to authenticated;
+                public.rc_lookahead_snapshot_meta, public.rc_actuals_current,
+                public.rc_cancelled_days to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Storage: the two things that are files

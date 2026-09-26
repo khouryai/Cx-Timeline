@@ -710,6 +710,74 @@ select assert((select count(*) from public.rc_change_annotations) = 0,
   'and a member cannot read them either');
 
 -- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'The cancellation log'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+select act_as(:'alice');
+insert into public.rc_legend (argb, meaning, role, valid_from)
+values ('FF0000', 'Cancellation', 'shift', date '2026-02-02');
+
+-- Two reads. The second still shows the Monday and Tuesday and adds the
+-- Wednesday, stored as the bare colour because it was read before red was
+-- mapped; a Day Shift beside them is not a cancellation.
+insert into public.rc_lookahead_snapshots (file_hash, sheet_name, grid, taken_at)
+values ('hash-cx-1', '4WLA', '{"rows":[]}'::jsonb, timestamptz '2026-09-07 08:00+00'),
+       ('hash-cx-2', '4WLA', '{"rows":[]}'::jsonb, timestamptz '2026-09-08 08:00+00');
+select id as cx1 from public.rc_lookahead_snapshots where file_hash = 'hash-cx-1' \gset
+select id as cx2 from public.rc_lookahead_snapshots where file_hash = 'hash-cx-2' \gset
+insert into public.rc_lookahead_rows (snapshot_id, week_start, row_key, raw_location, raw_label, cells) values
+  (:'cx1', date '2026-09-07', 'cx|a', 'TPSS 12', 'Cable pull',
+   '{"2026-09-07":"Cancellation","2026-09-08":"Cancellation","2026-09-09":"Day Shift"}'::jsonb),
+  (:'cx2', date '2026-09-07', 'cx|b', 'TPSS 12', 'Cable pull',
+   '{"2026-09-07":"Cancellation","2026-09-08":"Cancellation","2026-09-09":"#FF0000"}'::jsonb);
+
+select assert((select count(*) from public.rc_cancelled_days where raw_label = 'Cable pull') = 3,
+  'every red day is in the log once, however many reads showed it');
+select assert((select reads from public.rc_cancelled_days
+                where raw_label = 'Cable pull' and day = date '2026-09-07') = 2,
+  'with how many reads showed it');
+select assert((select count(*) from public.rc_cancelled_days
+                where raw_label = 'Cable pull' and day = date '2026-09-09') = 1,
+  'a day stored as the bare red is a cancellation once red is mapped as one');
+
+insert into public.rc_cancellation_notes (raw_label, raw_location, start_date, end_date, party, reason)
+values ('Cable pull', 'TPSS 12', date '2026-09-07', date '2026-09-09', 'BART', 'Possession withdrawn');
+select id as cx_note from public.rc_cancellation_notes where raw_label = 'Cable pull' \gset
+
+select refuses(:'alice',
+  format('update public.rc_cancellation_notes set party = %L where id = %L', 'Hitachi', :'cx_note'),
+  'editing why something was cancelled');
+select refuses(:'alice',
+  format('delete from public.rc_cancellation_notes where id = %L', :'cx_note'),
+  'deleting it');
+select refuses(:'alice',
+  format('insert into public.rc_cancellation_notes (raw_label, start_date, end_date, party) values (%L, %L, %L, %L)',
+         'Cable pull', '2026-09-07', '2026-09-07', 'Contractor'),
+  'a party that is not BART, Hitachi or Other');
+select act_as(:'alice');
+
+insert into public.rc_cancellation_notes (raw_label, raw_location, start_date, end_date, party, reason, supersedes_id)
+values ('Cable pull', 'TPSS 12', date '2026-09-07', date '2026-09-09', 'Hitachi', 'Our crew was reallocated', :'cx_note');
+select assert((select count(*) from public.rc_cancellation_notes) = 2,
+  'a correction is an additional row');
+
+select refuses(:'carol',
+  format('insert into public.rc_cancellation_notes (raw_label, start_date, end_date, party) values (%L, %L, %L, %L)',
+         'Cable pull', '2026-09-07', '2026-09-07', 'BART'),
+  'a member recording whose cancellation it was');
+select act_as(:'carol');
+select assert((select count(*) from public.rc_cancellation_notes) = 0,
+  'and a member cannot read the judgements');
+select assert((select count(*) from public.rc_cancelled_days where raw_label = 'Cable pull') = 3,
+  'though the red days themselves are the 4WLA, which is theirs to read');
+select act_as(:'alice');
+
+-- Leave the register as the sections below expect it: their counts know
+-- nothing of these two reads or of red being mapped this early.
+delete from public.rc_lookahead_snapshots where id in (:'cx1', :'cx2');
+delete from public.rc_legend where argb = 'FF0000' and valid_from = date '2026-02-02';
+
+-- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice 'The window moving is not a change of scope'; end $$;
 -- ══════════════════════════════════════════════════════════════════════════
 
@@ -1040,7 +1108,9 @@ select assert((select value from public.rc_settings where key = 'lookahead_sheet
 select act_as(:'carol');
 select assert((select count(*) from public.rc_legend) = 5,
   'a member can read the legend — their own row is drawn against it');
-select assert((select count(*) from public.rc_settings) = 1, 'and the settings');
+select assert((select count(*) from public.rc_settings) = 2, 'and the settings');
+select assert((select value from public.rc_settings where key = 'cancellation_log_from') = '2026-09-01',
+  'the cancellation log starts in September unless somebody says otherwise');
 select refuses(:'carol',
   format('insert into public.rc_legend (argb, meaning) values (%L, %L)', '3399FF', 'Day Shift'),
   'a member mapping a colour');

@@ -964,3 +964,16 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 @media (max-width: 900px) {
   .rc-pto-grid .rc-pto-name { min-width: 110px; }
 }
+
+/* The cancellation log: one square per red day, so a cancelled week reads as
+   a week at a glance. The cancellation colour is `--bad` in every theme. */
+.rc-cancel-cells {
+  display: flex;
+  gap: 2px;
+}
+.rc-cancel-cell {
+  width: 9px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--bad);
+}
