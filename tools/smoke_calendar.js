@@ -3315,6 +3315,62 @@ async function main() {
 
   await member.close();
 
+  /* ── A tablet in the room ─────────────────────────────────────────────
+     The meeting is run standing, on a tablet, and a tablet in landscape is
+     wider than every narrow rule — so it got the desktop's 24px buttons. A
+     touch screen now gets 44px targets whatever its width, and in landscape
+     the question and the answer sit side by side. */
+  console.log('\nTablet');
+  const tabletContext = pinClock(await browser.newContext({
+    viewport: { width: 1180, height: 820 }, hasTouch: true,
+  }));
+  const tablet = await tabletContext.newPage();
+  tablet.on('pageerror', (e) => consoleErrors.push(String(e)));
+  await serveStubbedConfig(tablet);
+  await tablet.addInitScript(() => { window.__rc = { role: 'admin', signedIn: true }; });
+  await tablet.addInitScript(`window.__rcSchemaVersion = ${SCHEMA_VERSION};`);
+  await tablet.addInitScript(fakeSdk);
+  await tablet.goto(url_, { waitUntil: 'load' });
+  await tablet.waitForSelector('.ws-switch', { timeout: 20000 });
+  await tablet.locator('.ws-btn', { hasText: 'Calendar' }).tap();
+  await tablet.waitForSelector('#rc-frame .rc-tabs', { timeout: 15000 });
+  await tablet.locator('#rc-frame .rc-tab', { hasText: 'Daily huddle' }).tap();
+  await tablet.waitForSelector('#rc-frame .rc-huddle', { timeout: 10000 });
+  const smallTargets = () => tablet.evaluate(() => [...document.querySelectorAll('#rc-frame button, #rc-frame select, #rc-frame input[type="text"]')]
+    .filter((n) => {
+      const r = n.getBoundingClientRect();
+      return r.width && r.height && r.height < 43.5;
+    })
+    .map((n) => `${n.tagName.toLowerCase()} "${(n.textContent || n.getAttribute('aria-label') || '').trim().slice(0, 20)}" ${Math.round(n.getBoundingClientRect().height)}px`));
+  const small = await smallTargets();
+  check('every control in the huddle is a 44px target on a touch screen', small.length === 0, small.slice(0, 4).join(' | '));
+
+  await tablet.locator('#rc-frame button', { hasText: 'Run the meeting' }).tap();
+  await tablet.waitForSelector('#rc-frame .rc-present');
+  await tablet.waitForTimeout(200);
+  const sides = await tablet.evaluate(() => {
+    const who = document.querySelector('#rc-frame .rc-present-who').getBoundingClientRect();
+    const answer = document.querySelector('#rc-frame .rc-present-answer').getBoundingClientRect();
+    return { whoRight: who.right, answerLeft: answer.left, answerTop: answer.top, whoTop: who.top,
+      pageScroll: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+  });
+  check('in landscape the answer sits beside the question, not below it',
+    sides.answerLeft >= sides.whoRight - 1 && sides.answerTop <= sides.whoTop + 80, JSON.stringify(sides));
+  check('and the page never scrolls sideways', sides.pageScroll <= 0, `${sides.pageScroll}px`);
+  if (process.env.CX_TABLET_SHOT) await tablet.screenshot({ path: process.env.CX_TABLET_SHOT });
+  const smallInRoom = await smallTargets();
+  check('the room\'s own controls are touch-sized too', smallInRoom.length === 0, smallInRoom.slice(0, 4).join(' | '));
+
+  await tablet.setViewportSize({ width: 820, height: 1180 });
+  await tablet.waitForTimeout(300);
+  const portrait = await tablet.evaluate(() => {
+    const who = document.querySelector('#rc-frame .rc-present-who').getBoundingClientRect();
+    const answer = document.querySelector('#rc-frame .rc-present-answer').getBoundingClientRect();
+    return { answerTop: answer.top, whoBottom: who.bottom };
+  });
+  check('in portrait it stacks, answer under the question', portrait.answerTop >= portrait.whoBottom, JSON.stringify(portrait));
+  await tabletContext.close();
+
   /* ── Console ──────────────────────────────────────────────────────────── */
   console.log('\nConsole');
   const real = consoleErrors.filter((e) => !/favicon|ERR_FILE_NOT_FOUND|fonts/i.test(e));

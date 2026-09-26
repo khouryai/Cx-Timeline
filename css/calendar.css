@@ -1056,3 +1056,54 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
     to top right, transparent calc(50% - 1px), currentColor calc(50% - 1px),
     currentColor calc(50% + 1px), transparent calc(50% + 1px));
 }
+
+/* ── A tablet in the room ────────────────────────────────────────────────
+   The huddle is run standing, on a tablet held in one hand, and a tablet in
+   landscape is wider than the 900px where the narrow rules begin — so none of
+   them applied to the device the meeting is most often run on. Touch is the
+   test here, not width: every control in the calendar reaches 44px, the size
+   a thumb hits without looking, and in landscape the meeting splits into the
+   question on the left and the answer on the right, so answering never means
+   scrolling past the question to find the buttons. */
+@media (pointer: coarse) {
+  .rc-frame .cx-btn,
+  #rc-frame .cx-btn,
+  #rc-frame .rc-tab {
+    min-height: 44px;
+  }
+  #rc-frame .cx-btn.mini { padding-inline: 14px; }
+  #rc-frame .cx-input,
+  #rc-frame select,
+  #rc-frame input[type='text'],
+  #rc-frame input[type='date'] {
+    min-height: 44px;
+    font-size: 16px; /* below 16px a tablet zooms the page on focus */
+  }
+  #rc-frame .rc-table td,
+  #rc-frame .rc-table th { padding: 10px 8px; }
+  /* A borderless button is a word on a desktop, where a pointer finds it by
+     hovering; a thumb has no hover, so each answer shows its edge. */
+  #rc-frame .rc-present-answer .cx-btn,
+  #rc-frame .rc-huddle .cx-btn { border: 1px solid var(--border-strong); }
+}
+
+@media (pointer: coarse) and (orientation: landscape) and (min-width: 900px) {
+  .rc-present {
+    max-width: 1180px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+    column-gap: var(--space-5);
+    row-gap: 0;
+    align-items: start;
+  }
+  .rc-present > * { grid-column: 1; }
+  .rc-present > .rc-present-top,
+  .rc-present > .rc-present-move { grid-column: 1 / -1; }
+  .rc-present > .rc-present-answer {
+    grid-column: 2;
+    grid-row: 2 / span 6;
+    border-top: 0;
+    padding-top: 0;
+  }
+  .rc-present-answer .cx-btn { min-height: 52px; }
+}
