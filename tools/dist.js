@@ -41,7 +41,7 @@ const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..'
 const OUT = path.join(ROOT, 'dist');
 
 /** Everything the browser actually loads, and nothing else. */
-const FILES = ['index.html', 'app.bundle.js', 'config.js', '_headers'];
+const FILES = ['index.html', 'app.bundle.js', 'calendar.bundle.js', 'config.js', '_headers'];
 const DIRS = ['css', 'vendor'];
 
 /**
@@ -183,6 +183,21 @@ function fingerprint(dir) {
     return to;
   };
 
+  /* The calendar first, because the main bundle names it: its hashed name is
+     written into the main bundle, and only then is the main bundle hashed —
+     otherwise a calendar-only change would not change the main bundle's name,
+     and a visitor holding the old one would ask for a file that is gone. */
+  const calendar = rename('calendar.bundle.js', (h) => `calendar.${h}.js`);
+  if (calendar) {
+    const appFile = path.join(dir, 'app.bundle.js');
+    const code = fs.readFileSync(appFile, 'utf8');
+    const named = code.replace("const CALENDAR_BUNDLE = 'calendar.bundle.js';", `const CALENDAR_BUNDLE = '${calendar}';`);
+    if (named === code) {
+      console.error('✗ the main bundle does not name calendar.bundle.js where ui/calendar_loader.js puts it.');
+      process.exit(1);
+    }
+    fs.writeFileSync(appFile, named);
+  }
   const bundle = rename('app.bundle.js', (h) => `app.${h}.js`);
   if (!bundle) {
     console.error('✗ no app.bundle.js to publish — run `npm run build` first.');
@@ -215,6 +230,7 @@ function fingerprint(dir) {
       '# The bundle and the stylesheets are named after their own contents, so a\n'
       + '# new deploy is a new URL and an old one can be kept forever.\n'
       + '/app.*.js\n  Cache-Control: public, max-age=31536000, immutable\n\n'
+      + '/calendar.*.js\n  Cache-Control: public, max-age=31536000, immutable\n\n'
       + '/css/*\n  Cache-Control: public, max-age=31536000, immutable\n'
     );
     if (after === before) {

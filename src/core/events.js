@@ -114,6 +114,7 @@ export const EV = {
   RC_QUEUE_CHANGED: 'rc:queue', // { pending } — unsynced huddle entries
 
   /* Which whole interface is on screen: the timeline, or the calendar. */
+  CALENDAR_FAILED: 'calendar:failed', // { message } — the calendar's code could not be loaded or started
   WORKSPACE_CHANGED: 'workspace:changed', // { workspace }
 
   /* Selection & interaction */
@@ -137,6 +138,7 @@ export const EV = {
   // that would be a cycle — and view-only state (a filter, a search) changes
   // nothing in the document, so no doc:changed fires to do it for them.
   PANE_REFRESH: 'panel:refresh',
+  PANE_OPEN: 'panel:open', // { pane } — a pane asking for another one; the dock owns showPane()
   TOAST: 'ui:toast',
   STATUS: 'ui:status',
   PRESENT_MODE: 'ui:present',

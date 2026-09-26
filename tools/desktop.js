@@ -171,6 +171,26 @@ function revision() {
 }
 
 /**
+ * The application as one script: the main bundle, then the calendar's.
+ *
+ * The web page fetches `calendar.bundle.js` the first time the calendar is
+ * opened. The desktop cannot: its loader lives in the installer, is older than
+ * the split, and hands the page exactly one script. So the desktop gets both,
+ * the calendar's factories registering into the main bundle's table as it runs
+ * — `ui/calendar_loader.js` then finds the calendar already there and fetches
+ * nothing. An installed shell of any age runs a payload of this shape.
+ */
+function desktopBundle() {
+  const main = fs.readFileSync(path.join(ROOT, 'app.bundle.js'), 'utf8');
+  const calendarFile = path.join(ROOT, 'calendar.bundle.js');
+  if (!fs.existsSync(calendarFile)) {
+    console.error('✗ calendar.bundle.js is missing — run `npm run build` first.');
+    process.exit(1);
+  }
+  return `${main}\n${fs.readFileSync(calendarFile, 'utf8')}`;
+}
+
+/**
  * One release, as the loader consumes it: the application's code and styles as
  * text, with enough about itself to be ordered against another copy.
  */
@@ -194,7 +214,7 @@ export function buildPayload(builtAt = new Date().toISOString()) {
     builtAt,
     revision: revision(),
     css,
-    bundle: fs.readFileSync(bundle, 'utf8'),
+    bundle: desktopBundle(),
   };
 }
 
@@ -313,7 +333,7 @@ export function assembleShell(builtAt = new Date().toISOString()) {
     path.join(SHELL_OUT, 'config.js'),
     withCalendar ? calendarConfig(rc) : BLANK_CONFIG
   );
-  fs.copyFileSync(path.join(ROOT, 'app.bundle.js'), path.join(SHELL_OUT, 'app.bundle.js'));
+  fs.writeFileSync(path.join(SHELL_OUT, 'app.bundle.js'), desktopBundle());
   copyDir(path.join(ROOT, 'css'), path.join(SHELL_OUT, 'css'));
   if (withCalendar) copyDir(path.join(ROOT, 'vendor'), path.join(SHELL_OUT, 'vendor'));
 

@@ -44,13 +44,16 @@ jobs:
           # lines — which makes the comparison always succeed and the check
           # worthless in exactly the case it exists for.
           strip() { grep -av '^ \* Modules:' "$1"; }
-          git show HEAD:app.bundle.js > /tmp/committed.js
-          if ! diff <(strip /tmp/committed.js) <(strip app.bundle.js) > /dev/null; then
-            echo "::error::app.bundle.js is out of date — run 'npm run build' and commit it"
-            diff <(strip /tmp/committed.js) <(strip app.bundle.js) | head -40
-            exit 1
-          fi
-          echo "the committed bundle is the source, built"
+          # Two bundles: the application, and the calendar it fetches on first use.
+          for bundle in app.bundle.js calendar.bundle.js; do
+            git show "HEAD:$bundle" > "/tmp/committed-$bundle"
+            if ! diff <(strip "/tmp/committed-$bundle") <(strip "$bundle") > /dev/null; then
+              echo "::error::$bundle is out of date — run 'npm run build' and commit it"
+              diff <(strip "/tmp/committed-$bundle") <(strip "$bundle") | head -40
+              exit 1
+            fi
+          done
+          echo "the committed bundles are the source, built"
 
   # This job needs `package-lock.json` committed, and for a long time it was
   # not: `.gitignore` held it, so `cache: npm` failed at setup, every suite step

@@ -34,11 +34,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
+import vm from 'node:vm';
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const SRC = path.join(ROOT, 'src');
 const ENTRY = path.join(SRC, 'main.js');
 const OUT = path.join(ROOT, 'app.bundle.js');
+/*
+ * The resource calendar, as a second bundle loaded the first time somebody
+ * opens it (`ui/calendar_loader.js`). Everything reachable from `ui/rc.js` that
+ * the main bundle does not already carry goes in it, registering itself into
+ * the main bundle's module table — so the two share one copy of every core
+ * module and a person who only ever uses the timeline never downloads it.
+ */
+const CALENDAR_ENTRY = path.join(SRC, 'ui', 'rc.js');
+const CALENDAR_OUT = path.join(ROOT, 'calendar.bundle.js');
 const CONFIG_OUT = path.join(ROOT, 'config.js');
 
 const IMPORT_NAMED = /^\s*import\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]\s*;?\s*$/;
@@ -268,9 +278,58 @@ function emit(modules, order, entryId) {
 
 ${body}
 
+  /* The module table, for the calendar bundle to register into. It is loaded
+     on first use and shares this bundle's copy of every module both need. */
+  if (typeof window !== 'undefined') window.__CX_MODULES = { mods: __mods, req: __req };
+
   __req(${JSON.stringify(entryId)});
 })();
 `;
+}
+
+/** The calendar bundle: factories only, added to the main bundle's table. */
+function emitCalendar(modules, ids) {
+  const body = ids
+    .map((id) => {
+      const mod = modules.get(id);
+      const registrations = mod.exports
+        .map((name) => `  Object.defineProperty(__x, ${JSON.stringify(name)}, { get: () => ${name}, enumerable: true });`)
+        .join('\n');
+      return [`// ${id}`, `__mods[${JSON.stringify(id)}] = function (__x, __req) {`, indent(mod.code), registrations, '};']
+        .join('\n');
+    })
+    .join('\n\n');
+  return `/*!
+ * CX Timeline — the resource calendar, loaded on first use.
+ * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
+ * Modules: ${ids.length}   Built: ${new Date().toISOString()}
+ */
+(function () {
+  'use strict';
+  var registry = typeof window !== 'undefined' && window.__CX_MODULES;
+  if (!registry) throw new Error('CX Timeline: calendar.bundle.js has to load after app.bundle.js');
+  var __mods = registry.mods;
+
+${body}
+})();
+`;
+}
+
+/**
+ * Parse what was written, before anybody loads it.
+ *
+ * The linker is a line-based rewrite, and a mistake it carries through — an
+ * object key renamed like a variable, say — produced a bundle the build
+ * reported as fine and no browser could run: the page stayed blank with one
+ * error in the console. `vm.Script` compiles without running, which is exactly
+ * the check that was missing.
+ */
+function assertParses(code, file) {
+  try {
+    new vm.Script(code, { filename: file });
+  } catch (err) {
+    throw new Error(`${path.basename(file)} does not parse — ${err.message}. The module that produced it is named in the comment above the failing line.`);
+  }
 }
 
 function indent(code) {
@@ -316,10 +375,26 @@ function build() {
   const modules = collect(ENTRY);
   const order = sort(modules);
   const bundle = emit(modules, order, toId(ENTRY));
+  assertParses(bundle, OUT);
+
+  /* Everything the calendar needs that the main bundle does not carry. The
+     calendar's own entry must not be reachable from main — that would put it in
+     both — which is what `ui/calendar_loader.js` is for. */
+  if (modules.has(toId(CALENDAR_ENTRY))) {
+    throw new Error('ui/rc.js is imported statically from the main bundle — load it through ui/calendar_loader.js');
+  }
+  const calendarModules = collect(CALENDAR_ENTRY);
+  const calendarIds = sort(calendarModules).filter((id) => !modules.has(id));
+  const calendar = emitCalendar(calendarModules, calendarIds);
+  assertParses(calendar, CALENDAR_OUT);
+
   fs.writeFileSync(OUT, bundle, 'utf8');
+  fs.writeFileSync(CALENDAR_OUT, calendar, 'utf8');
   const kb = (Buffer.byteLength(bundle) / 1024).toFixed(1);
+  const ckb = (Buffer.byteLength(calendar) / 1024).toFixed(1);
   console.log(`✓ app.bundle.js — ${order.length} modules, ${kb} kB, ${Date.now() - started}ms`);
-  return order;
+  console.log(`✓ calendar.bundle.js — ${calendarIds.length} modules, ${ckb} kB, loaded on first use`);
+  return [...order, ...calendarIds];
 }
 
 function watch() {

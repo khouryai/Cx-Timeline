@@ -134,9 +134,21 @@ check('and index.html points at what was actually written',
     .map((m) => m.replace(/^[a-z]+="|"$/g, ''))
     .every((rel) => exists(rel)));
 
+/* The calendar is a second bundle, fetched on first use. It is hashed like the
+   main one, and the main bundle names the hashed file — a name nobody rewrote
+   would ask for a file this deploy does not have. */
+const calendarFile = fs.readdirSync(path.join(ROOT, 'dist')).find((f) => /^calendar\.[0-9a-f]{10}\.js$/.test(f));
+check('the calendar is its own bundle, named after its bytes', Boolean(calendarFile), calendarFile || 'none');
+check('and the main bundle asks for exactly that file',
+  Boolean(calendarFile) && read(hashedBundle || '').includes(`const CALENDAR_BUNDLE = '${calendarFile}';`));
+check('so the page nobody opens the calendar on does not carry it',
+  !read(hashedBundle || '').includes('__mods["ui/rc.js"]'));
+
 const policy = read('_headers');
 check('they are cached forever, because the name changes when the bytes do',
   /\/app\.\*\.js\n\s*Cache-Control: public, max-age=31536000, immutable/.test(policy));
+check('the calendar bundle is cached forever too',
+  /\/calendar\.\*\.js\n\s*Cache-Control: public, max-age=31536000, immutable/.test(policy));
 check('and the rule that made the bundle uncacheable is gone',
   !/\/app\.bundle\.js/.test(policy));
 
@@ -163,6 +175,9 @@ try {
 // follows: the payload is built from the repository, not from `dist/`.
 build(['--no-backend']);
 const payload = JSON.parse(read('desktop/payload.json') || '{}');
+check('the desktop payload carries the calendar in the same script, for a loader that knows one',
+  typeof payload.bundle === 'string' && payload.bundle.includes('__mods["ui/rc.js"]')
+    && payload.bundle.indexOf('window.__CX_MODULES = {') < payload.bundle.indexOf('__mods["ui/rc.js"]'));
 check('the desktop payload still carries the bundle, whatever the site calls it',
   typeof payload.bundle === 'string' && payload.bundle.length > 100000,
   `${Math.round((payload.bundle || '').length / 1024)} kB`);

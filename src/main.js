@@ -40,7 +40,7 @@ import { installP6Drops } from './ui/p6.js';
 import { installLookaheadDrops } from './ui/lookahead.js';
 import { installShortcuts } from './ui/shortcuts.js';
 import * as workspace from './ui/workspace.js';
-import * as rcUi from './ui/rc.js';
+import { loadCalendar } from './ui/calendar_loader.js';
 import * as rcClient from './core/rc.js';
 import { lockPlan, setAccount } from './core/access.js';
 import * as exporters from './io/exporters.js';
@@ -162,7 +162,9 @@ async function boot() {
   // trial gate must not be waiting on either: a calendar that could not reach
   // its backend would otherwise look exactly like a broken update and get
   // rolled back.
-  workspace.registerCalendar(() => rcUi.build());
+  // Its code is a second bundle, fetched the first time it is opened — see
+  // ui/calendar_loader.js — so nobody who only uses the timeline downloads it.
+  workspace.registerCalendar(() => loadCalendar().then((calendar) => calendar.build()));
 
   // Resolve the calendar account, if there is a backend for one. This is the
   // only thing here that touches a network, and it deliberately sits after the

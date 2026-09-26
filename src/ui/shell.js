@@ -628,6 +628,9 @@ function wireEvents() {
   on(EV.ACCESS_CHANGED, refresh);
   // The switch is two buttons; repainting the sidebar to move a highlight
   // would throw away the pane list and its scroll position for nothing.
+  on(EV.CALENDAR_FAILED, ({ message }) => {
+    toast({ tone: 'bad', title: 'The calendar did not open', message, timeout: 10000 });
+  });
   on(EV.WORKSPACE_CHANGED, ({ workspace: which }) => {
     for (const btn of dom.sidenav.querySelectorAll('.ws-btn')) {
       const label = btn.querySelector('span')?.textContent.toLowerCase();

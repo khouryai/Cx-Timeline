@@ -64,13 +64,19 @@ export function show(name) {
 
   if (name === 'calendar' && !built) {
     built = true;
-    try {
-      builder?.();
-    } catch (err) {
-      // A calendar that cannot start must not take the timeline with it. The
-      // stage stays empty, the error is reported, and the switch back works.
+    // A calendar that cannot start must not take the timeline with it. The
+    // stage stays empty, the reason is said, and the switch back works. The
+    // builder may be asynchronous: its code is fetched on first use.
+    const failed = (err) => {
       built = false;
       console.error('[cx-timeline] the resource calendar failed to start:', err);
+      emit(EV.CALENDAR_FAILED, { message: err?.message || String(err) });
+    };
+    try {
+      const started = builder?.();
+      if (started && typeof started.catch === 'function') started.catch(failed);
+    } catch (err) {
+      failed(err);
     }
   }
 
