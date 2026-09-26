@@ -605,6 +605,19 @@ alter table public.rc_actuals add column if not exists supersedes_id uuid
   references public.rc_actuals(id) on delete set null;
 create index if not exists rc_actuals_supersedes_idx  on public.rc_actuals (supersedes_id);
 
+/*
+ * What somebody actually did that day, in words.
+ *
+ * The plan says what they were *asked* to do and `note` says what is left or
+ * anything else worth adding; neither says what the day was spent on — and on
+ * a day with nothing planned there was nowhere to write it at all, so the
+ * meeting heard it and the record kept a status against a blank. It is typed
+ * in the huddle (the meeting and the table alike), starts from the plan's own
+ * words, and is corrected like everything else here: a new row superseding the
+ * old one. Added after the table, so an existing project gets it too.
+ */
+alter table public.rc_actuals add column if not exists task text;
+
 -- What is true now: every outcome nobody has corrected. Readers and reports
 -- come through here, never the table — a corrected outcome counted twice is a
 -- completion rate that is quietly wrong.
@@ -1879,6 +1892,7 @@ $$;
 -- The parameter list grew (`p_supersedes`), and `create or replace` cannot
 -- change one, so the old shape is dropped first.
 drop function if exists public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text);
+drop function if exists public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid);
 create or replace function public.rc_record_actual(
   p_client_uuid uuid,
   p_person      uuid,
@@ -1894,7 +1908,9 @@ create or replace function public.rc_record_actual(
   p_shift       text default 'day',
   p_lookahead_row uuid default null,
   p_evidence    text default null,
-  p_supersedes  uuid default null
+  p_supersedes  uuid default null,
+  -- What they actually did, in words. See the column.
+  p_task        text default null
 )
 returns uuid
 language plpgsql
@@ -1950,11 +1966,11 @@ begin
   insert into public.rc_actuals
     (client_uuid, plan_entry_id, person_id, work_date, shift, status, category_id,
      location_id, note, blocked_reason, blocked_party_id, carry_chain_id,
-     lookahead_row_id, evidence_path, supersedes_id, created_by)
+     lookahead_row_id, evidence_path, supersedes_id, created_by, task)
   values
     (p_client_uuid, p_plan_entry, p_person, p_date, p_shift, p_status, p_category,
      p_location, p_note, p_blocked_reason, p_blocked_party, p_carry_chain,
-     p_lookahead_row, p_evidence, p_supersedes, auth.uid())
+     p_lookahead_row, p_evidence, p_supersedes, auth.uid(), nullif(btrim(p_task), ''))
   returning id into new_id;
 
   return new_id;
@@ -2016,7 +2032,7 @@ revoke all on function public.rc_delete_legend(uuid)                    from pub
 revoke all on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) from public, anon;
 revoke all on function public.rc_withdraw_plan(uuid)                    from public, anon;
 revoke all on function public.rc_reassign_plan(uuid, uuid)              from public, anon;
-revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid) from public, anon;
+revoke all on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid, text) from public, anon;
 
 grant execute on function public.rc_me()                                to authenticated;
 grant execute on function public.rc_is_admin()                          to authenticated;
@@ -2035,7 +2051,7 @@ grant execute on function public.rc_delete_legend(uuid)                 to authe
 grant execute on function public.rc_supersede_plan(uuid, uuid, text, uuid, text) to authenticated;
 grant execute on function public.rc_withdraw_plan(uuid)                 to authenticated;
 grant execute on function public.rc_reassign_plan(uuid, uuid)           to authenticated;
-grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid) to authenticated;
+grant execute on function public.rc_record_actual(uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid, text) to authenticated;
 
 do $$
 declare t text;

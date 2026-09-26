@@ -776,6 +776,7 @@ function fakeSdk() {
               category_id: args.p_category,
               location_id: args.p_location,
               note: args.p_note || null,
+              task: args.p_task || null,
               blocked_reason: args.p_blocked_reason,
               blocked_party_id: args.p_blocked_party,
               carry_chain_id: args.p_carry_chain,
@@ -2480,10 +2481,25 @@ async function main() {
 
   const before3 = await page.evaluate(() => window.__rc.rows.rc_actuals.length);
   const inFocus = await page.locator('#rc-frame .rc-present-who').innerText();
+
+  /* What they did and what kind of work it was, typed in the room as they say
+     it, and recorded with the status pressed next. */
+  check('the room can say what somebody did and what kind of work it was',
+    (await page.locator('#rc-frame .rc-present .rc-work-task').count()) === 1
+      && (await page.locator('#rc-frame .rc-present .rc-work-cat').count()) === 1);
+  await page.locator('#rc-frame .rc-present .rc-work-task').fill('Witnessed the IXL test instead');
+  const roomCat = await page.locator('#rc-frame .rc-present .rc-work-cat option').nth(2).getAttribute('value');
+  await page.locator('#rc-frame .rc-present .rc-work-cat').selectOption(roomCat);
   await page.locator('#rc-frame .rc-present').press('c');
   await page.waitForTimeout(600);
   check('a status letter records it here too, through the same path',
     await page.evaluate((n) => window.__rc.rows.rc_actuals.length === n + 1, before3));
+  const roomRow = await page.evaluate(() => window.__rc.rows.rc_actuals.slice(-1)[0]);
+  check('with what they did and its category',
+    roomRow.task === 'Witnessed the IXL test instead' && roomRow.category_id === roomCat,
+    `${roomRow.task} · ${roomRow.category_id}`);
+  check('and the room shows it back', /Witnessed the IXL test instead/.test(
+    await page.locator('#rc-frame .rc-present').innerText()));
 
   /* ── Recorded is not final ────────────────────────────────────────────
      Pressing "completed" used to be the end of it: the buttons went away and
@@ -2550,6 +2566,51 @@ async function main() {
   check('which brings the buttons and the note back in the cell',
     (await editRow.locator('button[aria-pressed="true"]').count()) === 1
       && (await editRow.locator('.rc-notes-box').count()) === 1);
+
+  /* The task and the category are editable in the table as well, and an edit is
+     a correction like any other: a new row, the status kept. */
+  const liveOf = (name) => page.evaluate((who) => {
+    const person = window.__rc.rows.rc_people.find((p) => p.name === who);
+    const rows = window.__rc.rows.rc_actuals.filter((a) => a.person_id === person.id);
+    return rows.filter((a) => !rows.some((b) => b.supersedes_id === a.id)).slice(-1)[0];
+  }, name);
+  const beforeEdit = await liveOf(inFocus);
+  await editRow.locator('.rc-work-task').fill('Witnessed the IXL test, then pulled cable');
+  await editRow.locator('.rc-work-task').press('Enter');
+  await page.waitForTimeout(600);
+  let afterEdit = await liveOf(inFocus);
+  check('what somebody did can be corrected from the table',
+    afterEdit.task === 'Witnessed the IXL test, then pulled cable'
+      && afterEdit.supersedes_id === beforeEdit.id && afterEdit.status === beforeEdit.status,
+    `${afterEdit.task} · ${afterEdit.status}`);
+  await editRow.locator('button', { hasText: 'Edit' }).click();
+  await page.waitForTimeout(200);
+  const otherCat = await editRow.locator('.rc-work-cat option').nth(1).getAttribute('value');
+  await editRow.locator('.rc-work-cat').selectOption(otherCat);
+  await page.waitForTimeout(600);
+  afterEdit = await liveOf(inFocus);
+  check('and so can its category, the moment it is picked',
+    afterEdit.category_id === otherCat && afterEdit.task === 'Witnessed the IXL test, then pulled cable');
+
+  /* Somebody with nothing planned: the day is written in, categorised and
+     recorded in one go, rather than a status against a blank. */
+  const unplanned = page.locator('#rc-frame tbody tr', { has: page.locator('input[placeholder^="Nothing was planned"]') });
+  console.log(`    (${await unplanned.count()} row(s) with nothing planned on this day)`);
+  if (await unplanned.count()) {
+    const row = unplanned.first();
+    const name = (await row.locator('td').first().innerText()).split('\n')[0];
+    await row.locator('.rc-work-task').fill('Office — wrote up the SAT report');
+    const officeCat = await row.locator('.rc-work-cat option', { hasText: 'Office' }).getAttribute('value');
+    await row.locator('.rc-work-cat').selectOption(officeCat);
+    await row.locator('button', { hasText: 'Completed' }).click();
+    await page.waitForTimeout(600);
+    const said = await liveOf(name);
+    check('a day with nothing planned can be written in and categorised',
+      said?.task === 'Office — wrote up the SAT report' && said?.category_id === officeCat,
+      `${name}: ${said?.task} · ${said?.category_id}`);
+  } else {
+    check('a day with nothing planned can be written in and categorised', false, 'no unplanned row to try it on');
+  }
 
   /* ── What is still in the way ─────────────────────────────────────────
      A blocked outcome said a day was lost and stopped there. These stay above

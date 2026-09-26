@@ -846,7 +846,7 @@ export const recordActual = ({
   categoryId = null, locationId = null, note = null,
   blockedReason = null, blockedPartyId = null,
   carryChainId = null, planEntryId = null, shift = 'day',
-  lookaheadRowId = null, evidencePath = null, supersedesId = null,
+  lookaheadRowId = null, evidencePath = null, supersedesId = null, task = null,
 }) =>
   rpc('rc_record_actual', {
     p_client_uuid: clientUuid,
@@ -866,6 +866,9 @@ export const recordActual = ({
     // The outcome this one corrects. The function refuses a row that has
     // already been corrected, so two edits of one outcome cannot both land.
     p_supersedes: supersedesId,
+    // What they actually did, in words — the one statement of the work on a day
+    // with nothing planned.
+    p_task: task,
   });
 
 export const resolveLocation = (raw) => rpc('rc_resolve_location', { p_raw: raw });

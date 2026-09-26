@@ -599,6 +599,21 @@ subscribes. That is what keeps the graph acyclic.
   did not upload would be the wrong way round. `evidence` is its own bucket,
   readable by anybody signed in: a picture only its author can open is not
   evidence of anything.
+- **An outcome says what the day was spent on, and what kind of work it was.**
+  `rc_actuals.task` is what somebody actually did, in words — distinct from the
+  plan (what they were asked) and from `note` (what is left, anything else) —
+  and `category_id` is what the reports group it by. On a day with nothing
+  planned the task is the only statement of the work there is, which is why it
+  exists: the meeting heard it and the record used to keep a status against a
+  blank. `workFields()` in `ui/rc_huddle.js` draws both, in the room and in the
+  table alike, pre-filled from the plan so the common case is no typing. Before
+  an outcome is recorded they are a draft that `commitOutcome()` reads through
+  `ctx.drafts` when a status is pressed (`workOf()`); afterwards Enter in the
+  box, a new category or Save writes a **correction** with the status kept —
+  never on blur, because the status buttons sit beside the fields and a
+  correction written on the way to pressing one would be corrected again at
+  once, which `rc_record_actual()` refuses. The function takes it as `p_task`,
+  the sixteenth argument; the fifteen-argument signature is dropped above it.
 - **Who said it and who typed it are different facts.** Most days somebody
   speaks and somebody else enters it, and an outcome attributed to whoever
   typed it is how a record stops being trusted. `outcomeDetail()` shows
@@ -1479,13 +1494,13 @@ node tools/test_lookahead.js         # 195 checks — the parser, the rows it de
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
 node tools/smoke.js                  # 294 checks — the application, local mode
-node tools/smoke_calendar.js         # 325 checks — the resource calendar, accounts, the
+node tools/smoke_calendar.js         # 331 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 315 checks — both permission models, and that
+node tools/test_sql.js               # 318 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result

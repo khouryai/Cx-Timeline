@@ -36,3 +36,7 @@ drop function if exists public.rc_record_actual(
   uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text);
 drop function if exists public.rc_record_actual(
   uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid);
+drop function if exists public.rc_record_actual(
+  uuid, uuid, date, text, uuid, uuid, text, text, uuid, uuid, uuid, text, uuid, text, uuid, text);
+-- An outcome said nothing of what the day was spent on, in an older project.
+alter table public.rc_actuals drop column if exists task;

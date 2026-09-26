@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 58   Built: 2026-09-26T05:11:09.243Z
+ * Modules: 58   Built: 2026-09-26T05:17:02.710Z
  */
 (function () {
   'use strict';
@@ -16548,7 +16548,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     categoryId = null, locationId = null, note = null,
     blockedReason = null, blockedPartyId = null,
     carryChainId = null, planEntryId = null, shift = 'day',
-    lookaheadRowId = null, evidencePath = null, supersedesId = null,
+    lookaheadRowId = null, evidencePath = null, supersedesId = null, task = null,
   }) =>
     rpc('rc_record_actual', {
       p_client_uuid: clientUuid,
@@ -16568,6 +16568,9 @@ __mods["core/rc.js"] = function (__x, __req) {
       // The outcome this one corrects. The function refuses a row that has
       // already been corrected, so two edits of one outcome cannot both land.
       p_supersedes: supersedesId,
+      // What they actually did, in words — the one statement of the work on a day
+      // with nothing planned.
+      p_task: task,
     });
 
   const resolveLocation = (raw) => rpc('rc_resolve_location', { p_raw: raw });
@@ -34300,6 +34303,9 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const ctx = {
       people, review, plan, planFor, plannedOn, absentOn, actualByPerson, cats, locs,
       categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
+      // What is typed in each person's "what they did" fields, read when a status
+      // is pressed — see `workFields()`.
+      drafts: new Map(),
     };
 
     root.appendChild(dateBar(date, review, plan, root, ctx));
@@ -34614,16 +34620,21 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
          read differently. */
       if (rc.isAdmin() || (person.id === rc.me()?.id && rc.canWrite())) {
         const redrawRoom = () => { clear(root); render(root); };
+        answer.appendChild(workFields({
+          ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw: redrawRoom,
+        }));
         answer.appendChild(statusButtons(ctx, person, review, wasPlanned, redrawRoom, actual));
         answer.appendChild(notesBox({
           ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw: redrawRoom,
         }));
       }
-    } else {
-      answer.appendChild(statusButtons(ctx, person, review, wasPlanned, () => {
-        clear(root);
-        render(root);
-      }));
+    } else if (rc.isAdmin() || (person.id === rc.me()?.id && rc.canWrite())) {
+      const redrawRoom = () => { clear(root); render(root); };
+      /* What they did and what kind of work it was, typed as they say it — and on
+         a day with nothing planned, the only statement of the work there is. The
+         status pressed next records it with the outcome. */
+      answer.appendChild(workFields({ ctx, person, date: review, plannedEntry: wasPlanned, redraw: redrawRoom }));
+      answer.appendChild(statusButtons(ctx, person, review, wasPlanned, redrawRoom));
     }
     wrap.appendChild(answer);
 
@@ -34694,7 +34705,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
         continue;
       }
       const status = STATUS_BY_ID.get(actual.status);
-      const said = [actual.blocked_reason, actual.note].filter(Boolean).join(' — ');
+      const said = [actual.task, actual.blocked_reason, actual.note].filter(Boolean).join(' — ');
       const where = locs.get(actual.location_id)?.name;
       lines.push(`  ${bullet[actual.status] || '·'} ${person.name} — ${status?.label || actual.status}`
         + `${where ? ` at ${where}` : ''}${said ? `: ${said}` : ''}`);
@@ -34970,6 +34981,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           title: 'Change the status or the note. The first answer stays on the record.',
           onClick: () => {
             clear(cell);
+            cell.appendChild(workFields({ ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw }));
             cell.appendChild(statusButtons(ctx, person, review, wasPlanned, redraw, actual));
             cell.appendChild(notesBox({ ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw }));
           },
@@ -34977,7 +34989,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       }
       row.appendChild(cell);
     } else if (admin || mine) {
-      row.appendChild(el('td', outcome, [statusButtons(ctx, person, review, wasPlanned, redraw)]));
+      row.appendChild(el('td', outcome, [
+        workFields({ ctx, person, date: review, plannedEntry: wasPlanned, redraw }),
+        statusButtons(ctx, person, review, wasPlanned, redraw),
+      ]));
     } else {
       row.appendChild(el('td', outcome, [el('span', { class: 'rc-hint', text: '—' })]));
     }
@@ -35036,6 +35051,9 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
    */
   function outcomeDetail(actual, ctx, person) {
     const out = [];
+    if (actual.task) out.push(el('div', { class: 'rc-outcome-task', text: actual.task }));
+    const category = ctx.cats?.get(actual.category_id)?.name;
+    if (category) out.push(el('div', { class: 'rc-hint rc-outcome-cat', text: category }));
     if (actual.blocked_reason) out.push(el('div', { class: 'rc-hint', text: actual.blocked_reason }));
     if (actual.note) out.push(el('div', { class: 'rc-hint', text: actual.note }));
 
@@ -35062,6 +35080,96 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     // A changed answer says so. The first one is still on the record underneath.
     if (actual.supersedes_id) out.push(el('div', { class: 'rc-hint', text: 'corrected' }));
     return out;
+  }
+
+  /**
+   * What somebody did that day, and what kind of work it was — typed in the room.
+   *
+   * The plan says what they were asked to do; this is what the day was actually
+   * spent on, and on a day with nothing planned it is the only statement of the
+   * work there is. It starts from the plan's own words and category, so the
+   * common case is no typing at all, and the category is what the reports group
+   * the outcome under.
+   *
+   * Before an outcome is recorded the fields are a draft: `commitOutcome()` reads
+   * them (through `ctx.drafts`) when a status is pressed, so pressing "Completed"
+   * records the words and the category with it. After, they edit what was said —
+   * Enter in the box, a new category, or Save writes a correction, the same
+   * superseding row every other change to an outcome is. Not on leaving the box:
+   * the status buttons sit beside it, and a correction written on the way to
+   * pressing one would be corrected again a moment later, which the database
+   * rightly refuses.
+   */
+  function workFields({ ctx, person, date, plannedEntry, current = null, redraw }) {
+    const selected = current ? (current.category_id || '') : (plannedEntry?.category_id || '');
+    const task = textInput({
+      value: current ? (current.task ?? plannedEntry?.task ?? '') : (plannedEntry?.task || ''),
+      placeholder: plannedEntry ? 'What they did' : 'Nothing was planned — what did they do?',
+    });
+    task.setAttribute('aria-label', `What ${person.name} did`);
+    task.classList.add('rc-work-task');
+    const category = selectInput({
+      value: selected,
+      placeholder: 'Category…',
+      options: (ctx.categories || [])
+        .filter((c) => c.active !== false || c.id === selected)
+        .map((c) => ({ value: c.id, label: c.name })),
+    });
+    category.setAttribute('aria-label', `What kind of work ${person.name} did`);
+    category.classList.add('rc-work-cat');
+
+    // Nothing once the row has been redrawn without these fields: a draft left in
+    // the map must never speak for a box that is no longer on screen.
+    const read = () => (task.isConnected
+      ? { task: task.value.trim() || null, categoryId: category.value || null }
+      : null);
+    ctx.drafts?.set(person.id, read);
+
+    const wrap = el('div', { class: 'rc-work' }, [
+      el('span', { class: 'rc-eyebrow', text: 'What they did' }),
+      task,
+      category,
+    ]);
+
+    if (current) {
+      const save = () => {
+        const next = read();
+        if (!next) return;
+        if (next.task === (current.task || null) && next.categoryId === (current.category_id || null)) return;
+        commitOutcome({
+          ctx, person, date, plannedEntry, redraw,
+          status: STATUS_BY_ID.get(current.status),
+          note: current.note || null,
+          supersedes: current,
+        });
+      };
+      task.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        event.stopPropagation();
+        save();
+      });
+      category.addEventListener('change', save);
+      wrap.appendChild(el('button', { class: 'cx-btn mini', text: 'Save', onClick: save }));
+    } else {
+      // Enter here is not "next person" or "record": a status has not been chosen.
+      task.addEventListener('keydown', (event) => { if (event.key === 'Enter') event.preventDefault(); });
+    }
+    return wrap;
+  }
+
+  /**
+   * The words and category an outcome is recorded with: what is typed in its
+   * fields where they are on screen, and otherwise what the outcome being
+   * corrected said, then what the plan said.
+   */
+  function workOf(ctx, person, plannedEntry, supersedes) {
+    const draft = ctx.drafts?.get(person.id)?.();
+    if (draft) return draft;
+    return {
+      task: supersedes?.task ?? null,
+      categoryId: supersedes?.category_id || plannedEntry?.category_id || null,
+    };
   }
 
   /**
@@ -35282,13 +35390,15 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
        without. The photograph carries over inside the function itself, so a
        replayed queue entry keeps it too. */
     const keep = supersedes && supersedes.status === status.id ? supersedes : null;
+    const work = workOf(ctx, person, plannedEntry, supersedes);
     const { sent, error } = await record({
       clientUuid,
       personId: person.id,
       date,
       status: status.id,
       note,
-      categoryId: plannedEntry?.category_id || supersedes?.category_id || null,
+      task: work.task,
+      categoryId: work.categoryId,
       locationId: plannedEntry?.location_id || supersedes?.location_id || null,
       planEntryId: plannedEntry?.id || supersedes?.plan_entry_id || null,
       carryChainId: chainId,
@@ -35459,7 +35569,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           personId: person.id,
           date,
           status: 'blocked',
-          categoryId: plannedEntry?.category_id || null,
+          ...(() => {
+            const work = workOf(ctx, person, plannedEntry, current);
+            return { task: work.task, categoryId: work.categoryId };
+          })(),
           locationId: plannedEntry?.location_id || null,
           planEntryId: plannedEntry?.id || null,
           blockedReason: reason.value.trim(),
@@ -40448,7 +40561,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
 
     return el('div', { class: 'rc-section' }, [
       el('div', { class: 'rc-scroll' }, [
-        el('table', { class: 'rc-table' }, [
+        el('table', { class: 'rc-table rc-report' }, [
           el('thead', {}, [
             el('tr', {}, [
               el('th', { text: groupBy[0].toUpperCase() + groupBy.slice(1) }),
@@ -40482,7 +40595,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
     }
 
     section.appendChild(el('div', { class: 'rc-scroll' }, [
-      el('table', { class: 'rc-table' }, [
+      el('table', { class: 'rc-table rc-report' }, [
         el('thead', {}, [el('tr', {}, [
           el('th', { text: 'Person' }), el('th', { text: 'First seen' }),
           el('th', { text: 'Days old' }), el('th', { text: 'Times carried' }),

@@ -1395,5 +1395,28 @@ select refuses(:'alice',
   'deleting the only administrator left');
 select public.rc_set_role(:'p_bob', 'admin');
 
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'What somebody did, in words'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+select act_as(:'alice');
+
+-- What they did, in words — on a day with nothing planned it is the only
+-- statement of the work there is — and a correction can change it.
+select public.rc_record_actual(
+  '23232323-2323-2323-2323-232323232323'::uuid, :'p_dan', date '2026-12-02',
+  'completed', :'cat_field', null, null, null, null, null, null, 'day', null, null, null,
+  'Pulled cable at the north end') as act_task \gset
+select assert((select task from public.rc_actuals where id = :'act_task') = 'Pulled cable at the north end',
+  'an outcome says what somebody actually did');
+select public.rc_record_actual(
+  '24242424-2424-2424-2424-242424242424'::uuid, :'p_dan', date '2026-12-02',
+  'completed', null, null, null, null, null, null, null, 'day', null, null, :'act_task',
+  'Terminated cable at the north end') as act_task2 \gset
+select assert((select task from public.rc_actuals_current where person_id = :'p_dan' and work_date = date '2026-12-02')
+  = 'Terminated cable at the north end', 'and correcting it is a new row the readers see');
+select assert((select task from public.rc_actuals where id = :'act_task') = 'Pulled cable at the north end',
+  'while the first answer stays underneath');
+
 reset role;
 do $$ begin raise notice ''; raise notice 'All resource calendar checks passed.'; end $$;
