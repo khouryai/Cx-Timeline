@@ -13,6 +13,9 @@
 
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
+import { pinClock, pinNodeClock } from './lib/clock.js';
+
+pinNodeClock();
 import { buildLookaheadWorkbook } from './fixtures/xlsx_fixture.js';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -60,7 +63,7 @@ function check(name, ok, detail = '') {
 async function main() {
   const server = await serve();
   const browser = await chromium.launch(launchOptions());
-  const context = await browser.newContext({ viewport: { width: 1600, height: 950 } });
+  const context = pinClock(await browser.newContext({ viewport: { width: 1600, height: 950 } }));
   const page = await context.newPage();
 
   const consoleErrors = [];

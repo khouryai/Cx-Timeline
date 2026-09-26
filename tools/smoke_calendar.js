@@ -27,6 +27,9 @@
 
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
+import { pinClock, pinNodeClock } from './lib/clock.js';
+
+pinNodeClock();
 import { buildLookaheadWorkbook } from './fixtures/xlsx_fixture.js';
 import path from 'node:path';
 import url from 'node:url';
@@ -1003,7 +1006,7 @@ const PLAN_WORDS = ['Signalling', 'Commissioning', 'ATS Integration', 'IXL Stati
 
 async function main() {
   const browser = await chromium.launch(launchOptions());
-  const context = await browser.newContext({ viewport: { width: 1500, height: 920 } });
+  const context = pinClock(await browser.newContext({ viewport: { width: 1500, height: 920 } }));
   const page = await context.newPage();
 
   const consoleErrors = [];
@@ -2558,7 +2561,9 @@ async function main() {
       && (await page.locator('#rc-frame .rc-huddle').count()) === 1);
 
   /* The table offers the same edit, in the same cell, through the same path. */
-  const editRow = page.locator('#rc-frame tbody tr', { hasText: inFocus });
+  // By the name in the row's first cell: another person's row can mention this
+  // one anywhere else in it (an owner picker lists everybody).
+  const editRow = page.locator('#rc-frame tbody tr', { has: page.locator('td:first-child', { hasText: inFocus }) });
   check('a recorded outcome in the table can be edited too',
     (await editRow.locator('button', { hasText: 'Edit' }).count()) === 1);
   await editRow.locator('button', { hasText: 'Edit' }).click();

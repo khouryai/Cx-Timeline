@@ -77,13 +77,20 @@ jobs:
       # tools/lib/chrome.js. Only Chromium is used, so only Chromium is fetched.
       - run: npx playwright install --with-deps chromium
 
-      - run: node tools/test_dist.js
-      - run: node tools/test_lookahead.js
-      - run: node tools/smoke.js
-      - run: node tools/smoke_folder.js
-      - run: node tools/smoke_desktop.js
-      - run: node tools/smoke_hosted.js
-      - run: node tools/smoke_calendar.js
+      # Side by side, where two suites do not share a directory — see the lanes
+      # in tools/run_tests.js. The clock is pinned to a Wednesday (tools/lib/clock.js),
+      # so a run on a Sunday is the same run as one on a Tuesday.
+      - name: Every browser and Node suite
+        run: >-
+          node tools/run_tests.js test_dist test_lookahead test_folder_rules
+          smoke smoke_folder smoke_desktop smoke_hosted smoke_calendar
+      # …and the calendar once more on a Monday, the day its date arithmetic has
+      # gone wrong on before: yesterday is a Friday, and the week under review
+      # is not the week on screen.
+      - name: The calendar, on a Monday
+        env:
+          CX_TEST_NOW: '2026-09-21T08:00:00Z'
+        run: node tools/run_tests.js smoke_calendar
 
       # A picture of the failure is worth more than the log when a layout
       # check goes red.
