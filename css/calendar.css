@@ -1006,3 +1006,44 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
    (where it happened, which build) set apart from what happened. */
 .rc-table td.rc-nowrap { white-space: nowrap; }
 .rc-table td.rc-mono { font-family: var(--f-mono); font-size: 12px; color: var(--text-muted); }
+
+/* ── One table behaviour (ui/rc_table.js) ─────────────────────────────── */
+
+/* A long table scrolls inside its frame, so its header can stay in view. The
+   page itself already scrolls vertically; a header made sticky to the page
+   would be caught by the frame's own horizontal scroll and never stick. */
+.rc-scroll.rc-scroll-tall {
+  max-height: min(70vh, 720px);
+  overflow: auto;
+}
+.rc-scroll .rc-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-2);
+}
+.rc-table th.rc-num { text-align: right; }
+.rc-table.rc-report th.rc-num { text-align: center; }
+
+.rc-table th.rc-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+.rc-table th.rc-sortable:hover,
+.rc-table th.rc-sortable:focus-visible { color: var(--text-main); }
+.rc-table th.rc-sortable::after {
+  content: '';
+  display: inline-block;
+  width: 0.9em;
+  margin-left: 4px;
+  opacity: 0.35;
+}
+.rc-table th.rc-sortable:hover::after { content: '↕'; }
+.rc-table th[aria-sort='ascending']::after { content: '↑'; opacity: 1; }
+.rc-table th[aria-sort='descending']::after { content: '↓'; opacity: 1; }
+
+.rc-table-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 6px;
+}

@@ -25,6 +25,7 @@ import * as lookahead from './rc_lookahead.js';
 import * as week from './rc_week.js';
 import * as pto from './rc_pto.js';
 import * as reports from './rc_reports.js';
+import { enhanceTables } from './rc_table.js';
 
 /**
  * The tabs, in the order the work actually happens: run today's meeting, plan
@@ -80,6 +81,19 @@ export function build() {
   headEl = el('div', { class: 'rc-head' });
   bodyEl = el('div', { class: 'rc-body' });
   frame.append(headEl, bodyEl);
+
+  // Every table a tab draws gets the same header, sorting and export — see
+  // ui/rc_table.js. Watched rather than called, because tabs draw in stages
+  // and a table can arrive long after render() has returned.
+  let pendingEnhance = false;
+  new MutationObserver(() => {
+    if (pendingEnhance) return;
+    pendingEnhance = true;
+    queueMicrotask(() => {
+      pendingEnhance = false;
+      enhanceTables(bodyEl);
+    });
+  }).observe(bodyEl, { childList: true, subtree: true });
 
   // A row written anywhere reloads whatever is on screen. There is no document
   // and no diff here, so the cheapest correct thing is to re-read — the

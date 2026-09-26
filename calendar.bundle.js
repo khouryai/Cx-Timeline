@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 15   Built: 2026-09-26T07:03:02.435Z
+ * Modules: 16   Built: 2026-09-26T07:21:07.310Z
  */
 (function () {
   'use strict';
@@ -1883,13 +1883,15 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
       return;
     }
 
-    host.appendChild(table(['When', 'Who', 'Where', 'What happened', 'Version'], rows.map((r) => el('tr', {}, [
-      el('td', { class: 'rc-nowrap', text: new Date(r.created_at).toLocaleString() }),
+    const log = table(['When', 'Who', 'Where', 'What happened', 'Version'], rows.map((r) => el('tr', {}, [
+      el('td', { class: 'rc-nowrap', text: new Date(r.created_at).toLocaleString(), dataset: { sort: r.created_at, csv: r.created_at } }),
       el('td', { text: byAccount.get(r.created_by) || (r.created_by ? 'An account not on the roster' : '—') }),
       el('td', { class: 'rc-mono', text: r.area }),
       el('td', { text: r.message }),
       el('td', { class: 'rc-mono', text: r.app_version || '—', title: r.user_agent || '' }),
-    ]))));
+    ])));
+    log.querySelector('table').dataset.csv = 'calendar-problems';
+    host.appendChild(log);
 
     const clearOlder = async (days, label) => {
       const before = new Date(Date.now() - days * 86400000).toISOString();
@@ -8675,7 +8677,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
 
     return el('div', { class: 'rc-section' }, [
       el('div', { class: 'rc-scroll' }, [
-        el('table', { class: 'rc-table rc-report' }, [
+        el('table', { class: 'rc-table rc-report', dataset: { csv: `outcomes-by-${groupBy}` } }, [
           el('thead', {}, [
             el('tr', {}, [
               el('th', { text: groupBy[0].toUpperCase() + groupBy.slice(1) }),
@@ -8709,7 +8711,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
     }
 
     section.appendChild(el('div', { class: 'rc-scroll' }, [
-      el('table', { class: 'rc-table rc-report' }, [
+      el('table', { class: 'rc-table rc-report', dataset: { csv: 'still-carrying' } }, [
         el('thead', {}, [el('tr', {}, [
           el('th', { text: 'Person' }), el('th', { text: 'First seen' }),
           el('th', { text: 'Days old' }), el('th', { text: 'Times carried' }),
@@ -8838,6 +8840,150 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
   Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
 };
 
+// ui/rc_table.js
+__mods["ui/rc_table.js"] = function (__x, __req) {
+  /**
+   * One behaviour for every table in the calendar.
+   *
+   * Fifteen tables were built in eight modules, and each behaved slightly
+   * differently: some numbers right-aligned under left-aligned headings, none
+   * could be sorted, and the header scrolled away on a long list so a column of
+   * figures was a column of figures with no name. Rather than a sixteenth way of
+   * building a table, this takes the ones that exist as they are drawn and gives
+   * each the same three things:
+   *
+   *   · the header stays in view while the rows scroll under it;
+   *   · a click on a heading sorts by that column — numbers as numbers, blanks
+   *     last, a second click reverses — and `aria-sort` says which;
+   *   · a table marked `data-csv="<name>"` carries an Export CSV button, and the
+   *     file holds exactly the rows on screen, in the order on screen.
+   *
+   * `ui/rc.js` runs it over whatever a tab draws, so a new table gets it without
+   * asking. Grids whose position *is* the meaning — the look-ahead, PTO, the
+   * week plan, the huddle — are left alone, and so is any table with a spanning
+   * cell, where a row is not a record and sorting would tear it apart.
+   *
+   * Imports: util, icons, exporters.
+   */
+
+  const { el } = __req("core/util.js");
+  const { icon } = __req("ui/icons.js");
+  const { saveFile } = __req("io/exporters.js");
+
+  /** Tables drawn as a grid, where reordering rows would change what they say. */
+  const POSITIONAL = ['la-grid', 'rc-pto-grid', 'rc-huddle', 'rc-resources'];
+
+  /** Taller than this and the frame scrolls on its own, so the header can stay. */
+  const TALL_ROWS = 14;
+
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+  /** Enhance every eligible table under `root`. Safe to call repeatedly. */
+  function enhanceTables(root) {
+    for (const table of root.querySelectorAll('table.rc-table:not([data-enhanced])')) {
+      enhanceTable(table);
+    }
+  }
+
+  function enhanceTable(table) {
+    table.dataset.enhanced = '1';
+    if (POSITIONAL.some((c) => table.classList.contains(c)) || table.dataset.plain != null) return;
+
+    const head = table.tHead?.rows[0];
+    const body = table.tBodies[0];
+    if (!head || !body) return;
+    const spans = body.querySelector('td[colspan], td[rowspan], th[colspan], th[rowspan]');
+
+    // A heading sits over its figures: where every cell in a column is a number,
+    // the heading takes the numbers' alignment rather than floating over the gap
+    // between two columns.
+    [...head.cells].forEach((th, index) => {
+      const cells = [...body.rows].map((r) => r.cells[index]).filter(Boolean);
+      if (cells.length && cells.every((c) => c.classList.contains('rc-num'))) th.classList.add('rc-num');
+    });
+
+    const frame = table.closest('.rc-scroll');
+    if (frame && body.rows.length > TALL_ROWS) frame.classList.add('rc-scroll-tall');
+
+    if (!spans && body.rows.length > 1) {
+      [...head.cells].forEach((th, index) => {
+        if (!th.textContent.trim()) return;
+        th.classList.add('rc-sortable');
+        th.tabIndex = 0;
+        th.setAttribute('aria-sort', 'none');
+        th.title = 'Sort by this column';
+        const sort = () => sortBy(table, index);
+        th.addEventListener('click', sort);
+        th.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            sort();
+          }
+        });
+      });
+    }
+
+    if (table.dataset.csv && body.rows.length) {
+      const button = el('button', {
+        class: 'cx-btn mini ghost rc-table-csv',
+        type: 'button',
+        html: icon('download', { size: 12 }) + '<span>Export CSV</span>',
+        title: 'Download these rows, in this order',
+        onClick: () => exportCsv(table),
+      });
+      (frame || table).before(el('div', { class: 'rc-table-tools' }, [button]));
+    }
+  }
+
+  /** What a cell sorts by: `data-sort` if the builder gave one, else its words. */
+  function keyOf(cell) {
+    if (!cell) return '';
+    if (cell.dataset.sort != null) return cell.dataset.sort;
+    const text = cell.textContent.trim();
+    return text === '—' ? '' : text;
+  }
+
+  function sortBy(table, index) {
+    const th = table.tHead.rows[0].cells[index];
+    const ascending = th.getAttribute('aria-sort') !== 'ascending';
+    for (const other of table.tHead.rows[0].cells) {
+      if (other.classList.contains('rc-sortable')) other.setAttribute('aria-sort', 'none');
+    }
+    th.setAttribute('aria-sort', ascending ? 'ascending' : 'descending');
+
+    const body = table.tBodies[0];
+    const rows = [...body.rows];
+    rows.sort((a, b) => {
+      const x = keyOf(a.cells[index]);
+      const y = keyOf(b.cells[index]);
+      // Blanks last whichever way round — an empty cell is not the smallest value.
+      if (!x || !y) return (!x) - (!y);
+      const cmp = collator.compare(x, y);
+      return ascending ? cmp : -cmp;
+    });
+    body.append(...rows);
+  }
+
+  function csvCell(value) {
+    const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
+  function exportCsv(table) {
+    const lines = [];
+    lines.push([...table.tHead.rows[0].cells].map((c) => csvCell(c.textContent)).join(','));
+    for (const row of table.tBodies[0].rows) {
+      lines.push([...row.cells].map((c) => csvCell(c.dataset.csv ?? c.textContent)).join(','));
+    }
+    const stamp = new Date().toISOString().slice(0, 10);
+    const name = String(table.dataset.csv).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    saveFile(`${name}-${stamp}.csv`, lines.join('\r\n') + '\r\n', 'text/csv', 'Table');
+  }
+
+  Object.defineProperty(__x, "enhanceTables", { get: () => enhanceTables, enumerable: true });
+  Object.defineProperty(__x, "enhanceTable", { get: () => enhanceTable, enumerable: true });
+};
+
 // ui/rc.js
 __mods["ui/rc.js"] = function (__x, __req) {
   /**
@@ -8867,6 +9013,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
   const week = __req("ui/rc_week.js");
   const pto = __req("ui/rc_pto.js");
   const reports = __req("ui/rc_reports.js");
+  const { enhanceTables } = __req("ui/rc_table.js");
 
   /**
    * The tabs, in the order the work actually happens: run today's meeting, plan
@@ -8922,6 +9069,19 @@ __mods["ui/rc.js"] = function (__x, __req) {
     headEl = el('div', { class: 'rc-head' });
     bodyEl = el('div', { class: 'rc-body' });
     frame.append(headEl, bodyEl);
+
+    // Every table a tab draws gets the same header, sorting and export — see
+    // ui/rc_table.js. Watched rather than called, because tabs draw in stages
+    // and a table can arrive long after render() has returned.
+    let pendingEnhance = false;
+    new MutationObserver(() => {
+      if (pendingEnhance) return;
+      pendingEnhance = true;
+      queueMicrotask(() => {
+        pendingEnhance = false;
+        enhanceTables(bodyEl);
+      });
+    }).observe(bodyEl, { childList: true, subtree: true });
 
     // A row written anywhere reloads whatever is on screen. There is no document
     // and no diff here, so the cheapest correct thing is to re-read — the

@@ -2884,6 +2884,33 @@ async function main() {
   check('and it says why they are never averaged together',
     /flatter or damn the wrong party/.test(repText));
 
+  /* ── One table behaviour ──────────────────────────────────────────────
+     Every table the calendar draws gets the same header, the same sorting and
+     — where the builder asks — the same export, from ui/rc_table.js. */
+  const report = page.locator('#rc-frame table.rc-report').first();
+  const heads = report.locator('thead th.rc-sortable');
+  check('a report table\'s headings sort it', (await heads.count()) >= 5, `${await heads.count()} sortable`);
+  const firstColumn = () => report.locator('tbody tr td:first-child').allInnerTexts();
+  const unsorted = await firstColumn();
+  await heads.first().click();
+  await page.waitForTimeout(100);
+  const ascending = await firstColumn();
+  await heads.first().click();
+  await page.waitForTimeout(100);
+  const descending = await firstColumn();
+  check('a click sorts by that column, and a second reverses it',
+    JSON.stringify(ascending) === JSON.stringify([...unsorted].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })))
+      && JSON.stringify(descending) === JSON.stringify([...ascending].reverse())
+      && (await heads.first().getAttribute('aria-sort')) === 'descending',
+    `${ascending.join(', ')} ↔ ${descending.join(', ')}`);
+  check('a heading over figures sits over them',
+    (await report.locator('thead th.rc-num').count()) >= 5);
+  await page.locator('#rc-frame .rc-table-csv').first().click();
+  await page.waitForTimeout(300);
+  const csvSaved = await page.evaluate(() => window.__saved?.name || '');
+  check('and a report can be taken out as CSV, as it stands on screen',
+    /^outcomes-by-[a-z]+-\d{4}-\d{2}-\d{2}\.csv$/.test(csvSaved), csvSaved);
+
   /* ══════════════════════════════════════════════════════════════════════
      The boundary
      ═══════════════════════════════════════════════════════════════════ */

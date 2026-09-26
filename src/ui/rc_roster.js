@@ -883,13 +883,15 @@ async function renderProblems(host) {
     return;
   }
 
-  host.appendChild(table(['When', 'Who', 'Where', 'What happened', 'Version'], rows.map((r) => el('tr', {}, [
-    el('td', { class: 'rc-nowrap', text: new Date(r.created_at).toLocaleString() }),
+  const log = table(['When', 'Who', 'Where', 'What happened', 'Version'], rows.map((r) => el('tr', {}, [
+    el('td', { class: 'rc-nowrap', text: new Date(r.created_at).toLocaleString(), dataset: { sort: r.created_at, csv: r.created_at } }),
     el('td', { text: byAccount.get(r.created_by) || (r.created_by ? 'An account not on the roster' : '—') }),
     el('td', { class: 'rc-mono', text: r.area }),
     el('td', { text: r.message }),
     el('td', { class: 'rc-mono', text: r.app_version || '—', title: r.user_agent || '' }),
-  ]))));
+  ])));
+  log.querySelector('table').dataset.csv = 'calendar-problems';
+  host.appendChild(log);
 
   const clearOlder = async (days, label) => {
     const before = new Date(Date.now() - days * 86400000).toISOString();
