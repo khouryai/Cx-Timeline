@@ -1924,6 +1924,13 @@ async function main() {
   check('and it says so rather than naming a meaning',
     /unmapped colour/.test(
       await page.locator('#rc-frame .la-grid td.la-unmapped').first().getAttribute('title')));
+  /* Red on its own is a fact only somebody who can tell red from green can
+     read, so a cancelled day is struck through as well. */
+  const cancelledCell = page.locator('#rc-frame .la-grid td.la-cancel');
+  check('a cancelled day is marked by more than its colour',
+    (await cancelledCell.count()) >= 1
+      && /Cancellation/.test(await cancelledCell.first().getAttribute('title'))
+      && (await cancelledCell.first().evaluate((n) => getComputedStyle(n).backgroundImage)).includes('gradient'));
 
   /* Most of the sheet is activities carried for reference with nothing
      scheduled against them. They are hidden by default, and the switch is what

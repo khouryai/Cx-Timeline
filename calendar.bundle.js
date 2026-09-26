@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 16   Built: 2026-09-26T07:39:08.679Z
+ * Modules: 16   Built: 2026-09-26T07:45:58.264Z
  */
 (function () {
   'use strict';
@@ -5916,7 +5916,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
   const { calendarPdf, calendarFit, PAGE_CHOICES } = __req("io/rc_pdf.js");
   const { saveFile } = __req("io/exporters.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes } = __req("core/lookahead.js");
+  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes, isCancelMeaning } = __req("core/lookahead.js");
 
 
 
@@ -6406,10 +6406,14 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
           classes.push('la-painted');
           if (isDark(mark.hex)) classes.push('la-dark');
           if (!mark.meaning) classes.push('la-unmapped');
+          // Struck through as well as red: a cancellation must not be a fact
+          // only somebody who can tell red from green can read. Never on a
+          // Resource row — red there marks names, not the work.
+          else if (!resource && isCancelMeaning(mark.meaning)) classes.push('la-cancel');
         }
         return el('td', {
           class: classes.join(' '),
-          style: mark?.hex ? `background:#${mark.hex}` : '',
+          style: mark?.hex ? `background-color:#${mark.hex}` : '',
           text: mark?.value || '',
           title: [what, d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
             mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value]

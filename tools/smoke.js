@@ -1867,6 +1867,16 @@ async function main() {
   }
 
   console.log('\nDock panes');
+  /* An icon-only button with no label is a button a screen reader announces
+     as "button". Checked across every pane and the chrome around it. */
+  const namelessControls = () => [...document.querySelectorAll('button, [role=button], a[href]')]
+    .filter((b) => {
+      const r = b.getBoundingClientRect();
+      if (!r.width || !r.height) return false;
+      return !(b.getAttribute('aria-label') || b.textContent || b.getAttribute('title') || '').trim();
+    })
+    .map((b) => b.outerHTML.slice(0, 120));
+  const unnamed = [];
   const panes = ['lookahead', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links', 'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists', 'settings'];
   for (const pane of panes) {
     const errorsBefore = consoleErrors.length;
@@ -1874,7 +1884,15 @@ async function main() {
     await page.waitForTimeout(220);
     const content = await page.locator('#dock .pane-scroll').innerHTML();
     check(`pane "${pane}" renders`, content.length > 40 && consoleErrors.length === errorsBefore);
+    unnamed.push(...(await page.evaluate(namelessControls)).map((html) => `${pane}: ${html}`));
   }
+  check('every control on screen has a name a screen reader can say', unnamed.length === 0,
+    unnamed.slice(0, 3).join(' | '));
+  check('notifications are announced: their host is a live region that is already there',
+    await page.evaluate(() => document.getElementById('cx-toasts')?.getAttribute('aria-live') === 'polite'));
+  check('and the status bar\'s shortcuts are buttons to a keyboard too',
+    await page.evaluate(() => [...document.querySelectorAll('#statusbar .sb-item.clickable')]
+      .every((n) => n.getAttribute('role') === 'button' && n.tabIndex === 0)));
 
   /* ── The command menu, and folding the sidebar ──────────────────────
      Everything is one keystroke and a word away, and every entry is a command

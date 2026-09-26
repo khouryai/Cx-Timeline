@@ -548,7 +548,11 @@ function buildStatusbar() {
 
   dom.saveDot = el('span', { class: 'sb-dot' });
   dom.saveText = el('span', { text: 'Saved' });
-  dom.statusbar.appendChild(el('span', { class: 'sb-item', title: 'Autosave status' }, [dom.saveDot, dom.saveText]));
+  // Announced when it changes — "Saving", "Saved", "Not saved" — and only this
+  // item: the rest of the bar follows the pointer and would never stop talking.
+  dom.statusbar.appendChild(el('span', {
+    class: 'sb-item', title: 'Autosave status', 'aria-live': 'polite', 'aria-atomic': 'true',
+  }, [dom.saveDot, dom.saveText]));
 
   dom.countText = el('span', { class: 'sb-item' });
   dom.statusbar.appendChild(dom.countText);
@@ -588,6 +592,18 @@ function buildStatusbar() {
     onClick: () => showPane('settings'),
   });
   dom.statusbar.appendChild(dom.storageText);
+
+  // The clickable items are buttons to a keyboard as well as a pointer.
+  for (const item of dom.statusbar.querySelectorAll('.sb-item.clickable')) {
+    item.setAttribute('role', 'button');
+    item.tabIndex = 0;
+    item.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        item.click();
+      }
+    });
+  }
 
   refreshStatus();
 }

@@ -206,7 +206,10 @@ let toastHost = null;
 
 function ensureToastHost() {
   if (!toastHost) {
-    toastHost = el('div', { id: 'cx-toasts' });
+    /* The host is the live region, not each toast: a region added to the page
+       at the same moment as its words is announced by some screen readers and
+       not others. One that already exists is announced by all of them. */
+    toastHost = el('div', { id: 'cx-toasts', role: 'region', 'aria-label': 'Notifications', 'aria-live': 'polite' });
     document.body.appendChild(toastHost);
   }
   return toastHost;
@@ -221,7 +224,8 @@ const TOAST_ICONS = { good: 'check-circle', warn: 'warning', bad: 'x-circle', in
 export function toast(opts) {
   const tone = opts.tone || 'info';
   const host = ensureToastHost();
-  const node = el('div', { class: `cx-toast ${tone}`, role: 'status' }, [
+  // A failure interrupts; everything else waits its turn.
+  const node = el('div', { class: `cx-toast ${tone}`, role: tone === 'bad' ? 'alert' : 'status' }, [
     el('span', { class: 't-icon', html: icon(TOAST_ICONS[tone] || 'info', { size: 16 }) }),
     el('div', { class: 't-body' }, [
       opts.title ? el('div', { class: 't-title', text: opts.title }) : null,

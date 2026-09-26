@@ -1047,3 +1047,12 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   justify-content: flex-end;
   margin: 0 0 6px;
 }
+
+/* A cancelled day is struck through as well as red, so it reads the same to
+   somebody who cannot tell red from the other shift colours. The line takes
+   the text colour the cell already chose for legibility over its paint. */
+.la-day.la-cancel {
+  background-image: linear-gradient(
+    to top right, transparent calc(50% - 1px), currentColor calc(50% - 1px),
+    currentColor calc(50% + 1px), transparent calc(50% + 1px));
+}

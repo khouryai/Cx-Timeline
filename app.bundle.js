@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-26T07:39:08.613Z
+ * Modules: 59   Built: 2026-09-26T07:45:58.197Z
  */
 (function () {
   'use strict';
@@ -17197,7 +17197,10 @@ __mods["ui/components.js"] = function (__x, __req) {
 
   function ensureToastHost() {
     if (!toastHost) {
-      toastHost = el('div', { id: 'cx-toasts' });
+      /* The host is the live region, not each toast: a region added to the page
+         at the same moment as its words is announced by some screen readers and
+         not others. One that already exists is announced by all of them. */
+      toastHost = el('div', { id: 'cx-toasts', role: 'region', 'aria-label': 'Notifications', 'aria-live': 'polite' });
       document.body.appendChild(toastHost);
     }
     return toastHost;
@@ -17212,7 +17215,8 @@ __mods["ui/components.js"] = function (__x, __req) {
   function toast(opts) {
     const tone = opts.tone || 'info';
     const host = ensureToastHost();
-    const node = el('div', { class: `cx-toast ${tone}`, role: 'status' }, [
+    // A failure interrupts; everything else waits its turn.
+    const node = el('div', { class: `cx-toast ${tone}`, role: tone === 'bad' ? 'alert' : 'status' }, [
       el('span', { class: 't-icon', html: icon(TOAST_ICONS[tone] || 'info', { size: 16 }) }),
       el('div', { class: 't-body' }, [
         opts.title ? el('div', { class: 't-title', text: opts.title }) : null,
@@ -30660,7 +30664,11 @@ __mods["ui/shell.js"] = function (__x, __req) {
 
     dom.saveDot = el('span', { class: 'sb-dot' });
     dom.saveText = el('span', { text: 'Saved' });
-    dom.statusbar.appendChild(el('span', { class: 'sb-item', title: 'Autosave status' }, [dom.saveDot, dom.saveText]));
+    // Announced when it changes — "Saving", "Saved", "Not saved" — and only this
+    // item: the rest of the bar follows the pointer and would never stop talking.
+    dom.statusbar.appendChild(el('span', {
+      class: 'sb-item', title: 'Autosave status', 'aria-live': 'polite', 'aria-atomic': 'true',
+    }, [dom.saveDot, dom.saveText]));
 
     dom.countText = el('span', { class: 'sb-item' });
     dom.statusbar.appendChild(dom.countText);
@@ -30700,6 +30708,18 @@ __mods["ui/shell.js"] = function (__x, __req) {
       onClick: () => showPane('settings'),
     });
     dom.statusbar.appendChild(dom.storageText);
+
+    // The clickable items are buttons to a keyboard as well as a pointer.
+    for (const item of dom.statusbar.querySelectorAll('.sb-item.clickable')) {
+      item.setAttribute('role', 'button');
+      item.tabIndex = 0;
+      item.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          item.click();
+        }
+      });
+    }
 
     refreshStatus();
   }

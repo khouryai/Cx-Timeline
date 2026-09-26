@@ -26,7 +26,7 @@ import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
 import { saveFile } from '../io/exporters.js';
 import {
   keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
-  reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes,
+  reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes, isCancelMeaning,
 } from '../core/lookahead.js';
 import { icon } from './icons.js';
 import {
@@ -514,10 +514,14 @@ function grid_(view, today) {
         classes.push('la-painted');
         if (isDark(mark.hex)) classes.push('la-dark');
         if (!mark.meaning) classes.push('la-unmapped');
+        // Struck through as well as red: a cancellation must not be a fact
+        // only somebody who can tell red from green can read. Never on a
+        // Resource row — red there marks names, not the work.
+        else if (!resource && isCancelMeaning(mark.meaning)) classes.push('la-cancel');
       }
       return el('td', {
         class: classes.join(' '),
-        style: mark?.hex ? `background:#${mark.hex}` : '',
+        style: mark?.hex ? `background-color:#${mark.hex}` : '',
         text: mark?.value || '',
         title: [what, d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
           mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value]
