@@ -2183,6 +2183,73 @@ select v.name, v.color, v.counts from (values
 where not exists (select 1 from public.rc_leave_kinds where name = v.name);
 
 -- ══════════════════════════════════════════════════════════════════════════
+-- Problems the application ran into
+--
+-- A screen that failed to load, an offline outcome the server refused, a
+-- look-ahead read that went wrong: each used to be a toast on one person's
+-- screen and a console line nobody saw, so the first an administrator heard
+-- of it was "the huddle didn't save on Tuesday". The calendar writes one row
+-- here for each, and Organisation → Problems lists them.
+--
+-- Only the calendar writes here, from named places in its own code — never a
+-- global error handler — because the plan's data must never reach this
+-- project, and an error thrown anywhere in the page can carry plan text.
+-- Append-only like the rest of the evidence: anybody signed in may add their
+-- own row, only an administrator may read them, nobody edits one, and an
+-- administrator clears old rows through `rc_clear_client_errors()`.
+-- ══════════════════════════════════════════════════════════════════════════
+
+create table if not exists public.rc_client_errors (
+  id          uuid primary key default gen_random_uuid(),
+  created_at  timestamptz not null default now(),
+  created_by  uuid default auth.uid() references auth.users(id) on delete set null,
+  area        text not null check (char_length(area) between 1 and 60),
+  message     text not null check (char_length(message) between 1 and 500),
+  app_version text check (char_length(app_version) <= 40),
+  user_agent  text check (char_length(user_agent) <= 300)
+);
+
+create index if not exists rc_client_errors_created_idx
+  on public.rc_client_errors (created_at desc);
+
+alter table public.rc_client_errors enable row level security;
+
+drop policy if exists rc_client_errors_read on public.rc_client_errors;
+create policy rc_client_errors_read on public.rc_client_errors
+  for select to authenticated using (public.rc_is_admin());
+
+-- Your own row, as yourself: a report cannot be written in somebody else's name.
+drop policy if exists rc_client_errors_insert on public.rc_client_errors;
+create policy rc_client_errors_insert on public.rc_client_errors
+  for insert to authenticated with check (created_by = auth.uid());
+
+revoke all on public.rc_client_errors from public, anon, authenticated;
+grant select, insert on public.rc_client_errors to authenticated;
+
+-- Clearing is a function, not a DELETE grant, for the reason every removal
+-- here is: a DELETE that RLS refuses matches nothing and reports success.
+create or replace function public.rc_clear_client_errors(p_before timestamptz)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  removed integer;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may clear the problem log';
+  end if;
+  delete from public.rc_client_errors where created_at < coalesce(p_before, now());
+  get diagnostics removed = row_count;
+  return removed;
+end;
+$$;
+
+revoke all on function public.rc_clear_client_errors(timestamptz) from public, anon;
+grant execute on function public.rc_clear_client_errors(timestamptz) to authenticated;
+
+-- ══════════════════════════════════════════════════════════════════════════
 -- The version stamp — last, on purpose.
 --
 -- The calendar reads this at sign-in and compares it with `SCHEMA_VERSION` in
@@ -2193,5 +2260,5 @@ where not exists (select 1 from public.rc_leave_kinds where name = v.name);
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '1')
+insert into public.rc_settings (key, value) values ('schema_version', '2')
 on conflict (key) do update set value = excluded.value, updated_at = now();

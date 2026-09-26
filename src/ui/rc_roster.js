@@ -22,11 +22,13 @@ import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import { icon } from './icons.js';
 import {
-  textInput, selectInput, toast, confirmDialog, promptDialog, field, badge, checkbox,
+  textInput, selectInput, toast, confirmDialog, promptDialog, field, badge, checkbox, emptyState,
 } from './components.js';
 import { notifyChanged, byId, dayLabel, todayISO, formModal } from './rc_util.js';
 
-const SECTIONS = ['people', 'locations', 'categories', 'leave', 'accounts'];
+const SECTIONS = ['people', 'locations', 'categories', 'leave', 'accounts', 'problems'];
+// Readable by an administrator alone, in the policies as well as here.
+const ADMIN_SECTIONS = new Set(['accounts', 'problems']);
 let section = 'people';
 
 /**
@@ -84,7 +86,7 @@ export async function render(root) {
   // Accounts is administrators-only in the database — `rc_list_invitations()`
   // returns nothing to anybody else — so a viewer is offered a tab that opens
   // onto a wall. It comes out of the row rather than explaining itself.
-  const visible = rc.isAdmin() ? SECTIONS : SECTIONS.filter((id) => id !== 'accounts');
+  const visible = rc.isAdmin() ? SECTIONS : SECTIONS.filter((id) => !ADMIN_SECTIONS.has(id));
   if (!visible.includes(section)) section = visible[0];
 
   const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
@@ -110,6 +112,7 @@ export async function render(root) {
   else if (section === 'locations') await renderLocations(host);
   else if (section === 'categories') await renderCategories(host);
   else if (section === 'accounts') await renderAccounts(host);
+  else if (section === 'problems') await renderProblems(host);
   else await renderLeave(host);
 }
 
@@ -842,6 +845,77 @@ function roleWord(role) {
 function roleBadge(role) {
   const label = role ? role[0].toUpperCase() + role.slice(1) : '—';
   return badge(label === 'Admin' ? 'Administrator' : label, ROLE_TONE[role] || 'muted');
+}
+
+/* ── Problems ──────────────────────────────────────────────────────────── */
+
+/**
+ * What the calendar ran into, on whose screen, and when.
+ *
+ * Each of these used to be a toast on one person's screen and a console line
+ * nobody saw, so the first anybody heard was "the huddle didn't save on
+ * Tuesday". `rc.reportError()` writes a row from a handful of named places —
+ * a tab that failed to load, an offline outcome the server refused, a read of
+ * the look-ahead that went wrong — and this lists them. It holds no plan data
+ * by construction: nothing on the timeline's side ever reports here.
+ */
+async function renderProblems(host) {
+  const [rows, people] = await Promise.all([
+    rc.listClientErrors(200),
+    rc.listPeople({ includeInactive: true }),
+  ]);
+  const byAccount = new Map(people.filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
+
+  host.appendChild(sectionHead('Problems reported'));
+  host.appendChild(el('p', {
+    class: 'rc-hint',
+    text: 'Things the calendar could not do, as they happened on somebody\'s screen: a tab that did '
+      + 'not load, an entry made offline that the database later refused, a look-ahead read that '
+      + 'went wrong. Each is reported once per page load. Nothing from the timeline is ever sent here.',
+  }));
+
+  if (!rows.length) {
+    host.appendChild(emptyState({
+      iconName: 'check-circle',
+      title: 'Nothing reported',
+      message: 'When the calendar cannot do something on anybody\'s screen, it is listed here.',
+    }));
+    return;
+  }
+
+  host.appendChild(table(['When', 'Who', 'Where', 'What happened', 'Version'], rows.map((r) => el('tr', {}, [
+    el('td', { class: 'rc-nowrap', text: new Date(r.created_at).toLocaleString() }),
+    el('td', { text: byAccount.get(r.created_by) || (r.created_by ? 'An account not on the roster' : '—') }),
+    el('td', { class: 'rc-mono', text: r.area }),
+    el('td', { text: r.message }),
+    el('td', { class: 'rc-mono', text: r.app_version || '—', title: r.user_agent || '' }),
+  ]))));
+
+  const clearOlder = async (days, label) => {
+    const before = new Date(Date.now() - days * 86400000).toISOString();
+    const ok = await confirmDialog({
+      title: label,
+      message: days
+        ? `Removes every problem reported more than ${days} days ago. They are not kept anywhere else.`
+        : 'Removes every problem in the list. They are not kept anywhere else.',
+      confirmLabel: 'Clear',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const n = await rc.clearClientErrors(before);
+      toast({ tone: 'good', message: `Cleared ${n} problem${n === 1 ? '' : 's'}.` });
+      notifyChanged('problems');
+    } catch (err) {
+      toast({ tone: 'bad', message: err?.message || String(err) });
+    }
+  };
+  host.appendChild(el('div', { class: 'rc-actions', style: 'margin-top:12px;display:flex;gap:8px' }, [
+    el('button', { class: 'cx-btn mini ghost', type: 'button', text: 'Clear older than 30 days',
+      onClick: () => clearOlder(30, 'Clear older problems') }),
+    el('button', { class: 'cx-btn mini ghost danger', type: 'button', text: 'Clear all',
+      onClick: () => clearOlder(0, 'Clear every problem') }),
+  ]));
 }
 
 /* ── Shared bits ───────────────────────────────────────────────────────── */

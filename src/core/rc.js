@@ -424,7 +424,7 @@ export async function exportEverything() {
   const tables = [
     'rc_people', 'rc_locations', 'rc_location_alias', 'rc_person_alias',
     'rc_categories', 'rc_parties',
-    'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries',
+    'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries', 'rc_client_errors',
     'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
     'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
   ];
@@ -449,6 +449,53 @@ export async function exportEverything() {
   return out;
 }
 
+/* ── Problems the calendar ran into ──────────────────────────────────── */
+
+const REPORT_LIMIT = 20;
+const reported = new Set();
+
+/**
+ * Write one row to `rc_client_errors`, and never throw.
+ *
+ * Called from named places in the calendar's own code — a tab that failed to
+ * load, an offline outcome the server refused, a look-ahead read that went
+ * wrong — and never from a global handler: an error thrown anywhere in the page
+ * can carry plan text, and plan data must never reach this project. The same
+ * message is reported once per page, and at most twenty per page, so a screen
+ * failing on every re-render cannot fill the table. Reporting a failure must
+ * never be a second failure, so everything here is swallowed.
+ */
+export function reportError(area, err) {
+  try {
+    if (!client || !user) return;
+    const message = String(err?.message || err || 'unknown').slice(0, 500) || 'unknown';
+    const key = `${area}\u0000${message}`;
+    if (reported.has(key) || reported.size >= REPORT_LIMIT) return;
+    reported.add(key);
+    const shell = typeof window !== 'undefined' ? window.CX_SHELL : null;
+    const row = {
+      area: String(area).slice(0, 60),
+      message,
+      created_by: user.id,
+      app_version: String(shell?.version || (typeof window !== 'undefined' && window.CX_CONFIG?.version) || '').slice(0, 40) || null,
+      user_agent: typeof navigator !== 'undefined' ? String(navigator.userAgent).slice(0, 300) : null,
+    };
+    Promise.resolve(client.from('rc_client_errors').insert([row]))
+      .then(() => forgetReads(), () => {})
+      .catch(() => {});
+  } catch {
+    /* reporting a failure must never be a second one */
+  }
+}
+
+/** The newest problems reported, for an administrator. */
+export function listClientErrors(limit = 100) {
+  return select('rc_client_errors', (q) => q.order('created_at', { ascending: false }).limit(limit));
+}
+
+/** Clear what was reported before a moment; answers how many rows went. */
+export const clearClientErrors = (before) => rpc('rc_clear_client_errors', { p_before: before });
+
 export function listSettings() {
   return select('rc_settings');
 }
@@ -463,7 +510,7 @@ export function listSettings() {
  * "could not update the legend", on one screen, weeks after the deploy that
  * needed it; this turns it into one sentence at sign-in naming the two files.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * Whether the database is the one this build was written against.

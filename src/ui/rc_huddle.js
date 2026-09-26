@@ -117,6 +117,8 @@ export async function flushQueue() {
       if (/fetch|network/i.test(String(err.message))) remaining.push(entry);
       else {
         console.warn('[cx-timeline] a queued outcome was refused and dropped:', err.message);
+        // The one failure here that loses somebody's words: it goes on the record.
+        rc.reportError('huddle:queue-dropped', `${entry.date}: ${err.message}`);
         toast({ tone: 'warn', message: `An entry from ${entry.date} was refused: ${err.message}` });
       }
     }

@@ -242,6 +242,7 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
       // Same reasoning as the rows: both are derived from snapshots that are
       // safely stored, so a failure here costs a re-derivation and not a read.
       console.warn('[cx-timeline] change events not written:', err.message);
+      rc.reportError('lookahead:changes', err);
     }
 
     /* And move the days the sheet has handed to somebody else.
@@ -257,6 +258,7 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
       // Same reasoning as the rows and the events: the snapshot is stored, so a
       // failure here costs a re-derivation on the next read rather than a read.
       console.warn('[cx-timeline] reassignments not applied:', err.message);
+      rc.reportError('lookahead:reassign', err);
     }
 
     run.outcome = 'snapshot';
@@ -497,6 +499,7 @@ export function checkNowButton() {
         // These messages say what to go and do, so they get longer than the
         // default three and a half seconds to be read.
         toast({ tone: 'bad', message: err.message, timeout: 12000 });
+        rc.reportError('lookahead:read', err);
       }
     },
   });

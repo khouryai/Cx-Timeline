@@ -695,7 +695,10 @@ function fakeSdk() {
             /* Column defaults. Postgres fills `active` in; a stub that did not
                would make a freshly inserted row invisible to every read that
                filters on it — which looks exactly like the write failing. */
-            const defaults = list.some((r) => 'active' in r) ? { active: true } : {};
+            const defaults = {
+              ...(list.some((r) => 'active' in r) ? { active: true } : {}),
+              ...(table === 'rc_client_errors' ? { created_at: new Date().toISOString() } : {}),
+            };
             const made = [].concat(rows).map((r, i) => (
               { id: `${table}-${list.length + i + 1}`, ...defaults, ...r }));
             list.push(...made);
@@ -755,6 +758,12 @@ function fakeSdk() {
         },
         rpc(name, args) {
           S.calls.push({ kind: 'rpc', table: name, payload: args });
+          if (name === 'rc_clear_client_errors') {
+            const list = S.rows.rc_client_errors || [];
+            const keep = list.filter((r) => (r.created_at || '') >= args.p_before);
+            S.rows.rc_client_errors = keep;
+            return Promise.resolve({ data: list.length - keep.length, error: null });
+          }
           if (name === 'rc_record_actual') {
             if (S.offline) return Promise.resolve({ data: null, error: { message: 'Failed to fetch' } });
             const existing = S.rows.rc_actuals.find((a) => a.client_uuid === args.p_client_uuid);
@@ -1191,6 +1200,35 @@ async function main() {
       && (await bannerNow().locator('button', { hasText: 'Reload' }).count()) === 1,
     'even after "run the SQL" was put away');
   await setVersion(String(await page.evaluate(() => window.__rcSchemaVersion)));
+  await page.waitForTimeout(200);
+
+  /* ── Problems reported ────────────────────────────────────────────────
+     A tab that fails used to be a message on one screen and a console line
+     nobody read. It is now a row an administrator can see — and only the
+     calendar reports, from named places, so no plan text can travel with it. */
+  console.log('\nProblems reported');
+  await page.evaluate(() => { window.__savedLeave = window.__rc.rows.rc_leave; window.__rc.rows.rc_leave = 42; });
+  await page.locator('#rc-frame .rc-tab', { hasText: 'PTO' }).click();
+  await page.waitForTimeout(400);
+  await page.evaluate(() => { window.__rc.rows.rc_leave = window.__savedLeave; });
+  const reportedRows = await page.evaluate(() => window.__rc.rows.rc_client_errors || []);
+  check('a tab that fails to load is reported, once, with where it happened',
+    reportedRows.length === 1 && reportedRows[0].area === 'tab:pto' && reportedRows[0].created_by,
+    reportedRows.map((r) => `${r.area}: ${String(r.message).slice(0, 40)}`).join(' | '));
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Organisation' }).click();
+  await page.waitForTimeout(300);
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Problems' }).click();
+  await page.waitForTimeout(300);
+  const problemsText = await page.locator('#rc-frame').innerText();
+  check('and an administrator finds it under Organisation → Problems', /tab:pto/.test(problemsText) && /Alex/.test(problemsText));
+  await page.locator('#rc-frame button', { hasText: 'Clear all' }).click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Clear' }).click();
+  await page.waitForTimeout(400);
+  check('clearing the log goes through the function and empties the list',
+    (await page.evaluate(() => (window.__rc.rows.rc_client_errors || []).length)) === 0
+      && /Nothing reported/.test(await page.locator('#rc-frame').innerText()));
+  await page.locator('#rc-frame .rc-tab', { hasText: 'People' }).click();
   await page.waitForTimeout(200);
 
   /* ── The roster ───────────────────────────────────────────────────────── */

@@ -8,6 +8,7 @@
 alter table public.rc_legend drop column if exists role;
 alter table public.rc_people drop column if exists scheduled;
 drop table if exists public.rc_settings;
+drop table if exists public.rc_client_errors;
 drop table if exists public.rc_invitations cascade;
 
 -- And a role check that has never heard of a viewer, so read-only access is

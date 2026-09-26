@@ -1001,3 +1001,8 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 .rc-schema-icon { color: var(--warn); flex: none; margin-top: 1px; }
 .rc-schema-text { flex: 1; min-width: 0; }
 .rc-schema-banner .cx-btn { flex: none; }
+
+/* Organisation → Problems: a timestamp that does not wrap, and machine words
+   (where it happened, which build) set apart from what happened. */
+.rc-table td.rc-nowrap { white-space: nowrap; }
+.rc-table td.rc-mono { font-family: var(--f-mono); font-size: 12px; color: var(--text-muted); }

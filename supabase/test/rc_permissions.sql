@@ -1418,5 +1418,37 @@ select assert((select task from public.rc_actuals_current where person_id = :'p_
 select assert((select task from public.rc_actuals where id = :'act_task') = 'Pulled cable at the north end',
   'while the first answer stays underneath');
 
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'Problems reported by the application'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+-- Anybody signed in reports what went wrong on their own screen, as themselves.
+select act_as(:'carol');
+insert into public.rc_client_errors (area, message, created_by)
+  values ('tab:week', 'rc_plan_current: permission denied', :'carol');
+select assert(true, 'a member can report a problem on their own screen');
+select refuses(:'carol',
+  format('insert into public.rc_client_errors (area, message, created_by) values (%L, %L, %L)',
+         'tab:week', 'forged', :'alice'),
+  'a member reporting a problem in somebody else''s name');
+select assert((select count(*) from public.rc_client_errors) = 0,
+  'and a member cannot read the log — it is an administrator''s');
+select refuses(:'carol', 'update public.rc_client_errors set message = ''nothing''',
+  'a member editing a report');
+select refuses(:'carol', 'select public.rc_clear_client_errors(now())',
+  'a member clearing the log');
+
+select act_as(:'alice');
+select assert((select count(*) from public.rc_client_errors) = 1,
+  'an administrator reads every report');
+select refuses(:'alice', 'update public.rc_client_errors set message = ''nothing''',
+  'even an administrator editing a report — it is a record');
+select refuses(:'alice', 'delete from public.rc_client_errors',
+  'or deleting one directly, where a refusal would look like success');
+select assert(public.rc_clear_client_errors(now() - interval '1 day') = 0,
+  'clearing older than yesterday leaves today''s report');
+select assert(public.rc_clear_client_errors(now() + interval '1 second') = 1,
+  'and clearing everything removes it, and says how many');
+
 reset role;
 do $$ begin raise notice ''; raise notice 'All resource calendar checks passed.'; end $$;

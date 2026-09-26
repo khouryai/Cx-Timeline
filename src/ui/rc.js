@@ -130,6 +130,7 @@ function render() {
   const view = el('div');
   bodyEl.append(schemaBanner(), view);
   Promise.resolve(RENDERERS[active](view)).catch((err) => {
+    rc.reportError(`tab:${active}`, err);
     clear(view);
     view.appendChild(loadFailed(err));
   });
