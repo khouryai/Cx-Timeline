@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 58   Built: 2026-09-25T22:09:41.479Z
+ * Modules: 58   Built: 2026-09-26T05:11:09.243Z
  */
 (function () {
   'use strict';
@@ -6702,18 +6702,42 @@ __mods["core/lookahead.js"] = function (__x, __req) {
        not others — so they are numbered by position and named where a heading
        happens to exist above the first activity. */
     const body = rows.filter((r) => r.row > header.row);
-    const metaCols = [...new Set(
-      body.flatMap((r) => r.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim()).map((c) => c.col))
-    )].sort((a, b) => a - b);
 
-    /* What the sheet calls each of those columns.
-       The nearest thing written in that column at or above the weekday row —
-       which is where a heading is, whichever row somebody put it on. It is worth
-       reading rather than guessing because one of these columns is the location,
-       and knowing *which* is the difference between recording where the work is
-       and recording nothing. Nothing depends on a heading existing: an unlabelled
-       column is '' and is treated as it always was. */
+    /* The row the sheet writes its column headings on.
+       "Activity ID, Description of Work Activity, Location, SSWP, Party to Action,
+       Work hours" sit together on one row above the calendar, and that row is found
+       the way the weekday row is: it is the one, at or above the weekday row, with
+       the most text left of the first day. Reading each column's nearest text
+       upwards instead — which is what this did — takes whatever is closest, so a
+       note typed in a gap row, or a label on the weekday row itself, stood in for
+       the real heading of its column and the row of headings never showed. A
+       single stray cell cannot win against a row of six. */
+    const labelled = (row) => row.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim());
+    let headingRow = null;
+    for (const row of rows) {
+      if (row.row > header.row) break;
+      const count = labelled(row).length;
+      if (count >= 2 && count >= (headingRow ? labelled(headingRow).length : 0)) headingRow = row;
+    }
+
+    /* The activity columns: every column left of the calendar that the body uses
+       or the heading row names. A named column whose cells are all empty is still
+       one of the sheet's columns — leaving it out would shift every heading after
+       it onto the wrong values in the reader's head. */
+    const metaCols = [...new Set([
+      ...body.flatMap((r) => labelled(r).map((c) => c.col)),
+      ...(headingRow ? labelled(headingRow).map((c) => c.col) : []),
+    ])].sort((a, b) => a - b);
+
+    /* What the sheet calls each of those columns: its cell on the heading row,
+       and only where that row says nothing, the nearest text above the weekday
+       row — the reading a sheet with its headings scattered over rows still needs.
+       It is worth reading rather than guessing because one of these columns is the
+       location, and knowing *which* is the difference between recording where the
+       work is and recording nothing. An unlabelled column is ''. */
     const headings = metaCols.map((col) => {
+      const own = String(at(headingRow, col)?.value ?? '').trim();
+      if (own) return own;
       for (let i = rows.length - 1; i >= 0; i--) {
         if (rows[i].row > header.row) continue;
         const text = String(at(rows[i], col)?.value ?? '').trim();
@@ -6941,15 +6965,32 @@ __mods["core/lookahead.js"] = function (__x, __req) {
 
       // Group this activity's marks by the week they fall in.
       const weeks = new Map();
-      for (const mark of marksOf(activity)) {
+      const bucketFor = (date) => {
+        const week = mondayOf(date);
+        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
+        return weeks.get(week);
+      };
+      for (const mark of activity.marks) {
         if (!mark.hex || mark.role === 'ignore') continue;
         const day = dayByCol.get(mark.col);
         if (!day?.date) continue;
-        const week = mondayOf(day.date);
-        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
-        const bucket = weeks.get(week);
+        const bucket = bucketFor(day.date);
         bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
         if (mark.value) bucket.marks[day.date] = mark.value;
+      }
+      /* The Resource row's own paint, which the workbook sometimes uses for the
+         shift instead of the activity line. It fills a day the activity line left
+         unpainted and never overrides one — the activity line is what the day *is*.
+         And it never says a day was cancelled: red on a Resource row is somebody
+         marking the names, not the work, so a cancellation colour there — or a
+         colour nobody has named, which might turn out to be one — is left out of
+         `cells` entirely, and with it out of `rc_cancelled_days`. */
+      for (const mark of activity.resource?.marks || []) {
+        if (!mark.hex || mark.role === 'ignore' || !mark.meaning || isCancelMeaning(mark.meaning)) continue;
+        const day = dayByCol.get(mark.col);
+        if (!day?.date) continue;
+        const bucket = bucketFor(day.date);
+        if (!(day.date in bucket.cells)) bucket.cells[day.date] = mark.meaning;
       }
       if (!weeks.size) continue;
 
@@ -7011,6 +7052,15 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     }
 
     return out;
+  }
+
+  /**
+   * Whether a legend meaning says a day was cancelled — the one rule, the same
+   * word `ingest()` looks for in the legend and `rc_cancelled_days` looks for in
+   * the stored cells.
+   */
+  function isCancelMeaning(meaning) {
+    return /cancel/i.test(String(meaning || ''));
   }
 
   /** The Monday of an ISO date's week, in UTC. A calendar date must not shift. */
@@ -7585,6 +7635,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "absencesFrom", { get: () => absencesFrom, enumerable: true });
   Object.defineProperty(__x, "locationColumnOf", { get: () => locationColumnOf, enumerable: true });
   Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
+  Object.defineProperty(__x, "isCancelMeaning", { get: () => isCancelMeaning, enumerable: true });
   Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
   Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
   Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
@@ -16222,6 +16273,11 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(limit));
   }
 
+  /** One snapshot with its grid, by id — for re-deriving what a past read said. */
+  function snapshotById(id) {
+    return select('rc_lookahead_snapshots', (q) => q.eq('id', id).limit(1)).then((rows) => rows[0] || null);
+  }
+
   function listSnapshotRows(snapshotId) {
     return select('rc_lookahead_rows', (q) => q.eq('snapshot_id', snapshotId).order('sheet_row'));
   }
@@ -16541,6 +16597,14 @@ __mods["core/rc.js"] = function (__x, __req) {
    * Record whose cancellation it was, and why. Append-only: a correction is a
    * new row carrying `supersedes_id`, never an edit.
    */
+  /**
+   * Replace what a stored row says each day was painted as. Only ever the
+   * re-derivation of a past read under today's rules — `cells` is derived from
+   * the snapshot, which is the durable record, so refining a rule means writing
+   * the derivation again rather than migrating anything.
+   */
+  const updateLookaheadRowCells = (id, cells) => update('rc_lookahead_rows', id, { cells });
+
   const addCancellationNote = (row) => insert('rc_cancellation_notes', [row]).then((r) => r[0]);
 
   /* ── Accounts ──────────────────────────────────────────────────────────── */
@@ -16688,6 +16752,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listSnapshotMeta", { get: () => listSnapshotMeta, enumerable: true });
   Object.defineProperty(__x, "latestSnapshot", { get: () => latestSnapshot, enumerable: true });
   Object.defineProperty(__x, "listSnapshots", { get: () => listSnapshots, enumerable: true });
+  Object.defineProperty(__x, "snapshotById", { get: () => snapshotById, enumerable: true });
   Object.defineProperty(__x, "listSnapshotRows", { get: () => listSnapshotRows, enumerable: true });
   Object.defineProperty(__x, "listChangeEvents", { get: () => listChangeEvents, enumerable: true });
   Object.defineProperty(__x, "listAnnotations", { get: () => listAnnotations, enumerable: true });
@@ -16732,6 +16797,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "updateSar", { get: () => updateSar, enumerable: true });
   Object.defineProperty(__x, "addSarLinks", { get: () => addSarLinks, enumerable: true });
   Object.defineProperty(__x, "addAnnotation", { get: () => addAnnotation, enumerable: true });
+  Object.defineProperty(__x, "updateLookaheadRowCells", { get: () => updateLookaheadRowCells, enumerable: true });
   Object.defineProperty(__x, "addCancellationNote", { get: () => addCancellationNote, enumerable: true });
   Object.defineProperty(__x, "invite", { get: () => invite, enumerable: true });
   Object.defineProperty(__x, "revokeInvitation", { get: () => revokeInvitation, enumerable: true });
@@ -36665,7 +36731,6 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       const shown = drawn(windowed(view, today), calendarFilter, showQuietRows);
       clear(strip);
       strip.appendChild(legendStrip(legend, grid.unknown, paintOn(shown)));
-      strip.appendChild(whyStrip(shown, legendRows));
       body.appendChild(grid_(shown, today));
     };
     // Redraw the rows only, never the input: rebuilding the field under the
@@ -37027,6 +37092,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
        knows how wide the content made them. Measured once the table is in the
        document, on the next frame. */
     requestAnimationFrame(() => {
+      freezeHead(head);
       const firstRow = table_.querySelector('tbody tr');
       if (!firstRow) return;
       let left = 0;
@@ -37048,6 +37114,10 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       table_.style.setProperty('--la-meta-w', `${left}px`);
     });
 
+    /* A header row can change height after the first frame — a font arriving, a
+       heading wrapping — and a stale offset lets one row slide under another. */
+    if (typeof ResizeObserver === 'function') new ResizeObserver(() => freezeHead(head)).observe(head);
+
     if (!rows.length) {
       return el('p', {
         class: 'rc-hint',
@@ -37057,6 +37127,24 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       });
     }
     return wrap;
+  }
+
+  /**
+   * Pin the three header rows — month, day number, weekday — one under the other.
+   *
+   * Every header cell was `position: sticky; top: 0`, so all three rows pinned to
+   * the same line and scrolling down stacked them on top of each other: the
+   * weekday letters covered the day numbers and the month, and the one thing a
+   * reader scrolling a hundred rows needs — which date this column is — was gone.
+   * Each row is now pinned at the height of the rows above it, measured, because
+   * only the browser knows how tall the content made them.
+   */
+  function freezeHead(head) {
+    let top = 0;
+    for (const tr of head.rows) {
+      for (const cell of tr.cells) cell.style.top = `${top}px`;
+      top += tr.getBoundingClientRect().height;
+    }
   }
 
   /**
@@ -37073,81 +37161,6 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * Pass no set at all and everything is listed, which is what a caller with
    * nothing drawn yet wants.
    */
-  /**
-   * Which colours are keeping rows on the calendar, and one click to say they are not.
-   *
-   * "It is still showing rows with nothing on them" is a question about a
-   * *colour*, and until now the calendar could not answer it. The switch hides a
-   * row with nothing scheduled; whether a row has something scheduled is decided
-   * entirely by whether any of its paint counts as `shift` — and the person
-   * looking at a hundred rows they did not expect has no way to find out which
-   * colour did that. They can see the legend, and they can see the grid, and
-   * joining the two by eye across a hundred days is not a thing anybody should be
-   * asked to do. So the calendar says it.
-   *
-   * The unmapped list above answers the same question for colours nobody has
-   * explained. This is its other half: a colour somebody *has* explained, as work,
-   * on rows where no work is happening. Both are one press from "Just shading",
-   * and for a mapped colour that press changes the role on the row in force rather
-   * than adding a second one — adding is what left a register with two answers for
-   * one colour in the first place.
-   */
-  function whyStrip(view, legendRows) {
-    const shownCols = new Set(view.days.map((d) => d.col));
-    const rowsFor = new Map();
-
-    for (const activity of view.activities) {
-      // A title is on screen for the sake of the rows under it, not for its paint.
-      if (activity.heading && !activity.highlighted) continue;
-      const hexes = new Set(marksOf(activity)
-        .filter((m) => m.hex && m.role === 'shift' && shownCols.has(m.col))
-        .map((m) => String(m.hex).toUpperCase()));
-      for (const hex of hexes) rowsFor.set(hex, (rowsFor.get(hex) || 0) + 1);
-    }
-    if (!rowsFor.size) return el('div');
-
-    /* The entry in force, by the same rule `applyLegend()` uses — newest
-       `valid_from` wins — so the button edits the row the calendar is actually
-       reading rather than whichever came back first. */
-    const inForce = (hex) => (legendRows || [])
-      .filter((l) => String(l.argb).toUpperCase() === hex)
-      .sort((a, b) => String(b.valid_from || '').localeCompare(String(a.valid_from || '')))[0] || null;
-
-    const strip = el('div', { class: 'la-legend la-why' });
-    strip.appendChild(el('span', { class: 'rc-eyebrow', text: 'On screen because of' }));
-
-    for (const [hex, count] of [...rowsFor.entries()].sort((a, b) => b[1] - a[1])) {
-      const entry = inForce(hex);
-      strip.appendChild(el('span', { class: 'la-why-item' }, [
-        el('span', { class: 'la-swatch', style: `background:#${hex}` }),
-        el('span', { text: `${entry?.meaning || `#${hex}, unmapped`} — ${count} row(s)` }),
-        // What a colour means is the register's, and the register is an
-        // administrator's. Everybody else reads why a row is here, and that is
-        // the useful half of this strip anyway.
-        rc.isAdmin() ? el('button', {
-          class: 'cx-btn mini ghost',
-          text: 'Just shading',
-          title: entry
-            ? `Rows whose only paint is ${entry.meaning} will drop out of the calendar. `
-              + 'The colour keeps its name; what changes is whether it counts as somebody being '
-              + 'on site.'
-            : 'Structure in the spreadsheet, not somebody on site.',
-          onClick: async () => {
-            try {
-              if (entry) await rc.updateLegend(entry.id, { role: 'ignore' });
-              else await rc.addLegend([{ argb: hex, meaning: 'Shading', role: 'ignore' }]);
-              notifyChanged('legend');
-              toast({ tone: 'good', message: `#${hex} is shading — ${count} row(s) drop out.` });
-            } catch (err) {
-              toast({ tone: 'bad', message: err.message });
-            }
-          },
-        }) : null,
-      ].filter(Boolean)));
-    }
-    return strip;
-  }
-
   function legendStrip(legend, unknown, onScreen = null) {
     const showing = (hex) => !onScreen || onScreen.has(String(hex).toUpperCase());
     const strip = el('div', { class: 'la-legend' });
@@ -37783,8 +37796,9 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const CANCEL_PARTIES = ['BART', 'Hitachi', 'Other'];
   const PARTY_TONE = { BART: 'warn', Hitachi: 'bad', Other: 'neutral' };
 
-  /** The first day the log reaches back to, when somebody has changed it on screen. */
+  /** The span the log covers, when somebody has changed it on screen. A blank end is no end. */
   let cancellationsFrom = null;
+  let cancellationsTo = '';
   let cancellationsUnansweredOnly = false;
 
   /**
@@ -37812,45 +37826,61 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       rc.listCancelledDays(from).catch((err) => { toast({ tone: 'bad', title: 'Could not read the cancellations', message: err.message }); return []; }),
       rc.listCancellationNotes().catch(() => []),
     ]);
-    const events = attachCancellationNotes(cancellationEvents(days, { from }), notes);
+    const to = cancellationsTo && cancellationsTo >= from ? cancellationsTo : '';
+    /* An event is in the span when it starts inside it. One that runs past the
+       end is kept whole rather than cut at the boundary: a cancelled week is one
+       event, and half of it in a report is a different claim. */
+    const events = attachCancellationNotes(cancellationEvents(days, { from }), notes)
+      .filter((e) => !to || e.start <= to);
 
-    const fromInput = el('input', {
-      type: 'date', class: 'cx-input mini', value: from, 'aria-label': 'Log starts on', style: 'width:150px',
-    });
-    fromInput.addEventListener('change', () => {
-      if (!fromInput.value) return;
-      cancellationsFrom = fromInput.value;
+    const dateBox = (value, label, onPick) => {
+      const box = el('input', {
+        type: 'date', class: 'cx-input mini', value, 'aria-label': label, style: 'width:150px',
+      });
+      box.addEventListener('change', () => onPick(box.value));
+      return box;
+    };
+    const fromInput = dateBox(from, 'Log starts on', (v) => {
+      if (!v) return;
+      cancellationsFrom = v;
       notifyChanged('cancellations');
     });
+    const toInput = dateBox(to, 'Log ends on', (v) => {
+      cancellationsTo = v;
+      notifyChanged('cancellations');
+    });
+    const span = to ? `${dayLabel(from)} to ${dayLabel(to)}` : `since ${dayLabel(from)}`;
 
     host.appendChild(el('div', { class: 'rc-section-head' }, [
       el('h3', { text: 'Cancellation log' }),
       el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end' }, [
         el('span', { class: 'rc-hint', style: 'margin:0;white-space:nowrap', text: 'From' }),
         fromInput,
-        events.length
-          ? el('button', {
-            class: 'cx-btn mini',
-            html: `${icon('download', { size: 12 })}<span>CSV</span>`,
-            onClick: () => saveFile(`cancellations-${todayISO()}.csv`, cancellationCsv(events), 'text/csv', 'Cancellation log'),
-          })
-          : null,
+        el('span', { class: 'rc-hint', style: 'margin:0;white-space:nowrap', text: 'To' }),
+        toInput,
+        el('button', {
+          class: 'cx-btn mini ghost',
+          html: `${icon('refresh', { size: 12 })}<span>Re-read saved snapshots</span>`,
+          title: 'Apply today\'s rules — Resource rows are never cancellations — to every read the log covers',
+          onClick: () => rederiveCancellations(from),
+        }),
         checkNowButton(),
       ].filter(Boolean)),
     ]));
 
     host.appendChild(el('p', {
       class: 'rc-hint',
-      text: 'Every run of red cells any read of the look-ahead has shown since '
-        + `${dayLabel(from)}. Cells side by side on one activity are one event. A cancellation `
-        + 'stays in the log after the sheet moves on — it was red when those reads were taken.',
+      text: `Every run of red cells any read of the look-ahead has shown ${span}. Cells side by `
+        + 'side on one activity are one event, and red on a Resource row is never a cancellation. '
+        + 'A cancellation stays in the log after the sheet moves on — it was red when those reads '
+        + 'were taken.',
     }));
 
     if (!events.length) {
       host.appendChild(emptyState({
         iconName: 'calendar',
         title: 'No cancellations',
-        message: `No read of the look-ahead since ${dayLabel(from)} has a cell painted in the colour the Legend calls a cancellation.`,
+        message: `No read of the look-ahead ${span} has a cell painted in the colour the Legend calls a cancellation.`,
       }));
       return;
     }
@@ -37877,6 +37907,22 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     }));
 
     const shown = cancellationsUnansweredOnly ? events.filter((e) => !e.note) : events;
+
+    /* The extract is what is on screen: the span above, and the "no reason yet"
+       narrowing when it is ticked. The file says which span in its name, because
+       a log that is quietly a fortnight of a quarter reads as the whole quarter. */
+    host.appendChild(el('div', { style: 'margin:8px 0 10px' }, [
+      el('button', {
+        class: 'cx-btn mini',
+        html: `${icon('download', { size: 12 })}<span>Export ${shown.length} to CSV</span>`,
+        onClick: () => saveFile(
+          `cancellations-${from}-to-${to || todayISO()}.csv`,
+          cancellationCsv(shown),
+          'text/csv',
+          'Cancellation log',
+        ),
+      }),
+    ]));
     const rows = shown.map((e) => el('tr', { class: 'rc-cancel-row', dataset: { start: e.start, label: e.label } }, [
       el('td', {}, [
         el('div', { class: 'rc-cancel-cells', 'aria-hidden': 'true' },
@@ -37925,6 +37971,62 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     ]));
 
     host.appendChild(table(['', 'Activity', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
+  }
+
+  /**
+   * Re-derive what every read since the log's start said each day was painted as.
+   *
+   * `rc_cancelled_days` reads the cells each ingest wrote, and those were written
+   * under the rules of the day. Red on a Resource row used to go in with the rest
+   * of the row's paint — and over the activity line's own colour — so a week of
+   * names marked in red read as a week cancelled. The rule is fixed in
+   * `rowsFrom()`; this applies it to the reads already taken. The snapshot is the
+   * durable record and `cells` is derived from it, so this rewrites a derivation
+   * and nothing else: rows are matched on `row_key` within their own snapshot,
+   * and a row the new reading does not produce is left exactly as it was.
+   *
+   * Reads up to six weeks before the start are included, because a sheet read in
+   * August already shows the first weeks of September.
+   */
+  async function rederiveCancellations(from) {
+    const ok = await confirmDialog({
+      title: 'Re-read the saved snapshots?',
+      message: 'Every read since six weeks before the log starts is read again under today\'s rules, '
+        + 'and what each stored row says about each day is rewritten to match. Nothing else changes — '
+        + 'not the snapshots, not the change log, not any reason already recorded.',
+      confirmLabel: 'Re-read',
+    });
+    if (!ok) return;
+
+    try {
+      const since = toISO(addDays(isoToMs(from), -42));
+      const [metas, legendRows] = await Promise.all([rc.listSnapshotMeta({ limit: 1000 }), rc.listLegend()]);
+      const legend = legendRows.map((r) => ({ argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
+      const wanted = metas.filter((m) => String(m.taken_at || '').slice(0, 10) >= since);
+      const same = (a, b) => JSON.stringify(Object.entries(a || {}).sort()) === JSON.stringify(Object.entries(b || {}).sort());
+
+      let changed = 0;
+      for (const meta of wanted) {
+        const snapshot = await rc.snapshotById(meta.id);
+        if (!snapshot?.grid) continue;
+        const view = readGrid(applyLegend(snapshot.grid, legend), { anchorISO: snapshot.taken_at });
+        const fresh = new Map((await rowsFrom(view, { snapshotId: snapshot.id })).map((r) => [r.row_key, r]));
+        for (const row of await rc.listSnapshotRows(snapshot.id)) {
+          const again = fresh.get(row.row_key);
+          if (!again || same(again.cells, row.cells)) continue;
+          await rc.updateLookaheadRowCells(row.id, again.cells);
+          changed++;
+        }
+      }
+      toast({
+        tone: 'good',
+        title: 'Saved snapshots re-read',
+        message: `${wanted.length} read(s) checked, ${changed} row(s) corrected.`,
+      });
+      notifyChanged('cancellations');
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not re-read the snapshots', message: err.message });
+    }
   }
 
   /** Say whose it was and why — or correct what was said. */

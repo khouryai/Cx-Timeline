@@ -1112,6 +1112,64 @@ check('a reworded row is a new suggestion, never a guess', reworded.added.length
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   The heading row, and red on a Resource row
+   ═══════════════════════════════════════════════════════════════════════ */
+
+console.log('\nThe heading row, and red on a Resource row');
+{
+  // The layout the workbook actually has: a title on row 1, the column headings
+  // across row 2 (B–G), a stray note on row 3, then the month, the day numbers
+  // and the weekday letters, with the calendar starting at column H.
+  const first = Date.UTC(2026, 8, 7);
+  const days = [...Array(7)].map((_, i) => new Date(first + i * 86400000));
+  const LET = ['M', 'Tu', 'W', 'Th', 'F', 'Sa', 'Su'];
+  const c = (col, value, hex = null, extra = {}) => ({ col, ref: `C${col}`, value, hex, ...extra });
+  const shift = (col, hex, meaning, value = '') => c(col, value, hex, {
+    meaning, role: meaning ? 'shift' : 'shift',
+  });
+  const headingGrid = (resourceMarks) => ({
+    rows: [
+      { row: 1, label: '', cells: [c(2, 'BART 4 Week Look Ahead')] },
+      { row: 2, label: '', cells: [c(2, 'Activity ID'), c(3, 'Description of Work Activity'), c(4, 'Location'),
+        c(5, 'SSWP'), c(6, 'Party to Action'), c(7, 'Work hours')] },
+      { row: 3, label: '', cells: [c(4, 'see note')] },
+      { row: 4, label: '', cells: [c(8, 'SEPTEMBER')] },
+      { row: 5, label: '', cells: days.map((d, i) => c(8 + i, String(d.getUTCDate()))) },
+      { row: 6, label: '', cells: days.map((d, i) => c(8 + i, LET[i])) },
+      { row: 7, label: '', cells: [c(3, 'Cable pull'), c(4, 'TPSS 12'),
+        shift(8, 'FFFF00', 'Day Shift'), shift(9, 'FFFF00', 'Day Shift')] },
+      { row: 8, label: '', cells: [c(3, 'Resource'), ...resourceMarks] },
+    ],
+  });
+
+  const view = cls.readGrid(headingGrid([]), { anchorISO: '2026-09-09' });
+  check('the headings are the sheet\'s heading row, B to G',
+    view.headings.join(' | ') === 'Activity ID | Description of Work Activity | Location | SSWP | Party to Action | Work hours',
+    view.headings.join(' | '));
+  check('a note typed between the headings and the calendar does not replace one',
+    !view.headings.includes('see note'));
+  check('a column the heading row names is drawn even with nothing under it',
+    view.meta.length === 6 && view.activities[0].meta.length === 6);
+  check('and the location is still found by its heading', cls.locationColumnOf(view) === 2);
+
+  const red = cls.readGrid(headingGrid([
+    shift(9, 'FF0000', 'Cancellation', 'Victor'),   // on a day the activity line is yellow
+    shift(10, 'FF0000', 'Cancellation'),           // on a day the activity line left blank
+    shift(11, 'FFC000', 'Swing Shift'),             // a shift painted on the Resource row only
+    shift(12, 'ABCDEF', null),                      // a colour nobody has named
+  ]), { anchorISO: '2026-09-09' });
+  const rowsR = await cls.rowsFrom(red, {});
+  const cells = rowsR[0]?.cells || {};
+  check('red on a Resource row is never a cancellation', !Object.values(cells).some((v) => /cancel/i.test(v)),
+    JSON.stringify(cells));
+  check('and never paints over the activity line', cells['2026-09-08'] === 'Day Shift');
+  check('a shift painted on the Resource row alone still counts as work', cells['2026-09-10'] === 'Swing Shift');
+  check('a colour nobody has named on a Resource row is left out, since it might be red',
+    !('2026-09-11' in cells));
+  check('the names on it are still read', rowsR[0]?.resources?.['2026-09-08'] === 'Victor');
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    The cancellation log
    ═══════════════════════════════════════════════════════════════════════ */
 

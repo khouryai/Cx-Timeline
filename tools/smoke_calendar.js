@@ -1543,22 +1543,32 @@ async function main() {
      nearly always looking for is this one; it used to be a two-pixel rule on
      the left edge of the cells, which is invisible in a table that has borders
      anyway. */
-  check('today is marked down the whole column, and the heading says so',
-    (await page.locator('#rc-frame .rc-resources thead th.rc-res-today .rc-today-tag').count()) === 1
-    && (await page.locator('#rc-frame .rc-resources tbody td.rc-res-today').count()) >= 1);
-  /* …and it survives the row hover. `.rc-table tbody tr:hover td` is the more
-     specific selector, so crossing a row painted the hover colour straight over
-     today's column and the one thing the reader was following disappeared. The
-     PTO grid learnt this the same way, with somebody's leave turning white under
-     the cursor. */
-  const todayCell = page.locator('#rc-frame .rc-resources tbody td.rc-res-today').first();
-  const tintBefore = await todayCell.evaluate((e) => getComputedStyle(e).backgroundColor);
-  await todayCell.hover();
-  await page.waitForTimeout(80);
-  const tintDuring = await todayCell.evaluate((e) => getComputedStyle(e).backgroundColor);
-  check('and hovering the row does not paint over it',
-    tintBefore === tintDuring, `${tintBefore} → ${tintDuring}`);
-  await page.mouse.move(0, 0);
+  /* The week plan draws the working week, so on a Saturday or a Sunday today
+     is not a column at all — and then the honest check is that no column claims
+     to be it. This failed every weekend, which is a test that knew what day it
+     was written on rather than a bug in the week plan. */
+  const weekendToday = [0, 6].includes(new Date().getDay());
+  if (weekendToday) {
+    check('on a weekend no weekday column claims to be today',
+      (await page.locator('#rc-frame .rc-resources .rc-res-today').count()) === 0);
+  } else {
+    check('today is marked down the whole column, and the heading says so',
+      (await page.locator('#rc-frame .rc-resources thead th.rc-res-today .rc-today-tag').count()) === 1
+      && (await page.locator('#rc-frame .rc-resources tbody td.rc-res-today').count()) >= 1);
+    /* …and it survives the row hover. `.rc-table tbody tr:hover td` is the more
+       specific selector, so crossing a row painted the hover colour straight over
+       today's column and the one thing the reader was following disappeared. The
+       PTO grid learnt this the same way, with somebody's leave turning white under
+       the cursor. */
+    const todayCell = page.locator('#rc-frame .rc-resources tbody td.rc-res-today').first();
+    const tintBefore = await todayCell.evaluate((e) => getComputedStyle(e).backgroundColor);
+    await todayCell.hover();
+    await page.waitForTimeout(80);
+    const tintDuring = await todayCell.evaluate((e) => getComputedStyle(e).backgroundColor);
+    check('and hovering the row does not paint over it',
+      tintBefore === tintDuring, `${tintBefore} → ${tintDuring}`);
+    await page.mouse.move(0, 0);
+  }
 
   /* There is one tab, and it used to be two.
      "Week plan" drew the team's week and "Resources" drew the same rows per
@@ -1969,57 +1979,32 @@ async function main() {
   check('and says how many of the register it left out',
     /not on screen/.test(stripText));
 
-  /* ── Which colour is keeping rows here ────────────────────────────────
-     "It is still showing rows with nothing on them" is a question about a
-     *colour*, and the calendar could not answer it: the switch hides a row with
-     nothing scheduled, whether a row counts as scheduled is decided entirely by
-     its paint, and joining the legend to a hundred days of grid by eye is not a
-     thing to ask anybody to do. So it says which colours are doing it, and one
-     press says they are not work. */
-  const why = page.locator('#rc-frame .la-why');
-  const whyText = await why.innerText();
-  check('the calendar says which colours are keeping rows on screen',
-    /Day Shift — \d+ row\(s\)/.test(whyText), whyText.replace(/\n/g, ' | ').slice(0, 110));
-  check('and a colour mapped as work is one press from being shading',
-    (await why.locator('button', { hasText: 'Just shading' }).count()) >= 1);
+  /* Whether a colour is work or shading is the Legend's to say, and only the
+     Legend's. The calendar used to list the colours keeping rows on screen with
+     "Just shading" beside each — a second place to change the register, on the
+     screen people read rather than the one they administer it from. */
+  check('the calendar offers no way to recategorise a colour',
+    (await page.locator('#rc-frame .la-why').count()) === 0
+      && !/on screen because of/i.test(await page.locator('#rc-frame').innerText()));
 
-  /* The press has to change the row the calendar is *reading* — the one in
-     force — rather than adding a second answer for the same colour. Adding is
-     what left the register with two answers in the first place. */
-  const rowsBefore = await page.locator('#rc-frame .la-grid tbody tr').count();
-  await why.locator('.la-why-item', { hasText: 'Third Shift' })
-    .locator('button', { hasText: 'Just shading' }).click();
-  await page.waitForTimeout(600);
-  check('pressing it edits the entry in force rather than adding another',
-    await page.evaluate(() => window.__rc.rows.rc_legend
-      .filter((l) => l.argb === '00B0F0').length === 1
-      && window.__rc.rows.rc_legend.find((l) => l.argb === '00B0F0').role === 'ignore'));
-
-  /* The same row also carries a near miss of the legend's blue that nobody has
-     mapped, so it is still on screen — correctly, and that is the point of
-     listing every colour rather than only the first. Saying so about that one
-     too is what finally drops the row, and it goes through the other half of the
-     button: a colour with no entry at all gets one. */
-  await page.locator('#rc-frame .la-why .la-why-item', { hasText: '3399FF' })
-    .locator('button', { hasText: 'Just shading' }).click();
-  await page.waitForTimeout(600);
-  check('and a colour with no entry at all gets one',
-    await page.evaluate(() => window.__rc.rows.rc_legend
-      .some((l) => l.argb === '3399FF' && l.role === 'ignore')));
-  check('once nothing on a row counts as work, the row drops off the calendar',
-    (await page.locator('#rc-frame .la-grid tbody tr').count()) < rowsBefore,
-    `${rowsBefore} rows -> ${await page.locator('#rc-frame .la-grid tbody tr').count()}`);
-
-  // Put it back, so the checks after this see the calendar they expect.
-  await page.locator('#rc-frame .rc-tab', { hasText: 'Legend' }).click();
-  await page.waitForSelector('#rc-frame .rc-table');
-  await page.evaluate(() => {
-    const blue = window.__rc.rows.rc_legend.find((l) => l.argb === '00B0F0');
-    if (blue) blue.role = 'shift';
-    window.__rc.rows.rc_legend = window.__rc.rows.rc_legend.filter((l) => l.argb !== '3399FF');
+  /* The three header rows stay put, one under the other. They were all pinned
+     at the same line, so scrolling down stacked the weekday letters over the
+     day numbers and the month, and nobody could tell which date a column was. */
+  const tops = await page.evaluate(() => [...document.querySelectorAll('#rc-frame .la-grid thead tr')]
+    .map((tr) => parseFloat(tr.cells[tr.cells.length - 1].style.top || '0')));
+  check('the month, day and weekday rows are frozen one under another',
+    tops.length === 3 && tops[0] === 0 && tops[1] > tops[0] && tops[2] > tops[1], JSON.stringify(tops));
+  const stuck = await page.evaluate(() => {
+    const scroller = document.querySelector('#rc-frame .la-grid').closest('.rc-scroll');
+    scroller.scrollTop = scroller.scrollHeight;
+    const box = scroller.getBoundingClientRect();
+    const rows = [...document.querySelectorAll('#rc-frame .la-grid thead tr')].map((tr) => tr.getBoundingClientRect().top);
+    scroller.scrollTop = 0;
+    return { box: box.top, rows };
   });
-  await page.locator('#rc-frame .rc-tab', { hasText: 'Calendar' }).click();
-  await page.waitForSelector('#rc-frame .la-grid');
+  check('and still in view with the rows scrolled to the bottom',
+    stuck.rows.every((t) => t >= stuck.box - 1 && t < stuck.box + 120)
+      && stuck.rows[1] > stuck.rows[0] && stuck.rows[2] > stuck.rows[1], JSON.stringify(stuck));
 
   // Filtering redraws the rows and leaves the field alone — rebuilding an
   // input under the caret is the trap this project has hit three times.
@@ -2156,6 +2141,26 @@ async function main() {
   check('the ones still owed a reason can be listed alone', (await cancelRows().count()) === 1);
   await page.locator('#rc-frame .cx-check', { hasText: 'Only the ones with no reason yet' }).locator('input').uncheck();
   await page.waitForTimeout(400);
+
+  // A span, not only a start: an end date before the second event drops it.
+  const firstEnd = await cancelRows().first().getAttribute('data-start');
+  await page.locator('#rc-frame input[aria-label="Log ends on"]').fill(firstEnd);
+  await page.locator('#rc-frame input[aria-label="Log ends on"]').dispatchEvent('change');
+  await page.waitForTimeout(500);
+  check('the log can be narrowed to an end date as well as a start',
+    (await cancelRows().count()) === 1 && /to /.test(await page.locator('#rc-frame').innerText()));
+  check('and the export says how many it will carry',
+    /Export 1 to CSV/.test(await page.locator('#rc-frame').innerText()));
+  await page.locator('#rc-frame input[aria-label="Log ends on"]').fill('');
+  await page.locator('#rc-frame input[aria-label="Log ends on"]').dispatchEvent('change');
+  await page.waitForTimeout(500);
+
+  await page.locator('#rc-frame button', { hasText: 'Re-read saved snapshots' }).click();
+  await page.waitForTimeout(300);
+  await page.locator('.cx-modal-foot .cx-btn.primary').click();
+  await page.waitForTimeout(900);
+  check('the saved snapshots can be re-read under today\'s rules',
+    /Saved snapshots re-read/.test(await page.locator('.cx-toast, .cx-toasts').allInnerTexts().then((t) => t.join(' '))));
 
   await cancelRows().first().locator('button', { hasText: 'Show cells' }).click();
   // No grid to wait for: this fixture's latest read has no "Cable pull" row,

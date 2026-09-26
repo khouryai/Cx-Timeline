@@ -681,7 +681,6 @@ async function renderCalendar(host) {
     const shown = drawn(windowed(view, today), calendarFilter, showQuietRows);
     clear(strip);
     strip.appendChild(legendStrip(legend, grid.unknown, paintOn(shown)));
-    strip.appendChild(whyStrip(shown, legendRows));
     body.appendChild(grid_(shown, today));
   };
   // Redraw the rows only, never the input: rebuilding the field under the
@@ -1043,6 +1042,7 @@ function grid_(view, today) {
      knows how wide the content made them. Measured once the table is in the
      document, on the next frame. */
   requestAnimationFrame(() => {
+    freezeHead(head);
     const firstRow = table_.querySelector('tbody tr');
     if (!firstRow) return;
     let left = 0;
@@ -1064,6 +1064,10 @@ function grid_(view, today) {
     table_.style.setProperty('--la-meta-w', `${left}px`);
   });
 
+  /* A header row can change height after the first frame — a font arriving, a
+     heading wrapping — and a stale offset lets one row slide under another. */
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => freezeHead(head)).observe(head);
+
   if (!rows.length) {
     return el('p', {
       class: 'rc-hint',
@@ -1073,6 +1077,24 @@ function grid_(view, today) {
     });
   }
   return wrap;
+}
+
+/**
+ * Pin the three header rows — month, day number, weekday — one under the other.
+ *
+ * Every header cell was `position: sticky; top: 0`, so all three rows pinned to
+ * the same line and scrolling down stacked them on top of each other: the
+ * weekday letters covered the day numbers and the month, and the one thing a
+ * reader scrolling a hundred rows needs — which date this column is — was gone.
+ * Each row is now pinned at the height of the rows above it, measured, because
+ * only the browser knows how tall the content made them.
+ */
+function freezeHead(head) {
+  let top = 0;
+  for (const tr of head.rows) {
+    for (const cell of tr.cells) cell.style.top = `${top}px`;
+    top += tr.getBoundingClientRect().height;
+  }
 }
 
 /**
@@ -1089,81 +1111,6 @@ function grid_(view, today) {
  * Pass no set at all and everything is listed, which is what a caller with
  * nothing drawn yet wants.
  */
-/**
- * Which colours are keeping rows on the calendar, and one click to say they are not.
- *
- * "It is still showing rows with nothing on them" is a question about a
- * *colour*, and until now the calendar could not answer it. The switch hides a
- * row with nothing scheduled; whether a row has something scheduled is decided
- * entirely by whether any of its paint counts as `shift` — and the person
- * looking at a hundred rows they did not expect has no way to find out which
- * colour did that. They can see the legend, and they can see the grid, and
- * joining the two by eye across a hundred days is not a thing anybody should be
- * asked to do. So the calendar says it.
- *
- * The unmapped list above answers the same question for colours nobody has
- * explained. This is its other half: a colour somebody *has* explained, as work,
- * on rows where no work is happening. Both are one press from "Just shading",
- * and for a mapped colour that press changes the role on the row in force rather
- * than adding a second one — adding is what left a register with two answers for
- * one colour in the first place.
- */
-function whyStrip(view, legendRows) {
-  const shownCols = new Set(view.days.map((d) => d.col));
-  const rowsFor = new Map();
-
-  for (const activity of view.activities) {
-    // A title is on screen for the sake of the rows under it, not for its paint.
-    if (activity.heading && !activity.highlighted) continue;
-    const hexes = new Set(marksOf(activity)
-      .filter((m) => m.hex && m.role === 'shift' && shownCols.has(m.col))
-      .map((m) => String(m.hex).toUpperCase()));
-    for (const hex of hexes) rowsFor.set(hex, (rowsFor.get(hex) || 0) + 1);
-  }
-  if (!rowsFor.size) return el('div');
-
-  /* The entry in force, by the same rule `applyLegend()` uses — newest
-     `valid_from` wins — so the button edits the row the calendar is actually
-     reading rather than whichever came back first. */
-  const inForce = (hex) => (legendRows || [])
-    .filter((l) => String(l.argb).toUpperCase() === hex)
-    .sort((a, b) => String(b.valid_from || '').localeCompare(String(a.valid_from || '')))[0] || null;
-
-  const strip = el('div', { class: 'la-legend la-why' });
-  strip.appendChild(el('span', { class: 'rc-eyebrow', text: 'On screen because of' }));
-
-  for (const [hex, count] of [...rowsFor.entries()].sort((a, b) => b[1] - a[1])) {
-    const entry = inForce(hex);
-    strip.appendChild(el('span', { class: 'la-why-item' }, [
-      el('span', { class: 'la-swatch', style: `background:#${hex}` }),
-      el('span', { text: `${entry?.meaning || `#${hex}, unmapped`} — ${count} row(s)` }),
-      // What a colour means is the register's, and the register is an
-      // administrator's. Everybody else reads why a row is here, and that is
-      // the useful half of this strip anyway.
-      rc.isAdmin() ? el('button', {
-        class: 'cx-btn mini ghost',
-        text: 'Just shading',
-        title: entry
-          ? `Rows whose only paint is ${entry.meaning} will drop out of the calendar. `
-            + 'The colour keeps its name; what changes is whether it counts as somebody being '
-            + 'on site.'
-          : 'Structure in the spreadsheet, not somebody on site.',
-        onClick: async () => {
-          try {
-            if (entry) await rc.updateLegend(entry.id, { role: 'ignore' });
-            else await rc.addLegend([{ argb: hex, meaning: 'Shading', role: 'ignore' }]);
-            notifyChanged('legend');
-            toast({ tone: 'good', message: `#${hex} is shading — ${count} row(s) drop out.` });
-          } catch (err) {
-            toast({ tone: 'bad', message: err.message });
-          }
-        },
-      }) : null,
-    ].filter(Boolean)));
-  }
-  return strip;
-}
-
 function legendStrip(legend, unknown, onScreen = null) {
   const showing = (hex) => !onScreen || onScreen.has(String(hex).toUpperCase());
   const strip = el('div', { class: 'la-legend' });
@@ -1799,8 +1746,9 @@ async function renderChanges(host) {
 const CANCEL_PARTIES = ['BART', 'Hitachi', 'Other'];
 const PARTY_TONE = { BART: 'warn', Hitachi: 'bad', Other: 'neutral' };
 
-/** The first day the log reaches back to, when somebody has changed it on screen. */
+/** The span the log covers, when somebody has changed it on screen. A blank end is no end. */
 let cancellationsFrom = null;
+let cancellationsTo = '';
 let cancellationsUnansweredOnly = false;
 
 /**
@@ -1828,45 +1776,61 @@ async function renderCancellations(host) {
     rc.listCancelledDays(from).catch((err) => { toast({ tone: 'bad', title: 'Could not read the cancellations', message: err.message }); return []; }),
     rc.listCancellationNotes().catch(() => []),
   ]);
-  const events = attachCancellationNotes(cancellationEvents(days, { from }), notes);
+  const to = cancellationsTo && cancellationsTo >= from ? cancellationsTo : '';
+  /* An event is in the span when it starts inside it. One that runs past the
+     end is kept whole rather than cut at the boundary: a cancelled week is one
+     event, and half of it in a report is a different claim. */
+  const events = attachCancellationNotes(cancellationEvents(days, { from }), notes)
+    .filter((e) => !to || e.start <= to);
 
-  const fromInput = el('input', {
-    type: 'date', class: 'cx-input mini', value: from, 'aria-label': 'Log starts on', style: 'width:150px',
-  });
-  fromInput.addEventListener('change', () => {
-    if (!fromInput.value) return;
-    cancellationsFrom = fromInput.value;
+  const dateBox = (value, label, onPick) => {
+    const box = el('input', {
+      type: 'date', class: 'cx-input mini', value, 'aria-label': label, style: 'width:150px',
+    });
+    box.addEventListener('change', () => onPick(box.value));
+    return box;
+  };
+  const fromInput = dateBox(from, 'Log starts on', (v) => {
+    if (!v) return;
+    cancellationsFrom = v;
     notifyChanged('cancellations');
   });
+  const toInput = dateBox(to, 'Log ends on', (v) => {
+    cancellationsTo = v;
+    notifyChanged('cancellations');
+  });
+  const span = to ? `${dayLabel(from)} to ${dayLabel(to)}` : `since ${dayLabel(from)}`;
 
   host.appendChild(el('div', { class: 'rc-section-head' }, [
     el('h3', { text: 'Cancellation log' }),
     el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end' }, [
       el('span', { class: 'rc-hint', style: 'margin:0;white-space:nowrap', text: 'From' }),
       fromInput,
-      events.length
-        ? el('button', {
-          class: 'cx-btn mini',
-          html: `${icon('download', { size: 12 })}<span>CSV</span>`,
-          onClick: () => saveFile(`cancellations-${todayISO()}.csv`, cancellationCsv(events), 'text/csv', 'Cancellation log'),
-        })
-        : null,
+      el('span', { class: 'rc-hint', style: 'margin:0;white-space:nowrap', text: 'To' }),
+      toInput,
+      el('button', {
+        class: 'cx-btn mini ghost',
+        html: `${icon('refresh', { size: 12 })}<span>Re-read saved snapshots</span>`,
+        title: 'Apply today\'s rules — Resource rows are never cancellations — to every read the log covers',
+        onClick: () => rederiveCancellations(from),
+      }),
       checkNowButton(),
     ].filter(Boolean)),
   ]));
 
   host.appendChild(el('p', {
     class: 'rc-hint',
-    text: 'Every run of red cells any read of the look-ahead has shown since '
-      + `${dayLabel(from)}. Cells side by side on one activity are one event. A cancellation `
-      + 'stays in the log after the sheet moves on — it was red when those reads were taken.',
+    text: `Every run of red cells any read of the look-ahead has shown ${span}. Cells side by `
+      + 'side on one activity are one event, and red on a Resource row is never a cancellation. '
+      + 'A cancellation stays in the log after the sheet moves on — it was red when those reads '
+      + 'were taken.',
   }));
 
   if (!events.length) {
     host.appendChild(emptyState({
       iconName: 'calendar',
       title: 'No cancellations',
-      message: `No read of the look-ahead since ${dayLabel(from)} has a cell painted in the colour the Legend calls a cancellation.`,
+      message: `No read of the look-ahead ${span} has a cell painted in the colour the Legend calls a cancellation.`,
     }));
     return;
   }
@@ -1893,6 +1857,22 @@ async function renderCancellations(host) {
   }));
 
   const shown = cancellationsUnansweredOnly ? events.filter((e) => !e.note) : events;
+
+  /* The extract is what is on screen: the span above, and the "no reason yet"
+     narrowing when it is ticked. The file says which span in its name, because
+     a log that is quietly a fortnight of a quarter reads as the whole quarter. */
+  host.appendChild(el('div', { style: 'margin:8px 0 10px' }, [
+    el('button', {
+      class: 'cx-btn mini',
+      html: `${icon('download', { size: 12 })}<span>Export ${shown.length} to CSV</span>`,
+      onClick: () => saveFile(
+        `cancellations-${from}-to-${to || todayISO()}.csv`,
+        cancellationCsv(shown),
+        'text/csv',
+        'Cancellation log',
+      ),
+    }),
+  ]));
   const rows = shown.map((e) => el('tr', { class: 'rc-cancel-row', dataset: { start: e.start, label: e.label } }, [
     el('td', {}, [
       el('div', { class: 'rc-cancel-cells', 'aria-hidden': 'true' },
@@ -1941,6 +1921,62 @@ async function renderCancellations(host) {
   ]));
 
   host.appendChild(table(['', 'Activity', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
+}
+
+/**
+ * Re-derive what every read since the log's start said each day was painted as.
+ *
+ * `rc_cancelled_days` reads the cells each ingest wrote, and those were written
+ * under the rules of the day. Red on a Resource row used to go in with the rest
+ * of the row's paint — and over the activity line's own colour — so a week of
+ * names marked in red read as a week cancelled. The rule is fixed in
+ * `rowsFrom()`; this applies it to the reads already taken. The snapshot is the
+ * durable record and `cells` is derived from it, so this rewrites a derivation
+ * and nothing else: rows are matched on `row_key` within their own snapshot,
+ * and a row the new reading does not produce is left exactly as it was.
+ *
+ * Reads up to six weeks before the start are included, because a sheet read in
+ * August already shows the first weeks of September.
+ */
+async function rederiveCancellations(from) {
+  const ok = await confirmDialog({
+    title: 'Re-read the saved snapshots?',
+    message: 'Every read since six weeks before the log starts is read again under today\'s rules, '
+      + 'and what each stored row says about each day is rewritten to match. Nothing else changes — '
+      + 'not the snapshots, not the change log, not any reason already recorded.',
+    confirmLabel: 'Re-read',
+  });
+  if (!ok) return;
+
+  try {
+    const since = toISO(addDays(isoToMs(from), -42));
+    const [metas, legendRows] = await Promise.all([rc.listSnapshotMeta({ limit: 1000 }), rc.listLegend()]);
+    const legend = legendRows.map((r) => ({ argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
+    const wanted = metas.filter((m) => String(m.taken_at || '').slice(0, 10) >= since);
+    const same = (a, b) => JSON.stringify(Object.entries(a || {}).sort()) === JSON.stringify(Object.entries(b || {}).sort());
+
+    let changed = 0;
+    for (const meta of wanted) {
+      const snapshot = await rc.snapshotById(meta.id);
+      if (!snapshot?.grid) continue;
+      const view = readGrid(applyLegend(snapshot.grid, legend), { anchorISO: snapshot.taken_at });
+      const fresh = new Map((await rowsFrom(view, { snapshotId: snapshot.id })).map((r) => [r.row_key, r]));
+      for (const row of await rc.listSnapshotRows(snapshot.id)) {
+        const again = fresh.get(row.row_key);
+        if (!again || same(again.cells, row.cells)) continue;
+        await rc.updateLookaheadRowCells(row.id, again.cells);
+        changed++;
+      }
+    }
+    toast({
+      tone: 'good',
+      title: 'Saved snapshots re-read',
+      message: `${wanted.length} read(s) checked, ${changed} row(s) corrected.`,
+    });
+    notifyChanged('cancellations');
+  } catch (err) {
+    toast({ tone: 'bad', title: 'Could not re-read the snapshots', message: err.message });
+  }
 }
 
 /** Say whose it was and why — or correct what was said. */

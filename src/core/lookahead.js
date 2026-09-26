@@ -432,18 +432,42 @@ export function readGrid(grid, { anchorISO = null } = {}) {
      not others — so they are numbered by position and named where a heading
      happens to exist above the first activity. */
   const body = rows.filter((r) => r.row > header.row);
-  const metaCols = [...new Set(
-    body.flatMap((r) => r.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim()).map((c) => c.col))
-  )].sort((a, b) => a - b);
 
-  /* What the sheet calls each of those columns.
-     The nearest thing written in that column at or above the weekday row —
-     which is where a heading is, whichever row somebody put it on. It is worth
-     reading rather than guessing because one of these columns is the location,
-     and knowing *which* is the difference between recording where the work is
-     and recording nothing. Nothing depends on a heading existing: an unlabelled
-     column is '' and is treated as it always was. */
+  /* The row the sheet writes its column headings on.
+     "Activity ID, Description of Work Activity, Location, SSWP, Party to Action,
+     Work hours" sit together on one row above the calendar, and that row is found
+     the way the weekday row is: it is the one, at or above the weekday row, with
+     the most text left of the first day. Reading each column's nearest text
+     upwards instead — which is what this did — takes whatever is closest, so a
+     note typed in a gap row, or a label on the weekday row itself, stood in for
+     the real heading of its column and the row of headings never showed. A
+     single stray cell cannot win against a row of six. */
+  const labelled = (row) => row.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim());
+  let headingRow = null;
+  for (const row of rows) {
+    if (row.row > header.row) break;
+    const count = labelled(row).length;
+    if (count >= 2 && count >= (headingRow ? labelled(headingRow).length : 0)) headingRow = row;
+  }
+
+  /* The activity columns: every column left of the calendar that the body uses
+     or the heading row names. A named column whose cells are all empty is still
+     one of the sheet's columns — leaving it out would shift every heading after
+     it onto the wrong values in the reader's head. */
+  const metaCols = [...new Set([
+    ...body.flatMap((r) => labelled(r).map((c) => c.col)),
+    ...(headingRow ? labelled(headingRow).map((c) => c.col) : []),
+  ])].sort((a, b) => a - b);
+
+  /* What the sheet calls each of those columns: its cell on the heading row,
+     and only where that row says nothing, the nearest text above the weekday
+     row — the reading a sheet with its headings scattered over rows still needs.
+     It is worth reading rather than guessing because one of these columns is the
+     location, and knowing *which* is the difference between recording where the
+     work is and recording nothing. An unlabelled column is ''. */
   const headings = metaCols.map((col) => {
+    const own = String(at(headingRow, col)?.value ?? '').trim();
+    if (own) return own;
     for (let i = rows.length - 1; i >= 0; i--) {
       if (rows[i].row > header.row) continue;
       const text = String(at(rows[i], col)?.value ?? '').trim();
@@ -671,15 +695,32 @@ export async function rowsFrom(view, {
 
     // Group this activity's marks by the week they fall in.
     const weeks = new Map();
-    for (const mark of marksOf(activity)) {
+    const bucketFor = (date) => {
+      const week = mondayOf(date);
+      if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
+      return weeks.get(week);
+    };
+    for (const mark of activity.marks) {
       if (!mark.hex || mark.role === 'ignore') continue;
       const day = dayByCol.get(mark.col);
       if (!day?.date) continue;
-      const week = mondayOf(day.date);
-      if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
-      const bucket = weeks.get(week);
+      const bucket = bucketFor(day.date);
       bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
       if (mark.value) bucket.marks[day.date] = mark.value;
+    }
+    /* The Resource row's own paint, which the workbook sometimes uses for the
+       shift instead of the activity line. It fills a day the activity line left
+       unpainted and never overrides one — the activity line is what the day *is*.
+       And it never says a day was cancelled: red on a Resource row is somebody
+       marking the names, not the work, so a cancellation colour there — or a
+       colour nobody has named, which might turn out to be one — is left out of
+       `cells` entirely, and with it out of `rc_cancelled_days`. */
+    for (const mark of activity.resource?.marks || []) {
+      if (!mark.hex || mark.role === 'ignore' || !mark.meaning || isCancelMeaning(mark.meaning)) continue;
+      const day = dayByCol.get(mark.col);
+      if (!day?.date) continue;
+      const bucket = bucketFor(day.date);
+      if (!(day.date in bucket.cells)) bucket.cells[day.date] = mark.meaning;
     }
     if (!weeks.size) continue;
 
@@ -741,6 +782,15 @@ export async function rowsFrom(view, {
   }
 
   return out;
+}
+
+/**
+ * Whether a legend meaning says a day was cancelled — the one rule, the same
+ * word `ingest()` looks for in the legend and `rc_cancelled_days` looks for in
+ * the stored cells.
+ */
+export function isCancelMeaning(meaning) {
+  return /cancel/i.test(String(meaning || ''));
 }
 
 /** The Monday of an ISO date's week, in UTC. A calendar date must not shift. */

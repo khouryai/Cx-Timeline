@@ -571,6 +571,11 @@ export function listSnapshots({ limit = 1 } = {}) {
   return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(limit));
 }
 
+/** One snapshot with its grid, by id — for re-deriving what a past read said. */
+export function snapshotById(id) {
+  return select('rc_lookahead_snapshots', (q) => q.eq('id', id).limit(1)).then((rows) => rows[0] || null);
+}
+
 export function listSnapshotRows(snapshotId) {
   return select('rc_lookahead_rows', (q) => q.eq('snapshot_id', snapshotId).order('sheet_row'));
 }
@@ -890,6 +895,14 @@ export const addAnnotation = (row) => insert('rc_change_annotations', [row]).the
  * Record whose cancellation it was, and why. Append-only: a correction is a
  * new row carrying `supersedes_id`, never an edit.
  */
+/**
+ * Replace what a stored row says each day was painted as. Only ever the
+ * re-derivation of a past read under today's rules — `cells` is derived from
+ * the snapshot, which is the durable record, so refining a rule means writing
+ * the derivation again rather than migrating anything.
+ */
+export const updateLookaheadRowCells = (id, cells) => update('rc_lookahead_rows', id, { cells });
+
 export const addCancellationNote = (row) => insert('rc_cancellation_notes', [row]).then((r) => r[0]);
 
 /* ── Accounts ──────────────────────────────────────────────────────────── */

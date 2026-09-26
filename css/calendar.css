@@ -834,21 +834,6 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   .rc-table.rc-resources td:first-child { font-weight: 700; font-size: var(--fs-small); }
 }
 
-/* Which colours are keeping rows on the calendar. The other half of the
-   unmapped strip: a colour somebody *has* explained, as work, on rows where no
-   work is happening. Set apart from the key above it, because the key says what
-   the colours mean and this says what they are doing to the screen. */
-.la-legend.la-why {
-  border-top: 1px dashed var(--border);
-  padding-top: var(--space-2);
-  margin-top: calc(var(--space-2) * -1);
-}
-.la-why-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
 /* Two tasks on one day, told apart without a heavy rule: a shift is often more
    than one job, and they have to read as separate things rather than as one
    description that wrapped. */
