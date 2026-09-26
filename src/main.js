@@ -39,7 +39,8 @@ import { requireSignIn, installAccessMode } from './ui/auth.js';
 import { installP6Drops } from './ui/p6.js';
 import { installLookaheadDrops } from './ui/lookahead.js';
 import { installShortcuts } from './ui/shortcuts.js';
-import { installCommandMenu, openCommandMenu } from './ui/command_menu.js';
+import { installCommandMenu } from './ui/command_menu.js';
+import { installCanvasHint } from './ui/canvas_hint.js';
 import * as workspace from './ui/workspace.js';
 import { loadCalendar } from './ui/calendar_loader.js';
 import * as rcClient from './core/rc.js';
@@ -122,6 +123,7 @@ async function boot() {
   renderer.mount(frame);
   buildMinimap(frame);
   buildLegend(frame);
+  installCanvasHint(frame);
 
   const inspector = document.getElementById('inspector');
   const inspectorResizer = el('div', { class: 'resizer left' });

@@ -918,3 +918,44 @@ body.read-only #inspector .cx-swatch {
   color: var(--info);
   white-space: nowrap;
 }
+
+/* ── The canvas with nothing on it (ui/canvas_hint.js) ────────────────── */
+.canvas-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  /* Above the floating legend (40), which otherwise covers the card's buttons
+     on a short canvas; below menus and dialogs. */
+  z-index: 45;
+}
+.canvas-hint[hidden] { display: none; }
+.canvas-hint-card {
+  pointer-events: auto;
+  max-width: 420px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  text-align: center;
+}
+.canvas-hint .ch-title {
+  font-weight: 600;
+  color: var(--text-main);
+  margin-bottom: 6px;
+}
+.canvas-hint .ch-msg {
+  font-size: var(--fs-small);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.canvas-hint .ch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
+}

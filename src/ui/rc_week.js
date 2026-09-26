@@ -55,7 +55,7 @@ import {
 } from './components.js';
 import {
   SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability,
-  notifyChanged, formModal, nameRegister, foldName,
+  notifyChanged, formModal, nameRegister, foldName, goToTab,
   ambiguousFirstNames, lookaheadWithResources, assignmentIndex,
   locationRegister, unmatchedLocations,
 } from './rc_util.js';
@@ -212,6 +212,7 @@ export async function render(root) {
       iconName: 'users',
       title: 'Nobody on the team yet',
       message: 'Add people in Organisation first. Being on the roster never requires an account.',
+      action: rc.isAdmin() ? { label: 'Open Organisation', onClick: () => goToTab('org') } : null,
     }));
     return;
   }

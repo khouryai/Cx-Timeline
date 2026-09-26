@@ -101,6 +101,7 @@ export function build() {
   on(EV.RC_CHANGED, () => render());
   on(EV.RC_AUTH_CHANGED, () => render());
   on(EV.RC_QUEUE_CHANGED, () => renderHead());
+  on(EV.RC_SHOW_TAB, ({ tab }) => showTab(tab));
 
   render();
   init();

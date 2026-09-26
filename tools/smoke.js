@@ -1847,6 +1847,23 @@ async function main() {
     await page.waitForTimeout(500);
     check('clearing it brings everything back', !(await chip.isVisible())
       && (await page.locator('.tl-obj').count()) >= all, `${await page.locator('.tl-obj').count()} of ${all}`);
+
+    /* A window with nothing in it looked exactly like an empty plan: a ruler
+       over a blank field. The canvas now says which it is, and the way out. */
+    const hint = page.locator('#canvas-frame .canvas-hint:not([hidden])');
+    check('a canvas with things on it says nothing', (await hint.count()) === 0);
+    await page.locator('#toolbar button[aria-label="Show only a date range"]').click();
+    await page.waitForTimeout(300);
+    await page.locator('.cx-modal input[aria-label="Show from"]').fill('2031-01-01');
+    await page.locator('.cx-modal input[aria-label="Show to"]').fill('2031-01-31');
+    await page.locator('.cx-modal-foot .cx-btn.primary').click();
+    await page.waitForTimeout(600);
+    const hintText = (await hint.count()) ? await hint.innerText() : '';
+    check('a date range with nothing in it says so, rather than looking like an empty plan',
+      /Nothing in view/.test(hintText) && /date range is set/.test(hintText), hintText.replace(/\n/g, ' · '));
+    await hint.locator('button', { hasText: 'Clear the date range' }).click();
+    await page.waitForTimeout(600);
+    check('and its button ends it', (await hint.count()) === 0 && (await page.locator('.tl-obj').count()) > 0);
   }
 
   console.log('\nDock panes');

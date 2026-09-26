@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 16   Built: 2026-09-26T07:21:07.310Z
+ * Modules: 16   Built: 2026-09-26T07:39:08.679Z
  */
 (function () {
   'use strict';
@@ -134,6 +134,15 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   /** A row was written. Whatever is on screen reloads. */
   function notifyChanged(what) {
     emit(EV.RC_CHANGED, { what });
+  }
+
+  /**
+   * Go to another calendar tab. A tab cannot import the router — `ui/rc.js`
+   * imports every tab — so it asks, the way a dock pane asks for another pane.
+   * This is what lets an empty screen point at the place its data comes from.
+   */
+  function goToTab(tab) {
+    emit(EV.RC_SHOW_TAB, { tab });
   }
 
   /**
@@ -973,6 +982,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "byId", { get: () => byId, enumerable: true });
   Object.defineProperty(__x, "groupBy", { get: () => groupBy, enumerable: true });
   Object.defineProperty(__x, "notifyChanged", { get: () => notifyChanged, enumerable: true });
+  Object.defineProperty(__x, "goToTab", { get: () => goToTab, enumerable: true });
   Object.defineProperty(__x, "STATUSES", { get: () => STATUSES, enumerable: true });
   Object.defineProperty(__x, "STATUS_BY_ID", { get: () => STATUS_BY_ID, enumerable: true });
   Object.defineProperty(__x, "SHIFTS", { get: () => SHIFTS, enumerable: true });
@@ -6027,6 +6037,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         message: 'The calendar is located by finding the row of weekday letters — M, Tu, W and '
           + 'the rest — and this sheet has none that are visible. Check the sheet name in Legend, '
           + 'and that the week columns are not hidden.',
+        action: admin ? { label: 'Open Legend', onClick: () => { la.section = 'legend'; notifyChanged('legend'); } } : null,
       }));
       return;
     }
@@ -6757,7 +6768,7 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
 
 
 
-  const { SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, foldName, ambiguousFirstNames, lookaheadWithResources, assignmentIndex, locationRegister, unmatchedLocations } = __req("ui/rc_util.js");
+  const { SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, foldName, goToTab, ambiguousFirstNames, lookaheadWithResources, assignmentIndex, locationRegister, unmatchedLocations } = __req("ui/rc_util.js");
 
 
 
@@ -6916,6 +6927,7 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
         iconName: 'users',
         title: 'Nobody on the team yet',
         message: 'Add people in Organisation first. Being on the roster never requires an account.',
+        action: rc.isAdmin() ? { label: 'Open Organisation', onClick: () => goToTab('org') } : null,
       }));
       return;
     }
@@ -7962,7 +7974,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
 
 
   const { ABSENCE_LABELS } = __req("core/lookahead.js");
-  const { weekStart, todayISO, dayLabel, byId, availability, isoToMs, notifyChanged, formModal, nameRegister, absenceAssignments, lookaheadWithResources } = __req("ui/rc_util.js");
+  const { weekStart, todayISO, dayLabel, byId, availability, isoToMs, notifyChanged, formModal, nameRegister, absenceAssignments, lookaheadWithResources, goToTab } = __req("ui/rc_util.js");
 
 
 
@@ -8045,7 +8057,12 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
     ].filter(Boolean)));
 
     if (!people.length) {
-      host.appendChild(emptyState({ title: 'Nobody on the roster yet.' }));
+      host.appendChild(emptyState({
+        iconName: 'users',
+        title: 'Nobody on the roster yet',
+        message: 'Leave is booked against people on the roster. Being on it never requires an account.',
+        action: rc.isAdmin() ? { label: 'Add people in Organisation', onClick: () => goToTab('org') } : null,
+      }));
       return;
     }
 
@@ -9089,6 +9106,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
     on(EV.RC_CHANGED, () => render());
     on(EV.RC_AUTH_CHANGED, () => render());
     on(EV.RC_QUEUE_CHANGED, () => renderHead());
+    on(EV.RC_SHOW_TAB, ({ tab }) => showTab(tab));
 
     render();
     init();

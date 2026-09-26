@@ -145,6 +145,7 @@ async function renderCalendar(host) {
       message: 'The calendar is located by finding the row of weekday letters — M, Tu, W and '
         + 'the rest — and this sheet has none that are visible. Check the sheet name in Legend, '
         + 'and that the week columns are not hidden.',
+      action: admin ? { label: 'Open Legend', onClick: () => { la.section = 'legend'; notifyChanged('legend'); } } : null,
     }));
     return;
   }

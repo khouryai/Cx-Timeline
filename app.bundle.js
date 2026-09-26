@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 58   Built: 2026-09-26T07:21:07.243Z
+ * Modules: 59   Built: 2026-09-26T07:39:08.613Z
  */
 (function () {
   'use strict';
@@ -558,6 +558,7 @@ __mods["core/events.js"] = function (__x, __req) {
     RC_AUTH_CHANGED: 'rc:auth', // { user, event }
     RC_CHANGED: 'rc:changed', // { what } — a row was written; panes reload
     RC_QUEUE_CHANGED: 'rc:queue', // { pending } — unsynced huddle entries
+    RC_SHOW_TAB: 'rc:tab', // { tab } — a tab asking for another; ui/rc.js owns the router
 
     /* Which whole interface is on screen: the timeline, or the calendar. */
     CALENDAR_FAILED: 'calendar:failed', // { message } — the calendar's code could not be loaded or started
@@ -27728,6 +27729,7 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
         iconName: 'link',
         title: 'No dependencies',
         message: 'Hover an object and drag from its round anchor onto another object to create a link.',
+        action: doc.objects.length ? null : { label: 'Add objects first', onClick: () => goToPane('palette') },
       }));
       return;
     }
@@ -27803,6 +27805,7 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
         iconName: 'bookmark',
         title: 'No baselines yet',
         message: 'A baseline freezes the current dates so later slippage can be measured against it.',
+        action: { label: 'Take the first baseline', onClick: () => cmd.takeBaseline() },
       }));
       return;
     }
@@ -33143,6 +33146,120 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/canvas_hint.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/canvas_hint.js"] = function (__x, __req) {
+  /**
+   * What to do when the canvas is empty.
+   *
+   * An empty plan and a plan whose every object is hidden looked exactly the
+   * same: a ruler over a blank field. The first wants something added, the
+   * second wants a filter cleared — and a date window set yesterday, or a filter
+   * in hide mode, is precisely the thing somebody has forgotten they set. So
+   * when nothing is laid out, the canvas says which case it is and offers the one
+   * or two actions that end it. Every action is an existing command.
+   *
+   * It reads the layout the renderer just drew (`RENDER_DONE` carries how many
+   * objects were packed) rather than working out visibility for itself, so it
+   * cannot disagree with what is on screen.
+   *
+   * Imports: util, events, store, access, icons, commands, pane_util.
+   */
+
+  const { el } = __req("core/util.js");
+  const { on, EV } = __req("core/events.js");
+  const store = __req("core/store.js");
+  const { planLocked } = __req("core/access.js");
+  const { icon } = __req("ui/icons.js");
+  const cmd = __req("ui/commands.js");
+  const { goToPane } = __req("ui/pane_util.js");
+  const renderer = __req("timeline/renderer.js");
+
+  let box = null;
+  let shown = '';
+
+  function installCanvasHint(frame) {
+    box = el('div', { class: 'canvas-hint', hidden: true, role: 'status' });
+    frame.appendChild(box);
+    on(EV.RENDER_DONE, ({ objects } = {}) => update(objects));
+  }
+
+  function action(label, iconName, run, primary = false) {
+    return el('button', {
+      class: `cx-btn mini${primary ? ' primary' : ''}`,
+      type: 'button',
+      html: icon(iconName, { size: 12 }) + `<span>${label}</span>`,
+      onClick: run,
+    });
+  }
+
+  function update(laidOut) {
+    if (!box) return;
+    const doc = store.getDoc();
+    if (laidOut > 0 || !doc) {
+      if (!box.hidden) { box.hidden = true; shown = ''; }
+      return;
+    }
+
+    const locked = planLocked();
+    const filters = store.getFilters();
+    const hidden = doc.objects.filter((o) => o.hidden).length;
+    const windowSet = Boolean(filters.from || filters.to);
+    const filtering = store.hasActiveFilters();
+
+    let key;
+    let title;
+    let message;
+    const actions = [];
+
+    if (!doc.objects.length) {
+      key = `empty:${locked}:${doc.lanes.length}`;
+      title = 'An empty plan';
+      message = locked
+        ? 'Nothing has been added to this plan yet, and this account may only read it.'
+        : 'Add the first activity, or bring a plan in from a file or a P6 export.';
+      if (!locked) {
+        if (doc.lanes.length) actions.push(action('Add an activity', 'plus', () => cmd.createObject('activity'), true));
+        else actions.push(action('Add a lane', 'layers', () => cmd.addLane(), true));
+        actions.push(action('Import…', 'upload', () => goToPane('io')));
+      }
+    } else {
+      key = `hidden:${windowSet}:${hidden}:${filtering}`;
+      title = 'Nothing in view';
+      const reasons = [];
+      if (windowSet) reasons.push('a date range is set');
+      if (filtering && !windowSet) reasons.push('the filter hides everything');
+      if (hidden) reasons.push(`${hidden} object${hidden === 1 ? ' is' : 's are'} hidden`);
+      message = reasons.length
+        ? `The plan has ${doc.objects.length} object${doc.objects.length === 1 ? '' : 's'}, but ${reasons.join(' and ')}.`
+        : `The plan has ${doc.objects.length} object${doc.objects.length === 1 ? '' : 's'}, none of them here.`;
+      // Setting the range framed the view on it, so clearing it here frames the
+      // plan again — otherwise the objects come back somewhere off screen.
+      if (windowSet) actions.push(action('Clear the date range', 'calendar', () => { cmd.clearDateWindow(); cmd.fitAll(); }, true));
+      if (filtering && !windowSet) {
+        actions.push(action('Clear the filter', 'filter', () => {
+          store.resetFilters();
+          renderer.requestRender();
+        }, !windowSet));
+      }
+      if (hidden) actions.push(action(`Show ${hidden} hidden`, 'eye', () => cmd.showAllHidden(), !filtering));
+      actions.push(action('Fit the whole plan', 'maximize', () => cmd.fitAll()));
+    }
+
+    if (key === shown && !box.hidden) return;
+    shown = key;
+    box.replaceChildren(el('div', { class: 'canvas-hint-card' }, [
+      el('div', { class: 'ch-title', text: title }),
+      el('div', { class: 'ch-msg', text: message }),
+      actions.length ? el('div', { class: 'ch-actions' }, actions) : null,
+    ].filter(Boolean)));
+    box.hidden = false;
+  }
+
+  Object.defineProperty(__x, "installCanvasHint", { get: () => installCanvasHint, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/calendar_loader.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/calendar_loader.js"] = function (__x, __req) {
@@ -33243,7 +33360,8 @@ __mods["main.js"] = function (__x, __req) {
   const { installP6Drops } = __req("ui/p6.js");
   const { installLookaheadDrops } = __req("ui/lookahead.js");
   const { installShortcuts } = __req("ui/shortcuts.js");
-  const { installCommandMenu, openCommandMenu } = __req("ui/command_menu.js");
+  const { installCommandMenu } = __req("ui/command_menu.js");
+  const { installCanvasHint } = __req("ui/canvas_hint.js");
   const workspace = __req("ui/workspace.js");
   const { loadCalendar } = __req("ui/calendar_loader.js");
   const rcClient = __req("core/rc.js");
@@ -33326,6 +33444,7 @@ __mods["main.js"] = function (__x, __req) {
     renderer.mount(frame);
     buildMinimap(frame);
     buildLegend(frame);
+    installCanvasHint(frame);
 
     const inspector = document.getElementById('inspector');
     const inspectorResizer = el('div', { class: 'resizer left' });

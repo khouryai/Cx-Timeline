@@ -124,6 +124,15 @@ export function notifyChanged(what) {
 }
 
 /**
+ * Go to another calendar tab. A tab cannot import the router — `ui/rc.js`
+ * imports every tab — so it asks, the way a dock pane asks for another pane.
+ * This is what lets an empty screen point at the place its data comes from.
+ */
+export function goToTab(tab) {
+  emit(EV.RC_SHOW_TAB, { tab });
+}
+
+/**
  * The five statuses, split into the two families that must never be averaged.
  *
  * Performance is what an individual did. Health is what was done to them — a

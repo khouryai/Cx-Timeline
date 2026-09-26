@@ -386,6 +386,7 @@ export function paneLinks(root) {
       iconName: 'link',
       title: 'No dependencies',
       message: 'Hover an object and drag from its round anchor onto another object to create a link.',
+      action: doc.objects.length ? null : { label: 'Add objects first', onClick: () => goToPane('palette') },
     }));
     return;
   }
@@ -461,6 +462,7 @@ export function paneBaselines(root) {
       iconName: 'bookmark',
       title: 'No baselines yet',
       message: 'A baseline freezes the current dates so later slippage can be measured against it.',
+      action: { label: 'Take the first baseline', onClick: () => cmd.takeBaseline() },
     }));
     return;
   }

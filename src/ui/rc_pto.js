@@ -48,7 +48,7 @@ import {
 import { ABSENCE_LABELS } from '../core/lookahead.js';
 import {
   weekStart, todayISO, dayLabel, byId, availability, isoToMs,
-  notifyChanged, formModal, nameRegister, absenceAssignments, lookaheadWithResources,
+  notifyChanged, formModal, nameRegister, absenceAssignments, lookaheadWithResources, goToTab,
 } from './rc_util.js';
 
 /** Which four weeks are on screen. Null means the one containing today. */
@@ -129,7 +129,12 @@ export async function render(root) {
   ].filter(Boolean)));
 
   if (!people.length) {
-    host.appendChild(emptyState({ title: 'Nobody on the roster yet.' }));
+    host.appendChild(emptyState({
+      iconName: 'users',
+      title: 'Nobody on the roster yet',
+      message: 'Leave is booked against people on the roster. Being on it never requires an account.',
+      action: rc.isAdmin() ? { label: 'Add people in Organisation', onClick: () => goToTab('org') } : null,
+    }));
     return;
   }
 
