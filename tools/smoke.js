@@ -1785,6 +1785,67 @@ async function main() {
   await page.locator('#dock .cx-seg button', { hasText: 'Suggested' }).click();
   await page.waitForTimeout(300);
 
+  console.log('\nHiding objects, and a date window');
+  {
+    await page.locator('#toolbar button[aria-label="Fit whole plan"]').click();
+    await page.waitForTimeout(500);
+    const TARGET = await page.locator('.tl-obj.shape-bar').first().getAttribute('data-label');
+    const node = () => page.locator(`.tl-obj[data-label="${TARGET.replace(/"/g, '\\"')}"]`);
+    const shown = await node().count();
+    await node().first().click({ button: 'right' });
+    await page.waitForTimeout(250);
+    await page.locator('.cx-menu .cx-menu-item', { hasText: /^Hide/ }).first().click();
+    await page.waitForTimeout(500);
+    check('an object can be hidden from its menu', shown >= 1 && (await node().count()) === 0);
+    const sbText = await page.locator('#statusbar').innerText();
+    check('and the status bar says something is hidden', /1 hidden/.test(sbText), sbText.replace(/\n/g, ' | ').slice(0, 120));
+
+    await page.locator('#statusbar .sb-item', { hasText: 'hidden' }).click();
+    await page.waitForTimeout(300);
+    check('which lists what is hidden, since it cannot be clicked on the canvas',
+      (await page.locator('.cx-modal').innerText()).includes(TARGET), TARGET);
+    await page.locator(`.cx-modal button[aria-label="Show ${TARGET}"]`).click();
+    await page.waitForTimeout(400);
+    await page.locator('.cx-modal-foot .cx-btn', { hasText: 'Close' }).click();
+    await page.waitForTimeout(300);
+    check('and showing it puts it back exactly as it was', (await node().count()) === shown);
+
+    // Hidden by the keyboard too, and back from the Filters pane.
+    await node().first().click();
+    await page.keyboard.press('Control+Shift+H');
+    await page.waitForTimeout(400);
+    check('the shortcut hides it as well', (await node().count()) === 0);
+    await page.locator('#sidenav .nav-link[data-pane="filters"]').click();
+    await page.waitForTimeout(300);
+    check('the Filters pane lists it', /hidden objects \(1\)/i.test(await page.locator('#dock').innerText()));
+    await page.locator('#dock button', { hasText: 'Show all' }).click();
+    await page.waitForTimeout(400);
+    check('and "Show all" brings everything back', (await node().count()) === shown);
+
+    /* A window of dates: only what overlaps it is drawn, the rest is hidden
+       rather than dimmed, and clearing it brings everything back. */
+    const all = await page.locator('.tl-obj').count();
+    await page.locator('#toolbar button[aria-label="Show only a date range"]').click();
+    await page.waitForTimeout(300);
+    await page.locator('.cx-modal input[aria-label="Show from"]').fill('2026-09-15');
+    await page.locator('.cx-modal input[aria-label="Show to"]').fill('2026-11-25');
+    await page.locator('.cx-modal-foot .cx-btn.primary').click();
+    await page.waitForTimeout(600);
+    const inWindow = await page.evaluate(() => [...document.querySelectorAll('.tl-obj')].length);
+    const chip = page.locator('#toolbar .tb-window');
+    check('a date range hides what falls outside it', inWindow > 0 && inWindow < all, `${all} → ${inWindow}`);
+    check('and the toolbar says a range is in force', await chip.isVisible() && /–/.test(await chip.innerText()),
+      await chip.innerText().catch(() => ''));
+    const dimmed = await page.locator('.tl-obj.dimmed, .tl-obj.filtered-out').count();
+    check('hidden, not dimmed', dimmed === 0, `${dimmed} dimmed`);
+    await chip.click();
+    await page.waitForTimeout(500);
+    await page.locator('#toolbar button[aria-label="Fit whole plan"]').click();
+    await page.waitForTimeout(500);
+    check('clearing it brings everything back', !(await chip.isVisible())
+      && (await page.locator('.tl-obj').count()) >= all, `${await page.locator('.tl-obj').count()} of ${all}`);
+  }
+
   console.log('\nDock panes');
   const panes = ['lookahead', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links', 'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists', 'settings'];
   for (const pane of panes) {

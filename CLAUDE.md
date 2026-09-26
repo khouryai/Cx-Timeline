@@ -164,6 +164,24 @@ subscribes. That is what keeps the graph acyclic.
   (`settings.filterMode`). Hiding drops them before packing in
   `computeLayout()`, so the rows reflow and the lanes close up; skipping them
   at paint time would leave the gaps they used to occupy. Exports always hide.
+- **Hidden is a way back, not a way out.** `obj.hidden` was on the model and
+  in the inspector, and `toggleHidden()` existed with nothing calling it — and a
+  hidden object is not drawn, so it could not be clicked to be shown again.
+  Hiding is now on the object's menu and `mod+shift+h`, a toast says where it
+  went, the status bar counts what is hidden and opens `openHiddenList()`, and
+  the Filters pane lists them with Show / Show all (`showObjects()`,
+  `showAllHidden()`). It is a plan edit like any other — undoable, and an
+  export leaves hidden objects out — because that is what the flag always was.
+- **A date window hides; the rest of the filter dims.** The filter's From/To is
+  read on its own by `dateWindowPredicate()` in `core/query.js`, and
+  `computeLayout({ windowFn })` drops what does not overlap it before packing,
+  whatever `filterMode` says — "show me 15 September to 25 November" is a
+  request not to see the rest, and dimming it would not be. It stays the
+  reader's own view (`ui.filters`, never the plan), so nothing is removed. Set
+  it from the toolbar ("Show only a date range", which also frames the view) or
+  the Filters pane; while one is in force the toolbar carries a chip naming it,
+  and pressing the chip clears it — a plan with half its objects hidden by a
+  window set yesterday otherwise looks like a plan with half its objects missing.
 - **Baseline comparison draws five things, not one** (`renderBaseline`): the
   ghost at the baseline dates behind the live bar, an arrow between the two
   finish edges labelled in days, the reason someone typed into the striped
@@ -1493,7 +1511,7 @@ node tools/test_dist.js              #  41 checks — every deployment shape, an
 node tools/test_lookahead.js         # 195 checks — the parser, the rows it derives, the
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
-node tools/smoke.js                  # 294 checks — the application, local mode
+node tools/smoke.js                  # 305 checks — the application, local mode
 node tools/smoke_calendar.js         # 331 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves

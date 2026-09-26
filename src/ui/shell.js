@@ -28,6 +28,7 @@ import { THEMES, applyTheme, getTheme } from './theme.js';
 import { showPane, currentPane, PANES } from './panels.js';
 import * as workspace from './workspace.js';
 import { accountBlock, openShareDialog } from './auth.js';
+import * as cmd from './commands.js';
 
 /** Sidebar structure — sections of dock panes. */
 const NAV = [
@@ -278,6 +279,15 @@ function buildToolbar() {
       }),
       toolButton('expand', 'Fit whole plan', fitAll, 'mod+0'),
       toolButton('calendar', 'Go to today', goToToday, 't'),
+      toolButton('filter', 'Show only a date range', () => cmd.openDateWindow()),
+      /* The window in force, and the way out of it. Said on the toolbar because
+         a plan with half its objects hidden by a date filter set yesterday looks
+         exactly like a plan with half its objects missing. */
+      (dom.windowChip = el('button', {
+        class: 'cx-btn mini tb-window',
+        title: 'Clear the date range — everything outside it comes back',
+        onClick: () => cmd.clearDateWindow(),
+      })),
     ]),
     el('div', { class: 'tb-sep' })
   );
@@ -377,10 +387,26 @@ function toolButton(iconName, title, onClick, key) {
   return button;
 }
 
+/** The date window in force, on the toolbar, with its own way out. */
+function refreshWindowChip() {
+  if (!dom.windowChip) return;
+  const { from, to } = store.getFilters();
+  if (!from && !to) {
+    dom.windowChip.style.display = 'none';
+    return;
+  }
+  const say = (iso) => fmtDate(Date.parse(`${iso}T00:00:00Z`), 'numeric');
+  const span = from && to ? `${say(from)} – ${say(to)}` : from ? `from ${say(from)}` : `to ${say(to)}`;
+  dom.windowChip.style.display = '';
+  dom.windowChip.innerHTML = `<span>${span}</span>${icon('x', { size: 11 })}`;
+  dom.windowChip.setAttribute('aria-label', `Clear the date range ${span}`);
+}
+
 function refreshToolbar() {
   const doc = store.getDoc();
   const settings = doc.settings;
   const history = store.historyState();
+  refreshWindowChip();
 
   dom.title.querySelector('.tt-name').textContent = doc.name;
   dom.title.querySelector('.tt-meta').textContent =
@@ -478,6 +504,13 @@ function buildStatusbar() {
   dom.selText = el('span', { class: 'sb-item' });
   dom.statusbar.appendChild(dom.selText);
 
+  dom.hiddenText = el('span', {
+    class: 'sb-item clickable',
+    title: 'Hidden objects — click to bring them back',
+    onClick: () => cmd.openHiddenList(),
+  });
+  dom.statusbar.appendChild(dom.hiddenText);
+
   dom.violationText = el('span', {
     class: 'sb-item clickable sb-warn',
     title: 'Show broken dependencies',
@@ -514,6 +547,9 @@ function refreshStatus() {
 
   dom.countText.textContent = `${doc.objects.length} objects · ${doc.lanes.length} lanes · ${doc.links.length} links`;
   dom.selText.textContent = selection.length ? `${selection.length} selected` : '';
+  const hidden = doc.objects.filter((o) => o.hidden).length;
+  dom.hiddenText.textContent = hidden ? `${hidden} hidden` : '';
+  dom.hiddenText.style.display = hidden ? '' : 'none';
 
   const violations = linkViolations(doc);
   dom.violationText.textContent = violations.count
@@ -600,6 +636,7 @@ function wireEvents() {
   });
   on(EV.FILE_STATE, () => refreshStatus());
   on(EV.SELECTION_CHANGED, () => refreshStatus());
+  on(EV.FILTER_CHANGED, () => refreshWindowChip());
   on(EV.TOOL_CHANGED, () => refreshToolbar());
   on(EV.VIEW_CHANGED, debounce(() => {
     refreshToolbar();

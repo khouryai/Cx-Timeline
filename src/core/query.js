@@ -56,6 +56,30 @@ export function filterPredicate(doc, filters) {
 }
 
 /**
+ * The date window: only what overlaps it is drawn.
+ *
+ * The From/To of the filter, asked on its own because it means something
+ * stronger than the rest of the filter. "Show me 15 September to 25 November"
+ * is a request to *not see* the rest — so it always hides, whatever the
+ * dim/hide switch says, and the lanes close up around what is left. Nothing is
+ * removed: the window lives in the reader's own view (`ui.filters`), never in
+ * the plan, and clearing it brings everything back. An object is in the window
+ * when any part of it is — a campaign running through 15 September belongs in a
+ * window that starts then. Null when no window is set.
+ */
+export function dateWindowPredicate(filters) {
+  const from = filters?.from ? toMs(filters.from) : null;
+  const to = filters?.to ? toMs(filters.to) : null;
+  if (from == null && to == null) return null;
+  return (obj) => {
+    const end = TYPES[obj.type]?.duration ? obj.end : obj.start + MS_DAY;
+    if (from != null && end <= from) return false;
+    if (to != null && obj.start > to) return false;
+    return true;
+  };
+}
+
+/**
  * The text box, read as a list.
  *
  * Commas separate the terms, so several can be searched at once; anything

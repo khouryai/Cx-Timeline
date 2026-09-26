@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 58   Built: 2026-09-26T05:17:02.710Z
+ * Modules: 58   Built: 2026-09-26T05:28:39.620Z
  */
 (function () {
   'use strict';
@@ -11007,6 +11007,30 @@ __mods["core/query.js"] = function (__x, __req) {
   }
 
   /**
+   * The date window: only what overlaps it is drawn.
+   *
+   * The From/To of the filter, asked on its own because it means something
+   * stronger than the rest of the filter. "Show me 15 September to 25 November"
+   * is a request to *not see* the rest — so it always hides, whatever the
+   * dim/hide switch says, and the lanes close up around what is left. Nothing is
+   * removed: the window lives in the reader's own view (`ui.filters`), never in
+   * the plan, and clearing it brings everything back. An object is in the window
+   * when any part of it is — a campaign running through 15 September belongs in a
+   * window that starts then. Null when no window is set.
+   */
+  function dateWindowPredicate(filters) {
+    const from = filters?.from ? toMs(filters.from) : null;
+    const to = filters?.to ? toMs(filters.to) : null;
+    if (from == null && to == null) return null;
+    return (obj) => {
+      const end = TYPES[obj.type]?.duration ? obj.end : obj.start + MS_DAY;
+      if (from != null && end <= from) return false;
+      if (to != null && obj.start > to) return false;
+      return true;
+    };
+  }
+
+  /**
    * The text box, read as a list.
    *
    * Commas separate the terms, so several can be searched at once; anything
@@ -11198,6 +11222,7 @@ __mods["core/query.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "filterPredicate", { get: () => filterPredicate, enumerable: true });
+  Object.defineProperty(__x, "dateWindowPredicate", { get: () => dateWindowPredicate, enumerable: true });
   Object.defineProperty(__x, "textTerms", { get: () => textTerms, enumerable: true });
   Object.defineProperty(__x, "searchableText", { get: () => searchableText, enumerable: true });
   Object.defineProperty(__x, "search", { get: () => search, enumerable: true });
@@ -12076,7 +12101,9 @@ __mods["timeline/layout.js"] = function (__x, __req) {
    * are returned ready to draw (`rect.ghost`, `layout.removed`) so no consumer
    * has to work out where they went a second time.
    */
-  function computeLayout({ filterFn = null, hideFiltered = false, includeOffscreen = false, gutterWidth = 190 } = {}) {
+  function computeLayout({
+    filterFn = null, hideFiltered = false, windowFn = null, includeOffscreen = false, gutterWidth = 190,
+  } = {}) {
     const doc = getDoc();
     const lanes = orderedLanes(false);
     const rects = [];
@@ -12106,7 +12133,8 @@ __mods["timeline/layout.js"] = function (__x, __req) {
 
     for (const lane of lanes) {
       const laneObjects = doc.objects.filter(
-        (o) => o.lane === lane.id && !o.hidden && !(hideFiltered && filterFn && !filterFn(o))
+        (o) => o.lane === lane.id && !o.hidden && !(windowFn && !windowFn(o))
+          && !(hideFiltered && filterFn && !filterFn(o))
       );
 
       // Measure every object in the lane, not just the visible ones: row heights
@@ -13078,7 +13106,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
   const { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } = __req("core/dates.js");
   const { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } = __req("core/model.js");
   const { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
-  const { filterPredicate } = __req("core/query.js");
+  const { filterPredicate, dateWindowPredicate } = __req("core/query.js");
   const { linkViolations, criticalPath, predecessorsOf } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const { computeLayout, stageHeight, ROW_HEIGHT } = __req("timeline/layout.js");
@@ -13207,7 +13235,13 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const settings = doc.settings;
 
     const predicate = hasActiveFilters() ? filterPredicate(doc, getFilters()) : null;
-    const layout = computeLayout({ filterFn: predicate, hideFiltered: settings.filterMode === 'hide' });
+    /* The date window always hides — see `dateWindowPredicate()` — so what is
+       outside it is dropped before packing, and the lanes close up. */
+    const layout = computeLayout({
+      filterFn: predicate,
+      hideFiltered: settings.filterMode === 'hide',
+      windowFn: dateWindowPredicate(getFilters()),
+    });
     lastLayout = layout;
 
     dom.stage.style.height = `${stageHeight(layout.geometry)}px`;
@@ -17919,7 +17953,140 @@ __mods["ui/commands.js"] = function (__x, __req) {
     if (!objects.length) return;
     const hide = !objects.every((o) => o.hidden);
     store.updateObjects(objects.map((o) => o.id), { hidden: hide }, hide ? 'Hide' : 'Show');
+    // A hidden object cannot be clicked, so it cannot stay selected either.
+    if (hide) store.setSelection([]);
     renderer.requestRender();
+    if (hide) {
+      /* Say where it went and how to get it back. A thing that vanishes off the
+         canvas with no word about it reads as deleted. */
+      toast({
+        tone: 'info',
+        title: objects.length === 1 ? `Hidden: ${objects[0].title}` : `${objects.length} objects hidden`,
+        message: 'Still in the plan. Bring it back from "hidden" in the status bar, or the Filters pane.',
+        action: { label: 'Undo', onClick: () => showObjects(objects.map((o) => o.id)) },
+      });
+    }
+  }
+
+  /** Every object somebody has hidden, in plan order. */
+  function hiddenObjects() {
+    return store.getDoc().objects.filter((o) => o.hidden);
+  }
+
+  /** Put hidden objects back on the timeline. Nothing about them changed while away. */
+  function showObjects(ids) {
+    const wanted = [].concat(ids).filter((id) => store.getObject(id)?.hidden);
+    if (!wanted.length) return false;
+    store.updateObjects(wanted, { hidden: false }, wanted.length === 1 ? 'Show' : `Show ${wanted.length} objects`);
+    renderer.requestRender();
+    return true;
+  }
+
+  function showAllHidden() {
+    return showObjects(hiddenObjects().map((o) => o.id));
+  }
+
+  /**
+   * The hidden objects, each one click from coming back.
+   *
+   * A hidden object is not drawn, so it cannot be right-clicked or selected on
+   * the canvas — without a list of them, hiding was a door that only opened one
+   * way. The same list is in the Filters pane.
+   */
+  function openHiddenList() {
+    const list = el('div', { class: 'cx-list hidden-list' });
+    const draw = () => {
+      list.replaceChildren();
+      const hidden = hiddenObjects();
+      if (!hidden.length) {
+        list.appendChild(el('div', { class: 'cx-hint', text: 'Nothing is hidden.' }));
+        return;
+      }
+      const lanes = new Map(store.getDoc().lanes.map((l) => [l.id, l.name]));
+      for (const obj of hidden) {
+        list.appendChild(el('div', { class: 'cx-listrow', dataset: { id: obj.id }, style: { cursor: 'default' } }, [
+          el('div', { class: 'lr-main' }, [
+            el('div', { class: 'lr-title', text: obj.title }),
+            el('div', { class: 'lr-meta', text: `${lanes.get(obj.lane) || 'no lane'} · ${fmtDate(obj.start, 'numeric')}` }),
+          ]),
+          el('button', {
+            class: 'cx-btn mini',
+            html: icon('eye', { size: 12 }) + '<span>Show</span>',
+            'aria-label': `Show ${obj.title}`,
+            onClick: () => { showObjects([obj.id]); draw(); },
+          }),
+        ]));
+      }
+    };
+    draw();
+    openModal({
+      title: 'Hidden objects',
+      subtitle: 'Hidden, not removed — each is still in the plan with everything it had.',
+      body: list,
+      actions: [
+        { label: 'Close' },
+        { label: 'Show all', kind: 'primary', onClick: () => { showAllHidden(); } },
+      ],
+    });
+  }
+
+  /* ── The date window ───────────────────────────────────────────────────── */
+
+  /**
+   * Show only what falls between two dates.
+   *
+   * Everything outside is hidden rather than dimmed and the lanes close up, and
+   * the view is framed on the window. It is the reader's own view — nothing in
+   * the plan changes, and clearing it brings everything back as it was.
+   */
+  function setDateWindow(from, to, { frame = true } = {}) {
+    store.setFilters({ from: from || null, to: to || null });
+    if (frame && (from || to)) {
+      const start = from ? Date.parse(`${from}T00:00:00Z`) : projectExtent(store.getDoc()).start;
+      const end = to ? Date.parse(`${to}T00:00:00Z`) + MS_DAY : projectExtent(store.getDoc()).end;
+      if (end > start) viewport.fitRange(start, end, 30);
+    }
+    renderer.invalidateAll?.();
+    renderer.requestRender();
+  }
+
+  function clearDateWindow() {
+    setDateWindow(null, null, { frame: false });
+  }
+
+  function openDateWindow() {
+    const current = store.getFilters();
+    const from = el('input', { type: 'date', class: 'cx-input', value: current.from || '', 'aria-label': 'Show from' });
+    const to = el('input', { type: 'date', class: 'cx-input', value: current.to || '', 'aria-label': 'Show to' });
+    const actions = [{ label: 'Cancel' }];
+    if (current.from || current.to) {
+      actions.push({ label: 'Clear dates', onClick: () => clearDateWindow() });
+    }
+    actions.push({
+      label: 'Show only these dates',
+      kind: 'primary',
+      onClick: () => {
+        if (!from.value && !to.value) {
+          toast({ tone: 'warn', title: 'Pick a date', message: 'Give a start, an end, or both.' });
+          return false;
+        }
+        if (from.value && to.value && to.value < from.value) {
+          toast({ tone: 'warn', title: 'The end is before the start' });
+          return false;
+        }
+        setDateWindow(from.value, to.value);
+        return undefined;
+      },
+    });
+    openModal({
+      title: 'Show only a date range',
+      subtitle: 'Everything outside it is hidden, not removed. Clear the dates to bring it all back.',
+      body: el('div', { class: 'cx-row', style: { gap: '12px' } }, [
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'From' }), from]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'To' }), to]),
+      ]),
+      actions,
+    });
   }
 
   function groupSelection() {
@@ -18566,6 +18733,13 @@ __mods["ui/commands.js"] = function (__x, __req) {
   Object.defineProperty(__x, "selectDependencyChain", { get: () => selectDependencyChain, enumerable: true });
   Object.defineProperty(__x, "toggleLock", { get: () => toggleLock, enumerable: true });
   Object.defineProperty(__x, "toggleHidden", { get: () => toggleHidden, enumerable: true });
+  Object.defineProperty(__x, "hiddenObjects", { get: () => hiddenObjects, enumerable: true });
+  Object.defineProperty(__x, "showObjects", { get: () => showObjects, enumerable: true });
+  Object.defineProperty(__x, "showAllHidden", { get: () => showAllHidden, enumerable: true });
+  Object.defineProperty(__x, "openHiddenList", { get: () => openHiddenList, enumerable: true });
+  Object.defineProperty(__x, "setDateWindow", { get: () => setDateWindow, enumerable: true });
+  Object.defineProperty(__x, "clearDateWindow", { get: () => clearDateWindow, enumerable: true });
+  Object.defineProperty(__x, "openDateWindow", { get: () => openDateWindow, enumerable: true });
   Object.defineProperty(__x, "groupSelection", { get: () => groupSelection, enumerable: true });
   Object.defineProperty(__x, "ungroupSelection", { get: () => ungroupSelection, enumerable: true });
   Object.defineProperty(__x, "setStatus", { get: () => setStatus, enumerable: true });
@@ -27854,26 +28028,66 @@ __mods["ui/panels.js"] = function (__x, __req) {
       }, 200),
     }), 'Separate several with commas — anything matching any of them is kept.'));
 
+    /* The date window. Unlike the rest of the filter it always *hides* what is
+       outside it, whatever the switch above says — "show me 15 September to 25
+       November" is a request not to see the rest. Nothing is removed, and the
+       toolbar says a window is in force for as long as it is. */
     root.appendChild(
       el('div', { class: 'cx-row', style: { marginTop: '10px' } }, [
-        field('From', textInput({
+        field('Show only from', textInput({
           type: 'date',
           value: filters.from || '',
           onChange: (v) => {
-            store.setFilters({ from: v || null });
-            renderer.requestRender();
+            cmd.setDateWindow(v || null, store.getFilters().to, { frame: false });
+            renderPane();
           },
         })),
         field('To', textInput({
           type: 'date',
           value: filters.to || '',
           onChange: (v) => {
-            store.setFilters({ to: v || null });
-            renderer.requestRender();
+            cmd.setDateWindow(store.getFilters().from, v || null, { frame: false });
+            renderPane();
           },
         })),
       ])
     );
+    if (filters.from || filters.to) {
+      root.appendChild(el('div', { style: { display: 'flex', gap: '6px', margin: '-4px 0 10px' } }, [
+        el('button', {
+          class: 'cx-btn mini',
+          html: icon('x', { size: 12 }) + '<span>Clear dates</span>',
+          onClick: () => { cmd.clearDateWindow(); renderPane(); },
+        }),
+        el('span', { class: 'cx-hint', text: 'Outside these dates is hidden, not removed.' }),
+      ]));
+    }
+
+    /* What somebody hid by hand, each one click from coming back. A hidden
+       object is not drawn, so this is the only place it can be reached. */
+    const hidden = doc.objects.filter((o) => o.hidden);
+    if (hidden.length) {
+      root.appendChild(section(`Hidden objects (${hidden.length})`, [
+        el('div', { class: 'cx-list' }, hidden.map((obj) => el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+          el('div', { class: 'lr-main' }, [
+            el('div', { class: 'lr-title', text: obj.title }),
+            el('div', { class: 'lr-meta', text: fmtDate(obj.start, 'numeric') }),
+          ]),
+          el('button', {
+            class: 'cx-btn mini',
+            html: icon('eye', { size: 12 }) + '<span>Show</span>',
+            'aria-label': `Show ${obj.title}`,
+            onClick: () => { cmd.showObjects([obj.id]); renderPane(); },
+          }),
+        ]))),
+        el('button', {
+          class: 'cx-btn mini',
+          style: { marginTop: '6px' },
+          html: icon('eye', { size: 12 }) + '<span>Show all</span>',
+          onClick: () => { cmd.showAllHidden(); renderPane(); },
+        }),
+      ]));
+    }
 
     root.appendChild(checkGroup('Type', 'types', Object.entries(TYPES).map(([id, t]) => ({ value: id, label: t.label })), filters.types));
     root.appendChild(checkGroup('Status', 'statuses', listOptions('status').map((o) => ({ value: o.id, label: o.label })), filters.statuses));
@@ -29250,6 +29464,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const { showPane, currentPane, PANES } = __req("ui/panels.js");
   const workspace = __req("ui/workspace.js");
   const { accountBlock, openShareDialog } = __req("ui/auth.js");
+  const cmd = __req("ui/commands.js");
 
   /** Sidebar structure — sections of dock panes. */
   const NAV = [
@@ -29500,6 +29715,15 @@ __mods["ui/shell.js"] = function (__x, __req) {
         }),
         toolButton('expand', 'Fit whole plan', fitAll, 'mod+0'),
         toolButton('calendar', 'Go to today', goToToday, 't'),
+        toolButton('filter', 'Show only a date range', () => cmd.openDateWindow()),
+        /* The window in force, and the way out of it. Said on the toolbar because
+           a plan with half its objects hidden by a date filter set yesterday looks
+           exactly like a plan with half its objects missing. */
+        (dom.windowChip = el('button', {
+          class: 'cx-btn mini tb-window',
+          title: 'Clear the date range — everything outside it comes back',
+          onClick: () => cmd.clearDateWindow(),
+        })),
       ]),
       el('div', { class: 'tb-sep' })
     );
@@ -29599,10 +29823,26 @@ __mods["ui/shell.js"] = function (__x, __req) {
     return button;
   }
 
+  /** The date window in force, on the toolbar, with its own way out. */
+  function refreshWindowChip() {
+    if (!dom.windowChip) return;
+    const { from, to } = store.getFilters();
+    if (!from && !to) {
+      dom.windowChip.style.display = 'none';
+      return;
+    }
+    const say = (iso) => fmtDate(Date.parse(`${iso}T00:00:00Z`), 'numeric');
+    const span = from && to ? `${say(from)} – ${say(to)}` : from ? `from ${say(from)}` : `to ${say(to)}`;
+    dom.windowChip.style.display = '';
+    dom.windowChip.innerHTML = `<span>${span}</span>${icon('x', { size: 11 })}`;
+    dom.windowChip.setAttribute('aria-label', `Clear the date range ${span}`);
+  }
+
   function refreshToolbar() {
     const doc = store.getDoc();
     const settings = doc.settings;
     const history = store.historyState();
+    refreshWindowChip();
 
     dom.title.querySelector('.tt-name').textContent = doc.name;
     dom.title.querySelector('.tt-meta').textContent =
@@ -29700,6 +29940,13 @@ __mods["ui/shell.js"] = function (__x, __req) {
     dom.selText = el('span', { class: 'sb-item' });
     dom.statusbar.appendChild(dom.selText);
 
+    dom.hiddenText = el('span', {
+      class: 'sb-item clickable',
+      title: 'Hidden objects — click to bring them back',
+      onClick: () => cmd.openHiddenList(),
+    });
+    dom.statusbar.appendChild(dom.hiddenText);
+
     dom.violationText = el('span', {
       class: 'sb-item clickable sb-warn',
       title: 'Show broken dependencies',
@@ -29736,6 +29983,9 @@ __mods["ui/shell.js"] = function (__x, __req) {
 
     dom.countText.textContent = `${doc.objects.length} objects · ${doc.lanes.length} lanes · ${doc.links.length} links`;
     dom.selText.textContent = selection.length ? `${selection.length} selected` : '';
+    const hidden = doc.objects.filter((o) => o.hidden).length;
+    dom.hiddenText.textContent = hidden ? `${hidden} hidden` : '';
+    dom.hiddenText.style.display = hidden ? '' : 'none';
 
     const violations = linkViolations(doc);
     dom.violationText.textContent = violations.count
@@ -29822,6 +30072,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
     });
     on(EV.FILE_STATE, () => refreshStatus());
     on(EV.SELECTION_CHANGED, () => refreshStatus());
+    on(EV.FILTER_CHANGED, () => refreshWindowChip());
     on(EV.TOOL_CHANGED, () => refreshToolbar());
     on(EV.VIEW_CHANGED, debounce(() => {
       refreshToolbar();
@@ -31704,6 +31955,9 @@ __mods["ui/menus.js"] = function (__x, __req) {
       'sep',
       ...violationItems(obj),
       { label: obj.locked ? 'Unlock' : 'Lock', icon: obj.locked ? 'unlock' : 'lock', key: 'mod+l', onClick: () => cmd.toggleLock() },
+      // Hidden, not deleted: it comes back from "hidden" in the status bar or the
+      // Filters pane, because a hidden object cannot be clicked to be shown again.
+      { label: many ? `Hide ${selection.length} objects` : 'Hide', icon: 'eye-off', key: 'mod+shift+h', onClick: () => cmd.toggleHidden() },
       { label: 'Select dependency chain', icon: 'route', key: 'mod+shift+d', onClick: () => cmd.selectDependencyChain() },
       { label: 'Zoom to selection', icon: 'expand', key: 'mod+shift+0', onClick: () => cmd.zoomToSelection() },
       'sep',
@@ -32036,6 +32290,11 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
         case 'l':
           e.preventDefault();
           cmd.toggleLock();
+          return;
+        case 'h':
+          if (!e.shiftKey) break;
+          e.preventDefault();
+          cmd.toggleHidden();
           return;
         case 'f':
           e.preventDefault();

@@ -83,6 +83,11 @@ function onKeyDown(e) {
         e.preventDefault();
         cmd.toggleLock();
         return;
+      case 'h':
+        if (!e.shiftKey) break;
+        e.preventDefault();
+        cmd.toggleHidden();
+        return;
       case 'f':
         e.preventDefault();
         showPane('search');
