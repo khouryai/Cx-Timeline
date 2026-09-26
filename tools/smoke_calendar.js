@@ -28,11 +28,16 @@
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
 import { pinClock, pinNodeClock } from './lib/clock.js';
-
-pinNodeClock();
 import { buildLookaheadWorkbook } from './fixtures/xlsx_fixture.js';
 import path from 'node:path';
 import url from 'node:url';
+import fs from 'node:fs';
+
+pinNodeClock();
+
+// The version core/rc.js expects, so the fake database can be stamped with it.
+const SCHEMA_VERSION = Number(fs.readFileSync(path.join(path.dirname(url.fileURLToPath(import.meta.url)), '..', 'src', 'core', 'rc.js'), 'utf8')
+  .match(/export const SCHEMA_VERSION = (\d+);/)[1]);
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 
@@ -400,6 +405,8 @@ function fakeSdk() {
     ],
     rc_settings: [
       { key: 'lookahead_sheet', value: '4WLA' },
+      // The version this build expects, so the banner below is the exception.
+      { key: 'schema_version', value: String(window.__rcSchemaVersion) },
       // Relative, like every other date here, so the log has a start whatever
       // day the suite runs on.
       { key: 'cancellation_log_from', value: iso(-40) },
@@ -1085,6 +1092,7 @@ async function main() {
   await captureDownloads(page);
   await captureClipboard(page);
   await page.addInitScript(fakeFolder);
+  await page.addInitScript(`window.__rcSchemaVersion = ${SCHEMA_VERSION};`);
   await page.addInitScript(fakeSdk);
   const url_ = 'file://' + path.join(ROOT, 'index.html');
 
@@ -1151,6 +1159,39 @@ async function main() {
     await page.evaluate(() => localStorage.getItem('cxtl.folder.name')));
   check('and the plan still has no backend of its own',
     await page.evaluate(() => window.CX_CONFIG.supabaseUrl === ''));
+
+  /* ── The database version ─────────────────────────────────────────────
+     The site deploys on a push and the SQL is run by hand, so they drift.
+     A database the application is ahead of is said once, at the top, with
+     the two files an administrator runs — rather than as a refused write on
+     some screen weeks later. */
+  console.log('\nSchema version');
+  const bannerNow = () => page.locator('#rc-frame .rc-schema-banner:not([hidden])');
+  check('a database at the expected version says nothing', (await bannerNow().count()) === 0);
+  const setVersion = (v) => page.evaluate((value) => {
+    const row = window.__rc.rows.rc_settings.find((r) => r.key === 'schema_version');
+    if (value === null) window.__rc.rows.rc_settings.splice(window.__rc.rows.rc_settings.indexOf(row), 1);
+    else row.value = value;
+    const { mods, req } = window.__CX_MODULES;
+    req('core/rc.js').forgetReads();
+    req('core/events.js').emit('rc:changed', { what: 'test' });
+  }, v);
+  await setVersion('0');
+  await page.waitForTimeout(300);
+  const behindText = (await bannerNow().count()) ? await bannerNow().innerText() : '';
+  check('a database behind the application is named, with the files to run',
+    /behind this version/.test(behindText) && /migrate\.sql/.test(behindText) && /rc_schema\.sql/.test(behindText),
+    behindText.replace(/\n/g, ' ').slice(0, 100));
+  await bannerNow().locator('button', { hasText: 'Hide for now' }).click();
+  check('and it can be put away for the session', (await bannerNow().count()) === 0);
+  await setVersion(String(await page.evaluate(() => window.__rcSchemaVersion + 1)));
+  await page.waitForTimeout(300);
+  check('a page older than its database is told to reload',
+    (await bannerNow().count()) === 1 && /older than the calendar's database/.test(await bannerNow().innerText())
+      && (await bannerNow().locator('button', { hasText: 'Reload' }).count()) === 1,
+    'even after "run the SQL" was put away');
+  await setVersion(String(await page.evaluate(() => window.__rcSchemaVersion)));
+  await page.waitForTimeout(200);
 
   /* ── The roster ───────────────────────────────────────────────────────── */
   console.log('\nOrganisation');
@@ -2950,6 +2991,7 @@ async function main() {
   // not per-context, and fakeSdk reads `__rc.role` when it builds the roster.
   await serveStubbedConfig(viewer);
   await viewer.addInitScript(() => { window.__rc = { role: 'viewer', signedIn: true }; });
+  await viewer.addInitScript(`window.__rcSchemaVersion = ${SCHEMA_VERSION};`);
   await viewer.addInitScript(fakeSdk);
   await viewer.goto(url_, { waitUntil: 'load' });
   // Attached rather than visible: a viewer lands on the calendar, so the canvas
@@ -3029,6 +3071,7 @@ async function main() {
   member.on('pageerror', (e) => consoleErrors.push(String(e)));
   await serveStubbedConfig(member);
   await member.addInitScript(() => { window.__rc = { role: 'member', signedIn: true }; });
+  await member.addInitScript(`window.__rcSchemaVersion = ${SCHEMA_VERSION};`);
   await member.addInitScript(fakeSdk);
   await member.goto(url_, { waitUntil: 'load' });
   // A member is not read-only, so they land on the timeline like anybody else

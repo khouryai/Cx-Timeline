@@ -20,11 +20,11 @@
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
 import { pinClock, pinNodeClock } from './lib/clock.js';
-
-pinNodeClock();
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
+
+pinNodeClock();
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 

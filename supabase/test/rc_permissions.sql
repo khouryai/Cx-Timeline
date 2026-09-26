@@ -1108,7 +1108,7 @@ select assert((select value from public.rc_settings where key = 'lookahead_sheet
 select act_as(:'carol');
 select assert((select count(*) from public.rc_legend) = 5,
   'a member can read the legend — their own row is drawn against it');
-select assert((select count(*) from public.rc_settings) = 2, 'and the settings');
+select assert((select count(*) from public.rc_settings) = 3, 'and the settings, the version stamp among them');
 select assert((select value from public.rc_settings where key = 'cancellation_log_from') = '2026-09-01',
   'the cancellation log starts in September unless somebody says otherwise');
 select refuses(:'carol',

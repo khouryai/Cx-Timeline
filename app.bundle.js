@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 57   Built: 2026-09-26T06:24:41.823Z
+ * Modules: 57   Built: 2026-09-26T06:49:39.785Z
  */
 (function () {
   'use strict';
@@ -16238,6 +16238,41 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_settings');
   }
 
+  /**
+   * The database version this build of the calendar expects.
+   *
+   * `rc_schema.sql` stamps its own number into `rc_settings.schema_version` as
+   * its very last statement, so a run that stopped half way does not claim to
+   * have finished. Raise both together — `tools/test_sql.js` fails when they
+   * differ. A column the database has never heard of used to surface as
+   * "could not update the legend", on one screen, weeks after the deploy that
+   * needed it; this turns it into one sentence at sign-in naming the two files.
+   */
+  const SCHEMA_VERSION = 1;
+
+  /**
+   * Whether the database is the one this build was written against.
+   *
+   * `behind` is the common case — the site deployed and nobody ran the SQL —
+   * and a project from before the stamp existed reads as version 0. `ahead`
+   * means the page is older than the database, which is a stale tab or a
+   * desktop copy that has not fetched its update yet. A read that fails answers
+   * `unknown` rather than guessing: the calendar has its own ways of saying the
+   * database is unreachable, and a second one here would only compete.
+   */
+  async function schemaStatus() {
+    let rows;
+    try {
+      rows = await listSettings();
+    } catch {
+      return { state: 'unknown', expected: SCHEMA_VERSION, found: null };
+    }
+    const row = (rows || []).find((r) => r.key === 'schema_version');
+    const found = row ? Number.parseInt(row.value, 10) || 0 : 0;
+    const state = found === SCHEMA_VERSION ? 'current' : found < SCHEMA_VERSION ? 'behind' : 'ahead';
+    return { state, expected: SCHEMA_VERSION, found };
+  }
+
   function listLeaveKinds() {
     return select('rc_leave_kinds', (q) => q.eq('active', true).order('name'));
   }
@@ -16822,6 +16857,8 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listLegend", { get: () => listLegend, enumerable: true });
   Object.defineProperty(__x, "exportEverything", { get: () => exportEverything, enumerable: true });
   Object.defineProperty(__x, "listSettings", { get: () => listSettings, enumerable: true });
+  Object.defineProperty(__x, "SCHEMA_VERSION", { get: () => SCHEMA_VERSION, enumerable: true });
+  Object.defineProperty(__x, "schemaStatus", { get: () => schemaStatus, enumerable: true });
   Object.defineProperty(__x, "listLeaveKinds", { get: () => listLeaveKinds, enumerable: true });
   Object.defineProperty(__x, "pendingLeave", { get: () => pendingLeave, enumerable: true });
   Object.defineProperty(__x, "listLeave", { get: () => listLeave, enumerable: true });

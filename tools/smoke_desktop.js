@@ -32,13 +32,13 @@
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
 import { pinClock, pinNodeClock } from './lib/clock.js';
-
-pinNodeClock();
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import { execFileSync } from 'node:child_process';
+
+pinNodeClock();
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const SHELL = path.join(ROOT, 'dist-desktop');

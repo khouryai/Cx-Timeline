@@ -2181,3 +2181,17 @@ select v.name, v.color, v.counts from (values
   ('Unpaid',       '#6b7280', false)
 ) as v(name, color, counts)
 where not exists (select 1 from public.rc_leave_kinds where name = v.name);
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- The version stamp — last, on purpose.
+--
+-- The calendar reads this at sign-in and compares it with `SCHEMA_VERSION` in
+-- `src/core/rc.js`; an administrator whose database is behind is told which
+-- files to run, instead of finding out from a refused write weeks later. It is
+-- the final statement so that a run which stopped part of the way through does
+-- not claim to have finished. Raise it together with the constant whenever
+-- this file changes shape — `tools/test_sql.js` fails when the two disagree.
+-- ══════════════════════════════════════════════════════════════════════════
+
+insert into public.rc_settings (key, value) values ('schema_version', '1')
+on conflict (key) do update set value = excluded.value, updated_at = now();

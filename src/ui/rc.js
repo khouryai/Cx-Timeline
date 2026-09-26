@@ -128,7 +128,7 @@ function render() {
   }
 
   const view = el('div');
-  bodyEl.appendChild(view);
+  bodyEl.append(schemaBanner(), view);
   Promise.resolve(RENDERERS[active](view)).catch((err) => {
     clear(view);
     view.appendChild(loadFailed(err));
@@ -244,6 +244,59 @@ function pendingLeaveChip() {
     })
     .catch(() => {});
   return chip;
+}
+
+/**
+ * "The database is older than the application", said once, at the top.
+ *
+ * The site deploys on a push and the SQL is run by hand, so the two drift — and
+ * the drift used to surface as a refused write on one screen weeks later,
+ * worded as whatever that screen happened to be doing. `rc.schemaStatus()`
+ * compares the stamp `rc_schema.sql` writes last with the version this build
+ * expects. An administrator is told the two files to run and in what order,
+ * because they are the one who can; everybody else is told that something may
+ * not work and who can fix it, because a member cannot act on a filename.
+ *
+ * Built empty and filled when the answer arrives, like the leave chip, and
+ * dismissible for the rest of the session — it is a notice, not a gate.
+ */
+let schemaDismissed = false;
+function schemaBanner() {
+  const box = el('div', { class: 'rc-schema-banner', role: 'status', hidden: true });
+  rc.schemaStatus().then(({ state, expected, found }) => {
+    if (state === 'current' || state === 'unknown') return;
+    const behind = state === 'behind';
+    // Hiding puts away "run the SQL", which somebody may reasonably defer; a
+    // page older than its database is a different problem and is said again.
+    if (behind && schemaDismissed) return;
+    const title = behind
+      ? `The calendar's database is behind this version of the application (database ${found || 'unversioned'}, application ${expected}).`
+      : `This page is older than the calendar's database (page ${expected}, database ${found}).`;
+    const detail = !behind
+      ? 'Reload to pick up the newer version. On the desktop application, close and reopen it.'
+      : rc.isAdmin()
+        ? 'In the Supabase SQL editor, run supabase/migrate.sql and then supabase/rc_schema.sql. Both are safe to run more than once. Until then, some changes may be refused.'
+        : 'Some changes may be refused until an administrator updates the database. Nothing you have entered is lost.';
+    box.append(
+      el('span', { class: 'rc-schema-icon', html: icon('warning', { size: 16 }) }),
+      el('div', { class: 'rc-schema-text' }, [el('strong', { text: title }), el('span', { text: ` ${detail}` })]),
+      el('button', {
+        class: 'cx-btn mini ghost',
+        type: 'button',
+        text: behind ? 'Hide for now' : 'Reload',
+        onClick: () => {
+          if (!behind) {
+            location.reload();
+            return;
+          }
+          schemaDismissed = true;
+          box.hidden = true;
+        },
+      })
+    );
+    box.hidden = false;
+  }).catch(() => {});
+  return box;
 }
 
 /* ── The states that are not the calendar ──────────────────────────────── */

@@ -981,3 +981,23 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 .rc-work .rc-work-task { flex: 1 1 200px; min-width: 160px; }
 .rc-work .rc-work-cat { flex: 0 1 160px; }
 .rc-outcome-task { margin-top: 3px; }
+
+/* The database is not the version this build expects — said once, at the top
+   of the calendar, and dismissible. See schemaBanner() in ui/rc.js. */
+.rc-schema-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-border);
+  border-radius: 8px;
+  background: var(--warn-light);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.rc-schema-banner[hidden] { display: none; }
+.rc-schema-icon { color: var(--warn); flex: none; margin-top: 1px; }
+.rc-schema-text { flex: 1; min-width: 0; }
+.rc-schema-banner .cx-btn { flex: none; }
