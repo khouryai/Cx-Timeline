@@ -93,6 +93,9 @@ function objectMenu({ id, clientX, clientY }) {
     'sep',
     ...violationItems(obj),
     { label: obj.locked ? 'Unlock' : 'Lock', icon: obj.locked ? 'unlock' : 'lock', key: 'mod+l', onClick: () => cmd.toggleLock() },
+    // Hidden, not deleted: it comes back from "hidden" in the status bar or the
+    // Filters pane, because a hidden object cannot be clicked to be shown again.
+    { label: many ? `Hide ${selection.length} objects` : 'Hide', icon: 'eye-off', key: 'mod+shift+h', onClick: () => cmd.toggleHidden() },
     { label: 'Select dependency chain', icon: 'route', key: 'mod+shift+d', onClick: () => cmd.selectDependencyChain() },
     { label: 'Zoom to selection', icon: 'expand', key: 'mod+shift+0', onClick: () => cmd.zoomToSelection() },
     'sep',

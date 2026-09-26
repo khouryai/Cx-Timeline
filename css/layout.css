@@ -824,3 +824,14 @@ body.read-only #inspector .cx-swatch {
   height: 22px;
   font-size: 9px;
 }
+
+/* The date window in force, on the toolbar, with its own way out. Hidden when
+   no window is set. */
+.tb-window {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-color: var(--info);
+  color: var(--info);
+  white-space: nowrap;
+}

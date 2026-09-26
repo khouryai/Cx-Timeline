@@ -205,6 +205,12 @@ alter table public.rc_invitations
 alter table public.rc_invitations enable row level security;
 grant select, insert, update, delete on public.rc_invitations to authenticated;
 
+-- ── What somebody actually did, in words ──────────────────────────────────
+-- An outcome said how the day went and nothing about what it was spent on, so a
+-- day with nothing planned was a status against a blank. The huddle now writes
+-- it, and `rc_record_actual` (in rc_schema.sql) takes it.
+alter table public.rc_actuals add column if not exists task text;
+
 /*
  * Nothing is dropped here any more.
  *
@@ -253,6 +259,12 @@ select 'rc_legend.role',
        case when exists (
          select 1 from information_schema.columns
           where table_schema = 'public' and table_name = 'rc_legend' and column_name = 'role'
+       ) then 'ok' else 'MISSING' end
+union all
+select 'rc_actuals.task',
+       case when exists (
+         select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'rc_actuals' and column_name = 'task'
        ) then 'ok' else 'MISSING' end
 union all
 select 'rc_settings',

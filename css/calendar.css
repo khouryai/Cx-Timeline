@@ -227,6 +227,12 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 .rc-pto-grid tbody tr:hover td.rc-pto-name { background: var(--surface-2); }
 .rc-table .rc-num { text-align: right; font-family: var(--f-mono); }
 .rc-table .rc-inactive td { opacity: 0.45; }
+/* Reports: every value sits centred under its own heading. The headings were
+   left-aligned and the numbers right-aligned, so a column's figures sat under
+   the gap between two headings and the table read as out of line. The first
+   column is the name the row is about, and stays left. */
+.rc-table.rc-report th:not(:first-child),
+.rc-table.rc-report td:not(:first-child) { text-align: center; }
 
 /* A wide table scrolls inside its own frame; the page never scrolls sideways. */
 .rc-scroll {
@@ -834,21 +840,6 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   .rc-table.rc-resources td:first-child { font-weight: 700; font-size: var(--fs-small); }
 }
 
-/* Which colours are keeping rows on the calendar. The other half of the
-   unmapped strip: a colour somebody *has* explained, as work, on rows where no
-   work is happening. Set apart from the key above it, because the key says what
-   the colours mean and this says what they are doing to the screen. */
-.la-legend.la-why {
-  border-top: 1px dashed var(--border);
-  padding-top: var(--space-2);
-  margin-top: calc(var(--space-2) * -1);
-}
-.la-why-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
 /* Two tasks on one day, told apart without a heavy rule: a shift is often more
    than one job, and they have to read as separate things rather than as one
    description that wrapped. */
@@ -977,3 +968,16 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   border-radius: 2px;
   background: var(--bad);
 }
+
+/* What somebody did that day, and the kind of work it was: a line of its own
+   above the status buttons in the huddle, in the table and in the room. */
+.rc-work {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+}
+.rc-work .rc-work-task { flex: 1 1 200px; min-width: 160px; }
+.rc-work .rc-work-cat { flex: 0 1 160px; }
+.rc-outcome-task { margin-top: 3px; }

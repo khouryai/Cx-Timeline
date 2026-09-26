@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 58   Built: 2026-09-25T22:09:41.479Z
+ * Modules: 58   Built: 2026-09-26T05:28:39.620Z
  */
 (function () {
   'use strict';
@@ -6702,18 +6702,42 @@ __mods["core/lookahead.js"] = function (__x, __req) {
        not others — so they are numbered by position and named where a heading
        happens to exist above the first activity. */
     const body = rows.filter((r) => r.row > header.row);
-    const metaCols = [...new Set(
-      body.flatMap((r) => r.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim()).map((c) => c.col))
-    )].sort((a, b) => a - b);
 
-    /* What the sheet calls each of those columns.
-       The nearest thing written in that column at or above the weekday row —
-       which is where a heading is, whichever row somebody put it on. It is worth
-       reading rather than guessing because one of these columns is the location,
-       and knowing *which* is the difference between recording where the work is
-       and recording nothing. Nothing depends on a heading existing: an unlabelled
-       column is '' and is treated as it always was. */
+    /* The row the sheet writes its column headings on.
+       "Activity ID, Description of Work Activity, Location, SSWP, Party to Action,
+       Work hours" sit together on one row above the calendar, and that row is found
+       the way the weekday row is: it is the one, at or above the weekday row, with
+       the most text left of the first day. Reading each column's nearest text
+       upwards instead — which is what this did — takes whatever is closest, so a
+       note typed in a gap row, or a label on the weekday row itself, stood in for
+       the real heading of its column and the row of headings never showed. A
+       single stray cell cannot win against a row of six. */
+    const labelled = (row) => row.cells.filter((c) => c.col < firstDay && String(c.value ?? '').trim());
+    let headingRow = null;
+    for (const row of rows) {
+      if (row.row > header.row) break;
+      const count = labelled(row).length;
+      if (count >= 2 && count >= (headingRow ? labelled(headingRow).length : 0)) headingRow = row;
+    }
+
+    /* The activity columns: every column left of the calendar that the body uses
+       or the heading row names. A named column whose cells are all empty is still
+       one of the sheet's columns — leaving it out would shift every heading after
+       it onto the wrong values in the reader's head. */
+    const metaCols = [...new Set([
+      ...body.flatMap((r) => labelled(r).map((c) => c.col)),
+      ...(headingRow ? labelled(headingRow).map((c) => c.col) : []),
+    ])].sort((a, b) => a - b);
+
+    /* What the sheet calls each of those columns: its cell on the heading row,
+       and only where that row says nothing, the nearest text above the weekday
+       row — the reading a sheet with its headings scattered over rows still needs.
+       It is worth reading rather than guessing because one of these columns is the
+       location, and knowing *which* is the difference between recording where the
+       work is and recording nothing. An unlabelled column is ''. */
     const headings = metaCols.map((col) => {
+      const own = String(at(headingRow, col)?.value ?? '').trim();
+      if (own) return own;
       for (let i = rows.length - 1; i >= 0; i--) {
         if (rows[i].row > header.row) continue;
         const text = String(at(rows[i], col)?.value ?? '').trim();
@@ -6941,15 +6965,32 @@ __mods["core/lookahead.js"] = function (__x, __req) {
 
       // Group this activity's marks by the week they fall in.
       const weeks = new Map();
-      for (const mark of marksOf(activity)) {
+      const bucketFor = (date) => {
+        const week = mondayOf(date);
+        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
+        return weeks.get(week);
+      };
+      for (const mark of activity.marks) {
         if (!mark.hex || mark.role === 'ignore') continue;
         const day = dayByCol.get(mark.col);
         if (!day?.date) continue;
-        const week = mondayOf(day.date);
-        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
-        const bucket = weeks.get(week);
+        const bucket = bucketFor(day.date);
         bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
         if (mark.value) bucket.marks[day.date] = mark.value;
+      }
+      /* The Resource row's own paint, which the workbook sometimes uses for the
+         shift instead of the activity line. It fills a day the activity line left
+         unpainted and never overrides one — the activity line is what the day *is*.
+         And it never says a day was cancelled: red on a Resource row is somebody
+         marking the names, not the work, so a cancellation colour there — or a
+         colour nobody has named, which might turn out to be one — is left out of
+         `cells` entirely, and with it out of `rc_cancelled_days`. */
+      for (const mark of activity.resource?.marks || []) {
+        if (!mark.hex || mark.role === 'ignore' || !mark.meaning || isCancelMeaning(mark.meaning)) continue;
+        const day = dayByCol.get(mark.col);
+        if (!day?.date) continue;
+        const bucket = bucketFor(day.date);
+        if (!(day.date in bucket.cells)) bucket.cells[day.date] = mark.meaning;
       }
       if (!weeks.size) continue;
 
@@ -7011,6 +7052,15 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     }
 
     return out;
+  }
+
+  /**
+   * Whether a legend meaning says a day was cancelled — the one rule, the same
+   * word `ingest()` looks for in the legend and `rc_cancelled_days` looks for in
+   * the stored cells.
+   */
+  function isCancelMeaning(meaning) {
+    return /cancel/i.test(String(meaning || ''));
   }
 
   /** The Monday of an ISO date's week, in UTC. A calendar date must not shift. */
@@ -7585,6 +7635,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "absencesFrom", { get: () => absencesFrom, enumerable: true });
   Object.defineProperty(__x, "locationColumnOf", { get: () => locationColumnOf, enumerable: true });
   Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
+  Object.defineProperty(__x, "isCancelMeaning", { get: () => isCancelMeaning, enumerable: true });
   Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
   Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
   Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
@@ -10956,6 +11007,30 @@ __mods["core/query.js"] = function (__x, __req) {
   }
 
   /**
+   * The date window: only what overlaps it is drawn.
+   *
+   * The From/To of the filter, asked on its own because it means something
+   * stronger than the rest of the filter. "Show me 15 September to 25 November"
+   * is a request to *not see* the rest — so it always hides, whatever the
+   * dim/hide switch says, and the lanes close up around what is left. Nothing is
+   * removed: the window lives in the reader's own view (`ui.filters`), never in
+   * the plan, and clearing it brings everything back. An object is in the window
+   * when any part of it is — a campaign running through 15 September belongs in a
+   * window that starts then. Null when no window is set.
+   */
+  function dateWindowPredicate(filters) {
+    const from = filters?.from ? toMs(filters.from) : null;
+    const to = filters?.to ? toMs(filters.to) : null;
+    if (from == null && to == null) return null;
+    return (obj) => {
+      const end = TYPES[obj.type]?.duration ? obj.end : obj.start + MS_DAY;
+      if (from != null && end <= from) return false;
+      if (to != null && obj.start > to) return false;
+      return true;
+    };
+  }
+
+  /**
    * The text box, read as a list.
    *
    * Commas separate the terms, so several can be searched at once; anything
@@ -11147,6 +11222,7 @@ __mods["core/query.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "filterPredicate", { get: () => filterPredicate, enumerable: true });
+  Object.defineProperty(__x, "dateWindowPredicate", { get: () => dateWindowPredicate, enumerable: true });
   Object.defineProperty(__x, "textTerms", { get: () => textTerms, enumerable: true });
   Object.defineProperty(__x, "searchableText", { get: () => searchableText, enumerable: true });
   Object.defineProperty(__x, "search", { get: () => search, enumerable: true });
@@ -12025,7 +12101,9 @@ __mods["timeline/layout.js"] = function (__x, __req) {
    * are returned ready to draw (`rect.ghost`, `layout.removed`) so no consumer
    * has to work out where they went a second time.
    */
-  function computeLayout({ filterFn = null, hideFiltered = false, includeOffscreen = false, gutterWidth = 190 } = {}) {
+  function computeLayout({
+    filterFn = null, hideFiltered = false, windowFn = null, includeOffscreen = false, gutterWidth = 190,
+  } = {}) {
     const doc = getDoc();
     const lanes = orderedLanes(false);
     const rects = [];
@@ -12055,7 +12133,8 @@ __mods["timeline/layout.js"] = function (__x, __req) {
 
     for (const lane of lanes) {
       const laneObjects = doc.objects.filter(
-        (o) => o.lane === lane.id && !o.hidden && !(hideFiltered && filterFn && !filterFn(o))
+        (o) => o.lane === lane.id && !o.hidden && !(windowFn && !windowFn(o))
+          && !(hideFiltered && filterFn && !filterFn(o))
       );
 
       // Measure every object in the lane, not just the visible ones: row heights
@@ -13027,7 +13106,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
   const { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } = __req("core/dates.js");
   const { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } = __req("core/model.js");
   const { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
-  const { filterPredicate } = __req("core/query.js");
+  const { filterPredicate, dateWindowPredicate } = __req("core/query.js");
   const { linkViolations, criticalPath, predecessorsOf } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const { computeLayout, stageHeight, ROW_HEIGHT } = __req("timeline/layout.js");
@@ -13156,7 +13235,13 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const settings = doc.settings;
 
     const predicate = hasActiveFilters() ? filterPredicate(doc, getFilters()) : null;
-    const layout = computeLayout({ filterFn: predicate, hideFiltered: settings.filterMode === 'hide' });
+    /* The date window always hides — see `dateWindowPredicate()` — so what is
+       outside it is dropped before packing, and the lanes close up. */
+    const layout = computeLayout({
+      filterFn: predicate,
+      hideFiltered: settings.filterMode === 'hide',
+      windowFn: dateWindowPredicate(getFilters()),
+    });
     lastLayout = layout;
 
     dom.stage.style.height = `${stageHeight(layout.geometry)}px`;
@@ -16222,6 +16307,11 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(limit));
   }
 
+  /** One snapshot with its grid, by id — for re-deriving what a past read said. */
+  function snapshotById(id) {
+    return select('rc_lookahead_snapshots', (q) => q.eq('id', id).limit(1)).then((rows) => rows[0] || null);
+  }
+
   function listSnapshotRows(snapshotId) {
     return select('rc_lookahead_rows', (q) => q.eq('snapshot_id', snapshotId).order('sheet_row'));
   }
@@ -16492,7 +16582,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     categoryId = null, locationId = null, note = null,
     blockedReason = null, blockedPartyId = null,
     carryChainId = null, planEntryId = null, shift = 'day',
-    lookaheadRowId = null, evidencePath = null, supersedesId = null,
+    lookaheadRowId = null, evidencePath = null, supersedesId = null, task = null,
   }) =>
     rpc('rc_record_actual', {
       p_client_uuid: clientUuid,
@@ -16512,6 +16602,9 @@ __mods["core/rc.js"] = function (__x, __req) {
       // The outcome this one corrects. The function refuses a row that has
       // already been corrected, so two edits of one outcome cannot both land.
       p_supersedes: supersedesId,
+      // What they actually did, in words — the one statement of the work on a day
+      // with nothing planned.
+      p_task: task,
     });
 
   const resolveLocation = (raw) => rpc('rc_resolve_location', { p_raw: raw });
@@ -16541,6 +16634,14 @@ __mods["core/rc.js"] = function (__x, __req) {
    * Record whose cancellation it was, and why. Append-only: a correction is a
    * new row carrying `supersedes_id`, never an edit.
    */
+  /**
+   * Replace what a stored row says each day was painted as. Only ever the
+   * re-derivation of a past read under today's rules — `cells` is derived from
+   * the snapshot, which is the durable record, so refining a rule means writing
+   * the derivation again rather than migrating anything.
+   */
+  const updateLookaheadRowCells = (id, cells) => update('rc_lookahead_rows', id, { cells });
+
   const addCancellationNote = (row) => insert('rc_cancellation_notes', [row]).then((r) => r[0]);
 
   /* ── Accounts ──────────────────────────────────────────────────────────── */
@@ -16688,6 +16789,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listSnapshotMeta", { get: () => listSnapshotMeta, enumerable: true });
   Object.defineProperty(__x, "latestSnapshot", { get: () => latestSnapshot, enumerable: true });
   Object.defineProperty(__x, "listSnapshots", { get: () => listSnapshots, enumerable: true });
+  Object.defineProperty(__x, "snapshotById", { get: () => snapshotById, enumerable: true });
   Object.defineProperty(__x, "listSnapshotRows", { get: () => listSnapshotRows, enumerable: true });
   Object.defineProperty(__x, "listChangeEvents", { get: () => listChangeEvents, enumerable: true });
   Object.defineProperty(__x, "listAnnotations", { get: () => listAnnotations, enumerable: true });
@@ -16732,6 +16834,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "updateSar", { get: () => updateSar, enumerable: true });
   Object.defineProperty(__x, "addSarLinks", { get: () => addSarLinks, enumerable: true });
   Object.defineProperty(__x, "addAnnotation", { get: () => addAnnotation, enumerable: true });
+  Object.defineProperty(__x, "updateLookaheadRowCells", { get: () => updateLookaheadRowCells, enumerable: true });
   Object.defineProperty(__x, "addCancellationNote", { get: () => addCancellationNote, enumerable: true });
   Object.defineProperty(__x, "invite", { get: () => invite, enumerable: true });
   Object.defineProperty(__x, "revokeInvitation", { get: () => revokeInvitation, enumerable: true });
@@ -17850,7 +17953,140 @@ __mods["ui/commands.js"] = function (__x, __req) {
     if (!objects.length) return;
     const hide = !objects.every((o) => o.hidden);
     store.updateObjects(objects.map((o) => o.id), { hidden: hide }, hide ? 'Hide' : 'Show');
+    // A hidden object cannot be clicked, so it cannot stay selected either.
+    if (hide) store.setSelection([]);
     renderer.requestRender();
+    if (hide) {
+      /* Say where it went and how to get it back. A thing that vanishes off the
+         canvas with no word about it reads as deleted. */
+      toast({
+        tone: 'info',
+        title: objects.length === 1 ? `Hidden: ${objects[0].title}` : `${objects.length} objects hidden`,
+        message: 'Still in the plan. Bring it back from "hidden" in the status bar, or the Filters pane.',
+        action: { label: 'Undo', onClick: () => showObjects(objects.map((o) => o.id)) },
+      });
+    }
+  }
+
+  /** Every object somebody has hidden, in plan order. */
+  function hiddenObjects() {
+    return store.getDoc().objects.filter((o) => o.hidden);
+  }
+
+  /** Put hidden objects back on the timeline. Nothing about them changed while away. */
+  function showObjects(ids) {
+    const wanted = [].concat(ids).filter((id) => store.getObject(id)?.hidden);
+    if (!wanted.length) return false;
+    store.updateObjects(wanted, { hidden: false }, wanted.length === 1 ? 'Show' : `Show ${wanted.length} objects`);
+    renderer.requestRender();
+    return true;
+  }
+
+  function showAllHidden() {
+    return showObjects(hiddenObjects().map((o) => o.id));
+  }
+
+  /**
+   * The hidden objects, each one click from coming back.
+   *
+   * A hidden object is not drawn, so it cannot be right-clicked or selected on
+   * the canvas — without a list of them, hiding was a door that only opened one
+   * way. The same list is in the Filters pane.
+   */
+  function openHiddenList() {
+    const list = el('div', { class: 'cx-list hidden-list' });
+    const draw = () => {
+      list.replaceChildren();
+      const hidden = hiddenObjects();
+      if (!hidden.length) {
+        list.appendChild(el('div', { class: 'cx-hint', text: 'Nothing is hidden.' }));
+        return;
+      }
+      const lanes = new Map(store.getDoc().lanes.map((l) => [l.id, l.name]));
+      for (const obj of hidden) {
+        list.appendChild(el('div', { class: 'cx-listrow', dataset: { id: obj.id }, style: { cursor: 'default' } }, [
+          el('div', { class: 'lr-main' }, [
+            el('div', { class: 'lr-title', text: obj.title }),
+            el('div', { class: 'lr-meta', text: `${lanes.get(obj.lane) || 'no lane'} · ${fmtDate(obj.start, 'numeric')}` }),
+          ]),
+          el('button', {
+            class: 'cx-btn mini',
+            html: icon('eye', { size: 12 }) + '<span>Show</span>',
+            'aria-label': `Show ${obj.title}`,
+            onClick: () => { showObjects([obj.id]); draw(); },
+          }),
+        ]));
+      }
+    };
+    draw();
+    openModal({
+      title: 'Hidden objects',
+      subtitle: 'Hidden, not removed — each is still in the plan with everything it had.',
+      body: list,
+      actions: [
+        { label: 'Close' },
+        { label: 'Show all', kind: 'primary', onClick: () => { showAllHidden(); } },
+      ],
+    });
+  }
+
+  /* ── The date window ───────────────────────────────────────────────────── */
+
+  /**
+   * Show only what falls between two dates.
+   *
+   * Everything outside is hidden rather than dimmed and the lanes close up, and
+   * the view is framed on the window. It is the reader's own view — nothing in
+   * the plan changes, and clearing it brings everything back as it was.
+   */
+  function setDateWindow(from, to, { frame = true } = {}) {
+    store.setFilters({ from: from || null, to: to || null });
+    if (frame && (from || to)) {
+      const start = from ? Date.parse(`${from}T00:00:00Z`) : projectExtent(store.getDoc()).start;
+      const end = to ? Date.parse(`${to}T00:00:00Z`) + MS_DAY : projectExtent(store.getDoc()).end;
+      if (end > start) viewport.fitRange(start, end, 30);
+    }
+    renderer.invalidateAll?.();
+    renderer.requestRender();
+  }
+
+  function clearDateWindow() {
+    setDateWindow(null, null, { frame: false });
+  }
+
+  function openDateWindow() {
+    const current = store.getFilters();
+    const from = el('input', { type: 'date', class: 'cx-input', value: current.from || '', 'aria-label': 'Show from' });
+    const to = el('input', { type: 'date', class: 'cx-input', value: current.to || '', 'aria-label': 'Show to' });
+    const actions = [{ label: 'Cancel' }];
+    if (current.from || current.to) {
+      actions.push({ label: 'Clear dates', onClick: () => clearDateWindow() });
+    }
+    actions.push({
+      label: 'Show only these dates',
+      kind: 'primary',
+      onClick: () => {
+        if (!from.value && !to.value) {
+          toast({ tone: 'warn', title: 'Pick a date', message: 'Give a start, an end, or both.' });
+          return false;
+        }
+        if (from.value && to.value && to.value < from.value) {
+          toast({ tone: 'warn', title: 'The end is before the start' });
+          return false;
+        }
+        setDateWindow(from.value, to.value);
+        return undefined;
+      },
+    });
+    openModal({
+      title: 'Show only a date range',
+      subtitle: 'Everything outside it is hidden, not removed. Clear the dates to bring it all back.',
+      body: el('div', { class: 'cx-row', style: { gap: '12px' } }, [
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'From' }), from]),
+        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'To' }), to]),
+      ]),
+      actions,
+    });
   }
 
   function groupSelection() {
@@ -18497,6 +18733,13 @@ __mods["ui/commands.js"] = function (__x, __req) {
   Object.defineProperty(__x, "selectDependencyChain", { get: () => selectDependencyChain, enumerable: true });
   Object.defineProperty(__x, "toggleLock", { get: () => toggleLock, enumerable: true });
   Object.defineProperty(__x, "toggleHidden", { get: () => toggleHidden, enumerable: true });
+  Object.defineProperty(__x, "hiddenObjects", { get: () => hiddenObjects, enumerable: true });
+  Object.defineProperty(__x, "showObjects", { get: () => showObjects, enumerable: true });
+  Object.defineProperty(__x, "showAllHidden", { get: () => showAllHidden, enumerable: true });
+  Object.defineProperty(__x, "openHiddenList", { get: () => openHiddenList, enumerable: true });
+  Object.defineProperty(__x, "setDateWindow", { get: () => setDateWindow, enumerable: true });
+  Object.defineProperty(__x, "clearDateWindow", { get: () => clearDateWindow, enumerable: true });
+  Object.defineProperty(__x, "openDateWindow", { get: () => openDateWindow, enumerable: true });
   Object.defineProperty(__x, "groupSelection", { get: () => groupSelection, enumerable: true });
   Object.defineProperty(__x, "ungroupSelection", { get: () => ungroupSelection, enumerable: true });
   Object.defineProperty(__x, "setStatus", { get: () => setStatus, enumerable: true });
@@ -27785,26 +28028,66 @@ __mods["ui/panels.js"] = function (__x, __req) {
       }, 200),
     }), 'Separate several with commas — anything matching any of them is kept.'));
 
+    /* The date window. Unlike the rest of the filter it always *hides* what is
+       outside it, whatever the switch above says — "show me 15 September to 25
+       November" is a request not to see the rest. Nothing is removed, and the
+       toolbar says a window is in force for as long as it is. */
     root.appendChild(
       el('div', { class: 'cx-row', style: { marginTop: '10px' } }, [
-        field('From', textInput({
+        field('Show only from', textInput({
           type: 'date',
           value: filters.from || '',
           onChange: (v) => {
-            store.setFilters({ from: v || null });
-            renderer.requestRender();
+            cmd.setDateWindow(v || null, store.getFilters().to, { frame: false });
+            renderPane();
           },
         })),
         field('To', textInput({
           type: 'date',
           value: filters.to || '',
           onChange: (v) => {
-            store.setFilters({ to: v || null });
-            renderer.requestRender();
+            cmd.setDateWindow(store.getFilters().from, v || null, { frame: false });
+            renderPane();
           },
         })),
       ])
     );
+    if (filters.from || filters.to) {
+      root.appendChild(el('div', { style: { display: 'flex', gap: '6px', margin: '-4px 0 10px' } }, [
+        el('button', {
+          class: 'cx-btn mini',
+          html: icon('x', { size: 12 }) + '<span>Clear dates</span>',
+          onClick: () => { cmd.clearDateWindow(); renderPane(); },
+        }),
+        el('span', { class: 'cx-hint', text: 'Outside these dates is hidden, not removed.' }),
+      ]));
+    }
+
+    /* What somebody hid by hand, each one click from coming back. A hidden
+       object is not drawn, so this is the only place it can be reached. */
+    const hidden = doc.objects.filter((o) => o.hidden);
+    if (hidden.length) {
+      root.appendChild(section(`Hidden objects (${hidden.length})`, [
+        el('div', { class: 'cx-list' }, hidden.map((obj) => el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+          el('div', { class: 'lr-main' }, [
+            el('div', { class: 'lr-title', text: obj.title }),
+            el('div', { class: 'lr-meta', text: fmtDate(obj.start, 'numeric') }),
+          ]),
+          el('button', {
+            class: 'cx-btn mini',
+            html: icon('eye', { size: 12 }) + '<span>Show</span>',
+            'aria-label': `Show ${obj.title}`,
+            onClick: () => { cmd.showObjects([obj.id]); renderPane(); },
+          }),
+        ]))),
+        el('button', {
+          class: 'cx-btn mini',
+          style: { marginTop: '6px' },
+          html: icon('eye', { size: 12 }) + '<span>Show all</span>',
+          onClick: () => { cmd.showAllHidden(); renderPane(); },
+        }),
+      ]));
+    }
 
     root.appendChild(checkGroup('Type', 'types', Object.entries(TYPES).map(([id, t]) => ({ value: id, label: t.label })), filters.types));
     root.appendChild(checkGroup('Status', 'statuses', listOptions('status').map((o) => ({ value: o.id, label: o.label })), filters.statuses));
@@ -29181,6 +29464,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const { showPane, currentPane, PANES } = __req("ui/panels.js");
   const workspace = __req("ui/workspace.js");
   const { accountBlock, openShareDialog } = __req("ui/auth.js");
+  const cmd = __req("ui/commands.js");
 
   /** Sidebar structure — sections of dock panes. */
   const NAV = [
@@ -29431,6 +29715,15 @@ __mods["ui/shell.js"] = function (__x, __req) {
         }),
         toolButton('expand', 'Fit whole plan', fitAll, 'mod+0'),
         toolButton('calendar', 'Go to today', goToToday, 't'),
+        toolButton('filter', 'Show only a date range', () => cmd.openDateWindow()),
+        /* The window in force, and the way out of it. Said on the toolbar because
+           a plan with half its objects hidden by a date filter set yesterday looks
+           exactly like a plan with half its objects missing. */
+        (dom.windowChip = el('button', {
+          class: 'cx-btn mini tb-window',
+          title: 'Clear the date range — everything outside it comes back',
+          onClick: () => cmd.clearDateWindow(),
+        })),
       ]),
       el('div', { class: 'tb-sep' })
     );
@@ -29530,10 +29823,26 @@ __mods["ui/shell.js"] = function (__x, __req) {
     return button;
   }
 
+  /** The date window in force, on the toolbar, with its own way out. */
+  function refreshWindowChip() {
+    if (!dom.windowChip) return;
+    const { from, to } = store.getFilters();
+    if (!from && !to) {
+      dom.windowChip.style.display = 'none';
+      return;
+    }
+    const say = (iso) => fmtDate(Date.parse(`${iso}T00:00:00Z`), 'numeric');
+    const span = from && to ? `${say(from)} – ${say(to)}` : from ? `from ${say(from)}` : `to ${say(to)}`;
+    dom.windowChip.style.display = '';
+    dom.windowChip.innerHTML = `<span>${span}</span>${icon('x', { size: 11 })}`;
+    dom.windowChip.setAttribute('aria-label', `Clear the date range ${span}`);
+  }
+
   function refreshToolbar() {
     const doc = store.getDoc();
     const settings = doc.settings;
     const history = store.historyState();
+    refreshWindowChip();
 
     dom.title.querySelector('.tt-name').textContent = doc.name;
     dom.title.querySelector('.tt-meta').textContent =
@@ -29631,6 +29940,13 @@ __mods["ui/shell.js"] = function (__x, __req) {
     dom.selText = el('span', { class: 'sb-item' });
     dom.statusbar.appendChild(dom.selText);
 
+    dom.hiddenText = el('span', {
+      class: 'sb-item clickable',
+      title: 'Hidden objects — click to bring them back',
+      onClick: () => cmd.openHiddenList(),
+    });
+    dom.statusbar.appendChild(dom.hiddenText);
+
     dom.violationText = el('span', {
       class: 'sb-item clickable sb-warn',
       title: 'Show broken dependencies',
@@ -29667,6 +29983,9 @@ __mods["ui/shell.js"] = function (__x, __req) {
 
     dom.countText.textContent = `${doc.objects.length} objects · ${doc.lanes.length} lanes · ${doc.links.length} links`;
     dom.selText.textContent = selection.length ? `${selection.length} selected` : '';
+    const hidden = doc.objects.filter((o) => o.hidden).length;
+    dom.hiddenText.textContent = hidden ? `${hidden} hidden` : '';
+    dom.hiddenText.style.display = hidden ? '' : 'none';
 
     const violations = linkViolations(doc);
     dom.violationText.textContent = violations.count
@@ -29753,6 +30072,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
     });
     on(EV.FILE_STATE, () => refreshStatus());
     on(EV.SELECTION_CHANGED, () => refreshStatus());
+    on(EV.FILTER_CHANGED, () => refreshWindowChip());
     on(EV.TOOL_CHANGED, () => refreshToolbar());
     on(EV.VIEW_CHANGED, debounce(() => {
       refreshToolbar();
@@ -31635,6 +31955,9 @@ __mods["ui/menus.js"] = function (__x, __req) {
       'sep',
       ...violationItems(obj),
       { label: obj.locked ? 'Unlock' : 'Lock', icon: obj.locked ? 'unlock' : 'lock', key: 'mod+l', onClick: () => cmd.toggleLock() },
+      // Hidden, not deleted: it comes back from "hidden" in the status bar or the
+      // Filters pane, because a hidden object cannot be clicked to be shown again.
+      { label: many ? `Hide ${selection.length} objects` : 'Hide', icon: 'eye-off', key: 'mod+shift+h', onClick: () => cmd.toggleHidden() },
       { label: 'Select dependency chain', icon: 'route', key: 'mod+shift+d', onClick: () => cmd.selectDependencyChain() },
       { label: 'Zoom to selection', icon: 'expand', key: 'mod+shift+0', onClick: () => cmd.zoomToSelection() },
       'sep',
@@ -31967,6 +32290,11 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
         case 'l':
           e.preventDefault();
           cmd.toggleLock();
+          return;
+        case 'h':
+          if (!e.shiftKey) break;
+          e.preventDefault();
+          cmd.toggleHidden();
           return;
         case 'f':
           e.preventDefault();
@@ -34234,6 +34562,9 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const ctx = {
       people, review, plan, planFor, plannedOn, absentOn, actualByPerson, cats, locs,
       categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
+      // What is typed in each person's "what they did" fields, read when a status
+      // is pressed — see `workFields()`.
+      drafts: new Map(),
     };
 
     root.appendChild(dateBar(date, review, plan, root, ctx));
@@ -34548,16 +34879,21 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
          read differently. */
       if (rc.isAdmin() || (person.id === rc.me()?.id && rc.canWrite())) {
         const redrawRoom = () => { clear(root); render(root); };
+        answer.appendChild(workFields({
+          ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw: redrawRoom,
+        }));
         answer.appendChild(statusButtons(ctx, person, review, wasPlanned, redrawRoom, actual));
         answer.appendChild(notesBox({
           ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw: redrawRoom,
         }));
       }
-    } else {
-      answer.appendChild(statusButtons(ctx, person, review, wasPlanned, () => {
-        clear(root);
-        render(root);
-      }));
+    } else if (rc.isAdmin() || (person.id === rc.me()?.id && rc.canWrite())) {
+      const redrawRoom = () => { clear(root); render(root); };
+      /* What they did and what kind of work it was, typed as they say it — and on
+         a day with nothing planned, the only statement of the work there is. The
+         status pressed next records it with the outcome. */
+      answer.appendChild(workFields({ ctx, person, date: review, plannedEntry: wasPlanned, redraw: redrawRoom }));
+      answer.appendChild(statusButtons(ctx, person, review, wasPlanned, redrawRoom));
     }
     wrap.appendChild(answer);
 
@@ -34628,7 +34964,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
         continue;
       }
       const status = STATUS_BY_ID.get(actual.status);
-      const said = [actual.blocked_reason, actual.note].filter(Boolean).join(' — ');
+      const said = [actual.task, actual.blocked_reason, actual.note].filter(Boolean).join(' — ');
       const where = locs.get(actual.location_id)?.name;
       lines.push(`  ${bullet[actual.status] || '·'} ${person.name} — ${status?.label || actual.status}`
         + `${where ? ` at ${where}` : ''}${said ? `: ${said}` : ''}`);
@@ -34904,6 +35240,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           title: 'Change the status or the note. The first answer stays on the record.',
           onClick: () => {
             clear(cell);
+            cell.appendChild(workFields({ ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw }));
             cell.appendChild(statusButtons(ctx, person, review, wasPlanned, redraw, actual));
             cell.appendChild(notesBox({ ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw }));
           },
@@ -34911,7 +35248,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       }
       row.appendChild(cell);
     } else if (admin || mine) {
-      row.appendChild(el('td', outcome, [statusButtons(ctx, person, review, wasPlanned, redraw)]));
+      row.appendChild(el('td', outcome, [
+        workFields({ ctx, person, date: review, plannedEntry: wasPlanned, redraw }),
+        statusButtons(ctx, person, review, wasPlanned, redraw),
+      ]));
     } else {
       row.appendChild(el('td', outcome, [el('span', { class: 'rc-hint', text: '—' })]));
     }
@@ -34970,6 +35310,9 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
    */
   function outcomeDetail(actual, ctx, person) {
     const out = [];
+    if (actual.task) out.push(el('div', { class: 'rc-outcome-task', text: actual.task }));
+    const category = ctx.cats?.get(actual.category_id)?.name;
+    if (category) out.push(el('div', { class: 'rc-hint rc-outcome-cat', text: category }));
     if (actual.blocked_reason) out.push(el('div', { class: 'rc-hint', text: actual.blocked_reason }));
     if (actual.note) out.push(el('div', { class: 'rc-hint', text: actual.note }));
 
@@ -34996,6 +35339,96 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     // A changed answer says so. The first one is still on the record underneath.
     if (actual.supersedes_id) out.push(el('div', { class: 'rc-hint', text: 'corrected' }));
     return out;
+  }
+
+  /**
+   * What somebody did that day, and what kind of work it was — typed in the room.
+   *
+   * The plan says what they were asked to do; this is what the day was actually
+   * spent on, and on a day with nothing planned it is the only statement of the
+   * work there is. It starts from the plan's own words and category, so the
+   * common case is no typing at all, and the category is what the reports group
+   * the outcome under.
+   *
+   * Before an outcome is recorded the fields are a draft: `commitOutcome()` reads
+   * them (through `ctx.drafts`) when a status is pressed, so pressing "Completed"
+   * records the words and the category with it. After, they edit what was said —
+   * Enter in the box, a new category, or Save writes a correction, the same
+   * superseding row every other change to an outcome is. Not on leaving the box:
+   * the status buttons sit beside it, and a correction written on the way to
+   * pressing one would be corrected again a moment later, which the database
+   * rightly refuses.
+   */
+  function workFields({ ctx, person, date, plannedEntry, current = null, redraw }) {
+    const selected = current ? (current.category_id || '') : (plannedEntry?.category_id || '');
+    const task = textInput({
+      value: current ? (current.task ?? plannedEntry?.task ?? '') : (plannedEntry?.task || ''),
+      placeholder: plannedEntry ? 'What they did' : 'Nothing was planned — what did they do?',
+    });
+    task.setAttribute('aria-label', `What ${person.name} did`);
+    task.classList.add('rc-work-task');
+    const category = selectInput({
+      value: selected,
+      placeholder: 'Category…',
+      options: (ctx.categories || [])
+        .filter((c) => c.active !== false || c.id === selected)
+        .map((c) => ({ value: c.id, label: c.name })),
+    });
+    category.setAttribute('aria-label', `What kind of work ${person.name} did`);
+    category.classList.add('rc-work-cat');
+
+    // Nothing once the row has been redrawn without these fields: a draft left in
+    // the map must never speak for a box that is no longer on screen.
+    const read = () => (task.isConnected
+      ? { task: task.value.trim() || null, categoryId: category.value || null }
+      : null);
+    ctx.drafts?.set(person.id, read);
+
+    const wrap = el('div', { class: 'rc-work' }, [
+      el('span', { class: 'rc-eyebrow', text: 'What they did' }),
+      task,
+      category,
+    ]);
+
+    if (current) {
+      const save = () => {
+        const next = read();
+        if (!next) return;
+        if (next.task === (current.task || null) && next.categoryId === (current.category_id || null)) return;
+        commitOutcome({
+          ctx, person, date, plannedEntry, redraw,
+          status: STATUS_BY_ID.get(current.status),
+          note: current.note || null,
+          supersedes: current,
+        });
+      };
+      task.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        event.stopPropagation();
+        save();
+      });
+      category.addEventListener('change', save);
+      wrap.appendChild(el('button', { class: 'cx-btn mini', text: 'Save', onClick: save }));
+    } else {
+      // Enter here is not "next person" or "record": a status has not been chosen.
+      task.addEventListener('keydown', (event) => { if (event.key === 'Enter') event.preventDefault(); });
+    }
+    return wrap;
+  }
+
+  /**
+   * The words and category an outcome is recorded with: what is typed in its
+   * fields where they are on screen, and otherwise what the outcome being
+   * corrected said, then what the plan said.
+   */
+  function workOf(ctx, person, plannedEntry, supersedes) {
+    const draft = ctx.drafts?.get(person.id)?.();
+    if (draft) return draft;
+    return {
+      task: supersedes?.task ?? null,
+      categoryId: supersedes?.category_id || plannedEntry?.category_id || null,
+    };
   }
 
   /**
@@ -35216,13 +35649,15 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
        without. The photograph carries over inside the function itself, so a
        replayed queue entry keeps it too. */
     const keep = supersedes && supersedes.status === status.id ? supersedes : null;
+    const work = workOf(ctx, person, plannedEntry, supersedes);
     const { sent, error } = await record({
       clientUuid,
       personId: person.id,
       date,
       status: status.id,
       note,
-      categoryId: plannedEntry?.category_id || supersedes?.category_id || null,
+      task: work.task,
+      categoryId: work.categoryId,
       locationId: plannedEntry?.location_id || supersedes?.location_id || null,
       planEntryId: plannedEntry?.id || supersedes?.plan_entry_id || null,
       carryChainId: chainId,
@@ -35393,7 +35828,10 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           personId: person.id,
           date,
           status: 'blocked',
-          categoryId: plannedEntry?.category_id || null,
+          ...(() => {
+            const work = workOf(ctx, person, plannedEntry, current);
+            return { task: work.task, categoryId: work.categoryId };
+          })(),
           locationId: plannedEntry?.location_id || null,
           planEntryId: plannedEntry?.id || null,
           blockedReason: reason.value.trim(),
@@ -36665,7 +37103,6 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       const shown = drawn(windowed(view, today), calendarFilter, showQuietRows);
       clear(strip);
       strip.appendChild(legendStrip(legend, grid.unknown, paintOn(shown)));
-      strip.appendChild(whyStrip(shown, legendRows));
       body.appendChild(grid_(shown, today));
     };
     // Redraw the rows only, never the input: rebuilding the field under the
@@ -37027,6 +37464,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
        knows how wide the content made them. Measured once the table is in the
        document, on the next frame. */
     requestAnimationFrame(() => {
+      freezeHead(head);
       const firstRow = table_.querySelector('tbody tr');
       if (!firstRow) return;
       let left = 0;
@@ -37048,6 +37486,10 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       table_.style.setProperty('--la-meta-w', `${left}px`);
     });
 
+    /* A header row can change height after the first frame — a font arriving, a
+       heading wrapping — and a stale offset lets one row slide under another. */
+    if (typeof ResizeObserver === 'function') new ResizeObserver(() => freezeHead(head)).observe(head);
+
     if (!rows.length) {
       return el('p', {
         class: 'rc-hint',
@@ -37057,6 +37499,24 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       });
     }
     return wrap;
+  }
+
+  /**
+   * Pin the three header rows — month, day number, weekday — one under the other.
+   *
+   * Every header cell was `position: sticky; top: 0`, so all three rows pinned to
+   * the same line and scrolling down stacked them on top of each other: the
+   * weekday letters covered the day numbers and the month, and the one thing a
+   * reader scrolling a hundred rows needs — which date this column is — was gone.
+   * Each row is now pinned at the height of the rows above it, measured, because
+   * only the browser knows how tall the content made them.
+   */
+  function freezeHead(head) {
+    let top = 0;
+    for (const tr of head.rows) {
+      for (const cell of tr.cells) cell.style.top = `${top}px`;
+      top += tr.getBoundingClientRect().height;
+    }
   }
 
   /**
@@ -37073,81 +37533,6 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * Pass no set at all and everything is listed, which is what a caller with
    * nothing drawn yet wants.
    */
-  /**
-   * Which colours are keeping rows on the calendar, and one click to say they are not.
-   *
-   * "It is still showing rows with nothing on them" is a question about a
-   * *colour*, and until now the calendar could not answer it. The switch hides a
-   * row with nothing scheduled; whether a row has something scheduled is decided
-   * entirely by whether any of its paint counts as `shift` — and the person
-   * looking at a hundred rows they did not expect has no way to find out which
-   * colour did that. They can see the legend, and they can see the grid, and
-   * joining the two by eye across a hundred days is not a thing anybody should be
-   * asked to do. So the calendar says it.
-   *
-   * The unmapped list above answers the same question for colours nobody has
-   * explained. This is its other half: a colour somebody *has* explained, as work,
-   * on rows where no work is happening. Both are one press from "Just shading",
-   * and for a mapped colour that press changes the role on the row in force rather
-   * than adding a second one — adding is what left a register with two answers for
-   * one colour in the first place.
-   */
-  function whyStrip(view, legendRows) {
-    const shownCols = new Set(view.days.map((d) => d.col));
-    const rowsFor = new Map();
-
-    for (const activity of view.activities) {
-      // A title is on screen for the sake of the rows under it, not for its paint.
-      if (activity.heading && !activity.highlighted) continue;
-      const hexes = new Set(marksOf(activity)
-        .filter((m) => m.hex && m.role === 'shift' && shownCols.has(m.col))
-        .map((m) => String(m.hex).toUpperCase()));
-      for (const hex of hexes) rowsFor.set(hex, (rowsFor.get(hex) || 0) + 1);
-    }
-    if (!rowsFor.size) return el('div');
-
-    /* The entry in force, by the same rule `applyLegend()` uses — newest
-       `valid_from` wins — so the button edits the row the calendar is actually
-       reading rather than whichever came back first. */
-    const inForce = (hex) => (legendRows || [])
-      .filter((l) => String(l.argb).toUpperCase() === hex)
-      .sort((a, b) => String(b.valid_from || '').localeCompare(String(a.valid_from || '')))[0] || null;
-
-    const strip = el('div', { class: 'la-legend la-why' });
-    strip.appendChild(el('span', { class: 'rc-eyebrow', text: 'On screen because of' }));
-
-    for (const [hex, count] of [...rowsFor.entries()].sort((a, b) => b[1] - a[1])) {
-      const entry = inForce(hex);
-      strip.appendChild(el('span', { class: 'la-why-item' }, [
-        el('span', { class: 'la-swatch', style: `background:#${hex}` }),
-        el('span', { text: `${entry?.meaning || `#${hex}, unmapped`} — ${count} row(s)` }),
-        // What a colour means is the register's, and the register is an
-        // administrator's. Everybody else reads why a row is here, and that is
-        // the useful half of this strip anyway.
-        rc.isAdmin() ? el('button', {
-          class: 'cx-btn mini ghost',
-          text: 'Just shading',
-          title: entry
-            ? `Rows whose only paint is ${entry.meaning} will drop out of the calendar. `
-              + 'The colour keeps its name; what changes is whether it counts as somebody being '
-              + 'on site.'
-            : 'Structure in the spreadsheet, not somebody on site.',
-          onClick: async () => {
-            try {
-              if (entry) await rc.updateLegend(entry.id, { role: 'ignore' });
-              else await rc.addLegend([{ argb: hex, meaning: 'Shading', role: 'ignore' }]);
-              notifyChanged('legend');
-              toast({ tone: 'good', message: `#${hex} is shading — ${count} row(s) drop out.` });
-            } catch (err) {
-              toast({ tone: 'bad', message: err.message });
-            }
-          },
-        }) : null,
-      ].filter(Boolean)));
-    }
-    return strip;
-  }
-
   function legendStrip(legend, unknown, onScreen = null) {
     const showing = (hex) => !onScreen || onScreen.has(String(hex).toUpperCase());
     const strip = el('div', { class: 'la-legend' });
@@ -37783,8 +38168,9 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const CANCEL_PARTIES = ['BART', 'Hitachi', 'Other'];
   const PARTY_TONE = { BART: 'warn', Hitachi: 'bad', Other: 'neutral' };
 
-  /** The first day the log reaches back to, when somebody has changed it on screen. */
+  /** The span the log covers, when somebody has changed it on screen. A blank end is no end. */
   let cancellationsFrom = null;
+  let cancellationsTo = '';
   let cancellationsUnansweredOnly = false;
 
   /**
@@ -37812,45 +38198,61 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       rc.listCancelledDays(from).catch((err) => { toast({ tone: 'bad', title: 'Could not read the cancellations', message: err.message }); return []; }),
       rc.listCancellationNotes().catch(() => []),
     ]);
-    const events = attachCancellationNotes(cancellationEvents(days, { from }), notes);
+    const to = cancellationsTo && cancellationsTo >= from ? cancellationsTo : '';
+    /* An event is in the span when it starts inside it. One that runs past the
+       end is kept whole rather than cut at the boundary: a cancelled week is one
+       event, and half of it in a report is a different claim. */
+    const events = attachCancellationNotes(cancellationEvents(days, { from }), notes)
+      .filter((e) => !to || e.start <= to);
 
-    const fromInput = el('input', {
-      type: 'date', class: 'cx-input mini', value: from, 'aria-label': 'Log starts on', style: 'width:150px',
-    });
-    fromInput.addEventListener('change', () => {
-      if (!fromInput.value) return;
-      cancellationsFrom = fromInput.value;
+    const dateBox = (value, label, onPick) => {
+      const box = el('input', {
+        type: 'date', class: 'cx-input mini', value, 'aria-label': label, style: 'width:150px',
+      });
+      box.addEventListener('change', () => onPick(box.value));
+      return box;
+    };
+    const fromInput = dateBox(from, 'Log starts on', (v) => {
+      if (!v) return;
+      cancellationsFrom = v;
       notifyChanged('cancellations');
     });
+    const toInput = dateBox(to, 'Log ends on', (v) => {
+      cancellationsTo = v;
+      notifyChanged('cancellations');
+    });
+    const span = to ? `${dayLabel(from)} to ${dayLabel(to)}` : `since ${dayLabel(from)}`;
 
     host.appendChild(el('div', { class: 'rc-section-head' }, [
       el('h3', { text: 'Cancellation log' }),
       el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end' }, [
         el('span', { class: 'rc-hint', style: 'margin:0;white-space:nowrap', text: 'From' }),
         fromInput,
-        events.length
-          ? el('button', {
-            class: 'cx-btn mini',
-            html: `${icon('download', { size: 12 })}<span>CSV</span>`,
-            onClick: () => saveFile(`cancellations-${todayISO()}.csv`, cancellationCsv(events), 'text/csv', 'Cancellation log'),
-          })
-          : null,
+        el('span', { class: 'rc-hint', style: 'margin:0;white-space:nowrap', text: 'To' }),
+        toInput,
+        el('button', {
+          class: 'cx-btn mini ghost',
+          html: `${icon('refresh', { size: 12 })}<span>Re-read saved snapshots</span>`,
+          title: 'Apply today\'s rules — Resource rows are never cancellations — to every read the log covers',
+          onClick: () => rederiveCancellations(from),
+        }),
         checkNowButton(),
       ].filter(Boolean)),
     ]));
 
     host.appendChild(el('p', {
       class: 'rc-hint',
-      text: 'Every run of red cells any read of the look-ahead has shown since '
-        + `${dayLabel(from)}. Cells side by side on one activity are one event. A cancellation `
-        + 'stays in the log after the sheet moves on — it was red when those reads were taken.',
+      text: `Every run of red cells any read of the look-ahead has shown ${span}. Cells side by `
+        + 'side on one activity are one event, and red on a Resource row is never a cancellation. '
+        + 'A cancellation stays in the log after the sheet moves on — it was red when those reads '
+        + 'were taken.',
     }));
 
     if (!events.length) {
       host.appendChild(emptyState({
         iconName: 'calendar',
         title: 'No cancellations',
-        message: `No read of the look-ahead since ${dayLabel(from)} has a cell painted in the colour the Legend calls a cancellation.`,
+        message: `No read of the look-ahead ${span} has a cell painted in the colour the Legend calls a cancellation.`,
       }));
       return;
     }
@@ -37877,6 +38279,22 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     }));
 
     const shown = cancellationsUnansweredOnly ? events.filter((e) => !e.note) : events;
+
+    /* The extract is what is on screen: the span above, and the "no reason yet"
+       narrowing when it is ticked. The file says which span in its name, because
+       a log that is quietly a fortnight of a quarter reads as the whole quarter. */
+    host.appendChild(el('div', { style: 'margin:8px 0 10px' }, [
+      el('button', {
+        class: 'cx-btn mini',
+        html: `${icon('download', { size: 12 })}<span>Export ${shown.length} to CSV</span>`,
+        onClick: () => saveFile(
+          `cancellations-${from}-to-${to || todayISO()}.csv`,
+          cancellationCsv(shown),
+          'text/csv',
+          'Cancellation log',
+        ),
+      }),
+    ]));
     const rows = shown.map((e) => el('tr', { class: 'rc-cancel-row', dataset: { start: e.start, label: e.label } }, [
       el('td', {}, [
         el('div', { class: 'rc-cancel-cells', 'aria-hidden': 'true' },
@@ -37925,6 +38343,62 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     ]));
 
     host.appendChild(table(['', 'Activity', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
+  }
+
+  /**
+   * Re-derive what every read since the log's start said each day was painted as.
+   *
+   * `rc_cancelled_days` reads the cells each ingest wrote, and those were written
+   * under the rules of the day. Red on a Resource row used to go in with the rest
+   * of the row's paint — and over the activity line's own colour — so a week of
+   * names marked in red read as a week cancelled. The rule is fixed in
+   * `rowsFrom()`; this applies it to the reads already taken. The snapshot is the
+   * durable record and `cells` is derived from it, so this rewrites a derivation
+   * and nothing else: rows are matched on `row_key` within their own snapshot,
+   * and a row the new reading does not produce is left exactly as it was.
+   *
+   * Reads up to six weeks before the start are included, because a sheet read in
+   * August already shows the first weeks of September.
+   */
+  async function rederiveCancellations(from) {
+    const ok = await confirmDialog({
+      title: 'Re-read the saved snapshots?',
+      message: 'Every read since six weeks before the log starts is read again under today\'s rules, '
+        + 'and what each stored row says about each day is rewritten to match. Nothing else changes — '
+        + 'not the snapshots, not the change log, not any reason already recorded.',
+      confirmLabel: 'Re-read',
+    });
+    if (!ok) return;
+
+    try {
+      const since = toISO(addDays(isoToMs(from), -42));
+      const [metas, legendRows] = await Promise.all([rc.listSnapshotMeta({ limit: 1000 }), rc.listLegend()]);
+      const legend = legendRows.map((r) => ({ argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
+      const wanted = metas.filter((m) => String(m.taken_at || '').slice(0, 10) >= since);
+      const same = (a, b) => JSON.stringify(Object.entries(a || {}).sort()) === JSON.stringify(Object.entries(b || {}).sort());
+
+      let changed = 0;
+      for (const meta of wanted) {
+        const snapshot = await rc.snapshotById(meta.id);
+        if (!snapshot?.grid) continue;
+        const view = readGrid(applyLegend(snapshot.grid, legend), { anchorISO: snapshot.taken_at });
+        const fresh = new Map((await rowsFrom(view, { snapshotId: snapshot.id })).map((r) => [r.row_key, r]));
+        for (const row of await rc.listSnapshotRows(snapshot.id)) {
+          const again = fresh.get(row.row_key);
+          if (!again || same(again.cells, row.cells)) continue;
+          await rc.updateLookaheadRowCells(row.id, again.cells);
+          changed++;
+        }
+      }
+      toast({
+        tone: 'good',
+        title: 'Saved snapshots re-read',
+        message: `${wanted.length} read(s) checked, ${changed} row(s) corrected.`,
+      });
+      notifyChanged('cancellations');
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not re-read the snapshots', message: err.message });
+    }
   }
 
   /** Say whose it was and why — or correct what was said. */
@@ -40346,7 +40820,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
 
     return el('div', { class: 'rc-section' }, [
       el('div', { class: 'rc-scroll' }, [
-        el('table', { class: 'rc-table' }, [
+        el('table', { class: 'rc-table rc-report' }, [
           el('thead', {}, [
             el('tr', {}, [
               el('th', { text: groupBy[0].toUpperCase() + groupBy.slice(1) }),
@@ -40380,7 +40854,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
     }
 
     section.appendChild(el('div', { class: 'rc-scroll' }, [
-      el('table', { class: 'rc-table' }, [
+      el('table', { class: 'rc-table rc-report' }, [
         el('thead', {}, [el('tr', {}, [
           el('th', { text: 'Person' }), el('th', { text: 'First seen' }),
           el('th', { text: 'Days old' }), el('th', { text: 'Times carried' }),

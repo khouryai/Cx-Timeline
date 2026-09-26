@@ -20,7 +20,7 @@ import { emit, EV } from '../core/events.js';
 import { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } from '../core/dates.js';
 import { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } from '../core/model.js';
 import { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
-import { filterPredicate } from '../core/query.js';
+import { filterPredicate, dateWindowPredicate } from '../core/query.js';
 import { linkViolations, criticalPath, predecessorsOf } from '../core/analysis.js';
 import * as viewport from './viewport.js';
 import { computeLayout, stageHeight, ROW_HEIGHT } from './layout.js';
@@ -149,7 +149,13 @@ export function renderNow() {
   const settings = doc.settings;
 
   const predicate = hasActiveFilters() ? filterPredicate(doc, getFilters()) : null;
-  const layout = computeLayout({ filterFn: predicate, hideFiltered: settings.filterMode === 'hide' });
+  /* The date window always hides — see `dateWindowPredicate()` — so what is
+     outside it is dropped before packing, and the lanes close up. */
+  const layout = computeLayout({
+    filterFn: predicate,
+    hideFiltered: settings.filterMode === 'hide',
+    windowFn: dateWindowPredicate(getFilters()),
+  });
   lastLayout = layout;
 
   dom.stage.style.height = `${stageHeight(layout.geometry)}px`;

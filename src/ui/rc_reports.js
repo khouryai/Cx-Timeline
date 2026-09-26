@@ -228,7 +228,7 @@ function breakdown(effort, people, categories, locations) {
 
   return el('div', { class: 'rc-section' }, [
     el('div', { class: 'rc-scroll' }, [
-      el('table', { class: 'rc-table' }, [
+      el('table', { class: 'rc-table rc-report' }, [
         el('thead', {}, [
           el('tr', {}, [
             el('th', { text: groupBy[0].toUpperCase() + groupBy.slice(1) }),
@@ -262,7 +262,7 @@ function carryOver(chains, people) {
   }
 
   section.appendChild(el('div', { class: 'rc-scroll' }, [
-    el('table', { class: 'rc-table' }, [
+    el('table', { class: 'rc-table rc-report' }, [
       el('thead', {}, [el('tr', {}, [
         el('th', { text: 'Person' }), el('th', { text: 'First seen' }),
         el('th', { text: 'Days old' }), el('th', { text: 'Times carried' }),

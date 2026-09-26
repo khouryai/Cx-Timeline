@@ -230,7 +230,140 @@ export function toggleHidden() {
   if (!objects.length) return;
   const hide = !objects.every((o) => o.hidden);
   store.updateObjects(objects.map((o) => o.id), { hidden: hide }, hide ? 'Hide' : 'Show');
+  // A hidden object cannot be clicked, so it cannot stay selected either.
+  if (hide) store.setSelection([]);
   renderer.requestRender();
+  if (hide) {
+    /* Say where it went and how to get it back. A thing that vanishes off the
+       canvas with no word about it reads as deleted. */
+    toast({
+      tone: 'info',
+      title: objects.length === 1 ? `Hidden: ${objects[0].title}` : `${objects.length} objects hidden`,
+      message: 'Still in the plan. Bring it back from "hidden" in the status bar, or the Filters pane.',
+      action: { label: 'Undo', onClick: () => showObjects(objects.map((o) => o.id)) },
+    });
+  }
+}
+
+/** Every object somebody has hidden, in plan order. */
+export function hiddenObjects() {
+  return store.getDoc().objects.filter((o) => o.hidden);
+}
+
+/** Put hidden objects back on the timeline. Nothing about them changed while away. */
+export function showObjects(ids) {
+  const wanted = [].concat(ids).filter((id) => store.getObject(id)?.hidden);
+  if (!wanted.length) return false;
+  store.updateObjects(wanted, { hidden: false }, wanted.length === 1 ? 'Show' : `Show ${wanted.length} objects`);
+  renderer.requestRender();
+  return true;
+}
+
+export function showAllHidden() {
+  return showObjects(hiddenObjects().map((o) => o.id));
+}
+
+/**
+ * The hidden objects, each one click from coming back.
+ *
+ * A hidden object is not drawn, so it cannot be right-clicked or selected on
+ * the canvas — without a list of them, hiding was a door that only opened one
+ * way. The same list is in the Filters pane.
+ */
+export function openHiddenList() {
+  const list = el('div', { class: 'cx-list hidden-list' });
+  const draw = () => {
+    list.replaceChildren();
+    const hidden = hiddenObjects();
+    if (!hidden.length) {
+      list.appendChild(el('div', { class: 'cx-hint', text: 'Nothing is hidden.' }));
+      return;
+    }
+    const lanes = new Map(store.getDoc().lanes.map((l) => [l.id, l.name]));
+    for (const obj of hidden) {
+      list.appendChild(el('div', { class: 'cx-listrow', dataset: { id: obj.id }, style: { cursor: 'default' } }, [
+        el('div', { class: 'lr-main' }, [
+          el('div', { class: 'lr-title', text: obj.title }),
+          el('div', { class: 'lr-meta', text: `${lanes.get(obj.lane) || 'no lane'} · ${fmtDate(obj.start, 'numeric')}` }),
+        ]),
+        el('button', {
+          class: 'cx-btn mini',
+          html: icon('eye', { size: 12 }) + '<span>Show</span>',
+          'aria-label': `Show ${obj.title}`,
+          onClick: () => { showObjects([obj.id]); draw(); },
+        }),
+      ]));
+    }
+  };
+  draw();
+  openModal({
+    title: 'Hidden objects',
+    subtitle: 'Hidden, not removed — each is still in the plan with everything it had.',
+    body: list,
+    actions: [
+      { label: 'Close' },
+      { label: 'Show all', kind: 'primary', onClick: () => { showAllHidden(); } },
+    ],
+  });
+}
+
+/* ── The date window ───────────────────────────────────────────────────── */
+
+/**
+ * Show only what falls between two dates.
+ *
+ * Everything outside is hidden rather than dimmed and the lanes close up, and
+ * the view is framed on the window. It is the reader's own view — nothing in
+ * the plan changes, and clearing it brings everything back as it was.
+ */
+export function setDateWindow(from, to, { frame = true } = {}) {
+  store.setFilters({ from: from || null, to: to || null });
+  if (frame && (from || to)) {
+    const start = from ? Date.parse(`${from}T00:00:00Z`) : projectExtent(store.getDoc()).start;
+    const end = to ? Date.parse(`${to}T00:00:00Z`) + MS_DAY : projectExtent(store.getDoc()).end;
+    if (end > start) viewport.fitRange(start, end, 30);
+  }
+  renderer.invalidateAll?.();
+  renderer.requestRender();
+}
+
+export function clearDateWindow() {
+  setDateWindow(null, null, { frame: false });
+}
+
+export function openDateWindow() {
+  const current = store.getFilters();
+  const from = el('input', { type: 'date', class: 'cx-input', value: current.from || '', 'aria-label': 'Show from' });
+  const to = el('input', { type: 'date', class: 'cx-input', value: current.to || '', 'aria-label': 'Show to' });
+  const actions = [{ label: 'Cancel' }];
+  if (current.from || current.to) {
+    actions.push({ label: 'Clear dates', onClick: () => clearDateWindow() });
+  }
+  actions.push({
+    label: 'Show only these dates',
+    kind: 'primary',
+    onClick: () => {
+      if (!from.value && !to.value) {
+        toast({ tone: 'warn', title: 'Pick a date', message: 'Give a start, an end, or both.' });
+        return false;
+      }
+      if (from.value && to.value && to.value < from.value) {
+        toast({ tone: 'warn', title: 'The end is before the start' });
+        return false;
+      }
+      setDateWindow(from.value, to.value);
+      return undefined;
+    },
+  });
+  openModal({
+    title: 'Show only a date range',
+    subtitle: 'Everything outside it is hidden, not removed. Clear the dates to bring it all back.',
+    body: el('div', { class: 'cx-row', style: { gap: '12px' } }, [
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'From' }), from]),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'To' }), to]),
+    ]),
+    actions,
+  });
 }
 
 export function groupSelection() {

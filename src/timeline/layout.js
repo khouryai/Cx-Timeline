@@ -651,7 +651,9 @@ export function packRows(entries, { minGapPx = 6 } = {}) {
  * are returned ready to draw (`rect.ghost`, `layout.removed`) so no consumer
  * has to work out where they went a second time.
  */
-export function computeLayout({ filterFn = null, hideFiltered = false, includeOffscreen = false, gutterWidth = 190 } = {}) {
+export function computeLayout({
+  filterFn = null, hideFiltered = false, windowFn = null, includeOffscreen = false, gutterWidth = 190,
+} = {}) {
   const doc = getDoc();
   const lanes = orderedLanes(false);
   const rects = [];
@@ -681,7 +683,8 @@ export function computeLayout({ filterFn = null, hideFiltered = false, includeOf
 
   for (const lane of lanes) {
     const laneObjects = doc.objects.filter(
-      (o) => o.lane === lane.id && !o.hidden && !(hideFiltered && filterFn && !filterFn(o))
+      (o) => o.lane === lane.id && !o.hidden && !(windowFn && !windowFn(o))
+        && !(hideFiltered && filterFn && !filterFn(o))
     );
 
     // Measure every object in the lane, not just the visible ones: row heights

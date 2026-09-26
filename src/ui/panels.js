@@ -883,26 +883,66 @@ function paneFilters(root) {
     }, 200),
   }), 'Separate several with commas — anything matching any of them is kept.'));
 
+  /* The date window. Unlike the rest of the filter it always *hides* what is
+     outside it, whatever the switch above says — "show me 15 September to 25
+     November" is a request not to see the rest. Nothing is removed, and the
+     toolbar says a window is in force for as long as it is. */
   root.appendChild(
     el('div', { class: 'cx-row', style: { marginTop: '10px' } }, [
-      field('From', textInput({
+      field('Show only from', textInput({
         type: 'date',
         value: filters.from || '',
         onChange: (v) => {
-          store.setFilters({ from: v || null });
-          renderer.requestRender();
+          cmd.setDateWindow(v || null, store.getFilters().to, { frame: false });
+          renderPane();
         },
       })),
       field('To', textInput({
         type: 'date',
         value: filters.to || '',
         onChange: (v) => {
-          store.setFilters({ to: v || null });
-          renderer.requestRender();
+          cmd.setDateWindow(store.getFilters().from, v || null, { frame: false });
+          renderPane();
         },
       })),
     ])
   );
+  if (filters.from || filters.to) {
+    root.appendChild(el('div', { style: { display: 'flex', gap: '6px', margin: '-4px 0 10px' } }, [
+      el('button', {
+        class: 'cx-btn mini',
+        html: icon('x', { size: 12 }) + '<span>Clear dates</span>',
+        onClick: () => { cmd.clearDateWindow(); renderPane(); },
+      }),
+      el('span', { class: 'cx-hint', text: 'Outside these dates is hidden, not removed.' }),
+    ]));
+  }
+
+  /* What somebody hid by hand, each one click from coming back. A hidden
+     object is not drawn, so this is the only place it can be reached. */
+  const hidden = doc.objects.filter((o) => o.hidden);
+  if (hidden.length) {
+    root.appendChild(section(`Hidden objects (${hidden.length})`, [
+      el('div', { class: 'cx-list' }, hidden.map((obj) => el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+        el('div', { class: 'lr-main' }, [
+          el('div', { class: 'lr-title', text: obj.title }),
+          el('div', { class: 'lr-meta', text: fmtDate(obj.start, 'numeric') }),
+        ]),
+        el('button', {
+          class: 'cx-btn mini',
+          html: icon('eye', { size: 12 }) + '<span>Show</span>',
+          'aria-label': `Show ${obj.title}`,
+          onClick: () => { cmd.showObjects([obj.id]); renderPane(); },
+        }),
+      ]))),
+      el('button', {
+        class: 'cx-btn mini',
+        style: { marginTop: '6px' },
+        html: icon('eye', { size: 12 }) + '<span>Show all</span>',
+        onClick: () => { cmd.showAllHidden(); renderPane(); },
+      }),
+    ]));
+  }
 
   root.appendChild(checkGroup('Type', 'types', Object.entries(TYPES).map(([id, t]) => ({ value: id, label: t.label })), filters.types));
   root.appendChild(checkGroup('Status', 'statuses', listOptions('status').map((o) => ({ value: o.id, label: o.label })), filters.statuses));

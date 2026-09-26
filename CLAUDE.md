@@ -164,6 +164,24 @@ subscribes. That is what keeps the graph acyclic.
   (`settings.filterMode`). Hiding drops them before packing in
   `computeLayout()`, so the rows reflow and the lanes close up; skipping them
   at paint time would leave the gaps they used to occupy. Exports always hide.
+- **Hidden is a way back, not a way out.** `obj.hidden` was on the model and
+  in the inspector, and `toggleHidden()` existed with nothing calling it — and a
+  hidden object is not drawn, so it could not be clicked to be shown again.
+  Hiding is now on the object's menu and `mod+shift+h`, a toast says where it
+  went, the status bar counts what is hidden and opens `openHiddenList()`, and
+  the Filters pane lists them with Show / Show all (`showObjects()`,
+  `showAllHidden()`). It is a plan edit like any other — undoable, and an
+  export leaves hidden objects out — because that is what the flag always was.
+- **A date window hides; the rest of the filter dims.** The filter's From/To is
+  read on its own by `dateWindowPredicate()` in `core/query.js`, and
+  `computeLayout({ windowFn })` drops what does not overlap it before packing,
+  whatever `filterMode` says — "show me 15 September to 25 November" is a
+  request not to see the rest, and dimming it would not be. It stays the
+  reader's own view (`ui.filters`, never the plan), so nothing is removed. Set
+  it from the toolbar ("Show only a date range", which also frames the view) or
+  the Filters pane; while one is in force the toolbar carries a chip naming it,
+  and pressing the chip clears it — a plan with half its objects hidden by a
+  window set yesterday otherwise looks like a plan with half its objects missing.
 - **Baseline comparison draws five things, not one** (`renderBaseline`): the
   ghost at the baseline dates behind the live bar, an arrow between the two
   finish edges labelled in days, the reason someone typed into the striped
@@ -599,6 +617,21 @@ subscribes. That is what keeps the graph acyclic.
   did not upload would be the wrong way round. `evidence` is its own bucket,
   readable by anybody signed in: a picture only its author can open is not
   evidence of anything.
+- **An outcome says what the day was spent on, and what kind of work it was.**
+  `rc_actuals.task` is what somebody actually did, in words — distinct from the
+  plan (what they were asked) and from `note` (what is left, anything else) —
+  and `category_id` is what the reports group it by. On a day with nothing
+  planned the task is the only statement of the work there is, which is why it
+  exists: the meeting heard it and the record used to keep a status against a
+  blank. `workFields()` in `ui/rc_huddle.js` draws both, in the room and in the
+  table alike, pre-filled from the plan so the common case is no typing. Before
+  an outcome is recorded they are a draft that `commitOutcome()` reads through
+  `ctx.drafts` when a status is pressed (`workOf()`); afterwards Enter in the
+  box, a new category or Save writes a **correction** with the status kept —
+  never on blur, because the status buttons sit beside the fields and a
+  correction written on the way to pressing one would be corrected again at
+  once, which `rc_record_actual()` refuses. The function takes it as `p_task`,
+  the sixteenth argument; the fifteen-argument signature is dropped above it.
 - **Who said it and who typed it are different facts.** Most days somebody
   speaks and somebody else enters it, and an outcome attributed to whoever
   typed it is how a record stops being trusted. `outcomeDetail()` shows
@@ -683,7 +716,12 @@ subscribes. That is what keeps the graph acyclic.
   and this is who is on it, and `describe()` reads which by the key. A Resource
   row changing is `resource_changed` with `field: 'resources'`, reusing the
   existing kind so no `rc_change_events` check constraint has to be widened in
-  a project that already has one.
+  a project that already has one. **Red on a Resource row is never a
+  cancellation**: people mark the names red, not the work. In `rowsFrom()` the
+  Resource row's paint only fills a day the activity line left unpainted, never
+  overrides it, and never with a cancellation meaning (`isCancelMeaning()`) or a
+  colour nobody has named — which might turn out to be red — so none of it
+  reaches `cells` or `rc_cancelled_days`.
 - **The sheet says who is away as well as who is on what, and none of it is
   scope.** Rows at the bottom of the 4WLA — "PTO", "Office", "Other Group /
   Project" — carry names in their day cells the way a Resource row does, and
@@ -865,6 +903,14 @@ subscribes. That is what keeps the graph acyclic.
   an event id — the event has none, and a week cancelled on Monday grows to a
   fortnight by Wednesday — so `attachCancellationNotes()` gives it to the event
   on the same activity whose days it overlaps, newest uncorrected note first.
+  The log takes a start **and an end** date (a blank end is no end; an event is
+  in the span when it starts inside it and is kept whole), and "Export N to CSV"
+  carries exactly what is on screen with the span in the file name. Because the
+  view reads cells written under the rules of the day, "Re-read saved
+  snapshots" re-derives `cells` for every read since six weeks before the start
+  (`rederiveCancellations()`), matched on `row_key` within each snapshot — which
+  is how the Resource-row rule reached reads taken before it existed. It rewrites
+  the derivation and nothing else: the snapshot is the record.
 - **The week plan is one tab, and it used to be two.** "Week plan" drew the
   team's week from the plan's side; "Resources" drew the same rows per person
   with what the 4WLA asked for beside them. People down and days across in both
@@ -1156,18 +1202,14 @@ subscribes. That is what keeps the graph acyclic.
   drawn as unmapped too, not only counted: `.la-day.la-unmapped` hatches the
   cell on the calendar, so a colour nobody has explained is visible on the grid
   rather than in a number at the top of it.
-- **The calendar says which colours are keeping rows on it.** `whyStrip()` tallies,
-  per colour, how many drawn rows that colour is what makes count as scheduled,
-  and offers "Just shading" against each. It exists because "it is still showing
-  rows with nothing on them" is a question about a *colour* and the screen could
-  not answer it: the switch hides a row with nothing scheduled, whether a row is
-  scheduled is decided entirely by whether any of its paint counts as `shift`,
-  and joining the legend to a hundred days of grid by eye is not a thing to ask
-  anybody to do. It is the other half of the unmapped list — that one covers a
-  colour nobody has explained, this one a colour somebody explained *as work* on
-  rows where none is happening. For a mapped colour the press changes the role on
-  the entry in force rather than adding a second one, because adding is what left
-  a register with two answers for one colour to begin with.
+- **What a colour is, is changed in Legend and nowhere else.** The calendar
+  used to carry an "On screen because of" strip (`whyStrip()`) listing each
+  colour keeping rows on screen with "Just shading" beside it. It was removed at
+  the user's request: a second place to recategorise a colour, on the screen
+  people read rather than the one the register is administered from. The
+  calendar's key still names unmapped colours and its button goes to Legend,
+  whose unmapped list keeps the one-click "Just shading" and whose entries carry
+  the role. `tools/smoke_calendar.js` checks the calendar offers none of it.
 - **The legend is versioned, so a colour resolves to the row *in force*.**
   `rc_legend` is `unique (valid_from, argb)` — one row per colour per date — and
   `inForce()` in `io/lookahead.js` picks the newest before anything is looked up.
@@ -1198,7 +1240,14 @@ subscribes. That is what keeps the graph acyclic.
   keeps from a hidden cell, and never a cell of the grid.
 - **The sheet's own column headings are read once and drawn everywhere.**
   `readGrid()` returns `headings`, one per frozen activity column, because it
-  has to — finding the Location column depends on it. The printed calendar has
+  has to — finding the Location column depends on it. They come off the sheet's
+  **heading row** — the row at or above the weekday letters with the most text
+  left of the calendar (row 2 on BART's file: Activity ID, Description of Work
+  Activity, Location, SSWP, Party to Action, Work hours) — and only where that
+  row is blank off the nearest text above the weekday row. Taking each column's
+  nearest text on its own let a note typed in a gap row stand in for a heading.
+  A column the heading row names is an activity column even when nothing under
+  it is filled in, so the headings never shift onto the wrong values. The printed calendar has
   drawn them since it was written; the grid on screen threw them away and put
   "Activity" across the lot, so a left-hand side of Location, SSWP and Party to
   action arrived as three anonymous columns of text. Both now fall back the same
@@ -1207,7 +1256,10 @@ subscribes. That is what keeps the graph acyclic.
   a heading nobody can trust. The header cells are frozen at the same offsets as
   the body's, which is what `la-meta-all` marks the two rows that still span
   every column, so they stay pinned at zero while the named ones track their
-  values.
+  values. **The three header rows are frozen one under another** by
+  `freezeHead()`, which pins each at the measured height of the rows above it
+  (and again on a resize). Every header cell used to be `top: 0`, so scrolling
+  down stacked the weekday letters over the day numbers and the month.
 - **The location column is found the same way the date axis is, and the spelling
   is kept whether or not it resolves.** `locationColumnOf()` reads the heading
   the workbook gives each activity column, so a column inserted to its left
@@ -1456,17 +1508,17 @@ npm run test:rust                    #  33 checks — the plan, lock and intake 
 
 node tools/test_dist.js              #  41 checks — every deployment shape, and that the
                                      #              plan still has no backend in any of them
-node tools/test_lookahead.js         # 186 checks — the parser, the rows it derives, the
+node tools/test_lookahead.js         # 195 checks — the parser, the rows it derives, the
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
-node tools/smoke.js                  # 294 checks — the application, local mode
-node tools/smoke_calendar.js         # 325 checks — the resource calendar, accounts, the
+node tools/smoke.js                  # 305 checks — the application, local mode
+node tools/smoke_calendar.js         # 331 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
-node tools/test_sql.js               # 315 checks — both permission models, and that
+node tools/test_sql.js               # 318 checks — both permission models, and that
                                      #              supabase/migrate.sql upgrades a project
                                      #              built before any of it
 node tools/smoke.js --shot out.png   # …and eyeball the result
