@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 57   Built: 2026-09-26T06:56:13.672Z
+ * Modules: 58   Built: 2026-09-26T07:03:02.369Z
  */
 (function () {
   'use strict';
@@ -18823,6 +18823,7 @@ __mods["ui/commands.js"] = function (__x, __req) {
       ['F11  /  P', 'Presentation mode'],
     ]},
     { group: 'Application', items: [
+      ['mod+k', 'Go to anything — panes, actions, themes'],
       ['mod+f', 'Global search'],
       ['mod+s', 'Save a restore point'],
       ['mod+p', 'Print / export to PDF'],
@@ -29878,6 +29879,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   Object.defineProperty(__x, "currentPane", { get: () => currentPane, enumerable: true });
   Object.defineProperty(__x, "showPane", { get: () => showPane, enumerable: true });
   Object.defineProperty(__x, "toggleDock", { get: () => toggleDock, enumerable: true });
+  Object.defineProperty(__x, "TITLES", { get: () => TITLES, enumerable: true });
   Object.defineProperty(__x, "installResizer", { get: () => installResizer, enumerable: true });
 };
 
@@ -29992,6 +29994,116 @@ __mods["ui/workspace.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/command_menu.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/command_menu.js"] = function (__x, __req) {
+  /**
+   * The command menu — mod+K.
+   *
+   * Twenty dock panes, a toolbar, a context menu and a list of shortcuts nobody
+   * remembers: the application can do a great deal, and most of it is found by
+   * already knowing where it is. This is the one place to type what you want
+   * — "baseline", "hidden", "dark", "milestone" — and go there. It adds no
+   * behaviour of its own: every entry calls the same command a menu, a button
+   * or a shortcut calls (`ui/commands.js`), so there is still one
+   * implementation and this is one more way in.
+   *
+   * Imports: events, model, commands, components, panels, theme, workspace.
+   */
+
+  const { emit } = __req("core/events.js");
+  const { TYPES } = __req("core/model.js");
+  const cmd = __req("ui/commands.js");
+  const { openPicker, modalOpen } = __req("ui/components.js");
+  const { showPane, TITLES } = __req("ui/panels.js");
+  const { THEMES, applyTheme } = __req("ui/theme.js");
+  const workspace = __req("ui/workspace.js");
+
+  /** On the timeline — a pane or an action there switches back to it first. */
+  function onTimeline(fn) {
+    return () => {
+      if (!workspace.isTimeline()) workspace.show('timeline');
+      fn();
+    };
+  }
+
+  /** Every entry, built when the menu opens so it reflects the moment. */
+  function commandEntries() {
+    const entries = [];
+    const add = (label, meta, run) => entries.push({ label, meta, run });
+
+    for (const [pane, title] of Object.entries(TITLES)) {
+      add(title, 'Open pane', onTimeline(() => showPane(pane)));
+    }
+
+    add('Fit the whole plan', 'View · mod+0', onTimeline(cmd.fitAll));
+    add('Zoom to the selection', 'View · mod+shift+0', onTimeline(cmd.zoomToSelection));
+    add('Go to today', 'View · T', onTimeline(cmd.goToToday));
+    add('Show only a date range…', 'View · hides everything outside it', onTimeline(cmd.openDateWindow));
+    add('Clear the date range', 'View', onTimeline(cmd.clearDateWindow));
+    add('Hidden objects…', 'View · show them again', onTimeline(cmd.openHiddenList));
+    add('Presentation mode', 'View · P', onTimeline(cmd.togglePresentation));
+
+    add('Hide the selection', 'Edit · mod+shift+H', onTimeline(cmd.toggleHidden));
+    add('Duplicate the selection', 'Edit · mod+D', onTimeline(cmd.duplicateSelection));
+    add('Select all', 'Edit · mod+A', onTimeline(cmd.selectAll));
+    add('Select broken dependencies', 'Edit', onTimeline(cmd.selectViolations));
+    add('Fix every broken dependency', 'Edit', onTimeline(cmd.resolveAllViolations));
+    add('Add a lane', 'Edit', onTimeline(() => cmd.addLane()));
+
+    for (const [type, def] of Object.entries(TYPES)) {
+      add(`Add ${def.label.toLowerCase()}`, `Add · ${def.group}`, onTimeline(() => cmd.createObject(type)));
+    }
+
+    add('Take a baseline', 'Plan', onTimeline(cmd.takeBaseline));
+    add('Save a restore point', 'Plan · mod+S', onTimeline(cmd.saveSnapshot));
+    add('Print or export to PDF', 'Plan · mod+P', onTimeline(() => emit('ui:print')));
+    add('New project', 'Plan', onTimeline(cmd.newProject));
+
+    for (const theme of THEMES) add(`${theme.label} theme`, `Theme · ${theme.description}`, () => applyTheme(theme.id));
+
+    if (document.querySelector('.ws-switch')) {
+      add('Switch to the timeline', 'Workspace', () => workspace.show('timeline'));
+      add('Switch to the resource calendar', 'Workspace', () => workspace.show('calendar'));
+    }
+    add('Keyboard shortcuts', 'Help · ?', cmd.showShortcuts);
+    return entries;
+  }
+
+  function openCommandMenu() {
+    if (modalOpen()) return null;
+    const entries = commandEntries();
+    return openPicker({
+      title: 'Go to…',
+      subtitle: 'A pane, an action, an object to add or a theme. Type to narrow.',
+      placeholder: 'What do you want to do?',
+      items: entries.map((e, i) => ({ label: e.label, meta: e.meta, value: String(i) })),
+      empty: 'Nothing by that name.',
+      onPick: (value) => {
+        const entry = entries[Number(value)];
+        // After the menu has closed, so a command that opens a dialog of its own
+        // does not open it underneath the one that is going away.
+        if (entry) setTimeout(entry.run, 0);
+      },
+    });
+  }
+
+  /** Wired by main.js — kept here so the shortcut and the button share it. */
+  function installCommandMenu() {
+    window.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        openCommandMenu();
+      }
+    }, true);
+  }
+
+  Object.defineProperty(__x, "commandEntries", { get: () => commandEntries, enumerable: true });
+  Object.defineProperty(__x, "openCommandMenu", { get: () => openCommandMenu, enumerable: true });
+  Object.defineProperty(__x, "installCommandMenu", { get: () => installCommandMenu, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/shell.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/shell.js"] = function (__x, __req) {
@@ -30026,6 +30138,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const workspace = __req("ui/workspace.js");
   const { accountBlock, openShareDialog } = __req("ui/auth.js");
   const cmd = __req("ui/commands.js");
+  const { openCommandMenu } = __req("ui/command_menu.js");
 
   /** Sidebar structure — sections of dock panes. */
   const NAV = [
@@ -30090,6 +30203,17 @@ __mods["ui/shell.js"] = function (__x, __req) {
 
   /* ── Side navigation ───────────────────────────────────────────────────── */
 
+  const FOLDED_KEY = 'cxtl.nav.folded';
+
+  /** The sidebar sections this browser has folded away. */
+  function foldedGroups() {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(FOLDED_KEY) || '[]'));
+    } catch {
+      return new Set();
+    }
+  }
+
   function buildSidenav() {
     clear(dom.sidenav);
     const doc = store.getDoc();
@@ -30118,9 +30242,49 @@ __mods["ui/shell.js"] = function (__x, __req) {
       dom.sidenav.appendChild(workspaceSwitch());
     }
 
+    // One way in to everything, before the list of places: the command menu.
+    dom.sidenav.appendChild(el('button', {
+      class: 'sidenav-command',
+      type: 'button',
+      title: 'Every pane, action, object type and theme, by name',
+      onClick: () => openCommandMenu(),
+    }, [
+      el('span', { class: 'nav-icon', html: icon('search', { size: 14 }) }),
+      el('span', { class: 'nav-label', text: 'Go to…' }),
+      el('kbd', { text: navigator.platform.includes('Mac') ? '⌘K' : 'Ctrl K' }),
+    ]));
+
     dom.navLinks = el('div', { class: 'sidenav-links' });
+    const folded = foldedGroups();
     for (const group of NAV) {
-      dom.navLinks.appendChild(el('div', { class: 'sidenav-section-label', text: group.section }));
+      /* A section folds away on its heading, and stays folded across reloads.
+         Twenty panes is a long column on a laptop, and most people use five of
+         them; the pane that is open stays visible even in a folded section, so
+         folding never hides where you are. */
+      const box = el('div', { class: 'sidenav-group' + (folded.has(group.section) ? ' folded' : '') });
+      const head = el('button', {
+        class: 'sidenav-section-label',
+        type: 'button',
+        'aria-expanded': String(!folded.has(group.section)),
+        title: 'Fold or unfold this section',
+        onClick: () => {
+          const now = box.classList.toggle('folded');
+          head.setAttribute('aria-expanded', String(!now));
+          const set = foldedGroups();
+          if (now) set.add(group.section);
+          else set.delete(group.section);
+          try {
+            localStorage.setItem(FOLDED_KEY, JSON.stringify([...set]));
+          } catch {
+            /* a remembered fold is a convenience; without storage it simply resets */
+          }
+        },
+      }, [
+        el('span', { text: group.section }),
+        el('span', { class: 'sidenav-fold', html: icon('chevron-down', { size: 10 }) }),
+      ]);
+      box.appendChild(head);
+      dom.navLinks.appendChild(box);
       for (const item of group.items) {
         // Some panes only mean anything with a backend behind them, and one is
         // for administrators. Both are re-evaluated on auth:changed, which
@@ -30140,7 +30304,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
           el('span', { class: 'nav-label', text: item.label }),
           el('span', { class: 'nav-count', dataset: { countFor: item.pane } }),
         ]);
-        dom.navLinks.appendChild(link);
+        box.appendChild(link);
       }
     }
     dom.sidenav.appendChild(dom.navLinks);
@@ -33079,6 +33243,7 @@ __mods["main.js"] = function (__x, __req) {
   const { installP6Drops } = __req("ui/p6.js");
   const { installLookaheadDrops } = __req("ui/lookahead.js");
   const { installShortcuts } = __req("ui/shortcuts.js");
+  const { installCommandMenu, openCommandMenu } = __req("ui/command_menu.js");
   const workspace = __req("ui/workspace.js");
   const { loadCalendar } = __req("ui/calendar_loader.js");
   const rcClient = __req("core/rc.js");
@@ -33173,6 +33338,7 @@ __mods["main.js"] = function (__x, __req) {
     attachInteractions();
     installMenus();
     installShortcuts();
+    installCommandMenu();
     installHoverPreview();
     installAccessMode();
     installP6Drops();

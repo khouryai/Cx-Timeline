@@ -215,7 +215,7 @@ const RENDERERS = {
   settings: paneSettings,
 };
 
-const TITLES = {
+export const TITLES = {
   projects: 'Projects', team: 'Team & access', p6: 'P6 schedule', lookahead: 'Look-ahead',
   lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
   campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',

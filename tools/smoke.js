@@ -1859,6 +1859,57 @@ async function main() {
     check(`pane "${pane}" renders`, content.length > 40 && consoleErrors.length === errorsBefore);
   }
 
+  /* ── The command menu, and folding the sidebar ──────────────────────
+     Everything is one keystroke and a word away, and every entry is a command
+     the menus already call — so opening a pane through it is the same as
+     clicking the pane. */
+  console.log('\nCommand menu');
+  await page.locator('#canvas-frame').click({ position: { x: 600, y: 12 } }).catch(() => {});
+  await page.keyboard.press('Control+k');
+  const menuFocused = () => page.waitForFunction(() => document.activeElement?.matches('.cx-modal input'), null, { timeout: 3000 });
+  await page.waitForSelector('.cx-modal .cx-picker-list', { timeout: 3000 }).catch(() => {});
+  await menuFocused().catch(() => {});
+  check('mod+K opens the command menu', (await page.locator('.cx-modal .cx-picker-list').count()) === 1);
+  const allEntries = await page.locator('.cx-modal .cx-picker-item').count();
+  await page.keyboard.type('baselines');
+  await page.waitForTimeout(120);
+  const narrowed = await page.locator('.cx-modal .cx-picker-item').count();
+  check('typing narrows it', narrowed > 0 && narrowed < allEntries, `${allEntries} → ${narrowed}`);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+  check('and Enter goes there — the same pane the sidebar opens',
+    (await page.locator('.cx-modal').count()) === 0
+      && (await page.locator('#sidenav .nav-link.active').getAttribute('data-pane')) === 'baselines');
+  await page.locator('#sidenav .sidenav-command').click();
+  await page.waitForSelector('.cx-modal .cx-picker-list');
+  await menuFocused();
+  await page.keyboard.type('light theme');
+  await page.waitForTimeout(120);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+  check('the sidebar button opens the same menu, and a theme is one entry in it',
+    (await page.evaluate(() => document.documentElement.dataset.theme)) === 'light');
+  await page.evaluate(() => document.querySelector('#sidenav .sidenav-command').click());
+  await page.waitForSelector('.cx-modal .cx-picker-list');
+  await menuFocused();
+  await page.keyboard.type('dark theme');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+
+  const reviewHead = page.locator('#sidenav .sidenav-section-label', { hasText: 'Review' });
+  await reviewHead.click();
+  await page.waitForTimeout(150);
+  check('a sidebar section folds away on its heading',
+    (await reviewHead.getAttribute('aria-expanded')) === 'false'
+      && !(await page.locator('#sidenav .nav-link[data-pane="legend"]').isVisible()));
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('.tl-obj', { timeout: 10000 });
+  check('and stays folded after a reload',
+    !(await page.locator('#sidenav .nav-link[data-pane="legend"]').isVisible()));
+  await page.locator('#sidenav .sidenav-section-label', { hasText: 'Review' }).click();
+  await page.waitForTimeout(150);
+  check('unfolding brings it back', await page.locator('#sidenav .nav-link[data-pane="legend"]').isVisible());
+
   /* The status palette, read from `core/model.js` rather than restated here —
      a status added without a colour of its own has to fail a check, not a
      squint at a plan. */

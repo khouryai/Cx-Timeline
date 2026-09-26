@@ -39,6 +39,7 @@ import { requireSignIn, installAccessMode } from './ui/auth.js';
 import { installP6Drops } from './ui/p6.js';
 import { installLookaheadDrops } from './ui/lookahead.js';
 import { installShortcuts } from './ui/shortcuts.js';
+import { installCommandMenu, openCommandMenu } from './ui/command_menu.js';
 import * as workspace from './ui/workspace.js';
 import { loadCalendar } from './ui/calendar_loader.js';
 import * as rcClient from './core/rc.js';
@@ -133,6 +134,7 @@ async function boot() {
   attachInteractions();
   installMenus();
   installShortcuts();
+  installCommandMenu();
   installHoverPreview();
   installAccessMode();
   installP6Drops();
