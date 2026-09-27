@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 20   Built: 2026-09-27T20:53:18.925Z
+ * Modules: 20   Built: 2026-09-27T21:53:16.954Z
  */
 (function () {
   'use strict';
@@ -4481,6 +4481,119 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
+     Cancellations, as the log will know them
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The label and location the cancellation log will give this row's days.
+   *
+   * The log is derived from what is published (`rowsFrom()` → `rc_lookahead_rows`
+   * → `rc_cancelled_days`), and a note is matched to an event by exactly these
+   * two strings — so a note recorded at the moment somebody paints a day red has
+   * to be keyed the way the log will key the event, or it will never be found.
+   * `tools/test_la_edit.js` holds this to what `rowsFrom()` actually produces.
+   */
+  function cancellationKey(row) {
+    const meta = metaValues(row);
+    return {
+      raw_label: meta.filter(Boolean).join(' · '),
+      raw_location: row.location || '',
+    };
+  }
+
+  /**
+   * Runs of consecutive days per row, from a list of `{ row, day }` — "Monday to
+   * Wednesday on the IXL row" is one cancellation, as the log counts it.
+   */
+  function dayRuns(items) {
+    const byRow = new Map();
+    for (const { row, day } of items) {
+      if (!byRow.has(row.id)) byRow.set(row.id, { row, days: new Set() });
+      byRow.get(row.id).days.add(day);
+    }
+    const runs = [];
+    for (const { row, days } of byRow.values()) {
+      const sorted = [...days].sort();
+      let start = sorted[0];
+      let prev = sorted[0];
+      for (const d of sorted.slice(1)) {
+        if (d === addDaysISO(prev, 1)) { prev = d; continue; }
+        runs.push({ row, start, end: prev });
+        start = d;
+        prev = d;
+      }
+      if (start) runs.push({ row, start, end: prev });
+    }
+    return runs;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Names from the roster
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const foldWord = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+  /**
+   * What to write for each person on the roster.
+   *
+   * The sheet is written in first names — "Adam, Jimmy" — and the calendar's
+   * name register matches a first name only when exactly one person answers to
+   * it. So a suggestion writes the first name where that is unambiguous and the
+   * full name where two people share it: what is written is always something the
+   * register will place, which is the point of suggesting it.
+   */
+  function nameChoices(people) {
+    const live = (people || []).filter((p) => p && p.name && p.active !== false);
+    const firsts = new Map();
+    for (const p of live) {
+      const first = foldWord(p.name).split(' ')[0];
+      firsts.set(first, (firsts.get(first) || 0) + 1);
+    }
+    return live
+      .map((p) => {
+        const first = String(p.name).trim().split(/\s+/)[0];
+        const unique = firsts.get(foldWord(first)) === 1;
+        return { insert: unique ? first : String(p.name).trim(), full: String(p.name).trim() };
+      })
+      .sort((a, b) => a.insert.localeCompare(b.insert));
+  }
+
+  /** The name being typed: whatever follows the last separator. */
+  function currentToken(text) {
+    const pieces = String(text ?? '').split(/,|\/|&|\+|\n|\band\b/i);
+    return pieces[pieces.length - 1].replace(/^\s+/, '');
+  }
+
+  /**
+   * Roster names that fit what is being typed, best first — a first name or a
+   * surname starting with it — leaving out anybody already in the cell.
+   */
+  function suggestNames(text, choices, limit = 6) {
+    const token = foldWord(currentToken(text));
+    if (!token) return [];
+    const already = new Set(String(text ?? '').split(/[,/&+\n]|\band\b/i).map(foldWord).filter(Boolean));
+    const scored = [];
+    for (const c of choices || []) {
+      if (already.has(foldWord(c.insert)) || already.has(foldWord(c.full))) continue;
+      const words = foldWord(c.full).split(' ');
+      let score = -1;
+      if (foldWord(c.insert).startsWith(token)) score = 0;
+      else if (words.some((w) => w.startsWith(token))) score = 1;
+      else if (foldWord(c.full).includes(token)) score = 2;
+      if (score >= 0) scored.push({ ...c, score });
+    }
+    return scored.sort((a, b) => a.score - b.score || a.insert.localeCompare(b.insert)).slice(0, limit);
+  }
+
+  /** The cell's text with the name being typed replaced by a chosen one. */
+  function acceptName(text, insert) {
+    const t = String(text ?? '');
+    const token = currentToken(t);
+    const head = t.slice(0, t.length - token.length);
+    return `${head}${head && !/[\s]$/.test(head) ? ' ' : ''}${insert}`;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
      The model and its ops
      ═══════════════════════════════════════════════════════════════════════ */
 
@@ -4947,6 +5060,12 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   Object.defineProperty(__x, "normaliseSupport", { get: () => normaliseSupport, enumerable: true });
   Object.defineProperty(__x, "supportTotals", { get: () => supportTotals, enumerable: true });
   Object.defineProperty(__x, "describeCounts", { get: () => describeCounts, enumerable: true });
+  Object.defineProperty(__x, "cancellationKey", { get: () => cancellationKey, enumerable: true });
+  Object.defineProperty(__x, "dayRuns", { get: () => dayRuns, enumerable: true });
+  Object.defineProperty(__x, "nameChoices", { get: () => nameChoices, enumerable: true });
+  Object.defineProperty(__x, "currentToken", { get: () => currentToken, enumerable: true });
+  Object.defineProperty(__x, "suggestNames", { get: () => suggestNames, enumerable: true });
+  Object.defineProperty(__x, "acceptName", { get: () => acceptName, enumerable: true });
   Object.defineProperty(__x, "cellKey", { get: () => cellKey, enumerable: true });
   Object.defineProperty(__x, "makeModel", { get: () => makeModel, enumerable: true });
   Object.defineProperty(__x, "cellList", { get: () => cellList, enumerable: true });
@@ -6147,7 +6266,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
   const ed = __req("core/la_edit.js");
-  const { readGrid } = __req("core/lookahead.js");
+  const { readGrid, isCancelMeaning } = __req("core/lookahead.js");
   const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
   const { lookaheadWorkbook, lookaheadFileName } = __req("io/la_xlsx.js");
   const { saveFile } = __req("io/exporters.js");
@@ -6221,10 +6340,11 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       return;
     }
 
-    const [settings, legend, codes] = await Promise.all([
+    const [settings, legend, codes, people] = await Promise.all([
       rc.listSettings().catch(() => []),
       rc.listLegend().catch(() => []),
       rc.listSupportCodes({ includeRetired: true }).catch(() => []),
+      rc.listPeople().catch(() => []),
     ]);
     E.legendAll = legend.map((r) => ({ argb: String(r.argb).toUpperCase(), meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
     const inForce = new Map();
@@ -6234,6 +6354,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     }
     E.legend = [...inForce.values()].filter((r) => r.role === 'shift' && r.meaning);
     E.codes = codes;
+    E.names = ed.nameChoices(people);
     E.title = settings.find((r) => r.key === 'lookahead_title')?.value || '';
     if (!E.start) E.start = ed.mondayOf(todayISO());
     E.weeks = ed.WINDOW_WEEKS.includes(la.editorWeeks) ? la.editorWeeks : 4;
@@ -7159,12 +7280,68 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       scroller.appendChild(hint);
     }
 
+    /* Names from the roster, while typing into a row of names. The sheet is
+       written in first names, and what is suggested is what the name register
+       will place — a first name where only one person has it, the full name
+       where two do — so a name typed here is never one somebody has to correct
+       on the week plan later. */
+    let names = null;
+    let pick = -1;
+    let found = [];
+    if ((row.kind === 'resource' || row.kind === 'absence') && c >= META && E.names?.length) {
+      names = el('div', {
+        class: 'lae-edit-hint lae-names', role: 'listbox', 'aria-label': 'People on the roster',
+        style: `left:${box.left - host.left + scroller.scrollLeft}px;top:${box.bottom - host.top + scroller.scrollTop + 2}px`,
+      });
+      scroller.appendChild(names);
+      hint = names;
+      const drawNames = () => {
+        found = ed.suggestNames(input.value, E.names);
+        pick = found.length ? Math.min(Math.max(pick, 0), found.length - 1) : -1;
+        clear(names);
+        names.hidden = !found.length;
+        found.forEach((n, i) => names.appendChild(el('button', {
+          class: `lae-name${i === pick ? ' lae-name-on' : ''}`, type: 'button', role: 'option',
+          'aria-selected': String(i === pick), text: n.insert, title: n.full,
+          onMouseDown: (ev) => { ev.preventDefault(); take(i); },
+        })));
+      };
+      const take = (i) => {
+        input.value = ed.acceptName(input.value, found[i].insert);
+        pick = -1;
+        drawNames();
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      };
+      input.addEventListener('input', () => { pick = 0; drawNames(); });
+      names.take = take;
+      drawNames();
+    }
+
     E.editing = { input, hint, r, c, row };
     input.focus();
     if (initial == null) input.select();
     else input.setSelectionRange(input.value.length, input.value.length);
 
     input.addEventListener('keydown', (e) => {
+      // With a name on offer, the arrows choose and Enter or Tab takes it;
+      // with none, they do what they always do.
+      if (names && found.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        pick = (pick + (e.key === 'ArrowDown' ? 1 : -1) + found.length) % found.length;
+        for (const [i, b] of [...names.children].entries()) {
+          b.classList.toggle('lae-name-on', i === pick);
+          b.setAttribute('aria-selected', String(i === pick));
+        }
+        e.stopPropagation();
+        return;
+      }
+      if (names && found.length && pick >= 0 && (e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) {
+        e.preventDefault();
+        names.take(pick);
+        e.stopPropagation();
+        return;
+      }
       if (e.key === 'Enter') { e.preventDefault(); commitEdit(); select(Math.min(r + (e.shiftKey ? -1 : 1), E.view.rows.length - 1), c); focusGrid(); }
       else if (e.key === 'Tab') { e.preventDefault(); commitEdit(); select(r, Math.min(Math.max(0, c + (e.shiftKey ? -1 : 1)), E.view.cols - 1)); focusGrid(); }
       else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); focusGrid(); }
@@ -7276,7 +7453,66 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       toast({ message: skipped ? 'Only an activity\'s days take a colour — names and PTO rows stay plain.' : 'Select the days to paint first.' });
       return;
     }
+    // Only the days that were not already this colour are newly cancelled.
+    const fresh = ops.filter((o) => (ed.getCell(E.model, o.row_id, o.day)?.color || null) !== color);
     commit(ops);
+    const meaning = color ? E.legendAll.find((e) => e.argb === color)?.meaning : null;
+    if (meaning && isCancelMeaning(meaning) && fresh.length) {
+      const rows = new Map(E.model.rows.map((r) => [r.id, r]));
+      askWhyCancelled(ed.dayRuns(fresh.map((o) => ({ row: rows.get(o.row_id), day: o.day })).filter((x) => x.row)));
+    }
+  }
+
+  /**
+   * Who cancelled it, and why — asked at the moment the day turns red.
+   *
+   * The cancellation log used to be filled in afterwards, from a list, by
+   * whoever remembered; by then "BART pulled the possession on Tuesday night" is
+   * a guess. So painting a day in the cancellation colour asks, there and then,
+   * and writes the same note the log's own dialog writes — keyed the way the log
+   * will key the event (`cancellationKey()`), so it is waiting there when the
+   * look-ahead is published. "Not now" is always an answer: the log still lists
+   * the event, unexplained, for later.
+   */
+  function askWhyCancelled(runs) {
+    if (!runs.length) return;
+    const party = selectInput({ value: 'BART', options: ['BART', 'Hitachi', 'Other'] });
+    const reason = el('textarea', { class: 'cx-input', rows: 3, placeholder: 'What happened — e.g. possession withdrawn by BART' });
+    const list = el('ul', { class: 'lae-cancel-runs' }, runs.map((r) => el('li', {
+      text: `${r.row.description || 'Activity'}${r.row.location ? ` at ${r.row.location}` : ''} — `
+        + `${r.start === r.end ? fmt(r.start) : `${fmt(r.start)} – ${fmt(r.end)}`}`,
+    })));
+    openModal({
+      title: runs.length === 1 ? 'Why was this cancelled?' : `Why were these ${runs.length} cancelled?`,
+      subtitle: 'Recorded in the cancellation log, attributed and dated',
+      body: el('div', { class: 'lae-form lae-cancel-form' }, [
+        list,
+        el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Responsible party' }), party]),
+        el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Reason' }), reason]),
+      ]),
+      actions: [
+        { label: 'Not now' },
+        {
+          label: 'Record', kind: 'primary', autofocus: true, onClick: async () => {
+            try {
+              for (const r of runs) {
+                await rc.addCancellationNote({
+                  ...ed.cancellationKey(r.row),
+                  start_date: r.start,
+                  end_date: r.end,
+                  party: party.value,
+                  reason: reason.value.trim() || null,
+                });
+              }
+              toast({ tone: 'good', message: `Recorded in the cancellation log — ${party.value}.` });
+            } catch (err) {
+              toast({ tone: 'bad', message: err.message, timeout: 10000 });
+              rc.reportError('lookahead:cancel-note', err);
+            }
+          },
+        },
+      ],
+    });
   }
 
   function addCode(code, direction) {

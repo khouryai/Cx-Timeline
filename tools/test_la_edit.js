@@ -137,6 +137,33 @@ console.log('\nSupport codes');
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   Names from the roster
+   ═══════════════════════════════════════════════════════════════════════ */
+
+console.log('\nNames from the roster');
+{
+  const people = [
+    { name: 'Adam Kowalski' }, { name: 'Jimmy Chen' }, { name: 'Victor Okonkwo' }, { name: 'Victor Hale' },
+    { name: 'Oleksii Bondar' }, { name: 'Retired Person', active: false },
+  ];
+  const choices = ed.nameChoices(people);
+  check('a first name one person answers to is written as the first name',
+    choices.find((c) => c.full === 'Adam Kowalski')?.insert === 'Adam');
+  check('a first name two people share is written in full, so the register can place it',
+    choices.filter((c) => /^Victor/.test(c.full)).every((c) => c.insert === c.full));
+  check('somebody retired is not offered', !choices.some((c) => c.full === 'Retired Person'));
+  check('the name being typed is what follows the last separator',
+    ed.currentToken('Adam, Ji') === 'Ji' && ed.currentToken('Adam and Vi') === 'Vi' && ed.currentToken('Ol') === 'Ol');
+  check('typing the start of a first name suggests it', ed.suggestNames('Adam, ji', choices)[0]?.insert === 'Jimmy');
+  check('so does the start of a surname', ed.suggestNames('Bon', choices)[0]?.insert === 'Oleksii');
+  check('both Victors are offered, in full', ed.suggestNames('vic', choices).map((c) => c.insert).join('|') === 'Victor Hale|Victor Okonkwo');
+  check('nobody already in the cell is offered again', !ed.suggestNames('Adam, Jimmy, a', choices).some((c) => c.insert === 'Adam'));
+  check('an empty piece suggests nothing', ed.suggestNames('Adam, ', choices).length === 0);
+  check('choosing replaces only the piece being typed', ed.acceptName('Adam, ji', 'Jimmy') === 'Adam, Jimmy'
+    && ed.acceptName('ol', 'Oleksii') === 'Oleksii');
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    Ops and undo
    ═══════════════════════════════════════════════════════════════════════ */
 
@@ -254,6 +281,28 @@ console.log('\nThe published grid');
   const rows = await cls.rowsFrom(view, { snapshotId: 's', locate: async () => null });
   check('what the rest of the calendar derives from it still derives',
     rows.some((r) => /IXL Regression Testing/.test(r.raw_label)) && rows.some((r) => /Cable pull/.test(r.raw_label)), `${rows.length} row(s)`);
+}
+
+console.log('\nCancellations, as the log will know them');
+{
+  const m = sample();
+  const days = ed.windowDays('2026-09-21', 5);
+  const view = cls.readGrid(la.applyLegend(ed.gridFromModel(m, days), LEGEND), { anchorISO: '2026-09-23' });
+  const published = await cls.rowsFrom(view, { snapshotId: 's', locate: async () => null });
+  for (const id of ['a1', 'a2']) {
+    const row = m.rows.find((r) => r.id === id);
+    const key = ed.cancellationKey(row);
+    const hit = published.find((p) => p.raw_label === key.raw_label && (p.raw_location || '') === key.raw_location);
+    check(`a note recorded in the editor is keyed as the log keys "${row.description}"`, Boolean(hit),
+      `${key.raw_label} @ ${key.raw_location}`);
+  }
+  const runs = ed.dayRuns([
+    { row: { id: 'a' }, day: '2026-09-21' }, { row: { id: 'a' }, day: '2026-09-22' },
+    { row: { id: 'a' }, day: '2026-09-24' }, { row: { id: 'b' }, day: '2026-09-22' },
+  ]);
+  check('consecutive red days on one row are one cancellation',
+    runs.map((r) => `${r.row.id}:${r.start}..${r.end}`).join(' ') === 'a:2026-09-21..2026-09-22 a:2026-09-24..2026-09-24 b:2026-09-22..2026-09-22',
+    runs.map((r) => `${r.row.id}:${r.start}..${r.end}`).join(' '));
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

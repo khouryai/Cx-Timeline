@@ -34,6 +34,7 @@ const LANES = [
   ['smoke_hosted'],
   ['smoke_calendar'],
   ['test_sql'],
+  ['test_xlsx_compat'], // skips itself where LibreOffice Calc is not installed
 ];
 
 const wanted = process.argv.slice(2);

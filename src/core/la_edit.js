@@ -324,6 +324,119 @@ export function describeCounts(counts, codes) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   Cancellations, as the log will know them
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The label and location the cancellation log will give this row's days.
+ *
+ * The log is derived from what is published (`rowsFrom()` → `rc_lookahead_rows`
+ * → `rc_cancelled_days`), and a note is matched to an event by exactly these
+ * two strings — so a note recorded at the moment somebody paints a day red has
+ * to be keyed the way the log will key the event, or it will never be found.
+ * `tools/test_la_edit.js` holds this to what `rowsFrom()` actually produces.
+ */
+export function cancellationKey(row) {
+  const meta = metaValues(row);
+  return {
+    raw_label: meta.filter(Boolean).join(' · '),
+    raw_location: row.location || '',
+  };
+}
+
+/**
+ * Runs of consecutive days per row, from a list of `{ row, day }` — "Monday to
+ * Wednesday on the IXL row" is one cancellation, as the log counts it.
+ */
+export function dayRuns(items) {
+  const byRow = new Map();
+  for (const { row, day } of items) {
+    if (!byRow.has(row.id)) byRow.set(row.id, { row, days: new Set() });
+    byRow.get(row.id).days.add(day);
+  }
+  const runs = [];
+  for (const { row, days } of byRow.values()) {
+    const sorted = [...days].sort();
+    let start = sorted[0];
+    let prev = sorted[0];
+    for (const d of sorted.slice(1)) {
+      if (d === addDaysISO(prev, 1)) { prev = d; continue; }
+      runs.push({ row, start, end: prev });
+      start = d;
+      prev = d;
+    }
+    if (start) runs.push({ row, start, end: prev });
+  }
+  return runs;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Names from the roster
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const foldWord = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * What to write for each person on the roster.
+ *
+ * The sheet is written in first names — "Adam, Jimmy" — and the calendar's
+ * name register matches a first name only when exactly one person answers to
+ * it. So a suggestion writes the first name where that is unambiguous and the
+ * full name where two people share it: what is written is always something the
+ * register will place, which is the point of suggesting it.
+ */
+export function nameChoices(people) {
+  const live = (people || []).filter((p) => p && p.name && p.active !== false);
+  const firsts = new Map();
+  for (const p of live) {
+    const first = foldWord(p.name).split(' ')[0];
+    firsts.set(first, (firsts.get(first) || 0) + 1);
+  }
+  return live
+    .map((p) => {
+      const first = String(p.name).trim().split(/\s+/)[0];
+      const unique = firsts.get(foldWord(first)) === 1;
+      return { insert: unique ? first : String(p.name).trim(), full: String(p.name).trim() };
+    })
+    .sort((a, b) => a.insert.localeCompare(b.insert));
+}
+
+/** The name being typed: whatever follows the last separator. */
+export function currentToken(text) {
+  const pieces = String(text ?? '').split(/,|\/|&|\+|\n|\band\b/i);
+  return pieces[pieces.length - 1].replace(/^\s+/, '');
+}
+
+/**
+ * Roster names that fit what is being typed, best first — a first name or a
+ * surname starting with it — leaving out anybody already in the cell.
+ */
+export function suggestNames(text, choices, limit = 6) {
+  const token = foldWord(currentToken(text));
+  if (!token) return [];
+  const already = new Set(String(text ?? '').split(/[,/&+\n]|\band\b/i).map(foldWord).filter(Boolean));
+  const scored = [];
+  for (const c of choices || []) {
+    if (already.has(foldWord(c.insert)) || already.has(foldWord(c.full))) continue;
+    const words = foldWord(c.full).split(' ');
+    let score = -1;
+    if (foldWord(c.insert).startsWith(token)) score = 0;
+    else if (words.some((w) => w.startsWith(token))) score = 1;
+    else if (foldWord(c.full).includes(token)) score = 2;
+    if (score >= 0) scored.push({ ...c, score });
+  }
+  return scored.sort((a, b) => a.score - b.score || a.insert.localeCompare(b.insert)).slice(0, limit);
+}
+
+/** The cell's text with the name being typed replaced by a chosen one. */
+export function acceptName(text, insert) {
+  const t = String(text ?? '');
+  const token = currentToken(t);
+  const head = t.slice(0, t.length - token.length);
+  return `${head}${head && !/[\s]$/.test(head) ? ' ' : ''}${insert}`;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    The model and its ops
    ═══════════════════════════════════════════════════════════════════════ */
 

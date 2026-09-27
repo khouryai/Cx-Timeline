@@ -1495,3 +1495,27 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   .lae-swatch, .lae-code { min-height: 36px; min-width: 36px; }
   .lae-grid th, .lae-grid td { height: 32px; }
 }
+
+/* Names from the roster, offered under a names cell while typing. */
+.lae-edit-hint.lae-names { flex-direction: column; min-width: 160px; padding: 4px; gap: 2px; }
+.lae-edit-hint[hidden] { display: none; }
+.lae-name {
+  text-align: left;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-main);
+  font: inherit;
+  font-size: var(--fs-tiny);
+  cursor: pointer;
+}
+.lae-name:hover,
+.lae-name.lae-name-on { background: var(--info-light); }
+.lae-cancel-form { grid-template-columns: 1fr; }
+.lae-cancel-runs {
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--fs-small);
+  color: var(--text-main);
+}

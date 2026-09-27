@@ -137,6 +137,31 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   check('an activity\'s columns edit in place',
     (await server()).rows.find((r) => r.description === 'ATS Site Test')?.location === 'W40');
 
+  /* ── Names from the roster ────────────────────────────────────────── */
+  const namesCell = rowLoc('Resource').locator(`td[data-c="${col(day(1))}"]`);
+  await namesCell.click();
+  await page.keyboard.type('pri');
+  await page.waitForTimeout(150);
+  const offered = await page.locator('#rc-frame .lae-names .lae-name').allInnerTexts();
+  check('typing into a names row offers the roster', offered.includes('Priya'), offered.join(', '));
+  await page.keyboard.press('Enter');
+  check('Enter takes the name offered, and keeps the cell open for the next',
+    (await page.locator('#rc-frame .lae-editor').inputValue()) === 'Priya'
+      && (await page.locator('#rc-frame .lae-editor').count()) === 1);
+  await page.keyboard.type(', ro');
+  await page.waitForTimeout(100);
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Enter');
+  await saved();
+  const namesSaved = await page.evaluate(({ iso }) => {
+    const rows = window.__rc.rows.rc_la_rows;
+    const res = rows.find((r) => r.kind === 'resource');
+    return window.__rc.rows.rc_la_cells.find((c) => c.row_id === res.id && c.day === iso)?.text;
+  }, { iso: day(1) });
+  check('and a second name goes after a comma, as the sheet writes them', namesSaved === 'Priya, Rosa', namesSaved);
+
   /* ── Painting and support ─────────────────────────────────────────── */
   const yellow = page.locator('#rc-frame .lae-swatch[aria-label="Paint Day Shift"]');
   await cell('IXL Regression Testing', day(0)).click();
@@ -167,6 +192,25 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await saved();
   check('Alt and a number paints with that legend colour',
     ((await serverCell('IXL Regression Testing', day(3)))?.color || '') !== '', JSON.stringify(await serverCell('IXL Regression Testing', day(3))));
+
+  /* Painting a day in the cancellation colour asks who and why, there and then. */
+  const cancelled = (await serverCell('IXL Regression Testing', day(3)))?.color === 'FF0000';
+  check('the third colour here is the cancellation colour', cancelled);
+  await page.waitForSelector('.cx-modal', { timeout: 3000 }).catch(() => {});
+  const why = page.locator('.cx-modal', { hasText: 'Why was this cancelled?' });
+  check('painting a day red asks why, at the moment it happens', (await why.count()) === 1);
+  await why.locator('select').selectOption('Hitachi');
+  await why.locator('textarea').fill('Crew reallocated to Y10');
+  const notesBefore = await page.evaluate(() => (window.__rc.rows.rc_cancellation_notes || []).length);
+  await why.locator('.cx-modal-foot button', { hasText: 'Record' }).click();
+  await page.waitForTimeout(400);
+  const note = await page.evaluate(() => (window.__rc.rows.rc_cancellation_notes || []).slice(-1)[0]);
+  check('and records it in the cancellation log, keyed as the log keys the event',
+    (await page.evaluate(() => (window.__rc.rows.rc_cancellation_notes || []).length)) === notesBefore + 1
+      && note?.party === 'Hitachi' && note?.reason === 'Crew reallocated to Y10'
+      && /IXL Regression Testing/.test(note?.raw_label) && note?.start_date === day(3) && note?.end_date === day(3),
+    JSON.stringify(note));
+  await grid().focus();
   await page.keyboard.press('Alt+0');
   await saved();
   check('and Alt+0 takes the colour off, keeping the codes',

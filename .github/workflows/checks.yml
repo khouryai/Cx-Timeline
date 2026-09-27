@@ -118,6 +118,21 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y postgresql
       - run: node tools/test_sql.js
 
+  # The Excel export, opened and re-saved by a spreadsheet program that did not
+  # write it. Microsoft Excel does not run on these runners; LibreOffice Calc is
+  # the nearest independent reader that does.
+  xlsx:
+    name: The Excel export opens in a spreadsheet program
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install LibreOffice Calc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-calc
+      - run: node tools/test_xlsx_compat.js
+
   rust:
     name: Plan and lock rules
     runs-on: ubuntu-latest

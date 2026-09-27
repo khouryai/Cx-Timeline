@@ -29,7 +29,7 @@ import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
 import * as ed from '../core/la_edit.js';
-import { readGrid } from '../core/lookahead.js';
+import { readGrid, isCancelMeaning } from '../core/lookahead.js';
 import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
 import { lookaheadWorkbook, lookaheadFileName } from '../io/la_xlsx.js';
 import { saveFile } from '../io/exporters.js';
@@ -103,10 +103,11 @@ export async function renderEditor(host) {
     return;
   }
 
-  const [settings, legend, codes] = await Promise.all([
+  const [settings, legend, codes, people] = await Promise.all([
     rc.listSettings().catch(() => []),
     rc.listLegend().catch(() => []),
     rc.listSupportCodes({ includeRetired: true }).catch(() => []),
+    rc.listPeople().catch(() => []),
   ]);
   E.legendAll = legend.map((r) => ({ argb: String(r.argb).toUpperCase(), meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
   const inForce = new Map();
@@ -116,6 +117,7 @@ export async function renderEditor(host) {
   }
   E.legend = [...inForce.values()].filter((r) => r.role === 'shift' && r.meaning);
   E.codes = codes;
+  E.names = ed.nameChoices(people);
   E.title = settings.find((r) => r.key === 'lookahead_title')?.value || '';
   if (!E.start) E.start = ed.mondayOf(todayISO());
   E.weeks = ed.WINDOW_WEEKS.includes(la.editorWeeks) ? la.editorWeeks : 4;
@@ -1041,12 +1043,68 @@ function startEdit(initial) {
     scroller.appendChild(hint);
   }
 
+  /* Names from the roster, while typing into a row of names. The sheet is
+     written in first names, and what is suggested is what the name register
+     will place — a first name where only one person has it, the full name
+     where two do — so a name typed here is never one somebody has to correct
+     on the week plan later. */
+  let names = null;
+  let pick = -1;
+  let found = [];
+  if ((row.kind === 'resource' || row.kind === 'absence') && c >= META && E.names?.length) {
+    names = el('div', {
+      class: 'lae-edit-hint lae-names', role: 'listbox', 'aria-label': 'People on the roster',
+      style: `left:${box.left - host.left + scroller.scrollLeft}px;top:${box.bottom - host.top + scroller.scrollTop + 2}px`,
+    });
+    scroller.appendChild(names);
+    hint = names;
+    const drawNames = () => {
+      found = ed.suggestNames(input.value, E.names);
+      pick = found.length ? Math.min(Math.max(pick, 0), found.length - 1) : -1;
+      clear(names);
+      names.hidden = !found.length;
+      found.forEach((n, i) => names.appendChild(el('button', {
+        class: `lae-name${i === pick ? ' lae-name-on' : ''}`, type: 'button', role: 'option',
+        'aria-selected': String(i === pick), text: n.insert, title: n.full,
+        onMouseDown: (ev) => { ev.preventDefault(); take(i); },
+      })));
+    };
+    const take = (i) => {
+      input.value = ed.acceptName(input.value, found[i].insert);
+      pick = -1;
+      drawNames();
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    };
+    input.addEventListener('input', () => { pick = 0; drawNames(); });
+    names.take = take;
+    drawNames();
+  }
+
   E.editing = { input, hint, r, c, row };
   input.focus();
   if (initial == null) input.select();
   else input.setSelectionRange(input.value.length, input.value.length);
 
   input.addEventListener('keydown', (e) => {
+    // With a name on offer, the arrows choose and Enter or Tab takes it;
+    // with none, they do what they always do.
+    if (names && found.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      pick = (pick + (e.key === 'ArrowDown' ? 1 : -1) + found.length) % found.length;
+      for (const [i, b] of [...names.children].entries()) {
+        b.classList.toggle('lae-name-on', i === pick);
+        b.setAttribute('aria-selected', String(i === pick));
+      }
+      e.stopPropagation();
+      return;
+    }
+    if (names && found.length && pick >= 0 && (e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) {
+      e.preventDefault();
+      names.take(pick);
+      e.stopPropagation();
+      return;
+    }
     if (e.key === 'Enter') { e.preventDefault(); commitEdit(); select(Math.min(r + (e.shiftKey ? -1 : 1), E.view.rows.length - 1), c); focusGrid(); }
     else if (e.key === 'Tab') { e.preventDefault(); commitEdit(); select(r, Math.min(Math.max(0, c + (e.shiftKey ? -1 : 1)), E.view.cols - 1)); focusGrid(); }
     else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); focusGrid(); }
@@ -1158,7 +1216,66 @@ function paint(color) {
     toast({ message: skipped ? 'Only an activity\'s days take a colour — names and PTO rows stay plain.' : 'Select the days to paint first.' });
     return;
   }
+  // Only the days that were not already this colour are newly cancelled.
+  const fresh = ops.filter((o) => (ed.getCell(E.model, o.row_id, o.day)?.color || null) !== color);
   commit(ops);
+  const meaning = color ? E.legendAll.find((e) => e.argb === color)?.meaning : null;
+  if (meaning && isCancelMeaning(meaning) && fresh.length) {
+    const rows = new Map(E.model.rows.map((r) => [r.id, r]));
+    askWhyCancelled(ed.dayRuns(fresh.map((o) => ({ row: rows.get(o.row_id), day: o.day })).filter((x) => x.row)));
+  }
+}
+
+/**
+ * Who cancelled it, and why — asked at the moment the day turns red.
+ *
+ * The cancellation log used to be filled in afterwards, from a list, by
+ * whoever remembered; by then "BART pulled the possession on Tuesday night" is
+ * a guess. So painting a day in the cancellation colour asks, there and then,
+ * and writes the same note the log's own dialog writes — keyed the way the log
+ * will key the event (`cancellationKey()`), so it is waiting there when the
+ * look-ahead is published. "Not now" is always an answer: the log still lists
+ * the event, unexplained, for later.
+ */
+function askWhyCancelled(runs) {
+  if (!runs.length) return;
+  const party = selectInput({ value: 'BART', options: ['BART', 'Hitachi', 'Other'] });
+  const reason = el('textarea', { class: 'cx-input', rows: 3, placeholder: 'What happened — e.g. possession withdrawn by BART' });
+  const list = el('ul', { class: 'lae-cancel-runs' }, runs.map((r) => el('li', {
+    text: `${r.row.description || 'Activity'}${r.row.location ? ` at ${r.row.location}` : ''} — `
+      + `${r.start === r.end ? fmt(r.start) : `${fmt(r.start)} – ${fmt(r.end)}`}`,
+  })));
+  openModal({
+    title: runs.length === 1 ? 'Why was this cancelled?' : `Why were these ${runs.length} cancelled?`,
+    subtitle: 'Recorded in the cancellation log, attributed and dated',
+    body: el('div', { class: 'lae-form lae-cancel-form' }, [
+      list,
+      el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Responsible party' }), party]),
+      el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Reason' }), reason]),
+    ]),
+    actions: [
+      { label: 'Not now' },
+      {
+        label: 'Record', kind: 'primary', autofocus: true, onClick: async () => {
+          try {
+            for (const r of runs) {
+              await rc.addCancellationNote({
+                ...ed.cancellationKey(r.row),
+                start_date: r.start,
+                end_date: r.end,
+                party: party.value,
+                reason: reason.value.trim() || null,
+              });
+            }
+            toast({ tone: 'good', message: `Recorded in the cancellation log — ${party.value}.` });
+          } catch (err) {
+            toast({ tone: 'bad', message: err.message, timeout: 10000 });
+            rc.reportError('lookahead:cancel-note', err);
+          }
+        },
+      },
+    ],
+  });
 }
 
 function addCode(code, direction) {
