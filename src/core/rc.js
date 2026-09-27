@@ -504,6 +504,15 @@ export async function lookaheadRevision() {
   return Number(data) || 0;
 }
 
+/**
+ * The edit log, newest first: the last `limit` changes, or every change from
+ * `sinceId` on. An administrator's read — the log is the evidence base.
+ */
+export function listLaEdits({ sinceId = null, limit = 2000 } = {}) {
+  if (sinceId != null) return selectAll('rc_la_edits', (q) => q.gte('id', sinceId).order('id', { ascending: false }));
+  return select('rc_la_edits', (q) => q.order('id', { ascending: false }).limit(limit));
+}
+
 export function listSupportCodes({ includeRetired = false } = {}) {
   return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
 }

@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 20   Built: 2026-09-27T21:53:16.954Z
+ * Modules: 20   Built: 2026-09-27T21:56:29.660Z
  */
 (function () {
   'use strict';
@@ -4718,6 +4718,90 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
+     Going back to an earlier moment
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The ops that put the look-ahead back the way it was before `edits`.
+   *
+   * `edits` are rows of `rc_la_edits` — everything recorded from some moment on,
+   * in any order. For each row and each day they touched, the *earliest* of them
+   * says what was there before: its `before`, or nothing at all if it was an
+   * insert. The result is ordinary ops, so a restore is itself an edit — saved,
+   * recorded in the log, and undone with one Ctrl+Z like anything else — rather
+   * than a rewrite of history, which the log does not allow anyway.
+   *
+   * Ordered so every op is legal when it runs: rows that come back (parents
+   * before their names rows), then cells, then rows that go (names rows first,
+   * with their cells cleared ahead of them). Nothing that is already as it was is
+   * touched.
+   */
+  function restoreOps(model, edits) {
+    const first = new Map();
+    for (const e of [...(edits || [])].sort((a, b) => Number(a.id) - Number(b.id))) {
+      const key = e.target === 'cell' ? `cell:${e.row_id}|${String(e.day).slice(0, 10)}` : `row:${e.row_id}`;
+      if (!first.has(key)) first.set(key, e);
+    }
+    const rowsNow = new Map(model.rows.map((r) => [r.id, r]));
+    const restoreRows = [];
+    const removeRows = [];
+    const cells = [];
+    const willExist = new Set(model.rows.map((r) => r.id));
+
+    for (const [key, e] of first) {
+      if (!key.startsWith('row:')) continue;
+      const was = e.action === 'insert' ? null : e.before;
+      const now = rowsNow.get(e.row_id) || null;
+      if (!was) {
+        if (now) { removeRows.push(now); willExist.delete(now.id); }
+        continue;
+      }
+      willExist.add(e.row_id);
+      const set = pick(was, ROW_FIELDS);
+      if (set.sort != null) set.sort = Number(set.sort);
+      if (set.level != null) set.level = Number(set.level);
+      if (now) {
+        const changed = Object.keys(set).filter((k) => String(now[k] ?? '') !== String(set[k] ?? ''));
+        if (changed.length) restoreRows.push({ op: 'row', id: e.row_id, set: Object.fromEntries(changed.map((k) => [k, set[k]])) });
+      } else {
+        restoreRows.push({ op: 'row', id: e.row_id, set });
+      }
+    }
+
+    for (const [key, e] of first) {
+      if (!key.startsWith('cell:')) continue;
+      if (!willExist.has(e.row_id)) continue; // goes with its row
+      const day = String(e.day).slice(0, 10);
+      const was = e.action === 'insert' ? null : e.before;
+      const color = was?.color ? String(was.color).toUpperCase() : null;
+      const text = was?.text || '';
+      const now = getCell(model, e.row_id, day);
+      if ((now?.color || null) === color && (now?.text || '') === text) continue;
+      cells.push({ op: 'cell', row_id: e.row_id, day, color, text });
+    }
+
+    const creates = restoreRows.sort((a, b) => ((a.set.kind === 'resource') - (b.set.kind === 'resource')));
+    const removals = deleteOps(model, removeRows.map((r) => r.id));
+    return [...creates, ...cells, ...removals];
+  }
+
+  /**
+   * Restore points: the log grouped into the saves that made it, newest first —
+   * "Tuesday 16:02, Dana, 12 changes" — which is how anybody remembers an edit.
+   */
+  function restorePoints(edits) {
+    const batches = new Map();
+    for (const e of edits || []) {
+      const b = batches.get(e.batch) || { batch: e.batch, firstId: Number(e.id), at: e.at, by: e.by, count: 0, rows: new Set() };
+      b.count++;
+      b.rows.add(e.row_id);
+      if (Number(e.id) < b.firstId) { b.firstId = Number(e.id); b.at = e.at; }
+      batches.set(e.batch, b);
+    }
+    return [...batches.values()].sort((a, b) => b.firstId - a.firstId).map((b) => ({ ...b, rows: b.rows.size }));
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
      Selections: fill and clipboard
      ═══════════════════════════════════════════════════════════════════════ */
 
@@ -5074,6 +5158,8 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   Object.defineProperty(__x, "stamp", { get: () => stamp, enumerable: true });
   Object.defineProperty(__x, "acknowledge", { get: () => acknowledge, enumerable: true });
   Object.defineProperty(__x, "deleteOps", { get: () => deleteOps, enumerable: true });
+  Object.defineProperty(__x, "restoreOps", { get: () => restoreOps, enumerable: true });
+  Object.defineProperty(__x, "restorePoints", { get: () => restorePoints, enumerable: true });
   Object.defineProperty(__x, "tile", { get: () => tile, enumerable: true });
   Object.defineProperty(__x, "toTSV", { get: () => toTSV, enumerable: true });
   Object.defineProperty(__x, "fromTSV", { get: () => fromTSV, enumerable: true });
@@ -7997,6 +8083,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       { label: 'Sheet title…', icon: 'type', onClick: () => titleDialog() },
       { label: 'Keyboard and mouse…', icon: 'help', onClick: () => helpDialog() },
       'sep',
+      { label: 'Take me back to an earlier moment…', icon: 'history', onClick: () => restoreDialog() },
       { label: 'Reload from the server', icon: 'refresh', onClick: async () => { await drain(); await reload(); } },
       { label: 'Go back to reading the workbook…', icon: 'unlink', danger: true, onClick: () => revertDialog() },
     ]);
@@ -8152,6 +8239,90 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     la.source = 'workbook';
     la.section = 'calendar';
     notifyChanged('lookahead');
+  }
+
+  /* ── Going back ─────────────────────────────────────────────────────────── */
+
+  /**
+   * "Put it back the way it was at 9:00 on Monday."
+   *
+   * The edit log already holds every change with what was there before it, so
+   * any moment it covers can be returned to: pick the save to go back to before,
+   * see how much that undoes, and the editor writes the difference as ordinary
+   * edits (`restoreOps()`). Nothing is erased — the log keeps the changes being
+   * reversed and the reversal itself — and one Ctrl+Z takes the restore back.
+   */
+  async function restoreDialog() {
+    await drain();
+    let edits;
+    let people;
+    try {
+      [edits, people] = await Promise.all([rc.listLaEdits({ limit: 3000 }), rc.listPeople({ includeInactive: true }).catch(() => [])]);
+    } catch (err) {
+      toast({ tone: 'bad', message: err.message });
+      return;
+    }
+    const who = new Map(people.filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
+    const points = ed.restorePoints(edits).slice(0, 60);
+    if (!points.length) {
+      toast({ message: 'Nothing has been changed here yet, so there is nowhere to go back to.' });
+      return;
+    }
+    const when = (iso) => new Date(iso).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    let chosen = points[0];
+    const summary = el('div', { class: 'rc-hint' });
+    const listEl = el('div', { class: 'lae-restore-list', role: 'listbox', 'aria-label': 'Saves' });
+    const drawList = () => {
+      clear(listEl);
+      for (const p of points) {
+        listEl.appendChild(el('button', {
+          class: `lae-restore-point${p === chosen ? ' on' : ''}`, type: 'button', role: 'option',
+          'aria-selected': String(p === chosen),
+          onClick: () => { chosen = p; drawList(); },
+        }, [
+          el('span', { class: 'lae-restore-when', text: when(p.at) }),
+          el('span', { text: who.get(p.by) || 'Somebody' }),
+          el('span', { class: 'rc-hint', text: `${p.count} change${p.count === 1 ? '' : 's'} on ${p.rows} row${p.rows === 1 ? '' : 's'}` }),
+        ]));
+      }
+      const since = points.filter((p) => p.firstId >= chosen.firstId);
+      const n = since.reduce((t, p) => t + p.count, 0);
+      summary.textContent = `Goes back to just before ${when(chosen.at)}: reverses ${n} change${n === 1 ? '' : 's'} in `
+        + `${since.length} save${since.length === 1 ? '' : 's'}. Nothing is erased — the reversal is itself a change you can undo.`;
+    };
+    drawList();
+    openModal({
+      title: 'Take me back to an earlier moment',
+      subtitle: 'Choose the save to go back to before',
+      body: el('div', { class: 'lae-form lae-restore' }, [listEl, summary]),
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Go back', kind: 'primary', onClick: async () => {
+            try {
+              const later = edits.filter((e) => Number(e.id) >= chosen.firstId);
+              const days = later.filter((e) => e.day).map((e) => String(e.day).slice(0, 10)).sort();
+              if (days.length) await ensureWindow([days[0], days[days.length - 1]]);
+              const ops = ed.restoreOps(E.model, later);
+              if (!ops.length) {
+                toast({ message: 'The look-ahead is already as it was then.' });
+                return;
+              }
+              commit(ops);
+              toast({
+                tone: 'good',
+                message: `Back to how it was before ${when(chosen.at)} — ${ops.length} change${ops.length === 1 ? '' : 's'} made.`,
+                action: { label: 'Undo', onClick: () => undo() },
+                timeout: 8000,
+              });
+            } catch (err) {
+              toast({ tone: 'bad', message: err.message, timeout: 10000 });
+              rc.reportError('lookahead:restore', err);
+            }
+          },
+        },
+      ],
+    });
   }
 
   /* ── Export ────────────────────────────────────────────────────────────── */

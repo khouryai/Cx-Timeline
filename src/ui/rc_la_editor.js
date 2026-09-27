@@ -1760,6 +1760,7 @@ function moreMenu(e) {
     { label: 'Sheet title…', icon: 'type', onClick: () => titleDialog() },
     { label: 'Keyboard and mouse…', icon: 'help', onClick: () => helpDialog() },
     'sep',
+    { label: 'Take me back to an earlier moment…', icon: 'history', onClick: () => restoreDialog() },
     { label: 'Reload from the server', icon: 'refresh', onClick: async () => { await drain(); await reload(); } },
     { label: 'Go back to reading the workbook…', icon: 'unlink', danger: true, onClick: () => revertDialog() },
   ]);
@@ -1915,6 +1916,90 @@ async function revertDialog() {
   la.source = 'workbook';
   la.section = 'calendar';
   notifyChanged('lookahead');
+}
+
+/* ── Going back ─────────────────────────────────────────────────────────── */
+
+/**
+ * "Put it back the way it was at 9:00 on Monday."
+ *
+ * The edit log already holds every change with what was there before it, so
+ * any moment it covers can be returned to: pick the save to go back to before,
+ * see how much that undoes, and the editor writes the difference as ordinary
+ * edits (`restoreOps()`). Nothing is erased — the log keeps the changes being
+ * reversed and the reversal itself — and one Ctrl+Z takes the restore back.
+ */
+async function restoreDialog() {
+  await drain();
+  let edits;
+  let people;
+  try {
+    [edits, people] = await Promise.all([rc.listLaEdits({ limit: 3000 }), rc.listPeople({ includeInactive: true }).catch(() => [])]);
+  } catch (err) {
+    toast({ tone: 'bad', message: err.message });
+    return;
+  }
+  const who = new Map(people.filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
+  const points = ed.restorePoints(edits).slice(0, 60);
+  if (!points.length) {
+    toast({ message: 'Nothing has been changed here yet, so there is nowhere to go back to.' });
+    return;
+  }
+  const when = (iso) => new Date(iso).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  let chosen = points[0];
+  const summary = el('div', { class: 'rc-hint' });
+  const listEl = el('div', { class: 'lae-restore-list', role: 'listbox', 'aria-label': 'Saves' });
+  const drawList = () => {
+    clear(listEl);
+    for (const p of points) {
+      listEl.appendChild(el('button', {
+        class: `lae-restore-point${p === chosen ? ' on' : ''}`, type: 'button', role: 'option',
+        'aria-selected': String(p === chosen),
+        onClick: () => { chosen = p; drawList(); },
+      }, [
+        el('span', { class: 'lae-restore-when', text: when(p.at) }),
+        el('span', { text: who.get(p.by) || 'Somebody' }),
+        el('span', { class: 'rc-hint', text: `${p.count} change${p.count === 1 ? '' : 's'} on ${p.rows} row${p.rows === 1 ? '' : 's'}` }),
+      ]));
+    }
+    const since = points.filter((p) => p.firstId >= chosen.firstId);
+    const n = since.reduce((t, p) => t + p.count, 0);
+    summary.textContent = `Goes back to just before ${when(chosen.at)}: reverses ${n} change${n === 1 ? '' : 's'} in `
+      + `${since.length} save${since.length === 1 ? '' : 's'}. Nothing is erased — the reversal is itself a change you can undo.`;
+  };
+  drawList();
+  openModal({
+    title: 'Take me back to an earlier moment',
+    subtitle: 'Choose the save to go back to before',
+    body: el('div', { class: 'lae-form lae-restore' }, [listEl, summary]),
+    actions: [
+      { label: 'Cancel' },
+      {
+        label: 'Go back', kind: 'primary', onClick: async () => {
+          try {
+            const later = edits.filter((e) => Number(e.id) >= chosen.firstId);
+            const days = later.filter((e) => e.day).map((e) => String(e.day).slice(0, 10)).sort();
+            if (days.length) await ensureWindow([days[0], days[days.length - 1]]);
+            const ops = ed.restoreOps(E.model, later);
+            if (!ops.length) {
+              toast({ message: 'The look-ahead is already as it was then.' });
+              return;
+            }
+            commit(ops);
+            toast({
+              tone: 'good',
+              message: `Back to how it was before ${when(chosen.at)} — ${ops.length} change${ops.length === 1 ? '' : 's'} made.`,
+              action: { label: 'Undo', onClick: () => undo() },
+              timeout: 8000,
+            });
+          } catch (err) {
+            toast({ tone: 'bad', message: err.message, timeout: 10000 });
+            rc.reportError('lookahead:restore', err);
+          }
+        },
+      },
+    ],
+  });
 }
 
 /* ── Export ────────────────────────────────────────────────────────────── */

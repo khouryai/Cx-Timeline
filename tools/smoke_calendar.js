@@ -411,6 +411,7 @@ function fakeSdk() {
     ],
     rc_la_rows: [],
     rc_la_cells: [],
+    rc_la_edits: [],
     rc_settings: [
       { key: 'lookahead_sheet', value: '4WLA' },
       // The version this build expects, so the banner below is the exception.
@@ -780,10 +781,22 @@ function fakeSdk() {
             const rows = S.rows.rc_la_rows || (S.rows.rc_la_rows = []);
             let cells = S.rows.rc_la_cells || (S.rows.rc_la_cells = []);
             const results = [];
+            const logLength = (S.rows.rc_la_edits || (S.rows.rc_la_edits = [])).length;
             const fail = (message) => {
               S.rows.rc_la_rows = JSON.parse(before.rows);
               S.rows.rc_la_cells = JSON.parse(before.cells);
+              S.rows.rc_la_edits.length = logLength;
               return Promise.resolve({ data: null, error: { message } });
+            };
+            // The edit log, as the function writes it: one row per change.
+            const batch = `batch-${Date.now()}-${Math.random()}`;
+            const log = (target, row_id, day, action, was, now) => {
+              S.editSeq = (S.editSeq || 0) + 1;
+              S.rows.rc_la_edits.push({
+                id: S.editSeq, at: new Date().toISOString(), by: 'user-rc-1', batch, target, row_id,
+                day: day || null, action, before: was ? JSON.parse(JSON.stringify(was)) : null,
+                after: now ? JSON.parse(JSON.stringify(now)) : null,
+              });
             };
             for (const op of args.p_ops || []) {
               const expect = op.expect || 0;
@@ -791,22 +804,28 @@ function fakeSdk() {
                 const hit = rows.find((r) => r.id === op.id);
                 if (!hit) {
                   if (expect) return fail('conflict: that row was removed by somebody else');
-                  rows.push({
+                  const made = {
                     id: op.id, kind: 'activity', parent_id: null, sort: 0, level: 0, activity_id: '', description: '',
                     location: '', sswp: '', party: '', work_hours: '', absence_kind: null, archived: false,
                     ...op.set, version: 1,
-                  });
+                  };
+                  rows.push(made);
+                  log('row', op.id, null, 'insert', null, made);
                   results.push({ kind: 'row', id: op.id, version: 1 });
                 } else {
                   if ((hit.version || 0) !== expect) return fail('conflict: somebody else changed that row a moment ago');
+                  const was = { ...hit };
                   Object.assign(hit, op.set);
                   hit.version = (hit.version || 0) + 1;
+                  log('row', op.id, null, 'update', was, hit);
                   results.push({ kind: 'row', id: op.id, version: hit.version });
                 }
               } else if (op.op === 'delete_row') {
                 const at = rows.findIndex((r) => r.id === op.id);
                 if (at >= 0) {
                   if ((rows[at].version || 0) !== expect) return fail('conflict: somebody else changed that row a moment ago');
+                  for (const c of cells.filter((x) => x.row_id === op.id)) log('cell', op.id, c.day, 'delete', c, null);
+                  log('row', op.id, null, 'delete', rows[at], null);
                   rows.splice(at, 1);
                   for (let i = rows.length - 1; i >= 0; i--) if (rows[i].parent_id === op.id) rows.splice(i, 1);
                   cells = cells.filter((c) => c.row_id !== op.id && rows.some((r) => r.id === c.row_id));
@@ -820,13 +839,17 @@ function fakeSdk() {
                 const color = op.color ? String(op.color).toUpperCase() : null;
                 const text = op.text || '';
                 if (!color && !text) {
-                  if (at >= 0) cells.splice(at, 1);
+                  if (at >= 0) { log('cell', op.row_id, op.day, 'delete', cells[at], null); cells.splice(at, 1); }
                   results.push({ kind: 'cell', row_id: op.row_id, day: op.day, version: 0 });
                 } else if (at >= 0) {
+                  const was = { ...cells[at] };
                   Object.assign(cells[at], { color, text, version: current + 1 });
+                  log('cell', op.row_id, op.day, 'update', was, cells[at]);
                   results.push({ kind: 'cell', row_id: op.row_id, day: op.day, version: current + 1 });
                 } else {
-                  cells.push({ row_id: op.row_id, day: op.day, color, text, version: 1 });
+                  const made = { row_id: op.row_id, day: op.day, color, text, version: 1 };
+                  cells.push(made);
+                  log('cell', op.row_id, op.day, 'insert', null, made);
                   results.push({ kind: 'cell', row_id: op.row_id, day: op.day, version: 1 });
                 }
               }

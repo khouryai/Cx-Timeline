@@ -408,6 +408,36 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   check('and its columns can be edited there too',
     (await server()).rows.find((r) => r.description === 'IXL Regression Testing')?.party === 'STS');
 
+  /* ── Take me back ─────────────────────────────────────────────────── */
+  await cell('ATS Site Test', day(20)).click();
+  await page.keyboard.type('X.TCE');
+  await page.keyboard.press('Enter');
+  await saved();
+  await cell('ATS Site Test', day(20)).click();
+  await page.keyboard.type('WIT');
+  await page.keyboard.press('Enter');
+  await saved();
+  check('two saves to go back through', (await serverCell('ATS Site Test', day(20)))?.text === 'WIT');
+  await page.locator('#rc-frame .lae-toolbar button[aria-label="More"]').click();
+  await page.locator('.cx-menu .cx-menu-item', { hasText: 'Take me back' }).click();
+  await page.waitForSelector('.cx-modal .lae-restore-point');
+  const points = page.locator('.cx-modal .lae-restore-point');
+  check('the saves are listed newest first, with who made them',
+    (await points.count()) >= 2 && /Alex/.test(await points.first().innerText()), await points.first().innerText());
+  await points.nth(1).click();
+  const restoreText = await page.locator('.cx-modal').innerText();
+  check('choosing one says how much going back reverses', /reverses 2 changes in 2 saves/.test(restoreText),
+    restoreText.split('\n').slice(-3).join(' | '));
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Go back' }).click();
+  await saved();
+  check('going back puts the look-ahead as it was before that save', !(await serverCell('ATS Site Test', day(20))));
+  await grid().focus();
+  await page.keyboard.press('Control+z');
+  await saved();
+  check('and going back can itself be undone', (await serverCell('ATS Site Test', day(20)))?.text === 'WIT');
+  check('the log keeps every step, the reversal included',
+    (await page.evaluate(() => window.__rc.rows.rc_la_edits.length)) > 10);
+
   /* ── Five weeks, and another window ───────────────────────────────── */
   await page.locator('#rc-frame .lae-toolbar .cx-seg button', { hasText: '5 weeks' }).click();
   await page.waitForTimeout(300);

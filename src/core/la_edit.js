@@ -561,6 +561,90 @@ export function deleteOps(model, ids) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   Going back to an earlier moment
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The ops that put the look-ahead back the way it was before `edits`.
+ *
+ * `edits` are rows of `rc_la_edits` — everything recorded from some moment on,
+ * in any order. For each row and each day they touched, the *earliest* of them
+ * says what was there before: its `before`, or nothing at all if it was an
+ * insert. The result is ordinary ops, so a restore is itself an edit — saved,
+ * recorded in the log, and undone with one Ctrl+Z like anything else — rather
+ * than a rewrite of history, which the log does not allow anyway.
+ *
+ * Ordered so every op is legal when it runs: rows that come back (parents
+ * before their names rows), then cells, then rows that go (names rows first,
+ * with their cells cleared ahead of them). Nothing that is already as it was is
+ * touched.
+ */
+export function restoreOps(model, edits) {
+  const first = new Map();
+  for (const e of [...(edits || [])].sort((a, b) => Number(a.id) - Number(b.id))) {
+    const key = e.target === 'cell' ? `cell:${e.row_id}|${String(e.day).slice(0, 10)}` : `row:${e.row_id}`;
+    if (!first.has(key)) first.set(key, e);
+  }
+  const rowsNow = new Map(model.rows.map((r) => [r.id, r]));
+  const restoreRows = [];
+  const removeRows = [];
+  const cells = [];
+  const willExist = new Set(model.rows.map((r) => r.id));
+
+  for (const [key, e] of first) {
+    if (!key.startsWith('row:')) continue;
+    const was = e.action === 'insert' ? null : e.before;
+    const now = rowsNow.get(e.row_id) || null;
+    if (!was) {
+      if (now) { removeRows.push(now); willExist.delete(now.id); }
+      continue;
+    }
+    willExist.add(e.row_id);
+    const set = pick(was, ROW_FIELDS);
+    if (set.sort != null) set.sort = Number(set.sort);
+    if (set.level != null) set.level = Number(set.level);
+    if (now) {
+      const changed = Object.keys(set).filter((k) => String(now[k] ?? '') !== String(set[k] ?? ''));
+      if (changed.length) restoreRows.push({ op: 'row', id: e.row_id, set: Object.fromEntries(changed.map((k) => [k, set[k]])) });
+    } else {
+      restoreRows.push({ op: 'row', id: e.row_id, set });
+    }
+  }
+
+  for (const [key, e] of first) {
+    if (!key.startsWith('cell:')) continue;
+    if (!willExist.has(e.row_id)) continue; // goes with its row
+    const day = String(e.day).slice(0, 10);
+    const was = e.action === 'insert' ? null : e.before;
+    const color = was?.color ? String(was.color).toUpperCase() : null;
+    const text = was?.text || '';
+    const now = getCell(model, e.row_id, day);
+    if ((now?.color || null) === color && (now?.text || '') === text) continue;
+    cells.push({ op: 'cell', row_id: e.row_id, day, color, text });
+  }
+
+  const creates = restoreRows.sort((a, b) => ((a.set.kind === 'resource') - (b.set.kind === 'resource')));
+  const removals = deleteOps(model, removeRows.map((r) => r.id));
+  return [...creates, ...cells, ...removals];
+}
+
+/**
+ * Restore points: the log grouped into the saves that made it, newest first —
+ * "Tuesday 16:02, Dana, 12 changes" — which is how anybody remembers an edit.
+ */
+export function restorePoints(edits) {
+  const batches = new Map();
+  for (const e of edits || []) {
+    const b = batches.get(e.batch) || { batch: e.batch, firstId: Number(e.id), at: e.at, by: e.by, count: 0, rows: new Set() };
+    b.count++;
+    b.rows.add(e.row_id);
+    if (Number(e.id) < b.firstId) { b.firstId = Number(e.id); b.at = e.at; }
+    batches.set(e.batch, b);
+  }
+  return [...batches.values()].sort((a, b) => b.firstId - a.firstId).map((b) => ({ ...b, rows: b.rows.size }));
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    Selections: fill and clipboard
    ═══════════════════════════════════════════════════════════════════════ */
 

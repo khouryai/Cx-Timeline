@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-27T21:53:16.880Z
+ * Modules: 59   Built: 2026-09-27T21:56:29.587Z
  */
 (function () {
   'use strict';
@@ -16290,6 +16290,15 @@ __mods["core/rc.js"] = function (__x, __req) {
     return Number(data) || 0;
   }
 
+  /**
+   * The edit log, newest first: the last `limit` changes, or every change from
+   * `sinceId` on. An administrator's read — the log is the evidence base.
+   */
+  function listLaEdits({ sinceId = null, limit = 2000 } = {}) {
+    if (sinceId != null) return selectAll('rc_la_edits', (q) => q.gte('id', sinceId).order('id', { ascending: false }));
+    return select('rc_la_edits', (q) => q.order('id', { ascending: false }).limit(limit));
+  }
+
   function listSupportCodes({ includeRetired = false } = {}) {
     return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
   }
@@ -16969,6 +16978,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listLaCells", { get: () => listLaCells, enumerable: true });
   Object.defineProperty(__x, "applyLookaheadOps", { get: () => applyLookaheadOps, enumerable: true });
   Object.defineProperty(__x, "lookaheadRevision", { get: () => lookaheadRevision, enumerable: true });
+  Object.defineProperty(__x, "listLaEdits", { get: () => listLaEdits, enumerable: true });
   Object.defineProperty(__x, "listSupportCodes", { get: () => listSupportCodes, enumerable: true });
   Object.defineProperty(__x, "addSupportCode", { get: () => addSupportCode, enumerable: true });
   Object.defineProperty(__x, "updateSupportCode", { get: () => updateSupportCode, enumerable: true });

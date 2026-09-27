@@ -1519,3 +1519,34 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   font-size: var(--fs-small);
   color: var(--text-main);
 }
+
+/* Take me back: the saves, newest first. */
+.lae-restore { grid-template-columns: 1fr; }
+.lae-restore-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 4px;
+}
+.lae-restore-point {
+  display: grid;
+  grid-template-columns: 170px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-main);
+  font: inherit;
+  font-size: var(--fs-small);
+  text-align: left;
+  cursor: pointer;
+}
+.lae-restore-point:hover { background: var(--surface-2); }
+.lae-restore-point.on { background: var(--info-light); outline: 1px solid var(--info-border); }
+.lae-restore-when { font-family: var(--f-mono); font-size: var(--fs-tiny); }

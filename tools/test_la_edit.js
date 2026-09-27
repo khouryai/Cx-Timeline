@@ -228,6 +228,75 @@ console.log('\nOps and undo');
     ed.getCell(m, 'a1', '2026-09-21').version === 8 && m.rows.find((r) => r.id === 'a2').version === 4);
 }
 
+console.log('\nGoing back to an earlier moment');
+{
+  // Simulate the log: apply batches to a model, recording what each op did.
+  const m = sample();
+  const log = [];
+  let id = 0;
+  const record = (batch, ops) => {
+    for (const op of ops) {
+      if (op.op === 'cell') {
+        const was = ed.getCell(m, op.row_id, op.day);
+        const gone = !op.color && !op.text;
+        log.push({ id: ++id, batch, target: 'cell', row_id: op.row_id, day: op.day,
+          action: was ? (gone ? 'delete' : 'update') : 'insert', before: was ? { ...was } : null });
+      } else if (op.op === 'row') {
+        const was = m.rows.find((r) => r.id === op.id);
+        log.push({ id: ++id, batch, target: 'row', row_id: op.id, action: was ? 'update' : 'insert', before: was ? { ...was } : null });
+      } else {
+        const was = m.rows.find((r) => r.id === op.id);
+        log.push({ id: ++id, batch, target: 'row', row_id: op.id, action: 'delete', before: { ...was } });
+      }
+      ed.applyOps(m, [op]);
+    }
+  };
+  const snapshot = () => JSON.stringify({
+    rows: ed.orderedRows(m.rows, { archived: true }).map(({ version, ...r }) => r),
+    cells: ed.cellList(m).map(({ version, ...c }) => c).sort((a, b) => (a.row_id + a.day).localeCompare(b.row_id + b.day)),
+  });
+  const before = snapshot();
+
+  record('b1', [{ op: 'cell', row_id: 'a1', day: '2026-09-21', color: 'FF0000', text: 'X.WIT' }]);
+  record('b2', [{ op: 'row', id: 'n1', set: { kind: 'activity', sort: 2500, description: 'Added later' } },
+    { op: 'cell', row_id: 'n1', day: '2026-09-22', color: 'FFFF00', text: 'X' }]);
+  record('b3', ed.deleteOps(m, ['a2']));
+  record('b4', [{ op: 'row', id: 'a1', set: { location: 'Y10' } },
+    { op: 'cell', row_id: 'a1', day: '2026-09-21', color: 'FFFF00', text: 'X.X' }]);
+  check('the log has done its damage', snapshot() !== before);
+
+  const back = ed.restoreOps(m, log);
+  ed.applyOps(m, back);
+  check('restoring to before the first save puts everything back exactly', snapshot() === before);
+  check('a row added since is removed, cells first', back.findIndex((o) => o.op === 'delete_row' && o.id === 'n1')
+    > back.findIndex((o) => o.op === 'cell' && o.row_id === 'n1'));
+  check('a row deleted since comes back with its cells, before they are refilled',
+    back.findIndex((o) => o.op === 'row' && o.id === 'a2') < back.findIndex((o) => o.op === 'cell' && o.row_id === 'a2'));
+
+  // Part-way: back to before batch 3 only.
+  const m2 = sample();
+  const log2 = [];
+  let id2 = 0;
+  const rec2 = (batch, ops) => {
+    for (const op of ops) {
+      const was = op.op === 'cell' ? ed.getCell(m2, op.row_id, op.day) : m2.rows.find((r) => r.id === op.id);
+      log2.push({ id: ++id2, batch, target: op.op === 'cell' ? 'cell' : 'row', row_id: op.row_id || op.id, day: op.day,
+        action: op.op === 'delete_row' ? 'delete' : was ? 'update' : 'insert', before: was ? { ...was } : null });
+      ed.applyOps(m2, [op]);
+    }
+  };
+  rec2('b1', [{ op: 'cell', row_id: 'a1', day: '2026-09-21', color: 'FF0000', text: 'X.WIT' }]);
+  rec2('b2', [{ op: 'cell', row_id: 'a1', day: '2026-09-21', color: 'FFFF00', text: 'X' }]);
+  const partial = ed.restoreOps(m2, log2.filter((e) => e.batch === 'b2'));
+  ed.applyOps(m2, partial);
+  check('restoring part-way keeps what came before', ed.getCell(m2, 'a1', '2026-09-21')?.color === 'FF0000');
+  check('nothing already as it was is touched', ed.restoreOps(m2, log2.filter((e) => e.batch === 'b2')).length === 0);
+
+  const points = ed.restorePoints(log);
+  check('restore points are the saves, newest first, with how much each changed',
+    points.map((p) => p.batch).join(',') === 'b4,b3,b2,b1' && points.find((p) => p.batch === 'b2').count === 2);
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    Fill and clipboard
    ═══════════════════════════════════════════════════════════════════════ */
