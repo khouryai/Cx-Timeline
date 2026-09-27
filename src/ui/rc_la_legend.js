@@ -73,6 +73,10 @@ export async function renderLegend(host) {
       + 'page as a week of no work.',
   }));
 
+  /* ── Support codes ───────────────────────────────────────────────────── */
+  host.appendChild(el('div', { style: 'height:24px' }));
+  await supportCodes(host);
+
   /* ── The register ────────────────────────────────────────────────────── */
   host.appendChild(el('div', { style: 'height:24px' }));
   host.appendChild(el('div', { class: 'rc-section-head' }, [
@@ -270,3 +274,91 @@ function editLegend(entry) {
   });
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   Support codes
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const PARTIES = ['BART', 'Hitachi', 'Other'];
+
+/**
+ * What each code typed into a day asks for.
+ *
+ * "X.WIT" on a day is one EIC and one BART witness; "X.X" is two EICs. The
+ * register lives here, beside the colours, because it is the same kind of
+ * thing: the sheet's shorthand, written down once so the editor can count it,
+ * the export can key it and nobody has to remember what "TCE" stood for. A
+ * code is retired rather than deleted — days already written with it keep
+ * meaning what they meant.
+ */
+async function supportCodes(host) {
+  const codes = await rc.listSupportCodes({ includeRetired: true }).catch(() => []);
+  const wrap = el('div', { class: 'lae-codes-admin' });
+  wrap.appendChild(el('div', { class: 'rc-section-head' }, [
+    el('h3', { text: 'Support codes' }),
+    el('button', {
+      class: 'cx-btn mini primary',
+      html: icon('plus', { size: 12 }) + '<span>Add a code</span>',
+      onClick: () => editCode(null, codes),
+    }),
+  ]));
+  wrap.appendChild(el('p', {
+    class: 'rc-hint',
+    text: 'What the letters typed into a day ask for: "X.WIT" is one of each, "X.X" is two. The editor offers '
+      + 'these as one-press buttons, totals them per day and per activity, and the Excel export prints this key '
+      + 'under the sheet. A code nobody has registered is kept as typed and marked, never guessed at.',
+  }));
+  if (!codes.length) {
+    wrap.appendChild(el('p', { class: 'rc-hint', text: 'No codes yet.' }));
+  } else {
+    wrap.appendChild(table(
+      ['Code', 'Asks for', 'Party', ''],
+      codes.map((c) => el('tr', { class: c.active === false ? 'rc-inactive' : '' }, [
+        el('td', {}, [el('span', { class: 'lae-code', text: String(c.code).toUpperCase() })]),
+        el('td', { text: c.name || '—' }),
+        el('td', { text: c.party || '—' }),
+        el('td', { style: 'text-align:right;white-space:nowrap' }, [
+          el('button', { class: 'cx-btn mini ghost', text: 'Edit', onClick: () => editCode(c, codes) }),
+          el('button', {
+            class: 'cx-btn mini ghost',
+            text: c.active === false ? 'Restore' : 'Retire',
+            title: c.active === false ? 'Offer it again' : 'Stop offering it. Days already written with it are left as they are.',
+            onClick: async () => {
+              try {
+                await rc.updateSupportCode(c.id, { active: c.active === false });
+                notifyChanged('support-codes');
+              } catch (err) {
+                toast({ tone: 'bad', message: err.message });
+              }
+            },
+          }),
+        ]),
+      ])),
+    ));
+  }
+  host.appendChild(wrap);
+}
+
+function editCode(existing, codes) {
+  const code = textInput({ value: existing?.code || '', placeholder: 'X', maxlength: '8' });
+  const name = textInput({ value: existing?.name || '', placeholder: 'EIC' });
+  const party = selectInput({ value: existing?.party || 'BART', options: PARTIES });
+  formModal({
+    title: existing ? `Support code ${String(existing.code).toUpperCase()}` : 'Add a support code',
+    confirmLabel: existing ? 'Save' : 'Add',
+    body: el('div', { class: 'lae-form' }, [
+      el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Code, as typed on the sheet' }), code]),
+      el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'What it asks for' }), name]),
+      el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Who provides it' }), party]),
+    ]),
+    onConfirm: async () => {
+      const value = code.value.trim().toUpperCase();
+      if (!/^[A-Z0-9]{1,8}$/.test(value)) throw new Error('A code is one to eight letters or digits, with no dots — the dots separate codes.');
+      const clash = codes.find((c) => String(c.code).toUpperCase() === value && c.id !== existing?.id);
+      if (clash) throw new Error(`${value} is already a code${clash.active === false ? ' (retired — restore it instead)' : ''}.`);
+      const row = { code: value, name: name.value.trim(), party: party.value };
+      if (existing) await rc.updateSupportCode(existing.id, row);
+      else await rc.addSupportCode({ ...row, active: true, sort: Math.max(0, ...codes.map((c) => c.sort || 0)) + 10 });
+      notifyChanged('support-codes');
+    },
+  });
+}

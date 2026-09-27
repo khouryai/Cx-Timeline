@@ -29,6 +29,7 @@ import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
 import { pinClock, pinNodeClock } from './lib/clock.js';
 import { buildLookaheadWorkbook } from './fixtures/xlsx_fixture.js';
+import { lookaheadEditor } from './smoke_la_editor.js';
 import path from 'node:path';
 import url from 'node:url';
 import fs from 'node:fs';
@@ -403,6 +404,13 @@ function fakeSdk() {
          until somebody says otherwise. Getting from there to a usable
          calendar in one click is what the checks below are about. */
     ],
+    rc_support_codes: [
+      { id: 'sc1', code: 'X', name: 'EIC', party: 'BART', active: true, sort: 10 },
+      { id: 'sc2', code: 'WIT', name: 'BART witness', party: 'BART', active: true, sort: 20 },
+      { id: 'sc3', code: 'TCE', name: 'TCE', party: 'BART', active: true, sort: 30 },
+    ],
+    rc_la_rows: [],
+    rc_la_cells: [],
     rc_settings: [
       { key: 'lookahead_sheet', value: '4WLA' },
       // The version this build expects, so the banner below is the exception.
@@ -643,6 +651,8 @@ function fakeSdk() {
       in(col, vs) { rows = rows.filter((r) => vs.includes(r[col])); return api; },
       order() { return api; },
       limit(n) { read.limit = n; return api; },
+      // Paging, as PostgREST does it: the editor reads every page of the cells.
+      range(from, to) { rows = rows.slice(from, to + 1); return api; },
       maybeSingle() { S.calls.push(read); return Promise.resolve({ data: rows[0] || null, error: null }); },
       then(resolve) { S.calls.push(read); return Promise.resolve({ data: rows, error: null }).then(resolve); },
     };
@@ -758,6 +768,73 @@ function fakeSdk() {
         },
         rpc(name, args) {
           S.calls.push({ kind: 'rpc', table: name, payload: args });
+          /* The look-ahead editor's one write: a batch of ops, all or nothing,
+             each checked against the version it expects — the function's rules,
+             modelled closely enough that a conflict here is a conflict there. */
+          if (name === 'rc_la_apply') {
+            if (S.role !== 'admin') {
+              return Promise.resolve({ data: null, error: { message: 'only an administrator may edit the look-ahead' } });
+            }
+            if (S.offline) return Promise.resolve({ data: null, error: { message: 'Failed to fetch' } });
+            const before = { rows: JSON.stringify(S.rows.rc_la_rows || []), cells: JSON.stringify(S.rows.rc_la_cells || []) };
+            const rows = S.rows.rc_la_rows || (S.rows.rc_la_rows = []);
+            let cells = S.rows.rc_la_cells || (S.rows.rc_la_cells = []);
+            const results = [];
+            const fail = (message) => {
+              S.rows.rc_la_rows = JSON.parse(before.rows);
+              S.rows.rc_la_cells = JSON.parse(before.cells);
+              return Promise.resolve({ data: null, error: { message } });
+            };
+            for (const op of args.p_ops || []) {
+              const expect = op.expect || 0;
+              if (op.op === 'row') {
+                const hit = rows.find((r) => r.id === op.id);
+                if (!hit) {
+                  if (expect) return fail('conflict: that row was removed by somebody else');
+                  rows.push({
+                    id: op.id, kind: 'activity', parent_id: null, sort: 0, level: 0, activity_id: '', description: '',
+                    location: '', sswp: '', party: '', work_hours: '', absence_kind: null, archived: false,
+                    ...op.set, version: 1,
+                  });
+                  results.push({ kind: 'row', id: op.id, version: 1 });
+                } else {
+                  if ((hit.version || 0) !== expect) return fail('conflict: somebody else changed that row a moment ago');
+                  Object.assign(hit, op.set);
+                  hit.version = (hit.version || 0) + 1;
+                  results.push({ kind: 'row', id: op.id, version: hit.version });
+                }
+              } else if (op.op === 'delete_row') {
+                const at = rows.findIndex((r) => r.id === op.id);
+                if (at >= 0) {
+                  if ((rows[at].version || 0) !== expect) return fail('conflict: somebody else changed that row a moment ago');
+                  rows.splice(at, 1);
+                  for (let i = rows.length - 1; i >= 0; i--) if (rows[i].parent_id === op.id) rows.splice(i, 1);
+                  cells = cells.filter((c) => c.row_id !== op.id && rows.some((r) => r.id === c.row_id));
+                  S.rows.rc_la_cells = cells;
+                }
+                results.push({ kind: 'row', id: op.id, version: 0, deleted: true });
+              } else if (op.op === 'cell') {
+                const at = cells.findIndex((c) => c.row_id === op.row_id && c.day === op.day);
+                const current = at >= 0 ? cells[at].version || 0 : 0;
+                if (current !== expect) return fail('conflict: somebody else changed that day a moment ago');
+                const color = op.color ? String(op.color).toUpperCase() : null;
+                const text = op.text || '';
+                if (!color && !text) {
+                  if (at >= 0) cells.splice(at, 1);
+                  results.push({ kind: 'cell', row_id: op.row_id, day: op.day, version: 0 });
+                } else if (at >= 0) {
+                  Object.assign(cells[at], { color, text, version: current + 1 });
+                  results.push({ kind: 'cell', row_id: op.row_id, day: op.day, version: current + 1 });
+                } else {
+                  cells.push({ row_id: op.row_id, day: op.day, color, text, version: 1 });
+                  results.push({ kind: 'cell', row_id: op.row_id, day: op.day, version: 1 });
+                }
+              }
+              S.laRevision = (S.laRevision || 0) + 1;
+            }
+            return Promise.resolve({ data: results, error: null });
+          }
+          if (name === 'rc_la_revision') return Promise.resolve({ data: S.laRevision || 0, error: null });
           if (name === 'rc_clear_client_errors') {
             const list = S.rows.rc_client_errors || [];
             const keep = list.filter((r) => (r.created_at || '') >= args.p_before);
@@ -1068,6 +1145,7 @@ async function main() {
   const captureDownloads = (pg) => pg.addInitScript(() => {
     const create = URL.createObjectURL.bind(URL);
     URL.createObjectURL = (blob) => {
+      window.__lastBlob = blob;
       blob.text().then((text) => {
         try {
           const parsed = JSON.parse(text);
@@ -3314,6 +3392,8 @@ async function main() {
     }));
 
   await member.close();
+
+  await lookaheadEditor(page, { check, shot: process.env.CX_EDITOR_SHOT || null });
 
   /* ── A tablet in the room ─────────────────────────────────────────────
      The meeting is run standing, on a tablet, and a tablet in landscape is

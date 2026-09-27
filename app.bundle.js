@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-26T07:52:03.249Z
+ * Modules: 59   Built: 2026-09-27T20:53:18.842Z
  */
 (function () {
   'use strict';
@@ -16211,6 +16211,7 @@ __mods["core/rc.js"] = function (__x, __req) {
       'rc_people', 'rc_locations', 'rc_location_alias', 'rc_person_alias',
       'rc_categories', 'rc_parties',
       'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries', 'rc_client_errors',
+      'rc_la_rows', 'rc_la_cells', 'rc_la_edits', 'rc_support_codes',
       'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
       'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
     ];
@@ -16234,6 +16235,66 @@ __mods["core/rc.js"] = function (__x, __req) {
     }
     return out;
   }
+
+  /* ── The look-ahead, edited here ───────────────────────────────────────── */
+
+  /**
+   * Every page of a read the server would otherwise cut off at its row limit.
+   *
+   * PostgREST answers a thousand rows at most, and a five-week look-ahead can
+   * hold more cells than that: a read that stopped at the limit would draw a
+   * sheet with its bottom rows blank and no sign anything was missing.
+   */
+  async function selectAll(table, build, pageSize = 1000) {
+    requireClient();
+    const key = `${table}|all|${describe(build)}`;
+    return remember(key, async () => {
+      const out = [];
+      for (let from = 0; ; from += pageSize) {
+        let query = client.from(table).select('*');
+        if (build) query = build(query);
+        const { data, error } = await query.range(from, from + pageSize - 1);
+        if (error) throw new Error(`${table}: ${error.message}`);
+        out.push(...(data || []));
+        if (!data || data.length < pageSize) break;
+      }
+      return out;
+    });
+  }
+
+  function listLaRows() {
+    return selectAll('rc_la_rows', (q) => q.order('sort').order('id'));
+  }
+
+  /** The cells between two dates, both inclusive. */
+  function listLaCells(fromISO, toISO) {
+    return selectAll('rc_la_cells', (q) => q.gte('day', fromISO).lte('day', toISO).order('day').order('row_id'));
+  }
+
+  /**
+   * Apply a batch of look-ahead ops (see `core/la_edit.js`), all or nothing.
+   * Answers with the version each op made; a stale op refuses the whole batch
+   * with a message starting "conflict:".
+   */
+  const applyLookaheadOps = (ops) => rpc('rc_la_apply', { p_ops: ops });
+
+  /**
+   * The newest change anybody has made, as a number — asked every few seconds by
+   * an open editor. A read, so it does not empty the read cache the way every
+   * other call to a function does.
+   */
+  async function lookaheadRevision() {
+    requireClient();
+    const { data, error } = await client.rpc('rc_la_revision', {});
+    if (error) throw new Error(`rc_la_revision: ${error.message}`);
+    return Number(data) || 0;
+  }
+
+  function listSupportCodes({ includeRetired = false } = {}) {
+    return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
+  }
+  const addSupportCode = (row) => insert('rc_support_codes', [row]).then((r) => r[0]);
+  const updateSupportCode = (id, patch) => update('rc_support_codes', id, patch);
 
   /* ── Problems the calendar ran into ──────────────────────────────────── */
 
@@ -16296,7 +16357,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 2;
+  const SCHEMA_VERSION = 3;
 
   /**
    * Whether the database is the one this build was written against.
@@ -16904,6 +16965,13 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listParties", { get: () => listParties, enumerable: true });
   Object.defineProperty(__x, "listLegend", { get: () => listLegend, enumerable: true });
   Object.defineProperty(__x, "exportEverything", { get: () => exportEverything, enumerable: true });
+  Object.defineProperty(__x, "listLaRows", { get: () => listLaRows, enumerable: true });
+  Object.defineProperty(__x, "listLaCells", { get: () => listLaCells, enumerable: true });
+  Object.defineProperty(__x, "applyLookaheadOps", { get: () => applyLookaheadOps, enumerable: true });
+  Object.defineProperty(__x, "lookaheadRevision", { get: () => lookaheadRevision, enumerable: true });
+  Object.defineProperty(__x, "listSupportCodes", { get: () => listSupportCodes, enumerable: true });
+  Object.defineProperty(__x, "addSupportCode", { get: () => addSupportCode, enumerable: true });
+  Object.defineProperty(__x, "updateSupportCode", { get: () => updateSupportCode, enumerable: true });
   Object.defineProperty(__x, "reportError", { get: () => reportError, enumerable: true });
   Object.defineProperty(__x, "listClientErrors", { get: () => listClientErrors, enumerable: true });
   Object.defineProperty(__x, "clearClientErrors", { get: () => clearClientErrors, enumerable: true });
@@ -32975,6 +33043,7 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
   const cmd = __req("ui/commands.js");
   const { modalOpen, closeMenu, closePopover } = __req("ui/components.js");
   const { showPane } = __req("ui/panels.js");
+  const workspace = __req("ui/workspace.js");
 
   function installShortcuts() {
     window.addEventListener('keydown', onKeyDown, true);
@@ -32994,6 +33063,11 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
     }
 
     if (modalOpen() || isTyping(e.target)) return;
+    /* Every key below acts on the timeline, and the calendar is a different
+       interface over different data: Delete there must not delete a bar on a
+       canvas nobody can see, and mod+Z must not undo the plan. The calendar's
+       own screens — the look-ahead editor above all — handle their keys. */
+    if (!workspace.isTimeline()) return;
 
     const mod = hasMod(e);
     const key = e.key.toLowerCase();

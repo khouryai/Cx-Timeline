@@ -425,6 +425,7 @@ export async function exportEverything() {
     'rc_people', 'rc_locations', 'rc_location_alias', 'rc_person_alias',
     'rc_categories', 'rc_parties',
     'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries', 'rc_client_errors',
+    'rc_la_rows', 'rc_la_cells', 'rc_la_edits', 'rc_support_codes',
     'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
     'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
   ];
@@ -448,6 +449,66 @@ export async function exportEverything() {
   }
   return out;
 }
+
+/* ── The look-ahead, edited here ───────────────────────────────────────── */
+
+/**
+ * Every page of a read the server would otherwise cut off at its row limit.
+ *
+ * PostgREST answers a thousand rows at most, and a five-week look-ahead can
+ * hold more cells than that: a read that stopped at the limit would draw a
+ * sheet with its bottom rows blank and no sign anything was missing.
+ */
+async function selectAll(table, build, pageSize = 1000) {
+  requireClient();
+  const key = `${table}|all|${describe(build)}`;
+  return remember(key, async () => {
+    const out = [];
+    for (let from = 0; ; from += pageSize) {
+      let query = client.from(table).select('*');
+      if (build) query = build(query);
+      const { data, error } = await query.range(from, from + pageSize - 1);
+      if (error) throw new Error(`${table}: ${error.message}`);
+      out.push(...(data || []));
+      if (!data || data.length < pageSize) break;
+    }
+    return out;
+  });
+}
+
+export function listLaRows() {
+  return selectAll('rc_la_rows', (q) => q.order('sort').order('id'));
+}
+
+/** The cells between two dates, both inclusive. */
+export function listLaCells(fromISO, toISO) {
+  return selectAll('rc_la_cells', (q) => q.gte('day', fromISO).lte('day', toISO).order('day').order('row_id'));
+}
+
+/**
+ * Apply a batch of look-ahead ops (see `core/la_edit.js`), all or nothing.
+ * Answers with the version each op made; a stale op refuses the whole batch
+ * with a message starting "conflict:".
+ */
+export const applyLookaheadOps = (ops) => rpc('rc_la_apply', { p_ops: ops });
+
+/**
+ * The newest change anybody has made, as a number — asked every few seconds by
+ * an open editor. A read, so it does not empty the read cache the way every
+ * other call to a function does.
+ */
+export async function lookaheadRevision() {
+  requireClient();
+  const { data, error } = await client.rpc('rc_la_revision', {});
+  if (error) throw new Error(`rc_la_revision: ${error.message}`);
+  return Number(data) || 0;
+}
+
+export function listSupportCodes({ includeRetired = false } = {}) {
+  return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
+}
+export const addSupportCode = (row) => insert('rc_support_codes', [row]).then((r) => r[0]);
+export const updateSupportCode = (id, patch) => update('rc_support_codes', id, patch);
 
 /* ── Problems the calendar ran into ──────────────────────────────────── */
 
@@ -510,7 +571,7 @@ export function listSettings() {
  * "could not update the legend", on one screen, weeks after the deploy that
  * needed it; this turns it into one sentence at sign-in naming the two files.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * Whether the database is the one this build was written against.

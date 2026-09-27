@@ -26,12 +26,19 @@ export const la = {
   showResources: true,
   /** How much of the calendar to show, in weeks from this one; 0 is everything. */
   calendarWeeks: 4,
+  /** 'workbook' until the look-ahead is written in the calendar, then 'editor'. */
+  source: 'workbook',
+  /** Whether somebody picked a section, so the tab stops choosing one for them. */
+  sectionChosen: false,
+  /** How many weeks the editor shows: four, or five to see one more ahead. */
+  editorWeeks: 4,
 };
 
 export const WEEK_CHOICES = [
   { weeks: 2, label: '2 weeks' },
   { weeks: 3, label: '3 weeks' },
   { weeks: 4, label: '4 weeks' },
+  { weeks: 5, label: '5 weeks' },
   { weeks: 0, label: 'Everything' },
 ];
 

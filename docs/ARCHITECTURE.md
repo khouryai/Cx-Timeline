@@ -1749,6 +1749,115 @@ bar items are keyboard buttons. A cancelled look-ahead day is struck through as
 well as red. `smoke.js` fails on any visible control without an accessible
 name.
 
+## The look-ahead is written in the calendar
+
+### The calendar is the look-ahead's source, and the workbook is something it produces
+
+The 4WLA used to be an Excel file two administrators kept by hand, which the
+calendar *read*: a snapshot on every "Check now", the change register built
+by comparing one reading with the last. It is now written in the calendar
+itself — Look-ahead → Editor — and an .xlsx in the 4WLA layout is something the
+calendar exports for whoever copies the rows into the project's master
+look-ahead. `rc_settings.lookahead_source` says which: `workbook` until the
+editor is adopted, then `editor`, after which "Check now" refuses (reading the
+archived file would overwrite a week of edits) and becomes the way to the
+editor. Going back is one menu item and deletes nothing.
+
+### The editor publishes the grid the workbook used to produce
+
+Every screen downstream — the calendar grid, the week plan and the huddle
+through `assignmentIndex()`, PTO, the cancellation log over `rc_lookahead_rows`,
+the change register, the reassignments — read a *parsed workbook*. Rather than
+teach each of them a second source, `gridFromModel()` in `core/la_edit.js`
+writes the editor's model in exactly the shape `parseSheet()` produced: headings
+on row 2 merged down to 6, the month band on 4, day numbers on 5, weekday letters
+on 6, rows from 7, a section band painted across its six activity columns (how
+`readGrid()` has always told a heading from work) and never across the days.
+`publishFromEditor()` in `ui/rc_ingest.js` hands that grid to `publishGrid()` —
+the second half of what a workbook read always did — deduplicated on content,
+covering the week just gone and the five ahead. The editor publishes a couple of
+seconds after its saves go quiet, and immediately when another section is
+opened, *quietly* (no `RC_CHANGED`), because a redraw of the whole tab every time
+it saved would throw away the cell somebody is typing in.
+
+### Every edit is an op, with an inverse, sent with the version it expects
+
+`core/la_edit.js` has three ops — set a row's fields (or create it), delete a
+row, set a cell — and `applyOps()` returns the ops that undo them, which is the
+whole of undo and redo: deleting an activity is its cells, its names row and
+itself, so one undo brings back all three. The editor applies ops locally at
+once, so typing never waits on the network, and queues them for
+`rc_la_apply()`. They are **stamped at send time** from the versions the server
+last acknowledged, simulated forward op by op, so two quick edits to one cell
+expect 0 and then 1 rather than 0 twice; stamped when the edit was made, a
+queued edit would be refused against its own predecessor.
+
+`rc_la_apply()` is the only way to write `rc_la_rows` and `rc_la_cells` (there
+is no write grant on either): administrators only, all or nothing, refusing any
+op whose `expect` is not the stored version with a message starting
+`conflict:`. The editor answers a conflict by reloading and saying so — the
+other administrator's version stands, the last change is not silently merged
+— and notices the other editor's saves by polling `rc_la_revision()`, a number,
+every twenty seconds and on focus, only while nobody is mid-edit.
+
+`rc_la_edits` is written by the same function in the same transaction, one row
+per change with what it was before and after, and has no write grant at all.
+That is the evidence base now: "the Tuesday shift was moved to Thursday by
+Dana at 16:02" is a row, where before it was an inference from two readings of
+a file.
+
+### What may be written where
+
+A section has a title and no days. An activity has six columns and days that
+take a colour from the legend's **shift** entries and support codes. A names
+row (Resource) has names on days and nothing else — its left-hand side is its
+activity's, and it is never painted, so red on a names row cannot be read as a
+cancellation. A PTO / Office / Other group row has a label and names. Pasting
+follows the same rules cell by cell, and a colour the legend does not list is
+left off with the text kept and a message saying how many — never snapped to
+the nearest colour, for the reason `applyLegend()` never guesses one.
+
+### Support codes are a register, like the colours
+
+"X.WIT" is one EIC and one BART witness; "X.X" is two EICs. `rc_support_codes`
+(Legend → Support codes) says what each code asks for and who provides it. The
+editor offers them as one-press buttons, counts them per day under the grid
+and per activity in its details, and the export prints the key under the sheet.
+A code nobody registered is kept exactly as typed and marked with a wavy
+underline, never dropped: an unknown code is a request nobody can staff until
+somebody says what it is. `supportTokens()` reads a cell the way the sheet is
+typed — pieces between dots, spacing and case ignored — and only activity rows
+are counted, so names never become codes.
+
+### The export is measured off BART's own workbook
+
+`io/la_xlsx.js` writes the layout the track allocation manager pastes from, and
+every dimension in it came off the real file: Arial 10, thin borders on every
+cell, column A hidden and B–G at the file's widths, the heading block's rows 2
+and 3 hidden with the headings merged B2:B6 … G2:G6, the month band merged per
+month on row 4, section headings bold on the `D9D9D9` band, weekends `7F7F7F`,
+painted days bold and centred with white writing on a dark fill, and each PTO /
+Office / Other group written as a grey label band over its row of names — the
+pair BART's file uses. Only the chosen window (four or five weeks from a
+Monday) and only rows with something in it (`rowsWithWork()`), with the colour
+and code keys underneath. Row heights are computed, because Excel does not grow
+a row for wrapped text when it opens a file. `io/xlsx_write.js` is a stored ZIP
+and a style table built as used, with no dependency, and
+`tools/test_la_edit.js` reads every export back through `parseSheet()` — the
+reader that reads BART's file — so an export that would not read back fails the
+build. The ZIP is stored rather than deflated on purpose: every spreadsheet
+program opens it, and it keeps the writer small enough to check by reading.
+
+### Starting
+
+The editor's first screen offers the last reading of the workbook, a workbook
+picked from disk, or nothing. `modelFromView()` carries across only what is
+still ahead — an activity with a shift, a code or a name from this week's
+Monday on, the sections above such activities (nested ones included), the
+names rows under them, and the PTO / Office / Other rows always — and counts
+what it left behind. Columns are mapped by position when the sheet uses B–G,
+because BART's file hides its heading row and there is no heading to read.
+
 ## What each suite covers
 
 `smoke.js` boots the real application in Chromium and checks rendering,

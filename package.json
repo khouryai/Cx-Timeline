@@ -25,7 +25,8 @@
     "build:calendar": "node tools/build.js && node tools/dist.js --calendar",
     "test:dist": "node tools/test_dist.js",
     "test:serial": "CX_TEST_JOBS=1 node tools/run_tests.js",
-    "test:folder-rules": "node tools/test_folder_rules.js"
+    "test:folder-rules": "node tools/test_folder_rules.js",
+    "test:la-edit": "node tools/test_la_edit.js"
   },
   "cxTimeline": {
     "_comment": "deployment: 'hosted' saves the plan to Supabase and requires a backend at build time; 'folder' publishes with no backend at all and keeps the plan in a folder the user picks; 'calendar' is 'folder' plus the resource calendar \u2014 the plan still has no backend and still lives in a folder, while the calendar has its own separate Supabase project so the team can read it in a browser. tools/dist.js reads this, so the shape of a deployment is decided here, in the repository, rather than in a CI setting nobody can see. The calendar shape needs RC_SUPABASE_URL and RC_SUPABASE_ANON_KEY as build variables and refuses to publish without them. updateChannel: the deployment an installed desktop copy follows for updates \u2014 blank means an installed copy never updates itself.",

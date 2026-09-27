@@ -123,10 +123,12 @@ ui/pane_util → ui/pane_plan · ui/pane_filters · ui/pane_io · ui/pane_projec
 ui/panels → ui/command_menu · ui/canvas_hint → ui/shell
 ui/workspace · ui/calendar_loader         the calendar, fetched on first use:
     ui/rc → ui/rc_roster · ui/rc_huddle · ui/rc_week · ui/rc_pto · ui/rc_reports
-          · ui/rc_lookahead → ui/rc_la_* · ui/rc_ingest → ui/rc_la_state
+          · ui/rc_lookahead → ui/rc_la_editor · ui/rc_la_* · ui/rc_ingest → ui/rc_la_state
           · ui/rc_table                   → ui/rc_util   (calendar.bundle.js)
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
 io/rc_pdf → io/pdf · io/lookahead         the calendar drawn for print — no DOM
+core/la_edit → core/lookahead             the look-ahead editor's model — no DOM
+io/la_xlsx → core/la_edit · io/xlsx_write the 4WLA as an .xlsx — no DOM
 main.js                                   the only module that may import freely
 ```
 
@@ -266,6 +268,15 @@ alternative shipped once and went wrong.
 - Every switch on the export is an argument, not the screen's state. [→](docs/ARCHITECTURE.md#every-switch-on-the-export-is-an-argument-not-the-screens-state)
 - The calendar draws the snapshot, not the file. [→](docs/ARCHITECTURE.md#the-calendar-draws-the-snapshot-not-the-file)
 
+### The look-ahead editor
+
+- The calendar is the look-ahead's source once the editor is adopted (`rc_settings.lookahead_source = 'editor'`); "Check now" then refuses to read the workbook. [→](docs/ARCHITECTURE.md#the-calendar-is-the-look-aheads-source-and-the-workbook-is-something-it-produces)
+- The editor publishes the grid a workbook read used to produce (`gridFromModel()` → `publishGrid()`), so nothing downstream reads a second source. Never teach a screen to read `rc_la_*` directly. [→](docs/ARCHITECTURE.md#the-editor-publishes-the-grid-the-workbook-used-to-produce)
+- Every edit is an op from `core/la_edit.js` with an inverse, written only through `rc_la_apply()`, stamped at send time with the version it expects. [→](docs/ARCHITECTURE.md#every-edit-is-an-op-with-an-inverse-sent-with-the-version-it-expects)
+- Only an activity's days are painted, only with the legend's shift colours; names rows are never painted. [→](docs/ARCHITECTURE.md#what-may-be-written-where)
+- Support codes are a register (`rc_support_codes`); an unknown code is kept and marked, never dropped or guessed. [→](docs/ARCHITECTURE.md#support-codes-are-a-register-like-the-colours)
+- The Excel export's layout is measured off BART's workbook and read back by `parseSheet()` in the tests. [→](docs/ARCHITECTURE.md#the-export-is-measured-off-barts-own-workbook)
+
 ### Added with the module split and the calendar bundle
 
 - **The calendar is a second bundle, fetched the first time it is opened.** [→](docs/ARCHITECTURE.md#the-calendar-is-a-second-bundle-fetched-the-first-time-it-is-opened)
@@ -327,6 +338,10 @@ alternative shipped once and went wrong.
   raise the stamp at the end of `rc_schema.sql` together with `SCHEMA_VERSION`
   in `core/rc.js`. Cover it in `supabase/test/rc_permissions.sql`, and in
   `supabase/test/downgrade.sql` if an older project would lack it.
+- **A new column on the look-ahead**: add it to `FIELDS` in `core/la_edit.js`
+  (heading and width off the sheet), to `rc_la_rows` and `rc_la_apply()`, and
+  to the frozen offsets in `.lae-grid` — the export and the published grid follow
+  from `FIELDS`.
 - **A new calendar failure worth an administrator's attention**: call
   `rc.reportError('<area>', err)` at that call site. Never from a global
   handler — see the rule on reporting.
@@ -348,12 +363,13 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | `test_dist.js` | 46 | every deployment shape, both bundles fingerprinted, and that the plan has no backend in any of them |
 | `test_lookahead.js` | 195 | the parser, the rows it derives, the change events and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
+| `test_la_edit.js` | 85 | the look-ahead editor's model, undo, support codes, the published grid, and the Excel export read back |
 | `smoke.js` | 318 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 349 | the resource calendar, accounts, the look-ahead grid, a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 414 | the resource calendar, accounts, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 64 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
-| `test_sql.js` | 328 | both permission models, the schema stamp, and that `migrate.sql` upgrades an old project |
+| `test_sql.js` | 354 | both permission models, the schema stamp, and that `migrate.sql` upgrades an old project |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**
 (`tools/lib/clock.js` shifts `Date` in Node and in every page). Build fixtures
@@ -399,6 +415,16 @@ Each of these has caused a real bug:
   and draws the label — and its optional sub-label — only if it fits. Nudging
   a partly off-screen label into view without that check prints it on top of
   its neighbour.
+- **Redrawing a grid drops the keyboard.** The editor rebuilds its grid on
+  every edit, and the element that had focus goes with it — so the shortcut
+  after an edit (Ctrl+Z after a paste, Alt+0 after Alt+3) went nowhere. `draw()`
+  gives focus back to the new grid unless a dialog or the search box has it.
+- **Removing a focused input fires its blur.** An in-place editor that commits
+  on blur and removes itself on commit re-entered itself; clear the editing
+  state *before* removing the input.
+- **The timeline's shortcuts listen on the whole window.** They now stand down
+  when the calendar is showing (`workspace.isTimeline()`), or Delete in the
+  calendar deleted a bar nobody could see and Ctrl+Z undid the plan.
 - **An inline `background:` shorthand wipes out every class-drawn pattern.**
   A painted look-ahead cell set `style="background:#hex"`, which resets
   `background-image` — so the hatch marking an unmapped colour was never drawn,

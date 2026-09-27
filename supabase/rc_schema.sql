@@ -2183,6 +2183,295 @@ select v.name, v.color, v.counts from (values
 where not exists (select 1 from public.rc_leave_kinds where name = v.name);
 
 -- ══════════════════════════════════════════════════════════════════════════
+-- The look-ahead, edited here
+--
+-- The 4WLA used to be a workbook the calendar *read*; it is now written in the
+-- calendar, and the .xlsx is something the calendar produces for whoever copies
+-- the rows into the project's master look-ahead. Two tables hold it as it
+-- stands — a row per line of the sheet, a cell per painted or written day — and
+-- a third, append-only, holds every change ever made to either, which is the
+-- record a claim is built from now that no two readings of a file need
+-- comparing to find out what moved.
+--
+-- Nobody writes the first two directly. Every edit goes through
+-- `rc_la_apply()`, one batch of ops in one transaction: it refuses anybody who
+-- is not an administrator (and says so, rather than matching nothing), refuses
+-- an op whose `expect` is not the version on the row — two people changing one
+-- cell at once get a refusal, not a silent winner — and writes the edit log in
+-- the same breath, so a change and its record cannot come apart.
+-- ══════════════════════════════════════════════════════════════════════════
+
+create table if not exists public.rc_la_rows (
+  id           uuid primary key,
+  kind         text not null check (kind in ('section', 'activity', 'resource', 'absence')),
+  parent_id    uuid references public.rc_la_rows(id) on delete cascade,
+  sort         double precision not null default 0,
+  level        smallint not null default 0 check (level between 0 and 3),
+  activity_id  text not null default '',
+  description  text not null default '',
+  location     text not null default '',
+  sswp         text not null default '',
+  party        text not null default '',
+  work_hours   text not null default '',
+  absence_kind text check (absence_kind in ('pto', 'office', 'other')),
+  archived     boolean not null default false,
+  version      integer not null default 1,
+  updated_at   timestamptz not null default now(),
+  updated_by   uuid references auth.users(id) on delete set null
+);
+
+create table if not exists public.rc_la_cells (
+  row_id     uuid not null references public.rc_la_rows(id) on delete cascade,
+  day        date not null,
+  color      text check (color ~ '^[0-9A-F]{6}$'),
+  text       text not null default '',
+  version    integer not null default 1,
+  updated_at timestamptz not null default now(),
+  updated_by uuid references auth.users(id) on delete set null,
+  primary key (row_id, day)
+);
+
+create index if not exists rc_la_cells_day_idx on public.rc_la_cells (day);
+
+create table if not exists public.rc_la_edits (
+  id      bigserial primary key,
+  at      timestamptz not null default now(),
+  by      uuid default auth.uid() references auth.users(id) on delete set null,
+  batch   uuid not null,
+  target  text not null check (target in ('row', 'cell')),
+  row_id  uuid not null,
+  day     date,
+  action  text not null check (action in ('insert', 'update', 'delete')),
+  before  jsonb,
+  after   jsonb
+);
+
+create index if not exists rc_la_edits_row_idx on public.rc_la_edits (row_id, at desc);
+
+-- What each support code on the sheet asks for: "X" an EIC, "WIT" a BART
+-- witness. Managed in the calendar — Legend → Support codes — like the colours.
+create table if not exists public.rc_support_codes (
+  id         uuid primary key default gen_random_uuid(),
+  code       text not null check (code ~ '^[A-Za-z0-9]{1,8}$'),
+  name       text not null default '',
+  party      text not null default 'BART',
+  active     boolean not null default true,
+  sort       integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists rc_support_codes_code_idx on public.rc_support_codes (upper(code));
+
+insert into public.rc_support_codes (code, name, party, sort)
+select v.code, v.name, v.party, v.sort from (values
+  ('X', 'EIC', 'BART', 10),
+  ('WIT', 'BART witness', 'BART', 20),
+  ('TCE', 'TCE', 'BART', 30)
+) as v(code, name, party, sort)
+where not exists (select 1 from public.rc_support_codes where upper(code) = v.code);
+
+alter table public.rc_la_rows       enable row level security;
+alter table public.rc_la_cells      enable row level security;
+alter table public.rc_la_edits      enable row level security;
+alter table public.rc_support_codes enable row level security;
+
+-- The look-ahead is the team's to read, as the calendar drawn from it is.
+drop policy if exists rc_la_rows_read on public.rc_la_rows;
+create policy rc_la_rows_read on public.rc_la_rows for select to authenticated using (true);
+drop policy if exists rc_la_cells_read on public.rc_la_cells;
+create policy rc_la_cells_read on public.rc_la_cells for select to authenticated using (true);
+-- Who changed what is the evidence base, and an administrator's.
+drop policy if exists rc_la_edits_read on public.rc_la_edits;
+create policy rc_la_edits_read on public.rc_la_edits for select to authenticated using (public.rc_is_admin());
+
+drop policy if exists rc_support_codes_read on public.rc_support_codes;
+create policy rc_support_codes_read on public.rc_support_codes for select to authenticated using (true);
+drop policy if exists rc_support_codes_write on public.rc_support_codes;
+create policy rc_support_codes_write on public.rc_support_codes for all to authenticated
+  using (public.rc_is_admin()) with check (public.rc_is_admin());
+
+-- Reading only. Every write to the look-ahead is `rc_la_apply()`; the log has
+-- no write grant at all, so nothing but that function can add to it and
+-- nothing can take from it.
+revoke all on public.rc_la_rows  from public, anon, authenticated;
+revoke all on public.rc_la_cells from public, anon, authenticated;
+revoke all on public.rc_la_edits from public, anon, authenticated;
+grant select on public.rc_la_rows  to authenticated;
+grant select on public.rc_la_cells to authenticated;
+grant select on public.rc_la_edits to authenticated;
+revoke all on public.rc_support_codes from public, anon;
+grant select, insert, update, delete on public.rc_support_codes to authenticated;
+
+create or replace function public.rc_la_apply(p_ops jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  op       jsonb;
+  results  jsonb := '[]'::jsonb;
+  v_batch  uuid := gen_random_uuid();
+  v_expect integer;
+  v_id     uuid;
+  v_day    date;
+  v_set    jsonb;
+  v_color  text;
+  v_text   text;
+  v_row    public.rc_la_rows;
+  v_after  public.rc_la_rows;
+  v_cell   public.rc_la_cells;
+  v_new    public.rc_la_cells;
+  v_found  boolean;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may edit the look-ahead' using errcode = '42501';
+  end if;
+
+  for op in select value from jsonb_array_elements(coalesce(p_ops, '[]'::jsonb)) loop
+    v_expect := coalesce((op->>'expect')::integer, 0);
+
+    if op->>'op' = 'row' then
+      v_id := (op->>'id')::uuid;
+      v_set := coalesce(op->'set', '{}'::jsonb);
+      select * into v_row from public.rc_la_rows where id = v_id for update;
+      v_found := found;
+
+      if not v_found then
+        if v_expect <> 0 then
+          raise exception 'conflict: that row was removed by somebody else — reload the look-ahead'
+            using errcode = '40001';
+        end if;
+        insert into public.rc_la_rows (id, kind, parent_id, sort, level, activity_id, description,
+                                       location, sswp, party, work_hours, absence_kind, archived,
+                                       version, updated_by)
+        values (v_id,
+                coalesce(v_set->>'kind', 'activity'),
+                nullif(v_set->>'parent_id', '')::uuid,
+                coalesce((v_set->>'sort')::double precision, 0),
+                coalesce((v_set->>'level')::smallint, 0),
+                coalesce(v_set->>'activity_id', ''),
+                coalesce(v_set->>'description', ''),
+                coalesce(v_set->>'location', ''),
+                coalesce(v_set->>'sswp', ''),
+                coalesce(v_set->>'party', ''),
+                coalesce(v_set->>'work_hours', ''),
+                nullif(v_set->>'absence_kind', ''),
+                coalesce((v_set->>'archived')::boolean, false),
+                1, auth.uid())
+        returning * into v_after;
+        insert into public.rc_la_edits (batch, target, row_id, action, after)
+        values (v_batch, 'row', v_id, 'insert', to_jsonb(v_after));
+      else
+        if v_row.version <> v_expect then
+          raise exception 'conflict: somebody else changed that row a moment ago — reload the look-ahead'
+            using errcode = '40001';
+        end if;
+        update public.rc_la_rows set
+          kind         = case when v_set ? 'kind' then v_set->>'kind' else kind end,
+          parent_id    = case when v_set ? 'parent_id' then nullif(v_set->>'parent_id', '')::uuid else parent_id end,
+          sort         = case when v_set ? 'sort' then (v_set->>'sort')::double precision else sort end,
+          level        = case when v_set ? 'level' then (v_set->>'level')::smallint else level end,
+          activity_id  = case when v_set ? 'activity_id' then coalesce(v_set->>'activity_id', '') else activity_id end,
+          description  = case when v_set ? 'description' then coalesce(v_set->>'description', '') else description end,
+          location     = case when v_set ? 'location' then coalesce(v_set->>'location', '') else location end,
+          sswp         = case when v_set ? 'sswp' then coalesce(v_set->>'sswp', '') else sswp end,
+          party        = case when v_set ? 'party' then coalesce(v_set->>'party', '') else party end,
+          work_hours   = case when v_set ? 'work_hours' then coalesce(v_set->>'work_hours', '') else work_hours end,
+          absence_kind = case when v_set ? 'absence_kind' then nullif(v_set->>'absence_kind', '') else absence_kind end,
+          archived     = case when v_set ? 'archived' then (v_set->>'archived')::boolean else archived end,
+          version      = version + 1,
+          updated_at   = now(),
+          updated_by   = auth.uid()
+        where id = v_id
+        returning * into v_after;
+        insert into public.rc_la_edits (batch, target, row_id, action, before, after)
+        values (v_batch, 'row', v_id, 'update', to_jsonb(v_row), to_jsonb(v_after));
+      end if;
+      results := results || jsonb_build_object('kind', 'row', 'id', v_id, 'version', v_after.version);
+
+    elsif op->>'op' = 'delete_row' then
+      v_id := (op->>'id')::uuid;
+      select * into v_row from public.rc_la_rows where id = v_id for update;
+      if found then
+        if v_row.version <> v_expect then
+          raise exception 'conflict: somebody else changed that row a moment ago — reload the look-ahead'
+            using errcode = '40001';
+        end if;
+        -- Its cells are logged one by one on the way out, so the record says
+        -- what was on the row as well as that the row went.
+        insert into public.rc_la_edits (batch, target, row_id, day, action, before)
+        select v_batch, 'cell', c.row_id, c.day, 'delete', to_jsonb(c)
+          from public.rc_la_cells c where c.row_id = v_id;
+        delete from public.rc_la_rows where id = v_id;
+        insert into public.rc_la_edits (batch, target, row_id, action, before)
+        values (v_batch, 'row', v_id, 'delete', to_jsonb(v_row));
+      end if;
+      results := results || jsonb_build_object('kind', 'row', 'id', v_id, 'version', 0, 'deleted', true);
+
+    elsif op->>'op' = 'cell' then
+      v_id := (op->>'row_id')::uuid;
+      v_day := (op->>'day')::date;
+      v_color := nullif(upper(coalesce(op->>'color', '')), '');
+      v_text := coalesce(op->>'text', '');
+      select * into v_cell from public.rc_la_cells where row_id = v_id and day = v_day for update;
+      v_found := found;
+      if coalesce(case when v_found then v_cell.version end, 0) <> v_expect then
+        raise exception 'conflict: somebody else changed that day a moment ago — reload the look-ahead'
+          using errcode = '40001';
+      end if;
+
+      if v_color is null and v_text = '' then
+        if v_found then
+          delete from public.rc_la_cells where row_id = v_id and day = v_day;
+          insert into public.rc_la_edits (batch, target, row_id, day, action, before)
+          values (v_batch, 'cell', v_id, v_day, 'delete', to_jsonb(v_cell));
+        end if;
+        results := results || jsonb_build_object('kind', 'cell', 'row_id', v_id, 'day', v_day, 'version', 0);
+      elsif v_found then
+        update public.rc_la_cells
+           set color = v_color, text = v_text, version = version + 1, updated_at = now(), updated_by = auth.uid()
+         where row_id = v_id and day = v_day
+        returning * into v_new;
+        insert into public.rc_la_edits (batch, target, row_id, day, action, before, after)
+        values (v_batch, 'cell', v_id, v_day, 'update', to_jsonb(v_cell), to_jsonb(v_new));
+        results := results || jsonb_build_object('kind', 'cell', 'row_id', v_id, 'day', v_day, 'version', v_new.version);
+      else
+        insert into public.rc_la_cells (row_id, day, color, text, version, updated_by)
+        values (v_id, v_day, v_color, v_text, 1, auth.uid())
+        returning * into v_new;
+        insert into public.rc_la_edits (batch, target, row_id, day, action, after)
+        values (v_batch, 'cell', v_id, v_day, 'insert', to_jsonb(v_new));
+        results := results || jsonb_build_object('kind', 'cell', 'row_id', v_id, 'day', v_day, 'version', 1);
+      end if;
+
+    else
+      raise exception 'unknown look-ahead op: %', op->>'op';
+    end if;
+  end loop;
+
+  return results;
+end;
+$$;
+
+-- The newest change, so an open editor can ask cheaply whether anybody else
+-- has written since it last looked. Anybody signed in may ask: it is a number.
+create or replace function public.rc_la_revision()
+returns bigint
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce(max(id), 0) from public.rc_la_edits;
+$$;
+
+revoke all on function public.rc_la_apply(jsonb) from public, anon;
+grant execute on function public.rc_la_apply(jsonb) to authenticated;
+revoke all on function public.rc_la_revision() from public, anon;
+grant execute on function public.rc_la_revision() to authenticated;
+
+-- ══════════════════════════════════════════════════════════════════════════
 -- Problems the application ran into
 --
 -- A screen that failed to load, an offline outcome the server refused, a
@@ -2260,5 +2549,5 @@ grant execute on function public.rc_clear_client_errors(timestamptz) to authenti
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '2')
+insert into public.rc_settings (key, value) values ('schema_version', '3')
 on conflict (key) do update set value = excluded.value, updated_at = now();

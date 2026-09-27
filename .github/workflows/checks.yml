@@ -82,7 +82,7 @@ jobs:
       # so a run on a Sunday is the same run as one on a Tuesday.
       - name: Every browser and Node suite
         run: >-
-          node tools/run_tests.js test_dist test_lookahead test_folder_rules
+          node tools/run_tests.js test_dist test_lookahead test_folder_rules test_la_edit
           smoke smoke_folder smoke_desktop smoke_hosted smoke_calendar
       # …and the calendar once more on a Monday, the day its date arithmetic has
       # gone wrong on before: yesterday is a Friday, and the week under review

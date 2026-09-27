@@ -28,7 +28,7 @@ const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..'
    disk or a fixed port. */
 const LANES = [
   ['test_dist', 'smoke_desktop'], // both assemble dist-desktop/
-  ['test_lookahead', 'test_folder_rules'],
+  ['test_lookahead', 'test_folder_rules', 'test_la_edit'],
   ['smoke'],
   ['smoke_folder'],
   ['smoke_hosted'],

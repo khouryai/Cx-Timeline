@@ -1450,5 +1450,96 @@ select assert(public.rc_clear_client_errors(now() - interval '1 day') = 0,
 select assert(public.rc_clear_client_errors(now() + interval '1 second') = 1,
   'and clearing everything removes it, and says how many');
 
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'The look-ahead, edited here'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+select act_as(:'alice');
+select public.rc_la_apply(jsonb_build_array(
+  jsonb_build_object('op', 'row', 'id', '51000000-0000-0000-0000-000000000001', 'expect', 0,
+    'set', jsonb_build_object('kind', 'section', 'sort', 1024, 'description', 'W40 — Testing')),
+  jsonb_build_object('op', 'row', 'id', '51000000-0000-0000-0000-000000000002', 'expect', 0,
+    'set', jsonb_build_object('kind', 'activity', 'sort', 2048, 'description', 'IXL Regression Testing',
+                              'location', 'W40', 'work_hours', '0700-1500')),
+  jsonb_build_object('op', 'row', 'id', '51000000-0000-0000-0000-000000000003', 'expect', 0,
+    'set', jsonb_build_object('kind', 'resource', 'parent_id', '51000000-0000-0000-0000-000000000002', 'sort', 2049)),
+  jsonb_build_object('op', 'cell', 'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-21',
+    'color', 'ffff00', 'text', 'X.WIT', 'expect', 0),
+  jsonb_build_object('op', 'cell', 'row_id', '51000000-0000-0000-0000-000000000003', 'day', '2026-09-21',
+    'color', null, 'text', 'Victor, Rosa', 'expect', 0)
+)) as la_first \gset
+select assert((select count(*) from public.rc_la_rows) = 3, 'an administrator writes the look-ahead in one batch');
+select assert((select color from public.rc_la_cells where text = 'X.WIT') = 'FFFF00',
+  'a colour is stored as the sheet writes it, upper case');
+select assert(jsonb_array_length(:'la_first'::jsonb) = 5
+  and (:'la_first'::jsonb)->3->>'version' = '1', 'and every op answers with the version it made');
+select assert((select count(*) from public.rc_la_edits) = 5, 'every change is on the record, in the same breath');
+
+-- Two people, one cell: the second is refused rather than silently winning.
+select public.rc_la_apply(jsonb_build_array(jsonb_build_object('op', 'cell',
+  'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-21', 'color', 'FF0000', 'text', 'X.WIT', 'expect', 1)));
+select refuses(:'alice', format('select public.rc_la_apply(%L::jsonb)', jsonb_build_array(jsonb_build_object('op', 'cell',
+  'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-21', 'color', 'FFC000', 'text', 'X', 'expect', 1))),
+  'writing over a day somebody else changed since you last looked');
+select act_as(:'alice');
+select assert((select color from public.rc_la_cells where row_id = '51000000-0000-0000-0000-000000000002') = 'FF0000',
+  'and what they wrote is what stands');
+select refuses(:'alice', format('select public.rc_la_apply(%L::jsonb)', jsonb_build_array(jsonb_build_object('op', 'row',
+  'id', '51000000-0000-0000-0000-000000000002', 'expect', 7, 'set', jsonb_build_object('location', 'Y10')))),
+  'renaming a row from a stale copy of it');
+select act_as(:'alice');
+
+-- A refused batch leaves nothing of itself behind.
+select refuses(:'alice', format('select public.rc_la_apply(%L::jsonb)', jsonb_build_array(
+  jsonb_build_object('op', 'row', 'id', '51000000-0000-0000-0000-000000000009', 'expect', 0,
+    'set', jsonb_build_object('kind', 'activity', 'description', 'Half a batch')),
+  jsonb_build_object('op', 'cell', 'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-21',
+    'color', 'FFC000', 'text', '', 'expect', 1))),
+  'a batch with one stale op in it');
+select act_as(:'alice');
+select assert(not exists (select 1 from public.rc_la_rows where description = 'Half a batch'),
+  'and none of it happened — a batch is all or nothing');
+
+-- Clearing a cell and deleting a row are on the record too.
+select public.rc_la_apply(jsonb_build_array(jsonb_build_object('op', 'cell',
+  'row_id', '51000000-0000-0000-0000-000000000003', 'day', '2026-09-21', 'color', null, 'text', '', 'expect', 1)));
+select assert(not exists (select 1 from public.rc_la_cells where row_id = '51000000-0000-0000-0000-000000000003'),
+  'blanking a day removes it');
+select public.rc_la_apply(jsonb_build_array(jsonb_build_object('op', 'delete_row',
+  'id', '51000000-0000-0000-0000-000000000001', 'expect', 1)));
+select assert((select count(*) from public.rc_la_edits where action = 'delete') = 2,
+  'the removals are recorded with what was there');
+select assert(public.rc_la_revision() = (select max(id) from public.rc_la_edits),
+  'the revision is the newest change, for an open editor to compare against');
+
+select act_as(:'carol');
+select assert((select count(*) from public.rc_la_rows) = 2, 'a member reads the look-ahead');
+select assert((select count(*) from public.rc_la_edits) = 0, 'but not who changed what — that is the evidence base');
+select refuses(:'carol', format('select public.rc_la_apply(%L::jsonb)', jsonb_build_array(jsonb_build_object('op', 'cell',
+  'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-22', 'color', 'FFFF00', 'text', 'X', 'expect', 0))),
+  'a member editing the look-ahead');
+select refuses(:'carol', 'insert into public.rc_la_rows (id, kind) values (gen_random_uuid(), ''activity'')',
+  'a member writing a row directly');
+select refuses(:'carol', 'update public.rc_la_cells set text = ''X''', 'a member changing a day directly');
+select act_as(:'alice');
+select refuses(:'alice', 'update public.rc_la_cells set text = ''X''',
+  'even an administrator changing a day around the function, where it would not be recorded');
+select refuses(:'alice', 'delete from public.rc_la_edits', 'or deleting the record of a change');
+select refuses(:'alice', 'update public.rc_la_edits set after = null', 'or rewriting it');
+
+-- Support codes are the register, and managed like the colours.
+select act_as(:'alice');
+select assert((select string_agg(code, ',' order by sort) from public.rc_support_codes) = 'X,WIT,TCE',
+  'the support codes the sheet uses are seeded');
+insert into public.rc_support_codes (code, name, party, sort) values ('SEC', 'Security escort', 'BART', 40);
+select assert(exists (select 1 from public.rc_support_codes where code = 'SEC'), 'an administrator adds one');
+select refuses(:'alice', 'insert into public.rc_support_codes (code, name) values (''x'', ''Duplicate'')',
+  'a code that already exists, in any case');
+select act_as(:'carol');
+select assert((select count(*) from public.rc_support_codes) = 4, 'a member reads them');
+select refuses(:'carol', 'insert into public.rc_support_codes (code, name) values (''ZZ'', ''Mine'')',
+  'a member adding a code');
+select refuses(:'carol', 'update public.rc_support_codes set name = ''Changed''', 'a member renaming one');
+
 reset role;
 do $$ begin raise notice ''; raise notice 'All resource calendar checks passed.'; end $$;

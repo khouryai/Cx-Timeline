@@ -29,6 +29,8 @@ import {
 import { toISO, addDays } from '../core/dates.js';
 
 import { la, table, WEEK_CHOICES } from './rc_la_state.js';
+import { gridFromModel, windowDays, addDaysISO, mondayOf, SECTION_BAND } from '../core/la_edit.js';
+import { hash64 } from '../core/folder_rules.js';
 
 /** Where the workbook lives, relative to the folder the plan is in. */
 const LOOKAHEAD_DIR = 'lookahead';
@@ -46,6 +48,14 @@ const LOOKAHEAD_DIR = 'lookahead';
  * out of a sync.
  */
 export async function ingest({ sheetName, legend, silent = false } = {}) {
+  /* Once the look-ahead is written in the calendar, the workbook is the old
+     copy: reading it again would overwrite a week of edits with whatever the
+     file said when it was archived. */
+  if ((await lookaheadSource()) === EDITOR_SOURCE) {
+    throw new Error('The look-ahead is written in the calendar now, so the workbook is no longer read. '
+      + 'Edit it under Look-ahead → Editor, and use Export to Excel for a copy.');
+  }
+
   /* Neither of these is a constant any more. The tab gets renamed by whoever
      maintains the workbook, and the legend is BART's to change — a redeploy is
      the wrong answer to either. Both are read from the database, and the
@@ -170,6 +180,80 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
       );
     }
 
+    return await publishGrid({ grid, legend, declared, hash, run, previous, silent });
+  } catch (err) {
+    if (run.outcome === 'error') {
+      run.note = err.message;
+      await rc.addIngestRun(run).catch(() => {});
+    }
+    throw err;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The editor as the source
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** `rc_settings.lookahead_source`: 'workbook' until the editor takes over. */
+export const EDITOR_SOURCE = 'editor';
+
+export async function lookaheadSource() {
+  const settings = await rc.listSettings().catch(() => []);
+  return settings.find((r) => r.key === 'lookahead_source')?.value || 'workbook';
+}
+
+/**
+ * The days a published read covers: the week just gone, this week and the
+ * five after it. The week behind is there because the huddle reviews
+ * yesterday — on a Monday that is last week — and a read that started today
+ * would leave it asking about a day the look-ahead no longer mentions.
+ */
+export function publishDays(todayIso) {
+  return windowDays(addDaysISO(mondayOf(todayIso), -7), 7);
+}
+
+/**
+ * Publish what the editor holds, so every other screen reads it.
+ *
+ * Deduplicated on the content, like a workbook read is on its bytes: the
+ * editor calls this whenever it has saved and gone quiet, and most of those
+ * calls find nothing new. The section band's grey is put in the legend as a
+ * divider the first time, because that is how `readGrid()` knows a heading.
+ */
+export async function publishFromEditor({ model, title = '', silent = true } = {}) {
+  let legend = (await rc.listLegend().catch(() => []))
+    .map((r) => ({ argb: r.argb, meaning: r.meaning, role: r.role || 'shift' }));
+  if (!legend.some((e) => String(e.argb).toUpperCase() === SECTION_BAND)) {
+    await rc.addLegend([{ argb: SECTION_BAND, meaning: 'Section band', role: 'divider' }]).catch(() => {});
+    legend = [...legend, { argb: SECTION_BAND, meaning: 'Section band', role: 'divider' }];
+  }
+  const days = publishDays(todayISO());
+  const grid = applyLegend(gridFromModel(model, days, { title }), legend);
+  const hash = `editor:${hash64(JSON.stringify(grid.rows.map((r) => r.cells.map((c) => [c.col, c.value, c.hex]))))}`;
+  const previous = await rc.latestSnapshot();
+  if (previous && previous.file_hash === hash) return { changed: false, events: [] };
+  const run = {
+    ran_at: new Date().toISOString(),
+    outcome: 'error',
+    note: null,
+    file_hash: hash,
+    file_mtime: new Date().toISOString(),
+  };
+  return publishGrid({ grid, legend, declared: [], hash, run, previous, silent, notify: false });
+}
+
+/**
+ * Store a read of the look-ahead and derive everything that hangs off it.
+ *
+ * The second half of what "Check now" always did, taken out so the editor can
+ * do it too: the editor's model becomes a grid (`gridFromModel()`) and arrives
+ * here exactly as a workbook did — snapshot, rows keyed by week and location,
+ * change events against the previous read, tasks moved to whoever the sheet
+ * now names. Everything downstream therefore reads one kind of record whether
+ * the look-ahead was typed into Excel or into the calendar.
+ */
+async function publishGrid({ grid, legend, declared = [], hash, run, previous, silent = false, notify = true }) {
+  try {
     const snapshot = await rc.addSnapshot({
       file_hash: hash,
       file_mtime: run.file_mtime,
@@ -306,7 +390,9 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
       });
     }
 
-    notifyChanged('lookahead');
+    // The editor publishes quietly: a redraw of the whole tab every time it
+    // saves would throw away the cell somebody is typing in.
+    if (notify) notifyChanged('lookahead');
     return { changed: true, snapshot, grid, events };
   } catch (err) {
     if (run.outcome === 'error') {
@@ -487,6 +573,15 @@ function sideOf(event, which) {
 }
 
 export function checkNowButton() {
+  /* Once the look-ahead is written in the calendar there is nothing to check:
+     the button that read the workbook becomes the way to the editor. */
+  if (la.source === EDITOR_SOURCE) {
+    return el('button', {
+      class: 'cx-btn mini primary',
+      html: icon('edit', { size: 12 }) + '<span>Edit the look-ahead</span>',
+      onClick: () => { la.section = 'editor'; notifyChanged('lookahead'); },
+    });
+  }
   return el('button', {
     class: 'cx-btn mini primary',
     html: icon('refresh', { size: 12 }) + '<span>Check now</span>',

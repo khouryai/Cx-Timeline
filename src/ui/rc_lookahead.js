@@ -39,13 +39,14 @@ import {
 import { toISO, addDays } from '../core/dates.js';
 
 import { la, table, WEEK_CHOICES } from './rc_la_state.js';
-import { checkNowButton } from './rc_ingest.js';
+import { checkNowButton, lookaheadSource, EDITOR_SOURCE } from './rc_ingest.js';
+import { renderEditor, flushEditor } from './rc_la_editor.js';
 import { renderLegend } from './rc_la_legend.js';
 import { renderChanges, renderSnapshots } from './rc_la_changes.js';
 import { renderCancellations } from './rc_la_cancellations.js';
 import { renderSars } from './rc_la_sars.js';
 
-const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'sars'];
+const SECTIONS = ['editor', 'calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'sars'];
 
 export async function render(root) {
   /* The calendar is the team's; the register around it is not.
@@ -57,8 +58,12 @@ export async function render(root) {
      restricted in the *policies* rather than here, and a section that would
      come back empty is a door onto a wall. */
   const admin = rc.isAdmin();
+  la.source = await lookaheadSource();
+  /* The editor is an administrator's — the look-ahead is written by the two
+     people who own it — and it is where they land once it is the source. */
   const sections = admin ? SECTIONS : ['calendar'];
-  if (!sections.includes(la.section)) la.section = sections[0];
+  if (admin && !la.sectionChosen && la.source === EDITOR_SOURCE) la.section = 'editor';
+  if (!sections.includes(la.section)) la.section = admin ? 'calendar' : sections[0];
 
   const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
   for (const id of sections) {
@@ -66,11 +71,19 @@ export async function render(root) {
       class: 'rc-tab',
       type: 'button',
       text: {
-        calendar: 'Calendar', cancellations: 'Cancellations', changes: 'Changes', snapshots: 'Snapshots',
-        legend: 'Legend', sars: 'Site access',
+        editor: 'Editor', calendar: 'Calendar', cancellations: 'Cancellations', changes: 'Changes',
+        snapshots: 'Snapshots', legend: 'Legend', sars: 'Site access',
       }[id],
       'aria-pressed': String(id === la.section),
-      onClick: () => { la.section = id; clear(root); render(root); },
+      onClick: async () => {
+        // Leaving the editor publishes what it holds first, so the section
+        // being opened reads the look-ahead as it now stands.
+        if (la.section === 'editor' && id !== 'editor') await flushEditor();
+        la.section = id;
+        la.sectionChosen = true;
+        clear(root);
+        render(root);
+      },
     }));
   }
   if (sections.length > 1) root.appendChild(nav);
@@ -78,7 +91,8 @@ export async function render(root) {
   const host = el('div');
   root.appendChild(host);
 
-  if (la.section === 'calendar') await renderCalendar(host);
+  if (la.section === 'editor') await renderEditor(host);
+  else if (la.section === 'calendar') await renderCalendar(host);
   else if (la.section === 'cancellations') await renderCancellations(host);
   else if (la.section === 'changes') await renderChanges(host);
   else if (la.section === 'snapshots') await renderSnapshots(host);

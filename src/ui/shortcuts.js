@@ -16,6 +16,7 @@ import { nudgeSelection, stretchSelection } from '../timeline/interactions.js';
 import * as cmd from './commands.js';
 import { modalOpen, closeMenu, closePopover } from './components.js';
 import { showPane } from './panels.js';
+import * as workspace from './workspace.js';
 
 export function installShortcuts() {
   window.addEventListener('keydown', onKeyDown, true);
@@ -35,6 +36,11 @@ function onKeyDown(e) {
   }
 
   if (modalOpen() || isTyping(e.target)) return;
+  /* Every key below acts on the timeline, and the calendar is a different
+     interface over different data: Delete there must not delete a bar on a
+     canvas nobody can see, and mod+Z must not undo the plan. The calendar's
+     own screens — the look-ahead editor above all — handle their keys. */
+  if (!workspace.isTimeline()) return;
 
   const mod = hasMod(e);
   const key = e.key.toLowerCase();

@@ -1107,3 +1107,391 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   }
   .rc-present-answer .cx-btn { min-height: 52px; }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The look-ahead editor (ui/rc_la_editor.js)
+
+   The calendar grid, made writable: the same header rows, the same frozen
+   activity columns, the workbook's own colours on the days. The activity
+   columns have fixed widths so they can be frozen at known offsets.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.lae-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) 0 var(--space-3);
+}
+.lae-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.lae-right { margin-left: auto; }
+.lae-range {
+  font-family: var(--f-mono);
+  font-size: var(--fs-tiny);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-main);
+  padding: 0 6px;
+  white-space: nowrap;
+}
+.lae-search { width: 170px; }
+
+.lae-palette { gap: 4px; }
+.lae-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform var(--dur-fast) var(--easing), box-shadow var(--dur-fast) var(--easing);
+}
+.lae-swatch:hover,
+.lae-swatch:focus-visible { transform: translateY(-1px); box-shadow: var(--shadow-md); }
+.lae-swatch-none {
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.lae-codes { gap: 4px; }
+.lae-code {
+  min-width: 30px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-main);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--easing), border-color var(--dur-fast) var(--easing);
+}
+.lae-code:hover,
+.lae-code:focus-visible { background: var(--surface-3); border-color: var(--info-border); }
+
+.lae-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-tiny);
+  color: var(--text-muted);
+  white-space: nowrap;
+  padding: 0 4px;
+}
+.lae-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--good);
+}
+.lae-status-saving .lae-status-dot { background: var(--info); }
+.lae-status-retry .lae-status-dot,
+.lae-status-conflict .lae-status-dot { background: var(--warn); }
+.lae-status-retry { color: var(--warn); }
+
+/* ── The grid ── */
+
+.lae-scroll {
+  position: relative;
+  overflow: auto;
+  max-height: calc(100vh - 250px);
+  min-height: 320px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  outline: none;
+}
+.lae-scroll:focus,
+.lae-scroll:focus-visible { outline: none; }
+/* The caret cell is the focus indicator inside the grid; the frame only hints. */
+.lae-scroll:focus-visible { box-shadow: 0 0 0 1px var(--info-border); }
+
+.lae-grid {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--fs-tiny);
+  user-select: none;
+  table-layout: fixed;
+}
+.lae-grid th,
+.lae-grid td {
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 3px 6px;
+  height: 26px;
+  box-sizing: border-box;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* The header: three rows, frozen one under another. */
+.lae-grid thead th {
+  position: sticky;
+  z-index: 3;
+  background: var(--surface-2);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: center;
+}
+.lae-grid thead tr:nth-child(1) th { top: 0; height: 26px; }
+.lae-grid thead tr:nth-child(2) th { top: 26px; height: 22px; color: var(--text-main); font-size: 11px; }
+.lae-grid thead tr:nth-child(3) th { top: 48px; height: 22px; border-bottom: 1px solid var(--border-strong); }
+.lae-grid thead th.lae-meta,
+.lae-grid thead th.lae-handle-head {
+  top: 0;
+  z-index: 5;
+  vertical-align: bottom;
+  text-align: left;
+  white-space: normal;
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--f-ui);
+  font-size: var(--fs-tiny);
+  color: var(--text-main);
+  height: 70px;
+}
+.lae-grid thead th.lae-month {
+  background: var(--surface-3);
+  color: var(--text-main);
+  text-align: left;
+  letter-spacing: 0.1em;
+}
+.lae-grid thead th.lae-weekend { color: var(--text-faint); }
+.lae-grid thead th.lae-today { color: var(--hitachi-red); }
+
+/* The activity columns, frozen at fixed offsets. */
+.lae-grid .lae-handle,
+.lae-grid .lae-handle-head,
+.lae-grid .lae-meta {
+  position: sticky;
+  z-index: 2;
+  background: var(--surface);
+}
+.lae-grid .lae-handle,
+.lae-grid .lae-handle-head { left: 0; width: 44px; min-width: 44px; max-width: 44px; padding: 0 2px; }
+.lae-grid .lae-meta-activity_id { left: 44px; width: 104px; min-width: 104px; max-width: 104px; }
+.lae-grid .lae-meta-description { left: 148px; width: 280px; min-width: 280px; max-width: 280px; }
+.lae-grid .lae-meta-location { left: 428px; width: 112px; min-width: 112px; max-width: 112px; }
+.lae-grid .lae-meta-sswp { left: 540px; width: 58px; min-width: 58px; max-width: 58px; }
+.lae-grid .lae-meta-party { left: 598px; width: 72px; min-width: 72px; max-width: 72px; }
+.lae-grid .lae-meta-work_hours { left: 670px; width: 92px; min-width: 92px; max-width: 92px; }
+.lae-grid .lae-meta-last { border-right: 2px solid var(--border-strong); }
+.lae-grid td.lae-meta { text-overflow: ellipsis; }
+.lae-grid td.lae-meta-description { font-weight: 500; color: var(--text-main); }
+
+.lae-grid .lae-day {
+  width: 58px;
+  min-width: 58px;
+  max-width: 58px;
+  text-align: center;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--text-main);
+}
+.lae-grid .lae-weekend { background: var(--surface-2); }
+.lae-grid td.lae-today { box-shadow: inset 2px 0 0 var(--hitachi-red); }
+/* A painted day states its own colour, so its writing has to stay legible over
+   whatever the colour turns out to be — as on the calendar grid. */
+.lae-grid td.lae-painted { color: #111; font-weight: 700; }
+.lae-grid td.lae-painted.lae-dark { color: #fff; }
+.lae-grid td.lae-cancel {
+  background-image: linear-gradient(
+    to top right, transparent calc(50% - 1px), currentColor calc(50% - 1px),
+    currentColor calc(50% + 1px), transparent calc(50% + 1px));
+}
+.lae-grid td.lae-unknown-code {
+  text-decoration: underline wavy var(--warn);
+  text-underline-offset: 3px;
+}
+
+/* Row kinds. */
+.lae-grid tr.lae-section td {
+  background: var(--surface-3);
+  border-top: 2px solid var(--border-strong);
+  font-weight: 700;
+  color: var(--text-main);
+}
+.lae-grid tr.lae-section td.lae-meta-description { font-size: var(--fs-small); overflow: visible; }
+.lae-grid tr.lae-resource td.lae-meta { font-style: italic; color: var(--text-muted); }
+.lae-grid tr.lae-resource td { border-bottom-color: var(--border-strong); }
+.lae-grid tr.lae-resource td.lae-day { font-family: var(--f-ui); font-weight: 500; text-align: left; }
+.lae-grid tr.lae-absence td.lae-meta-description { font-weight: 700; }
+.lae-grid tr.lae-absence td.lae-day { font-family: var(--f-ui); text-align: left; }
+.lae-grid tr.lae-archived td { opacity: 0.45; }
+.lae-grid td.lae-fixed.lae-meta { color: var(--text-muted); }
+
+.lae-grip {
+  display: inline-flex;
+  width: 18px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  cursor: grab;
+}
+.lae-grid tr:hover .lae-grip { color: var(--text-muted); }
+.lae-fold {
+  display: inline-flex;
+  width: 18px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+/* Selection: the range washed, the cell with the caret outlined, the corner
+   square that drags a fill. */
+.lae-grid td.lae-sel { box-shadow: inset 0 0 0 100px var(--info-light); }
+.lae-grid td.lae-sel.lae-painted { box-shadow: inset 0 0 0 2px var(--info); }
+.lae-grid td.lae-cur { outline: 2px solid var(--info); outline-offset: -2px; }
+.lae-grid tr.lae-sel-row td.lae-handle { background: var(--info-light); }
+.lae-grid td.lae-clip { outline: 1px dashed var(--info); outline-offset: -3px; }
+.lae-grid td.lae-fill-preview { box-shadow: inset 0 0 0 100px var(--info-light); outline: 1px dashed var(--info); outline-offset: -2px; }
+.lae-grid td { position: relative; }
+.lae-grid td.lae-meta,
+.lae-grid td.lae-handle { position: sticky; }
+.lae-fill-handle {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 7px;
+  height: 7px;
+  background: var(--info);
+  border: 1px solid var(--surface);
+  cursor: crosshair;
+  z-index: 1;
+}
+
+.lae-drop-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--hitachi-red);
+  pointer-events: none;
+  z-index: 6;
+}
+
+/* Typing into a cell. */
+.lae-editor {
+  position: absolute;
+  z-index: 7;
+  box-sizing: border-box;
+  padding: 2px 6px;
+  border: 2px solid var(--info);
+  border-radius: 0;
+  background: var(--surface);
+  color: var(--text-main);
+  font: inherit;
+  font-size: var(--fs-tiny);
+  outline: none;
+  box-shadow: var(--shadow-md);
+}
+.lae-edit-hint {
+  position: absolute;
+  z-index: 7;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+}
+
+/* What is asked for, per day, pinned under the grid. */
+.lae-grid tfoot td {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border-strong);
+  height: auto;
+  min-height: 26px;
+  vertical-align: top;
+}
+.lae-grid tfoot td.lae-handle,
+.lae-grid tfoot td.lae-meta { z-index: 4; }
+.lae-grid tfoot td.lae-totals-label {
+  left: 44px;
+  width: 718px;
+  min-width: 718px;
+  max-width: 718px;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.lae-grid tfoot td.lae-total {
+  white-space: pre-line;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--text-main);
+  text-align: center;
+}
+
+/* Starting: from the workbook, a file, or nothing. */
+.lae-start {
+  max-width: 720px;
+  margin: var(--space-4) auto;
+  text-align: center;
+}
+.lae-start h2 { margin: var(--space-2) 0; }
+.lae-start-icon { color: var(--text-muted); }
+.lae-start-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  text-align: left;
+}
+.lae-start-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.lae-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-2) var(--space-3);
+}
+.lae-summary { margin-top: var(--space-4); }
+.lae-summary-total {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--text-main);
+  margin: 4px 0 var(--space-2);
+}
+
+@media (pointer: coarse) {
+  .lae-swatch, .lae-code { min-height: 36px; min-width: 36px; }
+  .lae-grid th, .lae-grid td { height: 32px; }
+}
