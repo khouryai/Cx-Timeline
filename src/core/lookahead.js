@@ -1351,3 +1351,103 @@ export function attachCancellationNotes(events, notes) {
     return { ...event, note: current[current.length - 1] || null, history: touching };
   });
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Progress from the calendar
+
+   The daily huddle records what each person actually did, and the timeline
+   has had `actualStart` / `actualEnd` fields nobody filled in. This joins the
+   two: an outcome is traced to the look-ahead row it was recorded against, the
+   row to the suggestion a bar is linked to, and the bar is offered the first
+   and last day anybody worked on it.
+
+   Offered, never written. The same rule as the rest of the register: a read of
+   the calendar proposes, and somebody says yes. A finish is only offered when
+   the look-ahead has nothing left for the bar and the last word on it was
+   "completed" — a gap in the outcomes is not the end of the work.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Statuses that say somebody worked on the task that day. */
+export const WORKED_STATUSES = ['completed', 'partial', 'carried'];
+
+/**
+ * What the outcomes say about each linked bar.
+ *
+ * `objects` are the plan's objects (only those with `data.laIds` count);
+ * `activities` is the register's id → entry map; `actuals` are rows of
+ * `rc_actuals_current`; `rows` are the `rc_lookahead_rows` those outcomes (or
+ * their plan entries in `plan`) point at. An outcome with a row is matched
+ * through the row's label; one without falls back to its task text, which a
+ * day read off the sheet carries verbatim. Both go through `suggestionKey()`,
+ * so a match is exact or nothing.
+ *
+ * Returns one proposal per bar with at least one worked day:
+ * `{ objectId, first, last, days, people, lastStatus, start, end, byRow, byTask }`
+ * with `start` / `end` as UTC-midnight ms (end half-open, like the bar) and
+ * `end` null when a finish cannot be claimed yet.
+ */
+export function outcomeProgress({ objects = [], activities = {}, actuals = [], rows = [], plan = [], todayMs = Date.now() } = {}) {
+  const rowById = new Map(rows.map((r) => [r.id, r]));
+  const planById = new Map(plan.map((p) => [p.id, p]));
+
+  // key → the bars whose linked runs carry it
+  const barsByKey = new Map();
+  for (const obj of objects) {
+    const ids = Array.isArray(obj?.data?.laIds) ? obj.data.laIds : [];
+    for (const id of ids) {
+      const entry = activities[id];
+      if (!entry?.key) continue;
+      if (!barsByKey.has(entry.key)) barsByKey.set(entry.key, new Set());
+      barsByKey.get(entry.key).add(obj.id);
+    }
+  }
+  if (!barsByKey.size) return [];
+
+  const byBar = new Map();
+  for (const a of actuals) {
+    if (!WORKED_STATUSES.includes(a.status) || !a.work_date) continue;
+    const rowId = a.lookahead_row_id || planById.get(a.plan_entry_id)?.lookahead_row_id || null;
+    const row = rowId ? rowById.get(rowId) : null;
+    const key = suggestionKey(row ? row.raw_label : a.task);
+    const bars = key ? barsByKey.get(key) : null;
+    if (!bars) continue;
+    for (const id of bars) {
+      if (!byBar.has(id)) byBar.set(id, { dates: new Map(), people: new Set(), byRow: 0, byTask: 0 });
+      const acc = byBar.get(id);
+      const prev = acc.dates.get(a.work_date);
+      // Several people on one day: "completed" from anybody is the day's word.
+      if (!prev || a.status === 'completed') acc.dates.set(a.work_date, a.status);
+      if (a.person_id) acc.people.add(a.person_id);
+      if (row) acc.byRow++;
+      else acc.byTask++;
+    }
+  }
+
+  const out = [];
+  for (const obj of objects) {
+    const acc = byBar.get(obj.id);
+    if (!acc) continue;
+    const dates = [...acc.dates.keys()].sort();
+    const first = dates[0];
+    const last = dates[dates.length - 1];
+    const lastStatus = acc.dates.get(last);
+    const ahead = (obj.data.laIds || []).some((id) => {
+      const entry = activities[id];
+      return entry && !entry.dismissed && Number.isFinite(entry.end) && entry.end > todayMs;
+    });
+    const done = lastStatus === 'completed' && !ahead;
+    out.push({
+      objectId: obj.id,
+      first,
+      last,
+      days: dates.length,
+      people: acc.people.size,
+      lastStatus,
+      start: isoMs(first),
+      end: done ? isoMs(last) + 86400000 : null,
+      byRow: acc.byRow,
+      byTask: acc.byTask,
+    });
+  }
+  return out;
+}

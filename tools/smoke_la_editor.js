@@ -558,6 +558,49 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     && /the resource calendar/.test(plan.pane) && /ATS Site Test/.test(plan.pane), plan.toast.slice(0, 160));
   check('reading it sends nothing — the plan still never reaches the calendar',
     (await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select').length)) === sentBefore);
+
+  // Progress: place the suggestion, record a day's work against its row, and
+  // the bar is offered that day as its actual start.
+  await page.locator('#dock button[aria-label^="Add "][aria-label*="ATS Site Test"]').first().click();
+  await page.waitForTimeout(300);
+  await page.locator('.cx-modal button', { hasText: /^Add$/ }).click();
+  await page.waitForTimeout(400);
+  await page.locator('#sidenav .nav-link[data-pane="lookahead"]').click();
+  await page.waitForTimeout(400);
+  const progressBtn = page.locator('#dock button', { hasText: 'Progress from the calendar' });
+  check('a placed bar can take its progress from the calendar', (await progressBtn.count()) === 1);
+  const today = await page.evaluate(() => new Date().toISOString().slice(0, 10));
+  // Against every read's copy of the row: the stub ignores order(), so which
+  // snapshot counts as the latest is not something this test should depend on.
+  await page.evaluate((iso) => {
+    const S = window.__rc.rows;
+    S.rc_lookahead_rows.filter((r) => /ATS Site Test/.test(r.raw_label || '')).forEach((row, i) => {
+      S.rc_actuals.push({
+        id: `act-progress-${i}`, client_uuid: `act-progress-${i}`, person_id: S.rc_people[0].id, work_date: iso,
+        status: 'completed', task: row.raw_label, lookahead_row_id: row.id, shift: 'day',
+        created_at: new Date().toISOString(),
+      });
+    });
+  }, today);
+  const sentBeforeProgress = await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select').length);
+  await progressBtn.click();
+  await page.locator('.cx-modal .la-progress').waitFor({ timeout: 5000 }).catch(() => {});
+  const offer = await page.evaluate(() => document.querySelector('.cx-modal')?.innerText || [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | '));
+  check('the huddle\'s outcome is offered as the actual start, ticked because none was set',
+    /Progress from the calendar/.test(offer) && /Actual start/.test(offer)
+      && (await page.locator('.cx-modal .la-progress input[type="checkbox"]:checked').count()) >= 1, offer.replace(/\s+/g, ' ').slice(0, 200));
+  await page.locator('.cx-modal button', { hasText: 'Apply selected' }).click();
+  await page.waitForTimeout(400);
+  check('applying it records the date on the bar',
+    /Actual dates recorded/.test(await page.evaluate(() => [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | '))));
+  await progressBtn.click();
+  await page.waitForFunction(() => [...document.querySelectorAll('.cx-toast')].some((t) => /already agree|Could not/.test(t.textContent)),
+    null, { timeout: 5000 }).catch(() => {});
+  check('and asking again finds nothing new to offer',
+    /already agree/.test(await page.evaluate(() => [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | ')))
+      && !(await page.locator('.cx-modal .la-progress').count()));
+  check('reading progress sends nothing to the calendar',
+    (await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select').length)) === sentBeforeProgress);
   await page.locator('.ws-btn', { hasText: 'Calendar' }).click();
   await page.waitForTimeout(300);
 }

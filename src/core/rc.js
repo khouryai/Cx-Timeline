@@ -656,6 +656,20 @@ export function listActuals(fromISO, toISO) {
     q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
 }
 
+/**
+ * Look-ahead rows by id — for tracing an outcome to the row it was recorded
+ * against. Asked in slices so a long list of ids never makes an overlong URL.
+ */
+export async function lookaheadRowsByIds(ids) {
+  const unique = [...new Set((ids || []).filter(Boolean))];
+  const out = [];
+  for (let i = 0; i < unique.length; i += 200) {
+    const slice = unique.slice(i, i + 200);
+    out.push(...(await select('rc_lookahead_rows', (q) => q.in('id', slice), { columns: 'id,raw_label,raw_location' })));
+  }
+  return out;
+}
+
 /** Carried tasks, oldest first — a chain on its fifth day is the headline. */
 /**
  * Blockers, as they stand.

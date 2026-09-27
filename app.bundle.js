@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-27T22:03:56.218Z
+ * Modules: 59   Built: 2026-09-27T22:27:44.617Z
  */
 (function () {
   'use strict';
@@ -7672,6 +7672,106 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     });
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     Progress from the calendar
+
+     The daily huddle records what each person actually did, and the timeline
+     has had `actualStart` / `actualEnd` fields nobody filled in. This joins the
+     two: an outcome is traced to the look-ahead row it was recorded against, the
+     row to the suggestion a bar is linked to, and the bar is offered the first
+     and last day anybody worked on it.
+
+     Offered, never written. The same rule as the rest of the register: a read of
+     the calendar proposes, and somebody says yes. A finish is only offered when
+     the look-ahead has nothing left for the bar and the last word on it was
+     "completed" — a gap in the outcomes is not the end of the work.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Statuses that say somebody worked on the task that day. */
+  const WORKED_STATUSES = ['completed', 'partial', 'carried'];
+
+  /**
+   * What the outcomes say about each linked bar.
+   *
+   * `objects` are the plan's objects (only those with `data.laIds` count);
+   * `activities` is the register's id → entry map; `actuals` are rows of
+   * `rc_actuals_current`; `rows` are the `rc_lookahead_rows` those outcomes (or
+   * their plan entries in `plan`) point at. An outcome with a row is matched
+   * through the row's label; one without falls back to its task text, which a
+   * day read off the sheet carries verbatim. Both go through `suggestionKey()`,
+   * so a match is exact or nothing.
+   *
+   * Returns one proposal per bar with at least one worked day:
+   * `{ objectId, first, last, days, people, lastStatus, start, end, byRow, byTask }`
+   * with `start` / `end` as UTC-midnight ms (end half-open, like the bar) and
+   * `end` null when a finish cannot be claimed yet.
+   */
+  function outcomeProgress({ objects = [], activities = {}, actuals = [], rows = [], plan = [], todayMs = Date.now() } = {}) {
+    const rowById = new Map(rows.map((r) => [r.id, r]));
+    const planById = new Map(plan.map((p) => [p.id, p]));
+
+    // key → the bars whose linked runs carry it
+    const barsByKey = new Map();
+    for (const obj of objects) {
+      const ids = Array.isArray(obj?.data?.laIds) ? obj.data.laIds : [];
+      for (const id of ids) {
+        const entry = activities[id];
+        if (!entry?.key) continue;
+        if (!barsByKey.has(entry.key)) barsByKey.set(entry.key, new Set());
+        barsByKey.get(entry.key).add(obj.id);
+      }
+    }
+    if (!barsByKey.size) return [];
+
+    const byBar = new Map();
+    for (const a of actuals) {
+      if (!WORKED_STATUSES.includes(a.status) || !a.work_date) continue;
+      const rowId = a.lookahead_row_id || planById.get(a.plan_entry_id)?.lookahead_row_id || null;
+      const row = rowId ? rowById.get(rowId) : null;
+      const key = suggestionKey(row ? row.raw_label : a.task);
+      const bars = key ? barsByKey.get(key) : null;
+      if (!bars) continue;
+      for (const id of bars) {
+        if (!byBar.has(id)) byBar.set(id, { dates: new Map(), people: new Set(), byRow: 0, byTask: 0 });
+        const acc = byBar.get(id);
+        const prev = acc.dates.get(a.work_date);
+        // Several people on one day: "completed" from anybody is the day's word.
+        if (!prev || a.status === 'completed') acc.dates.set(a.work_date, a.status);
+        if (a.person_id) acc.people.add(a.person_id);
+        if (row) acc.byRow++;
+        else acc.byTask++;
+      }
+    }
+
+    const out = [];
+    for (const obj of objects) {
+      const acc = byBar.get(obj.id);
+      if (!acc) continue;
+      const dates = [...acc.dates.keys()].sort();
+      const first = dates[0];
+      const last = dates[dates.length - 1];
+      const lastStatus = acc.dates.get(last);
+      const ahead = (obj.data.laIds || []).some((id) => {
+        const entry = activities[id];
+        return entry && !entry.dismissed && Number.isFinite(entry.end) && entry.end > todayMs;
+      });
+      const done = lastStatus === 'completed' && !ahead;
+      out.push({
+        objectId: obj.id,
+        first,
+        last,
+        days: dates.length,
+        people: acc.people.size,
+        lastStatus,
+        start: isoMs(first),
+        end: done ? isoMs(last) + 86400000 : null,
+        byRow: acc.byRow,
+        byTask: acc.byTask,
+      });
+    }
+    return out;
+  }
+
   Object.defineProperty(__x, "isResourceLabel", { get: () => isResourceLabel, enumerable: true });
   Object.defineProperty(__x, "absenceKind", { get: () => absenceKind, enumerable: true });
   Object.defineProperty(__x, "ABSENCE_KINDS", { get: () => ABSENCE_KINDS, enumerable: true });
@@ -7697,6 +7797,8 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "reconcileSuggestions", { get: () => reconcileSuggestions, enumerable: true });
   Object.defineProperty(__x, "cancellationEvents", { get: () => cancellationEvents, enumerable: true });
   Object.defineProperty(__x, "attachCancellationNotes", { get: () => attachCancellationNotes, enumerable: true });
+  Object.defineProperty(__x, "WORKED_STATUSES", { get: () => WORKED_STATUSES, enumerable: true });
+  Object.defineProperty(__x, "outcomeProgress", { get: () => outcomeProgress, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -16446,6 +16548,20 @@ __mods["core/rc.js"] = function (__x, __req) {
       q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
   }
 
+  /**
+   * Look-ahead rows by id — for tracing an outcome to the row it was recorded
+   * against. Asked in slices so a long list of ids never makes an overlong URL.
+   */
+  async function lookaheadRowsByIds(ids) {
+    const unique = [...new Set((ids || []).filter(Boolean))];
+    const out = [];
+    for (let i = 0; i < unique.length; i += 200) {
+      const slice = unique.slice(i, i + 200);
+      out.push(...(await select('rc_lookahead_rows', (q) => q.in('id', slice), { columns: 'id,raw_label,raw_location' })));
+    }
+    return out;
+  }
+
   /** Carried tasks, oldest first — a chain on its fifth day is the headline. */
   /**
    * Blockers, as they stand.
@@ -16998,6 +17114,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listPlan", { get: () => listPlan, enumerable: true });
   Object.defineProperty(__x, "planHistory", { get: () => planHistory, enumerable: true });
   Object.defineProperty(__x, "listActuals", { get: () => listActuals, enumerable: true });
+  Object.defineProperty(__x, "lookaheadRowsByIds", { get: () => lookaheadRowsByIds, enumerable: true });
   Object.defineProperty(__x, "listBlockers", { get: () => listBlockers, enumerable: true });
   Object.defineProperty(__x, "blockerHistory", { get: () => blockerHistory, enumerable: true });
   Object.defineProperty(__x, "raiseBlocker", { get: () => raiseBlocker, enumerable: true });
@@ -23109,7 +23226,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
 
   const { el, clear, debounce, fold } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, fmtTimestamp, MS_DAY } = __req("core/dates.js");
+  const { fmtDate, fmtTimestamp, MS_DAY, toISO, toMs } = __req("core/dates.js");
   const { TYPES, lookaheadRegister, laLinkedIds, laPlaced, laPlacedIds, laVariance, statusOf } = __req("core/model.js");
 
 
@@ -23121,7 +23238,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
 
   const store = __req("core/store.js");
   const renderer = __req("timeline/renderer.js");
-  const { readGrid, marksOf, suggestionsFrom, reconcileSuggestions } = __req("core/lookahead.js");
+  const { readGrid, marksOf, suggestionsFrom, reconcileSuggestions, outcomeProgress } = __req("core/lookahead.js");
   const { readZip, readSheets, parseSheet, applyLegend, inForce, workOnlyLegend, fileLegend } = __req("io/lookahead.js");
 
 
@@ -23219,6 +23336,14 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
           title: 'Read a look-ahead workbook from a file',
           onClick: () => openLookaheadImport(),
         }),
+        calendar && laPlacedIds(store.getDoc()).size
+          ? el('button', {
+              class: 'cx-btn mini',
+              html: icon('check', { size: 12 }) + '<span>Progress from the calendar</span>',
+              title: 'Offer actual start and finish dates from what the huddle recorded',
+              onClick: () => progressFromCalendar(),
+            })
+          : null,
         Object.keys(register.activities).length
           ? el('button', {
               class: 'cx-btn mini ghost',
@@ -23312,6 +23437,143 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
     const follow = report.moved.filter((m) => placed.has(m.id));
     if (follow.length) setTimeout(() => openFollowDialog(follow), 350);
     return report;
+  }
+
+  /**
+   * Actual dates, from what the daily huddle recorded.
+   *
+   * The outcomes are traced to the look-ahead rows they were recorded against
+   * and from there to the bars linked to those rows (`outcomeProgress()`); each
+   * bar is offered the first day anybody worked on it as its actual start, and —
+   * only once the look-ahead has nothing more for it and the last word was
+   * "completed" — the day after the last as its actual finish. Nothing is written
+   * until somebody ticks it: a date nobody has set yet starts ticked, a date that
+   * would replace one somebody typed does not. Reads only; nothing about the plan
+   * goes to the calendar.
+   */
+  async function progressFromCalendar() {
+    const doc = store.getDoc();
+    const register = lookaheadRegister(doc);
+    const objects = doc.objects.filter((o) => laLinkedIds(o).length);
+    if (!objects.length) {
+      toast({ tone: 'warn', title: 'No linked bars', message: 'Place or link a look-ahead suggestion first — progress is read for bars that stand for one.' });
+      return null;
+    }
+    let from = Infinity;
+    for (const o of objects) {
+      for (const id of laLinkedIds(o)) {
+        const entry = register.activities[id];
+        if (entry?.start != null) from = Math.min(from, entry.start, entry.previous?.start ?? Infinity);
+      }
+      from = Math.min(from, o.start);
+    }
+    const todayMs = toMs(toISO(Date.now()));
+    // A fortnight's slack before the earliest date: work often starts early.
+    const fromISO = toISO(Math.min(Number.isFinite(from) ? from : todayMs, todayMs) - 14 * MS_DAY);
+    const toISOday = toISO(todayMs);
+
+    let proposals;
+    try {
+      const [actuals, plan] = await Promise.all([rc.listActuals(fromISO, toISOday), rc.listPlan(fromISO, toISOday)]);
+      const rowIds = [
+        ...actuals.map((a) => a.lookahead_row_id),
+        ...plan.map((p) => p.lookahead_row_id),
+      ];
+      const rows = await rc.lookaheadRowsByIds(rowIds);
+      proposals = outcomeProgress({ objects, activities: register.activities, actuals, rows, plan, todayMs: todayMs + MS_DAY });
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not read the calendar', message: err.message });
+      return null;
+    }
+
+    const offers = [];
+    for (const p of proposals) {
+      const obj = doc.objects.find((o) => o.id === p.objectId);
+      const hasDuration = !!TYPES[obj.type]?.duration;
+      const haveStart = toMs(obj.data?.actualStart);
+      const haveEnd = toMs(obj.data?.actualEnd);
+      const start = haveStart === p.start ? null : { value: p.start, replaces: Number.isFinite(haveStart) ? haveStart : null };
+      const end = !hasDuration || p.end == null || haveEnd === p.end
+        ? null
+        : { value: p.end, replaces: Number.isFinite(haveEnd) ? haveEnd : null };
+      if (start || end) offers.push({ obj, p, start, end });
+    }
+    if (!offers.length) {
+      toast({
+        tone: 'info',
+        title: 'Nothing new',
+        message: proposals.length
+          ? 'The actual dates already agree with what the huddle recorded.'
+          : 'No outcomes recorded yet against the look-ahead rows your bars stand for.',
+      });
+      return [];
+    }
+    openProgressDialog(offers);
+    return offers;
+  }
+
+  function openProgressDialog(offers) {
+    const chosen = new Map(); // `${id}|start` / `${id}|end` → ms
+    const rows = el('div', { class: 'cx-list la-progress' });
+    const choice = (obj, which, offer, label) => {
+      const key = `${obj.id}|${which}`;
+      if (offer.replaces == null) chosen.set(key, offer.value);
+      const shown = which === 'end' ? offer.value - MS_DAY : offer.value;
+      const text = `${label} ${fmtDate(shown, 'numeric')}`
+        + (offer.replaces != null ? ` (was ${fmtDate(which === 'end' ? offer.replaces - MS_DAY : offer.replaces, 'numeric')})` : '');
+      return checkbox({
+        label: text,
+        checked: offer.replaces == null,
+        onChange: (v) => (v ? chosen.set(key, offer.value) : chosen.delete(key)),
+      });
+    };
+    for (const { obj, p, start, end } of offers) {
+      const meta = [
+        `${p.days} day${p.days === 1 ? '' : 's'} worked`,
+        `${p.people} ${p.people === 1 ? 'person' : 'people'}`,
+        `last ${p.lastStatus} ${fmtDate(Date.parse(`${p.last}T00:00:00Z`), 'numeric')}`,
+        p.byTask && !p.byRow ? 'matched on the task wording' : null,
+      ].filter(Boolean).join(' · ');
+      rows.appendChild(
+        el('div', { class: 'cx-listrow la-progress-row', style: { cursor: 'default', alignItems: 'flex-start' } }, [
+          el('div', { class: 'lr-main' }, [
+            el('div', { class: 'lr-title', text: obj.title || TYPES[obj.type]?.label || 'Untitled' }),
+            el('div', { class: 'lr-meta', text: meta }),
+            el('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', marginTop: '6px' } }, [
+              start ? choice(obj, 'start', start, 'Actual start') : null,
+              end ? choice(obj, 'end', end, 'Actual finish') : null,
+            ].filter(Boolean)),
+          ]),
+        ])
+      );
+    }
+
+    openModal({
+      title: 'Progress from the calendar',
+      subtitle: 'Actual dates from the outcomes recorded in the daily huddle. Nothing changes on the timeline until you apply it.',
+      size: 'wide',
+      body: rows,
+      actions: [
+        { label: 'Not now' },
+        {
+          label: 'Apply selected',
+          kind: 'primary',
+          onClick: () => {
+            if (!chosen.size) return;
+            const patches = new Map();
+            for (const [key, ms] of chosen) {
+              const [id, which] = key.split('|');
+              if (!patches.has(id)) patches.set(id, {});
+              patches.get(id)[which === 'start' ? 'actualStart' : 'actualEnd'] = toISO(ms);
+            }
+            store.updateObjects([...patches.keys()], (o) => ({ data: patches.get(o.id) }), 'Actual dates from the calendar');
+            renderer.requestRender();
+            refresh();
+            toast({ tone: 'good', title: 'Actual dates recorded', message: `${patches.size} bar${patches.size === 1 ? '' : 's'} updated. Undo puts them back.` });
+          },
+        },
+      ],
+    });
   }
 
   /**
@@ -24029,6 +24291,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "paneLookahead", { get: () => paneLookahead, enumerable: true });
   Object.defineProperty(__x, "updateFromCalendar", { get: () => updateFromCalendar, enumerable: true });
+  Object.defineProperty(__x, "progressFromCalendar", { get: () => progressFromCalendar, enumerable: true });
   Object.defineProperty(__x, "openLookaheadImport", { get: () => openLookaheadImport, enumerable: true });
   Object.defineProperty(__x, "LA_MIME", { get: () => LA_MIME, enumerable: true });
   Object.defineProperty(__x, "installLookaheadDrops", { get: () => installLookaheadDrops, enumerable: true });

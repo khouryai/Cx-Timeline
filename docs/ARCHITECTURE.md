@@ -1858,6 +1858,77 @@ names rows under them, and the PTO / Office / Other rows always — and counts
 what it left behind. Columns are mapped by position when the sheet uses B–G,
 because BART's file hides its heading row and there is no heading to read.
 
+### Names are offered from the roster, and what is typed is kept
+
+Typing in a names row offers the calendar's people as you type the current
+name (`nameChoices()` / `suggestNames()` in `core/la_edit.js`) — the first name
+where it is unique on the roster, the full name where it is not, because the
+sheet is read back by `assignmentIndex()` and a first name two people share
+cannot be told apart. The list only offers: arrows choose, Enter or Tab accepts
+and keeps the cell open for the next name, and whatever is typed is written as
+typed. The rule on matching a name in a spreadsheet still holds; this makes the
+exact spelling the easy one to type.
+
+### Painting a cancellation asks why, once, and "not now" is an answer
+
+Red on a day is the fact; why it was cancelled is the detail, and it used to be
+asked for later in the Cancellations log, when nobody remembered. Painting a
+colour whose legend meaning `isCancelMeaning()` recognises now asks, grouped
+into one line per activity and run of days (`dayRuns()`), who cancelled and
+why, and records it with `addCancellationNote()` keyed by `cancellationKey()` —
+the label and location `rowsFrom()` writes, so the note lands on the event the
+log derives from the next publish. The paint is saved either way: the question
+never holds up the edit, and skipping it leaves the log to ask as it always did.
+
+### Going back is new edits, not a rewind
+
+"Take me back to an earlier moment" lists the save batches in `rc_la_edits`
+newest first (`restorePoints()`), and going back to one computes the ops that
+make every row and cell touched since then read as it did before
+(`restoreOps()`: the earliest logged `before` per key wins) and commits them
+like any other edit. Nothing is deleted from the log, the restore is itself one
+undoable step, and another administrator's save in between is refused by the
+same version check as everything else. A rewind that removed history would
+remove the evidence the log exists for.
+
+### The timeline reads the calendar's look-ahead in one step
+
+Where the calendar is signed in, the timeline's Look-ahead pane offers "Update
+from the calendar": the latest published reading and the legend, derived by the
+same `derive()` as a workbook import, written with `source: 'calendar'` on the
+register's stamp. It is a read — nothing of the plan goes the other way, and the
+smoke suite counts the writes to prove it. A note above the list says when the
+calendar holds a newer reading than the suggestions were made from. Importing a
+workbook is still there, for file mode and for anybody without a sign-in.
+
+### Progress comes back from the huddle as actual dates, offered
+
+The huddle records who worked on what each day; the timeline has had
+`actualStart` / `actualEnd` fields since the inspector did, filled in by hand or
+not at all. "Progress from the calendar" joins them. `outcomeProgress()` in
+`core/lookahead.js` traces each worked outcome (completed, partial, carried —
+never blocked, reassigned or absent) to its look-ahead row, directly or through
+its plan entry, and from the row's label to the bars linked to suggestions with
+the same `suggestionKey()`. A day with no row falls back to its task text, which
+a day read off the sheet carries verbatim; either way the match is exact or
+nothing. Each bar is offered its first worked day as the actual start and —
+only when the look-ahead has nothing ahead for it and the last word was
+"completed" — the day after its last as the actual finish (half-open, like the
+bar). A date nobody set starts ticked; one that would replace a typed date does
+not. Applying is one undoable edit, and nothing is sent to the calendar.
+
+### The export is opened by a second program in CI
+
+`test_la_edit.js` reads every export back through the application's own
+parser, which proves the file says what was meant but can share the writer's
+mistakes. `tools/test_xlsx_compat.js` hands the file to LibreOffice Calc
+instead, has it save the workbook again and print it, and reads the re-saved
+copy: sheet name, dates, colours, codes, the names row, escaping, sections,
+PTO, the merges and the frozen header must all survive a different
+implementation. Microsoft Excel does not run on CI machines; Calc is the nearest
+independent reader that does. The suite skips itself, saying so, where Calc is
+not installed, and the `xlsx` CI job installs it.
+
 ## What each suite covers
 
 `smoke.js` boots the real application in Chromium and checks rendering,

@@ -34,7 +34,7 @@
 
 import { el, clear, debounce, fold } from '../core/util.js';
 import { on, emit, EV } from '../core/events.js';
-import { fmtDate, fmtTimestamp, MS_DAY } from '../core/dates.js';
+import { fmtDate, fmtTimestamp, MS_DAY, toISO, toMs } from '../core/dates.js';
 import {
   TYPES,
   lookaheadRegister,
@@ -46,7 +46,7 @@ import {
 } from '../core/model.js';
 import * as store from '../core/store.js';
 import * as renderer from '../timeline/renderer.js';
-import { readGrid, marksOf, suggestionsFrom, reconcileSuggestions } from '../core/lookahead.js';
+import { readGrid, marksOf, suggestionsFrom, reconcileSuggestions, outcomeProgress } from '../core/lookahead.js';
 import {
   readZip, readSheets, parseSheet, applyLegend, inForce, workOnlyLegend, fileLegend,
 } from '../io/lookahead.js';
@@ -144,6 +144,14 @@ function importBar(register) {
         title: 'Read a look-ahead workbook from a file',
         onClick: () => openLookaheadImport(),
       }),
+      calendar && laPlacedIds(store.getDoc()).size
+        ? el('button', {
+            class: 'cx-btn mini',
+            html: icon('check', { size: 12 }) + '<span>Progress from the calendar</span>',
+            title: 'Offer actual start and finish dates from what the huddle recorded',
+            onClick: () => progressFromCalendar(),
+          })
+        : null,
       Object.keys(register.activities).length
         ? el('button', {
             class: 'cx-btn mini ghost',
@@ -237,6 +245,143 @@ export async function updateFromCalendar() {
   const follow = report.moved.filter((m) => placed.has(m.id));
   if (follow.length) setTimeout(() => openFollowDialog(follow), 350);
   return report;
+}
+
+/**
+ * Actual dates, from what the daily huddle recorded.
+ *
+ * The outcomes are traced to the look-ahead rows they were recorded against
+ * and from there to the bars linked to those rows (`outcomeProgress()`); each
+ * bar is offered the first day anybody worked on it as its actual start, and —
+ * only once the look-ahead has nothing more for it and the last word was
+ * "completed" — the day after the last as its actual finish. Nothing is written
+ * until somebody ticks it: a date nobody has set yet starts ticked, a date that
+ * would replace one somebody typed does not. Reads only; nothing about the plan
+ * goes to the calendar.
+ */
+export async function progressFromCalendar() {
+  const doc = store.getDoc();
+  const register = lookaheadRegister(doc);
+  const objects = doc.objects.filter((o) => laLinkedIds(o).length);
+  if (!objects.length) {
+    toast({ tone: 'warn', title: 'No linked bars', message: 'Place or link a look-ahead suggestion first — progress is read for bars that stand for one.' });
+    return null;
+  }
+  let from = Infinity;
+  for (const o of objects) {
+    for (const id of laLinkedIds(o)) {
+      const entry = register.activities[id];
+      if (entry?.start != null) from = Math.min(from, entry.start, entry.previous?.start ?? Infinity);
+    }
+    from = Math.min(from, o.start);
+  }
+  const todayMs = toMs(toISO(Date.now()));
+  // A fortnight's slack before the earliest date: work often starts early.
+  const fromISO = toISO(Math.min(Number.isFinite(from) ? from : todayMs, todayMs) - 14 * MS_DAY);
+  const toISOday = toISO(todayMs);
+
+  let proposals;
+  try {
+    const [actuals, plan] = await Promise.all([rc.listActuals(fromISO, toISOday), rc.listPlan(fromISO, toISOday)]);
+    const rowIds = [
+      ...actuals.map((a) => a.lookahead_row_id),
+      ...plan.map((p) => p.lookahead_row_id),
+    ];
+    const rows = await rc.lookaheadRowsByIds(rowIds);
+    proposals = outcomeProgress({ objects, activities: register.activities, actuals, rows, plan, todayMs: todayMs + MS_DAY });
+  } catch (err) {
+    toast({ tone: 'bad', title: 'Could not read the calendar', message: err.message });
+    return null;
+  }
+
+  const offers = [];
+  for (const p of proposals) {
+    const obj = doc.objects.find((o) => o.id === p.objectId);
+    const hasDuration = !!TYPES[obj.type]?.duration;
+    const haveStart = toMs(obj.data?.actualStart);
+    const haveEnd = toMs(obj.data?.actualEnd);
+    const start = haveStart === p.start ? null : { value: p.start, replaces: Number.isFinite(haveStart) ? haveStart : null };
+    const end = !hasDuration || p.end == null || haveEnd === p.end
+      ? null
+      : { value: p.end, replaces: Number.isFinite(haveEnd) ? haveEnd : null };
+    if (start || end) offers.push({ obj, p, start, end });
+  }
+  if (!offers.length) {
+    toast({
+      tone: 'info',
+      title: 'Nothing new',
+      message: proposals.length
+        ? 'The actual dates already agree with what the huddle recorded.'
+        : 'No outcomes recorded yet against the look-ahead rows your bars stand for.',
+    });
+    return [];
+  }
+  openProgressDialog(offers);
+  return offers;
+}
+
+function openProgressDialog(offers) {
+  const chosen = new Map(); // `${id}|start` / `${id}|end` → ms
+  const rows = el('div', { class: 'cx-list la-progress' });
+  const choice = (obj, which, offer, label) => {
+    const key = `${obj.id}|${which}`;
+    if (offer.replaces == null) chosen.set(key, offer.value);
+    const shown = which === 'end' ? offer.value - MS_DAY : offer.value;
+    const text = `${label} ${fmtDate(shown, 'numeric')}`
+      + (offer.replaces != null ? ` (was ${fmtDate(which === 'end' ? offer.replaces - MS_DAY : offer.replaces, 'numeric')})` : '');
+    return checkbox({
+      label: text,
+      checked: offer.replaces == null,
+      onChange: (v) => (v ? chosen.set(key, offer.value) : chosen.delete(key)),
+    });
+  };
+  for (const { obj, p, start, end } of offers) {
+    const meta = [
+      `${p.days} day${p.days === 1 ? '' : 's'} worked`,
+      `${p.people} ${p.people === 1 ? 'person' : 'people'}`,
+      `last ${p.lastStatus} ${fmtDate(Date.parse(`${p.last}T00:00:00Z`), 'numeric')}`,
+      p.byTask && !p.byRow ? 'matched on the task wording' : null,
+    ].filter(Boolean).join(' · ');
+    rows.appendChild(
+      el('div', { class: 'cx-listrow la-progress-row', style: { cursor: 'default', alignItems: 'flex-start' } }, [
+        el('div', { class: 'lr-main' }, [
+          el('div', { class: 'lr-title', text: obj.title || TYPES[obj.type]?.label || 'Untitled' }),
+          el('div', { class: 'lr-meta', text: meta }),
+          el('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', marginTop: '6px' } }, [
+            start ? choice(obj, 'start', start, 'Actual start') : null,
+            end ? choice(obj, 'end', end, 'Actual finish') : null,
+          ].filter(Boolean)),
+        ]),
+      ])
+    );
+  }
+
+  openModal({
+    title: 'Progress from the calendar',
+    subtitle: 'Actual dates from the outcomes recorded in the daily huddle. Nothing changes on the timeline until you apply it.',
+    size: 'wide',
+    body: rows,
+    actions: [
+      { label: 'Not now' },
+      {
+        label: 'Apply selected',
+        kind: 'primary',
+        onClick: () => {
+          if (!chosen.size) return;
+          const patches = new Map();
+          for (const [key, ms] of chosen) {
+            const [id, which] = key.split('|');
+            if (!patches.has(id)) patches.set(id, {});
+            patches.get(id)[which === 'start' ? 'actualStart' : 'actualEnd'] = toISO(ms);
+          }
+          store.updateObjects([...patches.keys()], (o) => ({ data: patches.get(o.id) }), 'Actual dates from the calendar');
+          renderer.requestRender();
+          refresh();
+          toast({ tone: 'good', title: 'Actual dates recorded', message: `${patches.size} bar${patches.size === 1 ? '' : 's'} updated. Undo puts them back.` });
+        },
+      },
+    ],
+  });
 }
 
 /**

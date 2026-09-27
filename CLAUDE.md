@@ -276,6 +276,12 @@ alternative shipped once and went wrong.
 - Only an activity's days are painted, only with the legend's shift colours; names rows are never painted. [→](docs/ARCHITECTURE.md#what-may-be-written-where)
 - Support codes are a register (`rc_support_codes`); an unknown code is kept and marked, never dropped or guessed. [→](docs/ARCHITECTURE.md#support-codes-are-a-register-like-the-colours)
 - The Excel export's layout is measured off BART's workbook and read back by `parseSheet()` in the tests. [→](docs/ARCHITECTURE.md#the-export-is-measured-off-barts-own-workbook)
+- Names rows offer the roster as you type; what is typed is what is written. [→](docs/ARCHITECTURE.md#names-are-offered-from-the-roster-and-what-is-typed-is-kept)
+- Painting a cancellation asks why, once; the paint is saved whatever the answer. [→](docs/ARCHITECTURE.md#painting-a-cancellation-asks-why-once-and-not-now-is-an-answer)
+- Going back is new edits through `rc_la_apply()`, never a rewind of the log. [→](docs/ARCHITECTURE.md#going-back-is-new-edits-not-a-rewind)
+- The timeline reads the calendar's look-ahead in one step, and sends nothing back. [→](docs/ARCHITECTURE.md#the-timeline-reads-the-calendars-look-ahead-in-one-step)
+- Progress comes back from the huddle as actual dates, offered and never written unasked (`outcomeProgress()`). [→](docs/ARCHITECTURE.md#progress-comes-back-from-the-huddle-as-actual-dates-offered)
+- The export is also opened and re-saved by LibreOffice Calc in CI (`test_xlsx_compat.js`). [→](docs/ARCHITECTURE.md#the-export-is-opened-by-a-second-program-in-ci)
 
 ### Added with the module split and the calendar bundle
 
@@ -353,6 +359,7 @@ npm run build          # must succeed — it lints the module graph and parses b
 npm test               # every suite, in parallel lanes (tools/run_tests.js); must exit 0
 npm run test:serial    # the same, one at a time
 npm run test:rust      #  33 checks — the plan, lock and intake rules, in Rust
+npm run test:xlsx      # the Excel export through LibreOffice Calc (skips without it)
 
 node tools/run_tests.js smoke smoke_calendar   # just these suites
 node tools/smoke.js --shot out.png             # …and eyeball the result
@@ -361,15 +368,16 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | Suite | Checks | What it covers |
 |---|---|---|
 | `test_dist.js` | 46 | every deployment shape, both bundles fingerprinted, and that the plan has no backend in any of them |
-| `test_lookahead.js` | 195 | the parser, the rows it derives, the change events and the printed calendar's geometry, no browser |
+| `test_lookahead.js` | 204 | the parser, the rows it derives, the change events, progress from outcomes and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
-| `test_la_edit.js` | 85 | the look-ahead editor's model, undo, support codes, the published grid, and the Excel export read back |
+| `test_la_edit.js` | 105 | the look-ahead editor's model, undo, support codes, the published grid, and the Excel export read back |
 | `smoke.js` | 318 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 414 | the resource calendar, accounts, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 434 | the resource calendar, accounts, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 64 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
 | `test_sql.js` | 354 | both permission models, the schema stamp, and that `migrate.sql` upgrades an old project |
+| `test_xlsx_compat.js` | 14 | the Excel export opened, re-saved and printed by LibreOffice Calc (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**
 (`tools/lib/clock.js` shifts `Date` in Node and in every page). Build fixtures

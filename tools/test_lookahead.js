@@ -1221,6 +1221,49 @@ console.log('\nThe cancellation log');
     noted.find((e) => e.label === 'IXL regression')?.note === null);
 }
 
+console.log('\nProgress from the calendar');
+{
+  const D = (iso) => Date.parse(`${iso}T00:00:00Z`);
+  const label = 'CDRL 9.04.27 · IXL Regression Testing · Tail Tracks';
+  const activities = {
+    r1: { id: 'r1', key: cls.suggestionKey(label), start: D('2026-09-14'), end: D('2026-09-19') },
+    r2: { id: 'r2', key: cls.suggestionKey('Night mode · Y10'), start: D('2026-09-21'), end: D('2026-10-03') },
+  };
+  const objects = [
+    { id: 'bar1', data: { laIds: ['r1'] } },
+    { id: 'bar2', data: { laIds: ['r2'] } },
+    { id: 'bar3', data: {} },
+  ];
+  const rows = [{ id: 'row-a', raw_label: label }, { id: 'row-b', raw_label: 'Night mode · Y10' }];
+  const plan = [{ id: 'plan-1', lookahead_row_id: 'row-b' }];
+  const actuals = [
+    { person_id: 'p1', work_date: '2026-09-15', status: 'partial', lookahead_row_id: 'row-a' },
+    { person_id: 'p2', work_date: '2026-09-15', status: 'completed', lookahead_row_id: 'row-a' },
+    { person_id: 'p1', work_date: '2026-09-16', status: 'blocked', lookahead_row_id: 'row-a' },
+    // No row: a day read off the sheet carries the row's words as its task.
+    { person_id: 'p1', work_date: '2026-09-18', status: 'completed', task: '  cdrl 9.04.27 ·  IXL Regression Testing · Tail Tracks ' },
+    // Through its plan entry.
+    { person_id: 'p3', work_date: '2026-09-22', status: 'carried', plan_entry_id: 'plan-1' },
+    // A different piece of work, and a near miss in wording: neither counts.
+    { person_id: 'p4', work_date: '2026-09-12', status: 'completed', task: 'IXL Regression Testing' },
+  ];
+  const out = cls.outcomeProgress({ objects, activities, actuals, rows, plan, todayMs: D('2026-09-24') });
+  const bar1 = out.find((p) => p.objectId === 'bar1');
+  const bar2 = out.find((p) => p.objectId === 'bar2');
+  check('an outcome reaches the bar linked to its row', !!bar1 && !!bar2 && out.length === 2, JSON.stringify(out.map((p) => p.objectId)));
+  check('the start is the first day anybody worked on it', bar1?.first === '2026-09-15' && bar1?.start === D('2026-09-15'));
+  check('a blocked day is not work, and a near miss in wording is not a match',
+    bar1?.days === 2 && bar1?.last === '2026-09-18', JSON.stringify(bar1));
+  check('a day off the sheet is matched on its exact words', bar1?.byTask === 1 && bar1?.byRow === 2);
+  check('a finish is offered once the run is over and the last word was completed',
+    bar1?.end === D('2026-09-19'), String(bar1?.end));
+  check('an outcome is traced through its plan entry', bar2?.first === '2026-09-22');
+  check('no finish while the look-ahead still has work for it', bar2?.end === null);
+  check('the people are counted, not the rows', bar1?.people === 2);
+  check('a bar linked to nothing is never offered anything',
+    cls.outcomeProgress({ objects: [objects[2]], activities, actuals, rows }).length === 0);
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');
