@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 20   Built: 2026-09-27T21:56:29.660Z
+ * Modules: 20   Built: 2026-09-27T22:03:56.296Z
  */
 (function () {
   'use strict';

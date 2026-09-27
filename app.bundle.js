@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-27T21:56:29.587Z
+ * Modules: 59   Built: 2026-09-27T22:03:56.218Z
  */
 (function () {
   'use strict';
@@ -9093,6 +9093,10 @@ __mods["core/store.js"] = function (__x, __req) {
         count: runs.length,
         windowStart: meta.windowStart ?? null,
         windowEnd: meta.windowEnd ?? null,
+        // 'calendar' when read from the resource calendar rather than a file, and
+        // which of its readings — so the pane can say when a newer one exists.
+        source: meta.source || 'file',
+        snapshotAt: meta.snapshotAt ?? null,
       };
       d.lookahead = {
         activities,
@@ -23197,11 +23201,22 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
       ? `${fmtDate(stamp.windowStart, 'numeric')} → ${fmtDate(stamp.windowEnd - MS_DAY, 'numeric')}`
       : null;
 
+    const calendar = calendarAvailable();
     return el('div', { style: { marginBottom: '12px' } }, [
+      calendar ? calendarNotice(register) : null,
       el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '9px' } }, [
+        calendar
+          ? el('button', {
+              class: 'cx-btn mini primary',
+              html: icon('refresh', { size: 12 }) + '<span>Update from the calendar</span>',
+              title: 'Read the look-ahead as the resource calendar holds it now — no workbook needed',
+              onClick: () => updateFromCalendar(),
+            })
+          : null,
         el('button', {
-          class: 'cx-btn mini primary',
+          class: `cx-btn mini${calendar ? '' : ' primary'}`,
           html: icon('upload', { size: 12 }) + '<span>Import look-ahead</span>',
+          title: 'Read a look-ahead workbook from a file',
           onClick: () => openLookaheadImport(),
         }),
         Object.keys(register.activities).length
@@ -23220,6 +23235,12 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
             ? el('span', { class: 'p6-stamp-value', text: fmtTimestamp(stamp.importedAt), title: [stamp.fileName, stamp.sheet].filter(Boolean).join(' · ') })
             : el('span', { class: 'p6-stamp-value none', text: 'not imported' }),
         ]),
+        stamp?.source === 'calendar'
+          ? el('div', { class: 'p6-stamp' }, [
+              el('span', { class: 'p6-stamp-label', text: 'From' }),
+              el('span', { class: 'p6-stamp-value', text: 'the resource calendar' }),
+            ])
+          : null,
         span
           ? el('div', { class: 'p6-stamp' }, [
               el('span', { class: 'p6-stamp-label', text: 'Window' }),
@@ -23228,6 +23249,91 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
           : null,
       ].filter(Boolean)),
     ]);
+  }
+
+  /* ── From the calendar ─────────────────────────────────────────────────── */
+
+  /** Whether the resource calendar is here to be read: configured, and signed in. */
+  function calendarAvailable() {
+    return rc.isConfigured() && rc.isSignedIn();
+  }
+
+  /**
+   * The look-ahead, as the resource calendar holds it now — in one step.
+   *
+   * The calendar is where the 4WLA is written, so a workbook exported from it and
+   * imported here would be a round trip through a file for nothing. This reads
+   * the calendar's latest published reading and its legend — reads only; nothing
+   * about the plan goes the other way — and makes the same suggestions an import
+   * does: nothing is placed or moved until somebody says so, and bars linked to
+   * runs that moved are offered the new dates exactly as after an import.
+   */
+  async function updateFromCalendar() {
+    let snapshot;
+    let legend;
+    try {
+      [snapshot, legend] = await Promise.all([rc.latestSnapshot(), rc.listLegend()]);
+    } catch (err) {
+      toast({ tone: 'bad', title: 'Could not read the calendar', message: err.message });
+      return null;
+    }
+    if (!snapshot?.grid?.rows?.length) {
+      toast({ tone: 'warn', title: 'Nothing to read yet', message: 'The resource calendar has no look-ahead yet.' });
+      return null;
+    }
+    const derived = derive(snapshot.grid, legend || [], String(snapshot.taken_at || '').slice(0, 10) || null);
+    if (!derived.dated) {
+      toast({ tone: 'warn', title: 'Nothing to import', message: 'The calendar\'s look-ahead could not be dated.' });
+      return null;
+    }
+    const report = store.importLookahead(derived.runs, {
+      fileName: 'Resource calendar',
+      sheet: snapshot.sheet_name || '',
+      colors: {},
+      windowStart: derived.windowStart,
+      windowEnd: derived.windowEnd,
+      source: 'calendar',
+      snapshotAt: snapshot.taken_at || null,
+    });
+    if (!report) return null;
+    renderer.requestRender();
+    refresh();
+    emit(EV.LOOKAHEAD_IMPORTED, { report });
+    const doc = store.getDoc();
+    const placed = laPlacedIds(doc);
+    const waiting = Object.values(lookaheadRegister(doc).activities)
+      .filter((a) => !a.dismissed && !a.past && !a.missing && !placed.has(a.id)).length;
+    toast({
+      tone: 'good',
+      title: 'Updated from the calendar',
+      message: `${derived.runs.length} runs · ${report.added.length} new · ${report.moved.length} moved`
+        + `${waiting ? ` · ${waiting} not on the timeline yet` : ''}.`,
+    });
+    const follow = report.moved.filter((m) => placed.has(m.id));
+    if (follow.length) setTimeout(() => openFollowDialog(follow), 350);
+    return report;
+  }
+
+  /**
+   * "The calendar's look-ahead has changed since" — said above the list, with
+   * the button, rather than left for somebody to notice. Asked of the snapshot
+   * list's metadata, never the grid, so opening the pane costs one small read.
+   */
+  function calendarNotice(register) {
+    const note = el('div', { class: 'cx-gate-msg la-calendar-notice', hidden: true, style: { marginBottom: '9px' } });
+    const since = register.imported?.source === 'calendar' ? register.imported.snapshotAt : null;
+    rc.listSnapshotMeta({ limit: 1 })
+      .then((rows) => {
+        const latest = rows?.[0]?.taken_at;
+        if (!latest) return;
+        if (since && Date.parse(latest) <= Date.parse(since)) return;
+        note.textContent = since
+          ? `The calendar's look-ahead has changed since these suggestions were read (${fmtTimestamp(Date.parse(latest))}).`
+          : 'The resource calendar holds the look-ahead — update from it rather than importing a workbook.';
+        note.hidden = false;
+      })
+      .catch(() => {});
+    return note;
   }
 
   /**
@@ -23922,6 +24028,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "paneLookahead", { get: () => paneLookahead, enumerable: true });
+  Object.defineProperty(__x, "updateFromCalendar", { get: () => updateFromCalendar, enumerable: true });
   Object.defineProperty(__x, "openLookaheadImport", { get: () => openLookaheadImport, enumerable: true });
   Object.defineProperty(__x, "LA_MIME", { get: () => LA_MIME, enumerable: true });
   Object.defineProperty(__x, "installLookaheadDrops", { get: () => installLookaheadDrops, enumerable: true });

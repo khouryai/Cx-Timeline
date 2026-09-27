@@ -534,4 +534,30 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     view.activities.some((a) => a.meta.includes('ATS Site Test') && a.marks.some((m) => m.value === 'X.TCE'))
       && !view.activities.some((a) => a.meta.includes('Cable pull')));
   await snap('end');
+
+  /* ── The timeline reads the look-ahead from the calendar ─────────────── */
+  await page.keyboard.press('Escape');
+  await page.locator('.ws-btn', { hasText: 'Timeline' }).click();
+  await page.waitForTimeout(300);
+  await page.locator('#sidenav .nav-link[data-pane="lookahead"]').click();
+  await page.waitForTimeout(400);
+  const fromCalendar = page.locator('#dock button', { hasText: 'Update from the calendar' });
+  check('the timeline offers the calendar\'s look-ahead in one step, no workbook needed', (await fromCalendar.count()) === 1);
+  const sentBefore = await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select').length);
+  await fromCalendar.click();
+  await page.waitForTimeout(600);
+  const plan = await page.evaluate(() => {
+    const doc = window.__cx_store?.getDoc?.() || null;
+    return {
+      toast: [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | '),
+      pane: document.querySelector('#dock')?.innerText || '',
+      doc: doc ? { source: doc.lookahead?.imported?.source, n: Object.keys(doc.lookahead?.activities || {}).length } : null,
+    };
+  });
+  check('and makes suggestions from what the editor wrote', /Updated from the calendar/.test(plan.toast)
+    && /the resource calendar/.test(plan.pane) && /ATS Site Test/.test(plan.pane), plan.toast.slice(0, 160));
+  check('reading it sends nothing — the plan still never reaches the calendar',
+    (await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select').length)) === sentBefore);
+  await page.locator('.ws-btn', { hasText: 'Calendar' }).click();
+  await page.waitForTimeout(300);
 }
