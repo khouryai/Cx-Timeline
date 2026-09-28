@@ -122,7 +122,8 @@ ui/pane_util → ui/pane_plan · ui/pane_filters · ui/pane_io · ui/pane_projec
              · ui/pane_settings · ui/p6 · ui/lookahead → ui/panels
 ui/panels → ui/command_menu · ui/canvas_hint → ui/shell
 ui/workspace · ui/calendar_loader         the calendar, fetched on first use:
-    ui/rc → ui/rc_roster · ui/rc_huddle · ui/rc_week · ui/rc_pto · ui/rc_reports
+    ui/rc → ui/rc_myday · ui/rc_roster → ui/rc_inbox · ui/rc_settings
+          · ui/rc_huddle · ui/rc_week · ui/rc_pto · ui/rc_reports
           · ui/rc_lookahead → ui/rc_la_editor · ui/rc_la_* · ui/rc_ingest → ui/rc_la_state
           · ui/rc_table                   → ui/rc_util   (calendar.bundle.js)
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
@@ -282,6 +283,9 @@ alternative shipped once and went wrong.
 - The timeline reads the calendar's look-ahead in one step, and sends nothing back. [→](docs/ARCHITECTURE.md#the-timeline-reads-the-calendars-look-ahead-in-one-step)
 - Progress comes back from the huddle as actual dates, offered and never written unasked (`outcomeProgress()`); a bar standing for several activities finishes only when every one of them has. [→](docs/ARCHITECTURE.md#progress-comes-back-from-the-huddle-as-actual-dates-offered)
 - The export is also opened and re-saved by LibreOffice Calc in CI (`test_xlsx_compat.js`). [→](docs/ARCHITECTURE.md#the-export-is-opened-by-a-second-program-in-ci)
+- A staffing clash is about the team (names rows, the PTO row, booked leave, two shifts in a day) — never the support codes, and never a name the roster does not know. [→](docs/ARCHITECTURE.md#a-staffing-clash-is-about-the-team-never-about-the-support)
+- A day's or a row's history is `rc_la_edits` read for one place; nothing is reconstructed. [→](docs/ARCHITECTURE.md#a-days-history-is-the-edit-log-read-for-one-place)
+- Readings are compacted, never deleted: only an editor reading's grid goes (`rc_compact_snapshots()`); rows, change events and links stay. [→](docs/ARCHITECTURE.md#readings-are-compacted-never-deleted)
 
 ### Added with the module split and the calendar bundle
 
@@ -294,6 +298,10 @@ alternative shipped once and went wrong.
 - **An empty screen names its next step.** [→](docs/ARCHITECTURE.md#an-empty-screen-names-its-next-step)
 - **Touch decides the calendar's sizes, not width.** [→](docs/ARCHITECTURE.md#touch-decides-the-calendars-sizes-not-width)
 - **Announce what changes; never rely on colour alone.** [→](docs/ARCHITECTURE.md#announce-what-changes-never-rely-on-colour-alone)
+- **An administrator works from one list** — Organisation → Inbox reads every source that can be waiting on them, and says when one could not be read. [→](docs/ARCHITECTURE.md#an-administrator-works-from-one-list)
+- **Settings are changed on screen** (Organisation → Settings), and `rc_settings`' policy is the control. [→](docs/ARCHITECTURE.md#settings-are-changed-on-screen)
+- **View as is a preview, refused at the client**: every write in `core/rc.js` throws `err.preview` while it is on, and nothing queues it. [→](docs/ARCHITECTURE.md#seeing-it-as-somebody-else-is-a-preview-refused-at-the-client)
+- **My day is where the team opens the calendar**, and it records nothing — outcomes stay in the huddle. [→](docs/ARCHITECTURE.md#my-day-is-where-the-team-opens-the-calendar)
 
 ## Extending it
 
@@ -370,13 +378,13 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | `test_dist.js` | 46 | every deployment shape, both bundles fingerprinted, and that the plan has no backend in any of them |
 | `test_lookahead.js` | 212 | the parser, the rows it derives, the change events, progress from outcomes and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
-| `test_la_edit.js` | 105 | the look-ahead editor's model, undo, support codes, the published grid, and the Excel export read back |
+| `test_la_edit.js` | 120 | the look-ahead editor's model, undo, support codes, the published grid, cell history, staffing clashes, and the Excel export read back |
 | `smoke.js` | 318 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 443 | the resource calendar, accounts, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 473 | the resource calendar, accounts, My day, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 64 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
-| `test_sql.js` | 354 | both permission models, the schema stamp, and that `migrate.sql` upgrades an old project |
+| `test_sql.js` | 364 | both permission models, snapshot compaction, the schema stamp, and that `migrate.sql` upgrades an old project |
 | `test_xlsx_compat.js` | 14 | the Excel export opened, re-saved and printed by LibreOffice Calc (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**

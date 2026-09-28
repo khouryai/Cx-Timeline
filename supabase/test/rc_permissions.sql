@@ -1541,5 +1541,51 @@ select refuses(:'carol', 'insert into public.rc_support_codes (code, name) value
   'a member adding a code');
 select refuses(:'carol', 'update public.rc_support_codes set name = ''Changed''', 'a member renaming one');
 
+-- Keeping the readings in check: an old editor reading loses its grid, never
+-- itself; the last of each day, a workbook read and anything recent are whole.
+select act_as(:'alice');
+insert into public.rc_lookahead_snapshots (id, taken_at, file_hash, sheet_name, grid) values
+  ('52000000-0000-0000-0000-000000000001', date_trunc('day', now()) - interval '100 days' + interval '9 hours',  'editor:old-1', '4WLA',
+   '{"rows":[{"row":7},{"row":8}],"unknown":["ABCDEF"]}'),
+  ('52000000-0000-0000-0000-000000000002', date_trunc('day', now()) - interval '100 days' + interval '10 hours', 'editor:old-2', '4WLA',
+   '{"rows":[{"row":7}],"unknown":[]}'),
+  ('52000000-0000-0000-0000-000000000003', date_trunc('day', now()) - interval '100 days' + interval '11 hours', 'editor:old-3', '4WLA',
+   '{"rows":[{"row":7},{"row":8},{"row":9}],"unknown":[]}'),
+  ('52000000-0000-0000-0000-000000000004', date_trunc('day', now()) - interval '100 days' + interval '8 hours',  'workbook-old', '4WLA',
+   '{"rows":[{"row":7}],"unknown":[]}'),
+  ('52000000-0000-0000-0000-000000000005', date_trunc('day', now()) - interval '2 days' + interval '9 hours',   'editor:new-1', '4WLA',
+   '{"rows":[{"row":7}],"unknown":[]}'),
+  ('52000000-0000-0000-0000-000000000006', date_trunc('day', now()) - interval '2 days' + interval '10 hours',  'editor:new-2', '4WLA',
+   '{"rows":[{"row":7}],"unknown":[]}');
+insert into public.rc_lookahead_rows (id, snapshot_id, week_start, row_key, raw_label)
+values ('52100000-0000-0000-0000-000000000001', '52000000-0000-0000-0000-000000000001', current_date - 100, 'k1', 'IXL');
+
+select act_as(:'carol');
+select refuses(:'carol', 'select public.rc_compact_snapshots()', 'a member tidying the readings');
+select act_as(:'alice');
+select assert(public.rc_compact_snapshots() = 2, 'two superseded editor readings from an old day are compacted');
+select assert((select grid ->> 'compacted' from public.rc_lookahead_snapshots where id = '52000000-0000-0000-0000-000000000001') = 'true'
+    and (select grid ->> 'compacted' from public.rc_lookahead_snapshots where id = '52000000-0000-0000-0000-000000000002') = 'true',
+  'their grids go');
+select assert((select grid ->> 'compacted' from public.rc_lookahead_snapshots where id = '52000000-0000-0000-0000-000000000003') is null,
+  'the last editor reading of that day keeps its grid');
+select assert((select grid ->> 'compacted' from public.rc_lookahead_snapshots where id = '52000000-0000-0000-0000-000000000004') is null,
+  'a workbook read keeps its grid whatever its age — it cannot be rebuilt');
+select assert((select count(*) from public.rc_lookahead_snapshots
+                where id in ('52000000-0000-0000-0000-000000000005', '52000000-0000-0000-0000-000000000006')
+                  and grid ->> 'compacted' is null) = 2,
+  'a recent reading keeps its grid');
+select assert(exists (select 1 from public.rc_lookahead_rows where id = '52100000-0000-0000-0000-000000000001'),
+  'a compacted reading keeps its rows, so nothing pointing at them comes loose');
+select assert((select row_count from public.rc_lookahead_snapshot_meta where id = '52000000-0000-0000-0000-000000000001') = 2
+    and (select unmapped_count from public.rc_lookahead_snapshot_meta where id = '52000000-0000-0000-0000-000000000001') = 1
+    and (select compacted from public.rc_lookahead_snapshot_meta where id = '52000000-0000-0000-0000-000000000001'),
+  'and the history still says how big it was, what it could not explain, and that it was compacted');
+select assert(public.rc_compact_snapshots() = 0, 'running it again changes nothing');
+update public.rc_settings set value = '1' where key = 'snapshot_keep_days';
+insert into public.rc_settings (key, value) select 'snapshot_keep_days', '1'
+ where not exists (select 1 from public.rc_settings where key = 'snapshot_keep_days');
+select assert(public.rc_compact_snapshots() = 0, 'a keep period under a fortnight is read as a fortnight');
+
 reset role;
 do $$ begin raise notice ''; raise notice 'All resource calendar checks passed.'; end $$;

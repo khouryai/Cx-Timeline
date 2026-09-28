@@ -294,7 +294,15 @@ export async function renderSnapshots(host) {
       el('td', { text: s.taken_at ? s.taken_at.slice(0, 16).replace('T', ' ') : '—' }),
       el('td', { text: s.file_mtime ? s.file_mtime.slice(0, 16).replace('T', ' ') : '—' }),
       el('td', { text: s.sheet_name }),
-      el('td', { class: 'rc-num', text: String(s.row_count ?? 0) }),
+      el('td', { class: 'rc-num', text: String(s.row_count ?? 0) }, [
+        s.compacted
+          ? el('span', {
+            class: 'rc-hint', style: 'margin:0 0 0 6px',
+            text: '· compacted',
+            title: 'A superseded editor reading past the keep period. Its grid can be rebuilt from the edit log; its rows and every link to them are kept.',
+          })
+          : null,
+      ]),
       el('td', { class: 'rc-num', text: String(s.unmapped_count ?? 0) }),
     ]))
   ));

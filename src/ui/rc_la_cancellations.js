@@ -248,7 +248,8 @@ async function rederiveCancellations(from) {
     let changed = 0;
     for (const meta of wanted) {
       const snapshot = await rc.snapshotById(meta.id);
-      if (!snapshot?.grid) continue;
+      // A compacted editor reading has no grid to re-read; its rows stand as written.
+      if (!snapshot?.grid || snapshot.grid.compacted) continue;
       const view = readGrid(applyLegend(snapshot.grid, legend), { anchorISO: snapshot.taken_at });
       const fresh = new Map((await rowsFrom(view, { snapshotId: snapshot.id })).map((r) => [r.row_key, r]));
       for (const row of await rc.listSnapshotRows(snapshot.id)) {

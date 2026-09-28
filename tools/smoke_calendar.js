@@ -970,6 +970,10 @@ function fakeSdk() {
             S.rows.rc_invitations.push(row);
             return Promise.resolve({ data: [row], error: null });
           }
+          if (name === 'rc_compact_snapshots') {
+            S.compactCalls = (S.compactCalls || 0) + 1;
+            return Promise.resolve({ data: 0, error: null });
+          }
           if (name === 'rc_list_invitations') {
             return Promise.resolve({ data: S.rows.rc_invitations.slice(), error: null });
           }
@@ -3201,6 +3205,13 @@ async function main() {
   await page.waitForTimeout(300);
   check('and a value that would throw history away is refused before it is sent',
     await page.evaluate(() => !window.__rc.rows.rc_settings.some((r) => r.key === 'snapshot_keep_days' && r.value === '3')));
+
+  const tidyBefore = await page.evaluate(() => window.__rc.compactCalls || 0);
+  await page.locator('#rc-frame .rc-settings button', { hasText: 'Tidy now' }).click();
+  await page.waitForTimeout(400);
+  check('and Tidy now runs it on demand, and says what it did',
+    (await page.evaluate(() => window.__rc.compactCalls || 0)) === tidyBefore + 1
+      && /Nothing to tidy/.test(await page.evaluate(() => [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | '))));
 
   /* Seeing it as somebody else. */
   await page.locator('#rc-frame .rc-head button', { hasText: 'View as' }).click();

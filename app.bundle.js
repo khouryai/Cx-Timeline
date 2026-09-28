@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-28T19:17:31.978Z
+ * Modules: 59   Built: 2026-09-28T19:35:55.089Z
  */
 (function () {
   'use strict';
@@ -16487,6 +16487,12 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_la_edits', (q) => q.eq('row_id', rowId).order('id', { ascending: false }).limit(1000));
   }
 
+  /**
+   * Slim the grids of superseded editor readings past the keep period, and say
+   * how many — see `rc_compact_snapshots()` for what is kept and why.
+   */
+  const compactSnapshots = () => rpc('rc_compact_snapshots', {});
+
   function listSupportCodes({ includeRetired = false } = {}) {
     return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
   }
@@ -16554,7 +16560,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 3;
+  const SCHEMA_VERSION = 4;
 
   /**
    * Whether the database is the one this build was written against.
@@ -17195,6 +17201,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "lookaheadRevision", { get: () => lookaheadRevision, enumerable: true });
   Object.defineProperty(__x, "listLaEdits", { get: () => listLaEdits, enumerable: true });
   Object.defineProperty(__x, "listLaEditsForRow", { get: () => listLaEditsForRow, enumerable: true });
+  Object.defineProperty(__x, "compactSnapshots", { get: () => compactSnapshots, enumerable: true });
   Object.defineProperty(__x, "listSupportCodes", { get: () => listSupportCodes, enumerable: true });
   Object.defineProperty(__x, "addSupportCode", { get: () => addSupportCode, enumerable: true });
   Object.defineProperty(__x, "updateSupportCode", { get: () => updateSupportCode, enumerable: true });

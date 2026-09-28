@@ -21,6 +21,8 @@ const xl = await import(path.join(ROOT, 'src/io/la_xlsx.js'));
 const META = ed.FIELDS.length;
 
 export async function lookaheadEditor(page, { check, shot = null }) {
+  // Tidying already run elsewhere in the suite, so this one counts only the editor's own.
+  const tidyAtStart = await page.evaluate(() => window.__rc.compactCalls || 0);
   console.log('\nLook-ahead editor');
   const snap = async (name) => { if (shot) await page.screenshot({ path: shot.replace(/\.png$/, `-${name}.png`) }); };
   const monday = ed.mondayOf(new Date().toISOString().slice(0, 10));
@@ -578,6 +580,11 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     view.activities.some((a) => a.meta.includes('ATS Site Test') && a.marks.some((m) => m.value === 'X.TCE'))
       && !view.activities.some((a) => a.meta.includes('Cable pull')));
   await snap('end');
+
+  check('after publishing, the editor tidies old readings — once a day from this browser',
+    await page.evaluate((n) => (window.__rc.compactCalls || 0) === n + 1
+      && (() => { try { return !!localStorage.getItem('cx.rc.compactedOn'); } catch { return true; } })(), tidyAtStart),
+    await page.evaluate(() => String(window.__rc.compactCalls)));
 
   /* ── The timeline reads the look-ahead from the calendar ─────────────── */
   await page.keyboard.press('Escape');

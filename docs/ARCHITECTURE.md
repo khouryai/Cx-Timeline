@@ -1944,6 +1944,104 @@ implementation. Microsoft Excel does not run on CI machines; Calc is the nearest
 independent reader that does. The suite skips itself, saying so, where Calc is
 not installed, and the `xlsx` CI job installs it.
 
+### A staffing clash is about the team, never about the support
+
+The editor reads every names row against the roster, the sheet's own PTO row
+and the leave booked in the calendar (`staffingIssues()` in `core/la_edit.js`)
+and marks three contradictions: somebody named on work on a day they have leave
+booked (asked for or approved — declined and cancelled leave is not leave),
+somebody on the PTO row the same day, and somebody on two activities painted as
+different shifts. Two activities on one shift is an ordinary day and is not
+flagged; a cancelled day is not a shift. The marked cell carries the reason in
+its tooltip and a corner so it does not rely on colour, and the toolbar counts
+them and lists each a press from its cell.
+
+Two things are deliberately left out. **The support an activity asks for** —
+"X.X", "X.WIT" — is the support's business: the look-ahead asks for as many as
+it needs, so nothing here counts codes against people. And **a name the roster
+does not know** is somebody else's person on a shared sheet, so it is not
+checked at all; the register is the same exact one the week plan reads
+(`nameRegister()`), with no near-miss correction, because a clash reported
+against a guessed person is worse than none.
+
+### A day's history is the edit log, read for one place
+
+Right-click a day for "History of this day", or a row for "History of this
+row": who changed it, when, and from what to what, newest first
+(`cellHistory()` / `rowHistory()`). Nothing is reconstructed — `rc_la_edits`
+keeps both sides of every change, and a row's move (`sort`) is left out because
+it is where the row sits, not what it says. Only an administrator can read the
+log, which is also who the editor is for.
+
+### An administrator works from one list
+
+Organisation opens on **Inbox** the first time in a session (`ui/rc_inbox.js`):
+leave to answer (approved or declined in place — one update either way), names
+and locations on the next five weeks of the look-ahead the registers cannot
+place, colours the legend does not explain, support codes nobody registered,
+cancellations with no reason, blockers nobody owns, invitations expired or not
+taken up, problems reported this week and a database behind the application.
+None of it is new information; each item is a press from the screen that
+answers it. Every source is read on its own, and one that fails is reported as
+a line of its own — "nothing is waiting" and "I could not look" are different
+answers. The Organisation tab carries the count, remembered for a minute
+because the header redraws on every write and the inbox reads a dozen sources.
+
+### Settings are changed on screen
+
+Organisation → Settings edits the `rc_settings` rows that used to need the SQL
+editor: the export title, the workbook's sheet, the cancellation log's start
+date and how long editor readings are kept whole. The policy on `rc_settings`
+is what limits them to administrators. Where the look-ahead is written is the
+one setting with consequences, so it is not a field: going back to the
+workbook asks first, exactly as the editor's menu does, and adopting the editor
+goes to the editor, which has to import something before there is anything to
+write in. A keep period under a fortnight is refused on screen and read as a
+fortnight by the database.
+
+### Seeing it as somebody else is a preview, refused at the client
+
+"View as…" lets an administrator see the calendar as a member or a viewer
+(`rc.previewAs()`): `me()`, `role()`, `isAdmin()` and `canWrite()` answer as
+that person, so every screen draws what they would get, and a banner above
+every tab says so and leads back. **Every write is refused in `core/rc.js`
+before it leaves the page** — `insert`, `update`, every function that is not a
+known read, settings, the legend, uploads and error reports — with an error
+carrying `preview: true`, and the huddle does not queue such a refusal for
+replay (it would replay as the administrator). The database is not asked to
+pretend: it still answers as the administrator, so a preview shows somebody's
+screens, not a proof of what their account could read — that proof is
+`supabase/test/rc_permissions.sql`. An administrator cannot preview another
+administrator, and the file lock's display name never takes a previewed name.
+
+### My day is where the team opens the calendar
+
+Members and viewers land on **My day** (`ui/rc_myday.js`): today and the next
+working day by their own working days, each task with where, which shift and
+who else is on the same look-ahead row that day — matched on the row, never on
+the wording — then the week at a glance, the last outcome recorded against them
+and the blockers they are chasing. It is a reading of `assignmentIndex()`, the
+same one the week plan and the huddle make, so it cannot disagree with them.
+**It records nothing.** The huddle is the one path an outcome is entered
+through, and a second one here would be two that could disagree on screen.
+
+### Readings are compacted, never deleted
+
+The editor publishes a reading every time its saves go quiet, and each carries
+the parsed grid — the one large column in the schema. Deleting old readings
+would keep that in check and break everything else: a reading's rows are what
+outcomes, plan entries, blockers and SAR links point at, and a change event
+names both readings it compares and cascades with either. So
+`rc_compact_snapshots()` removes only the **grid**, and only of an **editor**
+reading — whose every cell is in the append-only edit log and can be rebuilt —
+that is older than `snapshot_keep_days` and is not the last editor reading of
+its day or the newest reading of all. A workbook read's grid is the record of a
+file the application never stored and is kept at any age. The stub says it was
+compacted, how many rows it had and which colours it could not explain, so the
+snapshot history still reads true; re-reading the cancellation log skips it,
+because its rows already say what they said. The editor runs it after a
+publish once a day per browser, and Settings runs it on demand.
+
 ## What each suite covers
 
 `smoke.js` boots the real application in Chromium and checks rendering,

@@ -1483,10 +1483,14 @@ create or replace view public.rc_sars_without_rows with (security_invoker = true
 -- the newest grid is fetched on its own, once, by `latestSnapshot()`.
 -- `security_invoker`, or the view would run as its owner and show a member a
 -- register the table refuses them.
+-- A compacted reading (see `rc_compact_snapshots()`) keeps its row count in
+-- the stub, so the history still says how big it was.
 create or replace view public.rc_lookahead_snapshot_meta with (security_invoker = true) as
   select s.id, s.taken_at, s.file_mtime, s.file_hash, s.legend_at, s.sheet_name,
-         jsonb_array_length(coalesce(s.grid -> 'rows', '[]'::jsonb))    as row_count,
-         jsonb_array_length(coalesce(s.grid -> 'unknown', '[]'::jsonb)) as unmapped_count
+         coalesce((s.grid ->> 'row_count')::integer,
+                  jsonb_array_length(coalesce(s.grid -> 'rows', '[]'::jsonb)))  as row_count,
+         jsonb_array_length(coalesce(s.grid -> 'unknown', '[]'::jsonb))       as unmapped_count,
+         coalesce((s.grid ->> 'compacted')::boolean, false)                     as compacted
     from public.rc_lookahead_snapshots s;
 
 /*
@@ -2539,6 +2543,73 @@ revoke all on function public.rc_clear_client_errors(timestamptz) from public, a
 grant execute on function public.rc_clear_client_errors(timestamptz) to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════
+-- Keeping the readings in check
+--
+-- The editor publishes a reading whenever its saves go quiet, which is many a
+-- day, and each carries the whole parsed grid — the one large column in the
+-- schema. Nothing is deleted to keep that in check: a reading's rows are what
+-- outcomes, plan entries, blockers and SARs point at, and the change register's
+-- events name both readings they compare, so removing one would unlink the
+-- evidence and cascade away the history of what changed.
+--
+-- What goes is the grid, and only where it can be rebuilt: an **editor**
+-- reading, whose every cell is in the append-only `rc_la_edits`. A workbook
+-- read's grid is the durable record of a file the application never stored,
+-- and is kept whatever its age. Past `snapshot_keep_days` (Organisation →
+-- Settings; 60 by default, never under 14) only the last editor reading of each
+-- day keeps its grid; the others keep a stub saying they were compacted, how
+-- many rows they had and which colours they could not explain.
+-- ══════════════════════════════════════════════════════════════════════════
+
+create or replace function public.rc_compact_snapshots()
+returns integer
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_setting text;
+  v_keep    integer;
+  v_count   integer;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may tidy the look-ahead readings'
+      using errcode = '42501';
+  end if;
+  select value into v_setting from public.rc_settings where key = 'snapshot_keep_days';
+  v_keep := greatest(14, coalesce(case when v_setting ~ '^[0-9]{1,5}$' then v_setting::integer end, 60));
+
+  with ranked as (
+    select s.id,
+           row_number() over (
+             partition by (s.taken_at at time zone 'UTC')::date
+             order by s.taken_at desc, s.id desc) as nth
+      from public.rc_lookahead_snapshots s
+     where s.file_hash like 'editor:%'
+  )
+  update public.rc_lookahead_snapshots s
+     set grid = jsonb_build_object(
+           'compacted',    true,
+           'compacted_at', now(),
+           'row_count',    jsonb_array_length(coalesce(s.grid -> 'rows', '[]'::jsonb)),
+           'unknown',      coalesce(s.grid -> 'unknown', '[]'::jsonb),
+           'rows',         '[]'::jsonb)
+    from ranked r
+   where r.id = s.id
+     and r.nth > 1
+     and s.taken_at < now() - make_interval(days => v_keep)
+     and coalesce((s.grid ->> 'compacted')::boolean, false) = false
+     -- Never the newest reading, whatever its age: it is the look-ahead.
+     and s.id <> (select id from public.rc_lookahead_snapshots order by taken_at desc, id desc limit 1);
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+revoke all on function public.rc_compact_snapshots() from public, anon;
+grant execute on function public.rc_compact_snapshots() to authenticated;
+
+-- ══════════════════════════════════════════════════════════════════════════
 -- The version stamp — last, on purpose.
 --
 -- The calendar reads this at sign-in and compares it with `SCHEMA_VERSION` in
@@ -2549,5 +2620,5 @@ grant execute on function public.rc_clear_client_errors(timestamptz) to authenti
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '3')
+insert into public.rc_settings (key, value) values ('schema_version', '4')
 on conflict (key) do update set value = excluded.value, updated_at = now();

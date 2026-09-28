@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 23   Built: 2026-09-28T19:17:32.055Z
+ * Modules: 23   Built: 2026-09-28T19:35:55.165Z
  */
 (function () {
   'use strict';
@@ -2752,6 +2752,30 @@ __mods["ui/rc_settings.js"] = function (__x, __req) {
       required: true,
       check: (v) => (Number.isInteger(Number(v)) && Number(v) >= 14 ? null : 'At least 14 days, in whole days.'),
       said: (v) => `Editor readings are kept whole for ${v} days.`,
+    }));
+
+    list.appendChild(row({
+      label: 'Tidy the readings now',
+      hint: 'The editor does this once a day on its own. Only the grids of superseded editor readings go — the readings, their rows and every link to them stay.',
+      control: el('div', { class: 'rc-settings-inline' }, [
+        el('button', {
+          class: 'cx-btn mini', type: 'button', text: 'Tidy now',
+          onClick: async (e) => {
+            e.currentTarget.disabled = true;
+            try {
+              const n = await rc.compactSnapshots();
+              toast({
+                tone: 'good',
+                message: n ? `${n} older reading${n === 1 ? '' : 's'} compacted.` : 'Nothing to tidy — every reading is within the keep period or the last of its day.',
+              });
+            } catch (err) {
+              toast({ tone: 'bad', message: err?.message || String(err) });
+            } finally {
+              e.currentTarget.disabled = false;
+            }
+          },
+        }),
+      ]),
     }));
 
     /* ── What this is ───────────────────────────────────────────────────── */
@@ -9716,7 +9740,28 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     } catch (err) {
       E.dirtySincePublish = true;
       rc.reportError('lookahead:publish', err);
+      return;
     }
+    tidyOnceADay();
+  }
+
+  /**
+   * Compact superseded editor readings past the keep period — at most once a day
+   * from this browser, quietly, after a publish. The rules, and why nothing is
+   * deleted, are in `rc_compact_snapshots()`; Organisation → Settings runs it on
+   * demand too. Browser storage only remembers that it ran today: if it cannot,
+   * it runs again, which changes nothing the second time.
+   */
+  function tidyOnceADay() {
+    const key = 'cx.rc.compactedOn';
+    const today = todayISO();
+    try {
+      if (localStorage.getItem(key) === today) return;
+      localStorage.setItem(key, today);
+    } catch {
+      // No storage: running it again is harmless.
+    }
+    rc.compactSnapshots().catch((err) => rc.reportError('lookahead:compact', err));
   }
 
   /** Look for the other editor's changes, quietly, while nobody is mid-edit. */
@@ -10416,7 +10461,15 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
         el('td', { text: s.taken_at ? s.taken_at.slice(0, 16).replace('T', ' ') : '—' }),
         el('td', { text: s.file_mtime ? s.file_mtime.slice(0, 16).replace('T', ' ') : '—' }),
         el('td', { text: s.sheet_name }),
-        el('td', { class: 'rc-num', text: String(s.row_count ?? 0) }),
+        el('td', { class: 'rc-num', text: String(s.row_count ?? 0) }, [
+          s.compacted
+            ? el('span', {
+              class: 'rc-hint', style: 'margin:0 0 0 6px',
+              text: '· compacted',
+              title: 'A superseded editor reading past the keep period. Its grid can be rebuilt from the edit log; its rows and every link to them are kept.',
+            })
+            : null,
+        ]),
         el('td', { class: 'rc-num', text: String(s.unmapped_count ?? 0) }),
       ]))
     ));
@@ -10692,7 +10745,8 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
       let changed = 0;
       for (const meta of wanted) {
         const snapshot = await rc.snapshotById(meta.id);
-        if (!snapshot?.grid) continue;
+        // A compacted editor reading has no grid to re-read; its rows stand as written.
+        if (!snapshot?.grid || snapshot.grid.compacted) continue;
         const view = readGrid(applyLegend(snapshot.grid, legend), { anchorISO: snapshot.taken_at });
         const fresh = new Map((await rowsFrom(view, { snapshotId: snapshot.id })).map((r) => [r.row_key, r]));
         for (const row of await rc.listSnapshotRows(snapshot.id)) {

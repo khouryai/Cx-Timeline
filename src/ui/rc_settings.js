@@ -120,6 +120,30 @@ export async function renderSettings(host) {
     said: (v) => `Editor readings are kept whole for ${v} days.`,
   }));
 
+  list.appendChild(row({
+    label: 'Tidy the readings now',
+    hint: 'The editor does this once a day on its own. Only the grids of superseded editor readings go — the readings, their rows and every link to them stay.',
+    control: el('div', { class: 'rc-settings-inline' }, [
+      el('button', {
+        class: 'cx-btn mini', type: 'button', text: 'Tidy now',
+        onClick: async (e) => {
+          e.currentTarget.disabled = true;
+          try {
+            const n = await rc.compactSnapshots();
+            toast({
+              tone: 'good',
+              message: n ? `${n} older reading${n === 1 ? '' : 's'} compacted.` : 'Nothing to tidy — every reading is within the keep period or the last of its day.',
+            });
+          } catch (err) {
+            toast({ tone: 'bad', message: err?.message || String(err) });
+          } finally {
+            e.currentTarget.disabled = false;
+          }
+        },
+      }),
+    ]),
+  }));
+
   /* ── What this is ───────────────────────────────────────────────────── */
   list.appendChild(group('About'));
   const status = await rc.schemaStatus().catch(() => ({ state: 'unknown' }));

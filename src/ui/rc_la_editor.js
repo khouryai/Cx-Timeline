@@ -2363,7 +2363,28 @@ async function publish() {
   } catch (err) {
     E.dirtySincePublish = true;
     rc.reportError('lookahead:publish', err);
+    return;
   }
+  tidyOnceADay();
+}
+
+/**
+ * Compact superseded editor readings past the keep period — at most once a day
+ * from this browser, quietly, after a publish. The rules, and why nothing is
+ * deleted, are in `rc_compact_snapshots()`; Organisation → Settings runs it on
+ * demand too. Browser storage only remembers that it ran today: if it cannot,
+ * it runs again, which changes nothing the second time.
+ */
+function tidyOnceADay() {
+  const key = 'cx.rc.compactedOn';
+  const today = todayISO();
+  try {
+    if (localStorage.getItem(key) === today) return;
+    localStorage.setItem(key, today);
+  } catch {
+    // No storage: running it again is harmless.
+  }
+  rc.compactSnapshots().catch((err) => rc.reportError('lookahead:compact', err));
 }
 
 /** Look for the other editor's changes, quietly, while nobody is mid-edit. */

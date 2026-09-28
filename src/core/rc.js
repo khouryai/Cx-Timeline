@@ -558,6 +558,12 @@ export function listLaEditsForRow(rowId) {
   return select('rc_la_edits', (q) => q.eq('row_id', rowId).order('id', { ascending: false }).limit(1000));
 }
 
+/**
+ * Slim the grids of superseded editor readings past the keep period, and say
+ * how many — see `rc_compact_snapshots()` for what is kept and why.
+ */
+export const compactSnapshots = () => rpc('rc_compact_snapshots', {});
+
 export function listSupportCodes({ includeRetired = false } = {}) {
   return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
 }
@@ -625,7 +631,7 @@ export function listSettings() {
  * "could not update the legend", on one screen, weeks after the deploy that
  * needed it; this turns it into one sentence at sign-in naming the two files.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
  * Whether the database is the one this build was written against.
