@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-28T19:35:55.089Z
+ * Modules: 59   Built: 2026-09-28T19:50:28.865Z
  */
 (function () {
   'use strict';
@@ -7809,6 +7809,52 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     return out;
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     Only my rows
+
+     The look-ahead is a hundred-odd activities for the whole team, and somebody
+     on it wants the handful they are on. A names row belongs to the activity
+     line above it — that line is the work, and the names row says who lands on
+     each day of it — so the activity is what is kept, and it is drawn with its
+     names row under it as always. Section headings above a kept activity are
+     kept too, for the same reason they are in the editor's search: a row of work
+     with no section over it has lost where it sits in the plan.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The activities (and away rows) whose names name this person, in the days
+   * given, with the headings above them.
+   *
+   * `isMe(written)` answers whether a written name is this person — injected,
+   * because the register lives with the calendar. `cols`, when given, limits the
+   * question to the columns on screen: being named in a week nobody is looking
+   * at does not make a row yours this week. Rows with nothing scheduled are not
+   * dropped here: a row that names you is yours whether or not it is painted.
+   */
+  function rowsNaming(activities, isMe, cols = null) {
+    const rows = activities || [];
+    const inView = (col) => !cols || cols.has(col);
+    const names = (a) => (a.absence
+      ? (a.marks || []).filter((m) => m.value && inView(m.col)).flatMap((m) => resourceNames(m.value))
+      : (a.resource?.names || []).filter((n) => inView(n.col)).flatMap((n) => n.names));
+    const keep = new Array(rows.length).fill(false);
+    let sectionHasMine = false;
+    let belowIsKeptTitle = false;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const a = rows[i];
+      if (a.heading && !a.absence) {
+        keep[i] = sectionHasMine || belowIsKeptTitle;
+        sectionHasMine = false;
+        belowIsKeptTitle = keep[i];
+        continue;
+      }
+      keep[i] = names(a).some((n) => isMe(n));
+      if (keep[i] && !a.absence) sectionHasMine = true;
+      belowIsKeptTitle = false;
+    }
+    return rows.filter((_, i) => keep[i]);
+  }
+
   Object.defineProperty(__x, "isResourceLabel", { get: () => isResourceLabel, enumerable: true });
   Object.defineProperty(__x, "absenceKind", { get: () => absenceKind, enumerable: true });
   Object.defineProperty(__x, "ABSENCE_KINDS", { get: () => ABSENCE_KINDS, enumerable: true });
@@ -7836,6 +7882,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "attachCancellationNotes", { get: () => attachCancellationNotes, enumerable: true });
   Object.defineProperty(__x, "WORKED_STATUSES", { get: () => WORKED_STATUSES, enumerable: true });
   Object.defineProperty(__x, "outcomeProgress", { get: () => outcomeProgress, enumerable: true });
+  Object.defineProperty(__x, "rowsNaming", { get: () => rowsNaming, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════

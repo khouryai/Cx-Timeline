@@ -1917,3 +1917,13 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   .rc-myday-week { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .rc-myday-head { flex-wrap: wrap; }
 }
+
+/* ── Only my rows ─────────────────────────────────────────────────────────
+   Your own name on a names row: outlined in the primary colour and bold, so
+   it reads without the colour too. */
+.la-grid td.la-mine {
+  box-shadow: inset 0 0 0 2px var(--primary);
+  font-weight: 700;
+  color: var(--text-main);
+}
+.la-only-mine { font-weight: 600; }

@@ -3235,6 +3235,34 @@ async function main() {
   check('today and the next working day, as they would see them',
     /Today/i.test(priyaDay) && /Tomorrow|Next working day/i.test(priyaDay), priyaDay.replace(/\s+/g, ' ').slice(0, 240));
 
+  /* Only my rows, as a member sees the look-ahead: on by default, every names
+     row still under the activity line it belongs to, and the name marked. */
+  await page.locator('#rc-frame .rc-head .rc-tab', { hasText: 'Look-ahead' }).click();
+  await page.waitForSelector('#rc-frame .la-only-mine', { timeout: 10000 }).catch(() => {});
+  const mineView = await page.evaluate(() => {
+    const box = document.querySelector('#rc-frame .la-only-mine input');
+    const trs = [...document.querySelectorAll('#rc-frame .la-grid tbody tr')];
+    const orphans = trs.filter((tr, i) => tr.classList.contains('la-resource-row') && !tr.classList.contains('la-absence-row')
+      && (!trs[i - 1] || trs[i - 1].classList.contains('la-resource-row') || trs[i - 1].classList.contains('la-head-row'))).length;
+    return {
+      on: box?.checked ?? null,
+      rows: trs.length,
+      names: trs.filter((tr) => tr.classList.contains('la-resource-row') && !tr.classList.contains('la-absence-row')).length,
+      orphans,
+      marked: document.querySelectorAll('#rc-frame td.la-mine').length,
+      empty: !!document.querySelector('#rc-frame .cx-empty'),
+    };
+  });
+  check('a member\'s look-ahead opens on only their rows', mineView.on === true, JSON.stringify(mineView));
+  check('every names row is drawn under the activity line it belongs to',
+    mineView.names >= 1 && mineView.orphans === 0, JSON.stringify(mineView));
+  check('and their own name is marked on the days they are on', mineView.marked >= 1, JSON.stringify(mineView));
+  await page.locator('#rc-frame .la-only-mine input').uncheck();
+  await page.waitForTimeout(200);
+  const allRows = await page.locator('#rc-frame .la-grid tbody tr').count();
+  check('switching it off brings back the rest of the sheet', allRows > mineView.rows, `${mineView.rows} → ${allRows}`);
+  await page.locator('#rc-frame .la-only-mine input').check();
+
   const plansBefore = await page.evaluate(() => window.__rc.rows.rc_plan_entries.length);
   await page.locator('#rc-frame .rc-tab', { hasText: 'Week plan' }).click();
   await page.waitForSelector('#rc-frame .rc-resources', { timeout: 10000 });
@@ -3327,7 +3355,14 @@ async function main() {
      writes. The Changes list, the snapshot history and the SARs are the claim
      evidence and stay with the people answerable for it. */
   await viewer.locator('#rc-frame .rc-tab', { hasText: 'Look-ahead' }).click();
-  await viewer.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
+  await viewer.waitForSelector('#rc-frame .la-grid, #rc-frame .la-only-mine ~ * .cx-empty, #rc-frame .cx-empty', { timeout: 10000 });
+  /* The team opens on their own rows. This viewer is on none, and is told so,
+     one press from the whole sheet. */
+  if (await viewer.locator('#rc-frame .cx-empty', { hasText: 'not on anything' }).count()) {
+    check('somebody on no row is told so, not shown an empty grid', true);
+    await viewer.locator('#rc-frame .cx-empty button', { hasText: 'Show every row' }).click();
+    await viewer.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
+  }
   check('and the 4WLA actually draws for them',
     (await viewer.locator('#rc-frame .la-grid tbody tr').count()) >= 1);
   const vLa = await viewer.locator('#rc-frame').innerText();

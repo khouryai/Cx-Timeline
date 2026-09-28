@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 23   Built: 2026-09-28T19:35:55.165Z
+ * Modules: 23   Built: 2026-09-28T19:50:28.941Z
  */
 (function () {
   'use strict';
@@ -2240,6 +2240,14 @@ __mods["ui/rc_la_state.js"] = function (__x, __req) {
     sectionChosen: false,
     /** How many weeks the editor shows: four, or five to see one more ahead. */
     editorWeeks: 4,
+    /**
+     * Only the rows that name the person looking. Null until somebody chooses:
+     * then it is on for the team and off for an administrator, who is usually
+     * reading the whole sheet.
+     */
+    onlyMine: null,
+    /** Whose choice `onlyMine` is. */
+    onlyMineFor: null,
   };
 
   const WEEK_CHOICES = [
@@ -11150,7 +11158,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
   const { calendarPdf, calendarFit, PAGE_CHOICES } = __req("io/rc_pdf.js");
   const { saveFile } = __req("io/exporters.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes, isCancelMeaning } = __req("core/lookahead.js");
+  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes, isCancelMeaning, rowsNaming, resourceNames } = __req("core/lookahead.js");
+
 
 
 
@@ -11158,7 +11167,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
 
 
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName } = __req("ui/rc_util.js");
+  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName, nearestName } = __req("ui/rc_util.js");
 
 
 
@@ -11240,11 +11249,42 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * being read from the snapshot, so mapping a colour changes what is on screen
    * straight away instead of at the next ingest.
    */
+  /**
+   * "Is this written name me?" — the same register the week plan reads names
+   * with (full name, alias, a first name only one person has, and the one
+   * unambiguous near miss), so the rows this keeps are the rows the week plan
+   * puts you on. Null for an account with no person on the team.
+   */
+  async function meMatcher() {
+    const me = rc.me();
+    if (!me) return null;
+    const [people, aliases] = await Promise.all([
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+      rc.listPersonAliases().catch(() => []),
+    ]);
+    const register = nameRegister(people.length ? people : [me], aliases);
+    const memo = new Map();
+    return (written) => {
+      const key = foldName(written);
+      if (!key) return false;
+      if (!memo.has(key)) memo.set(key, (register.get(key) || nearestName(key, register)?.id || null) === me.id);
+      return memo.get(key);
+    };
+  }
+
   async function renderCalendar(host) {
-    const [snapshot, legendRows] = await Promise.all([
+    const [snapshot, legendRows, isMe] = await Promise.all([
       rc.latestSnapshot(),
       rc.listLegend(),
+      meMatcher(),
     ]);
+    // The choice belongs to whoever made it: a different person looking — an
+    // administrator previewing a member — starts from their own default.
+    const who = rc.me()?.id || null;
+    if (la.onlyMine === null || la.onlyMineFor !== who) {
+      la.onlyMine = Boolean(isMe) && !rc.isAdmin();
+      la.onlyMineFor = who;
+    }
 
     /* Reading the workbook is an administrator's job — it needs the folder, and
        ingestion writes the register. Everybody else is looking at the snapshot,
@@ -11311,6 +11351,17 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       checked: la.showResources,
       onChange: (on) => { la.showResources = on; draw(); },
     });
+    /* Only the activities whose names row puts me on a day on screen — drawn
+       with the activity line above the names, since that line is the work the
+       names land on, and under the sections they sit in. */
+    const mine = isMe
+      ? checkbox({
+        label: 'Only my rows',
+        checked: la.onlyMine,
+        onChange: (on) => { la.onlyMine = on; draw(); },
+      })
+      : null;
+    if (mine) mine.classList.add('la-only-mine');
 
     const dated = view.days.some((d) => d.date);
     const today = todayISO();
@@ -11332,10 +11383,20 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     const body = el('div');
     const draw = () => {
       clear(body);
-      const shown = drawn(windowed(view, today), la.calendarFilter, la.showQuietRows);
+      const onlyMine = Boolean(isMe && la.onlyMine);
+      const shown = drawn(windowed(view, today), la.calendarFilter, la.showQuietRows, la.showResources, onlyMine ? isMe : null);
       clear(strip);
       strip.appendChild(legendStrip(legend, grid.unknown, paintOn(shown)));
-      body.appendChild(grid_(shown, today));
+      if (onlyMine && !shown.activities.length) {
+        body.appendChild(emptyState({
+          iconName: 'calendar',
+          title: 'You are not on anything in these weeks',
+          message: 'No names row on the look-ahead puts you on a day in the weeks on screen. Widen the window, or see the whole sheet.',
+          action: { label: 'Show every row', onClick: () => { la.onlyMine = false; mine.querySelector('input').checked = false; draw(); } },
+        }));
+        return;
+      }
+      body.appendChild(grid_(shown, today, isMe));
     };
     // Redraw the rows only, never the input: rebuilding the field under the
     // caret is the trap this project has already been bitten by three times.
@@ -11347,12 +11408,13 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     }, [
       el('div', { style: 'flex:1;min-width:240px;max-width:340px' }, [search]),
       dated ? range : null,
+      mine,
       quiet,
       resources,
       /* The whole view, not the windowed one: the dialog picks its own weeks, and
          handing it what is on screen would quietly cap the export at whatever the
          range buttons were last set to. */
-      exportButton({ view, legendRows, today, sheetName: snapshot.sheet_name }),
+      exportButton({ view, legendRows, today, sheetName: snapshot.sheet_name, isMe }),
     ].filter(Boolean)));
     host.appendChild(body);
     draw();
@@ -11490,11 +11552,17 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * that was itself kept. That second clause is the parent case, and dropping it
    * would throw away the outer level of every section that has rows.
    */
-  function drawn(view, filter, showQuiet, withResources = la.showResources) {
+  function drawn(view, filter, showQuiet, withResources = la.showResources, isMe = null) {
     const terms = String(filter || '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean);
     let rows = view.activities;
 
-    if (!showQuiet) {
+    /* Only my rows: every activity whose names row names me on a day on
+       screen, with the sections above it — see `rowsNaming()`. It replaces the
+       "nothing scheduled" rule rather than adding to it: a row that names you
+       is yours whether or not anybody painted it yet. */
+    if (isMe) {
+      rows = rowsNaming(rows, isMe, new Set(view.days.map((d) => d.col)));
+    } else if (!showQuiet) {
       /* A heading that carries work is work.
          `heading` is a fact about paint in the activity columns, and a workbook
          that bands *every* row's description would make every row one — at which
@@ -11567,7 +11635,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   }
 
   /** The grid itself. Split out so the filter can redraw it without the header. */
-  function grid_(view, today) {
+  function grid_(view, today, isMe = null) {
     const rows = view.activities;
 
     /* The month band. Each label spans its own run of days, which is what the
@@ -11650,6 +11718,9 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         if (resource) classes.push('la-resource');
         if (d.weekend) classes.push('la-weekend');
         if (d.date && d.date === today) classes.push('la-today');
+        // Your own name, wherever it is written — the day you are on.
+        const yours = resource && isMe && mark?.value && resourceNames(mark.value).some(isMe);
+        if (yours) classes.push('la-mine');
         if (mark?.hex) {
           classes.push('la-painted');
           if (isDark(mark.hex)) classes.push('la-dark');
@@ -11664,7 +11735,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
           style: mark?.hex ? `background-color:#${mark.hex}` : '',
           text: mark?.value || '',
           title: [what, d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
-            mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value]
+            mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value,
+            yours ? 'you are on this day' : null]
             .filter(Boolean).join(' · '),
         });
       }),
@@ -11838,7 +11910,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * answers — a bigger sheet, fewer weeks, the names off — are all in this
    * dialog.
    */
-  function exportDialog({ view, legendRows, today, sheetName }) {
+  function exportDialog({ view, legendRows, today, sheetName, isMe = null }) {
     const weeks = selectInput({
       value: String(la.calendarWeeks || 0),
       options: [
@@ -11854,7 +11926,11 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       value: 'landscape',
       options: [{ value: 'landscape', label: 'Landscape' }, { value: 'portrait', label: 'Portrait' }],
     });
-    const title = textInput({ value: `${sheetName || '4WLA'} — look-ahead` });
+    const onlyMine = Boolean(isMe && la.onlyMine);
+    const title = textInput({ value: onlyMine ? `${rc.me()?.name || 'My'} — look-ahead` : `${sheetName || '4WLA'} — look-ahead` });
+    const withMine = isMe
+      ? checkbox({ label: 'Only my rows', checked: onlyMine })
+      : null;
 
     const withResources = checkbox({ label: 'Resource names, and who is away', checked: la.showResources });
     const withQuiet = checkbox({ label: 'Rows with nothing scheduled', checked: la.showQuietRows });
@@ -11872,7 +11948,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
        grid it was started from. */
     const chosen = () => {
       const narrowed = windowed(view, today, Number(weeks.value) || 0);
-      const rows = drawn(narrowed, on(withFilter) ? la.calendarFilter : '', on(withQuiet), on(withResources));
+      const rows = drawn(narrowed, on(withFilter) ? la.calendarFilter : '', on(withQuiet), on(withResources),
+        withMine && on(withMine) ? isMe : null);
       return {
         view: rows,
         opts: {
@@ -11914,7 +11991,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     };
 
     for (const control of [weeks, page, orientation]) control.addEventListener('change', refresh);
-    for (const box of [withResources, withQuiet, withLegend, withFilter]) {
+    for (const box of [withResources, withQuiet, withLegend, withFilter, withMine].filter(Boolean)) {
       box.querySelector('input').addEventListener('change', refresh);
     }
     refresh();
@@ -11928,6 +12005,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
           el('div', { style: 'flex:1' }, [field('Orientation', orientation)]),
         ]),
         field('Title', title),
+        withMine,
         withResources,
         withQuiet,
         withLegend,
@@ -11945,7 +12023,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         const { view: shown, opts } = chosen();
         if (!shown.activities.length) throw new Error('There is nothing to draw with those choices.');
         const blob = calendarPdf(shown, opts);
-        saveFile(`lookahead-${today}.pdf`, blob, 'application/pdf', 'Look-ahead');
+        const whose = withMine && on(withMine) ? `-${foldName(rc.me()?.name || 'mine') || 'mine'}` : '';
+        saveFile(`lookahead${whose}-${today}.pdf`, blob, 'application/pdf', 'Look-ahead');
       },
     });
   }

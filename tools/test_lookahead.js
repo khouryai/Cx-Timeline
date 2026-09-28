@@ -1301,6 +1301,38 @@ console.log('\nProgress from the calendar');
   check('and a day worked on both activities is one day', finished?.days === 5);
 }
 
+console.log('\nOnly my rows');
+{
+  const act = (label, names, extra = {}) => ({
+    meta: [label], marks: [], heading: false, highlighted: true, named: true,
+    resource: names ? { names: names.map(([col, list]) => ({ col, names: list })) } : null, ...extra,
+  });
+  const rows = [
+    { meta: ['PHASE 2'], heading: true, marks: [] },
+    { meta: ['W40 — Testing'], heading: true, marks: [] },
+    act('IXL Regression', [[10, ['Priya', 'Rosa']]]),
+    act('Cable pull', [[11, ['Tom']]]),
+    { meta: ['Y10 — Night works'], heading: true, marks: [] },
+    act('Night Mode', [[40, ['Priya']]]),
+    act('Unpainted, but mine', [[12, ['priya']]], { highlighted: false }),
+    { meta: ['Nothing of mine here'], heading: true, marks: [] },
+    act('Signals', [[10, ['Tom']]]),
+    { meta: ['PTO'], absence: 'pto', marks: [{ col: 10, value: 'Priya, Dana' }] },
+  ];
+  const isMe = (w) => String(w).trim().toLowerCase() === 'priya';
+  const kept = cls.rowsNaming(rows, isMe, new Set([10, 11, 12])).map((a) => a.meta[0]);
+  check('the activities whose names row names me are kept, with the sections above them',
+    kept.join(' | ') === 'PHASE 2 | W40 — Testing | IXL Regression | Y10 — Night works | Unpainted, but mine | PTO', kept.join(' | '));
+  check('a row that names me only in a week not on screen is not mine this week', !kept.includes('Night Mode'));
+  check('a section with none of mine under it goes, heading and all', !kept.includes('Nothing of mine here') && !kept.includes('Signals'));
+  check('a row naming me is kept even with nothing painted yet', kept.includes('Unpainted, but mine'));
+  check('the away row naming me is kept, and does not keep the section above it',
+    kept.includes('PTO') && !kept.includes('Nothing of mine here'));
+  check('with no columns given, every week counts', cls.rowsNaming(rows, isMe).some((a) => a.meta[0] === 'Night Mode'));
+  const ixl = cls.rowsNaming(rows, isMe, new Set([10])).find((a) => a.meta[0] === 'IXL Regression');
+  check('an activity is kept whole, so its names row is drawn under it', ixl?.resource?.names?.[0]?.names.includes('Rosa'));
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

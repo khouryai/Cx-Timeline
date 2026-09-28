@@ -32,6 +32,14 @@ export const la = {
   sectionChosen: false,
   /** How many weeks the editor shows: four, or five to see one more ahead. */
   editorWeeks: 4,
+  /**
+   * Only the rows that name the person looking. Null until somebody chooses:
+   * then it is on for the team and off for an administrator, who is usually
+   * reading the whole sheet.
+   */
+  onlyMine: null,
+  /** Whose choice `onlyMine` is. */
+  onlyMineFor: null,
 };
 
 export const WEEK_CHOICES = [
