@@ -1369,6 +1369,45 @@ console.log('\nOne activity, whole');
   check('what is written in the cell comes along', days[0].text === 'X.WIT');
 }
 
+console.log('\nWhat changed for me');
+{
+  const row = (label, cells, resources, location = 'W40') => ({ raw_label: label, raw_location: location, cells, resources });
+  const before = [
+    row('IXL Regression', { '2026-09-22': 'Day Shift', '2026-09-23': 'Day Shift', '2026-09-24': 'Day Shift' },
+      { '2026-09-22': 'Priya, Rosa', '2026-09-23': 'Priya', '2026-09-24': 'Priya' }),
+    row('Night Mode', { '2026-09-25': 'Day Shift', '2026-09-28': 'Night Shift' }, { '2026-09-25': 'Priya', '2026-09-28': 'Priya' }, 'Y10'),
+    row('Cable pull', { '2026-09-29': 'Day Shift' }, { '2026-09-29': 'Priya' }),
+    row('Signals', { '2026-09-30': 'Cancellation' }, { '2026-09-30': 'Priya' }),
+    row('Long ago', { '2026-08-01': 'Day Shift' }, { '2026-08-01': 'Priya' }),
+  ];
+  const after = [
+    // 22nd unchanged; 23rd cancelled; 24th moved to the 26th.
+    row('IXL Regression', { '2026-09-22': 'Day Shift', '2026-09-23': 'Cancellation', '2026-09-26': 'Day Shift' },
+      { '2026-09-22': 'Priya, Rosa', '2026-09-23': 'Priya', '2026-09-26': 'Priya' }),
+    // 25th now a night shift; 28th given to Tom.
+    row('Night Mode', { '2026-09-25': 'Night Shift', '2026-09-28': 'Night Shift' }, { '2026-09-25': 'Priya', '2026-09-28': 'Tom' }, 'Y10'),
+    // Cable pull gone entirely; a new activity added; Signals back on.
+    row('Possession prep', { '2026-10-02': 'Day Shift' }, { '2026-10-02': 'priya' }),
+    row('Signals', { '2026-09-30': 'Day Shift' }, { '2026-09-30': 'Priya' }),
+  ];
+  const isMe = (n) => String(n).trim().toLowerCase() === 'priya';
+  const changes = cls.changesForMe(before, after, isMe, { from: '2026-09-21', to: '2026-10-18' });
+  const kinds = changes.map((c) => `${c.kind}:${c.label}:${c.date}`);
+  const has = (k) => kinds.includes(k);
+  check('a day that stayed as it was is not a change', !changes.some((c) => c.date === '2026-09-22'), kinds.join(' '));
+  check('a day painted as a cancellation is said to be cancelled', has('cancelled:IXL Regression:2026-09-23'));
+  check('a day taken off and another of the same activity put on is one day moved',
+    has('moved:IXL Regression:2026-09-26') && changes.find((c) => c.kind === 'moved')?.from === '2026-09-24');
+  check('a different shift is said, with what it was', changes.some((c) => c.kind === 'shift' && c.was === 'Day Shift' && c.now === 'Night Shift'));
+  check('a day given to somebody else says who', changes.some((c) => c.kind === 'given' && c.names.join() === 'Tom'));
+  check('a day that went with nobody taking it is removed', has('removed:Cable pull:2026-09-29'));
+  check('a new day is added, however the name is cased', has('added:Possession prep:2026-10-02'));
+  check('a cancelled day back on is reinstated', has('reinstated:Signals:2026-09-30'));
+  check('days outside the window are not the question', !changes.some((c) => c.label === 'Long ago'));
+  check('in date order', changes.map((c) => c.date).join() === [...changes.map((c) => c.date)].sort().join());
+  check('nothing changed is an empty list', cls.changesForMe(before, before, isMe, { from: '2026-09-21' }).length === 0);
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

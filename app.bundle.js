@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-28T20:02:58.666Z
+ * Modules: 59   Built: 2026-09-28T20:17:48.391Z
  */
 (function () {
   'use strict';
@@ -7915,6 +7915,117 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     return out;
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     What changed for me
+
+     Somebody on the team opens the calendar and wants to know one thing before
+     anything else: has my week moved since I last looked? This compares two
+     readings of the look-ahead — the one they last said "got it" to, and the
+     latest — for the days that name them, and says what happened in the words a
+     person would use: a day added, a day taken away, a day moved, a day given
+     to somebody else, a day cancelled, a shift changed.
+
+     Both sides come from the stored rows (`rc_lookahead_rows`), which are never
+     compacted, so an old reading can always be compared. A reading is a complete
+     statement of the weeks it covers, so each side is one reading, whole.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The days a set of stored rows names somebody on, between `from` and `to`
+   * (ISO, inclusive): a map of `date|label` → `{ date, label, location, meaning,
+   * cancelled }`.
+   */
+  function myLookaheadDays(rows, isMe, { from = null, to = null } = {}) {
+    const out = new Map();
+    for (const row of rows || []) {
+      for (const [date, text] of Object.entries(row.resources || {})) {
+        const day = String(date).slice(0, 10);
+        if ((from && day < from) || (to && day > to)) continue;
+        if (!resourceNames(text).some((n) => isMe(n))) continue;
+        const meaning = row.cells?.[day] || row.cells?.[date] || '';
+        out.set(`${day}|${row.raw_label || ''}`, {
+          date: day,
+          label: row.raw_label || '',
+          location: row.raw_location || '',
+          meaning,
+          cancelled: isCancelMeaning(meaning),
+        });
+      }
+    }
+    return out;
+  }
+
+  /** How far apart a removed and an added day of one activity may be and still be one day moved. */
+  const MOVED_WITHIN_DAYS = 14;
+
+  /**
+   * What changed between two readings for the days that name this person:
+   * `[{ kind, date, label, location, from?, was?, now?, names? }]`, by date.
+   *
+   *   added      named on a day they were not before
+   *   removed    no longer named on a day they were, and nobody else took it
+   *   given      no longer named, and the row names somebody else that day
+   *   moved      removed from one day and added to another of the same activity
+   *   cancelled  still named, and the day is now painted as a cancellation
+   *   reinstated a day that was cancelled is back on
+   *   shift      still named, and the day is painted as a different shift
+   */
+  function changesForMe(beforeRows, afterRows, isMe, { from = null, to = null } = {}) {
+    const before = myLookaheadDays(beforeRows, isMe, { from, to });
+    const after = myLookaheadDays(afterRows, isMe, { from, to });
+    const afterRow = new Map();
+    for (const row of afterRows || []) {
+      for (const date of new Set([...Object.keys(row.resources || {}), ...Object.keys(row.cells || {})])) {
+        afterRow.set(`${String(date).slice(0, 10)}|${row.raw_label || ''}`, row);
+      }
+    }
+
+    const added = [...after.entries()].filter(([k]) => !before.has(k)).map(([, v]) => v);
+    const removed = [...before.entries()].filter(([k]) => !after.has(k)).map(([, v]) => v);
+    const out = [];
+
+    /* A day taken off and another of the same activity put on, close together,
+       is one day moved — nearest first, each day used once. */
+    const usedAdded = new Set();
+    const stillRemoved = [];
+    for (const r of removed.sort((a, b) => a.date.localeCompare(b.date))) {
+      let best = null;
+      let bestGap = Infinity;
+      added.forEach((a, i) => {
+        if (usedAdded.has(i) || a.label !== r.label) return;
+        const gap = Math.abs(Date.parse(`${a.date}T00:00:00Z`) - Date.parse(`${r.date}T00:00:00Z`)) / 86400000;
+        if (gap <= MOVED_WITHIN_DAYS && gap < bestGap) { best = i; bestGap = gap; }
+      });
+      if (best == null) { stillRemoved.push(r); continue; }
+      usedAdded.add(best);
+      const a = added[best];
+      out.push({ kind: 'moved', date: a.date, from: r.date, label: a.label, location: a.location, now: a.meaning, was: r.meaning });
+    }
+
+    added.forEach((a, i) => {
+      if (!usedAdded.has(i)) out.push({ kind: 'added', date: a.date, label: a.label, location: a.location, now: a.meaning });
+    });
+    for (const r of stillRemoved) {
+      const row = afterRow.get(`${r.date}|${r.label}`);
+      const names = resourceNames(row?.resources?.[r.date] || '').filter((n) => !isMe(n));
+      if (names.length) out.push({ kind: 'given', date: r.date, label: r.label, location: r.location, names });
+      else out.push({ kind: 'removed', date: r.date, label: r.label, location: r.location, was: r.meaning });
+    }
+    for (const [k, now] of after) {
+      const was = before.get(k);
+      if (!was) continue;
+      if (now.cancelled && !was.cancelled) {
+        out.push({ kind: 'cancelled', date: now.date, label: now.label, location: now.location, was: was.meaning });
+      } else if (was.cancelled && !now.cancelled) {
+        out.push({ kind: 'reinstated', date: now.date, label: now.label, location: now.location, now: now.meaning });
+      } else if (!now.cancelled && now.meaning !== was.meaning && now.meaning && was.meaning) {
+        out.push({ kind: 'shift', date: now.date, label: now.label, location: now.location, was: was.meaning, now: now.meaning });
+      }
+    }
+
+    return out.sort((a, b) => a.date.localeCompare(b.date) || a.label.localeCompare(b.label));
+  }
+
   Object.defineProperty(__x, "isResourceLabel", { get: () => isResourceLabel, enumerable: true });
   Object.defineProperty(__x, "absenceKind", { get: () => absenceKind, enumerable: true });
   Object.defineProperty(__x, "ABSENCE_KINDS", { get: () => ABSENCE_KINDS, enumerable: true });
@@ -7945,6 +8056,8 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "rowsNaming", { get: () => rowsNaming, enumerable: true });
   Object.defineProperty(__x, "activityTitle", { get: () => activityTitle, enumerable: true });
   Object.defineProperty(__x, "activityDays", { get: () => activityDays, enumerable: true });
+  Object.defineProperty(__x, "myLookaheadDays", { get: () => myLookaheadDays, enumerable: true });
+  Object.defineProperty(__x, "changesForMe", { get: () => changesForMe, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -16503,7 +16616,7 @@ __mods["core/rc.js"] = function (__x, __req) {
       'rc_people', 'rc_locations', 'rc_location_alias', 'rc_person_alias',
       'rc_categories', 'rc_parties',
       'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries', 'rc_client_errors',
-      'rc_la_rows', 'rc_la_cells', 'rc_la_edits', 'rc_support_codes',
+      'rc_la_rows', 'rc_la_cells', 'rc_la_edits', 'rc_support_codes', 'rc_la_seen',
       'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
       'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
     ];
@@ -16602,6 +16715,33 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   const compactSnapshots = () => rpc('rc_compact_snapshots', {});
 
+  /* ── Who has seen the changes to their days ─────────────────────────────── */
+
+  /** The newest "Got it" a person has given, or null — see `rc_la_seen`. */
+  function lastSeen(personId) {
+    return select('rc_la_seen', (q) => q.eq('person_id', personId).order('seen_at', { ascending: false }).limit(1))
+      .then((rows) => rows[0] || null);
+  }
+
+  /** Every "Got it", newest first — an administrator reads everybody's, anybody else their own. */
+  function listSeen() {
+    return select('rc_la_seen', (q) => q.order('seen_at', { ascending: false }).limit(2000));
+  }
+
+  /** Record that the person looking has seen the look-ahead as of this reading. */
+  function markSeen({ snapshotId, takenAt, changes = 0 }) {
+    const who = me();
+    if (!who) return Promise.reject(new Error('Only somebody on the team can say they have seen their days.'));
+    return insert('rc_la_seen', [{
+      person_id: who.id, snapshot_id: snapshotId, snapshot_taken_at: takenAt, changes,
+    }]).then((rows) => rows[0] || null);
+  }
+
+  /** One reading's stored rows — what "what changed for me" compares. */
+  function snapshotRows(snapshotId) {
+    return selectAll('rc_lookahead_rows', (q) => q.eq('snapshot_id', snapshotId).order('id'));
+  }
+
   function listSupportCodes({ includeRetired = false } = {}) {
     return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
   }
@@ -16669,7 +16809,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 4;
+  const SCHEMA_VERSION = 5;
 
   /**
    * Whether the database is the one this build was written against.
@@ -17311,6 +17451,10 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listLaEdits", { get: () => listLaEdits, enumerable: true });
   Object.defineProperty(__x, "listLaEditsForRow", { get: () => listLaEditsForRow, enumerable: true });
   Object.defineProperty(__x, "compactSnapshots", { get: () => compactSnapshots, enumerable: true });
+  Object.defineProperty(__x, "lastSeen", { get: () => lastSeen, enumerable: true });
+  Object.defineProperty(__x, "listSeen", { get: () => listSeen, enumerable: true });
+  Object.defineProperty(__x, "markSeen", { get: () => markSeen, enumerable: true });
+  Object.defineProperty(__x, "snapshotRows", { get: () => snapshotRows, enumerable: true });
   Object.defineProperty(__x, "listSupportCodes", { get: () => listSupportCodes, enumerable: true });
   Object.defineProperty(__x, "addSupportCode", { get: () => addSupportCode, enumerable: true });
   Object.defineProperty(__x, "updateSupportCode", { get: () => updateSupportCode, enumerable: true });

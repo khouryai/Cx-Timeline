@@ -2042,6 +2042,64 @@ snapshot history still reads true; re-reading the cancellation log skips it,
 because its rows already say what they said. The editor runs it after a
 publish once a day per browser, and Settings runs it on demand.
 
+### Only my rows keeps the activity line with its names
+
+The Look-ahead tab's **Only my rows** (on by default for the team, off for an
+administrator, and re-defaulted whenever somebody else is looking — View as)
+keeps the activities whose names row puts the person on a day on screen, and
+the PTO / Office rows naming them (`rowsNaming()` in `core/lookahead.js`).
+**The activity is what is kept, never the names row alone:** the activity line
+is the work and the names row says who lands on each of its days, so a names
+row drawn without the line above it would be names about nothing — the grid
+has always drawn the names row as part of its activity, and this keeps that.
+Section headings above a kept activity stay too, as they do in the editor's
+search. A row that names you is yours whether or not it is painted yet, so the
+switch replaces the "nothing scheduled" rule rather than adding to it. Names
+are matched through the same register as the week plan (`meMatcher()`), your
+own name is outlined on your days, and the PDF export offers the same switch.
+Somebody on no row is told so, one press from the whole sheet.
+
+### A task opens its whole activity
+
+Tapping a task on My day — or the activity's columns in the Look-ahead grid —
+opens the activity as the latest reading has it (`ui/rc_activity.js`): every
+column under the sheet's own headings, and every day from this week on with the
+shift its paint means, whether it was cancelled, what the cell says and who is
+on it, your days marked (`activityDays()`). It is found by its row in that
+reading **only when the row still says the same thing**, otherwise by the
+row's exact words, and one no longer on the sheet says so — a row number that
+has drifted must never open somebody else's work. Why a day was cancelled is
+claim evidence, readable by an administrator only, so the team sees that it
+was and an administrator sees who and why.
+
+An activity's name is its description column (`activityTitle()`). The rule
+used to take the first heading that mentioned an activity, which on BART's
+sheet is **Activity ID** — every suggestion on the timeline was named after its
+CDRL number. An identifier is never the title.
+
+### What changed for me is two readings compared, and Got it is append-only
+
+My day opens on what changed for the person since the reading they last
+acknowledged, for their days from today to four weeks out
+(`changesForMe()` in `core/lookahead.js`): **added**, **taken off**, **given
+to** somebody else, **moved** (a day of the same activity off and another on,
+within a fortnight, paired nearest first), **cancelled**, **back on** and
+**shift changed** — in words, by date. Both sides are the stored
+`rc_lookahead_rows` of one reading each, which compaction never touches, so any
+old reading can be compared; a reading is a complete statement of the weeks it
+covers, so nothing is merged across readings.
+
+**Got it** is a row in `rc_la_seen`: the person, the reading, when, and how
+many changes were on screen. Anybody on the team adds one for themselves — a
+viewer too, since being told is not writing the plan — nobody updates or
+deletes one, and only an administrator reads the team's. The first visit
+records the reading on screen as the starting point, and a new reading that
+changes none of the person's days is recorded quietly, because there was
+nothing to see; neither happens while previewing. The My day tab counts what
+is waiting, and the administrator's inbox lists who has changes they have not
+seen and who has never opened My day. Reminders stay inside the application:
+nothing is emailed from it, by design.
+
 ## What each suite covers
 
 `smoke.js` boots the real application in Chromium and checks rendering,

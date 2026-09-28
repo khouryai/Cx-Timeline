@@ -631,6 +631,7 @@ function fakeSdk() {
     rc_rows_without_sar: [],
     rc_sars_without_rows: [],
     rc_invitations: [],
+    rc_la_seen: [],
   };
 
   /* A filter chain thin enough to be obviously right, and no thinner. */
@@ -709,10 +710,13 @@ function fakeSdk() {
             const defaults = {
               ...(list.some((r) => 'active' in r) ? { active: true } : {}),
               ...(table === 'rc_client_errors' ? { created_at: new Date().toISOString() } : {}),
+              ...(table === 'rc_la_seen' ? { seen_at: new Date().toISOString() } : {}),
             };
             const made = [].concat(rows).map((r, i) => (
               { id: `${table}-${list.length + i + 1}`, ...defaults, ...r }));
-            list.push(...made);
+            // The stub ignores order(): a "Got it" is read newest first, so it goes in first.
+            if (table === 'rc_la_seen') list.unshift(...made);
+            else list.push(...made);
             // rc_plan_current is a *view* over the entries, and the stub makes
             // it an alias rather than a copy — so pushing again here would
             // double every plan row.
@@ -3162,6 +3166,20 @@ async function main() {
   console.log('\nThe administrator runs it from one place');
 
   await page.locator('.ws-btn', { hasText: 'Calendar' }).click().catch(() => {});
+  /* Dan has an account, and said "got it" to an older reading that had him on
+     a job the latest one no longer does. */
+  await page.evaluate((iso) => {
+    const S = window.__rc.rows;
+    const dan = S.rc_people.find((p) => p.name === 'Dan');
+    dan.user_id = dan.user_id || 'user-dan';
+    const latest = S.rc_lookahead_snapshots[0];
+    S.rc_lookahead_snapshots.push({ ...latest, id: 'snap-dan-old', taken_at: new Date(Date.now() - 86400000).toISOString(), file_hash: 'editor:dan-old' });
+    S.rc_lookahead_rows.push({
+      id: 'dan-old-row', snapshot_id: 'snap-dan-old', week_start: iso, sheet_row: null, row_key: 'dan-old',
+      raw_label: 'Old job · Y10', raw_location: 'Y10', cells: { [iso]: 'Day Shift' }, resources: { [iso]: 'Dan' },
+    });
+    S.rc_la_seen.push({ id: 'seen-dan', person_id: dan.id, snapshot_id: 'snap-dan-old', snapshot_taken_at: new Date().toISOString(), changes: 0, seen_at: new Date(Date.now() - 86400000).toISOString() });
+  }, new Date(Date.now() + 86400000).toISOString().slice(0, 10));
   await page.evaluate((iso) => {
     window.__rc.rows.rc_leave.push({
       id: 'lv-ask', person_id: 'p5', kind_id: 'k1', status: 'requested', start_date: iso, end_date: iso, note: 'Family visit',
@@ -3181,6 +3199,8 @@ async function main() {
   check('a leave request is in it, with who, what and the note',
     inbox.items.some((t) => /Rosa asked for Annual leave/.test(t) && /Family visit/.test(t)), inbox.items.join(' / ').slice(0, 300));
   check('every source was read — none reported as unreadable', inbox.failed.length === 0, inbox.failed.join(' / '));
+  check('the inbox says who has changes to their days they have not seen',
+    inbox.items.some((t) => /changes to their days they have not seen/.test(t) && /Dan \(\d+\)/.test(t)), inbox.items.join(' / ').slice(0, 400));
   const orgTab = page.locator('#rc-frame .rc-head .rc-tab', { hasText: 'Organisation' });
   await page.waitForFunction(() => !!document.querySelector('#rc-frame .rc-head .rc-tab-count'), null, { timeout: 5000 }).catch(() => {});
   check('and the Organisation tab counts it', Number(await orgTab.locator('.rc-tab-count').textContent().catch(() => '0')) >= 1);
@@ -3475,6 +3495,10 @@ async function main() {
   check('with today and the next working day side by side',
     myDay.cards[0] === 'Today' && /Tomorrow|Next working day/.test(myDay.cards[1] || ''), myDay.cards.join(', '));
   check('and the week at a glance, today marked', myDay.week === 7 && myDay.today === 1);
+  await member.waitForSelector('#rc-frame .rc-myday-uptodate', { timeout: 8000 }).catch(() => {});
+  check('the first time, the look-ahead on screen becomes the starting point, quietly',
+    /From now on/.test(await member.locator('#rc-frame .rc-myday-changes').innerText().catch(() => ''))
+      && await member.evaluate(() => window.__rc.rows.rc_la_seen.some((r) => r.person_id === 'p1' && r.changes === 0)));
   check('what was recorded is shown, and nothing here records an outcome',
     /Your last recorded day/i.test(myDay.text) && myDay.statusButtons === 0, `${myDay.statusButtons} | ${myDay.text.replace(/\s+/g, ' ').slice(0, 400)}`);
 
@@ -3502,6 +3526,22 @@ async function main() {
   const mDay = await mDates.nth(0).inputValue();
   await mDates.nth(1).fill(mDay);
   await member.locator('.cx-modal input[placeholder="What they will do"]').fill('Office — RFI log');
+  /* Meanwhile the look-ahead is published again, and this reading puts Alex on
+     a job tomorrow. Everything else about it is the reading before. */
+  const tomorrowIso = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  await member.evaluate((iso) => {
+    const S = window.__rc.rows;
+    const was = S.rc_lookahead_snapshots[0];
+    const fresh = { ...was, id: 'snap-newer', taken_at: new Date().toISOString(), file_hash: 'editor:newer' };
+    S.rc_lookahead_snapshots.unshift(fresh);
+    const copies = S.rc_lookahead_rows.filter((r) => r.snapshot_id === was.id)
+      .map((r, i) => ({ ...r, id: `newer-${i}`, snapshot_id: fresh.id }));
+    copies.push({
+      id: 'newer-alex', snapshot_id: fresh.id, week_start: iso, sheet_row: null, row_key: 'newer-alex',
+      raw_label: 'Possession prep · W30', raw_location: 'W30', cells: { [iso]: 'Day Shift' }, resources: { [iso]: 'Alex' },
+    });
+    S.rc_lookahead_rows.push(...copies);
+  }, tomorrowIso);
   await member.locator('.cx-modal .cx-modal-foot button', { hasText: 'Assign' }).click();
   await member.waitForTimeout(700);
   check('and the day they planned for themselves is written',
@@ -3516,6 +3556,28 @@ async function main() {
   check('and My day shows it, marked as planned by hand',
     myPlanned.card ? /Office — RFI log/.test(myPlanned.card) && /Planned by hand/.test(myPlanned.card) : /Office — RFI log/.test(myPlanned.strip),
     `${mDay}: ${(myPlanned.card || myPlanned.strip).replace(/\s+/g, ' ').slice(0, 200)}`);
+
+  /* What changed for me: the newer reading put Alex on a job tomorrow. */
+  await member.waitForSelector('#rc-frame .rc-myday-changes-open', { timeout: 8000 }).catch(() => {});
+  const changed = await member.evaluate(() => ({
+    text: document.querySelector('#rc-frame .rc-myday-changes')?.innerText || '',
+    count: document.querySelector('#rc-frame .rc-head .rc-tab-count-info')?.textContent || '',
+  }));
+  check('a change to their days is the first thing on My day, in words',
+    /1 change to your days/i.test(changed.text) && /Added/.test(changed.text) && /Possession prep/.test(changed.text),
+    changed.text.replace(/\s+/g, ' ').slice(0, 200));
+  check('and the My day tab counts it', changed.count === '1', changed.count);
+  await member.locator('#rc-frame .rc-myday-changes button', { hasText: 'Got it' }).click();
+  await member.waitForTimeout(600);
+  check('Got it records that they have seen the latest reading, and how much changed',
+    await member.evaluate(() => {
+      const newest = window.__rc.rows.rc_la_seen[0];
+      return newest?.person_id === 'p1' && newest.snapshot_id === 'snap-newer' && newest.changes === 1;
+    }));
+  await member.waitForSelector('#rc-frame .rc-myday-uptodate', { timeout: 8000 }).catch(() => {});
+  check('and the panel settles to "up to date"',
+    /up to date/i.test(await member.locator('#rc-frame .rc-myday-changes').innerText().catch(() => ''))
+      && !(await member.locator('#rc-frame .rc-head .rc-tab-count-info').count()));
   await member.locator('#rc-frame .rc-tab', { hasText: 'Week plan' }).click();
   await member.waitForSelector('#rc-frame .rc-resources', { timeout: 10000 });
 

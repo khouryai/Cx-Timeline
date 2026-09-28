@@ -309,12 +309,16 @@ export async function meMatcher() {
     rc.listPeople({ includeInactive: true }).catch(() => []),
     rc.listPersonAliases().catch(() => []),
   ]);
-  const register = nameRegister(people.length ? people : [me], aliases);
+  return personMatcher(nameRegister(people.length ? people : [me], aliases), me.id);
+}
+
+/** "Is this written name this person?" against a register — see `meMatcher()`. */
+export function personMatcher(register, personId) {
   const memo = new Map();
   return (written) => {
     const key = foldName(written);
     if (!key) return false;
-    if (!memo.has(key)) memo.set(key, (register.get(key) || nearestName(key, register)?.id || null) === me.id);
+    if (!memo.has(key)) memo.set(key, (register.get(key) || nearestName(key, register)?.id || null) === personId);
     return memo.get(key);
   };
 }

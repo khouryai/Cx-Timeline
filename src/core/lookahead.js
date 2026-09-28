@@ -1594,3 +1594,114 @@ export function activityDays(view, activity, { fromISO = null, isMe = () => fals
   }
   return out;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   What changed for me
+
+   Somebody on the team opens the calendar and wants to know one thing before
+   anything else: has my week moved since I last looked? This compares two
+   readings of the look-ahead — the one they last said "got it" to, and the
+   latest — for the days that name them, and says what happened in the words a
+   person would use: a day added, a day taken away, a day moved, a day given
+   to somebody else, a day cancelled, a shift changed.
+
+   Both sides come from the stored rows (`rc_lookahead_rows`), which are never
+   compacted, so an old reading can always be compared. A reading is a complete
+   statement of the weeks it covers, so each side is one reading, whole.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The days a set of stored rows names somebody on, between `from` and `to`
+ * (ISO, inclusive): a map of `date|label` → `{ date, label, location, meaning,
+ * cancelled }`.
+ */
+export function myLookaheadDays(rows, isMe, { from = null, to = null } = {}) {
+  const out = new Map();
+  for (const row of rows || []) {
+    for (const [date, text] of Object.entries(row.resources || {})) {
+      const day = String(date).slice(0, 10);
+      if ((from && day < from) || (to && day > to)) continue;
+      if (!resourceNames(text).some((n) => isMe(n))) continue;
+      const meaning = row.cells?.[day] || row.cells?.[date] || '';
+      out.set(`${day}|${row.raw_label || ''}`, {
+        date: day,
+        label: row.raw_label || '',
+        location: row.raw_location || '',
+        meaning,
+        cancelled: isCancelMeaning(meaning),
+      });
+    }
+  }
+  return out;
+}
+
+/** How far apart a removed and an added day of one activity may be and still be one day moved. */
+const MOVED_WITHIN_DAYS = 14;
+
+/**
+ * What changed between two readings for the days that name this person:
+ * `[{ kind, date, label, location, from?, was?, now?, names? }]`, by date.
+ *
+ *   added      named on a day they were not before
+ *   removed    no longer named on a day they were, and nobody else took it
+ *   given      no longer named, and the row names somebody else that day
+ *   moved      removed from one day and added to another of the same activity
+ *   cancelled  still named, and the day is now painted as a cancellation
+ *   reinstated a day that was cancelled is back on
+ *   shift      still named, and the day is painted as a different shift
+ */
+export function changesForMe(beforeRows, afterRows, isMe, { from = null, to = null } = {}) {
+  const before = myLookaheadDays(beforeRows, isMe, { from, to });
+  const after = myLookaheadDays(afterRows, isMe, { from, to });
+  const afterRow = new Map();
+  for (const row of afterRows || []) {
+    for (const date of new Set([...Object.keys(row.resources || {}), ...Object.keys(row.cells || {})])) {
+      afterRow.set(`${String(date).slice(0, 10)}|${row.raw_label || ''}`, row);
+    }
+  }
+
+  const added = [...after.entries()].filter(([k]) => !before.has(k)).map(([, v]) => v);
+  const removed = [...before.entries()].filter(([k]) => !after.has(k)).map(([, v]) => v);
+  const out = [];
+
+  /* A day taken off and another of the same activity put on, close together,
+     is one day moved — nearest first, each day used once. */
+  const usedAdded = new Set();
+  const stillRemoved = [];
+  for (const r of removed.sort((a, b) => a.date.localeCompare(b.date))) {
+    let best = null;
+    let bestGap = Infinity;
+    added.forEach((a, i) => {
+      if (usedAdded.has(i) || a.label !== r.label) return;
+      const gap = Math.abs(Date.parse(`${a.date}T00:00:00Z`) - Date.parse(`${r.date}T00:00:00Z`)) / 86400000;
+      if (gap <= MOVED_WITHIN_DAYS && gap < bestGap) { best = i; bestGap = gap; }
+    });
+    if (best == null) { stillRemoved.push(r); continue; }
+    usedAdded.add(best);
+    const a = added[best];
+    out.push({ kind: 'moved', date: a.date, from: r.date, label: a.label, location: a.location, now: a.meaning, was: r.meaning });
+  }
+
+  added.forEach((a, i) => {
+    if (!usedAdded.has(i)) out.push({ kind: 'added', date: a.date, label: a.label, location: a.location, now: a.meaning });
+  });
+  for (const r of stillRemoved) {
+    const row = afterRow.get(`${r.date}|${r.label}`);
+    const names = resourceNames(row?.resources?.[r.date] || '').filter((n) => !isMe(n));
+    if (names.length) out.push({ kind: 'given', date: r.date, label: r.label, location: r.location, names });
+    else out.push({ kind: 'removed', date: r.date, label: r.label, location: r.location, was: r.meaning });
+  }
+  for (const [k, now] of after) {
+    const was = before.get(k);
+    if (!was) continue;
+    if (now.cancelled && !was.cancelled) {
+      out.push({ kind: 'cancelled', date: now.date, label: now.label, location: now.location, was: was.meaning });
+    } else if (was.cancelled && !now.cancelled) {
+      out.push({ kind: 'reinstated', date: now.date, label: now.label, location: now.location, now: now.meaning });
+    } else if (!now.cancelled && now.meaning !== was.meaning && now.meaning && was.meaning) {
+      out.push({ kind: 'shift', date: now.date, label: now.label, location: now.location, was: was.meaning, now: now.meaning });
+    }
+  }
+
+  return out.sort((a, b) => a.date.localeCompare(b.date) || a.label.localeCompare(b.label));
+}

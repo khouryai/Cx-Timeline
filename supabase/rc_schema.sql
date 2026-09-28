@@ -2610,6 +2610,47 @@ revoke all on function public.rc_compact_snapshots() from public, anon;
 grant execute on function public.rc_compact_snapshots() to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════
+-- "Got it": who has seen the changes to their own days
+--
+-- My day shows somebody what changed on the look-ahead for the days that name
+-- them since the reading they last acknowledged, and "Got it" records that
+-- they have now seen the latest. It is the team's side of being told: the
+-- administrator's inbox lists who has changes they have not seen yet.
+--
+-- Append-only, like every other record of who knew what when: a person adds a
+-- row for themselves — a viewer too, since being told is not writing the
+-- plan — and nobody updates or deletes one. The current answer is the newest
+-- row per person. Only an administrator reads anybody else's.
+-- ══════════════════════════════════════════════════════════════════════════
+
+create table if not exists public.rc_la_seen (
+  id                bigserial primary key,
+  person_id         uuid not null references public.rc_people(id) on delete cascade,
+  snapshot_id       uuid references public.rc_lookahead_snapshots(id) on delete set null,
+  snapshot_taken_at timestamptz not null,
+  -- How many changes were on screen when they said so; 0 for the quiet
+  -- baseline recorded the first time, or when nothing affecting them changed.
+  changes           integer not null default 0 check (changes >= 0),
+  seen_at           timestamptz not null default now()
+);
+
+create index if not exists rc_la_seen_person_idx on public.rc_la_seen (person_id, seen_at desc);
+
+alter table public.rc_la_seen enable row level security;
+
+drop policy if exists rc_la_seen_read on public.rc_la_seen;
+create policy rc_la_seen_read on public.rc_la_seen for select to authenticated
+  using (public.rc_is_admin() or person_id = public.rc_me());
+
+drop policy if exists rc_la_seen_insert on public.rc_la_seen;
+create policy rc_la_seen_insert on public.rc_la_seen for insert to authenticated
+  with check (person_id = public.rc_me());
+
+revoke all on public.rc_la_seen from public, anon, authenticated;
+grant select, insert on public.rc_la_seen to authenticated;
+grant usage on sequence public.rc_la_seen_id_seq to authenticated;
+
+-- ══════════════════════════════════════════════════════════════════════════
 -- The version stamp — last, on purpose.
 --
 -- The calendar reads this at sign-in and compares it with `SCHEMA_VERSION` in
@@ -2620,5 +2661,5 @@ grant execute on function public.rc_compact_snapshots() to authenticated;
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '4')
+insert into public.rc_settings (key, value) values ('schema_version', '5')
 on conflict (key) do update set value = excluded.value, updated_at = now();

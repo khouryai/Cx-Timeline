@@ -122,7 +122,7 @@ ui/pane_util → ui/pane_plan · ui/pane_filters · ui/pane_io · ui/pane_projec
              · ui/pane_settings · ui/p6 · ui/lookahead → ui/panels
 ui/panels → ui/command_menu · ui/canvas_hint → ui/shell
 ui/workspace · ui/calendar_loader         the calendar, fetched on first use:
-    ui/rc → ui/rc_myday · ui/rc_roster → ui/rc_inbox · ui/rc_settings
+    ui/rc → ui/rc_myday · ui/rc_roster → ui/rc_inbox · ui/rc_settings · ui/rc_activity
           · ui/rc_huddle · ui/rc_week · ui/rc_pto · ui/rc_reports
           · ui/rc_lookahead → ui/rc_la_editor · ui/rc_la_* · ui/rc_ingest → ui/rc_la_state
           · ui/rc_table                   → ui/rc_util   (calendar.bundle.js)
@@ -302,6 +302,9 @@ alternative shipped once and went wrong.
 - **Settings are changed on screen** (Organisation → Settings), and `rc_settings`' policy is the control. [→](docs/ARCHITECTURE.md#settings-are-changed-on-screen)
 - **View as is a preview, refused at the client**: every write in `core/rc.js` throws `err.preview` while it is on, and nothing queues it. [→](docs/ARCHITECTURE.md#seeing-it-as-somebody-else-is-a-preview-refused-at-the-client)
 - **My day is where the team opens the calendar**, and it records nothing — outcomes stay in the huddle. [→](docs/ARCHITECTURE.md#my-day-is-where-the-team-opens-the-calendar)
+- **Only my rows keeps the activity line with its names**: an activity is kept whole, never a names row alone, with the sections above (`rowsNaming()`). [→](docs/ARCHITECTURE.md#only-my-rows-keeps-the-activity-line-with-its-names)
+- **A task opens its whole activity**, found by its row only while the row still says the same thing; an identifier column is never a title. [→](docs/ARCHITECTURE.md#a-task-opens-its-whole-activity)
+- **What changed for me is two readings' stored rows compared** (`changesForMe()`), and **Got it is append-only** (`rc_la_seen`). [→](docs/ARCHITECTURE.md#what-changed-for-me-is-two-readings-compared-and-got-it-is-append-only)
 
 ## Extending it
 
@@ -376,15 +379,15 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | Suite | Checks | What it covers |
 |---|---|---|
 | `test_dist.js` | 46 | every deployment shape, both bundles fingerprinted, and that the plan has no backend in any of them |
-| `test_lookahead.js` | 212 | the parser, the rows it derives, the change events, progress from outcomes and the printed calendar's geometry, no browser |
+| `test_lookahead.js` | 237 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_la_edit.js` | 120 | the look-ahead editor's model, undo, support codes, the published grid, cell history, staffing clashes, and the Excel export read back |
 | `smoke.js` | 318 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 473 | the resource calendar, accounts, My day, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 488 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 64 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
-| `test_sql.js` | 364 | both permission models, snapshot compaction, the schema stamp, and that `migrate.sql` upgrades an old project |
+| `test_sql.js` | 371 | both permission models, snapshot compaction, Got it, the schema stamp, and that `migrate.sql` upgrades an old project |
 | `test_xlsx_compat.js` | 14 | the Excel export opened, re-saved and printed by LibreOffice Calc (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**

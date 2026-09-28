@@ -465,7 +465,7 @@ export async function exportEverything() {
     'rc_people', 'rc_locations', 'rc_location_alias', 'rc_person_alias',
     'rc_categories', 'rc_parties',
     'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries', 'rc_client_errors',
-    'rc_la_rows', 'rc_la_cells', 'rc_la_edits', 'rc_support_codes',
+    'rc_la_rows', 'rc_la_cells', 'rc_la_edits', 'rc_support_codes', 'rc_la_seen',
     'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
     'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
   ];
@@ -564,6 +564,33 @@ export function listLaEditsForRow(rowId) {
  */
 export const compactSnapshots = () => rpc('rc_compact_snapshots', {});
 
+/* ── Who has seen the changes to their days ─────────────────────────────── */
+
+/** The newest "Got it" a person has given, or null — see `rc_la_seen`. */
+export function lastSeen(personId) {
+  return select('rc_la_seen', (q) => q.eq('person_id', personId).order('seen_at', { ascending: false }).limit(1))
+    .then((rows) => rows[0] || null);
+}
+
+/** Every "Got it", newest first — an administrator reads everybody's, anybody else their own. */
+export function listSeen() {
+  return select('rc_la_seen', (q) => q.order('seen_at', { ascending: false }).limit(2000));
+}
+
+/** Record that the person looking has seen the look-ahead as of this reading. */
+export function markSeen({ snapshotId, takenAt, changes = 0 }) {
+  const who = me();
+  if (!who) return Promise.reject(new Error('Only somebody on the team can say they have seen their days.'));
+  return insert('rc_la_seen', [{
+    person_id: who.id, snapshot_id: snapshotId, snapshot_taken_at: takenAt, changes,
+  }]).then((rows) => rows[0] || null);
+}
+
+/** One reading's stored rows — what "what changed for me" compares. */
+export function snapshotRows(snapshotId) {
+  return selectAll('rc_lookahead_rows', (q) => q.eq('snapshot_id', snapshotId).order('id'));
+}
+
 export function listSupportCodes({ includeRetired = false } = {}) {
   return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
 }
@@ -631,7 +658,7 @@ export function listSettings() {
  * "could not update the legend", on one screen, weeks after the deploy that
  * needed it; this turns it into one sentence at sign-in naming the two files.
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /**
  * Whether the database is the one this build was written against.

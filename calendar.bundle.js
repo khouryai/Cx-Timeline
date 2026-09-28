@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 24   Built: 2026-09-28T20:02:58.745Z
+ * Modules: 24   Built: 2026-09-28T20:17:48.473Z
  */
 (function () {
   'use strict';
@@ -322,12 +322,16 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       rc.listPeople({ includeInactive: true }).catch(() => []),
       rc.listPersonAliases().catch(() => []),
     ]);
-    const register = nameRegister(people.length ? people : [me], aliases);
+    return personMatcher(nameRegister(people.length ? people : [me], aliases), me.id);
+  }
+
+  /** "Is this written name this person?" against a register — see `meMatcher()`. */
+  function personMatcher(register, personId) {
     const memo = new Map();
     return (written) => {
       const key = foldName(written);
       if (!key) return false;
-      if (!memo.has(key)) memo.set(key, (register.get(key) || nearestName(key, register)?.id || null) === me.id);
+      if (!memo.has(key)) memo.set(key, (register.get(key) || nearestName(key, register)?.id || null) === personId);
       return memo.get(key);
     };
   }
@@ -1021,6 +1025,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "nameDistance", { get: () => nameDistance, enumerable: true });
   Object.defineProperty(__x, "nearestName", { get: () => nearestName, enumerable: true });
   Object.defineProperty(__x, "meMatcher", { get: () => meMatcher, enumerable: true });
+  Object.defineProperty(__x, "personMatcher", { get: () => personMatcher, enumerable: true });
   Object.defineProperty(__x, "locationRegister", { get: () => locationRegister, enumerable: true });
   Object.defineProperty(__x, "unmatchedLocations", { get: () => unmatchedLocations, enumerable: true });
   Object.defineProperty(__x, "uniqueFirstNames", { get: () => uniqueFirstNames, enumerable: true });
@@ -2327,11 +2332,11 @@ __mods["ui/rc_inbox.js"] = function (__x, __req) {
 
   const { el, clear } = __req("core/util.js");
   const rc = __req("core/rc.js");
-  const { cancellationEvents, attachCancellationNotes } = __req("core/lookahead.js");
+  const { cancellationEvents, attachCancellationNotes, changesForMe } = __req("core/lookahead.js");
   const ed = __req("core/la_edit.js");
   const { icon } = __req("ui/icons.js");
   const { toast, badge, emptyState } = __req("ui/components.js");
-  const { notifyChanged, goToTab, dayLabel, todayISO, orgNav, nameRegister, resourceAssignments, absenceAssignments, lookaheadWithResources, locationRegister, unmatchedLocations } = __req("ui/rc_util.js");
+  const { notifyChanged, goToTab, dayLabel, todayISO, orgNav, nameRegister, resourceAssignments, absenceAssignments, lookaheadWithResources, locationRegister, unmatchedLocations, personMatcher } = __req("ui/rc_util.js");
 
 
 
@@ -2542,6 +2547,63 @@ __mods["ui/rc_inbox.js"] = function (__x, __req) {
             title: `${plural(waiting.length, 'invitation')} not accepted yet`,
             detail: waiting.map((i) => i.pending_email).join(', '),
             actions: [{ label: 'Open Accounts', run: () => openOrg('accounts') }],
+          });
+        }
+      }),
+
+      /* Changes to somebody's days they have not seen yet. My day shows each
+         person what changed for them since their last "Got it"; this is the
+         other side of it — who has not looked. Only people with an account can
+         look, and an administrator is the one making the changes. */
+      attempt('Changes to people\'s days', async () => {
+        const [latest] = await rc.listSnapshotMeta({ limit: 1 });
+        if (!latest) return;
+        const [seenRows, aliases] = await Promise.all([rc.listSeen(), rc.listPersonAliases().catch(() => [])]);
+        const team = people.filter((p) => p.active && p.user_id && p.role !== 'admin');
+        if (!team.length) return;
+        const newest = new Map();
+        for (const row of seenRows) {
+          const held = newest.get(row.person_id);
+          if (!held || String(row.seen_at) > String(held.seen_at)) newest.set(row.person_id, row);
+        }
+        const register = nameRegister(people, aliases);
+        const rowsOf = new Map();
+        const rowsFor = async (id) => {
+          if (!rowsOf.has(id)) rowsOf.set(id, await rc.snapshotRows(id));
+          return rowsOf.get(id);
+        };
+        const after = await rowsFor(latest.id);
+        const to = ed.addDaysISO(today, 27);
+        const behind = [];
+        const never = [];
+        for (const p of team) {
+          const seen = newest.get(p.id);
+          if (!seen) { never.push(p.name); continue; }
+          if (!seen.snapshot_id || seen.snapshot_id === latest.id) continue;
+          const before = await rowsFor(seen.snapshot_id);
+          if (!before.length) continue;
+          const n = changesForMe(before, after, personMatcher(register, p.id), { from: today, to }).length;
+          if (n) behind.push({ name: p.name, n });
+        }
+        if (behind.length) {
+          items.push({
+            id: 'unseen',
+            area: 'Team',
+            tone: 'warn',
+            title: `${plural(behind.length, 'person has', 'people have')} changes to their days they have not seen`,
+            detail: behind.map((b) => `${b.name} (${b.n})`).join(', ')
+              + ' — they see them at the top of My day, with Got it.',
+            actions: [],
+          });
+        }
+        if (never.length) {
+          items.push({
+            id: 'unseen:never',
+            area: 'Team',
+            tone: 'info',
+            title: `${plural(never.length, 'person has', 'people have')} not opened My day yet`,
+            detail: never.join(', '),
+            actions: [],
           });
         }
       }),
@@ -5704,7 +5766,8 @@ __mods["ui/rc_myday.js"] = function (__x, __req) {
    * disagree on screen. What was recorded against your last day is shown, as the
    * week plan shows it.
    *
-   * Imports: util, dates, rc, icons, components, rc_util, rc_activity.
+   * Imports: util, dates, rc, core/lookahead, icons, components, rc_util,
+   *          rc_activity.
    */
 
   const { el } = __req("core/util.js");
@@ -5713,10 +5776,11 @@ __mods["ui/rc_myday.js"] = function (__x, __req) {
   const { icon } = __req("ui/icons.js");
   const { badge, emptyState } = __req("ui/components.js");
   const { openActivity } = __req("ui/rc_activity.js");
-  const { byId, dayLabel, todayISO, isoToMs, weekStart, goToTab, STATUS_BY_ID, SHIFTS, nameRegister, assignmentIndex, availability, lookaheadWithResources } = __req("ui/rc_util.js");
+  const { byId, dayLabel, todayISO, isoToMs, weekStart, goToTab, STATUS_BY_ID, SHIFTS, nameRegister, assignmentIndex, availability, lookaheadWithResources, meMatcher, notifyChanged } = __req("ui/rc_util.js");
 
 
 
+  const { changesForMe } = __req("core/lookahead.js");
 
   const ABSENCE_WORDS = { pto: 'Off — on the PTO row', office: 'In the office', other: 'On another project' };
 
@@ -5782,6 +5846,8 @@ __mods["ui/rc_myday.js"] = function (__x, __req) {
         onClick: () => goToTab('week'),
       }),
     ]));
+
+    root.appendChild(changesPanel());
 
     const cards = el('div', { class: 'rc-myday-cards' }, [
       dayCard(ctx, today, 'Today'),
@@ -5966,7 +6032,168 @@ __mods["ui/rc_myday.js"] = function (__x, __req) {
     return el('section', { class: 'rc-myday-weekwrap' }, [el('h3', { text: 'This week' }), strip]);
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     What changed for you
+
+     The look-ahead as it reads now against the reading this person last said
+     "Got it" to, for the days that name them from today on — `changesForMe()`
+     in `core/lookahead.js`. "Got it" is a row in `rc_la_seen`, append-only, and
+     it is what the administrator's inbox reads to say who has changes they have
+     not seen.
+
+     The first time, there is nothing to compare with, so the reading on screen
+     is recorded quietly as the starting point. A new reading that changes none
+     of this person's days is recorded quietly too — there was nothing to see.
+     Neither is recorded while an administrator is only previewing.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const HORIZON_DAYS = 27;
+
+  /** What changed for the person looking: `{ state, latest, seen, changes }`. */
+  async function myChanges() {
+    const who = rc.me();
+    if (!who) return { state: 'none', changes: [] };
+    const [latest] = await rc.listSnapshotMeta({ limit: 1 });
+    if (!latest) return { state: 'none', changes: [] };
+    let seen;
+    try {
+      seen = await rc.lastSeen(who.id);
+    } catch {
+      // An older database with nowhere to record it: say nothing rather than fail.
+      return { state: 'unavailable', changes: [] };
+    }
+    if (!seen) return { state: 'first', latest, changes: [] };
+    if (seen.snapshot_id === latest.id) return { state: 'current', latest, seen, changes: [] };
+    const today = todayISO();
+    const to = toISO(addDays(isoToMs(today), HORIZON_DAYS));
+    const [before, after, isMe] = await Promise.all([
+      seen.snapshot_id ? rc.snapshotRows(seen.snapshot_id) : Promise.resolve([]),
+      rc.snapshotRows(latest.id),
+      meMatcher(),
+    ]);
+    if (!before.length) return { state: 'first', latest, seen, changes: [] };
+    const changes = changesForMe(before, after, isMe || (() => false), { from: today, to });
+    return { state: changes.length ? 'changed' : 'quiet', latest, seen, changes };
+  }
+
+  let unseen = null; // { at, n } — for the count on the tab
+  /** How many changes are waiting on the person looking, remembered for a minute. */
+  async function unseenCount() {
+    if (unseen && Date.now() - unseen.at < 60000) return unseen.n;
+    const { changes } = await myChanges();
+    unseen = { at: Date.now(), n: changes.length };
+    return unseen.n;
+  }
+
+  /** Put the count on the My day tab as it now stands — the header drew it from memory. */
+  function showCount(n) {
+    unseen = { at: Date.now(), n };
+    const tab = document.querySelector('#rc-frame .rc-head .rc-tab[data-tab="myday"]');
+    if (!tab) return;
+    tab.querySelector('.rc-tab-count')?.remove();
+    if (!n) return;
+    tab.appendChild(el('span', { class: 'rc-tab-count rc-tab-count-info', text: String(n), 'aria-label': `${n} change${n === 1 ? '' : 's'} to your days` }));
+  }
+
+  function record(latest, changes) {
+    if (rc.previewing()) return Promise.resolve(null);
+    return rc.markSeen({ snapshotId: latest.id, takenAt: latest.taken_at, changes }).catch(() => null);
+  }
+
+  const KIND = {
+    added: { label: 'Added', tone: 'good' },
+    reinstated: { label: 'Back on', tone: 'good' },
+    moved: { label: 'Moved', tone: 'warn' },
+    shift: { label: 'Shift changed', tone: 'warn' },
+    cancelled: { label: 'Cancelled', tone: 'bad' },
+    removed: { label: 'Taken off', tone: 'bad' },
+    given: { label: 'Given to somebody else', tone: 'bad' },
+  };
+
+  function sentence(c) {
+    const on = (iso) => dayLabel(iso, 'day');
+    const where = c.location && !c.label.includes(c.location) ? ` (${c.location})` : '';
+    const what = `${c.label}${where}`;
+    switch (c.kind) {
+      case 'added': return `${on(c.date)} — ${what}${c.now ? `, ${c.now}` : ''}`;
+      case 'reinstated': return `${on(c.date)} — ${what} is back on${c.now ? `, ${c.now}` : ''}`;
+      case 'moved': return `${on(c.from)} → ${on(c.date)} — ${what}`;
+      case 'shift': return `${on(c.date)} — ${what}: now ${c.now} (was ${c.was})`;
+      case 'cancelled': return `${on(c.date)} — ${what}`;
+      case 'removed': return `${on(c.date)} — ${what}: you are no longer on it`;
+      case 'given': return `${on(c.date)} — ${what}: now ${c.names.join(', ')}`;
+      default: return `${on(c.date)} — ${what}`;
+    }
+  }
+
+  function changesPanel() {
+    const box = el('section', { class: 'rc-myday-changes', hidden: true, 'aria-live': 'polite', 'aria-label': 'What changed for you' });
+    const when = (iso) => new Date(iso).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    myChanges()
+      .then(async ({ state, latest, seen, changes }) => {
+        if (state === 'none' || state === 'unavailable') return;
+        if (state === 'first' || state === 'quiet') {
+          await record(latest, 0);
+          showCount(0);
+          box.append(el('p', {
+            class: 'rc-hint rc-myday-uptodate',
+            text: state === 'first'
+              ? 'From now on, whenever the look-ahead changes one of your days, it shows here first.'
+              : `Nothing on the look-ahead has changed for you since ${when(seen.snapshot_taken_at)}.`,
+          }));
+          box.hidden = false;
+          return;
+        }
+        if (state === 'current') {
+          box.append(el('p', { class: 'rc-hint rc-myday-uptodate', text: `You are up to date with the look-ahead as of ${when(latest.taken_at)}.` }));
+          box.hidden = false;
+          return;
+        }
+        showCount(changes.length);
+        box.classList.add('rc-myday-changes-open');
+        box.append(
+          el('div', { class: 'rc-myday-changes-head' }, [
+            el('h3', { text: `${changes.length} change${changes.length === 1 ? '' : 's'} to your days` }),
+            el('span', { class: 'rc-hint', text: `since you last looked, ${when(seen.snapshot_taken_at)}` }),
+          ]),
+          el('ul', { class: 'rc-myday-change-list' }, changes.map((c) => el('li', { class: `rc-myday-change rc-myday-change-${c.kind}` }, [
+            badge(c.kind === 'given' ? `Given to ${c.names[0]}${c.names.length > 1 ? ' +' : ''}` : KIND[c.kind]?.label || c.kind, KIND[c.kind]?.tone || 'neutral'),
+            el('span', { text: sentence(c) }),
+          ]))),
+          el('div', { class: 'rc-myday-changes-foot' }, [
+            el('button', {
+              class: 'cx-btn mini primary',
+              type: 'button',
+              text: 'Got it',
+              title: 'Say you have seen these. Your administrator can see who has not.',
+              onClick: async (e) => {
+                e.currentTarget.disabled = true;
+                if (rc.previewing()) {
+                  box.replaceChildren(el('p', { class: 'rc-hint', text: 'Preview only — nothing is recorded while you are seeing the calendar as somebody else.' }));
+                  return;
+                }
+                try {
+                  await rc.markSeen({ snapshotId: latest.id, takenAt: latest.taken_at, changes: changes.length });
+                  showCount(0);
+                  notifyChanged('seen');
+                } catch (err) {
+                  e.currentTarget.disabled = false;
+                  box.append(el('p', { class: 'rc-error', text: err?.message || String(err) }));
+                }
+              },
+            }),
+            el('span', { class: 'rc-hint', text: 'Your days below already show the look-ahead as it reads now.' }),
+          ]),
+        );
+        box.hidden = false;
+      })
+      .catch(() => {});
+    return box;
+  }
+
   Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+  Object.defineProperty(__x, "myChanges", { get: () => myChanges, enumerable: true });
+  Object.defineProperty(__x, "unseenCount", { get: () => unseenCount, enumerable: true });
 };
 
 // io/rc_pdf.js
@@ -14725,10 +14952,12 @@ __mods["ui/rc.js"] = function (__x, __req) {
           class: 'rc-tab',
           type: 'button',
           text: tab.label,
+          dataset: { tab: tab.id },
           'aria-pressed': String(tab.id === active),
           onClick: () => showTab(tab.id),
         });
         if (tab.id === 'org' && rc.isAdmin()) inboxBadge(button);
+        if (tab.id === 'myday') unseenBadge(button);
         tabs.appendChild(button);
       }
       headEl.appendChild(tabs);
@@ -14847,6 +15076,17 @@ __mods["ui/rc.js"] = function (__x, __req) {
         if (!n) return;
         button.appendChild(el('span', { class: 'rc-tab-count', text: String(n), 'aria-label': `${n} waiting on you` }));
         button.title = `${n} thing${n === 1 ? '' : 's'} waiting on you — see Organisation → Inbox`;
+      })
+      .catch(() => {});
+  }
+
+  /** How many changes to your own days you have not seen yet, on the My day tab. */
+  function unseenBadge(button) {
+    myday.unseenCount()
+      .then((n) => {
+        if (!n) return;
+        button.appendChild(el('span', { class: 'rc-tab-count rc-tab-count-info', text: String(n), 'aria-label': `${n} change${n === 1 ? '' : 's'} to your days` }));
+        button.title = `${n} change${n === 1 ? '' : 's'} to your days since you last looked`;
       })
       .catch(() => {});
   }

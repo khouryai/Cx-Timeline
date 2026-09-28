@@ -192,10 +192,12 @@ function renderHead() {
         class: 'rc-tab',
         type: 'button',
         text: tab.label,
+        dataset: { tab: tab.id },
         'aria-pressed': String(tab.id === active),
         onClick: () => showTab(tab.id),
       });
       if (tab.id === 'org' && rc.isAdmin()) inboxBadge(button);
+      if (tab.id === 'myday') unseenBadge(button);
       tabs.appendChild(button);
     }
     headEl.appendChild(tabs);
@@ -314,6 +316,17 @@ function inboxBadge(button) {
       if (!n) return;
       button.appendChild(el('span', { class: 'rc-tab-count', text: String(n), 'aria-label': `${n} waiting on you` }));
       button.title = `${n} thing${n === 1 ? '' : 's'} waiting on you — see Organisation → Inbox`;
+    })
+    .catch(() => {});
+}
+
+/** How many changes to your own days you have not seen yet, on the My day tab. */
+function unseenBadge(button) {
+  myday.unseenCount()
+    .then((n) => {
+      if (!n) return;
+      button.appendChild(el('span', { class: 'rc-tab-count rc-tab-count-info', text: String(n), 'aria-label': `${n} change${n === 1 ? '' : 's'} to your days` }));
+      button.title = `${n} change${n === 1 ? '' : 's'} to your days since you last looked`;
     })
     .catch(() => {});
 }

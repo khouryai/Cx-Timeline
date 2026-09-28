@@ -14,6 +14,7 @@ drop table if exists public.rc_la_cells;
 drop table if exists public.rc_la_rows;
 drop table if exists public.rc_support_codes;
 drop function if exists public.rc_compact_snapshots();
+drop table if exists public.rc_la_seen;
 drop table if exists public.rc_invitations cascade;
 
 -- And a role check that has never heard of a viewer, so read-only access is

@@ -25,13 +25,13 @@
 
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
-import { cancellationEvents, attachCancellationNotes } from '../core/lookahead.js';
+import { cancellationEvents, attachCancellationNotes, changesForMe } from '../core/lookahead.js';
 import * as ed from '../core/la_edit.js';
 import { icon } from './icons.js';
 import { toast, badge, emptyState } from './components.js';
 import {
   notifyChanged, goToTab, dayLabel, todayISO, orgNav, nameRegister, resourceAssignments,
-  absenceAssignments, lookaheadWithResources, locationRegister, unmatchedLocations,
+  absenceAssignments, lookaheadWithResources, locationRegister, unmatchedLocations, personMatcher,
 } from './rc_util.js';
 import { la } from './rc_la_state.js';
 
@@ -240,6 +240,63 @@ export async function inboxItems() {
           title: `${plural(waiting.length, 'invitation')} not accepted yet`,
           detail: waiting.map((i) => i.pending_email).join(', '),
           actions: [{ label: 'Open Accounts', run: () => openOrg('accounts') }],
+        });
+      }
+    }),
+
+    /* Changes to somebody's days they have not seen yet. My day shows each
+       person what changed for them since their last "Got it"; this is the
+       other side of it — who has not looked. Only people with an account can
+       look, and an administrator is the one making the changes. */
+    attempt('Changes to people\'s days', async () => {
+      const [latest] = await rc.listSnapshotMeta({ limit: 1 });
+      if (!latest) return;
+      const [seenRows, aliases] = await Promise.all([rc.listSeen(), rc.listPersonAliases().catch(() => [])]);
+      const team = people.filter((p) => p.active && p.user_id && p.role !== 'admin');
+      if (!team.length) return;
+      const newest = new Map();
+      for (const row of seenRows) {
+        const held = newest.get(row.person_id);
+        if (!held || String(row.seen_at) > String(held.seen_at)) newest.set(row.person_id, row);
+      }
+      const register = nameRegister(people, aliases);
+      const rowsOf = new Map();
+      const rowsFor = async (id) => {
+        if (!rowsOf.has(id)) rowsOf.set(id, await rc.snapshotRows(id));
+        return rowsOf.get(id);
+      };
+      const after = await rowsFor(latest.id);
+      const to = ed.addDaysISO(today, 27);
+      const behind = [];
+      const never = [];
+      for (const p of team) {
+        const seen = newest.get(p.id);
+        if (!seen) { never.push(p.name); continue; }
+        if (!seen.snapshot_id || seen.snapshot_id === latest.id) continue;
+        const before = await rowsFor(seen.snapshot_id);
+        if (!before.length) continue;
+        const n = changesForMe(before, after, personMatcher(register, p.id), { from: today, to }).length;
+        if (n) behind.push({ name: p.name, n });
+      }
+      if (behind.length) {
+        items.push({
+          id: 'unseen',
+          area: 'Team',
+          tone: 'warn',
+          title: `${plural(behind.length, 'person has', 'people have')} changes to their days they have not seen`,
+          detail: behind.map((b) => `${b.name} (${b.n})`).join(', ')
+            + ' — they see them at the top of My day, with Got it.',
+          actions: [],
+        });
+      }
+      if (never.length) {
+        items.push({
+          id: 'unseen:never',
+          area: 'Team',
+          tone: 'info',
+          title: `${plural(never.length, 'person has', 'people have')} not opened My day yet`,
+          detail: never.join(', '),
+          actions: [],
         });
       }
     }),

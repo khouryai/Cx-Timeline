@@ -1587,5 +1587,23 @@ insert into public.rc_settings (key, value) select 'snapshot_keep_days', '1'
  where not exists (select 1 from public.rc_settings where key = 'snapshot_keep_days');
 select assert(public.rc_compact_snapshots() = 0, 'a keep period under a fortnight is read as a fortnight');
 
+-- "Got it": everybody on the team records having seen their own days, and
+-- nobody else's; nobody rewrites or removes one; only an administrator reads
+-- the team's.
+select act_as(:'carol');
+insert into public.rc_la_seen (person_id, snapshot_id, snapshot_taken_at, changes)
+values (public.rc_me(), '52000000-0000-0000-0000-000000000006', now(), 3);
+select assert((select count(*) from public.rc_la_seen) = 1, 'a member records that they have seen their changes');
+select refuses(:'carol', format('insert into public.rc_la_seen (person_id, snapshot_taken_at) values (%L, now())',
+  (select id from public.rc_people where name = 'Dan')), 'a member saying somebody else has seen theirs');
+select refuses(:'carol', 'update public.rc_la_seen set changes = 0', 'a member rewriting what they saw');
+select refuses(:'carol', 'delete from public.rc_la_seen', 'or removing it');
+select act_as(:'dave');
+insert into public.rc_la_seen (person_id, snapshot_taken_at) values (public.rc_me(), now());
+select assert((select count(*) from public.rc_la_seen) = 1, 'a viewer records their own too, and reads only their own');
+select act_as(:'alice');
+select assert((select count(*) from public.rc_la_seen) = 2, 'an administrator reads the whole team''s');
+select refuses(:'alice', 'delete from public.rc_la_seen', 'and cannot remove one either');
+
 reset role;
 do $$ begin raise notice ''; raise notice 'All resource calendar checks passed.'; end $$;
