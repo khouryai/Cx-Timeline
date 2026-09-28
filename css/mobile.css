@@ -1,0 +1,798 @@
+/* ============================================================================
+   CX Calendar — the phone app (m/index.html)
+   ----------------------------------------------------------------------------
+   Loaded after tokens, base, components and calendar, and only by the phone
+   app, so every rule here can assume a phone. Everything is scoped under
+   `.m-app` or an `m-` class, and every colour is a token — the same contract
+   the rest of the application keeps.
+
+   Three things a phone needs that a desk does not:
+     - the notch and the home bar (`env(safe-area-inset-*)`), because the app
+       draws edge to edge when installed;
+     - 44px touch targets and 16px form text, below which iOS zooms the page
+       every time a field takes focus;
+     - dialogs as bottom sheets, within reach of the thumb that opened them.
+   ========================================================================= */
+
+/* ── The frame ──────────────────────────────────────────────────────────── */
+
+body.m-app {
+  font-size: var(--fs-body);
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+#m-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+}
+
+#m-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: calc(env(safe-area-inset-top) + 10px) calc(env(safe-area-inset-right) + var(--space-4)) 10px
+    calc(env(safe-area-inset-left) + var(--space-4));
+  background: var(--chrome-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.m-brand {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 30px;
+  border-radius: 3px;
+  background: var(--hitachi-red);
+}
+
+.m-head-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.m-head-title {
+  font-family: var(--f-display);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-main);
+}
+
+.m-head-btn {
+  flex: 0 0 auto;
+}
+
+.m-offline {
+  flex: 0 0 auto;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  border-radius: var(--radius-xs);
+  color: var(--warn);
+  background: var(--warn-light);
+  border: 1px solid var(--warn-border);
+}
+
+#m-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  padding: var(--space-3) calc(env(safe-area-inset-right) + var(--space-4)) var(--space-6)
+    calc(env(safe-area-inset-left) + var(--space-4));
+}
+
+/* A phone app on a tablet or a laptop: a column, not a stretched phone. */
+.m-view,
+#m-main > .rc-state,
+#m-main > .cx-empty {
+  max-width: 640px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+#m-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  background: var(--chrome-bg);
+  border-top: 1px solid var(--border);
+  padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+#m-tabs[hidden] {
+  display: none;
+}
+
+.m-tab {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 56px;
+  padding: 6px 4px;
+  color: var(--text-subtle);
+  border-top: 2px solid transparent;
+  transition: color var(--dur-fast) var(--easing), border-color var(--dur-fast) var(--easing);
+}
+.m-tab[aria-current='page'] {
+  color: var(--text-main);
+  border-top-color: var(--primary);
+}
+.m-tab-icon {
+  display: flex;
+}
+.m-tab-label {
+  font-size: var(--fs-tiny);
+  font-weight: 600;
+}
+
+/* ── Controls, sized for a thumb ────────────────────────────────────────── */
+
+.m-app .cx-btn {
+  min-height: 40px;
+  padding: 8px 14px;
+  font-size: var(--fs-base);
+}
+.m-app .cx-btn.mini {
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: var(--fs-small);
+}
+.m-app .cx-btn.icon {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+}
+.m-app .cx-input,
+.m-app .cx-select,
+.m-app .cx-textarea {
+  font-size: 16px;
+  min-height: 44px;
+  padding: 10px 12px;
+}
+.m-app .cx-select {
+  padding-right: 30px;
+}
+.m-app .cx-seg button {
+  min-height: 38px;
+  font-size: var(--fs-tiny);
+}
+.m-app .cx-label {
+  font-size: var(--fs-tiny);
+}
+
+.m-wide {
+  width: 100%;
+  min-height: 44px;
+}
+
+.m-link {
+  color: var(--info);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  padding: 4px;
+}
+
+.m-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.m-chip[aria-pressed='true'] {
+  background: var(--info-light);
+  border-color: var(--info-border);
+  color: var(--info);
+}
+
+/* ── Sheets and toasts ──────────────────────────────────────────────────── */
+
+.m-app .cx-modal-overlay {
+  align-items: flex-end;
+  padding: 0;
+}
+.m-app .cx-modal {
+  max-width: 640px;
+  max-height: 92vh;
+  max-height: 92dvh;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  border-bottom: 0;
+  padding-bottom: env(safe-area-inset-bottom);
+  animation: m-sheet-in var(--dur) var(--easing);
+}
+@keyframes m-sheet-in {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+.m-app .cx-modal-foot .cx-btn {
+  flex: 1 1 0;
+  min-height: 44px;
+}
+
+.m-app #cx-toasts {
+  left: calc(env(safe-area-inset-left) + var(--space-3));
+  right: calc(env(safe-area-inset-right) + var(--space-3));
+  bottom: calc(env(safe-area-inset-bottom) + 68px);
+  align-items: stretch;
+}
+.m-app .cx-toast {
+  min-width: 0;
+  max-width: none;
+}
+/* A toast's dismiss button stays small: it is secondary, and the toast goes on
+   its own. */
+.m-app .cx-toast .cx-btn.icon {
+  min-width: 32px;
+  min-height: 32px;
+}
+
+.m-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.m-daychips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* ── Shared text ────────────────────────────────────────────────────────── */
+
+.m-note {
+  font-size: var(--fs-small);
+  line-height: 1.55;
+  color: var(--text-muted);
+  margin: 0 0 var(--space-3);
+}
+.m-hint {
+  font-size: var(--fs-small);
+  line-height: 1.45;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.m-mono {
+  font-family: var(--f-mono);
+  font-size: var(--fs-tiny);
+}
+.m-empty-day {
+  font-size: var(--fs-small);
+  color: var(--text-subtle);
+  margin: 2px;
+}
+
+.m-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: 20vh;
+  color: var(--text-muted);
+  font-size: var(--fs-small);
+}
+.m-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid var(--border-strong);
+  border-top-color: var(--primary);
+  animation: m-spin 800ms linear infinite;
+}
+@keyframes m-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .m-spinner {
+    animation-duration: 2400ms;
+  }
+  .m-app .cx-modal {
+    animation: none;
+  }
+}
+
+.m-noscript {
+  padding: var(--space-5);
+  color: var(--text);
+}
+
+/* ── My week ────────────────────────────────────────────────────────────── */
+
+.m-weekbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.m-weekbar-mid {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+.m-weekbar-title {
+  font-family: var(--f-display);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--text-main);
+}
+.m-weekbar-sub {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+.m-whose {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.m-whose-label {
+  display: flex;
+  color: var(--text-muted);
+}
+
+.m-summary {
+  font-family: var(--f-mono);
+  font-size: var(--fs-tiny);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 var(--space-2);
+}
+
+.m-days {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.m-day {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  scroll-margin-top: var(--space-3);
+}
+.m-day.m-today {
+  border-color: var(--info-border);
+  box-shadow: 0 0 0 1px var(--info-border);
+}
+.m-day.m-quiet {
+  background: transparent;
+  border-style: dashed;
+}
+
+.m-day-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.m-day.m-today .m-day-head {
+  background: var(--info-light);
+}
+.m-day.m-quiet .m-day-head,
+.m-day.m-off .m-day-head {
+  border-bottom: 0;
+  background: transparent;
+}
+.m-day-name {
+  font-family: var(--f-display);
+  font-size: var(--fs-body);
+  font-weight: 700;
+  color: var(--text-main);
+}
+.m-day-date {
+  font-size: var(--fs-small);
+  color: var(--text-muted);
+}
+.m-today-tag {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--info);
+}
+.m-day-flags {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.m-day-flags .m-hint {
+  margin: 0;
+}
+
+.m-day-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 10px 12px 12px;
+}
+
+.m-task {
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--info);
+  border-radius: var(--radius-sm);
+}
+.m-task.m-task-away {
+  border-left-color: var(--rc-offproject);
+}
+.m-task.m-done-completed {
+  border-left-color: var(--good);
+}
+.m-task.m-done-partial,
+.m-task.m-done-carried {
+  border-left-color: var(--warn);
+}
+.m-task.m-done-blocked {
+  border-left-color: var(--bad);
+}
+.m-task.m-done-absent {
+  border-left-color: var(--neutral);
+}
+
+.m-task-title,
+.m-la-title {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+
+.m-task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin-top: 4px;
+  font-size: var(--fs-small);
+  color: var(--text-muted);
+}
+.m-where {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.m-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--space-2);
+}
+
+.m-outcome {
+  margin-top: 10px;
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--border-strong);
+}
+.m-outcome-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.m-outcome .cx-btn {
+  margin-top: 6px;
+}
+
+.m-task-acts {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: 10px;
+}
+.m-task-acts .cx-btn {
+  flex: 1 1 0;
+}
+
+.m-add {
+  width: 100%;
+  min-height: 44px;
+  border-style: dashed;
+}
+
+.m-asked {
+  padding: var(--space-2) 10px;
+  font-size: var(--fs-small);
+  color: var(--text);
+  background: var(--warn-light);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-sm);
+}
+
+.m-foot {
+  margin-top: var(--space-4);
+}
+
+/* ── The look-ahead ─────────────────────────────────────────────────────── */
+
+.m-sheet-age {
+  margin-bottom: var(--space-2);
+}
+
+.m-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  margin: 0 calc(-1 * var(--space-4));
+  padding: 2px var(--space-4) 10px;
+}
+.m-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.m-strip-day {
+  flex: 0 0 auto;
+  width: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 6px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--card-bg);
+  color: var(--text-muted);
+  scroll-snap-align: center;
+}
+.m-strip-day.m-strip-monday:not(:first-child) {
+  margin-left: 10px;
+}
+.m-strip-day.m-strip-weekend {
+  background: var(--surface-2);
+}
+.m-strip-day.m-strip-today {
+  border-color: var(--info-border);
+  color: var(--info);
+}
+.m-strip-day[aria-selected='true'] {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--white);
+}
+.m-strip-dow {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.m-strip-num {
+  font-family: var(--f-display);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  line-height: 1.2;
+}
+.m-strip-count {
+  min-height: 14px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+}
+
+.m-la-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 4px 0 var(--space-3);
+}
+.m-la-controls .cx-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.m-agenda {
+  min-height: 40vh;
+}
+.m-agenda-title {
+  font-family: var(--f-display);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--text-main);
+  margin: 4px 0 10px;
+}
+.m-section {
+  margin: 14px 0 6px;
+}
+
+.m-la-item {
+  display: flex;
+  gap: 10px;
+  margin-bottom: var(--space-2);
+  padding: 10px 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.m-la-item.m-mine {
+  border-color: var(--info-border);
+  box-shadow: 0 0 0 1px var(--info-border);
+}
+.m-la-item.m-cancelled .m-la-title {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+.m-la-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.m-swatch {
+  flex: 0 0 6px;
+  align-self: stretch;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.m-swatch-none {
+  background: var(--surface-3);
+}
+
+.m-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--space-2);
+}
+.m-name {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: var(--fs-small);
+  color: var(--text);
+  background: var(--surface-3);
+}
+.m-name.m-name-me {
+  font-weight: 700;
+  color: var(--info);
+  background: var(--info-light);
+  box-shadow: inset 0 0 0 1px var(--info-border);
+}
+
+.m-details {
+  margin-top: var(--space-2);
+  font-size: var(--fs-small);
+}
+.m-details summary {
+  padding: 6px 0;
+  color: var(--text-muted);
+  font-weight: 600;
+  cursor: pointer;
+}
+.m-details dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px var(--space-3);
+  margin: 4px 0 0;
+}
+.m-details dt {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+  padding-top: 2px;
+}
+.m-details dd {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.m-away {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.m-away-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.m-away-row .m-names {
+  margin-top: 0;
+}
+.m-away-kind {
+  flex: 0 0 76px;
+  padding-top: 2px;
+  font-size: var(--fs-small);
+  font-weight: 700;
+}
+.m-away-pto {
+  color: var(--rc-pto);
+}
+.m-away-office,
+.m-away-other {
+  color: var(--rc-offproject);
+}
+
+/* ── More ───────────────────────────────────────────────────────────────── */
+
+.m-card {
+  margin-bottom: var(--space-3);
+  padding: 14px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.m-card-title {
+  margin: 0 0 10px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-tiny);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.m-account {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: 10px;
+}
+.m-avatar {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--white);
+  font-weight: 700;
+}
+.m-account-name {
+  font-size: var(--fs-body);
+  font-weight: 700;
+  color: var(--text-main);
+}
+.m-steps {
+  list-style: decimal;
+  padding-left: 20px;
+  font-size: var(--fs-small);
+  line-height: 1.8;
+  color: var(--text);
+}

@@ -491,14 +491,14 @@ and never again.
 | Role | Sees | Writes |
 |---|---|---|
 | `admin` | Everything, including the KPIs and the look-ahead register | Everything |
-| `member` | The schedule and what happened | Their own daily outcomes |
+| `member` | The schedule and what happened | Their own days: plan, change and remove their own tasks; ask for leave |
 | `viewer` | The schedule and what happened | Nothing |
 
 For a read-only team, `viewer`. Promoting somebody later is a dropdown on their
-row — no migration, no redeploy. That lets them record **their own outcomes**.
-It does not let them set next week's tasks: the plan is admin-insert-only,
-because a plan that changed the evening before is delay evidence and the
-supersede chain assumes one author.
+row — no migration, no redeploy. A member plans **their own days** and nobody
+else's — `rc_can_act_for()` in the policies, not the interface — and a change or
+a removal is a new row superseding the old one, never an edit, because a plan
+that changed the evening before is delay evidence.
 
 ### The first administrator
 
@@ -549,6 +549,62 @@ timeline invitations and calendar invitations both work.
 Re-running `schema.sql` afterwards puts the timeline-only gate back, and every
 address invited from Organisation → Accounts would then be refused. If you ever
 re-run it, re-run `rc_schema.sql` after it.
+
+## 6. The phone app
+
+This shape also publishes a phone app at **`https://<your-site>/m/`**. There is
+nothing to configure: it uses the same `config.js`, the same calendar project and
+the same accounts as the site.
+
+It is the resource calendar for somebody in the field, and nothing else:
+
+- **My week** — their tasks day by day: what the 4WLA names them on, anything
+  they or an administrator typed in, whether they are on leave, and what the
+  daily huddle recorded against each task. They can **add** a task (to one day
+  or several), **change** one, and **remove** one they entered. Changing a day
+  the look-ahead plans writes their own entry for it; the workbook itself is
+  never touched. Anybody can look at a colleague's week; only an administrator
+  can change it.
+- **Look-ahead** — the four-week sheet read one day at a time: what is on, where,
+  the shift, who is named on it, and who is off site. **Only mine** narrows it
+  to what names them.
+- **More** — their account, light or dark, and how to install it.
+
+**The timeline is not in it** — not hidden, absent. `tools/build.js` builds the
+phone app from its own entry point and refuses to link the timeline, the plan's
+storage or anything that reads a plan file, so nothing of the P6 project is ever
+loaded on a phone. The huddle, PTO, reports and Organisation stay on a computer
+too.
+
+**Installing it.** Send the team the link. On Android, open it in Chrome and use
+**More → Install the app** (or the browser's own *Install app* menu). On an
+iPhone, open it in **Safari**, tap **Share**, then **Add to Home Screen** — iOS
+installs from Safari and nowhere else. An app installed on an iPhone keeps its
+own sign-in, separate from Safari's, so they sign in once more inside it.
+
+An invitation works on a phone too: `https://<your-site>/m/#join=<their address>`
+opens straight on *Create your account* with the address filled in.
+
+**Offline**, the installed app still opens — it keeps its own files on the
+phone — and says it cannot reach the calendar. It never keeps a copy of the
+calendar's data, so nothing on screen is ever an old answer dressed as a current
+one.
+
+**Updating** is deploying the site. A phone picks up the new version the next
+time the app is opened with a signal.
+
+**Behind Cloudflare Access** it needs nothing extra. A phone signs in through
+Access the first time it opens the link (and again whenever the Access session
+lapses), and the manifest is requested with credentials so installing works
+behind it. Unlike `/desktop/*`, there is nothing to bypass: everything under
+`/m/` is loaded by a browser that has a session.
+
+Verify:
+
+```bash
+curl -sI https://<your-site>/m/sw.js | grep -i cache-control   # no-cache
+curl -s  https://<your-site>/m/manifest.webmanifest | head -3   # JSON (behind Access: log in first)
+```
 
 ---
 

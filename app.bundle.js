@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 58   Built: 2026-09-26T05:28:39.620Z
+ * Modules: 59   Built: 2026-09-28T21:10:32.494Z
  */
 (function () {
   'use strict';
@@ -7386,14 +7386,117 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   }
 
   /**
+   * What the look-ahead has on one day: the sheet read down a single column.
+   *
+   * The phone's reading of the calendar. A hundred days across by a hundred and
+   * forty rows down is the workbook's shape and a laptop's, and on a phone it is a
+   * spreadsheet viewed through a letterbox — so the phone asks the question
+   * somebody standing on site actually has, "what is on today, and who is on it",
+   * and this is the answer. It is the same view every other screen draws: the
+   * same `readGrid()` output, the same rule for work (`role === 'shift'` on the
+   * activity line or its Resource row, via `marksOf()`), the same three
+   * exclusions — headings as titles, rows of names about people, rows nobody
+   * described.
+   *
+   * An activity is on the day when the day carries work paint **or** when its
+   * Resource row names somebody on it. The second clause is not a loosening: a
+   * name on a day is what makes it that person's plan (`assignmentIndex()`), and
+   * an agenda that left out a day the week plan shows as somebody's task would be
+   * the two screens disagreeing about the same cell.
+   *
+   * Each item carries the section heading it sits under, the legend's word for
+   * the paint (`meaning`, null when the day is only named), what the activity cell
+   * itself says ("X.WIT"), the names, and every other labelled column as a
+   * `details` pair — the phone draws those rather than guess which matter. The
+   * rows that say who is away come back apart, in `away`, grouped by kind.
+   *
+   * Null when the day is not on the sheet's dated axis: a sheet whose year could
+   * not be resolved has no "Tuesday the 8th" to answer for, and inventing one
+   * would be the guess `datePlease()` refused.
+   */
+  function agendaFor(view, iso) {
+    const day = (view?.days || []).find((d) => d.date === iso);
+    if (!day) return null;
+
+    const locCol = locationColumnOf(view);
+    const titleCol = titleColumnOf(view, locCol);
+    const headings = view.headings || [];
+    const items = [];
+    const awayByKind = new Map();
+    let section = '';
+
+    for (const activity of view.activities || []) {
+      const meta = activity.meta || [];
+
+      if (activity.absence) {
+        const mark = activity.marks.find((m) => m.col === day.col && String(m.value || '').trim());
+        if (!mark) continue;
+        const held = awayByKind.get(activity.absence) || [];
+        for (const name of resourceNames(mark.value)) if (!held.includes(name)) held.push(name);
+        awayByKind.set(activity.absence, held);
+        continue;
+      }
+
+      /* A heading opens a section whatever else it is. One carrying a shift is
+         also work — the calendar judges it that way, for the reason `drawn()`
+         gives — so it falls through to be read as an activity too. */
+      if (activity.heading) section = meta.filter(Boolean)[0] || section;
+      if (!activity.named) continue;
+
+      const work = marksOf(activity).filter((m) => m.col === day.col && m.hex && m.role === 'shift');
+      // The activity line's own paint first: the Resource row's only fills in.
+      const paint = work.find((m) => activity.marks.includes(m)) || work[0] || null;
+      const names = (activity.resource?.names || []).find((n) => n.col === day.col)?.names || [];
+      if (!paint && !names.length) continue;
+      if (activity.heading && !paint) continue;
+
+      const location = locCol >= 0 ? (meta[locCol] || '') : '';
+      const title = (titleCol >= 0 ? meta[titleCol] : '')
+        || longest(meta.filter((_, i) => i !== locCol)) || location;
+      const cell = activity.marks.find((m) => m.col === day.col)?.value || '';
+
+      items.push({
+        row: activity.row,
+        section: activity.heading ? '' : section,
+        title,
+        location,
+        meaning: paint?.meaning || null,
+        hex: paint?.hex || null,
+        cancelled: isCancelMeaning(paint?.meaning),
+        value: cell,
+        names,
+        details: meta
+          .map((value, i) => ({ heading: String(headings[i] || '').trim(), value, i }))
+          .filter((d) => d.value && d.i !== locCol && d.value !== title)
+          .map(({ heading, value }) => ({ heading, value })),
+      });
+    }
+
+    const away = [...awayByKind.entries()].map(([kind, names]) => ({
+      kind, label: ABSENCE_LABELS[kind] || kind, names,
+    }));
+    return { date: iso, weekday: day.weekday, weekend: day.weekend, items, away };
+  }
+
+  /**
    * The column that says what the work *is*, off the sheet's own heading.
    * Found like the location column is, and for the same reason; -1 when nothing
    * is labelled, and the caller falls back to the longest description it has.
+   *
+   * **A description beats an activity, and an identifier is never either.** BART's
+   * sheet opens "Activity ID, Description of Work Activity, …", and the first
+   * heading with "activit" in it is the ID — so a single pass over one pattern
+   * titled every suggestion, and every row on the phone's agenda, with a CDRL
+   * number. The fixture the suggestions were tested on had no ID column, which is
+   * why it read correctly there and nowhere else.
    */
   function titleColumnOf(view, locCol) {
     const headings = view?.headings || [];
-    for (let i = 0; i < headings.length; i++) {
-      if (i !== locCol && /\b(descr|activit|task|scope)/i.test(headings[i])) return i;
+    const identifier = /\b(id|no|nos|number|ref|code)\b|#/i;
+    for (const wanted of [/\bdescr/i, /\b(activit|task|scope)/i]) {
+      for (let i = 0; i < headings.length; i++) {
+        if (i !== locCol && wanted.test(headings[i]) && !identifier.test(headings[i])) return i;
+      }
     }
     return -1;
   }
@@ -7643,6 +7746,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "countable", { get: () => countable, enumerable: true });
   Object.defineProperty(__x, "describe", { get: () => describe, enumerable: true });
   Object.defineProperty(__x, "suggestionsFrom", { get: () => suggestionsFrom, enumerable: true });
+  Object.defineProperty(__x, "agendaFor", { get: () => agendaFor, enumerable: true });
   Object.defineProperty(__x, "suggestionKey", { get: () => suggestionKey, enumerable: true });
   Object.defineProperty(__x, "reconcileSuggestions", { get: () => reconcileSuggestions, enumerable: true });
   Object.defineProperty(__x, "cancellationEvents", { get: () => cancellationEvents, enumerable: true });
@@ -32415,6 +32519,169 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/rc_gate.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/rc_gate.js"] = function (__x, __req) {
+  /**
+   * The resource calendar's front door: the states that are not the calendar.
+   *
+   * No backend in this build, the sign-in and sign-up form, and an account that is
+   * not on the team. They lived in `ui/rc.js`, and they moved out when the phone
+   * app arrived — that module imports every tab, and through them the folder and
+   * the exporters, none of which a phone may carry. Two copies of a sign-in form
+   * would be two answers to "how does somebody join", so there is one, and each
+   * interface hands it the sentence that is true of where it is drawn.
+   *
+   * Nothing here is the control. Who may create an account is
+   * `rc_enforce_invitation()` on `auth.users`, and who may see what is the
+   * policies; this explains the state to the person looking at it.
+   *
+   * Imports: util, rc, icons, components.
+   */
+
+  const { el } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const { icon } = __req("ui/icons.js");
+  const { textInput } = __req("ui/components.js");
+
+  /**
+   * No backend in this build.
+   *
+   * Not an error. A build can legitimately have the timeline and not the calendar
+   * — that is what every build had until the calendar existed — so it says what is
+   * missing and where it is configured rather than pretending something broke.
+   */
+  function notConfigured({
+    message = 'The timeline works as it always has. The resource calendar needs a '
+      + 'Supabase project, named in config.js as rcSupabaseUrl and '
+      + 'rcSupabaseAnonKey — separate from the timeline, which stays in your folder.',
+  } = {}) {
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('database', { size: 32 }) }),
+      el('h2', { text: 'No resource calendar in this build' }),
+      el('p', { text: message }),
+    ]);
+  }
+
+  /**
+   * Signed in to nothing yet.
+   *
+   * The form writes to the calendar's own client, which keeps its own session
+   * under its own storage key. `onDone` runs once a session exists; `blurb` is
+   * the line under the title when signing in, because what is true about the
+   * rest of the application depends on which application this is.
+   */
+  function signInForm({
+    onDone = () => {},
+    blurb = 'The timeline needs no account and is already open behind this. Only the calendar does.',
+  } = {}) {
+    /* An invitation link carries the address it was sent to, so somebody
+       following one does not have to remember which of their addresses was
+       invited — and lands on the right half of the form. */
+    const invited = joiningAs();
+    let joining = Boolean(invited);
+
+    const email = textInput({ placeholder: 'you@example.com', type: 'email', value: invited || '' });
+    const password = textInput({ placeholder: 'Password', type: 'password' });
+    email.autocomplete = 'username';
+    const error = el('div', { class: 'rc-error', hidden: true });
+    const note = el('div', { class: 'rc-hint', hidden: true });
+    const button = el('button', { class: 'cx-btn primary' });
+    const swap = el('button', { class: 'cx-btn ghost mini' });
+    const title = el('h2');
+    const lead = el('p');
+
+    const paint = () => {
+      title.textContent = joining ? 'Create your account' : 'Sign in to the resource calendar';
+      lead.textContent = joining
+        ? 'Only an address an administrator has invited can create an account — the database '
+          + 'refuses the rest, so there is nothing to guess at here.'
+        : blurb;
+      button.textContent = joining ? 'Create account' : 'Sign in';
+      password.placeholder = joining ? 'Choose a password' : 'Password';
+      password.autocomplete = joining ? 'new-password' : 'current-password';
+      swap.textContent = joining ? 'I already have an account' : 'I was invited — create my account';
+    };
+
+    const submit = async () => {
+      error.hidden = true;
+      note.hidden = true;
+      button.disabled = true;
+      button.textContent = joining ? 'Creating…' : 'Signing in…';
+      try {
+        if (joining) {
+          const { live } = await rc.signUp(email.value, password.value);
+          if (!live) {
+            // The project has email confirmation on, so the account exists but
+            // the session does not. Saying so beats a form that looks stuck.
+            note.textContent = 'Account created. Confirm your address from the email just sent, '
+              + 'then sign in.';
+            note.hidden = false;
+            joining = false;
+            paint();
+            button.disabled = false;
+            return;
+          }
+        } else {
+          await rc.signIn(email.value, password.value);
+        }
+        onDone();
+      } catch (err) {
+        error.textContent = err.message;
+        error.hidden = false;
+        button.disabled = false;
+        paint();
+      }
+    };
+
+    button.addEventListener('click', submit);
+    swap.addEventListener('click', () => { joining = !joining; error.hidden = true; paint(); });
+    for (const field of [email, password]) {
+      field.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submit();
+      });
+    }
+    paint();
+
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('users', { size: 32 }) }),
+      title,
+      lead,
+      el('div', { class: 'rc-signin' }, [email, password, error, note, button, swap]),
+    ]);
+  }
+
+  /** The address an invitation link was sent to, from `#join=…`. */
+  function joiningAs() {
+    const match = /[#&?]join=([^&]+)/.exec(window.location.hash + window.location.search);
+    if (!match) return '';
+    try {
+      return decodeURIComponent(match[1]).trim();
+    } catch {
+      return '';
+    }
+  }
+
+  /** An account that is not on the team. A real answer, not a failure. */
+  function notOnTheTeam() {
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('user', { size: 32 }) }),
+      el('h2', { text: 'You are signed in, but not on this team' }),
+      el('p', {
+        text: 'An administrator adds people in Organisation. Until your account is '
+          + 'linked to a team record, the database will not show you anything.',
+      }),
+      el('button', { class: 'cx-btn ghost', text: 'Sign out', onClick: () => rc.signOut() }),
+    ]);
+  }
+
+  Object.defineProperty(__x, "notConfigured", { get: () => notConfigured, enumerable: true });
+  Object.defineProperty(__x, "signInForm", { get: () => signInForm, enumerable: true });
+  Object.defineProperty(__x, "joiningAs", { get: () => joiningAs, enumerable: true });
+  Object.defineProperty(__x, "notOnTheTeam", { get: () => notOnTheTeam, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/rc_util.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/rc_util.js"] = function (__x, __req) {
@@ -33326,6 +33593,38 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /**
+   * How each drawn task went, from the huddle's outcomes.
+   *
+   * Returns `(entry, personId, iso) => outcome | null`. Indexed two ways because
+   * an outcome points at one plan entry where there was one to point at, and at
+   * nothing but a person and a date where the day was derived from the sheet — so
+   * both keys are needed or the derived days, which are most of them, would show
+   * no outcome at all. A stored entry is matched on its id and on nothing else:
+   * two tasks on one day each carry their own note. A derived day takes whichever
+   * outcome was recorded against the person and the date, preferring one that
+   * points at no entry, because there is no row for it to point at.
+   *
+   * One function because the week plan and the phone's week both draw "how it
+   * went" against a task, and two readings of one outcome is two answers.
+   */
+  function outcomeLookup(actuals) {
+    const byEntry = new Map();
+    const byDay = new Map();
+    for (const row of actuals || []) {
+      if (row.plan_entry_id) byEntry.set(row.plan_entry_id, row);
+      const key = `${row.person_id}|${row.work_date}`;
+      if (!byDay.has(key)) byDay.set(key, []);
+      byDay.get(key).push(row);
+    }
+    return (entry, personId, iso) => {
+      if (entry?.id && byEntry.has(entry.id)) return byEntry.get(entry.id);
+      if (entry?.id) return null;
+      const day = byDay.get(`${personId}|${iso}`) || [];
+      return day.find((a) => !a.plan_entry_id) || day[0] || null;
+    };
+  }
+
+  /**
    * Whether somebody is available on a date.
    *
    * Leave is the reason this exists. Absence is a different fact from "carried
@@ -33397,9 +33696,11 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "graftLocations", { get: () => graftLocations, enumerable: true });
   Object.defineProperty(__x, "graftResources", { get: () => graftResources, enumerable: true });
   Object.defineProperty(__x, "resourceAssignments", { get: () => resourceAssignments, enumerable: true });
+  Object.defineProperty(__x, "nameResolver", { get: () => nameResolver, enumerable: true });
   Object.defineProperty(__x, "absenceAssignments", { get: () => absenceAssignments, enumerable: true });
   Object.defineProperty(__x, "shiftFor", { get: () => shiftFor, enumerable: true });
   Object.defineProperty(__x, "assignmentIndex", { get: () => assignmentIndex, enumerable: true });
+  Object.defineProperty(__x, "outcomeLookup", { get: () => outcomeLookup, enumerable: true });
   Object.defineProperty(__x, "availability", { get: () => availability, enumerable: true });
 };
 
@@ -38896,7 +39197,7 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
 
 
 
-  const { SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, foldName, ambiguousFirstNames, lookaheadWithResources, assignmentIndex, locationRegister, unmatchedLocations } = __req("ui/rc_util.js");
+  const { SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, foldName, ambiguousFirstNames, lookaheadWithResources, assignmentIndex, locationRegister, unmatchedLocations, outcomeLookup } = __req("ui/rc_util.js");
 
 
 
@@ -38980,29 +39281,9 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
        the spelling is kept and shown, never discarded and never guessed at. */
     const strangeLocations = unmatchedLocations(laRows, locationRegister(locations, locAliases));
 
-    /* How each day went, indexed two ways.
-       An outcome points at one plan entry where there was one to point at, and at
-       nothing but a person and a date where the day was derived from the sheet —
-       so both keys are needed or the derived days, which are most of them, would
-       show no outcome at all. The entry wins: two people can be planned on one
-       day and the note belongs to the task it was recorded against. */
-    const outcomeByEntry = new Map();
-    const outcomeByDay = new Map();
-    for (const row of actuals) {
-      if (row.plan_entry_id) outcomeByEntry.set(row.plan_entry_id, row);
-      const key = `${row.person_id}|${row.work_date}`;
-      if (!outcomeByDay.has(key)) outcomeByDay.set(key, []);
-      outcomeByDay.get(key).push(row);
-    }
-    /* The outcome for one drawn task. A stored entry is matched on its id; a
-       derived day takes whichever outcome was recorded against the person and the
-       date, because there is no row for it to point at. */
-    const outcomeFor = (entry, personId, iso) => {
-      if (entry?.id && outcomeByEntry.has(entry.id)) return outcomeByEntry.get(entry.id);
-      if (entry?.id) return null;
-      const day = outcomeByDay.get(`${personId}|${iso}`) || [];
-      return day.find((a_) => !a_.plan_entry_id) || day[0] || null;
-    };
+    /* How each day went — the one rule for matching an outcome to a drawn task,
+       shared with the phone's week so the two cannot disagree. */
+    const outcomeFor = outcomeLookup(actuals);
 
     const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
     const soon = leave.filter((l) => l.start_date > to
@@ -41000,14 +41281,14 @@ __mods["ui/rc.js"] = function (__x, __req) {
    * this module does. So signing in is something that happens when you arrive at
    * the calendar, not something that happens before the application starts.
    *
-   * Imports: util, events, rc, icons, components, and the tab modules.
+   * Imports: util, events, rc, components, rc_gate, and the tab modules.
    */
 
   const { el, clear } = __req("core/util.js");
   const { on, EV } = __req("core/events.js");
   const rc = __req("core/rc.js");
-  const { icon } = __req("ui/icons.js");
-  const { textInput, toast, emptyState } = __req("ui/components.js");
+  const { toast, emptyState } = __req("ui/components.js");
+  const { notConfigured, signInForm, notOnTheTeam } = __req("ui/rc_gate.js");
   const roster = __req("ui/rc_roster.js");
   const huddle = __req("ui/rc_huddle.js");
   const lookahead = __req("ui/rc_lookahead.js");
@@ -41108,7 +41389,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
       return;
     }
     if (!rc.isSignedIn()) {
-      bodyEl.appendChild(signInForm());
+      bodyEl.appendChild(signInForm({ onDone: () => render() }));
       return;
     }
     if (!rc.me()) {
@@ -41237,130 +41518,9 @@ __mods["ui/rc.js"] = function (__x, __req) {
 
   /* ── The states that are not the calendar ──────────────────────────────── */
 
-  /**
-   * No backend in this build.
-   *
-   * Not an error. A build can legitimately have the timeline and not this — that
-   * is what every build has had until now — so it says what is missing and where
-   * it is configured rather than pretending something broke.
-   */
-  function notConfigured() {
-    return el('div', { class: 'rc-state' }, [
-      el('div', { class: 'rc-state-icon', html: icon('database', { size: 32 }) }),
-      el('h2', { text: 'No resource calendar in this build' }),
-      el('p', {
-        text: 'The timeline works as it always has. The resource calendar needs a '
-          + 'Supabase project, named in config.js as rcSupabaseUrl and '
-          + 'rcSupabaseAnonKey — separate from the timeline, which stays in your folder.',
-      }),
-    ]);
-  }
-
-  /**
-   * Signed in to nothing yet.
-   *
-   * The form writes to the calendar's own client, which keeps its own session
-   * under its own storage key. Signing in here does not sign you in to anything
-   * the timeline uses, because the timeline uses nothing.
-   */
-  function signInForm() {
-    /* An invitation link carries the address it was sent to, so somebody
-       following one does not have to remember which of their addresses was
-       invited — and lands on the right half of the form. */
-    const invited = joiningAs();
-    let joining = Boolean(invited);
-
-    const email = textInput({ placeholder: 'you@example.com', type: 'email', value: invited || '' });
-    const password = textInput({ placeholder: 'Password', type: 'password' });
-    const error = el('div', { class: 'rc-error', hidden: true });
-    const note = el('div', { class: 'rc-hint', hidden: true });
-    const button = el('button', { class: 'cx-btn primary' });
-    const swap = el('button', { class: 'cx-btn ghost mini' });
-    const title = el('h2');
-    const blurb = el('p');
-
-    const paint = () => {
-      title.textContent = joining ? 'Create your account' : 'Sign in to the resource calendar';
-      blurb.textContent = joining
-        ? 'Only an address an administrator has invited can create an account — the database '
-          + 'refuses the rest, so there is nothing to guess at here.'
-        : 'The timeline needs no account and is already open behind this. Only the calendar does.';
-      button.textContent = joining ? 'Create account' : 'Sign in';
-      password.placeholder = joining ? 'Choose a password' : 'Password';
-      swap.textContent = joining ? 'I already have an account' : 'I was invited — create my account';
-    };
-
-    const submit = async () => {
-      error.hidden = true;
-      note.hidden = true;
-      button.disabled = true;
-      button.textContent = joining ? 'Creating…' : 'Signing in…';
-      try {
-        if (joining) {
-          const { live } = await rc.signUp(email.value, password.value);
-          if (!live) {
-            // The project has email confirmation on, so the account exists but
-            // the session does not. Saying so beats a form that looks stuck.
-            note.textContent = 'Account created. Confirm your address from the email just sent, '
-              + 'then sign in.';
-            note.hidden = false;
-            joining = false;
-            paint();
-            button.disabled = false;
-            return;
-          }
-        } else {
-          await rc.signIn(email.value, password.value);
-        }
-        render();
-      } catch (err) {
-        error.textContent = err.message;
-        error.hidden = false;
-        button.disabled = false;
-        paint();
-      }
-    };
-
-    button.addEventListener('click', submit);
-    swap.addEventListener('click', () => { joining = !joining; error.hidden = true; paint(); });
-    for (const field of [email, password]) {
-      field.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') submit();
-      });
-    }
-    paint();
-
-    return el('div', { class: 'rc-state' }, [
-      el('div', { class: 'rc-state-icon', html: icon('users', { size: 32 }) }),
-      title,
-      blurb,
-      el('div', { class: 'rc-signin' }, [email, password, error, note, button, swap]),
-    ]);
-  }
-
-  /** The address an invitation link was sent to, from `#join=…`. */
-  function joiningAs() {
-    const match = /[#&?]join=([^&]+)/.exec(window.location.hash + window.location.search);
-    if (!match) return '';
-    try {
-      return decodeURIComponent(match[1]).trim();
-    } catch {
-      return '';
-    }
-  }
-
-  /** An account that is not on the team. A real answer, not a failure. */
-  function notOnTheTeam() {
-    return el('div', { class: 'rc-state' }, [
-      el('div', { class: 'rc-state-icon', html: icon('user', { size: 32 }) }),
-      el('h2', { text: 'You are signed in, but not on this team' }),
-      el('p', {
-        text: 'An administrator adds people in Organisation. Until your account is '
-          + 'linked to a team record, the database will not show you anything.',
-      }),
-      el('button', { class: 'cx-btn ghost', text: 'Sign out', onClick: () => rc.signOut() }),
-    ]);
-  }
+  /* No backend, the sign-in form and an account that is not on the team live in
+     `ui/rc_gate.js`, because the phone app draws the same three and cannot
+     import this module — it imports every tab, and through them the folder. */
 
   function loadFailed(err) {
     return emptyState({

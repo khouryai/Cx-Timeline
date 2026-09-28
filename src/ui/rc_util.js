@@ -676,7 +676,7 @@ export function resourceAssignments(laRows, register) {
  * thousands. `corrected` says which of the two answers it is, so a caller can
  * report a name it only matched approximately instead of quietly absorbing it.
  */
-function nameResolver(register) {
+export function nameResolver(register) {
   const memo = new Map();
   return (key) => {
     if (memo.has(key)) return memo.get(key);
@@ -902,6 +902,38 @@ export function assignmentIndex({ planRows, laRows, register, absences = [], cat
     near: [...near, ...away.near],
     awayUnmatched: away.unmatched,
     derived: derived.size,
+  };
+}
+
+/**
+ * How each drawn task went, from the huddle's outcomes.
+ *
+ * Returns `(entry, personId, iso) => outcome | null`. Indexed two ways because
+ * an outcome points at one plan entry where there was one to point at, and at
+ * nothing but a person and a date where the day was derived from the sheet — so
+ * both keys are needed or the derived days, which are most of them, would show
+ * no outcome at all. A stored entry is matched on its id and on nothing else:
+ * two tasks on one day each carry their own note. A derived day takes whichever
+ * outcome was recorded against the person and the date, preferring one that
+ * points at no entry, because there is no row for it to point at.
+ *
+ * One function because the week plan and the phone's week both draw "how it
+ * went" against a task, and two readings of one outcome is two answers.
+ */
+export function outcomeLookup(actuals) {
+  const byEntry = new Map();
+  const byDay = new Map();
+  for (const row of actuals || []) {
+    if (row.plan_entry_id) byEntry.set(row.plan_entry_id, row);
+    const key = `${row.person_id}|${row.work_date}`;
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(row);
+  }
+  return (entry, personId, iso) => {
+    if (entry?.id && byEntry.has(entry.id)) return byEntry.get(entry.id);
+    if (entry?.id) return null;
+    const day = byDay.get(`${personId}|${iso}`) || [];
+    return day.find((a) => !a.plan_entry_id) || day[0] || null;
   };
 }
 

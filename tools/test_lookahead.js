@@ -1170,6 +1170,88 @@ console.log('\nThe heading row, and red on a Resource row');
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+   One day of the sheet, for a phone
+   ═══════════════════════════════════════════════════════════════════════ */
+
+console.log('\nThe look-ahead read one day at a time');
+{
+  const first = Date.UTC(2026, 8, 7);      // Monday 7 September 2026
+  const days = [...Array(7)].map((_, i) => new Date(first + i * 86400000));
+  const LET = ['M', 'Tu', 'W', 'Th', 'F', 'Sa', 'Su'];
+  const c = (col, value, hex = null, extra = {}) => ({ col, ref: `C${col}`, value, hex, ...extra });
+  const paint = (col, hex, meaning, value = '', role = 'shift') => c(col, value, hex, { meaning, role });
+  const view = cls.readGrid({
+    rows: [
+      { row: 2, label: '', cells: [c(2, 'Activity ID'), c(3, 'Description of Work Activity'),
+        c(4, 'Location'), c(5, 'Party to Action')] },
+      { row: 4, label: '', cells: [c(8, 'SEPTEMBER')] },
+      { row: 5, label: '', cells: days.map((d, i) => c(8 + i, String(d.getUTCDate()))) },
+      { row: 6, label: '', cells: days.map((d, i) => c(8 + i, LET[i])) },
+      // A section title: its activity cells are painted, its days are not.
+      { row: 7, label: '', cells: [c(2, 'PHASE 2', 'D9D9D9'), c(3, '', 'D9D9D9')] },
+      { row: 8, label: '', cells: [c(2, 'A-100'), c(3, 'Cable pull'), c(4, 'T12'), c(5, 'BART'),
+        paint(8, 'FFFF00', 'Day Shift', 'X.WIT'), paint(9, 'FF0000', 'Cancellation')] },
+      // Its Resource row: two names on Monday, and Dan on a Wednesday nobody painted.
+      { row: 9, label: '', cells: [c(3, 'Resource'), c(8, 'Victor, Rosa'), c(10, 'Dan')] },
+      // Paint the legend calls shading, and nothing else.
+      { row: 11, label: '', cells: [c(3, 'Grey band only'), paint(8, 'BFBFBF', 'Shading', '', 'ignore')] },
+      { row: 14, label: '', cells: [c(3, 'PTO'), c(8, 'Uma / Tom')] },
+      { row: 15, label: '', cells: [c(3, 'Office'), c(8, 'Sam')] },
+    ],
+  }, { anchorISO: '2026-09-09' });
+
+  const mon = cls.agendaFor(view, '2026-09-07');
+  const pull = mon?.items.find((i) => i.title === 'Cable pull');
+  check('a day lists what is painted as work on it', mon?.items.length === 1 && Boolean(pull),
+    (mon?.items || []).map((i) => i.title).join(', '));
+  check('titled from the description column, placed from the location column',
+    pull?.title === 'Cable pull' && pull?.location === 'T12');
+  check('under the section heading above it', pull?.section === 'PHASE 2');
+  check('with the legend’s word, the paint and what the cell itself says',
+    pull?.meaning === 'Day Shift' && pull?.hex === 'FFFF00' && pull?.value === 'X.WIT');
+  check('and the names off its Resource row for that day', pull?.names.join('|') === 'Victor|Rosa');
+  check('every other labelled column comes along as a detail, by its own heading',
+    JSON.stringify(pull?.details) === JSON.stringify([
+      { heading: 'Activity ID', value: 'A-100' }, { heading: 'Party to Action', value: 'BART' },
+    ]), JSON.stringify(pull?.details));
+  check('shading is not work, and a title is not an activity',
+    !mon?.items.some((i) => /Grey band|PHASE/.test(i.title)));
+  check('who is away comes back apart from the work, by kind',
+    JSON.stringify(mon?.away) === JSON.stringify([
+      { kind: 'pto', label: 'PTO', names: ['Uma', 'Tom'] },
+      { kind: 'office', label: 'Office', names: ['Sam'] },
+    ]), JSON.stringify(mon?.away));
+
+  const tue = cls.agendaFor(view, '2026-09-08');
+  check('a day painted as a cancellation says so',
+    tue?.items[0]?.cancelled === true && tue?.items[0]?.meaning === 'Cancellation');
+
+  const wed = cls.agendaFor(view, '2026-09-09');
+  check('a day the Resource row names somebody on is on the agenda, paint or not — '
+    + 'the week plan already calls it their plan',
+    wed?.items[0]?.title === 'Cable pull' && wed?.items[0]?.names.join() === 'Dan'
+    && wed?.items[0]?.meaning === null);
+
+  const thu = cls.agendaFor(view, '2026-09-10');
+  check('a day with nothing on it is empty, not missing', thu?.items.length === 0 && thu?.away.length === 0);
+  check('a day the sheet does not cover has no agenda at all', cls.agendaFor(view, '2026-10-01') === null);
+  check('the timeline’s suggestions are titled from the description too, not the ID beside it',
+    cls.suggestionsFrom(view)[0]?.title === 'Cable pull', cls.suggestionsFrom(view)[0]?.title);
+
+  // The same sheet with its month band gone: day numbers and weekday letters,
+  // and no year anybody could honestly claim for them.
+  const undated = cls.readGrid({
+    rows: [
+      { row: 5, label: '', cells: days.map((d, i) => c(8 + i, String(d.getUTCDate()))) },
+      { row: 6, label: '', cells: days.map((d, i) => c(8 + i, LET[i])) },
+      { row: 8, label: '', cells: [c(3, 'Cable pull'), paint(8, 'FFFF00', 'Day Shift')] },
+    ],
+  }, { anchorISO: '2026-09-09' });
+  check('a sheet whose dates could not be read has no agenda to give',
+    undated.days.length === 7 && cls.agendaFor(undated, '2026-09-07') === null);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
    The cancellation log
    ═══════════════════════════════════════════════════════════════════════ */
 

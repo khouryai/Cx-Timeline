@@ -1,0 +1,20 @@
+{
+  "name": "CX Calendar",
+  "short_name": "CX Calendar",
+  "description": "Your week and the four-week look-ahead, from the CX resource calendar.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0b0f1a",
+  "theme_color": "#0e1523",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "My week", "url": "./#week", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Look-ahead", "url": "./#lookahead", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

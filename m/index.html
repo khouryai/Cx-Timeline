@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <!-- Rewritten from the --chrome-bg token by mobile/theme.js once the theme is known. -->
+    <meta name="theme-color" content="#0e1523" />
+    <meta name="description" content="CX Calendar — your week and the four-week look-ahead, on your phone." />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="CX Calendar" />
+    <title>CX Calendar</title>
+
+    <!-- With credentials, or a site behind Cloudflare Access answers the manifest
+         with its login page and the phone never offers to install the app. -->
+    <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+
+    <link rel="stylesheet" href="../css/tokens.css" />
+    <link rel="stylesheet" href="../css/base.css" />
+    <link rel="stylesheet" href="../css/components.css" />
+    <link rel="stylesheet" href="../css/calendar.css" />
+    <link rel="stylesheet" href="../css/mobile.css" />
+
+    <!--
+      The phone app: the resource calendar and nothing else. The timeline is not
+      in this bundle — tools/build.js refuses to link it — so nothing of the plan
+      is ever loaded on a phone. Same config.js and the same vendored client as
+      the full site, and the same separate calendar project behind them.
+    -->
+    <script src="../config.js"></script>
+    <script src="../vendor/supabase.js"></script>
+    <script src="../mobile.bundle.js"></script>
+  </head>
+
+  <body>
+    <div id="m-app">
+      <header id="m-head"></header>
+      <main id="m-main">
+        <div class="m-loading" role="status">
+          <div class="m-spinner" aria-hidden="true"></div>
+          <span>Opening the calendar…</span>
+        </div>
+      </main>
+      <nav id="m-tabs" aria-label="Sections" hidden></nav>
+    </div>
+
+    <noscript>
+      <p class="m-noscript">CX Calendar needs JavaScript enabled.</p>
+    </noscript>
+  </body>
+</html>

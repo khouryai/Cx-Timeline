@@ -138,6 +138,10 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   text-align: center;
 }
 .rc-state .rc-state-icon {
+  /* Centred as a box: base.css makes every svg a block, which text-align
+     leaves on the left. */
+  display: flex;
+  justify-content: center;
   color: var(--text-muted);
   opacity: 0.5;
   margin-bottom: var(--space-3);

@@ -1116,14 +1116,117 @@ export function suggestionsFrom(view) {
 }
 
 /**
+ * What the look-ahead has on one day: the sheet read down a single column.
+ *
+ * The phone's reading of the calendar. A hundred days across by a hundred and
+ * forty rows down is the workbook's shape and a laptop's, and on a phone it is a
+ * spreadsheet viewed through a letterbox — so the phone asks the question
+ * somebody standing on site actually has, "what is on today, and who is on it",
+ * and this is the answer. It is the same view every other screen draws: the
+ * same `readGrid()` output, the same rule for work (`role === 'shift'` on the
+ * activity line or its Resource row, via `marksOf()`), the same three
+ * exclusions — headings as titles, rows of names about people, rows nobody
+ * described.
+ *
+ * An activity is on the day when the day carries work paint **or** when its
+ * Resource row names somebody on it. The second clause is not a loosening: a
+ * name on a day is what makes it that person's plan (`assignmentIndex()`), and
+ * an agenda that left out a day the week plan shows as somebody's task would be
+ * the two screens disagreeing about the same cell.
+ *
+ * Each item carries the section heading it sits under, the legend's word for
+ * the paint (`meaning`, null when the day is only named), what the activity cell
+ * itself says ("X.WIT"), the names, and every other labelled column as a
+ * `details` pair — the phone draws those rather than guess which matter. The
+ * rows that say who is away come back apart, in `away`, grouped by kind.
+ *
+ * Null when the day is not on the sheet's dated axis: a sheet whose year could
+ * not be resolved has no "Tuesday the 8th" to answer for, and inventing one
+ * would be the guess `datePlease()` refused.
+ */
+export function agendaFor(view, iso) {
+  const day = (view?.days || []).find((d) => d.date === iso);
+  if (!day) return null;
+
+  const locCol = locationColumnOf(view);
+  const titleCol = titleColumnOf(view, locCol);
+  const headings = view.headings || [];
+  const items = [];
+  const awayByKind = new Map();
+  let section = '';
+
+  for (const activity of view.activities || []) {
+    const meta = activity.meta || [];
+
+    if (activity.absence) {
+      const mark = activity.marks.find((m) => m.col === day.col && String(m.value || '').trim());
+      if (!mark) continue;
+      const held = awayByKind.get(activity.absence) || [];
+      for (const name of resourceNames(mark.value)) if (!held.includes(name)) held.push(name);
+      awayByKind.set(activity.absence, held);
+      continue;
+    }
+
+    /* A heading opens a section whatever else it is. One carrying a shift is
+       also work — the calendar judges it that way, for the reason `drawn()`
+       gives — so it falls through to be read as an activity too. */
+    if (activity.heading) section = meta.filter(Boolean)[0] || section;
+    if (!activity.named) continue;
+
+    const work = marksOf(activity).filter((m) => m.col === day.col && m.hex && m.role === 'shift');
+    // The activity line's own paint first: the Resource row's only fills in.
+    const paint = work.find((m) => activity.marks.includes(m)) || work[0] || null;
+    const names = (activity.resource?.names || []).find((n) => n.col === day.col)?.names || [];
+    if (!paint && !names.length) continue;
+    if (activity.heading && !paint) continue;
+
+    const location = locCol >= 0 ? (meta[locCol] || '') : '';
+    const title = (titleCol >= 0 ? meta[titleCol] : '')
+      || longest(meta.filter((_, i) => i !== locCol)) || location;
+    const cell = activity.marks.find((m) => m.col === day.col)?.value || '';
+
+    items.push({
+      row: activity.row,
+      section: activity.heading ? '' : section,
+      title,
+      location,
+      meaning: paint?.meaning || null,
+      hex: paint?.hex || null,
+      cancelled: isCancelMeaning(paint?.meaning),
+      value: cell,
+      names,
+      details: meta
+        .map((value, i) => ({ heading: String(headings[i] || '').trim(), value, i }))
+        .filter((d) => d.value && d.i !== locCol && d.value !== title)
+        .map(({ heading, value }) => ({ heading, value })),
+    });
+  }
+
+  const away = [...awayByKind.entries()].map(([kind, names]) => ({
+    kind, label: ABSENCE_LABELS[kind] || kind, names,
+  }));
+  return { date: iso, weekday: day.weekday, weekend: day.weekend, items, away };
+}
+
+/**
  * The column that says what the work *is*, off the sheet's own heading.
  * Found like the location column is, and for the same reason; -1 when nothing
  * is labelled, and the caller falls back to the longest description it has.
+ *
+ * **A description beats an activity, and an identifier is never either.** BART's
+ * sheet opens "Activity ID, Description of Work Activity, …", and the first
+ * heading with "activit" in it is the ID — so a single pass over one pattern
+ * titled every suggestion, and every row on the phone's agenda, with a CDRL
+ * number. The fixture the suggestions were tested on had no ID column, which is
+ * why it read correctly there and nowhere else.
  */
 function titleColumnOf(view, locCol) {
   const headings = view?.headings || [];
-  for (let i = 0; i < headings.length; i++) {
-    if (i !== locCol && /\b(descr|activit|task|scope)/i.test(headings[i])) return i;
+  const identifier = /\b(id|no|nos|number|ref|code)\b|#/i;
+  for (const wanted of [/\bdescr/i, /\b(activit|task|scope)/i]) {
+    for (let i = 0; i < headings.length; i++) {
+      if (i !== locCol && wanted.test(headings[i]) && !identifier.test(headings[i])) return i;
+    }
   }
   return -1;
 }
