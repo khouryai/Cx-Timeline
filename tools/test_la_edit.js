@@ -489,6 +489,86 @@ console.log('\nThe Excel export');
   check('control characters cannot corrupt the file', xw.xmlEscape('a\u0001b<c>') === 'ab&lt;c&gt;');
 }
 
+console.log('\nWhat happened to a cell');
+{
+  const edits = [
+    { id: 1, at: '2026-09-21T08:00:00Z', by: 'u1', target: 'cell', row_id: 'a1', day: '2026-09-22', action: 'insert', after: { color: 'ffff00', text: 'X' } },
+    { id: 2, at: '2026-09-21T09:00:00Z', by: 'u2', target: 'cell', row_id: 'a1', day: '2026-09-22', action: 'update', before: { color: 'FFFF00', text: 'X' }, after: { color: 'FF0000', text: 'X' } },
+    { id: 3, at: '2026-09-21T09:30:00Z', by: 'u2', target: 'cell', row_id: 'a1', day: '2026-09-23', action: 'insert', after: { color: null, text: 'Y' } },
+    { id: 4, at: '2026-09-21T10:00:00Z', by: 'u1', target: 'cell', row_id: 'a1', day: '2026-09-22T00:00:00', action: 'delete', before: { color: 'FF0000', text: 'X' } },
+    { id: 5, at: '2026-09-21T10:00:00Z', by: 'u1', target: 'row', row_id: 'a1', action: 'update', before: { description: 'IXL', sort: 1 }, after: { description: 'IXL Regression', sort: 1 } },
+    { id: 6, at: '2026-09-21T10:05:00Z', by: 'u1', target: 'row', row_id: 'a1', action: 'update', before: { description: 'IXL Regression', sort: 1 }, after: { description: 'IXL Regression', sort: 2048 } },
+  ];
+  const h = ed.cellHistory(edits, 'a1', '2026-09-22');
+  check('one day\'s changes, newest first, whatever the day\'s spelling', h.map((x) => x.id).join() === '4,2,1');
+  check('an insert has nothing before it and a delete nothing after', h[2].before === null && h[0].after === null);
+  check('colours are compared in one case', h[1].before.color === 'FFFF00' && h[2].after.color === 'FFFF00');
+  const meaning = (hex) => ({ FFFF00: 'Day Shift', FF0000: 'Cancellation' }[hex] || '');
+  check('a value reads as its meaning and its text', ed.describeCellValue(h[1].after, meaning) === 'Cancellation · X'
+    && ed.describeCellValue(null, meaning) === 'empty');
+  const rh = ed.rowHistory(edits, 'a1');
+  check('a row\'s history names the fields that changed, and leaves out a move',
+    rh.length === 1 && rh[0].changes[0].field === 'Description of Work Activity' && rh[0].changes[0].to === 'IXL Regression',
+    JSON.stringify(rh));
+}
+
+console.log('\nIs everybody named where they can be');
+{
+  const monday = '2026-09-21';
+  const d = (n) => ed.addDaysISO(monday, n);
+  const model = ed.makeModel([
+    ed.blankRow('activity', { id: 'a1', sort: 1, description: 'IXL Regression' }),
+    ed.blankRow('resource', { id: 'r1', parent_id: 'a1', sort: 2 }),
+    ed.blankRow('activity', { id: 'a2', sort: 3, description: 'Night Mode' }),
+    ed.blankRow('resource', { id: 'r2', parent_id: 'a2', sort: 4 }),
+    ed.blankRow('activity', { id: 'a3', sort: 5, description: 'Cable pull' }),
+    ed.blankRow('resource', { id: 'r3', parent_id: 'a3', sort: 6 }),
+    ed.blankRow('absence', { id: 'p1', sort: 7, description: 'PTO', absence_kind: 'pto' }),
+    ed.blankRow('absence', { id: 'o1', sort: 8, description: 'Office', absence_kind: 'office' }),
+  ], [
+    { row_id: 'a1', day: d(0), color: 'FFFF00', text: 'X.WIT.WIT.WIT' },
+    { row_id: 'r1', day: d(0), color: null, text: 'Priya, Rosa, Stranger' },
+    { row_id: 'a2', day: d(0), color: '000080', text: '' },
+    { row_id: 'r2', day: d(0), color: null, text: 'Rosa' },
+    { row_id: 'a3', day: d(0), color: 'FFFF00', text: '' },
+    { row_id: 'r3', day: d(0), color: null, text: 'Priya' },
+    { row_id: 'a1', day: d(1), color: 'FFFF00', text: '' },
+    { row_id: 'r1', day: d(1), color: null, text: 'Tom' },
+    { row_id: 'p1', day: d(1), color: null, text: 'Tom' },
+    { row_id: 'a1', day: d(2), color: 'FF0000', text: '' },
+    { row_id: 'r1', day: d(2), color: null, text: 'Uma' },
+    { row_id: 'a2', day: d(2), color: '000080', text: '' },
+    { row_id: 'r2', day: d(2), color: null, text: 'Uma' },
+    { row_id: 'o1', day: d(2), color: null, text: 'Priya' },
+    { row_id: 'r3', day: d(2), color: null, text: 'Priya' },
+    { row_id: 'a3', day: d(2), color: 'FFFF00', text: '' },
+  ]);
+  const roster = { priya: 'P', rosa: 'R', tom: 'T', uma: 'U' };
+  const resolve = (w) => { const id = roster[String(w).trim().toLowerCase()]; return id ? { id, name: w.trim() } : null; };
+  const leave = [
+    { person_id: 'P', start_date: d(2), end_date: d(3), status: 'requested', kind: 'Vacation' },
+    { person_id: 'R', start_date: d(2), end_date: d(2), status: 'declined', kind: 'Vacation' },
+  ];
+  const meanings = { FFFF00: 'Day Shift', '000080': 'Night Shift', FF0000: 'Cancellation' };
+  const { issues, byCell } = ed.staffingIssues(model, ed.windowDays(monday, 1), {
+    resolve, leave, isShift: (hex) => hex !== 'FF0000', shiftOf: (hex) => meanings[hex] || hex,
+  });
+  const of = (kind) => issues.filter((i) => i.kind === kind);
+  check('a person on a day shift and a night shift the same day is flagged on both rows',
+    of('shifts').filter((i) => i.person_id === 'R').map((i) => i.row_id).sort().join() === 'r1,r2', JSON.stringify(of('shifts')));
+  check('two activities on the same shift are an ordinary day',
+    !of('shifts').some((i) => i.person_id === 'P' && i.day === d(0)));
+  check('named on work while on the sheet\'s PTO row', of('pto').length === 1 && of('pto')[0].person_id === 'T' && of('pto')[0].row_id === 'r1');
+  check('the Office row is not time off', !issues.some((i) => i.person_id === 'P' && i.kind === 'pto'));
+  check('leave asked for in the calendar is flagged, and says it is only asked for',
+    of('leave').length === 1 && /requested/.test(of('leave')[0].detail));
+  check('declined leave is not leave', !of('leave').some((i) => i.person_id === 'R'));
+  check('a cancelled day is not a shift, so it clashes with nothing', !issues.some((i) => i.person_id === 'U'));
+  check('a name the roster does not know is not ours to check', !issues.some((i) => /Stranger/.test(i.name)));
+  check('support codes are not counted at all', !issues.some((i) => /support|WIT/i.test(i.detail)));
+  check('clashes are keyed by cell for drawing', (byCell.get(ed.cellKey('r1', d(0))) || []).length === 1);
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

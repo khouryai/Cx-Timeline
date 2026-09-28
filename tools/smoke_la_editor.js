@@ -162,6 +162,50 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   }, { iso: day(1) });
   check('and a second name goes after a comma, as the sheet writes them', namesSaved === 'Priya, Rosa', namesSaved);
 
+  /* ── Staffing: your team only ─────────────────────────────────────── */
+  await page.evaluate(({ iso }) => {
+    window.__rc.rows.rc_leave.push({
+      id: 'lv-priya', person_id: 'p3', kind_id: 'k1', status: 'approved', start_date: iso, end_date: iso,
+    });
+  }, { iso: day(1) });
+  await page.locator('#rc-frame .lae-toolbar button[aria-label="More"]').click();
+  await page.locator('.cx-menu .cx-menu-item', { hasText: 'Reload from the server' }).click();
+  await page.waitForSelector('#rc-frame td.lae-clash', { timeout: 5000 }).catch(() => {});
+  const clashCell = rowLoc('Resource').locator(`td[data-c="${col(day(1))}"]`);
+  check('a name on a day they have leave booked is marked, and says why',
+    await clashCell.evaluate((n) => n.classList.contains('lae-clash') && /Priya has Annual leave booked/.test(n.title)),
+    await clashCell.evaluate((n) => `${n.className} | ${n.title}`));
+  const clashBtn = page.locator('#rc-frame .lae-clash-btn');
+  const clashLabel = await clashBtn.textContent().catch(() => '');
+  const clashTitles = await page.locator('#rc-frame td.lae-clash').evaluateAll((ns) => ns.map((n) => n.title).join('\n'));
+  // The fixture's PTO row has Rosa off that day too — the sheet's own PTO row counts.
+  check('named on the sheet\'s own PTO row the same day is a clash too', /Rosa is on the PTO row that day/.test(clashTitles), clashTitles);
+  check('the toolbar counts the clashes', /^2 staffing clashes$/i.test(clashLabel.trim()), clashLabel);
+  await clashBtn.click();
+  await page.waitForSelector('.cx-modal .lae-clashes');
+  const clashText = await page.locator('.cx-modal').innerText();
+  check('the list says who, what and when, and counts no support', /On leave/.test(clashText) && /Priya/.test(clashText)
+    && /Support requested is not counted/.test(clashText), clashText.replace(/\s+/g, ' ').slice(0, 200));
+  await page.locator('.cx-modal .lae-clash-item button', { hasText: 'Show' }).first().click();
+  check('and one press takes you to the cell', await page.evaluate(() => !document.querySelector('.cx-modal'))
+    && await clashCell.evaluate((n) => n.classList.contains('lae-cur')));
+  await page.evaluate(() => { window.__rc.rows.rc_leave = window.__rc.rows.rc_leave.filter((l) => l.id !== 'lv-priya'); });
+
+  /* ── Who changed this day ─────────────────────────────────────────── */
+  await cell('IXL Regression Testing', day(1)).click({ button: 'right' });
+  await page.locator('.cx-menu .cx-menu-item', { hasText: 'History of this day' }).click();
+  await page.waitForSelector('.cx-modal .lae-history-item', { timeout: 5000 }).catch(() => {});
+  const hist = await page.locator('.cx-modal .lae-history-item').allInnerTexts();
+  check('a day\'s history says who changed it, from what to what',
+    hist.length >= 1 && /Alex/.test(hist[0]) && /empty\s*X\.WIT/.test(hist[hist.length - 1]), hist.join(' | ').replace(/\s+/g, ' ').slice(0, 240));
+  await page.locator('.cx-modal button', { hasText: 'Close' }).click();
+  await rowLoc('ATS Site Test').locator('td.lae-handle').click({ button: 'right' });
+  await page.locator('.cx-menu .cx-menu-item', { hasText: 'History of this row' }).click();
+  await page.waitForSelector('.cx-modal .lae-history-item', { timeout: 5000 }).catch(() => {});
+  const rowHist = await page.locator('.cx-modal .lae-history-item').allInnerTexts();
+  check('and a row\'s history names the field that changed', rowHist.some((t) => /Location: .*W40/.test(t)), rowHist.join(' | ').slice(0, 240));
+  await page.locator('.cx-modal button', { hasText: 'Close' }).click();
+
   /* ── Painting and support ─────────────────────────────────────────── */
   const yellow = page.locator('#rc-frame .lae-swatch[aria-label="Paint Day Shift"]');
   await cell('IXL Regression Testing', day(0)).click();

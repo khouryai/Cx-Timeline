@@ -38,7 +38,7 @@ import {
   toast, confirmDialog, contextMenu, openModal, textInput, selectInput, segmented, emptyState,
   attachTooltip,
 } from './components.js';
-import { notifyChanged, todayISO } from './rc_util.js';
+import { notifyChanged, todayISO, nameRegister, foldName } from './rc_util.js';
 import { publishFromEditor, publishDays, EDITOR_SOURCE } from './rc_ingest.js';
 import { la } from './rc_la_state.js';
 
@@ -85,6 +85,12 @@ const E = {
   editing: null,
   root: null,
   view: null, // what is drawn: { rows, days, cols }
+  // Who is on the team, for the staffing check: a lookup from a written name to
+  // a person, and the leave booked in the calendar across the loaded days.
+  resolveName: null,
+  leave: [],
+  leaveKinds: new Map(),
+  staff: { issues: [], byCell: new Map() },
   scroll: { left: 0, top: 0 },
 };
 
@@ -103,12 +109,24 @@ export async function renderEditor(host) {
     return;
   }
 
-  const [settings, legend, codes, people] = await Promise.all([
+  const [settings, legend, codes, people, aliases, leaveKinds] = await Promise.all([
     rc.listSettings().catch(() => []),
     rc.listLegend().catch(() => []),
     rc.listSupportCodes({ includeRetired: true }).catch(() => []),
     rc.listPeople().catch(() => []),
+    rc.listPersonAliases().catch(() => []),
+    rc.listLeaveKinds().catch(() => []),
   ]);
+  /* The same exact register the week plan reads names with — full name, alias,
+     or a first name only one person has. A name it cannot place is somebody
+     else's person, and the staffing check leaves it alone. */
+  const register = nameRegister(people, aliases);
+  const byId = new Map(people.map((p) => [p.id, p]));
+  E.resolveName = (written) => {
+    const id = register.get(foldName(written));
+    return id ? { id, name: byId.get(id)?.name || String(written).trim() } : null;
+  };
+  E.leaveKinds = new Map(leaveKinds.map((k) => [k.id, k.name]));
   E.legendAll = legend.map((r) => ({ argb: String(r.argb).toUpperCase(), meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
   const inForce = new Map();
   for (const r of E.legendAll) {
@@ -178,6 +196,14 @@ async function load() {
   for (const r of E.model.rows) E.server.set(`row:${r.id}`, r.version || 0);
   for (const c of ed.cellList(E.model)) E.server.set(`cell:${c.row_id}|${c.day}`, c.version || 0);
   E.revision = await rc.lookaheadRevision().catch(() => E.revision);
+  await loadLeave();
+}
+
+/** Leave booked across the loaded days — what the staffing check reads. */
+async function loadLeave() {
+  if (!E.loaded) return;
+  const rows = await rc.listLeave(E.loaded.from, E.loaded.to).catch(() => []);
+  E.leave = rows.map((l) => ({ ...l, kind: E.leaveKinds.get(l.kind_id) || 'leave' }));
 }
 
 /** Widen what is loaded when somebody pages back or forward past it. */
@@ -197,6 +223,7 @@ async function ensureLoaded() {
     }
   }
   E.loaded = { from: lo, to: hi };
+  await loadLeave();
 }
 
 function cleanRow(r) {
@@ -420,6 +447,7 @@ function draw() {
   const rows = visibleRows();
   E.view = { rows, days, cols: META + days.length };
   clampSelection();
+  E.staff = staffing(days);
 
   const prevScroll = host.querySelector('.lae-scroll');
   if (prevScroll) E.scroll = { left: prevScroll.scrollLeft, top: prevScroll.scrollTop };
@@ -437,6 +465,68 @@ function draw() {
   scroller.scrollTop = E.scroll.top;
   paintSelection();
   if (refocus) scroller.focus({ preventScroll: true });
+}
+
+/**
+ * Is everybody on the team named where they can be? Only the names rows and
+ * the PTO row, against the roster and the leave booked in the calendar — never
+ * the support an activity asks for (`staffingIssues()` in `core/la_edit.js`).
+ */
+function staffing(days) {
+  if (!E.resolveName) return { issues: [], byCell: new Map() };
+  const meaning = (hex) => E.legendAll.find((e) => e.argb === hex)?.meaning || '';
+  return ed.staffingIssues(E.model, days, {
+    resolve: E.resolveName,
+    leave: E.leave,
+    isShift: (hex) => !!meaning(hex) && !isCancelMeaning(meaning(hex)),
+    shiftOf: (hex) => meaning(hex) || `#${hex}`,
+  });
+}
+
+/** Every clash in the window, by day, each one a click from its cell. */
+function clashesDialog() {
+  const issues = E.staff.issues;
+  const rowsOnScreen = E.view.rows;
+  const body = el('div', { class: 'lae-form lae-clashes' });
+  const byDay = new Map();
+  for (const i of issues) {
+    if (!byDay.has(i.day)) byDay.set(i.day, []);
+    byDay.get(i.day).push(i);
+  }
+  let handle = null;
+  for (const [day, list] of [...byDay.entries()].sort()) {
+    body.appendChild(el('div', { class: 'lae-clash-day', text: fmtLong(day) }));
+    const seen = new Set();
+    for (const i of list) {
+      const key = `${i.person_id}|${i.kind}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const r = rowsOnScreen.findIndex((row) => row.id === i.row_id);
+      const c = META + E.view.days.indexOf(day);
+      body.appendChild(el('div', { class: 'lae-clash-item' }, [
+        el('span', { class: `cx-badge ${i.kind === 'shifts' ? 'warn' : 'bad'}`, text: CLASH_LABELS[i.kind] }),
+        el('span', { class: 'lae-clash-detail', text: i.detail }),
+        r >= 0 && c >= META
+          ? el('button', {
+            class: 'cx-btn mini ghost', type: 'button', text: 'Show',
+            onClick: () => { handle?.close(); select(r, c); focusGrid(); },
+          })
+          : el('span', { class: 'rc-hint', text: 'in a folded section' }),
+      ]));
+    }
+  }
+  handle = openModal({
+    title: 'Who is named where they cannot be',
+    subtitle: 'Your team only: names rows against the PTO row, the leave booked in the calendar, and one shift a day. Support requested is not counted.',
+    body,
+    actions: [{ label: 'Close' }],
+  });
+}
+
+const CLASH_LABELS = { leave: 'On leave', pto: 'On PTO', shifts: 'Two shifts' };
+
+function fmtLong(iso) {
+  return new Date(`${iso}T00:00:00Z`).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
 }
 
 function toolbar(days) {
@@ -505,7 +595,16 @@ function toolbar(days) {
     el('span', { text: statusText() }),
   ]);
 
+  const clashCount = new Set(E.staff.issues.map((i) => `${i.person_id}|${i.day}|${i.kind}`)).size;
   const right = el('div', { class: 'lae-group lae-right' }, [
+    clashCount
+      ? el('button', {
+        class: 'cx-btn mini lae-clash-btn', type: 'button',
+        html: icon('alert', { size: 12 }) + `<span>${clashCount} staffing clash${clashCount === 1 ? '' : 'es'}</span>`,
+        title: 'People on your team named on a day they are off, or on two shifts',
+        onClick: () => clashesDialog(),
+      })
+      : null,
     iconButton('undo', 'Undo  (Ctrl+Z)', () => undo(), !E.undo.length),
     iconButton('redo', 'Redo  (Ctrl+Y)', () => redo(), !E.redo.length),
     status,
@@ -514,7 +613,7 @@ function toolbar(days) {
       onClick: () => openExport(),
     }),
     iconButton('settings', 'More', (e) => moreMenu(e)),
-  ]);
+  ].filter(Boolean));
 
   const search = textInput({
     value: E.filter,
@@ -702,6 +801,11 @@ function bodyRow(row, r, days, today) {
     }
     // Names are wider than a day; the whole list is one hover away.
     if (!title && cell?.text) title = cell.text;
+    const clashes = E.staff.byCell.get(ed.cellKey(row.id, d));
+    if (clashes?.length) {
+      cls.push('lae-clash');
+      title = [...new Set(clashes.map((x) => x.detail))].join('\n') + (title ? `\n${title}` : '');
+    }
     const td = el('td', { class: cls.join(' '), dataset: { c: String(c) }, text: cell?.text || '', title });
     if (cell?.color) td.style.backgroundColor = `#${cell.color}`;
     if (!editable(row, c)) td.classList.add('lae-fixed');
@@ -1704,6 +1808,10 @@ function cellMenu(x, y, row) {
     E.clip ? { label: 'Paste', icon: 'clipboard', key: 'mod+v', onClick: () => pasteInternal() } : null,
     days ? { label: 'Clear text', icon: 'x', key: 'del', onClick: () => clearSelection() } : null,
     days ? { label: 'Clear text and colour', icon: 'x', onClick: () => clearSelection({ colour: true }) } : null,
+    one && one.kind !== 'section' && days
+      ? { label: 'History of this day…', icon: 'history', onClick: () => historyDialog(one, E.view.days[E.focus.c - META]) }
+      : null,
+    one ? { label: 'History of this row…', icon: 'history', onClick: () => historyDialog(one, null) } : null,
     'sep',
     { heading: 'Row' },
     { label: 'Insert activity above', icon: 'plus', onClick: () => insertRow('activity', 'above') },
@@ -1929,6 +2037,64 @@ async function revertDialog() {
  * edits (`restoreOps()`). Nothing is erased — the log keeps the changes being
  * reversed and the reversal itself — and one Ctrl+Z takes the restore back.
  */
+/**
+ * Who changed this — one day of a row, or the row's own fields — read from
+ * the edit log. The log is only ever appended to, so this is the whole story.
+ */
+async function historyDialog(row, day) {
+  await drain();
+  let edits;
+  let people;
+  try {
+    [edits, people] = await Promise.all([
+      rc.listLaEditsForRow(row.id),
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+    ]);
+  } catch (err) {
+    toast({ tone: 'bad', message: err.message });
+    return;
+  }
+  const who = new Map(people.filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
+  const when = (iso) => new Date(iso).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const meaning = (hex) => E.legendAll.find((e) => e.argb === hex)?.meaning || '';
+  const name = ed.metaValues(row).filter(Boolean)[0] || (row.kind === 'resource' ? 'Names row' : 'Row');
+  const list = el('ol', { class: 'lae-history', 'aria-label': 'Changes, newest first' });
+
+  if (day) {
+    for (const h of ed.cellHistory(edits, row.id, day)) {
+      list.appendChild(el('li', { class: 'lae-history-item' }, [
+        el('span', { class: 'lae-history-when', text: when(h.at) }),
+        el('span', { class: 'lae-history-who', text: who.get(h.by) || 'Somebody' }),
+        el('span', { class: 'lae-history-what' }, [
+          el('span', { class: 'lae-history-from', text: ed.describeCellValue(h.before, meaning) }),
+          el('span', { class: 'lae-history-arrow', html: icon('chevron-right', { size: 11 }), 'aria-label': 'became' }),
+          el('span', { class: 'lae-history-to', text: ed.describeCellValue(h.after, meaning) }),
+        ]),
+      ]));
+    }
+  } else {
+    for (const h of ed.rowHistory(edits, row.id)) {
+      const what = h.action === 'insert' ? 'Added'
+        : h.action === 'delete' ? 'Deleted'
+          : h.changes.map((c) => `${c.field}: ${c.from === '' ? 'empty' : c.from} → ${c.to === '' ? 'empty' : c.to}`).join('; ');
+      list.appendChild(el('li', { class: 'lae-history-item' }, [
+        el('span', { class: 'lae-history-when', text: when(h.at) }),
+        el('span', { class: 'lae-history-who', text: who.get(h.by) || 'Somebody' }),
+        el('span', { class: 'lae-history-what', text: what }),
+      ]));
+    }
+  }
+  const body = list.childElementCount
+    ? list
+    : el('p', { class: 'rc-hint', text: day ? 'Nothing has been written on this day yet.' : 'This row has not been changed since it was added.' });
+  openModal({
+    title: day ? `History of ${fmtLong(day)}` : 'History of this row',
+    subtitle: name,
+    body: el('div', { class: 'lae-form' }, [body]),
+    actions: [{ label: 'Close' }],
+  });
+}
+
 async function restoreDialog() {
   await drain();
   let edits;

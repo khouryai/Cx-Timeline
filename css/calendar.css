@@ -1550,3 +1550,90 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 .lae-restore-point:hover { background: var(--surface-2); }
 .lae-restore-point.on { background: var(--info-light); outline: 1px solid var(--info-border); }
 .lae-restore-when { font-family: var(--f-mono); font-size: var(--fs-tiny); }
+
+/* ── Staffing clashes ────────────────────────────────────────────────────
+   A names cell with somebody in it who cannot be there: on leave, on the PTO
+   row, or on two shifts. Marked with an inset outline and a corner so it reads
+   without colour too, and the reason is in the cell's tooltip. */
+.lae-grid td.lae-clash {
+  box-shadow: inset 0 0 0 2px var(--bad);
+  background-image: linear-gradient(225deg, var(--bad) 0 6px, transparent 6px);
+}
+.lae-clash-btn {
+  color: var(--bad);
+  border-color: var(--bad-border);
+  background: var(--bad-light);
+}
+.lae-clashes {
+  display: grid;
+  gap: 6px;
+  max-height: 60vh;
+  overflow: auto;
+}
+.lae-clash-day {
+  margin-top: 6px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.lae-clash-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  font-size: var(--fs-tiny);
+}
+.lae-clash-detail {
+  overflow-wrap: anywhere;
+}
+
+/* ── History of a day or a row ─────────────────────────────────────────── */
+.lae-history {
+  display: grid;
+  gap: 4px;
+  max-height: 60vh;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+.lae-history-item {
+  display: grid;
+  grid-template-columns: 150px 120px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-tiny);
+}
+.lae-history-item:nth-child(odd) {
+  background: var(--surface-2);
+}
+.lae-history-when {
+  font-family: var(--f-mono);
+  color: var(--text-subtle);
+}
+.lae-history-what {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  overflow-wrap: anywhere;
+}
+.lae-history-from {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+.lae-history-arrow {
+  display: inline-flex;
+  color: var(--text-subtle);
+}
+@media (max-width: 640px) {
+  .lae-history-item {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}

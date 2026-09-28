@@ -513,6 +513,11 @@ export function listLaEdits({ sinceId = null, limit = 2000 } = {}) {
   return select('rc_la_edits', (q) => q.order('id', { ascending: false }).limit(limit));
 }
 
+/** Everything the log says about one row and its days, newest first. */
+export function listLaEditsForRow(rowId) {
+  return select('rc_la_edits', (q) => q.eq('row_id', rowId).order('id', { ascending: false }).limit(1000));
+}
+
 export function listSupportCodes({ includeRetired = false } = {}) {
   return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
 }

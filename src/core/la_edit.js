@@ -38,7 +38,7 @@
  * Imports: core/lookahead (a leaf).
  */
 
-import { absenceKind, ABSENCE_LABELS } from './lookahead.js';
+import { absenceKind, ABSENCE_LABELS, resourceNames } from './lookahead.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
    Days
@@ -962,4 +962,172 @@ export function modelFromView(view, { fromISO, toISO = null, legend = [] } = {})
 function normaliseSupportIfCodes(text) {
   const t = String(text).trim();
   return /^[A-Za-z]{1,6}(\s*\.\s*[A-Za-z]{1,6})*\.?$/.test(t) ? normaliseSupport(t) : t;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   What happened to one cell, and to one row
+
+   `rc_la_edits` already says who changed what and when; these read it for one
+   place on the sheet, newest first. A cell's value is its colour and its text,
+   and the log keeps both sides of every change, so a history is the log
+   filtered — nothing is reconstructed.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** A cell's value as the log holds it: `{ color, text }`, or null for an empty day. */
+function cellValue(v) {
+  if (!v) return null;
+  const color = v.color ? String(v.color).toUpperCase() : null;
+  const text = String(v.text ?? '');
+  return color || text ? { color, text } : null;
+}
+
+/** The changes to one day of one row, newest first: `[{ id, at, by, before, after }]`. */
+export function cellHistory(edits, rowId, day) {
+  const want = String(day).slice(0, 10);
+  return (edits || [])
+    .filter((e) => e.target === 'cell' && e.row_id === rowId && String(e.day).slice(0, 10) === want)
+    .sort((a, b) => Number(b.id) - Number(a.id))
+    .map((e) => ({
+      id: e.id,
+      at: e.at,
+      by: e.by || null,
+      before: e.action === 'insert' ? null : cellValue(e.before),
+      after: e.action === 'delete' ? null : cellValue(e.after),
+    }));
+}
+
+const HISTORY_FIELDS = [
+  ...FIELDS.map((f) => ({ key: f.key, label: f.heading })),
+  { key: 'archived', label: 'Archived' },
+  { key: 'absence_kind', label: 'Kind' },
+];
+
+/**
+ * The changes to one row's own fields, newest first:
+ * `[{ id, at, by, action, changes: [{ field, from, to }] }]`. Moving a row
+ * (its `sort`) is left out: it is where the row sits, not what it says.
+ */
+export function rowHistory(edits, rowId) {
+  return (edits || [])
+    .filter((e) => e.target === 'row' && e.row_id === rowId)
+    .sort((a, b) => Number(b.id) - Number(a.id))
+    .map((e) => {
+      const before = e.before || {};
+      const after = e.after || {};
+      const changes = e.action === 'update'
+        ? HISTORY_FIELDS
+          .filter((f) => String(before[f.key] ?? '') !== String(after[f.key] ?? ''))
+          .map((f) => ({ field: f.label, from: before[f.key] ?? '', to: after[f.key] ?? '' }))
+        : [];
+      return { id: e.id, at: e.at, by: e.by || null, action: e.action, changes };
+    })
+    .filter((h) => h.action !== 'update' || h.changes.length);
+}
+
+/**
+ * A cell's value in words: the legend's meaning for its colour, then its text.
+ * `meaningOf(hex)` is injected — the legend lives with the calendar.
+ */
+export function describeCellValue(value, meaningOf = () => '') {
+  if (!value) return 'empty';
+  const colour = value.color ? (meaningOf(value.color) || `#${value.color}`) : '';
+  return [colour, value.text].filter(Boolean).join(' · ') || 'empty';
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Is everybody named where they can be?
+
+   Only the people on the team — the names rows and the PTO / Office rows, read
+   against the roster. What an activity *asks for* (its support codes) is the
+   support's business and is not counted here. A name the roster does not know
+   is somebody else's person and is left alone: the check is about the team.
+
+   Three clashes, each a contradiction in the plan rather than a judgement:
+     leave   named on work on a day they have leave booked in the calendar
+     pto     named on work on a day the sheet's own PTO row has them off
+     shifts  named on two activities that day painted as different shifts —
+             a day shift and a night shift, say. Two activities on one shift
+             is an ordinary day, and is not flagged.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * `resolve(written)` answers `{ id, name }` for a name on the roster, or null —
+ * injected, because the register lives with the calendar. `leave` is
+ * `[{ person_id, start_date, end_date, status, kind }]` (cancelled and
+ * declined are ignored). `isShift(hex)` says whether a colour is a shift at all
+ * (a cancellation is not), and `shiftOf(hex)` which shift it is.
+ *
+ * Returns `{ issues, byCell }`: every clash as
+ * `{ row_id, day, person_id, name, kind, detail }`, and the same keyed by
+ * `row_id|day` for drawing.
+ */
+export function staffingIssues(model, days, {
+  resolve, leave = [], isShift = (hex) => !!hex, shiftOf = (hex) => hex,
+} = {}) {
+  const issues = [];
+  const byCell = new Map();
+  if (!model || typeof resolve !== 'function') return { issues, byCell };
+  const rows = model.rows.filter((r) => !r.archived);
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const namesRows = rows.filter((r) => r.kind === 'resource' && byId.get(r.parent_id)?.kind === 'activity');
+  const ptoRows = rows.filter((r) => r.kind === 'absence' && (r.absence_kind || 'pto') === 'pto');
+  const liveLeave = (leave || []).filter((l) => l && !['cancelled', 'declined'].includes(l.status));
+
+  const add = (issue) => {
+    issues.push(issue);
+    const key = cellKey(issue.row_id, issue.day);
+    if (!byCell.has(key)) byCell.set(key, []);
+    byCell.get(key).push(issue);
+  };
+
+  for (const day of days) {
+    const off = new Set();
+    for (const r of ptoRows) {
+      for (const w of resourceNames(getCell(model, r.id, day)?.text)) {
+        const p = resolve(w);
+        if (p) off.add(p.id);
+      }
+    }
+    const onDay = new Map(); // person id → [{ row, shift, activity }]
+    for (const r of namesRows) {
+      const text = getCell(model, r.id, day)?.text;
+      if (!text) continue;
+      const activity = byId.get(r.parent_id);
+      const colour = getCell(model, activity.id, day)?.color || null;
+      for (const w of resourceNames(text)) {
+        const p = resolve(w);
+        if (!p) continue; // not one of ours
+        const title = activity.description || activity.activity_id || 'an activity';
+        if (!onDay.has(p.id)) onDay.set(p.id, []);
+        onDay.get(p.id).push({ row: r, colour, title, name: p.name || w });
+        if (off.has(p.id)) {
+          add({ row_id: r.id, day, person_id: p.id, name: p.name || w, kind: 'pto', detail: `${p.name || w} is on the PTO row that day` });
+        }
+        const away = liveLeave.find((l) => l.person_id === p.id
+          && String(l.start_date).slice(0, 10) <= day && String(l.end_date).slice(0, 10) >= day);
+        if (away) {
+          const asked = away.status === 'requested' || away.status === 'pending';
+          add({
+            row_id: r.id, day, person_id: p.id, name: p.name || w, kind: 'leave',
+            detail: `${p.name || w} has ${away.kind || 'leave'} ${asked ? 'requested' : 'booked'} that day`,
+          });
+        }
+      }
+    }
+    for (const [personId, spots] of onDay) {
+      const shifts = new Map();
+      for (const s of spots) {
+        if (!s.colour || !isShift(s.colour)) continue;
+        const which = shiftOf(s.colour);
+        if (!shifts.has(which)) shifts.set(which, s);
+      }
+      if (shifts.size < 2) continue;
+      const list = [...shifts.entries()].map(([which, s]) => `${which} on ${s.title}`).join(' and ');
+      for (const s of spots) {
+        if (!s.colour || !isShift(s.colour)) continue;
+        add({ row_id: s.row.id, day, person_id: personId, name: s.name, kind: 'shifts', detail: `${s.name} is on two shifts that day: ${list}` });
+      }
+    }
+  }
+  return { issues, byCell };
 }
