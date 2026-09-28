@@ -57,7 +57,7 @@ import {
   SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability,
   notifyChanged, formModal, nameRegister, foldName,
   ambiguousFirstNames, lookaheadWithResources, assignmentIndex,
-  locationRegister, unmatchedLocations,
+  locationRegister, unmatchedLocations, outcomeLookup,
 } from './rc_util.js';
 
 /** Which week is on screen. Null means the one containing today. */
@@ -137,29 +137,9 @@ export async function render(root) {
      the spelling is kept and shown, never discarded and never guessed at. */
   const strangeLocations = unmatchedLocations(laRows, locationRegister(locations, locAliases));
 
-  /* How each day went, indexed two ways.
-     An outcome points at one plan entry where there was one to point at, and at
-     nothing but a person and a date where the day was derived from the sheet —
-     so both keys are needed or the derived days, which are most of them, would
-     show no outcome at all. The entry wins: two people can be planned on one
-     day and the note belongs to the task it was recorded against. */
-  const outcomeByEntry = new Map();
-  const outcomeByDay = new Map();
-  for (const row of actuals) {
-    if (row.plan_entry_id) outcomeByEntry.set(row.plan_entry_id, row);
-    const key = `${row.person_id}|${row.work_date}`;
-    if (!outcomeByDay.has(key)) outcomeByDay.set(key, []);
-    outcomeByDay.get(key).push(row);
-  }
-  /* The outcome for one drawn task. A stored entry is matched on its id; a
-     derived day takes whichever outcome was recorded against the person and the
-     date, because there is no row for it to point at. */
-  const outcomeFor = (entry, personId, iso) => {
-    if (entry?.id && outcomeByEntry.has(entry.id)) return outcomeByEntry.get(entry.id);
-    if (entry?.id) return null;
-    const day = outcomeByDay.get(`${personId}|${iso}`) || [];
-    return day.find((a_) => !a_.plan_entry_id) || day[0] || null;
-  };
+  /* How each day went — the one rule for matching an outcome to a drawn task,
+     shared with the phone's week so the two cannot disagree. */
+  const outcomeFor = outcomeLookup(actuals);
 
   const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
   const soon = leave.filter((l) => l.start_date > to

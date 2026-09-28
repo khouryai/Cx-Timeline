@@ -11,9 +11,11 @@
  * module graph cannot run directly from disk.
  *
  * This linker resolves the module graph ahead of time, topologically sorts it,
- * and emits one self-executing bundle (`app.bundle.js`) that runs anywhere —
- * `file://` included. The generated bundle is committed so the app works with
- * zero setup; rebuild with `npm run build` after editing anything in `src/`.
+ * and emits one self-executing bundle per entry point that runs anywhere —
+ * `file://` included: `app.bundle.js` for the application and
+ * `mobile.bundle.js` for the phone app under `m/` (see `ENTRIES`). The
+ * generated bundles are committed so the app works with zero setup; rebuild
+ * with `npm run build` after editing anything in `src/`.
  *
  * Supported syntax (deliberately a strict subset, so the transform stays
  * simple and auditable — the whole codebase adheres to it):
@@ -37,9 +39,52 @@ import url from 'node:url';
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const SRC = path.join(ROOT, 'src');
-const ENTRY = path.join(SRC, 'main.js');
-const OUT = path.join(ROOT, 'app.bundle.js');
 const CONFIG_OUT = path.join(ROOT, 'config.js');
+
+/**
+ * The two applications this repository ships, and what each may contain.
+ *
+ * `app.bundle.js` is everything — the timeline and the calendar — and may
+ * import anything. `mobile.bundle.js` is the phone app under `m/`: the resource
+ * calendar and nothing else. It is a second entry rather than a mode of the
+ * first because what it must *not* contain is the point, and a bundle can only
+ * be kept free of the timeline by never linking it in.
+ *
+ * `forbid` makes that structural. A module whose id matches is refused with the
+ * chain of imports that reached it, so a helper that one day starts importing
+ * the store fails the build instead of quietly putting the plan's storage path
+ * — and the P6 project it reads — into a page that talks to Supabase. That is
+ * the same guarantee `core/rc.js` states for the desktop build, made by the
+ * linker rather than by a convention.
+ */
+const ENTRIES = [
+  {
+    entry: path.join(SRC, 'main.js'),
+    out: path.join(ROOT, 'app.bundle.js'),
+    title: 'CX Timeline — Interactive Timeline & Commissioning Planner',
+    forbid: null,
+  },
+  {
+    entry: path.join(SRC, 'mobile.js'),
+    out: path.join(ROOT, 'mobile.bundle.js'),
+    title: 'CX Calendar — the resource calendar, for a phone',
+    forbid: new RegExp('^(?:'
+      + [
+        'main\\.js',
+        // The timeline, whole.
+        'timeline/',
+        // The plan: its document, its history, its three storage backends.
+        'core/(?:store|storage|filestore|cloud|desktop|model|history|analysis|query|access)\\.js',
+        // Everything that reads or writes a plan file.
+        'io/(?:exporters|importers|scene|svg|pdf|p6)\\.js',
+        // The desktop interface's chrome and its calendar router, which
+        // imports every tab and through them the folder.
+        'ui/(?:shell|panels|inspector|commands|menus|shortcuts|theme|workspace|auth|p6|lookahead|rc)\\.js',
+        'ui/rc_(?:lookahead|huddle|roster|reports|pto|week)\\.js',
+      ].join('|')
+      + ')'),
+  },
+];
 
 const IMPORT_NAMED = /^\s*import\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]\s*;?\s*$/;
 const IMPORT_NS = /^\s*import\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s+from\s*['"]([^'"]+)['"]\s*;?\s*$/;
@@ -176,17 +221,34 @@ function parseModule(file) {
   return { id, file, code: out.join('\n'), deps: [...new Set(deps)], exports };
 }
 
-/** Walk the graph from the entry point, collecting every reachable module. */
-function collect(entry) {
+/**
+ * Walk the graph from the entry point, collecting every reachable module.
+ *
+ * With `forbid`, a module whose id matches is refused and the error names the
+ * route to it — "mobile.js → mobile/week.js → ui/rc_week.js" says which import
+ * to take out, where "ui/rc_week.js is not allowed" would leave somebody
+ * searching for it.
+ */
+function collect(entry, forbid = null) {
   const modules = new Map();
+  const via = new Map([[toId(entry), null]]);
   const stack = [entry];
   while (stack.length) {
     const file = stack.pop();
     const id = toId(file);
     if (modules.has(id)) continue;
+    if (forbid && forbid.test(id)) {
+      const chain = [];
+      for (let at = id; at; at = via.get(at)) chain.unshift(at);
+      throw new Error(`${chain[0]} may not contain ${id}\n  reached through: ${chain.join(' → ')}\n`
+        + '  The phone app is the resource calendar alone; the timeline and the plan stay out of it.');
+    }
     const mod = parseModule(file);
     modules.set(id, mod);
-    for (const dep of mod.deps) stack.push(path.join(SRC, dep));
+    for (const dep of mod.deps) {
+      if (!via.has(dep)) via.set(dep, id);
+      stack.push(path.join(SRC, dep));
+    }
   }
   return modules;
 }
@@ -220,10 +282,10 @@ function sort(modules) {
   return order;
 }
 
-function emit(modules, order, entryId) {
+function emit(modules, order, entryId, title) {
   const banner = [
     '/*!',
-    ' * CX Timeline — Interactive Timeline & Commissioning Planner',
+    ` * ${title}`,
     ' *',
     ' * GENERATED FILE — do not edit by hand.',
     ' * Built from the ES modules in src/ by tools/build.js (`npm run build`).',
@@ -311,15 +373,20 @@ function writeConfig() {
 }
 
 function build() {
-  const started = Date.now();
   writeConfig();
-  const modules = collect(ENTRY);
-  const order = sort(modules);
-  const bundle = emit(modules, order, toId(ENTRY));
-  fs.writeFileSync(OUT, bundle, 'utf8');
-  const kb = (Buffer.byteLength(bundle) / 1024).toFixed(1);
-  console.log(`✓ app.bundle.js — ${order.length} modules, ${kb} kB, ${Date.now() - started}ms`);
-  return order;
+  const orders = [];
+  for (const { entry, out, title, forbid } of ENTRIES) {
+    const started = Date.now();
+    const modules = collect(entry, forbid);
+    const order = sort(modules);
+    const bundle = emit(modules, order, toId(entry), title);
+    fs.writeFileSync(out, bundle, 'utf8');
+    const kb = (Buffer.byteLength(bundle) / 1024).toFixed(1);
+    const name = path.basename(out);
+    console.log(`✓ ${name}${' '.repeat(Math.max(1, 17 - name.length))}— ${order.length} modules, ${kb} kB, ${Date.now() - started}ms`);
+    orders.push(order);
+  }
+  return orders;
 }
 
 function watch() {

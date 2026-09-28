@@ -2,9 +2,10 @@
 
 ## The one rule that bites
 
-`index.html` loads **`app.bundle.js`**, not `src/`. After changing anything
-under `src/`, run `npm run build`. The bundle is committed on purpose: it is
-what a deploy serves, with no build step at the edge.
+`index.html` loads **`app.bundle.js`**, not `src/`, and the phone app's
+`m/index.html` loads **`mobile.bundle.js`**. After changing anything under
+`src/`, run `npm run build`, which writes both. The bundles are committed on
+purpose: they are what a deploy serves, with no build step at the edge.
 
 ## Hosted, with a local mode for tests
 
@@ -75,9 +76,13 @@ Three things about Postgres here that have already caused bugs:
 
 ## Architecture
 
-Authored as ES6 modules, linked ahead of time by `tools/build.js` into one
-IIFE. The linker supports a deliberately strict subset and rejects everything
-else with a clear error:
+Authored as ES6 modules, linked ahead of time by `tools/build.js` into an
+IIFE per entry point — `main.js` → `app.bundle.js`, the whole application, and
+`mobile.js` → `mobile.bundle.js`, the phone app. The phone entry carries a
+`forbid` list the linker enforces: the timeline, the plan's storage and anything
+that reads a plan file are refused, with the chain of imports that reached them.
+The linker supports a deliberately strict subset and rejects everything else
+with a clear error:
 
 - `import { a, b as c } from './x.js';` (may wrap across lines)
 - `import * as NS from './x.js';`
@@ -129,7 +134,17 @@ ui/workspace → ui/rc → ui/rc_roster · ui/rc_huddle · ui/rc_lookahead
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
 io/rc_pdf → io/pdf · io/lookahead   the calendar drawn for print — no DOM,
                                     so its geometry is tested without a browser
+ui/rc_gate                                the calendar's front door (no backend,
+                                          sign-in, not on the team), shared by
+                                          ui/rc and the phone app
 main.js                                    the only module that may import freely
+
+mobile/theme · mobile/pwa                 the phone app (m/): leaves
+mobile/week · mobile/lookahead · mobile/more
+  → mobile/shell → mobile.js              reads through ui/rc_util, ui/rc_gate
+                                          and ui/components — never the store,
+                                          the timeline or any plan I/O, which
+                                          tools/build.js refuses outright
 ```
 
 Lower layers never import upwards. When something low needs to reach the UI it
@@ -1250,7 +1265,11 @@ subscribes. That is what keeps the graph acyclic.
   it is filled in, so the headings never shift onto the wrong values. The printed calendar has
   drawn them since it was written; the grid on screen threw them away and put
   "Activity" across the lot, so a left-hand side of Location, SSWP and Party to
-  action arrived as three anonymous columns of text. Both now fall back the same
+  action arrived as three anonymous columns of text. What an activity is *called*
+  comes off them too (`titleColumnOf()`): a description first, and never a heading
+  shaped like an identifier — BART's first column is "Activity ID", and taking
+  the first heading containing "activit" titled every suggestion and every phone
+  agenda row with a CDRL number. Both now fall back the same
   way — "Activity" over the first column, nothing over a column the sheet never
   labelled — because a heading that differed between the screen and the print is
   a heading nobody can trust. The header cells are frozen at the same offsets as
@@ -1414,6 +1433,37 @@ subscribes. That is what keeps the graph acyclic.
   own frame, and pretending they fit a phone would be a worse answer than
   letting them scroll. The page itself must never scroll sideways, and there is
   a check for exactly that.
+- **The phone app is the calendar alone, and the linker keeps it that way.**
+  `m/` is CX Calendar: **My week** (one person's days, and the only place the
+  phone writes), **Look-ahead** (the sheet one day at a time) and **More**. It is
+  a second entry point, `src/mobile.js`, rather than a responsive mode of the
+  application, because what it must *not* carry is the point — and a bundle can
+  only be kept free of the timeline by never linking it in. `tools/build.js`
+  refuses the store, the plan's three storage backends, the timeline, the plan
+  exporters and the desktop calendar's router, naming the import chain; the
+  answer to a refusal is to move the helper down a layer, never to widen what
+  the phone may carry. It decides nothing of its own: a day's tasks are
+  `assignmentIndex()`, how a task went is `outcomeLookup()`, availability is
+  `availability()`, the day on the sheet is `agendaFor()` in `core/lookahead.js`,
+  the sign-in is `ui/rc_gate.js`, and every write is the same `rc_plan_entries`
+  row through the same `core/rc.js` — add, `supersedePlan()`, `withdrawPlan()`,
+  and overriding a derived day by writing the first stored entry with its
+  `lookahead_row_id`. So a task added on a phone is in the huddle exactly as one
+  added at a desk, and `rc_can_act_for()` in Postgres is the control, as ever.
+  **Its service worker keeps the app, never the data**: `m/sw.js` precaches the
+  page, the bundle, the stylesheets and `config.js`, asks the network first for
+  anything unhashed, never touches the calendar's origin, and is scoped to `m/`
+  so the timeline passes it untouched — a longer-lived copy of what the calendar
+  says would be a second answer to "what is on the server", which `core/rc.js`'s
+  thirty-second memory exists to avoid. Offline, it opens and says it cannot
+  reach the calendar. `tools/dist.js` publishes it **in the calendar shape
+  only** (every other shape has no calendar for it to open), renames its bundle
+  after its contents like the site's, and rewrites the worker's `PRECACHE` and
+  `VERSION` to match. Its theme is its own (`mobile/theme.js`, localStorage,
+  following the phone) because `ui/theme.js` imports the store. `css/mobile.css`
+  is scoped to `.m-app` and `m-` classes, makes every modal a bottom sheet,
+  holds form text at 16px so iOS does not zoom, and never writes a raw colour.
+  The icons are drawn by `tools/pwa_icons.js`; regenerate rather than edit them.
 - **New user actions go in `ui/commands.js`**, then get wired to the menu, the
   shortcut and the button. One implementation, three entry points.
 - **The filter's text box holds a list, not a phrase.** `textTerms()` in
@@ -1468,6 +1518,13 @@ subscribes. That is what keeps the graph acyclic.
   give it a module beside `ui/rc_week.js` that imports `ui/rc_util.js` for
   the shared reading — never a second copy of `assignmentIndex()` or a second
   register, which is the whole reason that module exists.
+- **A new phone screen**: add it to `TABS` in `src/mobile/shell.js` and give it
+  a module under `src/mobile/` that reads through `ui/rc_util.js`, exactly as a
+  calendar tab does. If it needs something the linker refuses, move that helper
+  down into `rc_util` or `core/` — the forbid list in `tools/build.js` is the
+  boundary, not an obstacle. Cover it in `tools/smoke_mobile.js`, which shares
+  the calendar's stub backend (`tools/lib/rc_stub.js`) so both interfaces are
+  tested against the same answers.
 - **A new dock pane**: add it to `PANES`, `TITLES` and `RENDERERS` in
   `ui/panels.js`, and to `NAV` in `ui/shell.js`. A pane that changes only its
   own view state — a filter, a search — must emit `EV.PANE_REFRESH` to redraw
@@ -1503,18 +1560,22 @@ subscribes. That is what keeps the graph acyclic.
 
 ```bash
 npm run build                        # must succeed — it also lints the module graph
-npm test                             # all five browser suites plus the SQL one, must exit 0
+npm test                             # all six browser suites plus the SQL one, must exit 0
 npm run test:rust                    #  33 checks — the plan, lock and intake rules, in Rust
 
-node tools/test_dist.js              #  41 checks — every deployment shape, and that the
-                                     #              plan still has no backend in any of them
-node tools/test_lookahead.js         # 195 checks — the parser, the rows it derives, the
+node tools/test_dist.js              #  54 checks — every deployment shape, and that the
+                                     #              plan still has no backend in any of them;
+                                     #              the phone app in the calendar shape only
+node tools/test_lookahead.js         # 209 checks — the parser, the rows it derives, the
                                      #              change events and the printed
                                      #              calendar's geometry, no browser
 node tools/smoke.js                  # 305 checks — the application, local mode
 node tools/smoke_calendar.js         # 331 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
+node tools/smoke_mobile.js           #  79 checks — the phone app: its week, its writes,
+                                     #              the look-ahead by day, installing,
+                                     #              offline, and that no timeline loads
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser
 node tools/smoke_desktop.js          #  64 checks — the desktop shell and its updates
 node tools/smoke_hosted.js           #  49 checks — sign-in, invites, read-only
@@ -1533,6 +1594,15 @@ baseline comparison — down to measuring, at five zooms, that no ghost, and no 
 written on one, is drawn over a bar or over another ghost — all eighteen dock panes,
 all five themes, every exporter (including PDF header validation) and reload
 persistence. **Any console error fails the run.**
+
+`smoke_mobile.js` serves the repository over HTTP — a service worker needs a
+real origin — at a phone's size with touch, against the same stub backend as
+`smoke_calendar.js`. It reads the phone bundle's module list and every request
+the page made, so a timeline module or a plan file reaching the phone fails it;
+it adds, changes, removes and overrides days and reads back the rows written; it
+checks the manifest's icons are real PNGs at the sizes claimed, that the worker
+is scoped to `m/`, caches the app and never the data, and that the page opens
+again with the network cut. `--shot out.png` writes one screenshot per screen.
 
 `smoke_folder.js` replaces `window.showDirectoryPicker` with an in-memory
 folder, so the lock, the read-only handover and the write guard are covered

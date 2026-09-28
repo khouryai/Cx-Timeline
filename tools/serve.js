@@ -20,6 +20,7 @@ const MIME = {
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -29,7 +30,9 @@ const MIME = {
 
 const server = http.createServer((req, res) => {
   const requested = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
-  const relative = requested === '/' ? 'index.html' : requested.replace(/^\/+/, '');
+  // A folder is its index page — `/` is the site and `/m/` the phone app — the
+  // way the static host serves them.
+  const relative = requested.replace(/^\/+/, '').replace(/(^|\/)$/, '$1index.html');
   const file = path.join(ROOT, relative);
 
   // Never serve outside the project root.

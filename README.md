@@ -367,6 +367,26 @@ out of having both registers: rows with no SAR, which is work planned without
 confirmed access, and SARs with no rows, which is access booked for work that
 has gone.
 
+### On a phone
+
+A calendar deployment also publishes **CX Calendar**, a phone app at `/m/` that
+installs to the home screen (Android: *Install app*; iPhone: Safari → Share →
+*Add to Home Screen*). It is the resource calendar for somebody on site, and
+nothing else:
+
+- **My week** — their own week, a day at a time: what the look-ahead names them
+  on, anything typed in by them or an administrator, leave, and what the daily
+  huddle recorded against each task. Add a task to one day or several, change
+  one, or remove one — each a new row on the record rather than an edit. A
+  colleague's week can be looked at, not changed.
+- **Look-ahead** — the four-week sheet read one day at a time, with who is on
+  each activity, who is off site, and an *Only mine* switch.
+
+The timeline is not in it at all: the phone app is built from its own entry
+point, and the build refuses to link the timeline or anything that reads the
+plan. It opens without a signal, and says it cannot reach the calendar rather
+than showing an old copy. See [DEPLOY.md](DEPLOY.md#6-the-phone-app).
+
 ### Search, filters and legend
 
 Global search covers titles, notes, owners, subsystems, areas, tags, versions,

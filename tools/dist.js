@@ -45,6 +45,15 @@ const FILES = ['index.html', 'app.bundle.js', 'config.js', '_headers'];
 const DIRS = ['css', 'vendor'];
 
 /**
+ * The phone app — `m/` and the bundle it loads. Published in the calendar shape
+ * only: it is the resource calendar and nothing else, and every other shape has
+ * no calendar for it to open. Shipping it there would put an installable app on
+ * the site whose only screen says there is nothing to show.
+ */
+const PHONE_FILES = ['mobile.bundle.js'];
+const PHONE_DIRS = ['m'];
+
+/**
  * Which shape to build.
  *
  * `package.json` → `cxTimeline.deployment` decides, so the answer lives in the
@@ -170,51 +179,91 @@ function fingerprint(dir) {
   const hash = (file) =>
     crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex').slice(0, 10);
 
-  const html = path.join(dir, 'index.html');
-  let markup = fs.readFileSync(html, 'utf8');
-  const renamed = [];
-
+  /** Published path before → after, for every file renamed. */
+  const renamed = new Map();
   const rename = (rel, make) => {
     const from = path.join(dir, rel);
     if (!fs.existsSync(from)) return null;
     const to = make(hash(from));
     fs.renameSync(from, path.join(dir, to));
-    renamed.push(to);
+    renamed.set(rel, to);
     return to;
   };
 
-  const bundle = rename('app.bundle.js', (h) => `app.${h}.js`);
-  if (!bundle) {
+  if (!rename('app.bundle.js', (h) => `app.${h}.js`)) {
     console.error('✗ no app.bundle.js to publish — run `npm run build` first.');
     process.exit(1);
   }
-  markup = markup.replace('src="app.bundle.js"', `src="${bundle}"`);
+  // The phone app's bundle, where this shape publishes one.
+  rename('mobile.bundle.js', (h) => `mobile.${h}.js`);
 
   const cssDir = path.join(dir, 'css');
   if (fs.existsSync(cssDir)) {
     for (const name of fs.readdirSync(cssDir).filter((f) => f.endsWith('.css'))) {
-      const to = rename(`css/${name}`, (h) => `css/${name.replace(/\.css$/, '')}.${h}.css`);
-      markup = markup.replace(`href="css/${name}"`, `href="${to}"`);
+      rename(`css/${name}`, (h) => `css/${name.replace(/\.css$/, '')}.${h}.css`);
     }
   }
 
-  if (/(src|href)="(app\.bundle\.js|css\/[a-z]+\.css)"/.test(markup)) {
-    console.error('✗ index.html still points at an unhashed asset — check the markup.');
-    process.exit(1);
-  }
-  fs.writeFileSync(html, markup);
+  /* Every page names its assets relative to itself, so the phone app's page —
+     one folder down — says `../css/…` where the site's says `css/…`. The same
+     map rewrites both, and a page left pointing at an unhashed name is an error
+     rather than a page that loads last deploy's stylesheet from somebody's
+     cache for a year. */
+  const rewrite = (rel, prefix) => {
+    const file = path.join(dir, rel);
+    if (!fs.existsSync(file)) return;
+    let markup = fs.readFileSync(file, 'utf8');
+    for (const [from, to] of renamed) {
+      markup = markup.split(`"${prefix}${from}"`).join(`"${prefix}${to}"`);
+    }
+    if (/(src|href)="(\.\.\/)?(app\.bundle\.js|mobile\.bundle\.js|css\/[a-z]+\.css)"/.test(markup)) {
+      console.error(`✗ ${rel} still points at an unhashed asset — check the markup.`);
+      process.exit(1);
+    }
+    fs.writeFileSync(file, markup);
+  };
+  rewrite('index.html', '');
+  rewrite('m/index.html', '../');
 
-  /* The rule that made the bundle uncacheable no longer applies to it, and a
+  /* The phone app's service worker precaches the app by name, so it has to be
+     told the names — and given a version that changes exactly when they do, so
+     a deploy that changed nothing leaves every phone's cache alone and one that
+     changed anything replaces it. */
+  const worker = path.join(dir, 'm/sw.js');
+  if (fs.existsSync(worker)) {
+    let source = fs.readFileSync(worker, 'utf8');
+    for (const [from, to] of renamed) {
+      source = source.split(`'../${from}'`).join(`'../${to}'`);
+    }
+    const precache = /const PRECACHE = \[[\s\S]*?\];/.exec(source)?.[0] || '';
+    if (!precache || /'\.\.\/(mobile\.bundle\.js|css\/[a-z]+\.css)'/.test(precache)) {
+      console.error('✗ m/sw.js still precaches an unhashed asset — check PRECACHE.');
+      process.exit(1);
+    }
+    const version = crypto.createHash('sha256')
+      .update(precache)
+      .update(fs.readFileSync(path.join(dir, 'm/index.html')))
+      .digest('hex').slice(0, 10);
+    const versioned = source.replace("const VERSION = 'dev';", `const VERSION = '${version}';`);
+    if (versioned === source) {
+      console.error('✗ could not stamp a version into m/sw.js — check the file.');
+      process.exit(1);
+    }
+    fs.writeFileSync(worker, versioned);
+  }
+
+  /* The rule that made the bundles uncacheable no longer applies to them, and a
      rule naming a file that is not there any more is worse than no rule: it
      reads as caching that is configured and is not. */
   const headers = path.join(dir, '_headers');
   if (fs.existsSync(headers)) {
     const before = fs.readFileSync(headers, 'utf8');
     const after = before.replace(
-      /# The bundle is rebuilt on every deploy[\s\S]*?\/app\.bundle\.js\n  Cache-Control: no-cache\n/,
-      '# The bundle and the stylesheets are named after their own contents, so a\n'
+      /# The bundles are rebuilt on every deploy[\s\S]*?\/app\.bundle\.js\n  Cache-Control: no-cache\n\n\/mobile\.bundle\.js\n  Cache-Control: no-cache\n/,
+      '# The bundles and the stylesheets are named after their own contents, so a\n'
       + '# new deploy is a new URL and an old one can be kept forever.\n'
       + '/app.*.js\n  Cache-Control: public, max-age=31536000, immutable\n\n'
+      + '/mobile.*.js\n  Cache-Control: public, max-age=31536000, immutable\n\n'
       + '/css/*\n  Cache-Control: public, max-age=31536000, immutable\n'
     );
     if (after === before) {
@@ -224,7 +273,7 @@ function fingerprint(dir) {
     fs.writeFileSync(headers, after);
   }
 
-  return renamed;
+  return [...renamed.values()];
 }
 
 function main() {
@@ -245,6 +294,18 @@ function main() {
     const src = path.join(ROOT, dir);
     if (!fs.existsSync(src)) continue;
     copyDir(src, path.join(OUT, dir));
+  }
+  if (WITH_CALENDAR) {
+    for (const file of PHONE_FILES) {
+      const src = path.join(ROOT, file);
+      if (!fs.existsSync(src)) {
+        console.error(`✗ no ${file} to publish — run \`npm run build\` first.`);
+        process.exit(1);
+      }
+      fs.copyFileSync(src, path.join(OUT, file));
+    }
+    for (const dir of PHONE_DIRS) copyDir(path.join(ROOT, dir), path.join(OUT, dir));
+    console.log('✓ m/            — the phone app: the calendar alone, installable');
   }
 
   if (NO_BACKEND) {

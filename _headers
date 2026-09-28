@@ -15,15 +15,36 @@
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: geolocation=(), camera=(), microphone=(), interest-cohort=()
 
-# The bundle is rebuilt on every deploy and its name never changes, so it must
-# not be cached across deploys or people keep running the previous version.
+# The bundles are rebuilt on every deploy and their names never change, so they
+# must not be cached across deploys or people keep running the previous version.
+# (tools/dist.js renames them after their contents and replaces this rule.)
 /app.bundle.js
+  Cache-Control: no-cache
+
+/mobile.bundle.js
   Cache-Control: no-cache
 
 /config.js
   Cache-Control: no-cache
 
 /index.html
+  Cache-Control: no-cache
+
+# The phone app (published in the calendar shape only). The page, the manifest
+# and the service worker are never cached by HTTP: the worker must see a new
+# deploy on the next open, and a browser checks a worker script for updates
+# against exactly this. What the worker itself keeps is the app, never the data.
+/m/
+  Cache-Control: no-cache
+
+/m/index.html
+  Cache-Control: no-cache
+
+/m/sw.js
+  Cache-Control: no-cache
+
+/m/manifest.webmanifest
+  Content-Type: application/manifest+json
   Cache-Control: no-cache
 
 # The vendored client is pinned, so it can be cached hard.

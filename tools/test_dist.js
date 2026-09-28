@@ -73,6 +73,8 @@ check('the vendored client is not shipped', !exists('vendor/supabase.js'));
 check('nor is its script tag left behind to 404', !read('index.html').includes('vendor/supabase.js'));
 check("connect-src is 'self' and nothing else", connectSrc().trim() === "'self'", connectSrc().trim());
 check('the desktop update channel is still published', exists('desktop/version.json'));
+check('and no phone app, because there is no calendar for it to open',
+  !exists('m/index.html') && !fs.readdirSync(DIST).some((f) => /^mobile\./.test(f)));
 
 /* ══════════════════════════════════════════════════════════════════════════
    Calendar — the plan still has none, the calendar has one
@@ -109,6 +111,53 @@ check('websockets to the same host are allowed', connectSrc().includes('wss://rc
 
 check('the desktop update channel is still published', exists('desktop/version.json'),
   'publishing the site is how the installed exe updates');
+
+console.log('\nA calendar deployment publishes the phone app beside it');
+
+const phone = read('m/index.html');
+const phoneBundle = (/src="\.\.\/(mobile\.[0-9a-f]{10}\.js)"/.exec(phone) || [])[1];
+check('the phone app is published at m/', Boolean(phone) && exists('m/manifest.webmanifest'));
+check('its bundle under a name derived from its bytes', Boolean(phoneBundle) && exists(phoneBundle),
+  phoneBundle || phone.match(/src="[^"]*mobile[^"]*"/)?.[0]);
+check('and the unhashed name is not there to be served uncached', !exists('mobile.bundle.js'));
+check('every stylesheet it names is the hashed one that was written',
+  (phone.match(/href="\.\.\/(css\/[a-z]+\.[0-9a-f]{10}\.css)"/g) || []).length === 5
+    && (phone.match(/href="\.\.\/(css\/[^"]+)"/g) || [])
+      .map((m) => m.replace(/^href="\.\.\/|"$/g, '')).every((rel) => exists(rel)));
+check('it loads the same config and the same calendar client as the site',
+  phone.includes('src="../config.js"') && phone.includes('src="../vendor/supabase.js"'));
+
+/* The thing the phone app is for, checked on what is actually published: the
+   bundle carries the calendar and not one module of the timeline or the plan. */
+const phoneModules = [...read(phoneBundle || 'missing').matchAll(/^\/\/ ([a-z_/]+\.js)$/gm)].map((m) => m[1]);
+check('the phone bundle carries the calendar client', phoneModules.includes('core/rc.js'));
+check('and nothing of the timeline or the plan\u2019s storage',
+  phoneModules.length > 0 && !phoneModules.some((m) =>
+    /^(timeline\/|core\/(store|storage|filestore|cloud|desktop|model)\.js|io\/(exporters|scene|pdf)\.js|main\.js)/.test(m)),
+  phoneModules.filter((m) => /timeline|store|storage|filestore|cloud|exporters/.test(m)).join(', '));
+
+/* The service worker precaches the app by name, so the names it lists have to
+   be the names that were published — one stale entry and install fails on
+   every phone, because `cache.addAll()` is all or nothing. */
+const worker = read('m/sw.js');
+const precache = [...(/const PRECACHE = \[([\s\S]*?)\];/.exec(worker) || [])[1]?.matchAll(/'([^']+)'/g) || []]
+  .map((m) => m[1]);
+const onDisk = (p) => {
+  const rel = path.posix.normalize(path.posix.join('m', p));
+  return p === './' ? exists('m/index.html') : exists(rel);
+};
+check('the service worker precaches exactly the published files',
+  precache.length >= 10 && precache.every(onDisk), precache.filter((p) => !onDisk(p)).join(', '));
+check('by their hashed names', precache.includes(`../${phoneBundle}`)
+  && !precache.some((p) => /mobile\.bundle\.js|\/[a-z]+\.css$/.test(p)));
+check('and carries a version derived from them, not "dev"',
+  /const VERSION = '[0-9a-f]{10}';/.test(worker));
+check('the page, the worker and the manifest are never cached by HTTP',
+  ['/m/', '/m/sw.js', '/m/manifest.webmanifest'].every((p) =>
+    new RegExp(`\\n${p.replace(/[./]/g, (c) => `\\${c}`)}\\n(?:  [^\\n]*\\n)*?  Cache-Control: no-cache`).test(read('_headers'))));
+check('while the hashed phone bundle is kept forever, like the site\u2019s',
+  /\/mobile\.\*\.js\n\s*Cache-Control: public, max-age=31536000, immutable/.test(read('_headers'))
+    && !/\/mobile\.bundle\.js/.test(read('_headers')));
 
 /* ══════════════════════════════════════════════════════════════════════════
    Hosted — unchanged

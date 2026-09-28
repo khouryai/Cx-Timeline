@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node tools/build.js",
     "watch": "node tools/build.js --watch",
-    "test": "node tools/test_dist.js && node tools/test_lookahead.js && node tools/smoke.js && node tools/smoke_folder.js && node tools/smoke_desktop.js && node tools/smoke_hosted.js && node tools/smoke_calendar.js && node tools/test_sql.js",
+    "test": "node tools/test_dist.js && node tools/test_lookahead.js && node tools/smoke.js && node tools/smoke_folder.js && node tools/smoke_desktop.js && node tools/smoke_hosted.js && node tools/smoke_calendar.js && node tools/smoke_mobile.js && node tools/test_sql.js",
     "serve": "node tools/serve.js",
     "test:sql": "node tools/test_sql.js",
     "test:smoke": "node tools/smoke.js",
@@ -21,6 +21,8 @@
     "desktop": "npm run build:desktop && cd src-tauri && cargo tauri dev",
     "desktop:installer": "npm run build:desktop && cd src-tauri && cargo tauri build",
     "test:calendar": "node tools/smoke_calendar.js",
+    "test:mobile": "node tools/smoke_mobile.js",
+    "icons:mobile": "node tools/pwa_icons.js",
     "test:lookahead": "node tools/test_lookahead.js",
     "build:calendar": "node tools/build.js && node tools/dist.js --calendar",
     "test:dist": "node tools/test_dist.js"
