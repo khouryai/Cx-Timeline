@@ -35,7 +35,7 @@ import {
 } from './components.js';
 import {
   notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
-  isoToMs, nameRegister, foldName, nearestName,
+  isoToMs, nameRegister, foldName, meMatcher,
 } from './rc_util.js';
 import { toISO, addDays } from '../core/dates.js';
 
@@ -46,6 +46,7 @@ import { renderLegend } from './rc_la_legend.js';
 import { renderChanges, renderSnapshots } from './rc_la_changes.js';
 import { renderCancellations } from './rc_la_cancellations.js';
 import { renderSars } from './rc_la_sars.js';
+import { openActivity } from './rc_activity.js';
 
 const SECTIONS = ['editor', 'calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'sars'];
 
@@ -115,29 +116,6 @@ export async function render(root) {
  * being read from the snapshot, so mapping a colour changes what is on screen
  * straight away instead of at the next ingest.
  */
-/**
- * "Is this written name me?" — the same register the week plan reads names
- * with (full name, alias, a first name only one person has, and the one
- * unambiguous near miss), so the rows this keeps are the rows the week plan
- * puts you on. Null for an account with no person on the team.
- */
-async function meMatcher() {
-  const me = rc.me();
-  if (!me) return null;
-  const [people, aliases] = await Promise.all([
-    rc.listPeople({ includeInactive: true }).catch(() => []),
-    rc.listPersonAliases().catch(() => []),
-  ]);
-  const register = nameRegister(people.length ? people : [me], aliases);
-  const memo = new Map();
-  return (written) => {
-    const key = foldName(written);
-    if (!key) return false;
-    if (!memo.has(key)) memo.set(key, (register.get(key) || nearestName(key, register)?.id || null) === me.id);
-    return memo.get(key);
-  };
-}
-
 async function renderCalendar(host) {
   const [snapshot, legendRows, isMe] = await Promise.all([
     rc.latestSnapshot(),
@@ -262,7 +240,7 @@ async function renderCalendar(host) {
       }));
       return;
     }
-    body.appendChild(grid_(shown, today, isMe));
+    body.appendChild(grid_(shown, today, isMe, snapshot.id));
   };
   // Redraw the rows only, never the input: rebuilding the field under the
   // caret is the trap this project has already been bitten by three times.
@@ -501,7 +479,7 @@ function paintOn(view) {
 }
 
 /** The grid itself. Split out so the filter can redraw it without the header. */
-function grid_(view, today, isMe = null) {
+function grid_(view, today, isMe = null, snapshotId = null) {
   const rows = view.activities;
 
   /* The month band. Each label spans its own run of days, which is what the
@@ -570,13 +548,18 @@ function grid_(view, today, isMe = null) {
    * per day. Used for the activity and for its Resource row alike, because the
    * two are the same shape and drawing them twice is how they drift apart.
    */
-  const line = (meta, marks, { klass = '', what = '', resource = false }) => el('tr', {
+  const line = (meta, marks, { klass = '', what = '', resource = false, open = null }) => el('tr', {
     class: klass,
   }, [
     ...meta.map((value, i) => el('td', {
-      class: 'la-meta' + (i === meta.length - 1 ? ' la-last' : ''),
+      class: 'la-meta' + (i === meta.length - 1 ? ' la-last' : '') + (open ? ' la-openable' : ''),
       text: value,
-      title: value,
+      title: open ? `${value}${value ? ' — ' : ''}open the whole activity` : value,
+      // The first column is the one keyboard stop for the row.
+      tabindex: open && i === 0 ? '0' : null,
+      role: open && i === 0 ? 'button' : null,
+      onClick: open || null,
+      onKeydown: open && i === 0 ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } } : null,
     })),
     ...view.days.map((d) => {
       const mark = marks.get(d.col);
@@ -618,6 +601,8 @@ function grid_(view, today, isMe = null) {
       // Styled as names, because that is what the cells hold. The paint on an
       // absence row means nothing the legend knows about.
       resource: Boolean(a.absence),
+      open: a.heading || a.absence ? null
+        : () => openActivity({ row: { raw_label: a.meta.filter(Boolean).join(' · '), snapshot_id: snapshotId, sheet_row: a.row } }),
     }));
     /* The Resource row, drawn under the activity it belongs to and never on its
        own — it has no location or hours of its own, only the ones it inherited,

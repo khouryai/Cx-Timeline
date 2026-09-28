@@ -15,7 +15,7 @@
  * disagree on screen. What was recorded against your last day is shown, as the
  * week plan shows it.
  *
- * Imports: util, dates, rc, icons, components, rc_util.
+ * Imports: util, dates, rc, icons, components, rc_util, rc_activity.
  */
 
 import { el } from '../core/util.js';
@@ -23,6 +23,7 @@ import { toISO, addDays } from '../core/dates.js';
 import * as rc from '../core/rc.js';
 import { icon } from './icons.js';
 import { badge, emptyState } from './components.js';
+import { openActivity } from './rc_activity.js';
 import {
   byId, dayLabel, todayISO, isoToMs, weekStart, goToTab, STATUS_BY_ID, SHIFTS, nameRegister,
   assignmentIndex, availability, lookaheadWithResources,
@@ -76,7 +77,8 @@ export async function render(root) {
   const locs = byId(locations);
   const names = byId(everybody);
 
-  const ctx = { person, index, leave, locs, names, planRows };
+  const laRowById = new Map((sheet.rows || []).map((r) => [r.id, r]));
+  const ctx = { person, index, leave, locs, names, planRows, laRowById };
 
   /* ── Greeting ─────────────────────────────────────────────────────── */
   const first = String(person?.name || '').trim().split(/\s+/)[0] || 'there';
@@ -144,7 +146,7 @@ function greeting() {
  * One day, for one person: every task on it, where, on which shift and with
  * whom — or that they are off, and why.
  */
-function dayCard({ person, index, leave, locs, names, planRows }, iso, title) {
+function dayCard({ person, index, leave, locs, names, planRows, laRowById }, iso, title) {
   const card = el('section', { class: 'rc-myday-card', 'aria-label': `${title}, ${dayLabel(iso)}`, dataset: { day: iso } });
   card.appendChild(el('div', { class: 'rc-myday-card-head' }, [
     el('h3', { text: title }),
@@ -183,7 +185,7 @@ function dayCard({ person, index, leave, locs, names, planRows }, iso, title) {
     const where = locs.get(t.location_id)?.name || t.raw_location || '';
     const shift = SHIFTS.find((s) => s.id === t.shift)?.label || '';
     const others = withWhom({ index, names, planRows }, person.id, iso, t);
-    card.appendChild(el('div', { class: 'rc-myday-task' }, [
+    const content = [
       el('div', { class: 'rc-myday-task-title', text: t.task || 'A task with no description' }),
       el('div', { class: 'rc-myday-facts' }, [
         where ? fact('pin', where) : null,
@@ -191,7 +193,26 @@ function dayCard({ person, index, leave, locs, names, planRows }, iso, title) {
         others.length ? fact('users', `With ${others.join(', ')}`) : fact('user', 'On your own'),
         t.from_lookahead ? null : fact('edit', 'Planned by hand'),
       ].filter(Boolean)),
-    ]));
+    ];
+    /* A task on the look-ahead opens the whole activity: every column, every
+       day from this week on, and who is on each. One planned by hand has no
+       activity behind it, so it is not a button. */
+    if (t.lookahead_row_id) {
+      content.push(el('span', { class: 'rc-myday-more', text: 'Details', 'aria-hidden': 'true' }));
+      card.appendChild(el('button', {
+        class: 'rc-myday-task rc-myday-task-open',
+        type: 'button',
+        'aria-label': `${t.task || 'Task'} — open the whole activity`,
+        onClick: async () => {
+          const row = laRowById.get(t.lookahead_row_id)
+            || (await rc.lookaheadRowsByIds([t.lookahead_row_id]).catch(() => []))[0]
+            || null;
+          openActivity({ row, task: t.task });
+        },
+      }, content));
+    } else {
+      card.appendChild(el('div', { class: 'rc-myday-task' }, content));
+    }
   }
   if (state.asked) {
     card.appendChild(el('p', { class: 'rc-hint', text: 'You have asked for leave on this day; nobody has answered yet.' }));

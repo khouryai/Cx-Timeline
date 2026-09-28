@@ -297,6 +297,29 @@ export function nearestName(key, register) {
 }
 
 /**
+ * "Is this written name me?" — the same register the week plan reads names
+ * with (full name, alias, a first name only one person has, and the one
+ * unambiguous near miss), so what it picks out is what the week plan puts
+ * the person on. Resolves to null for an account with no person on the team.
+ */
+export async function meMatcher() {
+  const me = rc.me();
+  if (!me) return null;
+  const [people, aliases] = await Promise.all([
+    rc.listPeople({ includeInactive: true }).catch(() => []),
+    rc.listPersonAliases().catch(() => []),
+  ]);
+  const register = nameRegister(people.length ? people : [me], aliases);
+  const memo = new Map();
+  return (written) => {
+    const key = foldName(written);
+    if (!key) return false;
+    if (!memo.has(key)) memo.set(key, (register.get(key) || nearestName(key, register)?.id || null) === me.id);
+    return memo.get(key);
+  };
+}
+
+/**
  * A lookup from a spelling of a place to a location id.
  *
  * The same three-source, exact-fold rule the names get, and the same fold —

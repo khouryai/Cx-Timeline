@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 23   Built: 2026-09-28T19:50:28.941Z
+ * Modules: 24   Built: 2026-09-28T20:02:58.745Z
  */
 (function () {
   'use strict';
@@ -307,6 +307,29 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       else if (d === bestAt && best && best.id !== id) tied = true;
     }
     return tied ? null : best;
+  }
+
+  /**
+   * "Is this written name me?" — the same register the week plan reads names
+   * with (full name, alias, a first name only one person has, and the one
+   * unambiguous near miss), so what it picks out is what the week plan puts
+   * the person on. Resolves to null for an account with no person on the team.
+   */
+  async function meMatcher() {
+    const me = rc.me();
+    if (!me) return null;
+    const [people, aliases] = await Promise.all([
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+      rc.listPersonAliases().catch(() => []),
+    ]);
+    const register = nameRegister(people.length ? people : [me], aliases);
+    const memo = new Map();
+    return (written) => {
+      const key = foldName(written);
+      if (!key) return false;
+      if (!memo.has(key)) memo.set(key, (register.get(key) || nearestName(key, register)?.id || null) === me.id);
+      return memo.get(key);
+    };
   }
 
   /**
@@ -997,6 +1020,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "nameRegister", { get: () => nameRegister, enumerable: true });
   Object.defineProperty(__x, "nameDistance", { get: () => nameDistance, enumerable: true });
   Object.defineProperty(__x, "nearestName", { get: () => nearestName, enumerable: true });
+  Object.defineProperty(__x, "meMatcher", { get: () => meMatcher, enumerable: true });
   Object.defineProperty(__x, "locationRegister", { get: () => locationRegister, enumerable: true });
   Object.defineProperty(__x, "unmatchedLocations", { get: () => unmatchedLocations, enumerable: true });
   Object.defineProperty(__x, "uniqueFirstNames", { get: () => uniqueFirstNames, enumerable: true });
@@ -5494,6 +5518,173 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
   Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
 };
 
+// ui/rc_activity.js
+__mods["ui/rc_activity.js"] = function (__x, __req) {
+  /**
+   * One activity, whole — what opens when somebody taps a task.
+   *
+   * My day says "IXL Regression Testing, W40, day shift, with Rosa". That is the
+   * day; this is the work: every column of the activity's line under the sheet's
+   * own headings (Activity ID, Location, SSWP#, Party to Action, Work Hours),
+   * and every day from this week on that it carries anything — which shift the
+   * paint means, whether it was cancelled, what is written in the cell, and who
+   * the names row puts on it, with your own days marked.
+   *
+   * Read off the latest reading of the look-ahead, the same one the calendar
+   * draws. A task is found on it by its row where it can be (the reading and
+   * the sheet row it was recorded against) and by the row's exact words where
+   * it cannot; one that is no longer on the sheet says so rather than showing
+   * something else.
+   *
+   * Why a day was cancelled is claim evidence and is only readable by an
+   * administrator (`rc_cancellation_notes`), so the team sees that it was, and
+   * an administrator sees who and why too.
+   *
+   * Imports: util, rc, core/lookahead, icons, components, rc_util, rc_la_state.
+   */
+
+  const { el } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const { activityTitle, activityDays } = __req("core/lookahead.js");
+  const { openModal, badge, emptyState } = __req("ui/components.js");
+  const { parsedView, dayLabel, todayISO, weekStart, isoToMs, goToTab, meMatcher } = __req("ui/rc_util.js");
+  const { toISO } = __req("core/dates.js");
+  const { la } = __req("ui/rc_la_state.js");
+
+  /** The label a stored look-ahead row carries for an activity: its columns, joined. */
+  const labelOf = (activity) => (activity?.meta || []).filter(Boolean).join(' · ');
+
+  /**
+   * Open an activity.
+   *
+   * `row` is an `rc_lookahead_rows` row (or anything with `raw_label`, and
+   * `snapshot_id` / `sheet_row` where known). `task` is the fallback wording.
+   */
+  async function openActivity({ row = null, task = '' } = {}) {
+    const [snapshot, legendRows, isMe, notes] = await Promise.all([
+      rc.latestSnapshot().catch(() => null),
+      rc.listLegend().catch(() => []),
+      meMatcher().catch(() => null),
+      rc.isAdmin() ? rc.listCancellationNotes().catch(() => []) : Promise.resolve([]),
+    ]);
+    const label = row?.raw_label || task || '';
+
+    if (!snapshot?.grid?.rows?.length) {
+      return openModal({
+        title: label || 'Activity',
+        body: emptyState({ iconName: 'calendar', title: 'No look-ahead to read', message: 'The look-ahead has not been published yet.' }),
+        actions: [{ label: 'Close' }],
+      });
+    }
+
+    const view = parsedView(snapshot, legendRows);
+    /* By its row in this reading where the task was recorded against it — and
+       only when that row still says the same thing, so a row number that no
+       longer lines up can never open somebody else's activity — then by the
+       row's exact words. */
+    const byRow = row?.snapshot_id === snapshot.id && row?.sheet_row != null
+      ? view.activities.find((a) => a.row === row.sheet_row && !a.heading && !a.absence)
+      : null;
+    const activity = (byRow && (!label || labelOf(byRow) === label) ? byRow : null)
+      || view.activities.find((a) => !a.heading && !a.absence && labelOf(a) === label);
+
+    if (!activity) {
+      return openModal({
+        title: label || 'Activity',
+        body: emptyState({
+          iconName: 'calendar',
+          title: 'No longer on the look-ahead',
+          message: 'This activity is not on the latest reading of the look-ahead. It may have been reworded, finished or removed — the Look-ahead tab has the sheet as it stands.',
+        }),
+        actions: [{ label: 'Close' }],
+      });
+    }
+
+    const title = activityTitle(view, activity);
+    const from = toISO(weekStart(isoToMs(todayISO())));
+    const days = activityDays(view, activity, { fromISO: from, isMe: isMe || (() => false) });
+    const today = todayISO();
+
+    /* The columns, under the sheet's own headings. */
+    const facts = el('dl', { class: 'rc-activity-facts' });
+    activity.meta.forEach((value, i) => {
+      if (!value) return;
+      const heading = String(view.headings?.[i] || '').trim() || `Column ${i + 1}`;
+      facts.append(el('dt', { text: heading }), el('dd', { text: value }));
+    });
+
+    /* Why, for the days an administrator has explained. */
+    const current = notes.filter((n) => !notes.some((m) => m.supersedes_id === n.id));
+    const why = (iso) => current.filter((n) => n.raw_label === labelOf(activity) && iso
+      && String(n.start_date).slice(0, 10) <= iso && String(n.end_date).slice(0, 10) >= iso)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
+
+    const list = el('ol', { class: 'rc-activity-days', 'aria-label': 'Days on this activity' });
+    for (const d of days) {
+      const note = d.cancelled ? why(d.date) : null;
+      list.appendChild(el('li', {
+        class: `rc-activity-day${d.mine ? ' rc-activity-mine' : ''}${d.cancelled ? ' rc-activity-cancelled' : ''}${d.date === today ? ' rc-activity-today' : ''}`,
+        'aria-current': d.date === today ? 'date' : null,
+      }, [
+        el('span', { class: 'rc-activity-when', text: d.date ? dayLabel(d.date, 'day') : d.label }),
+        el('span', { class: 'rc-activity-shift' }, [
+          d.hex ? el('span', { class: 'rc-activity-swatch', style: `background-color:#${d.hex}`, 'aria-hidden': 'true' }) : null,
+          el('span', { text: d.cancelled ? 'Cancelled' : (d.meaning || (d.hex ? 'Unexplained colour' : 'Not painted')) }),
+        ].filter(Boolean)),
+        el('span', { class: 'rc-activity-who' }, [
+          d.names.length
+            ? el('span', { text: d.names.join(', ') })
+            : el('span', { class: 'rc-hint', text: 'Nobody named' }),
+          d.mine ? badge('You', 'info') : null,
+        ].filter(Boolean)),
+        d.text ? el('span', { class: 'rc-activity-text', title: 'Written in the cell', text: d.text }) : null,
+        note
+          ? el('span', { class: 'rc-activity-why', text: `${note.party}${note.reason ? ` — ${note.reason}` : ''}` })
+          : null,
+      ].filter(Boolean)));
+    }
+
+    const mineCount = days.filter((d) => d.mine).length;
+    const body = el('div', { class: 'rc-activity' }, [
+      facts,
+      el('div', { class: 'rc-activity-sub' }, [
+        el('h4', { text: 'From this week on' }),
+        el('span', {
+          class: 'rc-hint',
+          text: days.length
+            ? `${days.length} day${days.length === 1 ? '' : 's'}${mineCount ? ` · you are on ${mineCount}` : ''}`
+            : '',
+        }),
+      ]),
+      days.length
+        ? list
+        : el('p', { class: 'rc-hint', text: 'Nothing on this activity from this week on.' }),
+    ]);
+
+    return openModal({
+      title: title || label || 'Activity',
+      subtitle: `As the look-ahead reads now — ${dayLabel(String(snapshot.taken_at).slice(0, 10), 'day')}`,
+      size: 'wide',
+      body,
+      actions: [
+        {
+          label: 'Show on the look-ahead',
+          onClick: () => {
+            la.calendarFilter = title;
+            la.onlyMine = false;
+            la.section = 'calendar';
+            la.sectionChosen = true;
+            goToTab('lookahead');
+          },
+        },
+        { label: 'Close', kind: 'primary' },
+      ],
+    });
+  }
+
+  Object.defineProperty(__x, "openActivity", { get: () => openActivity, enumerable: true });
+};
+
 // ui/rc_myday.js
 __mods["ui/rc_myday.js"] = function (__x, __req) {
   /**
@@ -5513,7 +5704,7 @@ __mods["ui/rc_myday.js"] = function (__x, __req) {
    * disagree on screen. What was recorded against your last day is shown, as the
    * week plan shows it.
    *
-   * Imports: util, dates, rc, icons, components, rc_util.
+   * Imports: util, dates, rc, icons, components, rc_util, rc_activity.
    */
 
   const { el } = __req("core/util.js");
@@ -5521,6 +5712,7 @@ __mods["ui/rc_myday.js"] = function (__x, __req) {
   const rc = __req("core/rc.js");
   const { icon } = __req("ui/icons.js");
   const { badge, emptyState } = __req("ui/components.js");
+  const { openActivity } = __req("ui/rc_activity.js");
   const { byId, dayLabel, todayISO, isoToMs, weekStart, goToTab, STATUS_BY_ID, SHIFTS, nameRegister, assignmentIndex, availability, lookaheadWithResources } = __req("ui/rc_util.js");
 
 
@@ -5574,7 +5766,8 @@ __mods["ui/rc_myday.js"] = function (__x, __req) {
     const locs = byId(locations);
     const names = byId(everybody);
 
-    const ctx = { person, index, leave, locs, names, planRows };
+    const laRowById = new Map((sheet.rows || []).map((r) => [r.id, r]));
+    const ctx = { person, index, leave, locs, names, planRows, laRowById };
 
     /* ── Greeting ─────────────────────────────────────────────────────── */
     const first = String(person?.name || '').trim().split(/\s+/)[0] || 'there';
@@ -5642,7 +5835,7 @@ __mods["ui/rc_myday.js"] = function (__x, __req) {
    * One day, for one person: every task on it, where, on which shift and with
    * whom — or that they are off, and why.
    */
-  function dayCard({ person, index, leave, locs, names, planRows }, iso, title) {
+  function dayCard({ person, index, leave, locs, names, planRows, laRowById }, iso, title) {
     const card = el('section', { class: 'rc-myday-card', 'aria-label': `${title}, ${dayLabel(iso)}`, dataset: { day: iso } });
     card.appendChild(el('div', { class: 'rc-myday-card-head' }, [
       el('h3', { text: title }),
@@ -5681,7 +5874,7 @@ __mods["ui/rc_myday.js"] = function (__x, __req) {
       const where = locs.get(t.location_id)?.name || t.raw_location || '';
       const shift = SHIFTS.find((s) => s.id === t.shift)?.label || '';
       const others = withWhom({ index, names, planRows }, person.id, iso, t);
-      card.appendChild(el('div', { class: 'rc-myday-task' }, [
+      const content = [
         el('div', { class: 'rc-myday-task-title', text: t.task || 'A task with no description' }),
         el('div', { class: 'rc-myday-facts' }, [
           where ? fact('pin', where) : null,
@@ -5689,7 +5882,26 @@ __mods["ui/rc_myday.js"] = function (__x, __req) {
           others.length ? fact('users', `With ${others.join(', ')}`) : fact('user', 'On your own'),
           t.from_lookahead ? null : fact('edit', 'Planned by hand'),
         ].filter(Boolean)),
-      ]));
+      ];
+      /* A task on the look-ahead opens the whole activity: every column, every
+         day from this week on, and who is on each. One planned by hand has no
+         activity behind it, so it is not a button. */
+      if (t.lookahead_row_id) {
+        content.push(el('span', { class: 'rc-myday-more', text: 'Details', 'aria-hidden': 'true' }));
+        card.appendChild(el('button', {
+          class: 'rc-myday-task rc-myday-task-open',
+          type: 'button',
+          'aria-label': `${t.task || 'Task'} — open the whole activity`,
+          onClick: async () => {
+            const row = laRowById.get(t.lookahead_row_id)
+              || (await rc.lookaheadRowsByIds([t.lookahead_row_id]).catch(() => []))[0]
+              || null;
+            openActivity({ row, task: t.task });
+          },
+        }, content));
+      } else {
+        card.appendChild(el('div', { class: 'rc-myday-task' }, content));
+      }
     }
     if (state.asked) {
       card.appendChild(el('p', { class: 'rc-hint', text: 'You have asked for leave on this day; nobody has answered yet.' }));
@@ -11167,7 +11379,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
 
 
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName, nearestName } = __req("ui/rc_util.js");
+  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName, meMatcher } = __req("ui/rc_util.js");
 
 
 
@@ -11180,6 +11392,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { renderChanges, renderSnapshots } = __req("ui/rc_la_changes.js");
   const { renderCancellations } = __req("ui/rc_la_cancellations.js");
   const { renderSars } = __req("ui/rc_la_sars.js");
+  const { openActivity } = __req("ui/rc_activity.js");
 
   const SECTIONS = ['editor', 'calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'sars'];
 
@@ -11249,29 +11462,6 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * being read from the snapshot, so mapping a colour changes what is on screen
    * straight away instead of at the next ingest.
    */
-  /**
-   * "Is this written name me?" — the same register the week plan reads names
-   * with (full name, alias, a first name only one person has, and the one
-   * unambiguous near miss), so the rows this keeps are the rows the week plan
-   * puts you on. Null for an account with no person on the team.
-   */
-  async function meMatcher() {
-    const me = rc.me();
-    if (!me) return null;
-    const [people, aliases] = await Promise.all([
-      rc.listPeople({ includeInactive: true }).catch(() => []),
-      rc.listPersonAliases().catch(() => []),
-    ]);
-    const register = nameRegister(people.length ? people : [me], aliases);
-    const memo = new Map();
-    return (written) => {
-      const key = foldName(written);
-      if (!key) return false;
-      if (!memo.has(key)) memo.set(key, (register.get(key) || nearestName(key, register)?.id || null) === me.id);
-      return memo.get(key);
-    };
-  }
-
   async function renderCalendar(host) {
     const [snapshot, legendRows, isMe] = await Promise.all([
       rc.latestSnapshot(),
@@ -11396,7 +11586,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         }));
         return;
       }
-      body.appendChild(grid_(shown, today, isMe));
+      body.appendChild(grid_(shown, today, isMe, snapshot.id));
     };
     // Redraw the rows only, never the input: rebuilding the field under the
     // caret is the trap this project has already been bitten by three times.
@@ -11635,7 +11825,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   }
 
   /** The grid itself. Split out so the filter can redraw it without the header. */
-  function grid_(view, today, isMe = null) {
+  function grid_(view, today, isMe = null, snapshotId = null) {
     const rows = view.activities;
 
     /* The month band. Each label spans its own run of days, which is what the
@@ -11704,13 +11894,18 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
      * per day. Used for the activity and for its Resource row alike, because the
      * two are the same shape and drawing them twice is how they drift apart.
      */
-    const line = (meta, marks, { klass = '', what = '', resource = false }) => el('tr', {
+    const line = (meta, marks, { klass = '', what = '', resource = false, open = null }) => el('tr', {
       class: klass,
     }, [
       ...meta.map((value, i) => el('td', {
-        class: 'la-meta' + (i === meta.length - 1 ? ' la-last' : ''),
+        class: 'la-meta' + (i === meta.length - 1 ? ' la-last' : '') + (open ? ' la-openable' : ''),
         text: value,
-        title: value,
+        title: open ? `${value}${value ? ' — ' : ''}open the whole activity` : value,
+        // The first column is the one keyboard stop for the row.
+        tabindex: open && i === 0 ? '0' : null,
+        role: open && i === 0 ? 'button' : null,
+        onClick: open || null,
+        onKeydown: open && i === 0 ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } } : null,
       })),
       ...view.days.map((d) => {
         const mark = marks.get(d.col);
@@ -11752,6 +11947,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         // Styled as names, because that is what the cells hold. The paint on an
         // absence row means nothing the legend knows about.
         resource: Boolean(a.absence),
+        open: a.heading || a.absence ? null
+          : () => openActivity({ row: { raw_label: a.meta.filter(Boolean).join(' · '), snapshot_id: snapshotId, sheet_row: a.row } }),
       }));
       /* The Resource row, drawn under the activity it belongs to and never on its
          own — it has no location or hours of its own, only the ones it inherited,

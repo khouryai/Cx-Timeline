@@ -3213,7 +3213,33 @@ async function main() {
     (await page.evaluate(() => window.__rc.compactCalls || 0)) === tidyBefore + 1
       && /Nothing to tidy/.test(await page.evaluate(() => [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | '))));
 
-  /* Seeing it as somebody else. */
+  /* Seeing it as somebody else. The first member the picker offers gets a day
+     tied to a look-ahead row, so their My day has a task that opens the whole
+     activity — whatever earlier sections planned for them by hand. */
+  // The row's words exactly as the calendar reads them, off the grid it draws.
+  await page.locator('#rc-frame .rc-head .rc-tab', { hasText: 'Look-ahead' }).click();
+  await page.locator('#rc-frame .rc-body .rc-tab', { hasText: 'Calendar' }).first().click().catch(() => {});
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 }).catch(() => {});
+  const ixlLabel = await page.evaluate(() => {
+    const tr = [...document.querySelectorAll('#rc-frame .la-grid tbody tr')]
+      .find((r) => !r.classList.contains('la-resource-row') && /IXL Regression Testing/.test(r.textContent));
+    return tr ? [...tr.querySelectorAll('td.la-meta')].map((td) => td.textContent).filter(Boolean).join(' · ') : null;
+  });
+  await page.evaluate(({ iso, label }) => {
+    const S = window.__rc.rows;
+    const who = S.rc_people.filter((p) => p.active && p.role === 'member' && p.id !== 'p1')
+      .sort((a, b) => a.name.localeCompare(b.name))[0];
+    if (!who || !label) return;
+    S.rc_lookahead_rows.push({
+      id: 'la-row-tap', snapshot_id: S.rc_lookahead_snapshots[0].id, week_start: iso, sheet_row: null,
+      row_key: 'tap', raw_label: label, raw_location: '', cells: {}, resources: {},
+    });
+    S.rc_plan_entries.push({
+      id: 'plan-la-tap', person_id: who.id, work_date: iso, shift: 'day', task: label,
+      location_id: null, category_id: null, lookahead_row_id: 'la-row-tap',
+      created_at: new Date().toISOString(), withdrawn: false,
+    });
+  }, { iso: new Date().toISOString().slice(0, 10), label: ixlLabel });
   await page.locator('#rc-frame .rc-head button', { hasText: 'View as' }).click();
   await page.waitForFunction(() => document.activeElement?.matches('.cx-modal input[type="text"]'), null, { timeout: 3000 }).catch(() => {});
   // Whoever is a member by now — earlier sections change people's roles.
@@ -3234,6 +3260,26 @@ async function main() {
   const priyaDay = await page.locator('#rc-frame .rc-myday-cards').innerText().catch(() => '');
   check('today and the next working day, as they would see them',
     /Today/i.test(priyaDay) && /Tomorrow|Next working day/i.test(priyaDay), priyaDay.replace(/\s+/g, ' ').slice(0, 240));
+
+  /* Tap a task: the whole activity — its columns under the sheet's headings,
+     every day from this week on, who is on each, and your days marked. */
+  const openTask = page.locator('#rc-frame .rc-myday-task-open', { hasText: 'IXL Regression Testing' }).first();
+  check('a task on the look-ahead can be opened', (await openTask.count()) === 1);
+  if (await openTask.count()) {
+    await openTask.click();
+    await page.waitForSelector('.cx-modal .rc-activity', { timeout: 8000 }).catch(() => {});
+    const act = await page.evaluate(() => ({
+      title: document.querySelector('.cx-modal .cx-modal-head')?.textContent || '',
+      facts: [...document.querySelectorAll('.cx-modal .rc-activity-facts dt')].map((n) => n.textContent),
+      days: document.querySelectorAll('.cx-modal .rc-activity-day').length,
+      mine: document.querySelectorAll('.cx-modal .rc-activity-mine').length,
+      text: document.querySelector('.cx-modal .rc-activity')?.innerText || '',
+    }));
+    check('it opens on the whole activity, with its columns under their headings',
+      act.facts.length >= 2 && act.days >= 1, JSON.stringify({ ...act, text: act.text.slice(0, 120) }));
+    check('and the days they are on are marked as theirs', act.mine >= 1 && /You/.test(act.text), act.text.replace(/\s+/g, ' ').slice(0, 200));
+    await page.locator('.cx-modal button', { hasText: 'Close' }).click();
+  }
 
   /* Only my rows, as a member sees the look-ahead: on by default, every names
      row still under the activity line it belongs to, and the name marked. */
@@ -3257,6 +3303,11 @@ async function main() {
   check('every names row is drawn under the activity line it belongs to',
     mineView.names >= 1 && mineView.orphans === 0, JSON.stringify(mineView));
   check('and their own name is marked on the days they are on', mineView.marked >= 1, JSON.stringify(mineView));
+  await page.locator('#rc-frame .la-openable[role="button"]').first().click();
+  await page.waitForSelector('.cx-modal .rc-activity', { timeout: 8000 }).catch(() => {});
+  check('an activity on the look-ahead opens the same way',
+    (await page.locator('.cx-modal .rc-activity-day').count()) >= 1);
+  await page.locator('.cx-modal button', { hasText: 'Close' }).click();
   await page.locator('#rc-frame .la-only-mine input').uncheck();
   await page.waitForTimeout(200);
   const allRows = await page.locator('#rc-frame .la-grid tbody tr').count();

@@ -1122,8 +1122,19 @@ export function suggestionsFrom(view) {
  */
 function titleColumnOf(view, locCol) {
   const headings = view?.headings || [];
-  for (let i = 0; i < headings.length; i++) {
-    if (i !== locCol && /\b(descr|activit|task|scope)/i.test(headings[i])) return i;
+  /* In order of preference. BART's sheet has both "Activity ID" and
+     "Description of Work Activity", and taking the first heading that mentions
+     an activity named every suggestion after its CDRL number. An identifier is
+     never the title. */
+  const wants = [
+    /\bdescr/i,
+    /\b(task|scope)\b/i,
+    /\bactivit(y|ies)\b(?!\s*(id|no\.?|number|#|ref))/i,
+  ];
+  for (const re of wants) {
+    for (let i = 0; i < headings.length; i++) {
+      if (i !== locCol && re.test(headings[i])) return i;
+    }
   }
   return -1;
 }
@@ -1533,4 +1544,53 @@ export function rowsNaming(activities, isMe, cols = null) {
     belowIsKeptTitle = false;
   }
   return rows.filter((_, i) => keep[i]);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   One activity, whole
+
+   What somebody sees when they tap a task: every column of the activity's
+   line under the sheet's own headings, and every day it has anything on —
+   the shift the paint means, whether it was cancelled, what is written in the
+   cell, and who the names row puts on it.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** The activity's name, found the way a suggestion's title is. */
+export function activityTitle(view, activity) {
+  const meta = activity?.meta || [];
+  const locCol = locationColumnOf(view);
+  const titleCol = titleColumnOf(view, locCol);
+  return (titleCol >= 0 ? meta[titleCol] : '') || longest(meta.filter((_, i) => i !== locCol)) || meta.find(Boolean) || '';
+}
+
+/**
+ * Every day the activity carries something on, from `fromISO` on (all of them
+ * when the axis is undated): `[{ date, col, meaning, hex, shift, cancelled,
+ * text, names, mine }]`. `shift` is true when the paint is work; `mine` when
+ * `isMe` answers yes for a name on that day.
+ */
+export function activityDays(view, activity, { fromISO = null, isMe = () => false } = {}) {
+  const marks = new Map((activity?.marks || []).map((m) => [m.col, m]));
+  const names = new Map((activity?.resource?.names || []).map((n) => [n.col, n.names]));
+  const out = [];
+  for (const d of view?.days || []) {
+    if (fromISO && d.date && d.date < fromISO) continue;
+    const mark = marks.get(d.col);
+    const who = names.get(d.col) || [];
+    const shift = Boolean(mark?.hex && mark.role === 'shift');
+    if (!shift && !mark?.value && !who.length && !(mark?.hex && isCancelMeaning(mark.meaning))) continue;
+    out.push({
+      date: d.date || null,
+      col: d.col,
+      label: d.date || `${d.month || ''} ${d.day || ''}`.trim(),
+      meaning: mark?.meaning || '',
+      hex: mark?.hex || null,
+      shift,
+      cancelled: Boolean(mark?.hex && isCancelMeaning(mark.meaning)),
+      text: mark?.value || '',
+      names: who,
+      mine: who.some((n) => isMe(n)),
+    });
+  }
+  return out;
 }

@@ -716,7 +716,7 @@ export async function lookaheadRowsByIds(ids) {
   const out = [];
   for (let i = 0; i < unique.length; i += 200) {
     const slice = unique.slice(i, i + 200);
-    out.push(...(await select('rc_lookahead_rows', (q) => q.in('id', slice), { columns: 'id,raw_label,raw_location' })));
+    out.push(...(await select('rc_lookahead_rows', (q) => q.in('id', slice), { columns: 'id,raw_label,raw_location,snapshot_id,sheet_row' })));
   }
   return out;
 }

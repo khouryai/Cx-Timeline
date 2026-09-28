@@ -1333,6 +1333,42 @@ console.log('\nOnly my rows');
   check('an activity is kept whole, so its names row is drawn under it', ixl?.resource?.names?.[0]?.names.includes('Rosa'));
 }
 
+console.log('\nOne activity, whole');
+{
+  const view = {
+    headings: ['Activity ID', 'Description of Work Activity', 'Location', 'SSWP#', 'Party to Action', 'Work Hours'],
+    days: [
+      { col: 8, date: '2026-09-18', day: '18', month: 'Sep' },
+      { col: 9, date: '2026-09-21', day: '21', month: 'Sep' },
+      { col: 10, date: '2026-09-22', day: '22', month: 'Sep' },
+      { col: 11, date: '2026-09-23', day: '23', month: 'Sep' },
+      { col: 12, date: '2026-09-24', day: '24', month: 'Sep' },
+    ],
+  };
+  const activity = {
+    meta: ['CDRL 9.04.27', 'IXL Regression Testing', 'W40', '660', 'STS', '0700-1500'],
+    marks: [
+      { col: 8, hex: 'FFFF00', role: 'shift', meaning: 'Day Shift', value: 'X' },
+      { col: 9, hex: 'FFFF00', role: 'shift', meaning: 'Day Shift', value: 'X.WIT' },
+      { col: 10, hex: 'FF0000', role: 'shift', meaning: 'Cancellation', value: '' },
+      { col: 11, hex: 'D9D9D9', role: 'ignore', meaning: 'Shading', value: '' },
+      { col: 12, hex: '000080', role: 'shift', meaning: 'Night Shift', value: '' },
+    ],
+    resource: { names: [{ col: 9, names: ['Priya', 'Rosa'] }, { col: 12, names: ['Tom'] }] },
+  };
+  check('the title is the description column, whatever order the columns are in',
+    cls.activityTitle(view, activity) === 'IXL Regression Testing');
+  const days = cls.activityDays(view, activity, { fromISO: '2026-09-21', isMe: (n) => n === 'Priya' });
+  check('the days from the given date on, and only those with something on them',
+    days.map((d) => d.date).join() === '2026-09-21,2026-09-22,2026-09-24', days.map((d) => d.date).join());
+  check('each day says which shift, and who is on it', days[0].meaning === 'Day Shift' && days[0].names.join() === 'Priya,Rosa'
+    && days[2].meaning === 'Night Shift' && days[2].names.join() === 'Tom');
+  check('a cancelled day is said to be, even with nobody named', days[1].cancelled && !days[1].names.length);
+  check('shading is not a day of work', !days.some((d) => d.date === '2026-09-23'));
+  check('the days I am on are marked, and only those', days[0].mine && !days[2].mine);
+  check('what is written in the cell comes along', days[0].text === 'X.WIT');
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');
