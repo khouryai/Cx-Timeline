@@ -106,7 +106,7 @@ export async function init() {
     const next = session?.user || null;
     const changed = (next?.id || null) !== (user?.id || null);
     user = next;
-    if (!next) person = null;
+    if (!next) { person = null; preview = null; }
     if (changed) emit(EV.RC_AUTH_CHANGED, { user, event });
   });
 
@@ -140,7 +140,45 @@ export function isSignedIn() {
  * refuse their writes accordingly.
  */
 export function me() {
-  return person;
+  return preview || person;
+}
+
+/* ── Seeing it as somebody else ─────────────────────────────────────────
+   An administrator can look at the calendar the way a member or a viewer
+   sees it, before telling the team to use it. Everything that decides what
+   to draw — `me()`, `role()`, `isAdmin()`, `canWrite()` — answers as that
+   person; every write is refused here, before it leaves the page, with an
+   error saying why (`err.preview`). The database is not asked to pretend:
+   it still answers as the administrator, so a preview shows the screens a
+   member gets, not a guarantee of the rows their account could read. */
+
+let preview = null; // the rc_people row being looked through, or null
+
+/** Look at the calendar as this person (a member or a viewer), or stop with null. */
+export function previewAs(who) {
+  if (who && person?.role !== 'admin') throw new Error('Only an administrator can see the calendar as somebody else.');
+  if (who && who.role === 'admin') throw new Error('Choose a member or a viewer — an administrator sees what you see.');
+  preview = who ? { id: who.id, name: who.name, email: who.email || null, title: who.title || null, subsystem: who.subsystem || null, role: who.role || 'member', active: true } : null;
+  forgetReads();
+  emit(EV.RC_AUTH_CHANGED, { user, event: who ? 'PREVIEW' : 'PREVIEW_ENDED' });
+}
+
+/** The person being looked through, or null. */
+export function previewing() {
+  return preview;
+}
+
+/** Whether the account actually signed in is an administrator, whoever it is previewing. */
+export function isRealAdmin() {
+  return person?.role === 'admin';
+}
+
+/** Refuse a write while previewing — before it reaches the network or a queue. */
+function guardPreview() {
+  if (!preview) return;
+  const err = new Error(`Preview only — nothing is saved while you are seeing the calendar as ${preview.name}.`);
+  err.preview = true;
+  throw err;
 }
 
 /**
@@ -152,12 +190,12 @@ export function me() {
  * something is missing, not to decide it.
  */
 export function isAdmin() {
-  return person?.role === 'admin';
+  return me()?.role === 'admin';
 }
 
 /** 'admin' | 'member' | 'viewer', or null for somebody not on the team. */
 export function role() {
-  return person?.role || null;
+  return me()?.role || null;
 }
 
 /**
@@ -169,11 +207,11 @@ export function role() {
  * the database, and that is the control; this decides what to draw.
  */
 export function canWrite() {
-  return person?.role === 'admin' || person?.role === 'member';
+  return me()?.role === 'admin' || me()?.role === 'member';
 }
 
 export function isViewer() {
-  return person?.role === 'viewer';
+  return me()?.role === 'viewer';
 }
 
 export function accountLabel() {
@@ -186,6 +224,7 @@ async function refreshPerson() {
   // Runs on every sign-in and account change: same rule as sign-out.
   forgetReads();
   person = null;
+  preview = null;
   if (!client || !user) return null;
   const { data, error } = await client
     .from('rc_people')
@@ -251,6 +290,7 @@ export async function signOut() {
   await client.auth.signOut();
   user = null;
   person = null;
+  preview = null;
   emit(EV.RC_AUTH_CHANGED, { user: null, event: 'SIGNED_OUT' });
 }
 
@@ -542,7 +582,7 @@ const reported = new Set();
  */
 export function reportError(area, err) {
   try {
-    if (!client || !user) return;
+    if (!client || !user || preview) return;
     const message = String(err?.message || err || 'unknown').slice(0, 500) || 'unknown';
     const key = `${area}\u0000${message}`;
     if (reported.has(key) || reported.size >= REPORT_LIMIT) return;
@@ -804,14 +844,19 @@ export function listSarsWithoutRows() {
  */
 async function insert(table, rows) {
   requireClient();
+  guardPreview();
   forgetReads();
   const { data, error } = await client.from(table).insert(rows).select();
   if (error) throw new Error(`${table}: ${error.message}`);
   return data || [];
 }
 
+/* Functions that only read, and so are allowed while previewing. */
+const READ_ONLY_RPC = new Set(['rc_list_invitations', 'rc_resolve_location']);
+
 async function rpc(name, args) {
   requireClient();
+  if (!READ_ONLY_RPC.has(name)) guardPreview();
   // Every function here that is not a pure read writes something, and the
   // reads are cheap; forgetting on all of them is simpler than a list that
   // has to be kept right.
@@ -831,6 +876,7 @@ async function rpc(name, args) {
  */
 async function update(table, id, patch) {
   requireClient();
+  guardPreview();
   forgetReads();
   const { data, error } = await client.from(table).update(patch).eq('id', id).select();
   if (error) throw new Error(`${table}: ${error.message}`);
@@ -866,6 +912,7 @@ export const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r
  */
 export async function addLegend(rows) {
   requireClient();
+  guardPreview();
   forgetReads();
   const { data, error } = await client
     .from('rc_legend')
@@ -907,6 +954,7 @@ export const deleteLegend = (id) => rpc('rc_delete_legend', { p_entry: id });
  */
 export async function setSetting(key, value) {
   requireClient();
+  guardPreview();
   forgetReads();
   const { data, error } = await client
     .from('rc_settings')
@@ -1140,6 +1188,7 @@ export async function refreshMe() {
  */
 export async function uploadSar(path, blob) {
   requireClient();
+  guardPreview();
   const { error } = await client.storage.from('sars').upload(path, blob, {
     upsert: false,
     contentType: blob?.type || 'application/pdf',
@@ -1162,6 +1211,7 @@ export async function uploadSar(path, blob) {
  */
 export async function uploadEvidence(path, blob) {
   requireClient();
+  guardPreview();
   const { error } = await client.storage.from('evidence').upload(path, blob, {
     upsert: false,
     contentType: blob?.type || 'image/jpeg',

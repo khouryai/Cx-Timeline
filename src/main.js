@@ -289,6 +289,8 @@ function installPenIdentity() {
     if (!filestore.isSupported()) return;
     const known = filestore.getDisplayName();
     if (known && known !== 'Someone') return;
+    // Never the name of somebody an administrator is only previewing as.
+    if (rcClient.previewing()) return;
     const name = rcClient.me()?.name;
     if (name) filestore.setDisplayName(name);
   };
@@ -329,10 +331,14 @@ function installPlanAccess() {
 
     const member = rcClient.isConfigured() && rcClient.isSignedIn()
       && Boolean(rcClient.me()) && !rcClient.isAdmin();
+    const previewing = rcClient.previewing();
     lockPlan(member
-      ? 'Your calendar account is not an administrator, so the plan opens read-only. '
-        + 'Everything you filter, hide or compare here is yours alone and stays with your '
-        + 'account.'
+      ? (previewing
+        ? `You are seeing the calendar as ${previewing.name}, who reads the plan and never writes it. `
+          + 'Go back to your own view in the calendar to edit.'
+        : 'Your calendar account is not an administrator, so the plan opens read-only. '
+          + 'Everything you filter, hide or compare here is yours alone and stays with your '
+          + 'account.')
       : '');
     emit(EV.ACCESS_CHANGED, { readOnly: store.isDocReadOnly() });
     emit(EV.FILE_STATE, filestore.state());

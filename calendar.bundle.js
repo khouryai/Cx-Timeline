@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 20   Built: 2026-09-28T18:34:08.961Z
+ * Modules: 23   Built: 2026-09-28T19:17:32.055Z
  */
 (function () {
   'use strict';
@@ -141,6 +141,12 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * imports every tab — so it asks, the way a dock pane asks for another pane.
    * This is what lets an empty screen point at the place its data comes from.
    */
+  /**
+   * Which Organisation section to open next — set by whoever sends somebody
+   * there (the inbox), read once by the tab. A tab cannot import another tab.
+   */
+  const orgNav = { section: null };
+
   function goToTab(tab) {
     emit(EV.RC_SHOW_TAB, { tab });
   }
@@ -982,6 +988,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "byId", { get: () => byId, enumerable: true });
   Object.defineProperty(__x, "groupBy", { get: () => groupBy, enumerable: true });
   Object.defineProperty(__x, "notifyChanged", { get: () => notifyChanged, enumerable: true });
+  Object.defineProperty(__x, "orgNav", { get: () => orgNav, enumerable: true });
   Object.defineProperty(__x, "goToTab", { get: () => goToTab, enumerable: true });
   Object.defineProperty(__x, "STATUSES", { get: () => STATUSES, enumerable: true });
   Object.defineProperty(__x, "STATUS_BY_ID", { get: () => STATUS_BY_ID, enumerable: true });
@@ -1006,6 +1013,1835 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "availability", { get: () => availability, enumerable: true });
 };
 
+// core/la_edit.js
+__mods["core/la_edit.js"] = function (__x, __req) {
+  /**
+   * The look-ahead, edited in the application rather than in Excel.
+   *
+   * The workbook used to be the source of truth and the calendar read it. Now the
+   * calendar *is* the source: two administrators edit rows and cells here, and
+   * an Excel file is something the calendar produces for whoever copies the rows
+   * into the project's master look-ahead. This module is the whole of that model
+   * with nothing attached — no DOM, no network — so every rule in it is tested in
+   * Node (`tools/test_lookahead.js`).
+   *
+   * The model is two lists, mirroring the two tables in `rc_schema.sql`:
+   *
+   *   rows   { id, kind, parent_id, sort, level, activity_id, description,
+   *            location, sswp, party, work_hours, absence_kind, archived, version }
+   *   cells  { row_id, day, color, text, version }       (keyed `row_id|day`)
+   *
+   * `kind` is one of four things a row on the 4WLA has always been:
+   *
+   *   section   a heading band ("W40 — Testing and Commissioning")
+   *   activity  a line of work, painted by day, with the support it needs typed
+   *             in the cell ("X.WIT")
+   *   resource  the names under an activity — `parent_id` is that activity, and
+   *             it moves with it
+   *   absence   a PTO / Office / Other group row of names, belonging to nobody
+   *
+   * **The editor publishes the same shape the workbook used to produce.**
+   * `gridFromModel()` writes a grid exactly as `parseSheet()` would have read it
+   * from an .xlsx — heading row, month band, day numbers, weekday letters, then
+   * the rows — so the calendar, the week plan, the huddle, PTO, the cancellation
+   * log and the change register all keep reading what they always read. Nothing
+   * downstream had to learn that the workbook went away.
+   *
+   * Every edit is an *op*, and every op has an inverse (`applyOps()` returns it),
+   * which is the whole of undo. The same ops go to the database through
+   * `rc_la_apply()`, stamped with the versions they expect (`stamp()`), so two
+   * people changing one cell at once get a refusal rather than a silent winner.
+   *
+   * Imports: core/lookahead (a leaf).
+   */
+
+  const { absenceKind, ABSENCE_LABELS, resourceNames } = __req("core/lookahead.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Days
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const MS_DAY = 86400000;
+  const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  const WEEKDAY_LETTERS = ['Su', 'M', 'Tu', 'W', 'Th', 'F', 'Sa'];
+
+  /** The editor shows four weeks by default and five at most. */
+  const WINDOW_WEEKS = [4, 5];
+
+  const isoMs = (iso) => Date.parse(`${iso}T00:00:00Z`);
+  const msIso = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+  function addDaysISO(iso, n) {
+    return msIso(isoMs(iso) + n * MS_DAY);
+  }
+
+  /** The Monday on or before a date. */
+  function mondayOf(iso) {
+    const dow = new Date(isoMs(iso)).getUTCDay();
+    return addDaysISO(iso, -((dow + 6) % 7));
+  }
+
+  /** Seven days a week for `weeks` weeks, from the Monday of `fromISO`. */
+  function windowDays(fromISO, weeks = 4) {
+    const start = mondayOf(fromISO);
+    return Array.from({ length: weeks * 7 }, (_, i) => addDaysISO(start, i));
+  }
+
+  function isWeekend(iso) {
+    const dow = new Date(isoMs(iso)).getUTCDay();
+    return dow === 0 || dow === 6;
+  }
+
+  function weekdayLetter(iso) {
+    return WEEKDAY_LETTERS[new Date(isoMs(iso)).getUTCDay()];
+  }
+
+  function monthLabel(iso) {
+    return MONTHS[new Date(isoMs(iso)).getUTCMonth()];
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Rows
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const KINDS = ['section', 'activity', 'resource', 'absence'];
+
+  /** The six columns left of the calendar, in the order the 4WLA prints them. */
+  const FIELDS = [
+    { key: 'activity_id', heading: 'Activity ID', width: 20.5703125 },
+    { key: 'description', heading: 'Description of Work Activity', width: 57.140625 },
+    { key: 'location', heading: 'Location', width: 28.5703125 },
+    { key: 'sswp', heading: 'SSWP#', width: 8.140625 },
+    { key: 'party', heading: 'Party to Action', width: 8.140625 },
+    { key: 'work_hours', heading: 'Work Hours', width: 15.5703125 },
+  ];
+
+  function blankRow(kind, extra = {}) {
+    return {
+      id: extra.id || newId(),
+      kind,
+      parent_id: null,
+      sort: 0,
+      level: 0,
+      activity_id: '',
+      description: kind === 'resource' ? 'Resource' : '',
+      location: '',
+      sswp: '',
+      party: '',
+      work_hours: '',
+      absence_kind: null,
+      archived: false,
+      version: 0,
+      ...extra,
+    };
+  }
+
+  /** A uuid made here, so a row exists — and can be undone — before the server has it. */
+  function newId() {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+    const hex = () => Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0');
+    return `${hex()}${hex()}-${hex()}-4${hex().slice(1)}-a${hex().slice(1)}-${hex()}${hex()}${hex()}`;
+  }
+
+  /**
+   * The rows in the order the sheet shows them.
+   *
+   * Top-level rows by `sort`, and each activity followed by its Resource rows —
+   * so moving an activity carries its names with it without anybody having to
+   * move them too, which is the mistake the workbook invited every week.
+   */
+  function orderedRows(rows, { archived = false } = {}) {
+    const live = rows.filter((r) => archived || !r.archived);
+    const bySort = (a, b) => (a.sort - b.sort) || String(a.id).localeCompare(String(b.id));
+    const children = new Map();
+    for (const r of live) {
+      if (r.kind === 'resource' && r.parent_id) {
+        if (!children.has(r.parent_id)) children.set(r.parent_id, []);
+        children.get(r.parent_id).push(r);
+      }
+    }
+    const top = live.filter((r) => !(r.kind === 'resource' && r.parent_id && live.some((p) => p.id === r.parent_id)));
+    const out = [];
+    for (const r of top.sort(bySort)) {
+      out.push(r);
+      for (const c of (children.get(r.id) || []).sort(bySort)) out.push(c);
+    }
+    return out;
+  }
+
+  /**
+   * A section and everything under it, as indexes into `ordered`.
+   *
+   * Down to the next section at the same level or above. That is what "the rows
+   * in this section" has always meant on the sheet, and it is what moving,
+   * collapsing and deleting a section act on.
+   */
+  function sectionBlock(ordered, index) {
+    const head = ordered[index];
+    if (!head || head.kind !== 'section') return [index, index];
+    let end = index;
+    for (let i = index + 1; i < ordered.length; i++) {
+      const r = ordered[i];
+      if (r.kind === 'section' && (r.level || 0) <= (head.level || 0)) break;
+      end = i;
+    }
+    return [index, end];
+  }
+
+  /** An activity with its Resource rows; any other row alone. */
+  function rowBlock(ordered, index) {
+    const row = ordered[index];
+    if (!row) return [index, index];
+    if (row.kind === 'section') return sectionBlock(ordered, index);
+    let end = index;
+    if (row.kind === 'activity') {
+      while (ordered[end + 1]?.kind === 'resource' && ordered[end + 1].parent_id === row.id) end++;
+    }
+    return [index, end];
+  }
+
+  /**
+   * A sort key between two neighbours.
+   *
+   * Plain numbers, midpoints between them. A thousand inserts at one spot would
+   * run out of precision, which is what `respace()` is for — the editor calls it
+   * when two neighbours come within a hair of each other.
+   */
+  function sortBetween(before, after) {
+    if (before == null && after == null) return 1024;
+    if (before == null) return after - 1024;
+    if (after == null) return before + 1024;
+    return (before + after) / 2;
+  }
+
+  function needsRespace(ordered) {
+    const top = ordered.filter((r) => r.kind !== 'resource');
+    for (let i = 1; i < top.length; i++) {
+      if (Math.abs(top[i].sort - top[i - 1].sort) < 1e-6) return true;
+    }
+    return false;
+  }
+
+  /** Evenly spaced sort keys for every top-level row, as ops. */
+  function respace(ordered) {
+    let n = 0;
+    const ops = [];
+    for (const r of ordered) {
+      if (r.kind === 'resource') continue;
+      n += 1024;
+      if (r.sort !== n) ops.push({ op: 'row', id: r.id, set: { sort: n } });
+    }
+    return ops;
+  }
+
+  /**
+   * The rows worth printing for a window of days, in sheet order.
+   *
+   * An activity with a colour, a code or a name on one of those days — its own
+   * cells or its Resource row's — with its Resource rows whatever they hold,
+   * because the pair is one thing on the sheet; the sections that have such an
+   * activity under them, nested sections included; and the PTO / Office / Other
+   * group rows always, because they are the frame the track allocation manager
+   * copies. This is what "only the current data" means for the export.
+   */
+  function rowsWithWork(model, days) {
+    const ordered = orderedRows(model.rows);
+    const inDays = new Set(days);
+    const busy = new Set(cellList(model).filter((c) => inDays.has(c.day) && (c.text || c.color)).map((c) => c.row_id));
+    const keep = new Array(ordered.length).fill(false);
+    let liveBelow = false;
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      const r = ordered[i];
+      if (r.kind === 'resource') continue;
+      if (r.kind === 'absence') { keep[i] = true; continue; }
+      if (r.kind === 'activity') {
+        const kids = ordered.filter((k) => k.kind === 'resource' && k.parent_id === r.id);
+        keep[i] = busy.has(r.id) || kids.some((k) => busy.has(k.id));
+        if (keep[i]) liveBelow = true;
+        continue;
+      }
+      keep[i] = liveBelow || (ordered[i + 1]?.kind === 'section' && keep[i + 1]);
+      liveBelow = false;
+    }
+    return ordered.filter((r, i) => (r.kind === 'resource'
+      ? keep[ordered.findIndex((p) => p.id === r.parent_id)]
+      : keep[i]));
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Support codes
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The support written in one cell: "X.WIT" is an EIC and a BART witness,
+   * "X.X" is two EICs.
+   *
+   * The workbook's own convention, read as it is typed: pieces between dots,
+   * spacing ignored, case ignored. A piece nobody has registered is still
+   * returned — marked, never dropped and never guessed at, because an unknown
+   * code is a request nobody can staff until somebody says what it is.
+   */
+  function supportTokens(text) {
+    return String(text ?? '')
+      .split('.')
+      .map((t) => t.trim().toUpperCase())
+      .filter(Boolean);
+  }
+
+  function parseSupport(text, codes) {
+    const known = new Set((codes || []).filter((c) => c.active !== false).map((c) => String(c.code).toUpperCase()));
+    const tokens = supportTokens(text).map((code) => ({ code, known: known.has(code) }));
+    return { tokens, unknown: [...new Set(tokens.filter((t) => !t.known).map((t) => t.code))] };
+  }
+
+  /** Tidy what was typed into the form the sheet writes: "x . wit" → "X.WIT". */
+  function normaliseSupport(text) {
+    const tokens = supportTokens(text);
+    return tokens.length ? tokens.join('.') : '';
+  }
+
+  /**
+   * How much of each kind of support is asked for.
+   *
+   * Counted over activity rows only — a Resource row holds names, not codes — and
+   * per day, per code; `byRow` gives the same count for each activity across the
+   * whole window, which is what the activity's own panel shows.
+   */
+  function supportTotals(model, days) {
+    const daySet = new Set(days);
+    const byDay = new Map(days.map((d) => [d, new Map()]));
+    const byRow = new Map();
+    const kinds = new Map(model.rows.map((r) => [r.id, r]));
+    for (const cell of cellList(model)) {
+      const row = kinds.get(cell.row_id);
+      if (!row || row.kind !== 'activity' || row.archived || !daySet.has(cell.day)) continue;
+      for (const code of supportTokens(cell.text)) {
+        const day = byDay.get(cell.day);
+        day.set(code, (day.get(code) || 0) + 1);
+        if (!byRow.has(row.id)) byRow.set(row.id, new Map());
+        const r = byRow.get(row.id);
+        r.set(code, (r.get(code) || 0) + 1);
+      }
+    }
+    return { byDay, byRow };
+  }
+
+  /** "2 X · 1 WIT", in the order the register lists the codes. */
+  function describeCounts(counts, codes) {
+    if (!counts || !counts.size) return '';
+    const order = (codes || []).map((c) => String(c.code).toUpperCase());
+    return [...counts.entries()]
+      .sort((a, b) => {
+        const ia = order.indexOf(a[0]);
+        const ib = order.indexOf(b[0]);
+        return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib) || a[0].localeCompare(b[0]);
+      })
+      .map(([code, n]) => `${n} ${code}`)
+      .join(' · ');
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Cancellations, as the log will know them
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The label and location the cancellation log will give this row's days.
+   *
+   * The log is derived from what is published (`rowsFrom()` → `rc_lookahead_rows`
+   * → `rc_cancelled_days`), and a note is matched to an event by exactly these
+   * two strings — so a note recorded at the moment somebody paints a day red has
+   * to be keyed the way the log will key the event, or it will never be found.
+   * `tools/test_la_edit.js` holds this to what `rowsFrom()` actually produces.
+   */
+  function cancellationKey(row) {
+    const meta = metaValues(row);
+    return {
+      raw_label: meta.filter(Boolean).join(' · '),
+      raw_location: row.location || '',
+    };
+  }
+
+  /**
+   * Runs of consecutive days per row, from a list of `{ row, day }` — "Monday to
+   * Wednesday on the IXL row" is one cancellation, as the log counts it.
+   */
+  function dayRuns(items) {
+    const byRow = new Map();
+    for (const { row, day } of items) {
+      if (!byRow.has(row.id)) byRow.set(row.id, { row, days: new Set() });
+      byRow.get(row.id).days.add(day);
+    }
+    const runs = [];
+    for (const { row, days } of byRow.values()) {
+      const sorted = [...days].sort();
+      let start = sorted[0];
+      let prev = sorted[0];
+      for (const d of sorted.slice(1)) {
+        if (d === addDaysISO(prev, 1)) { prev = d; continue; }
+        runs.push({ row, start, end: prev });
+        start = d;
+        prev = d;
+      }
+      if (start) runs.push({ row, start, end: prev });
+    }
+    return runs;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Names from the roster
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const foldWord = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+  /**
+   * What to write for each person on the roster.
+   *
+   * The sheet is written in first names — "Adam, Jimmy" — and the calendar's
+   * name register matches a first name only when exactly one person answers to
+   * it. So a suggestion writes the first name where that is unambiguous and the
+   * full name where two people share it: what is written is always something the
+   * register will place, which is the point of suggesting it.
+   */
+  function nameChoices(people) {
+    const live = (people || []).filter((p) => p && p.name && p.active !== false);
+    const firsts = new Map();
+    for (const p of live) {
+      const first = foldWord(p.name).split(' ')[0];
+      firsts.set(first, (firsts.get(first) || 0) + 1);
+    }
+    return live
+      .map((p) => {
+        const first = String(p.name).trim().split(/\s+/)[0];
+        const unique = firsts.get(foldWord(first)) === 1;
+        return { insert: unique ? first : String(p.name).trim(), full: String(p.name).trim() };
+      })
+      .sort((a, b) => a.insert.localeCompare(b.insert));
+  }
+
+  /** The name being typed: whatever follows the last separator. */
+  function currentToken(text) {
+    const pieces = String(text ?? '').split(/,|\/|&|\+|\n|\band\b/i);
+    return pieces[pieces.length - 1].replace(/^\s+/, '');
+  }
+
+  /**
+   * Roster names that fit what is being typed, best first — a first name or a
+   * surname starting with it — leaving out anybody already in the cell.
+   */
+  function suggestNames(text, choices, limit = 6) {
+    const token = foldWord(currentToken(text));
+    if (!token) return [];
+    const already = new Set(String(text ?? '').split(/[,/&+\n]|\band\b/i).map(foldWord).filter(Boolean));
+    const scored = [];
+    for (const c of choices || []) {
+      if (already.has(foldWord(c.insert)) || already.has(foldWord(c.full))) continue;
+      const words = foldWord(c.full).split(' ');
+      let score = -1;
+      if (foldWord(c.insert).startsWith(token)) score = 0;
+      else if (words.some((w) => w.startsWith(token))) score = 1;
+      else if (foldWord(c.full).includes(token)) score = 2;
+      if (score >= 0) scored.push({ ...c, score });
+    }
+    return scored.sort((a, b) => a.score - b.score || a.insert.localeCompare(b.insert)).slice(0, limit);
+  }
+
+  /** The cell's text with the name being typed replaced by a chosen one. */
+  function acceptName(text, insert) {
+    const t = String(text ?? '');
+    const token = currentToken(t);
+    const head = t.slice(0, t.length - token.length);
+    return `${head}${head && !/[\s]$/.test(head) ? ' ' : ''}${insert}`;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The model and its ops
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const cellKey = (rowId, day) => `${rowId}|${day}`;
+
+  function makeModel(rows = [], cells = []) {
+    const map = new Map();
+    for (const c of cells) map.set(cellKey(c.row_id, c.day), { ...c });
+    return { rows: rows.map((r) => ({ ...r })), cells: map };
+  }
+
+  function cellList(model) {
+    return [...model.cells.values()];
+  }
+
+  function getCell(model, rowId, day) {
+    return model.cells.get(cellKey(rowId, day)) || null;
+  }
+
+  const ROW_FIELDS = ['kind', 'parent_id', 'sort', 'level', 'activity_id', 'description', 'location',
+    'sswp', 'party', 'work_hours', 'absence_kind', 'archived'];
+
+  /**
+   * Apply ops to the model in place, and return the ops that undo them.
+   *
+   *   { op: 'row', id, set: {…fields} }          create (with `kind`) or change a row
+   *   { op: 'delete_row', id }                    remove a row (its cells go with it)
+   *   { op: 'cell', row_id, day, color, text }    set a cell; blank both to clear it
+   *
+   * The inverse of a batch is its ops' inverses in reverse order, so an undo puts
+   * back exactly what was there — a deleted activity returns with its cells, its
+   * Resource rows and their names, because deleting it was all of those ops.
+   */
+  function applyOps(model, ops) {
+    const inverse = [];
+    for (const op of ops) {
+      if (op.op === 'row') {
+        const at = model.rows.findIndex((r) => r.id === op.id);
+        if (at < 0) {
+          const row = { ...blankRow(op.set?.kind || 'activity', { id: op.id }), ...op.set, version: 0 };
+          model.rows.push(row);
+          inverse.push({ op: 'delete_row', id: op.id });
+        } else {
+          const row = model.rows[at];
+          const before = {};
+          for (const k of Object.keys(op.set || {})) {
+            if (!ROW_FIELDS.includes(k)) continue;
+            before[k] = row[k];
+          }
+          model.rows[at] = { ...row, ...pick(op.set, ROW_FIELDS) };
+          inverse.push({ op: 'row', id: op.id, set: before });
+        }
+      } else if (op.op === 'delete_row') {
+        const at = model.rows.findIndex((r) => r.id === op.id);
+        if (at < 0) continue;
+        const row = model.rows[at];
+        // The cells first, so undoing recreates the row before it refills them.
+        const cells = cellList(model).filter((c) => c.row_id === op.id);
+        for (const c of cells) model.cells.delete(cellKey(c.row_id, c.day));
+        model.rows.splice(at, 1);
+        const restore = [{ op: 'row', id: row.id, set: pick(row, ROW_FIELDS) }];
+        for (const c of cells) restore.push({ op: 'cell', row_id: c.row_id, day: c.day, color: c.color || null, text: c.text || '' });
+        inverse.push(...restore.reverse());
+      } else if (op.op === 'cell') {
+        const key = cellKey(op.row_id, op.day);
+        const was = model.cells.get(key) || null;
+        const color = op.color ? String(op.color).toUpperCase() : null;
+        const text = String(op.text ?? '');
+        if (!color && !text) model.cells.delete(key);
+        else model.cells.set(key, { row_id: op.row_id, day: op.day, color, text, version: was?.version || 0 });
+        inverse.push({ op: 'cell', row_id: op.row_id, day: op.day, color: was?.color || null, text: was?.text || '' });
+      }
+    }
+    return inverse.reverse();
+  }
+
+  function pick(obj, keys) {
+    const out = {};
+    for (const k of keys) if (obj && k in obj) out[k] = obj[k];
+    return out;
+  }
+
+  /**
+   * The versions each op expects to find, from the model *before* it is applied.
+   *
+   * Done at send time rather than when the op was made, because an undo is sent
+   * long after it was recorded, against whatever the row has become since.
+   */
+  function stamp(model, ops) {
+    return ops.map((op) => {
+      if (op.op === 'cell') return { ...op, expect: getCell(model, op.row_id, op.day)?.version || 0 };
+      const row = model.rows.find((r) => r.id === op.id);
+      return { ...op, expect: row ? row.version || 0 : 0 };
+    });
+  }
+
+  /** Record the versions the server answered with. */
+  function acknowledge(model, results) {
+    for (const r of results || []) {
+      if (r.kind === 'cell') {
+        const c = model.cells.get(cellKey(r.row_id, r.day));
+        if (c) c.version = r.version;
+      } else if (r.kind === 'row') {
+        const row = model.rows.find((x) => x.id === r.id);
+        if (row) row.version = r.version;
+      }
+    }
+  }
+
+  /** Ops that delete a row and everything that belongs to it, cells first. */
+  function deleteOps(model, ids) {
+    const want = new Set(ids);
+    for (const r of model.rows) if (r.kind === 'resource' && want.has(r.parent_id)) want.add(r.id);
+    const ops = [];
+    for (const c of cellList(model)) {
+      if (want.has(c.row_id)) ops.push({ op: 'cell', row_id: c.row_id, day: c.day, color: null, text: '' });
+    }
+    // Children before parents: a Resource row points at its activity.
+    const rows = model.rows.filter((r) => want.has(r.id)).sort((a, b) => (b.kind === 'resource') - (a.kind === 'resource'));
+    for (const r of rows) ops.push({ op: 'delete_row', id: r.id });
+    return ops;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Going back to an earlier moment
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The ops that put the look-ahead back the way it was before `edits`.
+   *
+   * `edits` are rows of `rc_la_edits` — everything recorded from some moment on,
+   * in any order. For each row and each day they touched, the *earliest* of them
+   * says what was there before: its `before`, or nothing at all if it was an
+   * insert. The result is ordinary ops, so a restore is itself an edit — saved,
+   * recorded in the log, and undone with one Ctrl+Z like anything else — rather
+   * than a rewrite of history, which the log does not allow anyway.
+   *
+   * Ordered so every op is legal when it runs: rows that come back (parents
+   * before their names rows), then cells, then rows that go (names rows first,
+   * with their cells cleared ahead of them). Nothing that is already as it was is
+   * touched.
+   */
+  function restoreOps(model, edits) {
+    const first = new Map();
+    for (const e of [...(edits || [])].sort((a, b) => Number(a.id) - Number(b.id))) {
+      const key = e.target === 'cell' ? `cell:${e.row_id}|${String(e.day).slice(0, 10)}` : `row:${e.row_id}`;
+      if (!first.has(key)) first.set(key, e);
+    }
+    const rowsNow = new Map(model.rows.map((r) => [r.id, r]));
+    const restoreRows = [];
+    const removeRows = [];
+    const cells = [];
+    const willExist = new Set(model.rows.map((r) => r.id));
+
+    for (const [key, e] of first) {
+      if (!key.startsWith('row:')) continue;
+      const was = e.action === 'insert' ? null : e.before;
+      const now = rowsNow.get(e.row_id) || null;
+      if (!was) {
+        if (now) { removeRows.push(now); willExist.delete(now.id); }
+        continue;
+      }
+      willExist.add(e.row_id);
+      const set = pick(was, ROW_FIELDS);
+      if (set.sort != null) set.sort = Number(set.sort);
+      if (set.level != null) set.level = Number(set.level);
+      if (now) {
+        const changed = Object.keys(set).filter((k) => String(now[k] ?? '') !== String(set[k] ?? ''));
+        if (changed.length) restoreRows.push({ op: 'row', id: e.row_id, set: Object.fromEntries(changed.map((k) => [k, set[k]])) });
+      } else {
+        restoreRows.push({ op: 'row', id: e.row_id, set });
+      }
+    }
+
+    for (const [key, e] of first) {
+      if (!key.startsWith('cell:')) continue;
+      if (!willExist.has(e.row_id)) continue; // goes with its row
+      const day = String(e.day).slice(0, 10);
+      const was = e.action === 'insert' ? null : e.before;
+      const color = was?.color ? String(was.color).toUpperCase() : null;
+      const text = was?.text || '';
+      const now = getCell(model, e.row_id, day);
+      if ((now?.color || null) === color && (now?.text || '') === text) continue;
+      cells.push({ op: 'cell', row_id: e.row_id, day, color, text });
+    }
+
+    const creates = restoreRows.sort((a, b) => ((a.set.kind === 'resource') - (b.set.kind === 'resource')));
+    const removals = deleteOps(model, removeRows.map((r) => r.id));
+    return [...creates, ...cells, ...removals];
+  }
+
+  /**
+   * Restore points: the log grouped into the saves that made it, newest first —
+   * "Tuesday 16:02, Dana, 12 changes" — which is how anybody remembers an edit.
+   */
+  function restorePoints(edits) {
+    const batches = new Map();
+    for (const e of edits || []) {
+      const b = batches.get(e.batch) || { batch: e.batch, firstId: Number(e.id), at: e.at, by: e.by, count: 0, rows: new Set() };
+      b.count++;
+      b.rows.add(e.row_id);
+      if (Number(e.id) < b.firstId) { b.firstId = Number(e.id); b.at = e.at; }
+      batches.set(e.batch, b);
+    }
+    return [...batches.values()].sort((a, b) => b.firstId - a.firstId).map((b) => ({ ...b, rows: b.rows.size }));
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Selections: fill and clipboard
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Repeat a block of cells across a larger area, the way Excel's fill handle
+   * does: the pattern tiles, so dragging "X.WIT on yellow, blank, blank" along a
+   * row repeats it every three days.
+   */
+  function tile(source, height, width) {
+    const h = source.length;
+    const w = source[0]?.length || 0;
+    if (!h || !w) return [];
+    return Array.from({ length: height }, (_, r) =>
+      Array.from({ length: width }, (_, c) => ({ ...source[r % h][c % w] })));
+  }
+
+  /** A block of `{ color, text }` as tab-separated text, which every spreadsheet reads. */
+  function toTSV(block) {
+    return block.map((row) => row.map((c) => String(c.text ?? '').replace(/[\t\r\n]+/g, ' ')).join('\t')).join('\r\n');
+  }
+
+  function fromTSV(text) {
+    const lines = String(text ?? '').replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n');
+    return lines.map((line) => line.split('\t').map((t) => ({ color: null, text: t.trim() })));
+  }
+
+  const escapeHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  /**
+   * The same block as an HTML table, colours included — which is what Excel
+   * reads on paste, so painted cells arrive painted.
+   */
+  function toHTML(block) {
+    const rows = block.map((row) => `<tr>${row.map((c) => {
+      const bg = c.color ? ` style="background:#${c.color};mso-pattern:#${c.color} none"` : '';
+      return `<td${bg}>${escapeHtml(c.text)}</td>`;
+    }).join('')}</tr>`).join('');
+    return `<table>${rows}</table>`;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The published grid — the shape the rest of the calendar reads
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Spreadsheet column letters. */
+  function colLetters(n) {
+    let s = '';
+    while (n > 0) {
+      const m = (n - 1) % 26;
+      s = String.fromCharCode(65 + m) + s;
+      n = Math.floor((n - 1) / 26);
+    }
+    return s;
+  }
+
+  /** The grey the section bands are painted in, on the sheet and on the grid. */
+  const SECTION_BAND = 'D9D9D9';
+
+  /** Where things go on the sheet — shared by the published grid and the export. */
+  const LAYOUT = {
+    firstMetaCol: 2, // B
+    firstDayCol: 8, // H
+    titleRow: 1,
+    headingRow: 2, // B2:B6 … G2:G6, merged
+    monthRow: 4,
+    dayRow: 5,
+    weekdayRow: 6,
+    firstBodyRow: 7,
+  };
+
+  /**
+   * The model as a parsed workbook.
+   *
+   * Laid out as the 4WLA is — headings on row 2, the month band on 4, day numbers
+   * on 5, weekday letters on 6, rows from 7 — so `readGrid()` finds it exactly the
+   * way it found the file: by the weekday letters, not by a column number. A
+   * section band is painted across its six activity columns, which is how
+   * `readGrid()` has always told a heading from work, and never across the days,
+   * where paint would read as a shift.
+   */
+  function gridFromModel(model, days, { title = '' } = {}) {
+    const L = LAYOUT;
+    const rows = [];
+    const cell = (row, col, value, hex = null) => ({ col, ref: `${colLetters(col)}${row}`, value: value ?? '', hex });
+    const merges = [];
+
+    rows.push({ row: L.titleRow, label: '', cells: [cell(L.titleRow, L.firstMetaCol, title)] });
+    rows.push({
+      row: L.headingRow, label: '',
+      cells: FIELDS.map((f, i) => cell(L.headingRow, L.firstMetaCol + i, f.heading)),
+    });
+    FIELDS.forEach((_, i) => {
+      const col = colLetters(L.firstMetaCol + i);
+      merges.push(`${col}${L.headingRow}:${col}${L.weekdayRow}`);
+    });
+
+    const monthCells = [];
+    let lastMonth = null;
+    let runStart = 0;
+    days.forEach((d, i) => {
+      const m = monthLabel(d);
+      if (m !== lastMonth) {
+        if (lastMonth !== null && i - 1 > runStart) {
+          merges.push(`${colLetters(L.firstDayCol + runStart)}${L.monthRow}:${colLetters(L.firstDayCol + i - 1)}${L.monthRow}`);
+        }
+        monthCells.push(cell(L.monthRow, L.firstDayCol + i, m));
+        lastMonth = m;
+        runStart = i;
+      }
+    });
+    if (days.length && days.length - 1 > runStart) {
+      merges.push(`${colLetters(L.firstDayCol + runStart)}${L.monthRow}:${colLetters(L.firstDayCol + days.length - 1)}${L.monthRow}`);
+    }
+    rows.push({ row: L.monthRow, label: '', cells: monthCells });
+    rows.push({
+      row: L.dayRow, label: '',
+      cells: days.map((d, i) => cell(L.dayRow, L.firstDayCol + i, String(Number(d.slice(8, 10))))),
+    });
+    rows.push({
+      row: L.weekdayRow, label: '',
+      cells: days.map((d, i) => cell(L.weekdayRow, L.firstDayCol + i, weekdayLetter(d))),
+    });
+
+    let r = L.firstBodyRow;
+    for (const row of orderedRows(model.rows)) {
+      const cells = [];
+      const meta = metaValues(row);
+      const band = row.kind === 'section' ? SECTION_BAND : null;
+      meta.forEach((value, i) => {
+        if (value || band) cells.push(cell(r, L.firstMetaCol + i, value, band));
+      });
+      if (row.kind !== 'section') {
+        days.forEach((d, i) => {
+          const c = getCell(model, row.id, d);
+          if (c && (c.text || c.color)) cells.push(cell(r, L.firstDayCol + i, c.text || '', c.color || null));
+        });
+      }
+      rows.push({ row: r, label: '', cells });
+      r++;
+    }
+
+    return { sheet: '4WLA', rows, merges, hiddenColumns: [], conditional: [], unknown: [] };
+  }
+
+  /** The six activity-column values a row prints, in `FIELDS` order. */
+  function metaValues(row) {
+    if (row.kind === 'resource') return ['', 'Resource', '', '', '', ''];
+    if (row.kind === 'absence') {
+      const label = row.description || ABSENCE_LABELS[row.absence_kind] || 'PTO';
+      return ['', label, '', '', '', ''];
+    }
+    if (row.kind === 'section') return ['', row.description || '', '', '', '', ''];
+    return FIELDS.map((f) => String(row[f.key] ?? ''));
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Starting from the workbook
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Which of the sheet's activity columns is which field.
+   *
+   * By column where the sheet uses the 4WLA's own columns — B is the Activity ID
+   * and G the work hours whatever is filled in, and BART's file hides the heading
+   * row, so there is often no heading to read — and by heading otherwise.
+   */
+  function fieldIndexes(headings, metaCols) {
+    const cols = metaCols || [];
+    if (cols.length && cols.every((c) => c >= LAYOUT.firstMetaCol && c < LAYOUT.firstMetaCol + FIELDS.length)) {
+      const out = {};
+      FIELDS.forEach((f, i) => {
+        const at = cols.indexOf(LAYOUT.firstMetaCol + i);
+        if (at >= 0) out[f.key] = at;
+      });
+      return out;
+    }
+    return fieldIndexesByHeading(headings);
+  }
+
+  function fieldIndexesByHeading(headings) {
+    const tests = {
+      activity_id: /activity\s*id/i,
+      description: /descr|activity/i,
+      location: /location/i,
+      sswp: /sswp/i,
+      party: /party/i,
+      work_hours: /hour/i,
+    };
+    const out = {};
+    const used = new Set();
+    for (const key of ['activity_id', 'location', 'sswp', 'party', 'work_hours', 'description']) {
+      const i = (headings || []).findIndex((h, idx) => !used.has(idx) && tests[key].test(String(h || '')));
+      if (i >= 0) { out[key] = i; used.add(i); }
+    }
+    FIELDS.forEach((f, pos) => {
+      if (out[f.key] == null && !used.has(pos) && pos < (headings || []).length) { out[f.key] = pos; used.add(pos); }
+    });
+    return out;
+  }
+
+  /**
+   * The editor's first contents, from a reading of the old workbook.
+   *
+   * `view` is `readGrid()` of a legend-applied grid, dated. What comes across is
+   * what is still ahead: an activity with a shift, a support code or a name from
+   * `fromISO` on; the sections that have such activities under them; the
+   * PTO / Office / Other group rows always, because they are the frame of the
+   * sheet. The past, the hidden rows and columns and the weekend shading stay
+   * behind with the old file.
+   *
+   * Only paint the legend calls a **shift** is carried — Day, Swing, Night,
+   * Blanket, Cancellation — because the editor paints with nothing else. Shading,
+   * section bands and colours nobody has named are counted in the report and
+   * left behind, never guessed at.
+   */
+  function modelFromView(view, { fromISO, toISO = null, legend = [] } = {}) {
+    const shift = new Map();
+    for (const e of legend || []) {
+      if ((e.role || 'shift') === 'shift' && e.meaning) shift.set(String(e.argb).toUpperCase(), e.meaning);
+    }
+    const report = { activities: 0, sections: 0, resources: 0, absences: 0, cells: 0, droppedColours: 0, past: 0 };
+    const dayOf = new Map((view.days || []).filter((d) => d.date).map((d) => [d.col, d.date]));
+    const inWindow = (date) => date && date >= fromISO && (!toISO || date <= toISO);
+    const idx = fieldIndexes(view.headings, view.meta);
+
+    const pending = []; // rows in sheet order, each with its cells
+    const cellsOf = (marks, keepColour) => {
+      const out = [];
+      for (const m of marks || []) {
+        const day = dayOf.get(m.col);
+        if (!day) continue;
+        if (!inWindow(day)) { report.past++; continue; }
+        let color = m.hex ? String(m.hex).toUpperCase() : null;
+        if (color && (!keepColour || !shift.has(color))) {
+          report.droppedColours++;
+          color = null;
+        }
+        const text = String(m.value ?? '').trim();
+        if (!color && !text) continue;
+        out.push({ day, color, text });
+      }
+      return out;
+    };
+
+    for (const a of view.activities || []) {
+      if (a.heading) {
+        pending.push({ kind: 'section', description: a.meta.find(Boolean) || '', cells: [] });
+        continue;
+      }
+      if (a.absence) {
+        pending.push({
+          kind: 'absence',
+          absence_kind: a.absence,
+          description: a.meta.find((v) => absenceKind(v)) || ABSENCE_LABELS[a.absence],
+          cells: cellsOf(a.marks, false),
+        });
+        continue;
+      }
+      const fields = {};
+      for (const f of FIELDS) fields[f.key] = idx[f.key] != null ? (a.meta[idx[f.key]] || '') : '';
+      const cells = cellsOf(a.marks, true);
+      const names = a.resource ? cellsOf(a.resource.marks, false) : [];
+      pending.push({ kind: 'activity', ...fields, cells, resource: a.resource ? names : null, live: cells.length > 0 || names.length > 0 });
+    }
+
+    /* Which sections stay: those with a live activity under them, and a section
+       directly above another kept section — the workbook nests "PHASE 2" over
+       "W40 — Testing" over "IXL (W40)", and keeping only the innermost would
+       orphan the others. Walked backwards, as `drawn()` does. */
+    const keep = new Array(pending.length).fill(false);
+    let liveBelow = false;
+    for (let i = pending.length - 1; i >= 0; i--) {
+      const p = pending[i];
+      if (p.kind === 'activity') {
+        keep[i] = p.live;
+        if (p.live) liveBelow = true;
+      } else if (p.kind === 'absence') {
+        keep[i] = true;
+      } else {
+        keep[i] = liveBelow || (pending[i + 1]?.kind === 'section' && keep[i + 1]);
+        liveBelow = false;
+      }
+    }
+
+    const rows = [];
+    const cells = [];
+    let sort = 0;
+    pending.forEach((p, i) => {
+      if (!keep[i]) return;
+      sort += 1024;
+      const row = blankRow(p.kind, {
+        sort,
+        description: p.description || '',
+        absence_kind: p.absence_kind || null,
+      });
+      if (p.kind === 'activity') for (const f of FIELDS) row[f.key] = p[f.key] || '';
+      rows.push(row);
+      report[{ section: 'sections', activity: 'activities', absence: 'absences' }[p.kind]]++;
+      for (const c of p.cells) {
+        const text = p.kind === 'activity' ? normaliseSupportIfCodes(c.text) : c.text;
+        cells.push({ row_id: row.id, day: c.day, color: c.color, text, version: 0 });
+      }
+      if (p.resource) {
+        const res = blankRow('resource', { parent_id: row.id, sort: sort + 1 });
+        rows.push(res);
+        report.resources++;
+        for (const c of p.resource) cells.push({ row_id: res.id, day: c.day, color: null, text: c.text, version: 0 });
+      }
+    });
+    report.cells = cells.length;
+    return { model: makeModel(rows, cells), report };
+  }
+
+  /** "X " → "X", "x.wit" → "X.WIT" — but only when it *looks* like codes, so a note survives. */
+  function normaliseSupportIfCodes(text) {
+    const t = String(text).trim();
+    return /^[A-Za-z]{1,6}(\s*\.\s*[A-Za-z]{1,6})*\.?$/.test(t) ? normaliseSupport(t) : t;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     What happened to one cell, and to one row
+
+     `rc_la_edits` already says who changed what and when; these read it for one
+     place on the sheet, newest first. A cell's value is its colour and its text,
+     and the log keeps both sides of every change, so a history is the log
+     filtered — nothing is reconstructed.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** A cell's value as the log holds it: `{ color, text }`, or null for an empty day. */
+  function cellValue(v) {
+    if (!v) return null;
+    const color = v.color ? String(v.color).toUpperCase() : null;
+    const text = String(v.text ?? '');
+    return color || text ? { color, text } : null;
+  }
+
+  /** The changes to one day of one row, newest first: `[{ id, at, by, before, after }]`. */
+  function cellHistory(edits, rowId, day) {
+    const want = String(day).slice(0, 10);
+    return (edits || [])
+      .filter((e) => e.target === 'cell' && e.row_id === rowId && String(e.day).slice(0, 10) === want)
+      .sort((a, b) => Number(b.id) - Number(a.id))
+      .map((e) => ({
+        id: e.id,
+        at: e.at,
+        by: e.by || null,
+        before: e.action === 'insert' ? null : cellValue(e.before),
+        after: e.action === 'delete' ? null : cellValue(e.after),
+      }));
+  }
+
+  const HISTORY_FIELDS = [
+    ...FIELDS.map((f) => ({ key: f.key, label: f.heading })),
+    { key: 'archived', label: 'Archived' },
+    { key: 'absence_kind', label: 'Kind' },
+  ];
+
+  /**
+   * The changes to one row's own fields, newest first:
+   * `[{ id, at, by, action, changes: [{ field, from, to }] }]`. Moving a row
+   * (its `sort`) is left out: it is where the row sits, not what it says.
+   */
+  function rowHistory(edits, rowId) {
+    return (edits || [])
+      .filter((e) => e.target === 'row' && e.row_id === rowId)
+      .sort((a, b) => Number(b.id) - Number(a.id))
+      .map((e) => {
+        const before = e.before || {};
+        const after = e.after || {};
+        const changes = e.action === 'update'
+          ? HISTORY_FIELDS
+            .filter((f) => String(before[f.key] ?? '') !== String(after[f.key] ?? ''))
+            .map((f) => ({ field: f.label, from: before[f.key] ?? '', to: after[f.key] ?? '' }))
+          : [];
+        return { id: e.id, at: e.at, by: e.by || null, action: e.action, changes };
+      })
+      .filter((h) => h.action !== 'update' || h.changes.length);
+  }
+
+  /**
+   * A cell's value in words: the legend's meaning for its colour, then its text.
+   * `meaningOf(hex)` is injected — the legend lives with the calendar.
+   */
+  function describeCellValue(value, meaningOf = () => '') {
+    if (!value) return 'empty';
+    const colour = value.color ? (meaningOf(value.color) || `#${value.color}`) : '';
+    return [colour, value.text].filter(Boolean).join(' · ') || 'empty';
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Is everybody named where they can be?
+
+     Only the people on the team — the names rows and the PTO / Office rows, read
+     against the roster. What an activity *asks for* (its support codes) is the
+     support's business and is not counted here. A name the roster does not know
+     is somebody else's person and is left alone: the check is about the team.
+
+     Three clashes, each a contradiction in the plan rather than a judgement:
+       leave   named on work on a day they have leave booked in the calendar
+       pto     named on work on a day the sheet's own PTO row has them off
+       shifts  named on two activities that day painted as different shifts —
+               a day shift and a night shift, say. Two activities on one shift
+               is an ordinary day, and is not flagged.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * `resolve(written)` answers `{ id, name }` for a name on the roster, or null —
+   * injected, because the register lives with the calendar. `leave` is
+   * `[{ person_id, start_date, end_date, status, kind }]` (cancelled and
+   * declined are ignored). `isShift(hex)` says whether a colour is a shift at all
+   * (a cancellation is not), and `shiftOf(hex)` which shift it is.
+   *
+   * Returns `{ issues, byCell }`: every clash as
+   * `{ row_id, day, person_id, name, kind, detail }`, and the same keyed by
+   * `row_id|day` for drawing.
+   */
+  function staffingIssues(model, days, {
+    resolve, leave = [], isShift = (hex) => !!hex, shiftOf = (hex) => hex,
+  } = {}) {
+    const issues = [];
+    const byCell = new Map();
+    if (!model || typeof resolve !== 'function') return { issues, byCell };
+    const rows = model.rows.filter((r) => !r.archived);
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const namesRows = rows.filter((r) => r.kind === 'resource' && byId.get(r.parent_id)?.kind === 'activity');
+    const ptoRows = rows.filter((r) => r.kind === 'absence' && (r.absence_kind || 'pto') === 'pto');
+    const liveLeave = (leave || []).filter((l) => l && !['cancelled', 'declined'].includes(l.status));
+
+    const add = (issue) => {
+      issues.push(issue);
+      const key = cellKey(issue.row_id, issue.day);
+      if (!byCell.has(key)) byCell.set(key, []);
+      byCell.get(key).push(issue);
+    };
+
+    for (const day of days) {
+      const off = new Set();
+      for (const r of ptoRows) {
+        for (const w of resourceNames(getCell(model, r.id, day)?.text)) {
+          const p = resolve(w);
+          if (p) off.add(p.id);
+        }
+      }
+      const onDay = new Map(); // person id → [{ row, shift, activity }]
+      for (const r of namesRows) {
+        const text = getCell(model, r.id, day)?.text;
+        if (!text) continue;
+        const activity = byId.get(r.parent_id);
+        const colour = getCell(model, activity.id, day)?.color || null;
+        for (const w of resourceNames(text)) {
+          const p = resolve(w);
+          if (!p) continue; // not one of ours
+          const title = activity.description || activity.activity_id || 'an activity';
+          if (!onDay.has(p.id)) onDay.set(p.id, []);
+          onDay.get(p.id).push({ row: r, colour, title, name: p.name || w });
+          if (off.has(p.id)) {
+            add({ row_id: r.id, day, person_id: p.id, name: p.name || w, kind: 'pto', detail: `${p.name || w} is on the PTO row that day` });
+          }
+          const away = liveLeave.find((l) => l.person_id === p.id
+            && String(l.start_date).slice(0, 10) <= day && String(l.end_date).slice(0, 10) >= day);
+          if (away) {
+            const asked = away.status === 'requested' || away.status === 'pending';
+            add({
+              row_id: r.id, day, person_id: p.id, name: p.name || w, kind: 'leave',
+              detail: `${p.name || w} has ${away.kind || 'leave'} ${asked ? 'requested' : 'booked'} that day`,
+            });
+          }
+        }
+      }
+      for (const [personId, spots] of onDay) {
+        const shifts = new Map();
+        for (const s of spots) {
+          if (!s.colour || !isShift(s.colour)) continue;
+          const which = shiftOf(s.colour);
+          if (!shifts.has(which)) shifts.set(which, s);
+        }
+        if (shifts.size < 2) continue;
+        const list = [...shifts.entries()].map(([which, s]) => `${which} on ${s.title}`).join(' and ');
+        for (const s of spots) {
+          if (!s.colour || !isShift(s.colour)) continue;
+          add({ row_id: s.row.id, day, person_id: personId, name: s.name, kind: 'shifts', detail: `${s.name} is on two shifts that day: ${list}` });
+        }
+      }
+    }
+    return { issues, byCell };
+  }
+
+  Object.defineProperty(__x, "WINDOW_WEEKS", { get: () => WINDOW_WEEKS, enumerable: true });
+  Object.defineProperty(__x, "addDaysISO", { get: () => addDaysISO, enumerable: true });
+  Object.defineProperty(__x, "mondayOf", { get: () => mondayOf, enumerable: true });
+  Object.defineProperty(__x, "windowDays", { get: () => windowDays, enumerable: true });
+  Object.defineProperty(__x, "isWeekend", { get: () => isWeekend, enumerable: true });
+  Object.defineProperty(__x, "weekdayLetter", { get: () => weekdayLetter, enumerable: true });
+  Object.defineProperty(__x, "monthLabel", { get: () => monthLabel, enumerable: true });
+  Object.defineProperty(__x, "KINDS", { get: () => KINDS, enumerable: true });
+  Object.defineProperty(__x, "FIELDS", { get: () => FIELDS, enumerable: true });
+  Object.defineProperty(__x, "blankRow", { get: () => blankRow, enumerable: true });
+  Object.defineProperty(__x, "newId", { get: () => newId, enumerable: true });
+  Object.defineProperty(__x, "orderedRows", { get: () => orderedRows, enumerable: true });
+  Object.defineProperty(__x, "sectionBlock", { get: () => sectionBlock, enumerable: true });
+  Object.defineProperty(__x, "rowBlock", { get: () => rowBlock, enumerable: true });
+  Object.defineProperty(__x, "sortBetween", { get: () => sortBetween, enumerable: true });
+  Object.defineProperty(__x, "needsRespace", { get: () => needsRespace, enumerable: true });
+  Object.defineProperty(__x, "respace", { get: () => respace, enumerable: true });
+  Object.defineProperty(__x, "rowsWithWork", { get: () => rowsWithWork, enumerable: true });
+  Object.defineProperty(__x, "supportTokens", { get: () => supportTokens, enumerable: true });
+  Object.defineProperty(__x, "parseSupport", { get: () => parseSupport, enumerable: true });
+  Object.defineProperty(__x, "normaliseSupport", { get: () => normaliseSupport, enumerable: true });
+  Object.defineProperty(__x, "supportTotals", { get: () => supportTotals, enumerable: true });
+  Object.defineProperty(__x, "describeCounts", { get: () => describeCounts, enumerable: true });
+  Object.defineProperty(__x, "cancellationKey", { get: () => cancellationKey, enumerable: true });
+  Object.defineProperty(__x, "dayRuns", { get: () => dayRuns, enumerable: true });
+  Object.defineProperty(__x, "nameChoices", { get: () => nameChoices, enumerable: true });
+  Object.defineProperty(__x, "currentToken", { get: () => currentToken, enumerable: true });
+  Object.defineProperty(__x, "suggestNames", { get: () => suggestNames, enumerable: true });
+  Object.defineProperty(__x, "acceptName", { get: () => acceptName, enumerable: true });
+  Object.defineProperty(__x, "cellKey", { get: () => cellKey, enumerable: true });
+  Object.defineProperty(__x, "makeModel", { get: () => makeModel, enumerable: true });
+  Object.defineProperty(__x, "cellList", { get: () => cellList, enumerable: true });
+  Object.defineProperty(__x, "getCell", { get: () => getCell, enumerable: true });
+  Object.defineProperty(__x, "applyOps", { get: () => applyOps, enumerable: true });
+  Object.defineProperty(__x, "stamp", { get: () => stamp, enumerable: true });
+  Object.defineProperty(__x, "acknowledge", { get: () => acknowledge, enumerable: true });
+  Object.defineProperty(__x, "deleteOps", { get: () => deleteOps, enumerable: true });
+  Object.defineProperty(__x, "restoreOps", { get: () => restoreOps, enumerable: true });
+  Object.defineProperty(__x, "restorePoints", { get: () => restorePoints, enumerable: true });
+  Object.defineProperty(__x, "tile", { get: () => tile, enumerable: true });
+  Object.defineProperty(__x, "toTSV", { get: () => toTSV, enumerable: true });
+  Object.defineProperty(__x, "fromTSV", { get: () => fromTSV, enumerable: true });
+  Object.defineProperty(__x, "toHTML", { get: () => toHTML, enumerable: true });
+  Object.defineProperty(__x, "colLetters", { get: () => colLetters, enumerable: true });
+  Object.defineProperty(__x, "SECTION_BAND", { get: () => SECTION_BAND, enumerable: true });
+  Object.defineProperty(__x, "LAYOUT", { get: () => LAYOUT, enumerable: true });
+  Object.defineProperty(__x, "gridFromModel", { get: () => gridFromModel, enumerable: true });
+  Object.defineProperty(__x, "metaValues", { get: () => metaValues, enumerable: true });
+  Object.defineProperty(__x, "modelFromView", { get: () => modelFromView, enumerable: true });
+  Object.defineProperty(__x, "cellHistory", { get: () => cellHistory, enumerable: true });
+  Object.defineProperty(__x, "rowHistory", { get: () => rowHistory, enumerable: true });
+  Object.defineProperty(__x, "describeCellValue", { get: () => describeCellValue, enumerable: true });
+  Object.defineProperty(__x, "staffingIssues", { get: () => staffingIssues, enumerable: true });
+};
+
+// ui/rc_la_state.js
+__mods["ui/rc_la_state.js"] = function (__x, __req) {
+  /**
+   * What the look-ahead tab is showing, shared by its sections.
+   *
+   * The tab was one 2,400-line module, and its sections reached into each other's
+   * `let`s — "Show cells" in the cancellation log set the calendar's filter and
+   * section directly. Split into a module per section, that state lives here as
+   * one object, because an ES module cannot reassign another's binding and the
+   * linker forbids `export let` anyway. Also the one table helper they share.
+   *
+   * Imports: util.
+   */
+
+  const { el } = __req("core/util.js");
+
+  const la = {
+    /** Which section is on screen. */
+    section: 'calendar',
+    /** Free text filter on the calendar, kept across a redraw of the section. */
+    calendarFilter: '',
+    /**
+     * Whether rows nobody highlighted are drawn. Off by default: most of the sheet
+     * is activities carried for reference with nothing scheduled against them.
+     */
+    showQuietRows: false,
+    /** Whether the names on each activity's Resource row are drawn. */
+    showResources: true,
+    /** How much of the calendar to show, in weeks from this one; 0 is everything. */
+    calendarWeeks: 4,
+    /** 'workbook' until the look-ahead is written in the calendar, then 'editor'. */
+    source: 'workbook',
+    /** Whether somebody picked a section, so the tab stops choosing one for them. */
+    sectionChosen: false,
+    /** How many weeks the editor shows: four, or five to see one more ahead. */
+    editorWeeks: 4,
+  };
+
+  const WEEK_CHOICES = [
+    { weeks: 2, label: '2 weeks' },
+    { weeks: 3, label: '3 weeks' },
+    { weeks: 4, label: '4 weeks' },
+    { weeks: 5, label: '5 weeks' },
+    { weeks: 0, label: 'Everything' },
+  ];
+
+  /* ── Shared ────────────────────────────────────────────────────────────── */
+
+  function table(headers, rows) {
+    return el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [el('tr', {}, headers.map((h) => el('th', { text: h })))]),
+        el('tbody', {}, rows),
+      ]),
+    ]);
+  }
+
+  Object.defineProperty(__x, "la", { get: () => la, enumerable: true });
+  Object.defineProperty(__x, "WEEK_CHOICES", { get: () => WEEK_CHOICES, enumerable: true });
+  Object.defineProperty(__x, "table", { get: () => table, enumerable: true });
+};
+
+// ui/rc_inbox.js
+__mods["ui/rc_inbox.js"] = function (__x, __req) {
+  /**
+   * The administrator's inbox — everything waiting on an administrator, in one
+   * list.
+   *
+   * None of it is new information. Leave requests are in PTO, names the roster
+   * cannot place are in the week plan, unmapped colours in Legend, cancellations
+   * without a reason in the log, unowned blockers in the huddle, unanswered
+   * invitations in Accounts. Five screens, each of which somebody had to think to
+   * open. This reads the same sources and lists what is outstanding, each item a
+   * press from the screen that answers it — and a leave request is answered
+   * right here, because that is one button either way.
+   *
+   * Every source is read on its own and a failed read is reported as a line of
+   * its own, never as an empty inbox: "nothing is waiting" and "I could not
+   * look" are different answers, and only one of them lets somebody stop
+   * worrying.
+   *
+   * Reads only, apart from answering leave. What an administrator may do is
+   * still decided in Postgres; this is where they are told there is something
+   * to do.
+   *
+   * Imports: util, rc, core/lookahead, core/la_edit, icons, components, rc_util,
+   *          rc_la_state.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const { cancellationEvents, attachCancellationNotes } = __req("core/lookahead.js");
+  const ed = __req("core/la_edit.js");
+  const { icon } = __req("ui/icons.js");
+  const { toast, badge, emptyState } = __req("ui/components.js");
+  const { notifyChanged, goToTab, dayLabel, todayISO, orgNav, nameRegister, resourceAssignments, absenceAssignments, lookaheadWithResources, locationRegister, unmatchedLocations } = __req("ui/rc_util.js");
+
+
+
+  const { la } = __req("ui/rc_la_state.js");
+
+  /* ── Where each item is answered ───────────────────────────────────────── */
+
+  function openOrg(section) {
+    orgNav.section = section;
+    goToTab('org');
+  }
+
+  function openLookahead(section) {
+    la.section = section;
+    la.sectionChosen = true;
+    goToTab('lookahead');
+  }
+
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+  /* ── Reading ───────────────────────────────────────────────────────────── */
+
+  /**
+   * What is waiting, as `[{ id, area, tone, title, detail, actions }]` — each
+   * action `{ label, run, primary? }`. Grouped where one answer settles many
+   * (every unplaceable name is one visit to the week plan), itemised where each
+   * is its own decision (every leave request).
+   */
+  async function inboxItems() {
+    const today = todayISO();
+    const monday = ed.mondayOf(today);
+    const horizon = ed.addDaysISO(monday, 5 * 7 - 1);
+    const items = [];
+    const failed = [];
+    const attempt = async (area, fn) => {
+      try {
+        await fn();
+      } catch (err) {
+        failed.push({ area, message: err?.message || String(err) });
+      }
+    };
+
+    const [people, kinds] = await Promise.all([
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+      rc.listLeaveKinds().catch(() => []),
+    ]);
+    const personName = (id) => people.find((p) => p.id === id)?.name || 'Somebody';
+    const kindName = (id) => kinds.find((k) => k.id === id)?.name || 'leave';
+
+    await Promise.all([
+      /* Leave asked for. Each one is a decision, so each one is an item. */
+      attempt('Leave requests', async () => {
+        for (const l of await rc.pendingLeave()) {
+          const span = l.start_date === l.end_date
+            ? dayLabel(l.start_date)
+            : `${dayLabel(l.start_date)} – ${dayLabel(l.end_date)}`;
+          items.push({
+            id: `leave:${l.id}`,
+            area: 'Leave',
+            tone: 'warn',
+            title: `${personName(l.person_id)} asked for ${kindName(l.kind_id)}`,
+            detail: [span, l.note].filter(Boolean).join(' · '),
+            actions: [
+              { label: 'Approve', primary: true, run: () => answerLeave(l, 'approved') },
+              { label: 'Decline', run: () => answerLeave(l, 'declined') },
+            ],
+          });
+        }
+      }),
+
+      /* Names and places on the look-ahead the registers cannot place. */
+      attempt('Names and locations', async () => {
+        const [aliases, locations, locAliases, sheet] = await Promise.all([
+          rc.listPersonAliases().catch(() => []),
+          rc.listLocations({ includeInactive: true }).catch(() => []),
+          rc.listLocationAliases().catch(() => []),
+          lookaheadWithResources(monday, horizon),
+        ]);
+        const register = nameRegister(people, aliases);
+        const names = [
+          ...resourceAssignments(sheet.rows, register).unmatched,
+          ...absenceAssignments(sheet.absences, register).unmatched,
+        ];
+        const unique = [...new Map(names.map((n) => [n.name.toLowerCase(), n])).values()];
+        if (unique.length) {
+          items.push({
+            id: 'names',
+            area: 'Look-ahead',
+            tone: 'warn',
+            title: `${plural(unique.length, 'name')} on the look-ahead ${unique.length === 1 ? 'matches' : 'match'} nobody on the roster`,
+            detail: unique.slice(0, 8).map((n) => `"${n.name}"`).join(', ') + (unique.length > 8 ? ` and ${unique.length - 8} more` : '')
+              + ' — say who each one is once, and it is settled.',
+            actions: [{ label: 'Answer in Week plan', primary: true, run: () => goToTab('week') }],
+          });
+        }
+        const places = unmatchedLocations(sheet.rows, locationRegister(locations, locAliases));
+        if (places.length) {
+          items.push({
+            id: 'locations',
+            area: 'Look-ahead',
+            tone: 'info',
+            title: `${plural(places.length, 'location')} on the look-ahead ${places.length === 1 ? 'is' : 'are'} not on the register`,
+            detail: places.slice(0, 8).map((p) => `"${p.name}"`).join(', ') + ' — add each as a location, or as another spelling of one.',
+            actions: [{ label: 'Open Locations', primary: true, run: () => openOrg('locations') }],
+          });
+        }
+      }),
+
+      /* Colours on the sheet the legend does not explain. */
+      attempt('Legend', async () => {
+        const [meta] = await rc.listSnapshotMeta({ limit: 1 });
+        const n = Number(meta?.unmapped_count || 0);
+        if (n) {
+          items.push({
+            id: 'colours',
+            area: 'Look-ahead',
+            tone: 'warn',
+            title: `${plural(n, 'colour')} on the look-ahead ${n === 1 ? 'means' : 'mean'} nothing yet`,
+            detail: 'Until the legend says what it is, a painted day in that colour is drawn as possible work and counted as nothing.',
+            actions: [{ label: 'Open Legend', primary: true, run: () => openLookahead('legend') }],
+          });
+        }
+      }),
+
+      /* Support codes typed that nobody registered — the editor's own sheet. */
+      attempt('Support codes', async () => {
+        const settings = await rc.listSettings().catch(() => []);
+        if (settings.find((r) => r.key === 'lookahead_source')?.value !== 'editor') return;
+        const [rows, cells, codes] = await Promise.all([
+          rc.listLaRows(),
+          rc.listLaCells(monday, horizon),
+          rc.listSupportCodes({ includeRetired: true }),
+        ]);
+        const activities = new Set(rows.filter((r) => r.kind === 'activity' && !r.archived).map((r) => r.id));
+        const unknown = new Set();
+        for (const c of cells) {
+          if (!activities.has(c.row_id) || !c.text) continue;
+          if (!/^[A-Za-z0-9]{1,8}(\.[A-Za-z0-9]{1,8})*$/.test(String(c.text).trim())) continue;
+          for (const u of ed.parseSupport(c.text, codes).unknown) unknown.add(u);
+        }
+        if (unknown.size) {
+          items.push({
+            id: 'codes',
+            area: 'Look-ahead',
+            tone: 'info',
+            title: `${plural(unknown.size, 'support code')} on the look-ahead ${unknown.size === 1 ? 'is' : 'are'} not registered`,
+            detail: `${[...unknown].join(', ')} — kept exactly as typed, and marked in the editor until somebody says what ${unknown.size === 1 ? 'it asks' : 'they ask'} for.`,
+            actions: [{ label: 'Open Legend', primary: true, run: () => openLookahead('legend') }],
+          });
+        }
+      }),
+
+      /* Cancellations nobody has said anything about. */
+      attempt('Cancellations', async () => {
+        const settings = await rc.listSettings().catch(() => []);
+        const from = settings.find((x) => x.key === 'cancellation_log_from')?.value || `${today.slice(0, 4)}-09-01`;
+        const [days, notes] = await Promise.all([rc.listCancelledDays(from), rc.listCancellationNotes().catch(() => [])]);
+        const open = attachCancellationNotes(cancellationEvents(days, { from }), notes).filter((e) => !e.note);
+        if (open.length) {
+          items.push({
+            id: 'cancellations',
+            area: 'Look-ahead',
+            tone: 'bad',
+            title: `${plural(open.length, 'cancellation')} with no reason yet`,
+            detail: open.slice(0, 4).map((e) => `${e.label || 'An activity'} (${dayLabel(e.start)})`).join('; ')
+              + (open.length > 4 ? `; and ${open.length - 4} more` : '')
+              + ' — the log is the claim, and a cancellation with no party is one nobody can argue.',
+            actions: [{ label: 'Open the log', primary: true, run: () => openLookahead('cancellations') }],
+          });
+        }
+      }),
+
+      /* Blocked days nobody has taken on. */
+      attempt('Blockers', async () => {
+        const blockers = (await rc.listBlockers()).filter((b) => !b.owner_id);
+        for (const b of blockers.slice(0, 10)) {
+          items.push({
+            id: `blocker:${b.id}`,
+            area: 'Huddle',
+            tone: 'bad',
+            title: `Blocked, and nobody owns it: ${b.summary || 'no summary'}`,
+            detail: `Raised by ${personName(b.person_id)} ${b.age_days != null ? `${plural(Number(b.age_days), 'day')} ago` : ''}`.trim(),
+            actions: [{ label: 'Open the huddle', primary: true, run: () => goToTab('huddle') }],
+          });
+        }
+      }),
+
+      /* Invitations sent and not yet taken up. */
+      attempt('Invitations', async () => {
+        const pending = await rc.listInvitations();
+        const expired = pending.filter((i) => i.pending_expired);
+        const waiting = pending.filter((i) => !i.pending_expired);
+        if (expired.length) {
+          items.push({
+            id: 'invites:expired',
+            area: 'Accounts',
+            tone: 'warn',
+            title: `${plural(expired.length, 'invitation')} expired before ${expired.length === 1 ? 'it was' : 'they were'} used`,
+            detail: expired.map((i) => i.pending_email).join(', '),
+            actions: [{ label: 'Open Accounts', primary: true, run: () => openOrg('accounts') }],
+          });
+        }
+        if (waiting.length) {
+          items.push({
+            id: 'invites:waiting',
+            area: 'Accounts',
+            tone: 'info',
+            title: `${plural(waiting.length, 'invitation')} not accepted yet`,
+            detail: waiting.map((i) => i.pending_email).join(', '),
+            actions: [{ label: 'Open Accounts', run: () => openOrg('accounts') }],
+          });
+        }
+      }),
+
+      /* Something broke on somebody's screen in the last week. */
+      attempt('Problems', async () => {
+        const since = Date.now() - 7 * 86400000;
+        const recent = (await rc.listClientErrors(50)).filter((e) => Date.parse(e.created_at) >= since);
+        if (recent.length) {
+          items.push({
+            id: 'problems',
+            area: 'Problems',
+            tone: 'info',
+            title: `${plural(recent.length, 'problem')} reported this week`,
+            detail: [...new Set(recent.map((e) => e.area))].slice(0, 5).join(', '),
+            actions: [{ label: 'Open Problems', run: () => openOrg('problems') }],
+          });
+        }
+      }),
+
+      /* The database older than the application. */
+      attempt('Database', async () => {
+        const { state, expected, found } = await rc.schemaStatus();
+        if (state === 'behind') {
+          items.push({
+            id: 'schema',
+            area: 'Database',
+            tone: 'bad',
+            title: 'The calendar\'s database needs updating',
+            detail: `Database ${found || 'unversioned'}, application ${expected}. In the Supabase SQL editor, run supabase/migrate.sql and then supabase/rc_schema.sql.`,
+            actions: [],
+          });
+        }
+      }),
+    ]);
+
+    const order = { bad: 0, warn: 1, info: 2 };
+    items.sort((a, b) => order[a.tone] - order[b.tone]);
+    return { items, failed };
+  }
+
+  async function answerLeave(row, status) {
+    try {
+      await rc.updateLeave(row.id, { status });
+      toast({ tone: 'good', message: status === 'approved' ? 'Approved.' : 'Declined, and on the record as declined.' });
+      notifyChanged('leave');
+    } catch (err) {
+      toast({ tone: 'bad', message: err?.message || String(err) });
+    }
+  }
+
+  /**
+   * How many things are waiting — for the badge on the Organisation tab.
+   *
+   * The header is redrawn on every write, and the inbox reads a dozen sources;
+   * so the count is remembered for a minute. Opening the inbox itself always
+   * reads afresh, and refreshes this.
+   */
+  let counted = null; // { at, n }
+  async function inboxCount() {
+    if (counted && Date.now() - counted.at < 60000) return counted.n;
+    const { items } = await inboxItems();
+    counted = { at: Date.now(), n: items.length };
+    return counted.n;
+  }
+
+  /* ── Drawing ───────────────────────────────────────────────────────────── */
+
+  async function renderInbox(host) {
+    host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Waiting on you' })]));
+    const body = el('div', { class: 'rc-inbox', 'aria-busy': 'true' }, [
+      el('p', { class: 'rc-hint', text: 'Looking through leave, the look-ahead, blockers and accounts…' }),
+    ]);
+    host.appendChild(body);
+
+    const { items, failed } = await inboxItems();
+    counted = { at: Date.now(), n: items.length };
+    clear(body);
+    body.removeAttribute('aria-busy');
+
+    if (!items.length && !failed.length) {
+      body.appendChild(emptyState({
+        iconName: 'check',
+        title: 'Nothing is waiting on you',
+        message: 'No leave to answer, nothing on the look-ahead the registers cannot place, no cancellation without a reason and no blocker without an owner.',
+      }));
+      return;
+    }
+
+    const list = el('ul', { class: 'rc-inbox-list', 'aria-label': 'Waiting on you' });
+    for (const item of items) {
+      list.appendChild(el('li', { class: `rc-inbox-item rc-inbox-${item.tone}`, dataset: { id: item.id } }, [
+        el('span', { class: 'rc-inbox-area' }, [badge(item.area, item.tone)]),
+        el('div', { class: 'rc-inbox-text' }, [
+          el('div', { class: 'rc-inbox-title', text: item.title }),
+          item.detail ? el('div', { class: 'rc-inbox-detail', text: item.detail }) : null,
+        ].filter(Boolean)),
+        el('div', { class: 'rc-inbox-actions' }, item.actions.map((a) => el('button', {
+          class: `cx-btn mini${a.primary ? ' primary' : ' ghost'}`,
+          type: 'button',
+          text: a.label,
+          onClick: () => a.run(),
+        }))),
+      ]));
+    }
+    body.appendChild(list);
+
+    for (const f of failed) {
+      body.appendChild(el('p', { class: 'rc-hint rc-inbox-failed' }, [
+        el('span', { html: icon('alert', { size: 12 }), 'aria-hidden': 'true' }),
+        el('span', { text: ` Could not check ${f.area.toLowerCase()}: ${f.message}` }),
+      ]));
+    }
+  }
+
+  Object.defineProperty(__x, "inboxItems", { get: () => inboxItems, enumerable: true });
+  Object.defineProperty(__x, "inboxCount", { get: () => inboxCount, enumerable: true });
+  Object.defineProperty(__x, "renderInbox", { get: () => renderInbox, enumerable: true });
+};
+
+// ui/rc_settings.js
+__mods["ui/rc_settings.js"] = function (__x, __req) {
+  /**
+   * Organisation → Settings: the calendar's settings, changed on screen.
+   *
+   * They were always rows in `rc_settings`, and some could only be changed in the
+   * SQL editor — which meant they were not changed. Each is one field and a Save,
+   * written through `rc.setSetting()`, and the policy on `rc_settings` is what
+   * lets only an administrator write them; this screen is only shown to one.
+   *
+   * Switching the look-ahead's source is the one setting with consequences, so
+   * it is not a field: going back to the workbook asks first, exactly as the
+   * editor's own menu does, and adopting the editor goes to the editor, which
+   * has to import something before there is anything to write in.
+   *
+   * Imports: util, rc, components, rc_util, rc_la_state.
+   */
+
+  const { el } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const { textInput, toast, confirmDialog, badge } = __req("ui/components.js");
+  const { notifyChanged, goToTab, dayLabel } = __req("ui/rc_util.js");
+  const { la } = __req("ui/rc_la_state.js");
+
+  /** How long an editor-published reading is kept whole, unless somebody says otherwise. */
+  const DEFAULT_KEEP_DAYS = 60;
+
+  const value = (settings, key) => settings.find((r) => r.key === key)?.value ?? null;
+
+  async function renderSettings(host) {
+    const settings = await rc.listSettings().catch(() => []);
+    const source = value(settings, 'lookahead_source') || 'workbook';
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Settings' })]));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'What the calendar is set to. Only an administrator can change these — the database refuses anybody else.',
+    }));
+
+    const list = el('div', { class: 'rc-settings' });
+    host.appendChild(list);
+
+    /* ── The look-ahead ─────────────────────────────────────────────────── */
+    list.appendChild(group('The look-ahead'));
+
+    list.appendChild(row({
+      label: 'Where it is written',
+      hint: source === 'editor'
+        ? 'In the calendar\'s own editor. "Check now" does not read the workbook while this is set.'
+        : 'In the Excel workbook, read on "Check now". Start writing it in the calendar from Look-ahead → Editor.',
+      control: el('div', { class: 'rc-settings-inline' }, [
+        badge(source === 'editor' ? 'The editor' : 'The workbook', source === 'editor' ? 'good' : 'neutral'),
+        source === 'editor'
+          ? el('button', {
+            class: 'cx-btn mini ghost danger', type: 'button', text: 'Go back to the workbook…',
+            onClick: async () => {
+              const ok = await confirmDialog({
+                title: 'Go back to reading the workbook?',
+                message: 'The calendar will read the .xlsx again the next time somebody presses Check now. '
+                  + 'Nothing written in the editor is deleted — it stays for the record, and you can come back to it.',
+                confirmLabel: 'Go back to the workbook',
+                danger: true,
+              });
+              if (!ok) return;
+              await save('lookahead_source', 'workbook', 'The look-ahead is read from the workbook again.');
+              la.source = 'workbook';
+              la.section = 'calendar';
+            },
+          })
+          : el('button', {
+            class: 'cx-btn mini', type: 'button', text: 'Open the editor',
+            onClick: () => {
+              la.section = 'editor';
+              la.sectionChosen = true;
+              goToTab('lookahead');
+            },
+          }),
+      ]),
+    }));
+
+    list.appendChild(textRow({
+      key: 'lookahead_title',
+      label: 'Title on the export',
+      hint: 'Printed across the top of the Excel export.',
+      current: value(settings, 'lookahead_title') || '',
+      placeholder: 'Four Week Look-Ahead',
+      said: (v) => (v ? `The export is titled "${v}".` : 'The export has no title.'),
+    }));
+
+    list.appendChild(textRow({
+      key: 'lookahead_sheet',
+      label: 'Sheet in the workbook',
+      hint: 'The tab the grid is on, when the look-ahead is read from the workbook. Never guessed.',
+      current: value(settings, 'lookahead_sheet') || '4WLA',
+      placeholder: '4WLA',
+      required: true,
+      said: (v) => `The workbook is read from the "${v}" sheet.`,
+    }));
+
+    list.appendChild(textRow({
+      key: 'cancellation_log_from',
+      label: 'Cancellation log starts on',
+      hint: 'The first day the cancellation log counts — a date from the contract, not from the code.',
+      current: value(settings, 'cancellation_log_from') || '',
+      type: 'date',
+      required: true,
+      said: (v) => `The cancellation log starts on ${dayLabel(v)}.`,
+    }));
+
+    /* ── Keeping the record tidy ────────────────────────────────────────── */
+    list.appendChild(group('Housekeeping'));
+    list.appendChild(textRow({
+      key: 'snapshot_keep_days',
+      label: 'Keep every editor reading for',
+      hint: 'The editor publishes a reading whenever it goes quiet. Older than this, only the last reading of each day is kept; '
+        + 'every workbook read, every reading a SAR or a cancellation points at, and the change register are kept regardless.',
+      current: value(settings, 'snapshot_keep_days') || String(DEFAULT_KEEP_DAYS),
+      type: 'number',
+      suffix: 'days',
+      required: true,
+      check: (v) => (Number.isInteger(Number(v)) && Number(v) >= 14 ? null : 'At least 14 days, in whole days.'),
+      said: (v) => `Editor readings are kept whole for ${v} days.`,
+    }));
+
+    /* ── What this is ───────────────────────────────────────────────────── */
+    list.appendChild(group('About'));
+    const status = await rc.schemaStatus().catch(() => ({ state: 'unknown' }));
+    list.appendChild(row({
+      label: 'Database version',
+      hint: status.state === 'behind'
+        ? 'Behind this application. Run supabase/migrate.sql and then supabase/rc_schema.sql in the Supabase SQL editor.'
+        : 'Set by rc_schema.sql when it is run.',
+      control: el('div', { class: 'rc-settings-inline' }, [
+        el('span', { class: 'rc-settings-mono', text: String(status.found ?? value(settings, 'schema_version') ?? '—') }),
+        status.state === 'behind' ? badge('Needs updating', 'bad') : null,
+      ].filter(Boolean)),
+    }));
+  }
+
+  function group(title) {
+    return el('div', { class: 'rc-settings-group', text: title });
+  }
+
+  function row({ label, hint, control }) {
+    return el('div', { class: 'rc-settings-row' }, [
+      el('div', { class: 'rc-settings-label' }, [
+        el('div', { class: 'rc-settings-name', text: label }),
+        hint ? el('div', { class: 'rc-hint', text: hint }) : null,
+      ].filter(Boolean)),
+      el('div', { class: 'rc-settings-control' }, [control]),
+    ]);
+  }
+
+  /**
+   * A setting that is a piece of text, a date or a number: the field, and a Save
+   * that stays greyed until something changed. Enter saves too.
+   */
+  function textRow({ key, label, hint, current, placeholder = '', type = 'text', suffix = '', required = false, check = null, said }) {
+    const input = textInput({ value: current, placeholder });
+    input.type = type;
+    input.setAttribute('aria-label', label);
+    input.dataset.setting = key;
+    if (type === 'number') { input.min = '14'; input.step = '1'; input.style.width = '90px'; }
+    const button = el('button', { class: 'cx-btn mini', type: 'button', text: 'Save', disabled: true });
+    const sync = () => { button.disabled = input.value.trim() === String(current).trim(); };
+    input.addEventListener('input', sync);
+    const commit = async () => {
+      const v = input.value.trim();
+      if (v === String(current).trim()) return;
+      if (required && !v) {
+        toast({ tone: 'warn', message: `${label} cannot be empty.` });
+        return;
+      }
+      const problem = check?.(v);
+      if (problem) {
+        toast({ tone: 'warn', message: problem });
+        return;
+      }
+      if (await save(key, v, said(v))) {
+        current = v;
+        sync();
+      }
+    };
+    button.addEventListener('click', commit);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(); });
+    return row({
+      label,
+      hint,
+      control: el('div', { class: 'rc-settings-inline' }, [
+        input,
+        suffix ? el('span', { class: 'rc-hint', style: 'margin:0', text: suffix }) : null,
+        button,
+      ].filter(Boolean)),
+    });
+  }
+
+  async function save(key, v, message) {
+    try {
+      await rc.setSetting(key, v);
+      toast({ tone: 'good', message });
+      notifyChanged('settings');
+      return true;
+    } catch (err) {
+      toast({ tone: 'bad', message: err?.message || String(err) });
+      return false;
+    }
+  }
+
+  Object.defineProperty(__x, "DEFAULT_KEEP_DAYS", { get: () => DEFAULT_KEEP_DAYS, enumerable: true });
+  Object.defineProperty(__x, "renderSettings", { get: () => renderSettings, enumerable: true });
+};
+
 // ui/rc_roster.js
 __mods["ui/rc_roster.js"] = function (__x, __req) {
   /**
@@ -1025,7 +2861,8 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
    * "doc" typed one week against "documentation" the next are two categories to a
    * database and one to a person.
    *
-   * Imports: util, events, dates, rc, icons, components, rc_util.
+   * Imports: util, events, dates, rc, icons, components, rc_util, rc_inbox,
+   *          rc_settings.
    */
 
   const { el, clear } = __req("core/util.js");
@@ -1034,12 +2871,15 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
   const { textInput, selectInput, toast, confirmDialog, promptDialog, field, badge, checkbox, emptyState } = __req("ui/components.js");
 
 
-  const { notifyChanged, byId, dayLabel, todayISO, formModal } = __req("ui/rc_util.js");
+  const { notifyChanged, byId, dayLabel, todayISO, formModal, orgNav } = __req("ui/rc_util.js");
+  const { renderInbox } = __req("ui/rc_inbox.js");
+  const { renderSettings } = __req("ui/rc_settings.js");
 
-  const SECTIONS = ['people', 'locations', 'categories', 'leave', 'accounts', 'problems'];
+  const SECTIONS = ['inbox', 'people', 'locations', 'categories', 'leave', 'accounts', 'problems', 'settings'];
   // Readable by an administrator alone, in the policies as well as here.
-  const ADMIN_SECTIONS = new Set(['accounts', 'problems']);
-  let section = 'people';
+  const ADMIN_SECTIONS = new Set(['inbox', 'accounts', 'problems', 'settings']);
+  // An administrator opens Organisation on what is waiting for them.
+  let section = null;
 
   /**
    * The three roles, in one place, worded as the consequence rather than the
@@ -1097,6 +2937,10 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
     // returns nothing to anybody else — so a viewer is offered a tab that opens
     // onto a wall. It comes out of the row rather than explaining itself.
     const visible = rc.isAdmin() ? SECTIONS : SECTIONS.filter((id) => !ADMIN_SECTIONS.has(id));
+    if (orgNav.section) {
+      section = orgNav.section;
+      orgNav.section = null;
+    }
     if (!visible.includes(section)) section = visible[0];
 
     const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
@@ -1118,7 +2962,9 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
     const host = el('div');
     root.appendChild(host);
 
-    if (section === 'people') await renderPeople(host);
+    if (section === 'inbox') await renderInbox(host);
+    else if (section === 'settings') await renderSettings(host);
+    else if (section === 'people') await renderPeople(host);
     else if (section === 'locations') await renderLocations(host);
     else if (section === 'categories') await renderCategories(host);
     else if (section === 'accounts') await renderAccounts(host);
@@ -2049,6 +3895,8 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       await rc.recordActual(entry);
       return { sent: true };
     } catch (err) {
+      // Refused because an administrator is only previewing: nothing to replay.
+      if (err?.preview) return { sent: false, error: err };
       const queue = readQueue();
       queue.push(entry);
       writeQueue(queue);
@@ -3344,7 +5192,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
       blockedPartyId: keep?.blocked_party_id || null,
       supersedesId: supersedes?.id || null,
     });
-    if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
+    if (!sent) toast({ tone: 'warn', message: error?.preview ? error.message : `Saved locally — ${error.message}` });
 
     /* A carried task is going to be done tomorrow, and re-typing it is both slow
        and how the chain used to get broken. Rolling it forward here is the only
@@ -3518,7 +5366,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           supersedesId: current?.id || null,
         };
         const { sent, error } = await record(entry);
-        if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
+        if (!sent) toast({ tone: 'warn', message: error?.preview ? error.message : `Saved locally — ${error.message}` });
 
         /* The outcome says a day was lost; the blocker is the thing somebody has
            to do about it. Raised separately and after, so a failure here leaves
@@ -3611,6 +5459,269 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "pendingCount", { get: () => pendingCount, enumerable: true });
   Object.defineProperty(__x, "flushQueue", { get: () => flushQueue, enumerable: true });
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+};
+
+// ui/rc_myday.js
+__mods["ui/rc_myday.js"] = function (__x, __req) {
+  /**
+   * My day — the calendar for one person: today, the next working day, and the
+   * rest of the week at a glance.
+   *
+   * Everything else in the calendar is about the team: a grid of people down and
+   * days across, a meeting that goes round the room. Somebody opening it on a
+   * phone at six in the morning wants one answer — where am I today, on what,
+   * with whom, and what about tomorrow — and had to find their own row to get it.
+   *
+   * It is a reading, not a second plan. The day comes from `assignmentIndex()`,
+   * the same function the week plan and the huddle read, so the 4WLA's names rows
+   * are the plan for the days they name and a stored entry is somebody overriding
+   * it. **Outcomes are shown, not recorded:** the huddle is the one path an
+   * outcome is entered through, and a second one here would be two that could
+   * disagree on screen. What was recorded against your last day is shown, as the
+   * week plan shows it.
+   *
+   * Imports: util, dates, rc, icons, components, rc_util.
+   */
+
+  const { el } = __req("core/util.js");
+  const { toISO, addDays } = __req("core/dates.js");
+  const rc = __req("core/rc.js");
+  const { icon } = __req("ui/icons.js");
+  const { badge, emptyState } = __req("ui/components.js");
+  const { byId, dayLabel, todayISO, isoToMs, weekStart, goToTab, STATUS_BY_ID, SHIFTS, nameRegister, assignmentIndex, availability, lookaheadWithResources } = __req("ui/rc_util.js");
+
+
+
+
+  const ABSENCE_WORDS = { pto: 'Off — on the PTO row', office: 'In the office', other: 'On another project' };
+
+  /** The next day this person works, after `iso`. */
+  function nextWorkingDay(person, iso) {
+    const working = Array.isArray(person?.working_days) ? person.working_days : [1, 2, 3, 4, 5];
+    let ms = addDays(isoToMs(iso), 1);
+    for (let i = 0; i < 14; i++) {
+      const weekday = new Date(ms).getUTCDay() || 7;
+      if (working.includes(weekday)) return toISO(ms);
+      ms = addDays(ms, 1);
+    }
+    return toISO(addDays(isoToMs(iso), 1));
+  }
+
+  async function render(root) {
+    const who = rc.me();
+    const today = todayISO();
+    const monday = toISO(weekStart(isoToMs(today)));
+
+    const [everybody, aliases] = await Promise.all([
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+      rc.listPersonAliases().catch(() => []),
+    ]);
+    const person = everybody.find((p) => p.id === who?.id) || who;
+    const next = nextWorkingDay(person, today);
+    // The week and whatever the next working day reaches into.
+    const until = [toISO(addDays(isoToMs(monday), 6)), next].sort().pop();
+
+    const [planRows, sheet, leave, actuals, locations, categories, blockers] = await Promise.all([
+      rc.listPlan(monday, until).catch(() => []),
+      lookaheadWithResources(monday, toISO(addDays(weekStart(isoToMs(until)), 6))).catch(() => ({ rows: [], absences: [] })),
+      rc.listLeave(monday, until).catch(() => []),
+      rc.listActuals(toISO(addDays(isoToMs(today), -14)), today).catch(() => []),
+      rc.listLocations({ includeInactive: true }).catch(() => []),
+      rc.listCategories().catch(() => []),
+      rc.listBlockers().catch(() => []),
+    ]);
+
+    const index = assignmentIndex({
+      planRows,
+      laRows: sheet.rows,
+      absences: sheet.absences,
+      categories,
+      register: nameRegister(everybody, aliases),
+    });
+    const locs = byId(locations);
+    const names = byId(everybody);
+
+    const ctx = { person, index, leave, locs, names, planRows };
+
+    /* ── Greeting ─────────────────────────────────────────────────────── */
+    const first = String(person?.name || '').trim().split(/\s+/)[0] || 'there';
+    root.appendChild(el('div', { class: 'rc-myday-head' }, [
+      el('div', {}, [
+        el('div', { class: 'rc-eyebrow', text: dayLabel(today, 'dayFull') }),
+        el('h2', { class: 'rc-myday-hello', text: `${greeting()}, ${first}` }),
+      ]),
+      el('button', {
+        class: 'cx-btn mini ghost', type: 'button',
+        html: `${icon('calendar', { size: 12 })}<span>My week plan</span>`,
+        onClick: () => goToTab('week'),
+      }),
+    ]));
+
+    const cards = el('div', { class: 'rc-myday-cards' }, [
+      dayCard(ctx, today, 'Today'),
+      dayCard(ctx, next, next === toISO(addDays(isoToMs(today), 1)) ? 'Tomorrow' : `Next working day`),
+    ]);
+    root.appendChild(cards);
+
+    /* ── The week at a glance ─────────────────────────────────────────── */
+    root.appendChild(weekStrip(ctx, monday, today));
+
+    /* ── What was said about your last day ────────────────────────────── */
+    const mine = actuals
+      .filter((a) => a.person_id === person?.id)
+      .sort((a, b) => String(b.work_date).localeCompare(String(a.work_date)));
+    const last = mine[0];
+    const owned = blockers.filter((b) => b.owner_id === person?.id);
+    root.appendChild(el('div', { class: 'rc-myday-foot' }, [
+      el('section', { class: 'rc-myday-note', 'aria-label': 'Your last recorded day' }, [
+        el('h3', { text: 'Your last recorded day' }),
+        last
+          ? el('div', { class: 'rc-myday-outcome' }, [
+            badge(STATUS_BY_ID.get(last.status)?.label || last.status, STATUS_BY_ID.get(last.status)?.tone || 'neutral'),
+            el('span', { text: dayLabel(String(last.work_date).slice(0, 10)) }),
+            last.task ? el('span', { class: 'rc-hint', text: last.task }) : null,
+            last.note ? el('div', { class: 'rc-myday-said', text: `“${last.note}”` }) : null,
+          ].filter(Boolean))
+          : el('p', { class: 'rc-hint', text: 'Nothing recorded in the last fortnight.' }),
+        el('p', { class: 'rc-hint', text: 'Outcomes are recorded in the daily huddle.' }),
+      ]),
+      owned.length
+        ? el('section', { class: 'rc-myday-note', 'aria-label': 'Blockers you are chasing' }, [
+          el('h3', { text: 'You are chasing' }),
+          ...owned.map((b) => el('div', { class: 'rc-myday-blocker' }, [
+            badge('Blocked', 'bad'),
+            el('span', { text: b.summary || 'A blocked day' }),
+            b.due_date ? el('span', { class: 'rc-hint', text: `due ${dayLabel(String(b.due_date).slice(0, 10))}` }) : null,
+          ].filter(Boolean))),
+        ])
+        : null,
+    ].filter(Boolean)));
+  }
+
+  function greeting() {
+    const h = new Date().getHours();
+    if (h < 12) return 'Good morning';
+    if (h < 18) return 'Good afternoon';
+    return 'Good evening';
+  }
+
+  /**
+   * One day, for one person: every task on it, where, on which shift and with
+   * whom — or that they are off, and why.
+   */
+  function dayCard({ person, index, leave, locs, names, planRows }, iso, title) {
+    const card = el('section', { class: 'rc-myday-card', 'aria-label': `${title}, ${dayLabel(iso)}`, dataset: { day: iso } });
+    card.appendChild(el('div', { class: 'rc-myday-card-head' }, [
+      el('h3', { text: title }),
+      el('span', { class: 'rc-hint', text: dayLabel(iso, 'day') }),
+    ]));
+
+    const absent = index.absent(person.id, iso);
+    const state = availability(person, iso, leave, absent);
+    if (state.state === 'leave') {
+      card.appendChild(el('div', { class: 'rc-myday-off' }, [
+        el('span', { html: icon('sun', { size: 18 }), 'aria-hidden': 'true' }),
+        el('span', { text: state.leave ? 'On leave' : 'Off — on the PTO row' }),
+      ]));
+      return card;
+    }
+    if (state.state === 'non-working') {
+      card.appendChild(el('p', { class: 'rc-hint', text: 'Not one of your working days.' }));
+      return card;
+    }
+
+    const tasks = index.on(person.id, iso);
+    if (!tasks.length) {
+      card.appendChild(emptyState({
+        iconName: 'calendar',
+        title: 'Nothing planned yet',
+        message: 'The look-ahead does not name you on this day and nobody has planned it. Ask in the huddle, or plan it in your week plan.',
+      }));
+    }
+    for (const t of tasks) {
+      if (t.absence) {
+        card.appendChild(el('div', { class: 'rc-myday-task' }, [
+          el('div', { class: 'rc-myday-task-title', text: ABSENCE_WORDS[t.absence] || t.task || 'Away from the project' }),
+        ]));
+        continue;
+      }
+      const where = locs.get(t.location_id)?.name || t.raw_location || '';
+      const shift = SHIFTS.find((s) => s.id === t.shift)?.label || '';
+      const others = withWhom({ index, names, planRows }, person.id, iso, t);
+      card.appendChild(el('div', { class: 'rc-myday-task' }, [
+        el('div', { class: 'rc-myday-task-title', text: t.task || 'A task with no description' }),
+        el('div', { class: 'rc-myday-facts' }, [
+          where ? fact('pin', where) : null,
+          shift ? fact('clock', `${shift} shift`) : null,
+          others.length ? fact('users', `With ${others.join(', ')}`) : fact('user', 'On your own'),
+          t.from_lookahead ? null : fact('edit', 'Planned by hand'),
+        ].filter(Boolean)),
+      ]));
+    }
+    if (state.asked) {
+      card.appendChild(el('p', { class: 'rc-hint', text: 'You have asked for leave on this day; nobody has answered yet.' }));
+    }
+    return card;
+  }
+
+  function weekdayOf(iso) {
+    return new Date(`${iso}T00:00:00Z`).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', timeZone: 'UTC' });
+  }
+
+  function fact(iconName, text) {
+    return el('span', { class: 'rc-myday-fact' }, [
+      el('span', { html: icon(iconName, { size: 12 }), 'aria-hidden': 'true' }),
+      el('span', { text }),
+    ]);
+  }
+
+  /**
+   * Who else is on the same piece of work that day: everybody the look-ahead's
+   * names row puts on the same row, and anybody planned against the same row by
+   * hand. Matched on the row, never on the wording of a task.
+   */
+  function withWhom({ index, names, planRows }, meId, iso, task) {
+    const rowId = task.lookahead_row_id;
+    if (!rowId) return [];
+    const ids = new Set();
+    for (const [personId, days] of index.byPerson) {
+      if (personId === meId) continue;
+      if ((days.get(iso) || []).some((r) => r.id === rowId)) ids.add(personId);
+    }
+    for (const p of planRows) {
+      if (p.person_id !== meId && p.work_date === iso && p.lookahead_row_id === rowId) ids.add(p.person_id);
+    }
+    return [...ids].map((id) => names.get(id)?.name).filter(Boolean).sort();
+  }
+
+  /** Monday to Sunday: where you are each day, in a word. */
+  function weekStrip({ person, index, leave, locs }, monday, today) {
+    const strip = el('ol', { class: 'rc-myday-week', 'aria-label': 'Your week' });
+    for (let i = 0; i < 7; i++) {
+      const iso = toISO(addDays(isoToMs(monday), i));
+      const state = availability(person, iso, leave, index.absent(person.id, iso));
+      const tasks = state.state === 'available' ? index.on(person.id, iso) : [];
+      let text = '';
+      if (state.state === 'leave') text = 'Off';
+      else if (state.state === 'non-working') text = '—';
+      else if (!tasks.length) text = 'Nothing yet';
+      else {
+        text = [...new Set(tasks.map((t) => (t.absence ? (ABSENCE_WORDS[t.absence] || 'Away').split(' ')[0]
+          : locs.get(t.location_id)?.code || locs.get(t.location_id)?.name || t.raw_location || 'Task')))].join(', ');
+      }
+      strip.appendChild(el('li', {
+        class: `rc-myday-day${iso === today ? ' rc-myday-today' : ''}${state.state !== 'available' ? ' rc-myday-quiet' : ''}`,
+        'aria-current': iso === today ? 'date' : null,
+        title: tasks.map((t) => t.task).filter(Boolean).join('\n'),
+      }, [
+        el('span', { class: 'rc-myday-wd', text: weekdayOf(iso) }),
+        el('span', { class: 'rc-myday-where', text }),
+      ]));
+    }
+    return el('section', { class: 'rc-myday-weekwrap' }, [el('h3', { text: 'This week' }), strip]);
+  }
+
   Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
 };
 
@@ -4089,1259 +6200,6 @@ __mods["io/rc_pdf.js"] = function (__x, __req) {
   Object.defineProperty(__x, "calendarPdf", { get: () => calendarPdf, enumerable: true });
   Object.defineProperty(__x, "calendarFit", { get: () => calendarFit, enumerable: true });
   Object.defineProperty(__x, "PAGE_CHOICES", { get: () => PAGE_CHOICES, enumerable: true });
-};
-
-// ui/rc_la_state.js
-__mods["ui/rc_la_state.js"] = function (__x, __req) {
-  /**
-   * What the look-ahead tab is showing, shared by its sections.
-   *
-   * The tab was one 2,400-line module, and its sections reached into each other's
-   * `let`s — "Show cells" in the cancellation log set the calendar's filter and
-   * section directly. Split into a module per section, that state lives here as
-   * one object, because an ES module cannot reassign another's binding and the
-   * linker forbids `export let` anyway. Also the one table helper they share.
-   *
-   * Imports: util.
-   */
-
-  const { el } = __req("core/util.js");
-
-  const la = {
-    /** Which section is on screen. */
-    section: 'calendar',
-    /** Free text filter on the calendar, kept across a redraw of the section. */
-    calendarFilter: '',
-    /**
-     * Whether rows nobody highlighted are drawn. Off by default: most of the sheet
-     * is activities carried for reference with nothing scheduled against them.
-     */
-    showQuietRows: false,
-    /** Whether the names on each activity's Resource row are drawn. */
-    showResources: true,
-    /** How much of the calendar to show, in weeks from this one; 0 is everything. */
-    calendarWeeks: 4,
-    /** 'workbook' until the look-ahead is written in the calendar, then 'editor'. */
-    source: 'workbook',
-    /** Whether somebody picked a section, so the tab stops choosing one for them. */
-    sectionChosen: false,
-    /** How many weeks the editor shows: four, or five to see one more ahead. */
-    editorWeeks: 4,
-  };
-
-  const WEEK_CHOICES = [
-    { weeks: 2, label: '2 weeks' },
-    { weeks: 3, label: '3 weeks' },
-    { weeks: 4, label: '4 weeks' },
-    { weeks: 5, label: '5 weeks' },
-    { weeks: 0, label: 'Everything' },
-  ];
-
-  /* ── Shared ────────────────────────────────────────────────────────────── */
-
-  function table(headers, rows) {
-    return el('div', { class: 'rc-scroll' }, [
-      el('table', { class: 'rc-table' }, [
-        el('thead', {}, [el('tr', {}, headers.map((h) => el('th', { text: h })))]),
-        el('tbody', {}, rows),
-      ]),
-    ]);
-  }
-
-  Object.defineProperty(__x, "la", { get: () => la, enumerable: true });
-  Object.defineProperty(__x, "WEEK_CHOICES", { get: () => WEEK_CHOICES, enumerable: true });
-  Object.defineProperty(__x, "table", { get: () => table, enumerable: true });
-};
-
-// core/la_edit.js
-__mods["core/la_edit.js"] = function (__x, __req) {
-  /**
-   * The look-ahead, edited in the application rather than in Excel.
-   *
-   * The workbook used to be the source of truth and the calendar read it. Now the
-   * calendar *is* the source: two administrators edit rows and cells here, and
-   * an Excel file is something the calendar produces for whoever copies the rows
-   * into the project's master look-ahead. This module is the whole of that model
-   * with nothing attached — no DOM, no network — so every rule in it is tested in
-   * Node (`tools/test_lookahead.js`).
-   *
-   * The model is two lists, mirroring the two tables in `rc_schema.sql`:
-   *
-   *   rows   { id, kind, parent_id, sort, level, activity_id, description,
-   *            location, sswp, party, work_hours, absence_kind, archived, version }
-   *   cells  { row_id, day, color, text, version }       (keyed `row_id|day`)
-   *
-   * `kind` is one of four things a row on the 4WLA has always been:
-   *
-   *   section   a heading band ("W40 — Testing and Commissioning")
-   *   activity  a line of work, painted by day, with the support it needs typed
-   *             in the cell ("X.WIT")
-   *   resource  the names under an activity — `parent_id` is that activity, and
-   *             it moves with it
-   *   absence   a PTO / Office / Other group row of names, belonging to nobody
-   *
-   * **The editor publishes the same shape the workbook used to produce.**
-   * `gridFromModel()` writes a grid exactly as `parseSheet()` would have read it
-   * from an .xlsx — heading row, month band, day numbers, weekday letters, then
-   * the rows — so the calendar, the week plan, the huddle, PTO, the cancellation
-   * log and the change register all keep reading what they always read. Nothing
-   * downstream had to learn that the workbook went away.
-   *
-   * Every edit is an *op*, and every op has an inverse (`applyOps()` returns it),
-   * which is the whole of undo. The same ops go to the database through
-   * `rc_la_apply()`, stamped with the versions they expect (`stamp()`), so two
-   * people changing one cell at once get a refusal rather than a silent winner.
-   *
-   * Imports: core/lookahead (a leaf).
-   */
-
-  const { absenceKind, ABSENCE_LABELS, resourceNames } = __req("core/lookahead.js");
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Days
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const MS_DAY = 86400000;
-  const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
-  const WEEKDAY_LETTERS = ['Su', 'M', 'Tu', 'W', 'Th', 'F', 'Sa'];
-
-  /** The editor shows four weeks by default and five at most. */
-  const WINDOW_WEEKS = [4, 5];
-
-  const isoMs = (iso) => Date.parse(`${iso}T00:00:00Z`);
-  const msIso = (ms) => new Date(ms).toISOString().slice(0, 10);
-
-  function addDaysISO(iso, n) {
-    return msIso(isoMs(iso) + n * MS_DAY);
-  }
-
-  /** The Monday on or before a date. */
-  function mondayOf(iso) {
-    const dow = new Date(isoMs(iso)).getUTCDay();
-    return addDaysISO(iso, -((dow + 6) % 7));
-  }
-
-  /** Seven days a week for `weeks` weeks, from the Monday of `fromISO`. */
-  function windowDays(fromISO, weeks = 4) {
-    const start = mondayOf(fromISO);
-    return Array.from({ length: weeks * 7 }, (_, i) => addDaysISO(start, i));
-  }
-
-  function isWeekend(iso) {
-    const dow = new Date(isoMs(iso)).getUTCDay();
-    return dow === 0 || dow === 6;
-  }
-
-  function weekdayLetter(iso) {
-    return WEEKDAY_LETTERS[new Date(isoMs(iso)).getUTCDay()];
-  }
-
-  function monthLabel(iso) {
-    return MONTHS[new Date(isoMs(iso)).getUTCMonth()];
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Rows
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const KINDS = ['section', 'activity', 'resource', 'absence'];
-
-  /** The six columns left of the calendar, in the order the 4WLA prints them. */
-  const FIELDS = [
-    { key: 'activity_id', heading: 'Activity ID', width: 20.5703125 },
-    { key: 'description', heading: 'Description of Work Activity', width: 57.140625 },
-    { key: 'location', heading: 'Location', width: 28.5703125 },
-    { key: 'sswp', heading: 'SSWP#', width: 8.140625 },
-    { key: 'party', heading: 'Party to Action', width: 8.140625 },
-    { key: 'work_hours', heading: 'Work Hours', width: 15.5703125 },
-  ];
-
-  function blankRow(kind, extra = {}) {
-    return {
-      id: extra.id || newId(),
-      kind,
-      parent_id: null,
-      sort: 0,
-      level: 0,
-      activity_id: '',
-      description: kind === 'resource' ? 'Resource' : '',
-      location: '',
-      sswp: '',
-      party: '',
-      work_hours: '',
-      absence_kind: null,
-      archived: false,
-      version: 0,
-      ...extra,
-    };
-  }
-
-  /** A uuid made here, so a row exists — and can be undone — before the server has it. */
-  function newId() {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-    const hex = () => Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0');
-    return `${hex()}${hex()}-${hex()}-4${hex().slice(1)}-a${hex().slice(1)}-${hex()}${hex()}${hex()}`;
-  }
-
-  /**
-   * The rows in the order the sheet shows them.
-   *
-   * Top-level rows by `sort`, and each activity followed by its Resource rows —
-   * so moving an activity carries its names with it without anybody having to
-   * move them too, which is the mistake the workbook invited every week.
-   */
-  function orderedRows(rows, { archived = false } = {}) {
-    const live = rows.filter((r) => archived || !r.archived);
-    const bySort = (a, b) => (a.sort - b.sort) || String(a.id).localeCompare(String(b.id));
-    const children = new Map();
-    for (const r of live) {
-      if (r.kind === 'resource' && r.parent_id) {
-        if (!children.has(r.parent_id)) children.set(r.parent_id, []);
-        children.get(r.parent_id).push(r);
-      }
-    }
-    const top = live.filter((r) => !(r.kind === 'resource' && r.parent_id && live.some((p) => p.id === r.parent_id)));
-    const out = [];
-    for (const r of top.sort(bySort)) {
-      out.push(r);
-      for (const c of (children.get(r.id) || []).sort(bySort)) out.push(c);
-    }
-    return out;
-  }
-
-  /**
-   * A section and everything under it, as indexes into `ordered`.
-   *
-   * Down to the next section at the same level or above. That is what "the rows
-   * in this section" has always meant on the sheet, and it is what moving,
-   * collapsing and deleting a section act on.
-   */
-  function sectionBlock(ordered, index) {
-    const head = ordered[index];
-    if (!head || head.kind !== 'section') return [index, index];
-    let end = index;
-    for (let i = index + 1; i < ordered.length; i++) {
-      const r = ordered[i];
-      if (r.kind === 'section' && (r.level || 0) <= (head.level || 0)) break;
-      end = i;
-    }
-    return [index, end];
-  }
-
-  /** An activity with its Resource rows; any other row alone. */
-  function rowBlock(ordered, index) {
-    const row = ordered[index];
-    if (!row) return [index, index];
-    if (row.kind === 'section') return sectionBlock(ordered, index);
-    let end = index;
-    if (row.kind === 'activity') {
-      while (ordered[end + 1]?.kind === 'resource' && ordered[end + 1].parent_id === row.id) end++;
-    }
-    return [index, end];
-  }
-
-  /**
-   * A sort key between two neighbours.
-   *
-   * Plain numbers, midpoints between them. A thousand inserts at one spot would
-   * run out of precision, which is what `respace()` is for — the editor calls it
-   * when two neighbours come within a hair of each other.
-   */
-  function sortBetween(before, after) {
-    if (before == null && after == null) return 1024;
-    if (before == null) return after - 1024;
-    if (after == null) return before + 1024;
-    return (before + after) / 2;
-  }
-
-  function needsRespace(ordered) {
-    const top = ordered.filter((r) => r.kind !== 'resource');
-    for (let i = 1; i < top.length; i++) {
-      if (Math.abs(top[i].sort - top[i - 1].sort) < 1e-6) return true;
-    }
-    return false;
-  }
-
-  /** Evenly spaced sort keys for every top-level row, as ops. */
-  function respace(ordered) {
-    let n = 0;
-    const ops = [];
-    for (const r of ordered) {
-      if (r.kind === 'resource') continue;
-      n += 1024;
-      if (r.sort !== n) ops.push({ op: 'row', id: r.id, set: { sort: n } });
-    }
-    return ops;
-  }
-
-  /**
-   * The rows worth printing for a window of days, in sheet order.
-   *
-   * An activity with a colour, a code or a name on one of those days — its own
-   * cells or its Resource row's — with its Resource rows whatever they hold,
-   * because the pair is one thing on the sheet; the sections that have such an
-   * activity under them, nested sections included; and the PTO / Office / Other
-   * group rows always, because they are the frame the track allocation manager
-   * copies. This is what "only the current data" means for the export.
-   */
-  function rowsWithWork(model, days) {
-    const ordered = orderedRows(model.rows);
-    const inDays = new Set(days);
-    const busy = new Set(cellList(model).filter((c) => inDays.has(c.day) && (c.text || c.color)).map((c) => c.row_id));
-    const keep = new Array(ordered.length).fill(false);
-    let liveBelow = false;
-    for (let i = ordered.length - 1; i >= 0; i--) {
-      const r = ordered[i];
-      if (r.kind === 'resource') continue;
-      if (r.kind === 'absence') { keep[i] = true; continue; }
-      if (r.kind === 'activity') {
-        const kids = ordered.filter((k) => k.kind === 'resource' && k.parent_id === r.id);
-        keep[i] = busy.has(r.id) || kids.some((k) => busy.has(k.id));
-        if (keep[i]) liveBelow = true;
-        continue;
-      }
-      keep[i] = liveBelow || (ordered[i + 1]?.kind === 'section' && keep[i + 1]);
-      liveBelow = false;
-    }
-    return ordered.filter((r, i) => (r.kind === 'resource'
-      ? keep[ordered.findIndex((p) => p.id === r.parent_id)]
-      : keep[i]));
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Support codes
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * The support written in one cell: "X.WIT" is an EIC and a BART witness,
-   * "X.X" is two EICs.
-   *
-   * The workbook's own convention, read as it is typed: pieces between dots,
-   * spacing ignored, case ignored. A piece nobody has registered is still
-   * returned — marked, never dropped and never guessed at, because an unknown
-   * code is a request nobody can staff until somebody says what it is.
-   */
-  function supportTokens(text) {
-    return String(text ?? '')
-      .split('.')
-      .map((t) => t.trim().toUpperCase())
-      .filter(Boolean);
-  }
-
-  function parseSupport(text, codes) {
-    const known = new Set((codes || []).filter((c) => c.active !== false).map((c) => String(c.code).toUpperCase()));
-    const tokens = supportTokens(text).map((code) => ({ code, known: known.has(code) }));
-    return { tokens, unknown: [...new Set(tokens.filter((t) => !t.known).map((t) => t.code))] };
-  }
-
-  /** Tidy what was typed into the form the sheet writes: "x . wit" → "X.WIT". */
-  function normaliseSupport(text) {
-    const tokens = supportTokens(text);
-    return tokens.length ? tokens.join('.') : '';
-  }
-
-  /**
-   * How much of each kind of support is asked for.
-   *
-   * Counted over activity rows only — a Resource row holds names, not codes — and
-   * per day, per code; `byRow` gives the same count for each activity across the
-   * whole window, which is what the activity's own panel shows.
-   */
-  function supportTotals(model, days) {
-    const daySet = new Set(days);
-    const byDay = new Map(days.map((d) => [d, new Map()]));
-    const byRow = new Map();
-    const kinds = new Map(model.rows.map((r) => [r.id, r]));
-    for (const cell of cellList(model)) {
-      const row = kinds.get(cell.row_id);
-      if (!row || row.kind !== 'activity' || row.archived || !daySet.has(cell.day)) continue;
-      for (const code of supportTokens(cell.text)) {
-        const day = byDay.get(cell.day);
-        day.set(code, (day.get(code) || 0) + 1);
-        if (!byRow.has(row.id)) byRow.set(row.id, new Map());
-        const r = byRow.get(row.id);
-        r.set(code, (r.get(code) || 0) + 1);
-      }
-    }
-    return { byDay, byRow };
-  }
-
-  /** "2 X · 1 WIT", in the order the register lists the codes. */
-  function describeCounts(counts, codes) {
-    if (!counts || !counts.size) return '';
-    const order = (codes || []).map((c) => String(c.code).toUpperCase());
-    return [...counts.entries()]
-      .sort((a, b) => {
-        const ia = order.indexOf(a[0]);
-        const ib = order.indexOf(b[0]);
-        return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib) || a[0].localeCompare(b[0]);
-      })
-      .map(([code, n]) => `${n} ${code}`)
-      .join(' · ');
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Cancellations, as the log will know them
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * The label and location the cancellation log will give this row's days.
-   *
-   * The log is derived from what is published (`rowsFrom()` → `rc_lookahead_rows`
-   * → `rc_cancelled_days`), and a note is matched to an event by exactly these
-   * two strings — so a note recorded at the moment somebody paints a day red has
-   * to be keyed the way the log will key the event, or it will never be found.
-   * `tools/test_la_edit.js` holds this to what `rowsFrom()` actually produces.
-   */
-  function cancellationKey(row) {
-    const meta = metaValues(row);
-    return {
-      raw_label: meta.filter(Boolean).join(' · '),
-      raw_location: row.location || '',
-    };
-  }
-
-  /**
-   * Runs of consecutive days per row, from a list of `{ row, day }` — "Monday to
-   * Wednesday on the IXL row" is one cancellation, as the log counts it.
-   */
-  function dayRuns(items) {
-    const byRow = new Map();
-    for (const { row, day } of items) {
-      if (!byRow.has(row.id)) byRow.set(row.id, { row, days: new Set() });
-      byRow.get(row.id).days.add(day);
-    }
-    const runs = [];
-    for (const { row, days } of byRow.values()) {
-      const sorted = [...days].sort();
-      let start = sorted[0];
-      let prev = sorted[0];
-      for (const d of sorted.slice(1)) {
-        if (d === addDaysISO(prev, 1)) { prev = d; continue; }
-        runs.push({ row, start, end: prev });
-        start = d;
-        prev = d;
-      }
-      if (start) runs.push({ row, start, end: prev });
-    }
-    return runs;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Names from the roster
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const foldWord = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-
-  /**
-   * What to write for each person on the roster.
-   *
-   * The sheet is written in first names — "Adam, Jimmy" — and the calendar's
-   * name register matches a first name only when exactly one person answers to
-   * it. So a suggestion writes the first name where that is unambiguous and the
-   * full name where two people share it: what is written is always something the
-   * register will place, which is the point of suggesting it.
-   */
-  function nameChoices(people) {
-    const live = (people || []).filter((p) => p && p.name && p.active !== false);
-    const firsts = new Map();
-    for (const p of live) {
-      const first = foldWord(p.name).split(' ')[0];
-      firsts.set(first, (firsts.get(first) || 0) + 1);
-    }
-    return live
-      .map((p) => {
-        const first = String(p.name).trim().split(/\s+/)[0];
-        const unique = firsts.get(foldWord(first)) === 1;
-        return { insert: unique ? first : String(p.name).trim(), full: String(p.name).trim() };
-      })
-      .sort((a, b) => a.insert.localeCompare(b.insert));
-  }
-
-  /** The name being typed: whatever follows the last separator. */
-  function currentToken(text) {
-    const pieces = String(text ?? '').split(/,|\/|&|\+|\n|\band\b/i);
-    return pieces[pieces.length - 1].replace(/^\s+/, '');
-  }
-
-  /**
-   * Roster names that fit what is being typed, best first — a first name or a
-   * surname starting with it — leaving out anybody already in the cell.
-   */
-  function suggestNames(text, choices, limit = 6) {
-    const token = foldWord(currentToken(text));
-    if (!token) return [];
-    const already = new Set(String(text ?? '').split(/[,/&+\n]|\band\b/i).map(foldWord).filter(Boolean));
-    const scored = [];
-    for (const c of choices || []) {
-      if (already.has(foldWord(c.insert)) || already.has(foldWord(c.full))) continue;
-      const words = foldWord(c.full).split(' ');
-      let score = -1;
-      if (foldWord(c.insert).startsWith(token)) score = 0;
-      else if (words.some((w) => w.startsWith(token))) score = 1;
-      else if (foldWord(c.full).includes(token)) score = 2;
-      if (score >= 0) scored.push({ ...c, score });
-    }
-    return scored.sort((a, b) => a.score - b.score || a.insert.localeCompare(b.insert)).slice(0, limit);
-  }
-
-  /** The cell's text with the name being typed replaced by a chosen one. */
-  function acceptName(text, insert) {
-    const t = String(text ?? '');
-    const token = currentToken(t);
-    const head = t.slice(0, t.length - token.length);
-    return `${head}${head && !/[\s]$/.test(head) ? ' ' : ''}${insert}`;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The model and its ops
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const cellKey = (rowId, day) => `${rowId}|${day}`;
-
-  function makeModel(rows = [], cells = []) {
-    const map = new Map();
-    for (const c of cells) map.set(cellKey(c.row_id, c.day), { ...c });
-    return { rows: rows.map((r) => ({ ...r })), cells: map };
-  }
-
-  function cellList(model) {
-    return [...model.cells.values()];
-  }
-
-  function getCell(model, rowId, day) {
-    return model.cells.get(cellKey(rowId, day)) || null;
-  }
-
-  const ROW_FIELDS = ['kind', 'parent_id', 'sort', 'level', 'activity_id', 'description', 'location',
-    'sswp', 'party', 'work_hours', 'absence_kind', 'archived'];
-
-  /**
-   * Apply ops to the model in place, and return the ops that undo them.
-   *
-   *   { op: 'row', id, set: {…fields} }          create (with `kind`) or change a row
-   *   { op: 'delete_row', id }                    remove a row (its cells go with it)
-   *   { op: 'cell', row_id, day, color, text }    set a cell; blank both to clear it
-   *
-   * The inverse of a batch is its ops' inverses in reverse order, so an undo puts
-   * back exactly what was there — a deleted activity returns with its cells, its
-   * Resource rows and their names, because deleting it was all of those ops.
-   */
-  function applyOps(model, ops) {
-    const inverse = [];
-    for (const op of ops) {
-      if (op.op === 'row') {
-        const at = model.rows.findIndex((r) => r.id === op.id);
-        if (at < 0) {
-          const row = { ...blankRow(op.set?.kind || 'activity', { id: op.id }), ...op.set, version: 0 };
-          model.rows.push(row);
-          inverse.push({ op: 'delete_row', id: op.id });
-        } else {
-          const row = model.rows[at];
-          const before = {};
-          for (const k of Object.keys(op.set || {})) {
-            if (!ROW_FIELDS.includes(k)) continue;
-            before[k] = row[k];
-          }
-          model.rows[at] = { ...row, ...pick(op.set, ROW_FIELDS) };
-          inverse.push({ op: 'row', id: op.id, set: before });
-        }
-      } else if (op.op === 'delete_row') {
-        const at = model.rows.findIndex((r) => r.id === op.id);
-        if (at < 0) continue;
-        const row = model.rows[at];
-        // The cells first, so undoing recreates the row before it refills them.
-        const cells = cellList(model).filter((c) => c.row_id === op.id);
-        for (const c of cells) model.cells.delete(cellKey(c.row_id, c.day));
-        model.rows.splice(at, 1);
-        const restore = [{ op: 'row', id: row.id, set: pick(row, ROW_FIELDS) }];
-        for (const c of cells) restore.push({ op: 'cell', row_id: c.row_id, day: c.day, color: c.color || null, text: c.text || '' });
-        inverse.push(...restore.reverse());
-      } else if (op.op === 'cell') {
-        const key = cellKey(op.row_id, op.day);
-        const was = model.cells.get(key) || null;
-        const color = op.color ? String(op.color).toUpperCase() : null;
-        const text = String(op.text ?? '');
-        if (!color && !text) model.cells.delete(key);
-        else model.cells.set(key, { row_id: op.row_id, day: op.day, color, text, version: was?.version || 0 });
-        inverse.push({ op: 'cell', row_id: op.row_id, day: op.day, color: was?.color || null, text: was?.text || '' });
-      }
-    }
-    return inverse.reverse();
-  }
-
-  function pick(obj, keys) {
-    const out = {};
-    for (const k of keys) if (obj && k in obj) out[k] = obj[k];
-    return out;
-  }
-
-  /**
-   * The versions each op expects to find, from the model *before* it is applied.
-   *
-   * Done at send time rather than when the op was made, because an undo is sent
-   * long after it was recorded, against whatever the row has become since.
-   */
-  function stamp(model, ops) {
-    return ops.map((op) => {
-      if (op.op === 'cell') return { ...op, expect: getCell(model, op.row_id, op.day)?.version || 0 };
-      const row = model.rows.find((r) => r.id === op.id);
-      return { ...op, expect: row ? row.version || 0 : 0 };
-    });
-  }
-
-  /** Record the versions the server answered with. */
-  function acknowledge(model, results) {
-    for (const r of results || []) {
-      if (r.kind === 'cell') {
-        const c = model.cells.get(cellKey(r.row_id, r.day));
-        if (c) c.version = r.version;
-      } else if (r.kind === 'row') {
-        const row = model.rows.find((x) => x.id === r.id);
-        if (row) row.version = r.version;
-      }
-    }
-  }
-
-  /** Ops that delete a row and everything that belongs to it, cells first. */
-  function deleteOps(model, ids) {
-    const want = new Set(ids);
-    for (const r of model.rows) if (r.kind === 'resource' && want.has(r.parent_id)) want.add(r.id);
-    const ops = [];
-    for (const c of cellList(model)) {
-      if (want.has(c.row_id)) ops.push({ op: 'cell', row_id: c.row_id, day: c.day, color: null, text: '' });
-    }
-    // Children before parents: a Resource row points at its activity.
-    const rows = model.rows.filter((r) => want.has(r.id)).sort((a, b) => (b.kind === 'resource') - (a.kind === 'resource'));
-    for (const r of rows) ops.push({ op: 'delete_row', id: r.id });
-    return ops;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Going back to an earlier moment
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * The ops that put the look-ahead back the way it was before `edits`.
-   *
-   * `edits` are rows of `rc_la_edits` — everything recorded from some moment on,
-   * in any order. For each row and each day they touched, the *earliest* of them
-   * says what was there before: its `before`, or nothing at all if it was an
-   * insert. The result is ordinary ops, so a restore is itself an edit — saved,
-   * recorded in the log, and undone with one Ctrl+Z like anything else — rather
-   * than a rewrite of history, which the log does not allow anyway.
-   *
-   * Ordered so every op is legal when it runs: rows that come back (parents
-   * before their names rows), then cells, then rows that go (names rows first,
-   * with their cells cleared ahead of them). Nothing that is already as it was is
-   * touched.
-   */
-  function restoreOps(model, edits) {
-    const first = new Map();
-    for (const e of [...(edits || [])].sort((a, b) => Number(a.id) - Number(b.id))) {
-      const key = e.target === 'cell' ? `cell:${e.row_id}|${String(e.day).slice(0, 10)}` : `row:${e.row_id}`;
-      if (!first.has(key)) first.set(key, e);
-    }
-    const rowsNow = new Map(model.rows.map((r) => [r.id, r]));
-    const restoreRows = [];
-    const removeRows = [];
-    const cells = [];
-    const willExist = new Set(model.rows.map((r) => r.id));
-
-    for (const [key, e] of first) {
-      if (!key.startsWith('row:')) continue;
-      const was = e.action === 'insert' ? null : e.before;
-      const now = rowsNow.get(e.row_id) || null;
-      if (!was) {
-        if (now) { removeRows.push(now); willExist.delete(now.id); }
-        continue;
-      }
-      willExist.add(e.row_id);
-      const set = pick(was, ROW_FIELDS);
-      if (set.sort != null) set.sort = Number(set.sort);
-      if (set.level != null) set.level = Number(set.level);
-      if (now) {
-        const changed = Object.keys(set).filter((k) => String(now[k] ?? '') !== String(set[k] ?? ''));
-        if (changed.length) restoreRows.push({ op: 'row', id: e.row_id, set: Object.fromEntries(changed.map((k) => [k, set[k]])) });
-      } else {
-        restoreRows.push({ op: 'row', id: e.row_id, set });
-      }
-    }
-
-    for (const [key, e] of first) {
-      if (!key.startsWith('cell:')) continue;
-      if (!willExist.has(e.row_id)) continue; // goes with its row
-      const day = String(e.day).slice(0, 10);
-      const was = e.action === 'insert' ? null : e.before;
-      const color = was?.color ? String(was.color).toUpperCase() : null;
-      const text = was?.text || '';
-      const now = getCell(model, e.row_id, day);
-      if ((now?.color || null) === color && (now?.text || '') === text) continue;
-      cells.push({ op: 'cell', row_id: e.row_id, day, color, text });
-    }
-
-    const creates = restoreRows.sort((a, b) => ((a.set.kind === 'resource') - (b.set.kind === 'resource')));
-    const removals = deleteOps(model, removeRows.map((r) => r.id));
-    return [...creates, ...cells, ...removals];
-  }
-
-  /**
-   * Restore points: the log grouped into the saves that made it, newest first —
-   * "Tuesday 16:02, Dana, 12 changes" — which is how anybody remembers an edit.
-   */
-  function restorePoints(edits) {
-    const batches = new Map();
-    for (const e of edits || []) {
-      const b = batches.get(e.batch) || { batch: e.batch, firstId: Number(e.id), at: e.at, by: e.by, count: 0, rows: new Set() };
-      b.count++;
-      b.rows.add(e.row_id);
-      if (Number(e.id) < b.firstId) { b.firstId = Number(e.id); b.at = e.at; }
-      batches.set(e.batch, b);
-    }
-    return [...batches.values()].sort((a, b) => b.firstId - a.firstId).map((b) => ({ ...b, rows: b.rows.size }));
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Selections: fill and clipboard
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Repeat a block of cells across a larger area, the way Excel's fill handle
-   * does: the pattern tiles, so dragging "X.WIT on yellow, blank, blank" along a
-   * row repeats it every three days.
-   */
-  function tile(source, height, width) {
-    const h = source.length;
-    const w = source[0]?.length || 0;
-    if (!h || !w) return [];
-    return Array.from({ length: height }, (_, r) =>
-      Array.from({ length: width }, (_, c) => ({ ...source[r % h][c % w] })));
-  }
-
-  /** A block of `{ color, text }` as tab-separated text, which every spreadsheet reads. */
-  function toTSV(block) {
-    return block.map((row) => row.map((c) => String(c.text ?? '').replace(/[\t\r\n]+/g, ' ')).join('\t')).join('\r\n');
-  }
-
-  function fromTSV(text) {
-    const lines = String(text ?? '').replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n');
-    return lines.map((line) => line.split('\t').map((t) => ({ color: null, text: t.trim() })));
-  }
-
-  const escapeHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-  /**
-   * The same block as an HTML table, colours included — which is what Excel
-   * reads on paste, so painted cells arrive painted.
-   */
-  function toHTML(block) {
-    const rows = block.map((row) => `<tr>${row.map((c) => {
-      const bg = c.color ? ` style="background:#${c.color};mso-pattern:#${c.color} none"` : '';
-      return `<td${bg}>${escapeHtml(c.text)}</td>`;
-    }).join('')}</tr>`).join('');
-    return `<table>${rows}</table>`;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The published grid — the shape the rest of the calendar reads
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /** Spreadsheet column letters. */
-  function colLetters(n) {
-    let s = '';
-    while (n > 0) {
-      const m = (n - 1) % 26;
-      s = String.fromCharCode(65 + m) + s;
-      n = Math.floor((n - 1) / 26);
-    }
-    return s;
-  }
-
-  /** The grey the section bands are painted in, on the sheet and on the grid. */
-  const SECTION_BAND = 'D9D9D9';
-
-  /** Where things go on the sheet — shared by the published grid and the export. */
-  const LAYOUT = {
-    firstMetaCol: 2, // B
-    firstDayCol: 8, // H
-    titleRow: 1,
-    headingRow: 2, // B2:B6 … G2:G6, merged
-    monthRow: 4,
-    dayRow: 5,
-    weekdayRow: 6,
-    firstBodyRow: 7,
-  };
-
-  /**
-   * The model as a parsed workbook.
-   *
-   * Laid out as the 4WLA is — headings on row 2, the month band on 4, day numbers
-   * on 5, weekday letters on 6, rows from 7 — so `readGrid()` finds it exactly the
-   * way it found the file: by the weekday letters, not by a column number. A
-   * section band is painted across its six activity columns, which is how
-   * `readGrid()` has always told a heading from work, and never across the days,
-   * where paint would read as a shift.
-   */
-  function gridFromModel(model, days, { title = '' } = {}) {
-    const L = LAYOUT;
-    const rows = [];
-    const cell = (row, col, value, hex = null) => ({ col, ref: `${colLetters(col)}${row}`, value: value ?? '', hex });
-    const merges = [];
-
-    rows.push({ row: L.titleRow, label: '', cells: [cell(L.titleRow, L.firstMetaCol, title)] });
-    rows.push({
-      row: L.headingRow, label: '',
-      cells: FIELDS.map((f, i) => cell(L.headingRow, L.firstMetaCol + i, f.heading)),
-    });
-    FIELDS.forEach((_, i) => {
-      const col = colLetters(L.firstMetaCol + i);
-      merges.push(`${col}${L.headingRow}:${col}${L.weekdayRow}`);
-    });
-
-    const monthCells = [];
-    let lastMonth = null;
-    let runStart = 0;
-    days.forEach((d, i) => {
-      const m = monthLabel(d);
-      if (m !== lastMonth) {
-        if (lastMonth !== null && i - 1 > runStart) {
-          merges.push(`${colLetters(L.firstDayCol + runStart)}${L.monthRow}:${colLetters(L.firstDayCol + i - 1)}${L.monthRow}`);
-        }
-        monthCells.push(cell(L.monthRow, L.firstDayCol + i, m));
-        lastMonth = m;
-        runStart = i;
-      }
-    });
-    if (days.length && days.length - 1 > runStart) {
-      merges.push(`${colLetters(L.firstDayCol + runStart)}${L.monthRow}:${colLetters(L.firstDayCol + days.length - 1)}${L.monthRow}`);
-    }
-    rows.push({ row: L.monthRow, label: '', cells: monthCells });
-    rows.push({
-      row: L.dayRow, label: '',
-      cells: days.map((d, i) => cell(L.dayRow, L.firstDayCol + i, String(Number(d.slice(8, 10))))),
-    });
-    rows.push({
-      row: L.weekdayRow, label: '',
-      cells: days.map((d, i) => cell(L.weekdayRow, L.firstDayCol + i, weekdayLetter(d))),
-    });
-
-    let r = L.firstBodyRow;
-    for (const row of orderedRows(model.rows)) {
-      const cells = [];
-      const meta = metaValues(row);
-      const band = row.kind === 'section' ? SECTION_BAND : null;
-      meta.forEach((value, i) => {
-        if (value || band) cells.push(cell(r, L.firstMetaCol + i, value, band));
-      });
-      if (row.kind !== 'section') {
-        days.forEach((d, i) => {
-          const c = getCell(model, row.id, d);
-          if (c && (c.text || c.color)) cells.push(cell(r, L.firstDayCol + i, c.text || '', c.color || null));
-        });
-      }
-      rows.push({ row: r, label: '', cells });
-      r++;
-    }
-
-    return { sheet: '4WLA', rows, merges, hiddenColumns: [], conditional: [], unknown: [] };
-  }
-
-  /** The six activity-column values a row prints, in `FIELDS` order. */
-  function metaValues(row) {
-    if (row.kind === 'resource') return ['', 'Resource', '', '', '', ''];
-    if (row.kind === 'absence') {
-      const label = row.description || ABSENCE_LABELS[row.absence_kind] || 'PTO';
-      return ['', label, '', '', '', ''];
-    }
-    if (row.kind === 'section') return ['', row.description || '', '', '', '', ''];
-    return FIELDS.map((f) => String(row[f.key] ?? ''));
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Starting from the workbook
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Which of the sheet's activity columns is which field.
-   *
-   * By column where the sheet uses the 4WLA's own columns — B is the Activity ID
-   * and G the work hours whatever is filled in, and BART's file hides the heading
-   * row, so there is often no heading to read — and by heading otherwise.
-   */
-  function fieldIndexes(headings, metaCols) {
-    const cols = metaCols || [];
-    if (cols.length && cols.every((c) => c >= LAYOUT.firstMetaCol && c < LAYOUT.firstMetaCol + FIELDS.length)) {
-      const out = {};
-      FIELDS.forEach((f, i) => {
-        const at = cols.indexOf(LAYOUT.firstMetaCol + i);
-        if (at >= 0) out[f.key] = at;
-      });
-      return out;
-    }
-    return fieldIndexesByHeading(headings);
-  }
-
-  function fieldIndexesByHeading(headings) {
-    const tests = {
-      activity_id: /activity\s*id/i,
-      description: /descr|activity/i,
-      location: /location/i,
-      sswp: /sswp/i,
-      party: /party/i,
-      work_hours: /hour/i,
-    };
-    const out = {};
-    const used = new Set();
-    for (const key of ['activity_id', 'location', 'sswp', 'party', 'work_hours', 'description']) {
-      const i = (headings || []).findIndex((h, idx) => !used.has(idx) && tests[key].test(String(h || '')));
-      if (i >= 0) { out[key] = i; used.add(i); }
-    }
-    FIELDS.forEach((f, pos) => {
-      if (out[f.key] == null && !used.has(pos) && pos < (headings || []).length) { out[f.key] = pos; used.add(pos); }
-    });
-    return out;
-  }
-
-  /**
-   * The editor's first contents, from a reading of the old workbook.
-   *
-   * `view` is `readGrid()` of a legend-applied grid, dated. What comes across is
-   * what is still ahead: an activity with a shift, a support code or a name from
-   * `fromISO` on; the sections that have such activities under them; the
-   * PTO / Office / Other group rows always, because they are the frame of the
-   * sheet. The past, the hidden rows and columns and the weekend shading stay
-   * behind with the old file.
-   *
-   * Only paint the legend calls a **shift** is carried — Day, Swing, Night,
-   * Blanket, Cancellation — because the editor paints with nothing else. Shading,
-   * section bands and colours nobody has named are counted in the report and
-   * left behind, never guessed at.
-   */
-  function modelFromView(view, { fromISO, toISO = null, legend = [] } = {}) {
-    const shift = new Map();
-    for (const e of legend || []) {
-      if ((e.role || 'shift') === 'shift' && e.meaning) shift.set(String(e.argb).toUpperCase(), e.meaning);
-    }
-    const report = { activities: 0, sections: 0, resources: 0, absences: 0, cells: 0, droppedColours: 0, past: 0 };
-    const dayOf = new Map((view.days || []).filter((d) => d.date).map((d) => [d.col, d.date]));
-    const inWindow = (date) => date && date >= fromISO && (!toISO || date <= toISO);
-    const idx = fieldIndexes(view.headings, view.meta);
-
-    const pending = []; // rows in sheet order, each with its cells
-    const cellsOf = (marks, keepColour) => {
-      const out = [];
-      for (const m of marks || []) {
-        const day = dayOf.get(m.col);
-        if (!day) continue;
-        if (!inWindow(day)) { report.past++; continue; }
-        let color = m.hex ? String(m.hex).toUpperCase() : null;
-        if (color && (!keepColour || !shift.has(color))) {
-          report.droppedColours++;
-          color = null;
-        }
-        const text = String(m.value ?? '').trim();
-        if (!color && !text) continue;
-        out.push({ day, color, text });
-      }
-      return out;
-    };
-
-    for (const a of view.activities || []) {
-      if (a.heading) {
-        pending.push({ kind: 'section', description: a.meta.find(Boolean) || '', cells: [] });
-        continue;
-      }
-      if (a.absence) {
-        pending.push({
-          kind: 'absence',
-          absence_kind: a.absence,
-          description: a.meta.find((v) => absenceKind(v)) || ABSENCE_LABELS[a.absence],
-          cells: cellsOf(a.marks, false),
-        });
-        continue;
-      }
-      const fields = {};
-      for (const f of FIELDS) fields[f.key] = idx[f.key] != null ? (a.meta[idx[f.key]] || '') : '';
-      const cells = cellsOf(a.marks, true);
-      const names = a.resource ? cellsOf(a.resource.marks, false) : [];
-      pending.push({ kind: 'activity', ...fields, cells, resource: a.resource ? names : null, live: cells.length > 0 || names.length > 0 });
-    }
-
-    /* Which sections stay: those with a live activity under them, and a section
-       directly above another kept section — the workbook nests "PHASE 2" over
-       "W40 — Testing" over "IXL (W40)", and keeping only the innermost would
-       orphan the others. Walked backwards, as `drawn()` does. */
-    const keep = new Array(pending.length).fill(false);
-    let liveBelow = false;
-    for (let i = pending.length - 1; i >= 0; i--) {
-      const p = pending[i];
-      if (p.kind === 'activity') {
-        keep[i] = p.live;
-        if (p.live) liveBelow = true;
-      } else if (p.kind === 'absence') {
-        keep[i] = true;
-      } else {
-        keep[i] = liveBelow || (pending[i + 1]?.kind === 'section' && keep[i + 1]);
-        liveBelow = false;
-      }
-    }
-
-    const rows = [];
-    const cells = [];
-    let sort = 0;
-    pending.forEach((p, i) => {
-      if (!keep[i]) return;
-      sort += 1024;
-      const row = blankRow(p.kind, {
-        sort,
-        description: p.description || '',
-        absence_kind: p.absence_kind || null,
-      });
-      if (p.kind === 'activity') for (const f of FIELDS) row[f.key] = p[f.key] || '';
-      rows.push(row);
-      report[{ section: 'sections', activity: 'activities', absence: 'absences' }[p.kind]]++;
-      for (const c of p.cells) {
-        const text = p.kind === 'activity' ? normaliseSupportIfCodes(c.text) : c.text;
-        cells.push({ row_id: row.id, day: c.day, color: c.color, text, version: 0 });
-      }
-      if (p.resource) {
-        const res = blankRow('resource', { parent_id: row.id, sort: sort + 1 });
-        rows.push(res);
-        report.resources++;
-        for (const c of p.resource) cells.push({ row_id: res.id, day: c.day, color: null, text: c.text, version: 0 });
-      }
-    });
-    report.cells = cells.length;
-    return { model: makeModel(rows, cells), report };
-  }
-
-  /** "X " → "X", "x.wit" → "X.WIT" — but only when it *looks* like codes, so a note survives. */
-  function normaliseSupportIfCodes(text) {
-    const t = String(text).trim();
-    return /^[A-Za-z]{1,6}(\s*\.\s*[A-Za-z]{1,6})*\.?$/.test(t) ? normaliseSupport(t) : t;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     What happened to one cell, and to one row
-
-     `rc_la_edits` already says who changed what and when; these read it for one
-     place on the sheet, newest first. A cell's value is its colour and its text,
-     and the log keeps both sides of every change, so a history is the log
-     filtered — nothing is reconstructed.
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /** A cell's value as the log holds it: `{ color, text }`, or null for an empty day. */
-  function cellValue(v) {
-    if (!v) return null;
-    const color = v.color ? String(v.color).toUpperCase() : null;
-    const text = String(v.text ?? '');
-    return color || text ? { color, text } : null;
-  }
-
-  /** The changes to one day of one row, newest first: `[{ id, at, by, before, after }]`. */
-  function cellHistory(edits, rowId, day) {
-    const want = String(day).slice(0, 10);
-    return (edits || [])
-      .filter((e) => e.target === 'cell' && e.row_id === rowId && String(e.day).slice(0, 10) === want)
-      .sort((a, b) => Number(b.id) - Number(a.id))
-      .map((e) => ({
-        id: e.id,
-        at: e.at,
-        by: e.by || null,
-        before: e.action === 'insert' ? null : cellValue(e.before),
-        after: e.action === 'delete' ? null : cellValue(e.after),
-      }));
-  }
-
-  const HISTORY_FIELDS = [
-    ...FIELDS.map((f) => ({ key: f.key, label: f.heading })),
-    { key: 'archived', label: 'Archived' },
-    { key: 'absence_kind', label: 'Kind' },
-  ];
-
-  /**
-   * The changes to one row's own fields, newest first:
-   * `[{ id, at, by, action, changes: [{ field, from, to }] }]`. Moving a row
-   * (its `sort`) is left out: it is where the row sits, not what it says.
-   */
-  function rowHistory(edits, rowId) {
-    return (edits || [])
-      .filter((e) => e.target === 'row' && e.row_id === rowId)
-      .sort((a, b) => Number(b.id) - Number(a.id))
-      .map((e) => {
-        const before = e.before || {};
-        const after = e.after || {};
-        const changes = e.action === 'update'
-          ? HISTORY_FIELDS
-            .filter((f) => String(before[f.key] ?? '') !== String(after[f.key] ?? ''))
-            .map((f) => ({ field: f.label, from: before[f.key] ?? '', to: after[f.key] ?? '' }))
-          : [];
-        return { id: e.id, at: e.at, by: e.by || null, action: e.action, changes };
-      })
-      .filter((h) => h.action !== 'update' || h.changes.length);
-  }
-
-  /**
-   * A cell's value in words: the legend's meaning for its colour, then its text.
-   * `meaningOf(hex)` is injected — the legend lives with the calendar.
-   */
-  function describeCellValue(value, meaningOf = () => '') {
-    if (!value) return 'empty';
-    const colour = value.color ? (meaningOf(value.color) || `#${value.color}`) : '';
-    return [colour, value.text].filter(Boolean).join(' · ') || 'empty';
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Is everybody named where they can be?
-
-     Only the people on the team — the names rows and the PTO / Office rows, read
-     against the roster. What an activity *asks for* (its support codes) is the
-     support's business and is not counted here. A name the roster does not know
-     is somebody else's person and is left alone: the check is about the team.
-
-     Three clashes, each a contradiction in the plan rather than a judgement:
-       leave   named on work on a day they have leave booked in the calendar
-       pto     named on work on a day the sheet's own PTO row has them off
-       shifts  named on two activities that day painted as different shifts —
-               a day shift and a night shift, say. Two activities on one shift
-               is an ordinary day, and is not flagged.
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * `resolve(written)` answers `{ id, name }` for a name on the roster, or null —
-   * injected, because the register lives with the calendar. `leave` is
-   * `[{ person_id, start_date, end_date, status, kind }]` (cancelled and
-   * declined are ignored). `isShift(hex)` says whether a colour is a shift at all
-   * (a cancellation is not), and `shiftOf(hex)` which shift it is.
-   *
-   * Returns `{ issues, byCell }`: every clash as
-   * `{ row_id, day, person_id, name, kind, detail }`, and the same keyed by
-   * `row_id|day` for drawing.
-   */
-  function staffingIssues(model, days, {
-    resolve, leave = [], isShift = (hex) => !!hex, shiftOf = (hex) => hex,
-  } = {}) {
-    const issues = [];
-    const byCell = new Map();
-    if (!model || typeof resolve !== 'function') return { issues, byCell };
-    const rows = model.rows.filter((r) => !r.archived);
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    const namesRows = rows.filter((r) => r.kind === 'resource' && byId.get(r.parent_id)?.kind === 'activity');
-    const ptoRows = rows.filter((r) => r.kind === 'absence' && (r.absence_kind || 'pto') === 'pto');
-    const liveLeave = (leave || []).filter((l) => l && !['cancelled', 'declined'].includes(l.status));
-
-    const add = (issue) => {
-      issues.push(issue);
-      const key = cellKey(issue.row_id, issue.day);
-      if (!byCell.has(key)) byCell.set(key, []);
-      byCell.get(key).push(issue);
-    };
-
-    for (const day of days) {
-      const off = new Set();
-      for (const r of ptoRows) {
-        for (const w of resourceNames(getCell(model, r.id, day)?.text)) {
-          const p = resolve(w);
-          if (p) off.add(p.id);
-        }
-      }
-      const onDay = new Map(); // person id → [{ row, shift, activity }]
-      for (const r of namesRows) {
-        const text = getCell(model, r.id, day)?.text;
-        if (!text) continue;
-        const activity = byId.get(r.parent_id);
-        const colour = getCell(model, activity.id, day)?.color || null;
-        for (const w of resourceNames(text)) {
-          const p = resolve(w);
-          if (!p) continue; // not one of ours
-          const title = activity.description || activity.activity_id || 'an activity';
-          if (!onDay.has(p.id)) onDay.set(p.id, []);
-          onDay.get(p.id).push({ row: r, colour, title, name: p.name || w });
-          if (off.has(p.id)) {
-            add({ row_id: r.id, day, person_id: p.id, name: p.name || w, kind: 'pto', detail: `${p.name || w} is on the PTO row that day` });
-          }
-          const away = liveLeave.find((l) => l.person_id === p.id
-            && String(l.start_date).slice(0, 10) <= day && String(l.end_date).slice(0, 10) >= day);
-          if (away) {
-            const asked = away.status === 'requested' || away.status === 'pending';
-            add({
-              row_id: r.id, day, person_id: p.id, name: p.name || w, kind: 'leave',
-              detail: `${p.name || w} has ${away.kind || 'leave'} ${asked ? 'requested' : 'booked'} that day`,
-            });
-          }
-        }
-      }
-      for (const [personId, spots] of onDay) {
-        const shifts = new Map();
-        for (const s of spots) {
-          if (!s.colour || !isShift(s.colour)) continue;
-          const which = shiftOf(s.colour);
-          if (!shifts.has(which)) shifts.set(which, s);
-        }
-        if (shifts.size < 2) continue;
-        const list = [...shifts.entries()].map(([which, s]) => `${which} on ${s.title}`).join(' and ');
-        for (const s of spots) {
-          if (!s.colour || !isShift(s.colour)) continue;
-          add({ row_id: s.row.id, day, person_id: personId, name: s.name, kind: 'shifts', detail: `${s.name} is on two shifts that day: ${list}` });
-        }
-      }
-    }
-    return { issues, byCell };
-  }
-
-  Object.defineProperty(__x, "WINDOW_WEEKS", { get: () => WINDOW_WEEKS, enumerable: true });
-  Object.defineProperty(__x, "addDaysISO", { get: () => addDaysISO, enumerable: true });
-  Object.defineProperty(__x, "mondayOf", { get: () => mondayOf, enumerable: true });
-  Object.defineProperty(__x, "windowDays", { get: () => windowDays, enumerable: true });
-  Object.defineProperty(__x, "isWeekend", { get: () => isWeekend, enumerable: true });
-  Object.defineProperty(__x, "weekdayLetter", { get: () => weekdayLetter, enumerable: true });
-  Object.defineProperty(__x, "monthLabel", { get: () => monthLabel, enumerable: true });
-  Object.defineProperty(__x, "KINDS", { get: () => KINDS, enumerable: true });
-  Object.defineProperty(__x, "FIELDS", { get: () => FIELDS, enumerable: true });
-  Object.defineProperty(__x, "blankRow", { get: () => blankRow, enumerable: true });
-  Object.defineProperty(__x, "newId", { get: () => newId, enumerable: true });
-  Object.defineProperty(__x, "orderedRows", { get: () => orderedRows, enumerable: true });
-  Object.defineProperty(__x, "sectionBlock", { get: () => sectionBlock, enumerable: true });
-  Object.defineProperty(__x, "rowBlock", { get: () => rowBlock, enumerable: true });
-  Object.defineProperty(__x, "sortBetween", { get: () => sortBetween, enumerable: true });
-  Object.defineProperty(__x, "needsRespace", { get: () => needsRespace, enumerable: true });
-  Object.defineProperty(__x, "respace", { get: () => respace, enumerable: true });
-  Object.defineProperty(__x, "rowsWithWork", { get: () => rowsWithWork, enumerable: true });
-  Object.defineProperty(__x, "supportTokens", { get: () => supportTokens, enumerable: true });
-  Object.defineProperty(__x, "parseSupport", { get: () => parseSupport, enumerable: true });
-  Object.defineProperty(__x, "normaliseSupport", { get: () => normaliseSupport, enumerable: true });
-  Object.defineProperty(__x, "supportTotals", { get: () => supportTotals, enumerable: true });
-  Object.defineProperty(__x, "describeCounts", { get: () => describeCounts, enumerable: true });
-  Object.defineProperty(__x, "cancellationKey", { get: () => cancellationKey, enumerable: true });
-  Object.defineProperty(__x, "dayRuns", { get: () => dayRuns, enumerable: true });
-  Object.defineProperty(__x, "nameChoices", { get: () => nameChoices, enumerable: true });
-  Object.defineProperty(__x, "currentToken", { get: () => currentToken, enumerable: true });
-  Object.defineProperty(__x, "suggestNames", { get: () => suggestNames, enumerable: true });
-  Object.defineProperty(__x, "acceptName", { get: () => acceptName, enumerable: true });
-  Object.defineProperty(__x, "cellKey", { get: () => cellKey, enumerable: true });
-  Object.defineProperty(__x, "makeModel", { get: () => makeModel, enumerable: true });
-  Object.defineProperty(__x, "cellList", { get: () => cellList, enumerable: true });
-  Object.defineProperty(__x, "getCell", { get: () => getCell, enumerable: true });
-  Object.defineProperty(__x, "applyOps", { get: () => applyOps, enumerable: true });
-  Object.defineProperty(__x, "stamp", { get: () => stamp, enumerable: true });
-  Object.defineProperty(__x, "acknowledge", { get: () => acknowledge, enumerable: true });
-  Object.defineProperty(__x, "deleteOps", { get: () => deleteOps, enumerable: true });
-  Object.defineProperty(__x, "restoreOps", { get: () => restoreOps, enumerable: true });
-  Object.defineProperty(__x, "restorePoints", { get: () => restorePoints, enumerable: true });
-  Object.defineProperty(__x, "tile", { get: () => tile, enumerable: true });
-  Object.defineProperty(__x, "toTSV", { get: () => toTSV, enumerable: true });
-  Object.defineProperty(__x, "fromTSV", { get: () => fromTSV, enumerable: true });
-  Object.defineProperty(__x, "toHTML", { get: () => toHTML, enumerable: true });
-  Object.defineProperty(__x, "colLetters", { get: () => colLetters, enumerable: true });
-  Object.defineProperty(__x, "SECTION_BAND", { get: () => SECTION_BAND, enumerable: true });
-  Object.defineProperty(__x, "LAYOUT", { get: () => LAYOUT, enumerable: true });
-  Object.defineProperty(__x, "gridFromModel", { get: () => gridFromModel, enumerable: true });
-  Object.defineProperty(__x, "metaValues", { get: () => metaValues, enumerable: true });
-  Object.defineProperty(__x, "modelFromView", { get: () => modelFromView, enumerable: true });
-  Object.defineProperty(__x, "cellHistory", { get: () => cellHistory, enumerable: true });
-  Object.defineProperty(__x, "rowHistory", { get: () => rowHistory, enumerable: true });
-  Object.defineProperty(__x, "describeCellValue", { get: () => describeCellValue, enumerable: true });
-  Object.defineProperty(__x, "staffingIssues", { get: () => staffingIssues, enumerable: true });
 };
 
 // ui/rc_ingest.js
@@ -13363,14 +14221,16 @@ __mods["ui/rc.js"] = function (__x, __req) {
   const { on, EV } = __req("core/events.js");
   const rc = __req("core/rc.js");
   const { icon } = __req("ui/icons.js");
-  const { textInput, toast, emptyState } = __req("ui/components.js");
+  const { textInput, toast, emptyState, openPicker } = __req("ui/components.js");
   const roster = __req("ui/rc_roster.js");
   const huddle = __req("ui/rc_huddle.js");
+  const myday = __req("ui/rc_myday.js");
   const lookahead = __req("ui/rc_lookahead.js");
   const week = __req("ui/rc_week.js");
   const pto = __req("ui/rc_pto.js");
   const reports = __req("ui/rc_reports.js");
   const { enhanceTables } = __req("ui/rc_table.js");
+  const { inboxCount } = __req("ui/rc_inbox.js");
 
   /**
    * The tabs, in the order the work actually happens: run today's meeting, plan
@@ -13382,6 +14242,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
    * and each one missing something the other had.
    */
   const TABS = [
+    { id: 'myday', label: 'My day' },
     { id: 'huddle', label: 'Daily huddle' },
     { id: 'week', label: 'Week plan' },
     { id: 'pto', label: 'PTO' },
@@ -13391,6 +14252,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
   ];
 
   const RENDERERS = {
+    myday: myday.render,
     huddle: huddle.render,
     week: week.render,
     pto: pto.render,
@@ -13488,7 +14350,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
     }
 
     const view = el('div');
-    bodyEl.append(schemaBanner(), view);
+    bodyEl.append(previewBanner(), schemaBanner(), view);
     Promise.resolve(RENDERERS[active](view)).catch((err) => {
       rc.reportError(`tab:${active}`, err);
       clear(view);
@@ -13529,13 +14391,15 @@ __mods["ui/rc.js"] = function (__x, __req) {
       const visible = rc.isAdmin() ? TABS : TABS.filter((t) => !ADMIN_ONLY.has(t.id));
       if (!visible.some((t) => t.id === active)) active = visible[0].id;
       for (const tab of visible) {
-        tabs.appendChild(el('button', {
+        const button = el('button', {
           class: 'rc-tab',
           type: 'button',
           text: tab.label,
           'aria-pressed': String(tab.id === active),
           onClick: () => showTab(tab.id),
-        }));
+        });
+        if (tab.id === 'org' && rc.isAdmin()) inboxBadge(button);
+        tabs.appendChild(button);
       }
       headEl.appendChild(tabs);
 
@@ -13562,6 +14426,16 @@ __mods["ui/rc.js"] = function (__x, __req) {
         }));
       }
 
+      if (rc.isRealAdmin() && !rc.previewing()) {
+        headEl.appendChild(el('button', {
+          class: 'cx-btn mini ghost',
+          type: 'button',
+          html: `${icon('eye', { size: 12 })}<span>View as…</span>`,
+          title: 'See the calendar as a member or a viewer sees it. Nothing is saved while you do.',
+          onClick: () => chooseViewAs(),
+        }));
+      }
+
       headEl.appendChild(el('button', {
         class: 'cx-btn mini ghost',
         text: rc.accountLabel(),
@@ -13572,6 +14446,79 @@ __mods["ui/rc.js"] = function (__x, __req) {
         },
       }));
     }
+  }
+
+  /**
+   * Pick somebody to see the calendar as. Members and viewers only: an
+   * administrator sees what you already see.
+   */
+  async function chooseViewAs() {
+    let people;
+    try {
+      people = await rc.listPeople();
+    } catch (err) {
+      toast({ tone: 'bad', message: err.message });
+      return;
+    }
+    const choices = people.filter((p) => p.role !== 'admin' && p.id !== rc.me()?.id);
+    if (!choices.length) {
+      toast({ message: 'Nobody on the team is a member or a viewer yet.' });
+      return;
+    }
+    openPicker({
+      title: 'View the calendar as…',
+      subtitle: 'Everything is drawn as they would see it. Nothing you press is saved.',
+      placeholder: 'Search the team…',
+      items: choices.map((p) => ({ value: p.id, label: p.name, meta: `${p.role === 'viewer' ? 'Viewer' : 'Member'}${p.title ? ` · ${p.title}` : ''}` })),
+      empty: 'Nobody matches.',
+      onPick: (id) => {
+        const who = choices.find((p) => p.id === id);
+        if (!who) return;
+        try {
+          active = 'myday';
+          rc.previewAs(who); // redraws, through RC_AUTH_CHANGED
+        } catch (err) {
+          toast({ tone: 'bad', message: err.message });
+        }
+      },
+    });
+  }
+
+  /** "You are seeing this as Priya", with the way back, above every tab while it is true. */
+  function previewBanner() {
+    const who = rc.previewing();
+    if (!who) return el('span', { hidden: true });
+    return el('div', { class: 'rc-preview-banner', role: 'status' }, [
+      el('span', { html: icon('eye', { size: 16 }), 'aria-hidden': 'true' }),
+      el('div', { class: 'rc-preview-text' }, [
+        el('strong', { text: `You are seeing the calendar as ${who.name} (${who.role === 'viewer' ? 'viewer' : 'member'}).` }),
+        el('span', { text: ' Nothing you press is saved. The database still answers as you, so this shows their screens, not their permissions.' }),
+      ]),
+      el('button', {
+        class: 'cx-btn mini primary',
+        type: 'button',
+        text: 'Back to my view',
+        onClick: () => {
+          active = 'org';
+          rc.previewAs(null); // redraws, through RC_AUTH_CHANGED
+        },
+      }),
+    ]);
+  }
+
+  /**
+   * How much is waiting in the administrator's inbox, on the Organisation tab.
+   * Filled when the count arrives, and absent when nothing is waiting or the
+   * count could not be read — it is a prompt, and the inbox is the record.
+   */
+  function inboxBadge(button) {
+    inboxCount()
+      .then((n) => {
+        if (!n) return;
+        button.appendChild(el('span', { class: 'rc-tab-count', text: String(n), 'aria-label': `${n} waiting on you` }));
+        button.title = `${n} thing${n === 1 ? '' : 's'} waiting on you — see Organisation → Inbox`;
+      })
+      .catch(() => {});
   }
 
   /**

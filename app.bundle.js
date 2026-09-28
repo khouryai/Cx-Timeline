@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-28T18:34:08.743Z
+ * Modules: 59   Built: 2026-09-28T19:17:31.978Z
  */
 (function () {
   'use strict';
@@ -16035,7 +16035,7 @@ __mods["core/rc.js"] = function (__x, __req) {
       const next = session?.user || null;
       const changed = (next?.id || null) !== (user?.id || null);
       user = next;
-      if (!next) person = null;
+      if (!next) { person = null; preview = null; }
       if (changed) emit(EV.RC_AUTH_CHANGED, { user, event });
     });
 
@@ -16069,7 +16069,45 @@ __mods["core/rc.js"] = function (__x, __req) {
    * refuse their writes accordingly.
    */
   function me() {
-    return person;
+    return preview || person;
+  }
+
+  /* ── Seeing it as somebody else ─────────────────────────────────────────
+     An administrator can look at the calendar the way a member or a viewer
+     sees it, before telling the team to use it. Everything that decides what
+     to draw — `me()`, `role()`, `isAdmin()`, `canWrite()` — answers as that
+     person; every write is refused here, before it leaves the page, with an
+     error saying why (`err.preview`). The database is not asked to pretend:
+     it still answers as the administrator, so a preview shows the screens a
+     member gets, not a guarantee of the rows their account could read. */
+
+  let preview = null; // the rc_people row being looked through, or null
+
+  /** Look at the calendar as this person (a member or a viewer), or stop with null. */
+  function previewAs(who) {
+    if (who && person?.role !== 'admin') throw new Error('Only an administrator can see the calendar as somebody else.');
+    if (who && who.role === 'admin') throw new Error('Choose a member or a viewer — an administrator sees what you see.');
+    preview = who ? { id: who.id, name: who.name, email: who.email || null, title: who.title || null, subsystem: who.subsystem || null, role: who.role || 'member', active: true } : null;
+    forgetReads();
+    emit(EV.RC_AUTH_CHANGED, { user, event: who ? 'PREVIEW' : 'PREVIEW_ENDED' });
+  }
+
+  /** The person being looked through, or null. */
+  function previewing() {
+    return preview;
+  }
+
+  /** Whether the account actually signed in is an administrator, whoever it is previewing. */
+  function isRealAdmin() {
+    return person?.role === 'admin';
+  }
+
+  /** Refuse a write while previewing — before it reaches the network or a queue. */
+  function guardPreview() {
+    if (!preview) return;
+    const err = new Error(`Preview only — nothing is saved while you are seeing the calendar as ${preview.name}.`);
+    err.preview = true;
+    throw err;
   }
 
   /**
@@ -16081,12 +16119,12 @@ __mods["core/rc.js"] = function (__x, __req) {
    * something is missing, not to decide it.
    */
   function isAdmin() {
-    return person?.role === 'admin';
+    return me()?.role === 'admin';
   }
 
   /** 'admin' | 'member' | 'viewer', or null for somebody not on the team. */
   function role() {
-    return person?.role || null;
+    return me()?.role || null;
   }
 
   /**
@@ -16098,11 +16136,11 @@ __mods["core/rc.js"] = function (__x, __req) {
    * the database, and that is the control; this decides what to draw.
    */
   function canWrite() {
-    return person?.role === 'admin' || person?.role === 'member';
+    return me()?.role === 'admin' || me()?.role === 'member';
   }
 
   function isViewer() {
-    return person?.role === 'viewer';
+    return me()?.role === 'viewer';
   }
 
   function accountLabel() {
@@ -16115,6 +16153,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     // Runs on every sign-in and account change: same rule as sign-out.
     forgetReads();
     person = null;
+    preview = null;
     if (!client || !user) return null;
     const { data, error } = await client
       .from('rc_people')
@@ -16180,6 +16219,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     await client.auth.signOut();
     user = null;
     person = null;
+    preview = null;
     emit(EV.RC_AUTH_CHANGED, { user: null, event: 'SIGNED_OUT' });
   }
 
@@ -16471,7 +16511,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   function reportError(area, err) {
     try {
-      if (!client || !user) return;
+      if (!client || !user || preview) return;
       const message = String(err?.message || err || 'unknown').slice(0, 500) || 'unknown';
       const key = `${area}\u0000${message}`;
       if (reported.has(key) || reported.size >= REPORT_LIMIT) return;
@@ -16733,14 +16773,19 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function insert(table, rows) {
     requireClient();
+    guardPreview();
     forgetReads();
     const { data, error } = await client.from(table).insert(rows).select();
     if (error) throw new Error(`${table}: ${error.message}`);
     return data || [];
   }
 
+  /* Functions that only read, and so are allowed while previewing. */
+  const READ_ONLY_RPC = new Set(['rc_list_invitations', 'rc_resolve_location']);
+
   async function rpc(name, args) {
     requireClient();
+    if (!READ_ONLY_RPC.has(name)) guardPreview();
     // Every function here that is not a pure read writes something, and the
     // reads are cheap; forgetting on all of them is simpler than a list that
     // has to be kept right.
@@ -16760,6 +16805,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function update(table, id, patch) {
     requireClient();
+    guardPreview();
     forgetReads();
     const { data, error } = await client.from(table).update(patch).eq('id', id).select();
     if (error) throw new Error(`${table}: ${error.message}`);
@@ -16795,6 +16841,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function addLegend(rows) {
     requireClient();
+    guardPreview();
     forgetReads();
     const { data, error } = await client
       .from('rc_legend')
@@ -16836,6 +16883,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function setSetting(key, value) {
     requireClient();
+    guardPreview();
     forgetReads();
     const { data, error } = await client
       .from('rc_settings')
@@ -17069,6 +17117,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function uploadSar(path, blob) {
     requireClient();
+    guardPreview();
     const { error } = await client.storage.from('sars').upload(path, blob, {
       upsert: false,
       contentType: blob?.type || 'application/pdf',
@@ -17091,6 +17140,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function uploadEvidence(path, blob) {
     requireClient();
+    guardPreview();
     const { error } = await client.storage.from('evidence').upload(path, blob, {
       upsert: false,
       contentType: blob?.type || 'image/jpeg',
@@ -17119,6 +17169,9 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "currentUser", { get: () => currentUser, enumerable: true });
   Object.defineProperty(__x, "isSignedIn", { get: () => isSignedIn, enumerable: true });
   Object.defineProperty(__x, "me", { get: () => me, enumerable: true });
+  Object.defineProperty(__x, "previewAs", { get: () => previewAs, enumerable: true });
+  Object.defineProperty(__x, "previewing", { get: () => previewing, enumerable: true });
+  Object.defineProperty(__x, "isRealAdmin", { get: () => isRealAdmin, enumerable: true });
   Object.defineProperty(__x, "isAdmin", { get: () => isAdmin, enumerable: true });
   Object.defineProperty(__x, "role", { get: () => role, enumerable: true });
   Object.defineProperty(__x, "canWrite", { get: () => canWrite, enumerable: true });
@@ -34218,6 +34271,8 @@ __mods["main.js"] = function (__x, __req) {
       if (!filestore.isSupported()) return;
       const known = filestore.getDisplayName();
       if (known && known !== 'Someone') return;
+      // Never the name of somebody an administrator is only previewing as.
+      if (rcClient.previewing()) return;
       const name = rcClient.me()?.name;
       if (name) filestore.setDisplayName(name);
     };
@@ -34258,10 +34313,14 @@ __mods["main.js"] = function (__x, __req) {
 
       const member = rcClient.isConfigured() && rcClient.isSignedIn()
         && Boolean(rcClient.me()) && !rcClient.isAdmin();
+      const previewing = rcClient.previewing();
       lockPlan(member
-        ? 'Your calendar account is not an administrator, so the plan opens read-only. '
-          + 'Everything you filter, hide or compare here is yours alone and stays with your '
-          + 'account.'
+        ? (previewing
+          ? `You are seeing the calendar as ${previewing.name}, who reads the plan and never writes it. `
+            + 'Go back to your own view in the calendar to edit.'
+          : 'Your calendar account is not an administrator, so the plan opens read-only. '
+            + 'Everything you filter, hide or compare here is yours alone and stays with your '
+            + 'account.')
         : '');
       emit(EV.ACCESS_CHANGED, { readOnly: store.isDocReadOnly() });
       emit(EV.FILE_STATE, filestore.state());

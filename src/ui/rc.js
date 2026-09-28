@@ -18,14 +18,16 @@ import { el, clear } from '../core/util.js';
 import { on, EV } from '../core/events.js';
 import * as rc from '../core/rc.js';
 import { icon } from './icons.js';
-import { textInput, toast, emptyState } from './components.js';
+import { textInput, toast, emptyState, openPicker } from './components.js';
 import * as roster from './rc_roster.js';
 import * as huddle from './rc_huddle.js';
+import * as myday from './rc_myday.js';
 import * as lookahead from './rc_lookahead.js';
 import * as week from './rc_week.js';
 import * as pto from './rc_pto.js';
 import * as reports from './rc_reports.js';
 import { enhanceTables } from './rc_table.js';
+import { inboxCount } from './rc_inbox.js';
 
 /**
  * The tabs, in the order the work actually happens: run today's meeting, plan
@@ -37,6 +39,7 @@ import { enhanceTables } from './rc_table.js';
  * and each one missing something the other had.
  */
 const TABS = [
+  { id: 'myday', label: 'My day' },
   { id: 'huddle', label: 'Daily huddle' },
   { id: 'week', label: 'Week plan' },
   { id: 'pto', label: 'PTO' },
@@ -46,6 +49,7 @@ const TABS = [
 ];
 
 const RENDERERS = {
+  myday: myday.render,
   huddle: huddle.render,
   week: week.render,
   pto: pto.render,
@@ -143,7 +147,7 @@ function render() {
   }
 
   const view = el('div');
-  bodyEl.append(schemaBanner(), view);
+  bodyEl.append(previewBanner(), schemaBanner(), view);
   Promise.resolve(RENDERERS[active](view)).catch((err) => {
     rc.reportError(`tab:${active}`, err);
     clear(view);
@@ -184,13 +188,15 @@ function renderHead() {
     const visible = rc.isAdmin() ? TABS : TABS.filter((t) => !ADMIN_ONLY.has(t.id));
     if (!visible.some((t) => t.id === active)) active = visible[0].id;
     for (const tab of visible) {
-      tabs.appendChild(el('button', {
+      const button = el('button', {
         class: 'rc-tab',
         type: 'button',
         text: tab.label,
         'aria-pressed': String(tab.id === active),
         onClick: () => showTab(tab.id),
-      }));
+      });
+      if (tab.id === 'org' && rc.isAdmin()) inboxBadge(button);
+      tabs.appendChild(button);
     }
     headEl.appendChild(tabs);
 
@@ -217,6 +223,16 @@ function renderHead() {
       }));
     }
 
+    if (rc.isRealAdmin() && !rc.previewing()) {
+      headEl.appendChild(el('button', {
+        class: 'cx-btn mini ghost',
+        type: 'button',
+        html: `${icon('eye', { size: 12 })}<span>View as…</span>`,
+        title: 'See the calendar as a member or a viewer sees it. Nothing is saved while you do.',
+        onClick: () => chooseViewAs(),
+      }));
+    }
+
     headEl.appendChild(el('button', {
       class: 'cx-btn mini ghost',
       text: rc.accountLabel(),
@@ -227,6 +243,79 @@ function renderHead() {
       },
     }));
   }
+}
+
+/**
+ * Pick somebody to see the calendar as. Members and viewers only: an
+ * administrator sees what you already see.
+ */
+async function chooseViewAs() {
+  let people;
+  try {
+    people = await rc.listPeople();
+  } catch (err) {
+    toast({ tone: 'bad', message: err.message });
+    return;
+  }
+  const choices = people.filter((p) => p.role !== 'admin' && p.id !== rc.me()?.id);
+  if (!choices.length) {
+    toast({ message: 'Nobody on the team is a member or a viewer yet.' });
+    return;
+  }
+  openPicker({
+    title: 'View the calendar as…',
+    subtitle: 'Everything is drawn as they would see it. Nothing you press is saved.',
+    placeholder: 'Search the team…',
+    items: choices.map((p) => ({ value: p.id, label: p.name, meta: `${p.role === 'viewer' ? 'Viewer' : 'Member'}${p.title ? ` · ${p.title}` : ''}` })),
+    empty: 'Nobody matches.',
+    onPick: (id) => {
+      const who = choices.find((p) => p.id === id);
+      if (!who) return;
+      try {
+        active = 'myday';
+        rc.previewAs(who); // redraws, through RC_AUTH_CHANGED
+      } catch (err) {
+        toast({ tone: 'bad', message: err.message });
+      }
+    },
+  });
+}
+
+/** "You are seeing this as Priya", with the way back, above every tab while it is true. */
+function previewBanner() {
+  const who = rc.previewing();
+  if (!who) return el('span', { hidden: true });
+  return el('div', { class: 'rc-preview-banner', role: 'status' }, [
+    el('span', { html: icon('eye', { size: 16 }), 'aria-hidden': 'true' }),
+    el('div', { class: 'rc-preview-text' }, [
+      el('strong', { text: `You are seeing the calendar as ${who.name} (${who.role === 'viewer' ? 'viewer' : 'member'}).` }),
+      el('span', { text: ' Nothing you press is saved. The database still answers as you, so this shows their screens, not their permissions.' }),
+    ]),
+    el('button', {
+      class: 'cx-btn mini primary',
+      type: 'button',
+      text: 'Back to my view',
+      onClick: () => {
+        active = 'org';
+        rc.previewAs(null); // redraws, through RC_AUTH_CHANGED
+      },
+    }),
+  ]);
+}
+
+/**
+ * How much is waiting in the administrator's inbox, on the Organisation tab.
+ * Filled when the count arrives, and absent when nothing is waiting or the
+ * count could not be read — it is a prompt, and the inbox is the record.
+ */
+function inboxBadge(button) {
+  inboxCount()
+    .then((n) => {
+      if (!n) return;
+      button.appendChild(el('span', { class: 'rc-tab-count', text: String(n), 'aria-label': `${n} waiting on you` }));
+      button.title = `${n} thing${n === 1 ? '' : 's'} waiting on you — see Organisation → Inbox`;
+    })
+    .catch(() => {});
 }
 
 /**

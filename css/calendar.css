@@ -1637,3 +1637,283 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
     gap: 2px;
   }
 }
+
+/* ── The administrator's inbox ───────────────────────────────────────── */
+.rc-tab-count {
+  display: inline-block;
+  min-width: 18px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 9px;
+  border: 1px solid var(--bad-border);
+  background: var(--bad-light);
+  color: var(--bad);
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+.rc-inbox-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rc-inbox-item {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.rc-inbox-bad { border-left-color: var(--bad); }
+.rc-inbox-warn { border-left-color: var(--warn); }
+.rc-inbox-info { border-left-color: var(--info); }
+.rc-inbox-title {
+  font-weight: 600;
+  color: var(--text-main);
+}
+.rc-inbox-detail {
+  margin-top: 2px;
+  font-size: var(--fs-tiny);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.rc-inbox-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.rc-inbox-failed {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--warn);
+}
+@media (max-width: 700px) {
+  .rc-inbox-item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .rc-inbox-actions { justify-content: flex-start; }
+}
+
+/* ── Settings ─────────────────────────────────────────────────────────── */
+.rc-settings {
+  display: grid;
+  max-width: 880px;
+}
+.rc-settings-group {
+  margin: 18px 0 6px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.rc-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.rc-settings-name {
+  font-weight: 600;
+  color: var(--text-main);
+}
+.rc-settings-row .rc-hint { margin: 2px 0 0; }
+.rc-settings-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.rc-settings-inline .cx-input { flex: 1 1 160px; min-width: 0; }
+.rc-settings-mono { font-family: var(--f-mono); }
+@media (max-width: 700px) {
+  .rc-settings-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+}
+
+/* ── Seeing it as somebody else ──────────────────────────────────────── */
+.rc-preview-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--info-border);
+  border-radius: 8px;
+  background: var(--info-light);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.rc-preview-banner > span:first-child { color: var(--info); flex: none; display: inline-flex; }
+.rc-preview-text { flex: 1; min-width: 0; }
+@media (max-width: 640px) {
+  .rc-preview-banner { flex-wrap: wrap; }
+}
+
+/* ── My day ───────────────────────────────────────────────────────────── */
+.rc-myday-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.rc-myday-hello {
+  margin: 2px 0 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+.rc-myday-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+.rc-myday-card {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.rc-myday-card:first-child {
+  border-color: var(--primary);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+.rc-myday-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.rc-myday-card-head h3,
+.rc-myday-weekwrap h3,
+.rc-myday-note h3 {
+  margin: 0;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.rc-myday-card-head .rc-hint { margin: 0; }
+.rc-myday-task {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.rc-myday-task-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+.rc-myday-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+.rc-myday-fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-tiny);
+  color: var(--text-muted);
+}
+.rc-myday-off {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+.rc-myday-off > span:first-child { color: var(--warn); display: inline-flex; }
+.rc-myday-weekwrap {
+  margin-top: 18px;
+}
+.rc-myday-week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.rc-myday-day {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  min-width: 0;
+}
+.rc-myday-today {
+  border-color: var(--primary);
+}
+.rc-myday-quiet {
+  background: var(--surface-2);
+}
+.rc-myday-wd {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.rc-myday-where {
+  font-size: var(--fs-tiny);
+  font-weight: 600;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+.rc-myday-quiet .rc-myday-where { color: var(--text-muted); font-weight: 400; }
+.rc-myday-foot {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+.rc-myday-note {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.rc-myday-note .rc-hint { margin: 0; }
+.rc-myday-outcome,
+.rc-myday-blocker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.rc-myday-said {
+  flex-basis: 100%;
+  font-style: italic;
+  color: var(--text-muted);
+}
+@media (max-width: 640px) {
+  .rc-myday-week { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .rc-myday-head { flex-wrap: wrap; }
+}

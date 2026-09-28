@@ -128,6 +128,12 @@ export function notifyChanged(what) {
  * imports every tab — so it asks, the way a dock pane asks for another pane.
  * This is what lets an empty screen point at the place its data comes from.
  */
+/**
+ * Which Organisation section to open next — set by whoever sends somebody
+ * there (the inbox), read once by the tab. A tab cannot import another tab.
+ */
+export const orgNav = { section: null };
+
 export function goToTab(tab) {
   emit(EV.RC_SHOW_TAB, { tab });
 }

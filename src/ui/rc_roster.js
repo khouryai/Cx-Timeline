@@ -15,7 +15,8 @@
  * "doc" typed one week against "documentation" the next are two categories to a
  * database and one to a person.
  *
- * Imports: util, events, dates, rc, icons, components, rc_util.
+ * Imports: util, events, dates, rc, icons, components, rc_util, rc_inbox,
+ *          rc_settings.
  */
 
 import { el, clear } from '../core/util.js';
@@ -24,12 +25,15 @@ import { icon } from './icons.js';
 import {
   textInput, selectInput, toast, confirmDialog, promptDialog, field, badge, checkbox, emptyState,
 } from './components.js';
-import { notifyChanged, byId, dayLabel, todayISO, formModal } from './rc_util.js';
+import { notifyChanged, byId, dayLabel, todayISO, formModal, orgNav } from './rc_util.js';
+import { renderInbox } from './rc_inbox.js';
+import { renderSettings } from './rc_settings.js';
 
-const SECTIONS = ['people', 'locations', 'categories', 'leave', 'accounts', 'problems'];
+const SECTIONS = ['inbox', 'people', 'locations', 'categories', 'leave', 'accounts', 'problems', 'settings'];
 // Readable by an administrator alone, in the policies as well as here.
-const ADMIN_SECTIONS = new Set(['accounts', 'problems']);
-let section = 'people';
+const ADMIN_SECTIONS = new Set(['inbox', 'accounts', 'problems', 'settings']);
+// An administrator opens Organisation on what is waiting for them.
+let section = null;
 
 /**
  * The three roles, in one place, worded as the consequence rather than the
@@ -87,6 +91,10 @@ export async function render(root) {
   // returns nothing to anybody else — so a viewer is offered a tab that opens
   // onto a wall. It comes out of the row rather than explaining itself.
   const visible = rc.isAdmin() ? SECTIONS : SECTIONS.filter((id) => !ADMIN_SECTIONS.has(id));
+  if (orgNav.section) {
+    section = orgNav.section;
+    orgNav.section = null;
+  }
   if (!visible.includes(section)) section = visible[0];
 
   const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
@@ -108,7 +116,9 @@ export async function render(root) {
   const host = el('div');
   root.appendChild(host);
 
-  if (section === 'people') await renderPeople(host);
+  if (section === 'inbox') await renderInbox(host);
+  else if (section === 'settings') await renderSettings(host);
+  else if (section === 'people') await renderPeople(host);
   else if (section === 'locations') await renderLocations(host);
   else if (section === 'categories') await renderCategories(host);
   else if (section === 'accounts') await renderAccounts(host);
