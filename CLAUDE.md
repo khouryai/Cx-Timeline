@@ -280,7 +280,7 @@ alternative shipped once and went wrong.
 - Painting a cancellation asks why, once; the paint is saved whatever the answer. [→](docs/ARCHITECTURE.md#painting-a-cancellation-asks-why-once-and-not-now-is-an-answer)
 - Going back is new edits through `rc_la_apply()`, never a rewind of the log. [→](docs/ARCHITECTURE.md#going-back-is-new-edits-not-a-rewind)
 - The timeline reads the calendar's look-ahead in one step, and sends nothing back. [→](docs/ARCHITECTURE.md#the-timeline-reads-the-calendars-look-ahead-in-one-step)
-- Progress comes back from the huddle as actual dates, offered and never written unasked (`outcomeProgress()`). [→](docs/ARCHITECTURE.md#progress-comes-back-from-the-huddle-as-actual-dates-offered)
+- Progress comes back from the huddle as actual dates, offered and never written unasked (`outcomeProgress()`); a bar standing for several activities finishes only when every one of them has. [→](docs/ARCHITECTURE.md#progress-comes-back-from-the-huddle-as-actual-dates-offered)
 - The export is also opened and re-saved by LibreOffice Calc in CI (`test_xlsx_compat.js`). [→](docs/ARCHITECTURE.md#the-export-is-opened-by-a-second-program-in-ci)
 
 ### Added with the module split and the calendar bundle
@@ -368,11 +368,11 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | Suite | Checks | What it covers |
 |---|---|---|
 | `test_dist.js` | 46 | every deployment shape, both bundles fingerprinted, and that the plan has no backend in any of them |
-| `test_lookahead.js` | 204 | the parser, the rows it derives, the change events, progress from outcomes and the printed calendar's geometry, no browser |
+| `test_lookahead.js` | 212 | the parser, the rows it derives, the change events, progress from outcomes and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_la_edit.js` | 105 | the look-ahead editor's model, undo, support codes, the published grid, and the Excel export read back |
 | `smoke.js` | 318 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 434 | the resource calendar, accounts, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 443 | the resource calendar, accounts, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 64 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |

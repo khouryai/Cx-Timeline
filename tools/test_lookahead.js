@@ -1262,6 +1262,43 @@ console.log('\nProgress from the calendar');
   check('the people are counted, not the rows', bar1?.people === 2);
   check('a bar linked to nothing is never offered anything',
     cls.outcomeProgress({ objects: [objects[2]], activities, actuals, rows }).length === 0);
+
+  // One bar standing for two activities.
+  const acts2 = {
+    a: { id: 'a', key: cls.suggestionKey('IXL Regression'), title: 'IXL Regression', start: D('2026-09-07'), end: D('2026-09-12') },
+    b: { id: 'b', key: cls.suggestionKey('IXL Night Mode'), title: 'IXL Night Mode', start: D('2026-09-07'), end: D('2026-09-10') },
+    b2: { id: 'b2', key: cls.suggestionKey('IXL Night Mode'), title: 'IXL Night Mode', start: D('2026-09-14'), end: D('2026-09-15') },
+  };
+  const both = [{ id: 'combo', data: { laIds: ['a', 'b', 'b2'] } }];
+  const mixed = [
+    { person_id: 'p1', work_date: '2026-09-07', status: 'partial', task: 'IXL Night Mode' },
+    { person_id: 'p1', work_date: '2026-09-08', status: 'partial', task: 'IXL Night Mode' },
+    { person_id: 'p2', work_date: '2026-09-09', status: 'partial', task: 'IXL Regression' },
+    { person_id: 'p2', work_date: '2026-09-10', status: 'completed', task: 'IXL Regression' },
+  ];
+  const combo = cls.outcomeProgress({ objects: both, activities: acts2, actuals: mixed, todayMs: D('2026-09-24') })[0];
+  check('several runs of one row are one activity', combo?.activities.length === 2, JSON.stringify(combo?.activities.map((a) => a.title)));
+  check('the start is the earliest worked day across every activity', combo?.first === '2026-09-07');
+  check('one activity completing does not finish the bar', combo?.end === null);
+  check('and the one holding it back is named', combo?.holding.join() === 'IXL Night Mode', JSON.stringify(combo?.holding));
+  check('each activity is summarised on its own',
+    combo?.activities.find((a) => a.title === 'IXL Regression')?.done === true
+      && combo?.activities.find((a) => a.title === 'IXL Night Mode')?.lastStatus === 'partial');
+  const silent = cls.outcomeProgress({
+    objects: both, activities: acts2, todayMs: D('2026-09-24'),
+    actuals: mixed.filter((a) => a.task === 'IXL Regression'),
+  })[0];
+  check('an activity with nothing recorded holds the finish back too',
+    silent?.end === null && silent?.activities.find((a) => a.title === 'IXL Night Mode')?.recorded === false);
+  const finished = cls.outcomeProgress({
+    objects: both, activities: acts2, todayMs: D('2026-09-24'),
+    actuals: [...mixed,
+      { person_id: 'p1', work_date: '2026-09-14', status: 'completed', task: 'IXL Night Mode' },
+      { person_id: 'p2', work_date: '2026-09-08', status: 'partial', task: 'IXL Regression' }],
+  })[0];
+  check('once every activity is completed the finish is the last of them',
+    finished?.end === D('2026-09-15') && finished?.holding.length === 0, String(finished?.end));
+  check('and a day worked on both activities is one day', finished?.days === 5);
 }
 
 console.log(`\n${passed}/${passed + failures.length} checks passed`);

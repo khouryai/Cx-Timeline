@@ -1911,11 +1911,26 @@ never blocked, reassigned or absent) to its look-ahead row, directly or through
 its plan entry, and from the row's label to the bars linked to suggestions with
 the same `suggestionKey()`. A day with no row falls back to its task text, which
 a day read off the sheet carries verbatim; either way the match is exact or
-nothing. Each bar is offered its first worked day as the actual start and —
-only when the look-ahead has nothing ahead for it and the last word was
-"completed" — the day after its last as the actual finish (half-open, like the
-bar). A date nobody set starts ticked; one that would replace a typed date does
-not. Applying is one undoable edit, and nothing is sent to the calendar.
+nothing. The button reads afresh (`forgetReads()`): an outcome recorded
+seconds ago is the one somebody pressed it to see.
+
+A bar may stand for several activities, and each is read on its own — runs of
+one row are one activity, grouped by key. The actual start is the first day
+*any* of them was worked. The actual finish (the day after the last worked day,
+half-open like the bar) is offered only when **every** activity is done: nothing
+ahead of it on the look-ahead, and its own last word "completed". One activity
+finishing is not the bar finishing, and an activity nobody has recorded against
+holds the finish back as surely as one marked partial — pooling the outcomes and
+reading only the last day across all of them offered a finish while half the
+work was still open. The dialog says which activities a held finish waits on,
+always; the per-activity breakdown (days, span, last word, and Done / Still
+planned / Not completed / Nothing recorded) is shown or hidden per bar, and
+"Show each activity" opens or closes them all and is remembered in this
+browser's storage — a convenience, so a refused storage only means it starts
+hidden.
+
+A date nobody set starts ticked; one that would replace a typed date does not.
+Applying is one undoable edit, and nothing is sent to the calendar.
 
 ### The export is opened by a second program in CI
 

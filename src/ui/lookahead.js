@@ -61,6 +61,7 @@ import {
   selectInput,
   segmented,
   checkbox,
+  toggle,
   emptyState,
   badge,
   chipStat,
@@ -282,6 +283,9 @@ export async function progressFromCalendar() {
 
   let proposals;
   try {
+    // Asked for now, so read now: an outcome recorded in the last thirty
+    // seconds is exactly the one somebody pressed this to see.
+    rc.forgetReads();
     const [actuals, plan] = await Promise.all([rc.listActuals(fromISO, toISOday), rc.listPlan(fromISO, toISOday)]);
     const rowIds = [
       ...actuals.map((a) => a.lookahead_row_id),
@@ -306,12 +310,15 @@ export async function progressFromCalendar() {
       : { value: p.end, replaces: Number.isFinite(haveEnd) ? haveEnd : null };
     if (start || end) offers.push({ obj, p, start, end });
   }
+  const held = proposals.filter((p) => p.end == null && p.holding.length
+    && TYPES[doc.objects.find((o) => o.id === p.objectId)?.type]?.duration).length;
   if (!offers.length) {
     toast({
       tone: 'info',
       title: 'Nothing new',
       message: proposals.length
-        ? 'The actual dates already agree with what the huddle recorded.'
+        ? `The actual dates already agree with what the huddle recorded.${
+          held ? ` ${held} bar${held === 1 ? ' is' : 's are'} still waiting on an activity to finish.` : ''}`
         : 'No outcomes recorded yet against the look-ahead rows your bars stand for.',
     });
     return [];
@@ -320,9 +327,59 @@ export async function progressFromCalendar() {
   return offers;
 }
 
+/* Whether the dialog opens with each bar's activities shown — a preference of
+   this browser's, and nothing worse than the default if storage is refused. */
+const PROGRESS_DETAIL_KEY = 'cx.lookahead.progressDetail';
+function progressDetailPref() {
+  try {
+    return localStorage.getItem(PROGRESS_DETAIL_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+function setProgressDetailPref(on) {
+  try {
+    localStorage.setItem(PROGRESS_DETAIL_KEY, on ? '1' : '0');
+  } catch {
+    // Remembering is a convenience; the switch still works for this dialog.
+  }
+}
+
+/** One activity's line in a bar's breakdown. */
+function activityLine(a) {
+  const on = (iso) => fmtDate(Date.parse(`${iso}T00:00:00Z`), 'numeric');
+  const state = a.done
+    ? badge('Done', 'good')
+    : a.ahead
+      ? badge('Still planned', 'info')
+      : a.recorded
+        ? badge('Not completed', 'warn')
+        : badge('Nothing recorded', 'neutral');
+  const facts = a.recorded
+    ? [
+        `${a.days} day${a.days === 1 ? '' : 's'}`,
+        `${on(a.first)} → ${on(a.last)}`,
+        `last ${a.lastStatus}`,
+      ].join(' · ')
+    : 'no outcomes against it yet';
+  return el('li', { class: 'la-progress-act' }, [
+    el('span', { class: 'la-progress-act-title', text: a.title || 'Untitled activity' }),
+    el('span', { class: 'la-progress-act-facts', text: facts }),
+    state,
+  ]);
+}
+
 function openProgressDialog(offers) {
   const chosen = new Map(); // `${id}|start` / `${id}|end` → ms
   const rows = el('div', { class: 'cx-list la-progress' });
+  const details = []; // [{ list, button }] — every bar's breakdown
+  const setOpen = ({ list, button }, open) => {
+    list.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+    button.innerHTML = icon(open ? 'chevron-down' : 'chevron-right', { size: 11 })
+      + `<span>${open ? 'Hide' : 'Show'} ${list.childElementCount} activities</span>`;
+  };
+  const showAll = progressDetailPref();
   const choice = (obj, which, offer, label) => {
     const key = `${obj.id}|${which}`;
     if (offer.replaces == null) chosen.set(key, offer.value);
@@ -336,31 +393,65 @@ function openProgressDialog(offers) {
     });
   };
   for (const { obj, p, start, end } of offers) {
+    const several = p.activities.length > 1;
     const meta = [
+      several ? `${p.activities.length} activities` : null,
       `${p.days} day${p.days === 1 ? '' : 's'} worked`,
       `${p.people} ${p.people === 1 ? 'person' : 'people'}`,
       `last ${p.lastStatus} ${fmtDate(Date.parse(`${p.last}T00:00:00Z`), 'numeric')}`,
       p.byTask && !p.byRow ? 'matched on the task wording' : null,
     ].filter(Boolean).join(' · ');
+    // Why there is no finish, said whether or not the breakdown is open.
+    const waiting = !end && p.end == null && p.holding.length && TYPES[obj.type]?.duration
+      ? el('div', { class: 'la-progress-wait', text: `Finish waits on ${p.holding.join(', ')}` })
+      : null;
+    let detail = null;
+    if (several) {
+      const list = el('ul', { class: 'la-progress-acts' }, p.activities.map(activityLine));
+      const button = el('button', { type: 'button', class: 'cx-btn mini ghost la-progress-toggle' });
+      const entry = { list, button };
+      button.addEventListener('click', () => setOpen(entry, list.hidden));
+      setOpen(entry, showAll);
+      details.push(entry);
+      detail = el('div', {}, [button, list]);
+    }
     rows.appendChild(
       el('div', { class: 'cx-listrow la-progress-row', style: { cursor: 'default', alignItems: 'flex-start' } }, [
         el('div', { class: 'lr-main' }, [
           el('div', { class: 'lr-title', text: obj.title || TYPES[obj.type]?.label || 'Untitled' }),
           el('div', { class: 'lr-meta', text: meta }),
+          waiting,
           el('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', marginTop: '6px' } }, [
             start ? choice(obj, 'start', start, 'Actual start') : null,
             end ? choice(obj, 'end', end, 'Actual finish') : null,
           ].filter(Boolean)),
-        ]),
+          detail,
+        ].filter(Boolean)),
       ])
     );
   }
+
+  const body = el('div', {}, [
+    details.length
+      ? el('div', { class: 'la-progress-head' }, [
+          toggle({
+            label: 'Show each activity',
+            checked: showAll,
+            onChange: (on) => {
+              setProgressDetailPref(on);
+              for (const d of details) setOpen(d, on);
+            },
+          }),
+        ])
+      : null,
+    rows,
+  ].filter(Boolean));
 
   openModal({
     title: 'Progress from the calendar',
     subtitle: 'Actual dates from the outcomes recorded in the daily huddle. Nothing changes on the timeline until you apply it.',
     size: 'wide',
-    body: rows,
+    body,
     actions: [
       { label: 'Not now' },
       {

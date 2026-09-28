@@ -543,7 +543,7 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await page.waitForTimeout(400);
   const fromCalendar = page.locator('#dock button', { hasText: 'Update from the calendar' });
   check('the timeline offers the calendar\'s look-ahead in one step, no workbook needed', (await fromCalendar.count()) === 1);
-  const sentBefore = await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select').length);
+  const sentBefore = await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select' && c.table !== 'rc_la_revision').length);
   await fromCalendar.click();
   await page.waitForTimeout(600);
   const plan = await page.evaluate(() => {
@@ -557,7 +557,7 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   check('and makes suggestions from what the editor wrote', /Updated from the calendar/.test(plan.toast)
     && /the resource calendar/.test(plan.pane) && /ATS Site Test/.test(plan.pane), plan.toast.slice(0, 160));
   check('reading it sends nothing — the plan still never reaches the calendar',
-    (await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select').length)) === sentBefore);
+    (await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select' && c.table !== 'rc_la_revision').length)) === sentBefore);
 
   // Progress: place the suggestion, record a day's work against its row, and
   // the bar is offered that day as its actual start.
@@ -568,6 +568,10 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await page.locator('#sidenav .nav-link[data-pane="lookahead"]').click();
   await page.waitForTimeout(400);
   const progressBtn = page.locator('#dock button', { hasText: 'Progress from the calendar' });
+  const openProgress = async () => {
+    await progressBtn.click();
+    await page.locator('.cx-modal .la-progress').waitFor({ timeout: 5000 }).catch(() => {});
+  };
   check('a placed bar can take its progress from the calendar', (await progressBtn.count()) === 1);
   const today = await page.evaluate(() => new Date().toISOString().slice(0, 10));
   // Against every read's copy of the row: the stub ignores order(), so which
@@ -582,9 +586,8 @@ export async function lookaheadEditor(page, { check, shot = null }) {
       });
     });
   }, today);
-  const sentBeforeProgress = await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select').length);
-  await progressBtn.click();
-  await page.locator('.cx-modal .la-progress').waitFor({ timeout: 5000 }).catch(() => {});
+  const sentBeforeProgress = await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select' && c.table !== 'rc_la_revision').length);
+  await openProgress();
   const offer = await page.evaluate(() => document.querySelector('.cx-modal')?.innerText || [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | '));
   check('the huddle\'s outcome is offered as the actual start, ticked because none was set',
     /Progress from the calendar/.test(offer) && /Actual start/.test(offer)
@@ -600,7 +603,84 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     /already agree/.test(await page.evaluate(() => [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | ')))
       && !(await page.locator('.cx-modal .la-progress').count()));
   check('reading progress sends nothing to the calendar',
-    (await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select').length)) === sentBeforeProgress);
+    (await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select' && c.table !== 'rc_la_revision').length)) === sentBeforeProgress);
+
+  // A second activity under the same bar: linked, worked the day before, never
+  // completed — so the start moves earlier and the finish waits on it.
+  // One whose words the calendar's rows carry, so an outcome can be recorded
+  // against it.
+  const labels = await page.evaluate(() => window.__rc.rows.rc_lookahead_rows.map((r) => r.raw_label || ''));
+  const linkable = await page.locator('#dock button[aria-label^="Link "][aria-label$=" to an object"]').evaluateAll((bs) =>
+    bs.map((b) => b.getAttribute('aria-label').replace(/^Link /, '').replace(/ to an object$/, '')));
+  const second = linkable.find((t) => !/ATS Site Test/.test(t) && labels.some((l) => l.includes(t)));
+  check('there is a second suggestion to link', !!second, linkable.join(' | ').slice(0, 160));
+  await page.locator(`#dock button[aria-label="Link ${second} to an object"]`).first().click();
+  // The picker focuses its search box on a timer; typing before then goes nowhere.
+  await page.waitForFunction(() => document.activeElement?.matches('.cx-modal input[type="text"]'), null, { timeout: 3000 }).catch(() => {});
+  await page.keyboard.type('ATS Site Test');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(400);
+  check('the second activity is linked to the same bar',
+    (await page.locator(`#dock button[aria-label="Unlink ${second}"]`).count()) >= 1
+      || /Linked/.test(await page.evaluate(() => [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' '))));
+  const yesterday = await page.evaluate(() => new Date(Date.now() - 86400000).toISOString().slice(0, 10));
+  await page.evaluate(({ iso, title }) => {
+    const S = window.__rc.rows;
+    S.rc_lookahead_rows.filter((r) => (r.raw_label || '').includes(title)).forEach((row, i) => {
+      S.rc_actuals.push({
+        id: `act-second-${i}`, client_uuid: `act-second-${i}`, person_id: S.rc_people[1].id, work_date: iso,
+        status: 'partial', task: row.raw_label, lookahead_row_id: row.id, shift: 'day',
+        created_at: new Date().toISOString(),
+      });
+    });
+  }, { iso: yesterday, title: second });
+  await page.evaluate(() => { try { localStorage.removeItem('cx.lookahead.progressDetail'); } catch {} });
+  await openProgress();
+  const two = await page.evaluate(() => {
+    const m = document.querySelector('.cx-modal');
+    const list = m?.querySelector('.la-progress-acts');
+    return {
+      text: m?.innerText || '',
+      items: list ? list.children.length : 0,
+      hidden: list ? list.hidden : null,
+      toggle: m?.querySelector('.la-progress-toggle')?.textContent || '',
+      toasts: [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).slice(-4),
+    };
+  });
+  check('a bar standing for two activities says so, with the breakdown hidden to start',
+    /2 activities/.test(two.text) && two.items === 2 && two.hidden === true && /Show 2 activities/.test(two.toggle),
+    JSON.stringify({ ...two, text: two.text.replace(/\s+/g, ' ').slice(0, 220) }));
+  check('the finish waits on the activity that has not completed, and says which',
+    (two.text.split('Finish waits on ')[1] || '').split('\n')[0].includes(second)
+      && !/Actual finish/.test(two.text), two.text.replace(/\s+/g, ' ').slice(0, 260));
+  check('the earlier day on the other activity moves the start, unticked because it replaces one',
+    /Actual start [^\n]*\(was/.test(two.text)
+      && !(await page.locator('.cx-modal .la-progress input[type="checkbox"]:checked').count()));
+  await page.locator('.cx-modal .la-progress-toggle').click();
+  const shown = await page.evaluate(() => {
+    const list = document.querySelector('.cx-modal .la-progress-acts');
+    return { hidden: list.hidden, text: list.innerText, expanded: document.querySelector('.cx-modal .la-progress-toggle').getAttribute('aria-expanded') };
+  });
+  check('one bar\'s activities can be shown on their own',
+    shown.hidden === false && shown.expanded === 'true' && /Still planned|Not completed/.test(shown.text) && /ATS Site Test/.test(shown.text),
+    shown.text.replace(/\s+/g, ' ').slice(0, 200));
+  await page.locator('.cx-modal .la-progress-toggle').click();
+  check('and hidden again', await page.evaluate(() => document.querySelector('.cx-modal .la-progress-acts').hidden));
+  await page.locator('.cx-modal .la-progress-head label').click();
+  check('"Show each activity" opens every bar\'s breakdown',
+    await page.evaluate(() => [...document.querySelectorAll('.cx-modal .la-progress-acts')].every((l) => !l.hidden)));
+  await page.locator('.cx-modal button', { hasText: 'Not now' }).click();
+  await page.waitForTimeout(300);
+  await openProgress();
+  check('and the choice is remembered the next time the dialog opens',
+    await page.evaluate(() => {
+      const lists = [...document.querySelectorAll('.cx-modal .la-progress-acts')];
+      return lists.length > 0 && lists.every((l) => !l.hidden)
+        && document.querySelector('.cx-modal .la-progress-head input').checked;
+    }));
+  await page.locator('.cx-modal .la-progress-head label').click();
+  await page.locator('.cx-modal button', { hasText: 'Not now' }).click();
+  await page.waitForTimeout(300);
   await page.locator('.ws-btn', { hasText: 'Calendar' }).click();
   await page.waitForTimeout(300);
 }

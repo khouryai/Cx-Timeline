@@ -1362,9 +1362,12 @@ export function attachCancellationNotes(events, notes) {
    and last day anybody worked on it.
 
    Offered, never written. The same rule as the rest of the register: a read of
-   the calendar proposes, and somebody says yes. A finish is only offered when
-   the look-ahead has nothing left for the bar and the last word on it was
-   "completed" — a gap in the outcomes is not the end of the work.
+   the calendar proposes, and somebody says yes. A bar may stand for several
+   activities, and each is read on its own: the start is the first day any of
+   them was worked, and a finish is only offered when *every* one has nothing
+   left on the look-ahead and its own last word was "completed" — a gap in the
+   outcomes is not the end of the work, and one activity finishing is not the
+   bar finishing.
    ═══════════════════════════════════════════════════════════════════════ */
 
 /** Statuses that say somebody worked on the task that day. */
@@ -1381,72 +1384,106 @@ export const WORKED_STATUSES = ['completed', 'partial', 'carried'];
  * day read off the sheet carries verbatim. Both go through `suggestionKey()`,
  * so a match is exact or nothing.
  *
+ * A bar's linked runs are grouped by that key — several runs of one row are one
+ * activity — and each activity is summarised on its own in `activities`:
+ * `{ key, title, days, first, last, lastStatus, ahead, recorded, done }`.
+ *
  * Returns one proposal per bar with at least one worked day:
- * `{ objectId, first, last, days, people, lastStatus, start, end, byRow, byTask }`
- * with `start` / `end` as UTC-midnight ms (end half-open, like the bar) and
- * `end` null when a finish cannot be claimed yet.
+ * `{ objectId, first, last, days, people, lastStatus, start, end, byRow,
+ *    byTask, activities, holding }` with `start` / `end` as UTC-midnight ms (end
+ * half-open, like the bar). `end` is null unless every activity is `done`;
+ * `holding` names the ones that are not.
  */
 export function outcomeProgress({ objects = [], activities = {}, actuals = [], rows = [], plan = [], todayMs = Date.now() } = {}) {
   const rowById = new Map(rows.map((r) => [r.id, r]));
   const planById = new Map(plan.map((p) => [p.id, p]));
 
-  // key → the bars whose linked runs carry it
+  // Each bar's activities, by key, and the bars each key belongs to.
+  const barKeys = new Map(); // bar id → Map(key → { title, ahead })
   const barsByKey = new Map();
   for (const obj of objects) {
     const ids = Array.isArray(obj?.data?.laIds) ? obj.data.laIds : [];
     for (const id of ids) {
       const entry = activities[id];
       if (!entry?.key) continue;
+      if (!barKeys.has(obj.id)) barKeys.set(obj.id, new Map());
+      const keys = barKeys.get(obj.id);
+      const known = keys.get(entry.key) || { title: entry.title || entry.label || '', ahead: false };
+      if (!entry.dismissed && Number.isFinite(entry.end) && entry.end > todayMs) known.ahead = true;
+      keys.set(entry.key, known);
       if (!barsByKey.has(entry.key)) barsByKey.set(entry.key, new Set());
       barsByKey.get(entry.key).add(obj.id);
     }
   }
   if (!barsByKey.size) return [];
 
-  const byBar = new Map();
+  // What was recorded against each key: the day's word, who, and how it matched.
+  const byKey = new Map();
   for (const a of actuals) {
     if (!WORKED_STATUSES.includes(a.status) || !a.work_date) continue;
     const rowId = a.lookahead_row_id || planById.get(a.plan_entry_id)?.lookahead_row_id || null;
     const row = rowId ? rowById.get(rowId) : null;
     const key = suggestionKey(row ? row.raw_label : a.task);
-    const bars = key ? barsByKey.get(key) : null;
-    if (!bars) continue;
-    for (const id of bars) {
-      if (!byBar.has(id)) byBar.set(id, { dates: new Map(), people: new Set(), byRow: 0, byTask: 0 });
-      const acc = byBar.get(id);
-      const prev = acc.dates.get(a.work_date);
-      // Several people on one day: "completed" from anybody is the day's word.
-      if (!prev || a.status === 'completed') acc.dates.set(a.work_date, a.status);
-      if (a.person_id) acc.people.add(a.person_id);
-      if (row) acc.byRow++;
-      else acc.byTask++;
-    }
+    if (!key || !barsByKey.has(key)) continue;
+    if (!byKey.has(key)) byKey.set(key, { dates: new Map(), people: new Set(), byRow: 0, byTask: 0 });
+    const acc = byKey.get(key);
+    const prev = acc.dates.get(a.work_date);
+    // Several people on one day: "completed" from anybody is the day's word.
+    if (!prev || a.status === 'completed') acc.dates.set(a.work_date, a.status);
+    if (a.person_id) acc.people.add(a.person_id);
+    if (row) acc.byRow++;
+    else acc.byTask++;
   }
 
   const out = [];
   for (const obj of objects) {
-    const acc = byBar.get(obj.id);
-    if (!acc) continue;
-    const dates = [...acc.dates.keys()].sort();
-    const first = dates[0];
-    const last = dates[dates.length - 1];
-    const lastStatus = acc.dates.get(last);
-    const ahead = (obj.data.laIds || []).some((id) => {
-      const entry = activities[id];
-      return entry && !entry.dismissed && Number.isFinite(entry.end) && entry.end > todayMs;
-    });
-    const done = lastStatus === 'completed' && !ahead;
+    const keys = barKeys.get(obj.id);
+    if (!keys || ![...keys.keys()].some((k) => byKey.has(k))) continue;
+    const people = new Set();
+    let byRow = 0;
+    let byTask = 0;
+    const summary = [];
+    for (const [key, { title, ahead }] of keys) {
+      const acc = byKey.get(key);
+      const dates = acc ? [...acc.dates.keys()].sort() : [];
+      const last = dates[dates.length - 1] || null;
+      const lastStatus = last ? acc.dates.get(last) : null;
+      if (acc) {
+        acc.people.forEach((p) => people.add(p));
+        byRow += acc.byRow;
+        byTask += acc.byTask;
+      }
+      summary.push({
+        key,
+        title,
+        days: dates.length,
+        first: dates[0] || null,
+        last,
+        lastStatus,
+        ahead,
+        recorded: dates.length > 0,
+        done: !ahead && lastStatus === 'completed',
+      });
+    }
+    const worked = summary.filter((a) => a.recorded);
+    const first = worked.map((a) => a.first).sort()[0];
+    const last = worked.map((a) => a.last).sort().pop();
+    const allDates = new Set();
+    for (const a of worked) for (const d of byKey.get(a.key).dates.keys()) allDates.add(d);
+    const done = summary.every((a) => a.done);
     out.push({
       objectId: obj.id,
       first,
       last,
-      days: dates.length,
-      people: acc.people.size,
-      lastStatus,
+      days: allDates.size,
+      people: people.size,
+      lastStatus: worked.find((a) => a.last === last)?.lastStatus || null,
       start: isoMs(first),
       end: done ? isoMs(last) + 86400000 : null,
-      byRow: acc.byRow,
-      byTask: acc.byTask,
+      byRow,
+      byTask,
+      activities: summary,
+      holding: summary.filter((a) => !a.done).map((a) => a.title),
     });
   }
   return out;
