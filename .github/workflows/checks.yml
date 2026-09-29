@@ -59,7 +59,7 @@ jobs:
               echo "$bundle: the committed bundle is the source, built"
             fi
           done
-          exit $status"
+          exit $status
 
   # This job needs `package-lock.json` committed, and for a long time it was
   # not: `.gitignore` held it, so `cache: npm` failed at setup, every suite step
