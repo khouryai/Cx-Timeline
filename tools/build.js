@@ -12,7 +12,8 @@
  *
  * This linker resolves the module graph ahead of time, topologically sorts it,
  * and emits one self-executing bundle per entry point that runs anywhere —
- * `file://` included: `app.bundle.js` for the application and
+ * `file://` included: `app.bundle.js` for the application, with the calendar
+ * split off into `calendar.bundle.js` that it loads on first use, and
  * `mobile.bundle.js` for the phone app under `m/` (see `ENTRIES`). The
  * generated bundles are committed so the app works with zero setup; rebuild
  * with `npm run build` after editing anything in `src/`.
@@ -36,16 +37,26 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
+import vm from 'node:vm';
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const SRC = path.join(ROOT, 'src');
+/*
+ * The resource calendar, as a bundle the main one loads the first time somebody
+ * opens it (`ui/calendar_loader.js`). Everything reachable from `ui/rc.js` that
+ * the main bundle does not already carry goes in it, registering itself into
+ * the main bundle's module table — so the two share one copy of every core
+ * module and a person who only ever uses the timeline never downloads it.
+ */
+const CALENDAR_ENTRY = path.join(SRC, 'ui', 'rc.js');
+const CALENDAR_OUT = path.join(ROOT, 'calendar.bundle.js');
 const CONFIG_OUT = path.join(ROOT, 'config.js');
 
 /**
  * The two applications this repository ships, and what each may contain.
  *
- * `app.bundle.js` is everything — the timeline and the calendar — and may
- * import anything. `mobile.bundle.js` is the phone app under `m/`: the resource
+ * `app.bundle.js` is everything — the timeline, and the calendar through
+ * `calendar.bundle.js`, which it loads on first use — and may import anything. `mobile.bundle.js` is the phone app under `m/`: the resource
  * calendar and nothing else. It is a second entry rather than a mode of the
  * first because what it must *not* contain is the point, and a bundle can only
  * be kept free of the timeline by never linking it in.
@@ -63,6 +74,8 @@ const ENTRIES = [
     out: path.join(ROOT, 'app.bundle.js'),
     title: 'CX Timeline — Interactive Timeline & Commissioning Planner',
     forbid: null,
+    // Publishes its module table, and the calendar bundle is built against it.
+    calendar: true,
   },
   {
     entry: path.join(SRC, 'mobile.js'),
@@ -282,7 +295,7 @@ function sort(modules) {
   return order;
 }
 
-function emit(modules, order, entryId, title) {
+function emit(modules, order, entryId, title, { registry = false } = {}) {
   const banner = [
     '/*!',
     ` * ${title}`,
@@ -330,9 +343,58 @@ function emit(modules, order, entryId, title) {
 
 ${body}
 
+${registry ? `  /* The module table, for the calendar bundle to register into. It is loaded
+     on first use and shares this bundle's copy of every module both need. */
+  if (typeof window !== 'undefined') window.__CX_MODULES = { mods: __mods, req: __req };
+` : ''}
   __req(${JSON.stringify(entryId)});
 })();
 `;
+}
+
+/** The calendar bundle: factories only, added to the main bundle's table. */
+function emitCalendar(modules, ids) {
+  const body = ids
+    .map((id) => {
+      const mod = modules.get(id);
+      const registrations = mod.exports
+        .map((name) => `  Object.defineProperty(__x, ${JSON.stringify(name)}, { get: () => ${name}, enumerable: true });`)
+        .join('\n');
+      return [`// ${id}`, `__mods[${JSON.stringify(id)}] = function (__x, __req) {`, indent(mod.code), registrations, '};']
+        .join('\n');
+    })
+    .join('\n\n');
+  return `/*!
+ * CX Timeline — the resource calendar, loaded on first use.
+ * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
+ * Modules: ${ids.length}   Built: ${new Date().toISOString()}
+ */
+(function () {
+  'use strict';
+  var registry = typeof window !== 'undefined' && window.__CX_MODULES;
+  if (!registry) throw new Error('CX Timeline: calendar.bundle.js has to load after app.bundle.js');
+  var __mods = registry.mods;
+
+${body}
+})();
+`;
+}
+
+/**
+ * Parse what was written, before anybody loads it.
+ *
+ * The linker is a line-based rewrite, and a mistake it carries through — an
+ * object key renamed like a variable, say — produced a bundle the build
+ * reported as fine and no browser could run: the page stayed blank with one
+ * error in the console. `vm.Script` compiles without running, which is exactly
+ * the check that was missing.
+ */
+function assertParses(code, file) {
+  try {
+    new vm.Script(code, { filename: file });
+  } catch (err) {
+    throw new Error(`${path.basename(file)} does not parse — ${err.message}. The module that produced it is named in the comment above the failing line.`);
+  }
 }
 
 function indent(code) {
@@ -374,17 +436,38 @@ function writeConfig() {
 
 function build() {
   writeConfig();
+  const built = [];
   const orders = [];
-  for (const { entry, out, title, forbid } of ENTRIES) {
+  for (const { entry, out, title, forbid, calendar } of ENTRIES) {
     const started = Date.now();
     const modules = collect(entry, forbid);
     const order = sort(modules);
-    const bundle = emit(modules, order, toId(entry), title);
+    const bundle = emit(modules, order, toId(entry), title, { registry: Boolean(calendar) });
+    assertParses(bundle, out);
+    built.push({ out, bundle, line: `${order.length} modules`, started });
+    orders.push(order);
+    if (!calendar) continue;
+
+    /* Everything the calendar needs that the main bundle does not carry. The
+       calendar's own entry must not be reachable from main — that would put it
+       in both — which is what `ui/calendar_loader.js` is for. */
+    if (modules.has(toId(CALENDAR_ENTRY))) {
+      throw new Error('ui/rc.js is imported statically from the main bundle — load it through ui/calendar_loader.js');
+    }
+    const calendarModules = collect(CALENDAR_ENTRY);
+    const calendarIds = sort(calendarModules).filter((id) => !modules.has(id));
+    const code = emitCalendar(calendarModules, calendarIds);
+    assertParses(code, CALENDAR_OUT);
+    built.push({ out: CALENDAR_OUT, bundle: code, line: `${calendarIds.length} modules`, note: 'loaded on first use' });
+    orders.push(calendarIds);
+  }
+  // Written only once every bundle parses, so a failed build leaves the last good set.
+  for (const { out, bundle, line, started, note } of built) {
     fs.writeFileSync(out, bundle, 'utf8');
     const kb = (Buffer.byteLength(bundle) / 1024).toFixed(1);
     const name = path.basename(out);
-    console.log(`✓ ${name}${' '.repeat(Math.max(1, 17 - name.length))}— ${order.length} modules, ${kb} kB, ${Date.now() - started}ms`);
-    orders.push(order);
+    const tail = note || `${Date.now() - started}ms`;
+    console.log(`✓ ${name}${' '.repeat(Math.max(1, 19 - name.length))}— ${line}, ${kb} kB, ${tail}`);
   }
   return orders;
 }

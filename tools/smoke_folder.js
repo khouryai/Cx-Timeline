@@ -25,9 +25,12 @@
 
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
+import { pinClock, pinNodeClock } from './lib/clock.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
+
+pinNodeClock();
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 let passed = 0;
@@ -137,7 +140,7 @@ const planText = (page, name) => page.evaluate((n) => (window.__folder.files[n] 
 
 async function main() {
   const browser = await chromium.launch(launchOptions());
-  const context = await browser.newContext({ viewport: { width: 1500, height: 920 } });
+  const context = pinClock(await browser.newContext({ viewport: { width: 1500, height: 920 } }));
   const page = await context.newPage();
 
   const consoleErrors = [];

@@ -1222,10 +1222,13 @@ export function agendaFor(view, iso) {
  */
 function titleColumnOf(view, locCol) {
   const headings = view?.headings || [];
+  /* In order of preference, and a heading shaped like an identifier is never
+     taken whichever word it carries — "Activity ID", "Task No.", "Scope Ref". */
   const identifier = /\b(id|no|nos|number|ref|code)\b|#/i;
-  for (const wanted of [/\bdescr/i, /\b(activit|task|scope)/i]) {
+  const wants = [/\bdescr/i, /\b(task|scope)/i, /\bactivit/i];
+  for (const re of wants) {
     for (let i = 0; i < headings.length; i++) {
-      if (i !== locCol && wanted.test(headings[i]) && !identifier.test(headings[i])) return i;
+      if (i !== locCol && re.test(headings[i]) && !identifier.test(headings[i])) return i;
     }
   }
   return -1;
@@ -1453,4 +1456,347 @@ export function attachCancellationNotes(events, notes) {
     const current = touching.filter((n) => !superseded.has(n.id));
     return { ...event, note: current[current.length - 1] || null, history: touching };
   });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Progress from the calendar
+
+   The daily huddle records what each person actually did, and the timeline
+   has had `actualStart` / `actualEnd` fields nobody filled in. This joins the
+   two: an outcome is traced to the look-ahead row it was recorded against, the
+   row to the suggestion a bar is linked to, and the bar is offered the first
+   and last day anybody worked on it.
+
+   Offered, never written. The same rule as the rest of the register: a read of
+   the calendar proposes, and somebody says yes. A bar may stand for several
+   activities, and each is read on its own: the start is the first day any of
+   them was worked, and a finish is only offered when *every* one has nothing
+   left on the look-ahead and its own last word was "completed" — a gap in the
+   outcomes is not the end of the work, and one activity finishing is not the
+   bar finishing.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Statuses that say somebody worked on the task that day. */
+export const WORKED_STATUSES = ['completed', 'partial', 'carried'];
+
+/**
+ * What the outcomes say about each linked bar.
+ *
+ * `objects` are the plan's objects (only those with `data.laIds` count);
+ * `activities` is the register's id → entry map; `actuals` are rows of
+ * `rc_actuals_current`; `rows` are the `rc_lookahead_rows` those outcomes (or
+ * their plan entries in `plan`) point at. An outcome with a row is matched
+ * through the row's label; one without falls back to its task text, which a
+ * day read off the sheet carries verbatim. Both go through `suggestionKey()`,
+ * so a match is exact or nothing.
+ *
+ * A bar's linked runs are grouped by that key — several runs of one row are one
+ * activity — and each activity is summarised on its own in `activities`:
+ * `{ key, title, days, first, last, lastStatus, ahead, recorded, done }`.
+ *
+ * Returns one proposal per bar with at least one worked day:
+ * `{ objectId, first, last, days, people, lastStatus, start, end, byRow,
+ *    byTask, activities, holding }` with `start` / `end` as UTC-midnight ms (end
+ * half-open, like the bar). `end` is null unless every activity is `done`;
+ * `holding` names the ones that are not.
+ */
+export function outcomeProgress({ objects = [], activities = {}, actuals = [], rows = [], plan = [], todayMs = Date.now() } = {}) {
+  const rowById = new Map(rows.map((r) => [r.id, r]));
+  const planById = new Map(plan.map((p) => [p.id, p]));
+
+  // Each bar's activities, by key, and the bars each key belongs to.
+  const barKeys = new Map(); // bar id → Map(key → { title, ahead })
+  const barsByKey = new Map();
+  for (const obj of objects) {
+    const ids = Array.isArray(obj?.data?.laIds) ? obj.data.laIds : [];
+    for (const id of ids) {
+      const entry = activities[id];
+      if (!entry?.key) continue;
+      if (!barKeys.has(obj.id)) barKeys.set(obj.id, new Map());
+      const keys = barKeys.get(obj.id);
+      const known = keys.get(entry.key) || { title: entry.title || entry.label || '', ahead: false };
+      if (!entry.dismissed && Number.isFinite(entry.end) && entry.end > todayMs) known.ahead = true;
+      keys.set(entry.key, known);
+      if (!barsByKey.has(entry.key)) barsByKey.set(entry.key, new Set());
+      barsByKey.get(entry.key).add(obj.id);
+    }
+  }
+  if (!barsByKey.size) return [];
+
+  // What was recorded against each key: the day's word, who, and how it matched.
+  const byKey = new Map();
+  for (const a of actuals) {
+    if (!WORKED_STATUSES.includes(a.status) || !a.work_date) continue;
+    const rowId = a.lookahead_row_id || planById.get(a.plan_entry_id)?.lookahead_row_id || null;
+    const row = rowId ? rowById.get(rowId) : null;
+    const key = suggestionKey(row ? row.raw_label : a.task);
+    if (!key || !barsByKey.has(key)) continue;
+    if (!byKey.has(key)) byKey.set(key, { dates: new Map(), people: new Set(), byRow: 0, byTask: 0 });
+    const acc = byKey.get(key);
+    const prev = acc.dates.get(a.work_date);
+    // Several people on one day: "completed" from anybody is the day's word.
+    if (!prev || a.status === 'completed') acc.dates.set(a.work_date, a.status);
+    if (a.person_id) acc.people.add(a.person_id);
+    if (row) acc.byRow++;
+    else acc.byTask++;
+  }
+
+  const out = [];
+  for (const obj of objects) {
+    const keys = barKeys.get(obj.id);
+    if (!keys || ![...keys.keys()].some((k) => byKey.has(k))) continue;
+    const people = new Set();
+    let byRow = 0;
+    let byTask = 0;
+    const summary = [];
+    for (const [key, { title, ahead }] of keys) {
+      const acc = byKey.get(key);
+      const dates = acc ? [...acc.dates.keys()].sort() : [];
+      const last = dates[dates.length - 1] || null;
+      const lastStatus = last ? acc.dates.get(last) : null;
+      if (acc) {
+        acc.people.forEach((p) => people.add(p));
+        byRow += acc.byRow;
+        byTask += acc.byTask;
+      }
+      summary.push({
+        key,
+        title,
+        days: dates.length,
+        first: dates[0] || null,
+        last,
+        lastStatus,
+        ahead,
+        recorded: dates.length > 0,
+        done: !ahead && lastStatus === 'completed',
+      });
+    }
+    const worked = summary.filter((a) => a.recorded);
+    const first = worked.map((a) => a.first).sort()[0];
+    const last = worked.map((a) => a.last).sort().pop();
+    const allDates = new Set();
+    for (const a of worked) for (const d of byKey.get(a.key).dates.keys()) allDates.add(d);
+    const done = summary.every((a) => a.done);
+    out.push({
+      objectId: obj.id,
+      first,
+      last,
+      days: allDates.size,
+      people: people.size,
+      lastStatus: worked.find((a) => a.last === last)?.lastStatus || null,
+      start: isoMs(first),
+      end: done ? isoMs(last) + 86400000 : null,
+      byRow,
+      byTask,
+      activities: summary,
+      holding: summary.filter((a) => !a.done).map((a) => a.title),
+    });
+  }
+  return out;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Only my rows
+
+   The look-ahead is a hundred-odd activities for the whole team, and somebody
+   on it wants the handful they are on. A names row belongs to the activity
+   line above it — that line is the work, and the names row says who lands on
+   each day of it — so the activity is what is kept, and it is drawn with its
+   names row under it as always. Section headings above a kept activity are
+   kept too, for the same reason they are in the editor's search: a row of work
+   with no section over it has lost where it sits in the plan.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The activities (and away rows) whose names name this person, in the days
+ * given, with the headings above them.
+ *
+ * `isMe(written)` answers whether a written name is this person — injected,
+ * because the register lives with the calendar. `cols`, when given, limits the
+ * question to the columns on screen: being named in a week nobody is looking
+ * at does not make a row yours this week. Rows with nothing scheduled are not
+ * dropped here: a row that names you is yours whether or not it is painted.
+ */
+export function rowsNaming(activities, isMe, cols = null) {
+  const rows = activities || [];
+  const inView = (col) => !cols || cols.has(col);
+  const names = (a) => (a.absence
+    ? (a.marks || []).filter((m) => m.value && inView(m.col)).flatMap((m) => resourceNames(m.value))
+    : (a.resource?.names || []).filter((n) => inView(n.col)).flatMap((n) => n.names));
+  const keep = new Array(rows.length).fill(false);
+  let sectionHasMine = false;
+  let belowIsKeptTitle = false;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const a = rows[i];
+    if (a.heading && !a.absence) {
+      keep[i] = sectionHasMine || belowIsKeptTitle;
+      sectionHasMine = false;
+      belowIsKeptTitle = keep[i];
+      continue;
+    }
+    keep[i] = names(a).some((n) => isMe(n));
+    if (keep[i] && !a.absence) sectionHasMine = true;
+    belowIsKeptTitle = false;
+  }
+  return rows.filter((_, i) => keep[i]);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   One activity, whole
+
+   What somebody sees when they tap a task: every column of the activity's
+   line under the sheet's own headings, and every day it has anything on —
+   the shift the paint means, whether it was cancelled, what is written in the
+   cell, and who the names row puts on it.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** The activity's name, found the way a suggestion's title is. */
+export function activityTitle(view, activity) {
+  const meta = activity?.meta || [];
+  const locCol = locationColumnOf(view);
+  const titleCol = titleColumnOf(view, locCol);
+  return (titleCol >= 0 ? meta[titleCol] : '') || longest(meta.filter((_, i) => i !== locCol)) || meta.find(Boolean) || '';
+}
+
+/**
+ * Every day the activity carries something on, from `fromISO` on (all of them
+ * when the axis is undated): `[{ date, col, meaning, hex, shift, cancelled,
+ * text, names, mine }]`. `shift` is true when the paint is work; `mine` when
+ * `isMe` answers yes for a name on that day.
+ */
+export function activityDays(view, activity, { fromISO = null, isMe = () => false } = {}) {
+  const marks = new Map((activity?.marks || []).map((m) => [m.col, m]));
+  const names = new Map((activity?.resource?.names || []).map((n) => [n.col, n.names]));
+  const out = [];
+  for (const d of view?.days || []) {
+    if (fromISO && d.date && d.date < fromISO) continue;
+    const mark = marks.get(d.col);
+    const who = names.get(d.col) || [];
+    const shift = Boolean(mark?.hex && mark.role === 'shift');
+    if (!shift && !mark?.value && !who.length && !(mark?.hex && isCancelMeaning(mark.meaning))) continue;
+    out.push({
+      date: d.date || null,
+      col: d.col,
+      label: d.date || `${d.month || ''} ${d.day || ''}`.trim(),
+      meaning: mark?.meaning || '',
+      hex: mark?.hex || null,
+      shift,
+      cancelled: Boolean(mark?.hex && isCancelMeaning(mark.meaning)),
+      text: mark?.value || '',
+      names: who,
+      mine: who.some((n) => isMe(n)),
+    });
+  }
+  return out;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   What changed for me
+
+   Somebody on the team opens the calendar and wants to know one thing before
+   anything else: has my week moved since I last looked? This compares two
+   readings of the look-ahead — the one they last said "got it" to, and the
+   latest — for the days that name them, and says what happened in the words a
+   person would use: a day added, a day taken away, a day moved, a day given
+   to somebody else, a day cancelled, a shift changed.
+
+   Both sides come from the stored rows (`rc_lookahead_rows`), which are never
+   compacted, so an old reading can always be compared. A reading is a complete
+   statement of the weeks it covers, so each side is one reading, whole.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The days a set of stored rows names somebody on, between `from` and `to`
+ * (ISO, inclusive): a map of `date|label` → `{ date, label, location, meaning,
+ * cancelled }`.
+ */
+export function myLookaheadDays(rows, isMe, { from = null, to = null } = {}) {
+  const out = new Map();
+  for (const row of rows || []) {
+    for (const [date, text] of Object.entries(row.resources || {})) {
+      const day = String(date).slice(0, 10);
+      if ((from && day < from) || (to && day > to)) continue;
+      if (!resourceNames(text).some((n) => isMe(n))) continue;
+      const meaning = row.cells?.[day] || row.cells?.[date] || '';
+      out.set(`${day}|${row.raw_label || ''}`, {
+        date: day,
+        label: row.raw_label || '',
+        location: row.raw_location || '',
+        meaning,
+        cancelled: isCancelMeaning(meaning),
+      });
+    }
+  }
+  return out;
+}
+
+/** How far apart a removed and an added day of one activity may be and still be one day moved. */
+const MOVED_WITHIN_DAYS = 14;
+
+/**
+ * What changed between two readings for the days that name this person:
+ * `[{ kind, date, label, location, from?, was?, now?, names? }]`, by date.
+ *
+ *   added      named on a day they were not before
+ *   removed    no longer named on a day they were, and nobody else took it
+ *   given      no longer named, and the row names somebody else that day
+ *   moved      removed from one day and added to another of the same activity
+ *   cancelled  still named, and the day is now painted as a cancellation
+ *   reinstated a day that was cancelled is back on
+ *   shift      still named, and the day is painted as a different shift
+ */
+export function changesForMe(beforeRows, afterRows, isMe, { from = null, to = null } = {}) {
+  const before = myLookaheadDays(beforeRows, isMe, { from, to });
+  const after = myLookaheadDays(afterRows, isMe, { from, to });
+  const afterRow = new Map();
+  for (const row of afterRows || []) {
+    for (const date of new Set([...Object.keys(row.resources || {}), ...Object.keys(row.cells || {})])) {
+      afterRow.set(`${String(date).slice(0, 10)}|${row.raw_label || ''}`, row);
+    }
+  }
+
+  const added = [...after.entries()].filter(([k]) => !before.has(k)).map(([, v]) => v);
+  const removed = [...before.entries()].filter(([k]) => !after.has(k)).map(([, v]) => v);
+  const out = [];
+
+  /* A day taken off and another of the same activity put on, close together,
+     is one day moved — nearest first, each day used once. */
+  const usedAdded = new Set();
+  const stillRemoved = [];
+  for (const r of removed.sort((a, b) => a.date.localeCompare(b.date))) {
+    let best = null;
+    let bestGap = Infinity;
+    added.forEach((a, i) => {
+      if (usedAdded.has(i) || a.label !== r.label) return;
+      const gap = Math.abs(Date.parse(`${a.date}T00:00:00Z`) - Date.parse(`${r.date}T00:00:00Z`)) / 86400000;
+      if (gap <= MOVED_WITHIN_DAYS && gap < bestGap) { best = i; bestGap = gap; }
+    });
+    if (best == null) { stillRemoved.push(r); continue; }
+    usedAdded.add(best);
+    const a = added[best];
+    out.push({ kind: 'moved', date: a.date, from: r.date, label: a.label, location: a.location, now: a.meaning, was: r.meaning });
+  }
+
+  added.forEach((a, i) => {
+    if (!usedAdded.has(i)) out.push({ kind: 'added', date: a.date, label: a.label, location: a.location, now: a.meaning });
+  });
+  for (const r of stillRemoved) {
+    const row = afterRow.get(`${r.date}|${r.label}`);
+    const names = resourceNames(row?.resources?.[r.date] || '').filter((n) => !isMe(n));
+    if (names.length) out.push({ kind: 'given', date: r.date, label: r.label, location: r.location, names });
+    else out.push({ kind: 'removed', date: r.date, label: r.label, location: r.location, was: r.meaning });
+  }
+  for (const [k, now] of after) {
+    const was = before.get(k);
+    if (!was) continue;
+    if (now.cancelled && !was.cancelled) {
+      out.push({ kind: 'cancelled', date: now.date, label: now.label, location: now.location, was: was.meaning });
+    } else if (was.cancelled && !now.cancelled) {
+      out.push({ kind: 'reinstated', date: now.date, label: now.label, location: now.location, now: now.meaning });
+    } else if (!now.cancelled && now.meaning !== was.meaning && now.meaning && was.meaning) {
+      out.push({ kind: 'shift', date: now.date, label: now.label, location: now.location, was: was.meaning, now: now.meaning });
+    }
+  }
+
+  return out.sort((a, b) => a.date.localeCompare(b.date) || a.label.localeCompare(b.label));
 }

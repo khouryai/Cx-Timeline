@@ -27,10 +27,14 @@
 
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
+import { pinClock, pinNodeClock } from './lib/clock.js';
 import { buildLookaheadWorkbook } from './fixtures/xlsx_fixture.js';
-import { fakeSdk } from './lib/rc_stub.js';
+import { lookaheadEditor } from './smoke_la_editor.js';
+import { fakeSdk, SCHEMA_VERSION } from './lib/rc_stub.js';
 import path from 'node:path';
 import url from 'node:url';
+
+pinNodeClock();
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 
@@ -128,7 +132,7 @@ const PLAN_WORDS = ['Signalling', 'Commissioning', 'ATS Integration', 'IXL Stati
 
 async function main() {
   const browser = await chromium.launch(launchOptions());
-  const context = await browser.newContext({ viewport: { width: 1500, height: 920 } });
+  const context = pinClock(await browser.newContext({ viewport: { width: 1500, height: 920 } }));
   const page = await context.newPage();
 
   const consoleErrors = [];
@@ -174,6 +178,7 @@ async function main() {
   const captureDownloads = (pg) => pg.addInitScript(() => {
     const create = URL.createObjectURL.bind(URL);
     URL.createObjectURL = (blob) => {
+      window.__lastBlob = blob;
       blob.text().then((text) => {
         try {
           const parsed = JSON.parse(text);
@@ -207,6 +212,7 @@ async function main() {
   await captureDownloads(page);
   await captureClipboard(page);
   await page.addInitScript(fakeFolder);
+  await page.addInitScript(`window.__rcSchemaVersion = ${SCHEMA_VERSION};`);
   await page.addInitScript(fakeSdk);
   const url_ = 'file://' + path.join(ROOT, 'index.html');
 
@@ -273,6 +279,68 @@ async function main() {
     await page.evaluate(() => localStorage.getItem('cxtl.folder.name')));
   check('and the plan still has no backend of its own',
     await page.evaluate(() => window.CX_CONFIG.supabaseUrl === ''));
+
+  /* ── The database version ─────────────────────────────────────────────
+     The site deploys on a push and the SQL is run by hand, so they drift.
+     A database the application is ahead of is said once, at the top, with
+     the two files an administrator runs — rather than as a refused write on
+     some screen weeks later. */
+  console.log('\nSchema version');
+  const bannerNow = () => page.locator('#rc-frame .rc-schema-banner:not([hidden])');
+  check('a database at the expected version says nothing', (await bannerNow().count()) === 0);
+  const setVersion = (v) => page.evaluate((value) => {
+    const row = window.__rc.rows.rc_settings.find((r) => r.key === 'schema_version');
+    if (value === null) window.__rc.rows.rc_settings.splice(window.__rc.rows.rc_settings.indexOf(row), 1);
+    else row.value = value;
+    const { mods, req } = window.__CX_MODULES;
+    req('core/rc.js').forgetReads();
+    req('core/events.js').emit('rc:changed', { what: 'test' });
+  }, v);
+  await setVersion('0');
+  await page.waitForTimeout(300);
+  const behindText = (await bannerNow().count()) ? await bannerNow().innerText() : '';
+  check('a database behind the application is named, with the files to run',
+    /behind this version/.test(behindText) && /migrate\.sql/.test(behindText) && /rc_schema\.sql/.test(behindText),
+    behindText.replace(/\n/g, ' ').slice(0, 100));
+  await bannerNow().locator('button', { hasText: 'Hide for now' }).click();
+  check('and it can be put away for the session', (await bannerNow().count()) === 0);
+  await setVersion(String(await page.evaluate(() => window.__rcSchemaVersion + 1)));
+  await page.waitForTimeout(300);
+  check('a page older than its database is told to reload',
+    (await bannerNow().count()) === 1 && /older than the calendar's database/.test(await bannerNow().innerText())
+      && (await bannerNow().locator('button', { hasText: 'Reload' }).count()) === 1,
+    'even after "run the SQL" was put away');
+  await setVersion(String(await page.evaluate(() => window.__rcSchemaVersion)));
+  await page.waitForTimeout(200);
+
+  /* ── Problems reported ────────────────────────────────────────────────
+     A tab that fails used to be a message on one screen and a console line
+     nobody read. It is now a row an administrator can see — and only the
+     calendar reports, from named places, so no plan text can travel with it. */
+  console.log('\nProblems reported');
+  await page.evaluate(() => { window.__savedLeave = window.__rc.rows.rc_leave; window.__rc.rows.rc_leave = 42; });
+  await page.locator('#rc-frame .rc-tab', { hasText: 'PTO' }).click();
+  await page.waitForTimeout(400);
+  await page.evaluate(() => { window.__rc.rows.rc_leave = window.__savedLeave; });
+  const reportedRows = await page.evaluate(() => window.__rc.rows.rc_client_errors || []);
+  check('a tab that fails to load is reported, once, with where it happened',
+    reportedRows.length === 1 && reportedRows[0].area === 'tab:pto' && reportedRows[0].created_by,
+    reportedRows.map((r) => `${r.area}: ${String(r.message).slice(0, 40)}`).join(' | '));
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Organisation' }).click();
+  await page.waitForTimeout(300);
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Problems' }).click();
+  await page.waitForTimeout(300);
+  const problemsText = await page.locator('#rc-frame').innerText();
+  check('and an administrator finds it under Organisation → Problems', /tab:pto/.test(problemsText) && /Alex/.test(problemsText));
+  await page.locator('#rc-frame button', { hasText: 'Clear all' }).click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Clear' }).click();
+  await page.waitForTimeout(400);
+  check('clearing the log goes through the function and empties the list',
+    (await page.evaluate(() => (window.__rc.rows.rc_client_errors || []).length)) === 0
+      && /Nothing reported/.test(await page.locator('#rc-frame').innerText()));
+  await page.locator('#rc-frame .rc-tab', { hasText: 'People' }).click();
+  await page.waitForTimeout(200);
 
   /* ── The roster ───────────────────────────────────────────────────────── */
   console.log('\nOrganisation');
@@ -967,6 +1035,13 @@ async function main() {
   check('and it says so rather than naming a meaning',
     /unmapped colour/.test(
       await page.locator('#rc-frame .la-grid td.la-unmapped').first().getAttribute('title')));
+  /* Red on its own is a fact only somebody who can tell red from green can
+     read, so a cancelled day is struck through as well. */
+  const cancelledCell = page.locator('#rc-frame .la-grid td.la-cancel');
+  check('a cancelled day is marked by more than its colour',
+    (await cancelledCell.count()) >= 1
+      && /Cancellation/.test(await cancelledCell.first().getAttribute('title'))
+      && (await cancelledCell.first().evaluate((n) => getComputedStyle(n).backgroundImage)).includes('gradient'));
 
   /* Most of the sheet is activities carried for reference with nothing
      scheduled against them. They are hidden by default, and the switch is what
@@ -1683,7 +1758,9 @@ async function main() {
       && (await page.locator('#rc-frame .rc-huddle').count()) === 1);
 
   /* The table offers the same edit, in the same cell, through the same path. */
-  const editRow = page.locator('#rc-frame tbody tr', { hasText: inFocus });
+  // By the name in the row's first cell: another person's row can mention this
+  // one anywhere else in it (an owner picker lists everybody).
+  const editRow = page.locator('#rc-frame tbody tr', { has: page.locator('td:first-child', { hasText: inFocus }) });
   check('a recorded outcome in the table can be edited too',
     (await editRow.locator('button', { hasText: 'Edit' }).count()) === 1);
   await editRow.locator('button', { hasText: 'Edit' }).click();
@@ -1925,6 +2002,33 @@ async function main() {
   check('and it says why they are never averaged together',
     /flatter or damn the wrong party/.test(repText));
 
+  /* ── One table behaviour ──────────────────────────────────────────────
+     Every table the calendar draws gets the same header, the same sorting and
+     — where the builder asks — the same export, from ui/rc_table.js. */
+  const report = page.locator('#rc-frame table.rc-report').first();
+  const heads = report.locator('thead th.rc-sortable');
+  check('a report table\'s headings sort it', (await heads.count()) >= 5, `${await heads.count()} sortable`);
+  const firstColumn = () => report.locator('tbody tr td:first-child').allInnerTexts();
+  const unsorted = await firstColumn();
+  await heads.first().click();
+  await page.waitForTimeout(100);
+  const ascending = await firstColumn();
+  await heads.first().click();
+  await page.waitForTimeout(100);
+  const descending = await firstColumn();
+  check('a click sorts by that column, and a second reverses it',
+    JSON.stringify(ascending) === JSON.stringify([...unsorted].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })))
+      && JSON.stringify(descending) === JSON.stringify([...ascending].reverse())
+      && (await heads.first().getAttribute('aria-sort')) === 'descending',
+    `${ascending.join(', ')} ↔ ${descending.join(', ')}`);
+  check('a heading over figures sits over them',
+    (await report.locator('thead th.rc-num').count()) >= 5);
+  await page.locator('#rc-frame .rc-table-csv').first().click();
+  await page.waitForTimeout(300);
+  const csvSaved = await page.evaluate(() => window.__saved?.name || '');
+  check('and a report can be taken out as CSV, as it stands on screen',
+    /^outcomes-by-[a-z]+-\d{4}-\d{2}-\d{2}\.csv$/.test(csvSaved), csvSaved);
+
   /* ══════════════════════════════════════════════════════════════════════
      The boundary
      ═══════════════════════════════════════════════════════════════════ */
@@ -1959,17 +2063,24 @@ async function main() {
     await page.locator('#rc-frame .rc-tab', { hasText: 'PTO' }).click();
     await page.waitForSelector('#rc-frame .rc-pto');
   };
-  await lap();
-  await lap();
-  const sweep = await page.evaluate(() => window.__rc.calls
+  const selects = () => page.evaluate(() => window.__rc.calls
     .filter((c) => c.kind === 'select').map((c) => c.table));
+  await lap();
+  /* How many the first lap reads depends on how long ago the sections above
+     read the same things — past thirty seconds they are read again, and on a
+     slow machine that is most of them — so it is not the measure. The second
+     lap is: straight after the first, everything it asks for is remembered. */
+  const firstLap = (await selects()).length;
+  await lap();
+  const sweep = await selects();
   const count = (table) => sweep.filter((t) => t === table).length;
   check('six visits move at most one grid',
     count('rc_lookahead_snapshots') <= 1, `${count('rc_lookahead_snapshots')} grid read(s)`);
   check('and read the roster at most twice — once scheduled, once everybody',
     count('rc_people') <= 2, `${count('rc_people')} roster read(s)`);
-  check('the second lap round the same three tabs reads nothing new',
-    sweep.length <= 12, `${sweep.length} read(s) across six visits`);
+  const again = sweep.slice(firstLap);
+  check('the second lap round the same three tabs reads nothing new', again.length === 0,
+    again.length ? `re-read ${again.join(', ')}` : `${firstLap} read(s) on the first lap, none on the second`);
   /* The other half — a write empties it — is what the legend checks above
      already prove: pressing "Just shading" writes a legend row and the calendar
      has to redraw from the *new* legend, which it did not while the upsert path
@@ -2059,6 +2170,214 @@ async function main() {
     await page.evaluate(() => Boolean(window.CX_CONFIG.rcSupabaseUrl)));
 
   /* ══════════════════════════════════════════════════════════════════════
+     Running it: the inbox, the settings, and seeing it as somebody else
+     ═══════════════════════════════════════════════════════════════════ */
+  console.log('\nThe administrator runs it from one place');
+
+  await page.locator('.ws-btn', { hasText: 'Calendar' }).click().catch(() => {});
+  /* Dan has an account, and said "got it" to an older reading that had him on
+     a job the latest one no longer does. */
+  await page.evaluate((iso) => {
+    const S = window.__rc.rows;
+    const dan = S.rc_people.find((p) => p.name === 'Dan');
+    dan.user_id = dan.user_id || 'user-dan';
+    const latest = S.rc_lookahead_snapshots[0];
+    S.rc_lookahead_snapshots.push({ ...latest, id: 'snap-dan-old', taken_at: new Date(Date.now() - 86400000).toISOString(), file_hash: 'editor:dan-old' });
+    S.rc_lookahead_rows.push({
+      id: 'dan-old-row', snapshot_id: 'snap-dan-old', week_start: iso, sheet_row: null, row_key: 'dan-old',
+      raw_label: 'Old job · Y10', raw_location: 'Y10', cells: { [iso]: 'Day Shift' }, resources: { [iso]: 'Dan' },
+    });
+    S.rc_la_seen.push({ id: 'seen-dan', person_id: dan.id, snapshot_id: 'snap-dan-old', snapshot_taken_at: new Date().toISOString(), changes: 0, seen_at: new Date(Date.now() - 86400000).toISOString() });
+  }, new Date(Date.now() + 86400000).toISOString().slice(0, 10));
+  await page.evaluate((iso) => {
+    window.__rc.rows.rc_leave.push({
+      id: 'lv-ask', person_id: 'p5', kind_id: 'k1', status: 'requested', start_date: iso, end_date: iso, note: 'Family visit',
+    });
+    /* Both are colleagues' writes, which come through nothing on this page — so
+       the page sees them when its thirty-second read memory runs out. The suite
+       lets it forget now rather than waiting that out. */
+    window.__CX_MODULES.req('core/rc.js').forgetReads();
+  }, new Date(Date.now() + 9 * 86400000).toISOString().slice(0, 10));
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Week plan' }).click();
+  await page.waitForSelector('#rc-frame .rc-head .rc-tab-count', { timeout: 15000 }).catch(() => {});
+  await page.locator('#rc-frame .rc-head .rc-tab', { hasText: 'Organisation' }).click();
+  await page.locator('#rc-frame .rc-body .rc-tab', { hasText: 'Inbox' }).click();
+  await page.waitForSelector('#rc-frame .rc-inbox-list, #rc-frame .rc-inbox .cx-empty', { timeout: 15000 }).catch(() => {});
+  const inbox = await page.evaluate(() => ({
+    section: document.querySelector('#rc-frame .rc-tabs .rc-tab[aria-pressed="true"]')?.textContent,
+    items: [...document.querySelectorAll('#rc-frame .rc-inbox-item')].map((n) => n.innerText.replace(/\s+/g, ' ')),
+    failed: [...document.querySelectorAll('#rc-frame .rc-inbox-failed')].map((n) => n.textContent),
+  }));
+  check('the inbox lists what is waiting', inbox.items.length > 0, JSON.stringify(inbox).slice(0, 200));
+  check('a leave request is in it, with who, what and the note',
+    inbox.items.some((t) => /Rosa asked for Annual leave/.test(t) && /Family visit/.test(t)), inbox.items.join(' / ').slice(0, 300));
+  check('every source was read — none reported as unreadable', inbox.failed.length === 0, inbox.failed.join(' / '));
+  check('the inbox says who has changes to their days they have not seen',
+    inbox.items.some((t) => /changes to their days they have not seen/.test(t) && /Dan \(\d+\)/.test(t)), inbox.items.join(' / ').slice(0, 400));
+  const orgTab = page.locator('#rc-frame .rc-head .rc-tab', { hasText: 'Organisation' });
+  await page.waitForFunction(() => !!document.querySelector('#rc-frame .rc-head .rc-tab-count'), null, { timeout: 5000 }).catch(() => {});
+  check('and the Organisation tab counts it', Number(await orgTab.locator('.rc-tab-count').textContent().catch(() => '0')) >= 1);
+  await page.locator('#rc-frame .rc-inbox-item', { hasText: 'Rosa asked for' }).locator('button', { hasText: 'Approve' }).click();
+  await page.waitForTimeout(500);
+  check('it is answered from the inbox', await page.evaluate(() => window.__rc.rows.rc_leave.find((l) => l.id === 'lv-ask')?.status === 'approved'));
+  await page.waitForFunction(() => ![...document.querySelectorAll('#rc-frame .rc-inbox-item')].some((n) => /Rosa asked for/.test(n.textContent)), null, { timeout: 8000 }).catch(() => {});
+  check('and leaves it', !(await page.locator('#rc-frame .rc-inbox-item', { hasText: 'Rosa asked for' }).count()));
+
+  /* Settings, on screen. */
+  await page.locator('#rc-frame .rc-body .rc-tab', { hasText: 'Settings' }).click();
+  await page.waitForSelector('#rc-frame .rc-settings');
+  const logFrom = page.locator('#rc-frame input[data-setting="cancellation_log_from"]');
+  await logFrom.fill('2026-09-07');
+  await logFrom.press('Enter');
+  await page.waitForTimeout(400);
+  check('a setting is changed on screen, not in the SQL editor',
+    await page.evaluate(() => window.__rc.rows.rc_settings.find((r) => r.key === 'cancellation_log_from')?.value === '2026-09-07'));
+  const keep = page.locator('#rc-frame input[data-setting="snapshot_keep_days"]');
+  await keep.fill('3');
+  await keep.press('Enter');
+  await page.waitForTimeout(300);
+  check('and a value that would throw history away is refused before it is sent',
+    await page.evaluate(() => !window.__rc.rows.rc_settings.some((r) => r.key === 'snapshot_keep_days' && r.value === '3')));
+
+  const tidyBefore = await page.evaluate(() => window.__rc.compactCalls || 0);
+  await page.locator('#rc-frame .rc-settings button', { hasText: 'Tidy now' }).click();
+  await page.waitForTimeout(400);
+  check('and Tidy now runs it on demand, and says what it did',
+    (await page.evaluate(() => window.__rc.compactCalls || 0)) === tidyBefore + 1
+      && /Nothing to tidy/.test(await page.evaluate(() => [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | '))));
+
+  /* Seeing it as somebody else. The first member the picker offers gets a day
+     tied to a look-ahead row, so their My day has a task that opens the whole
+     activity — whatever earlier sections planned for them by hand. */
+  // The row's words exactly as the calendar reads them, off the grid it draws.
+  await page.locator('#rc-frame .rc-head .rc-tab', { hasText: 'Look-ahead' }).click();
+  await page.locator('#rc-frame .rc-body .rc-tab', { hasText: 'Calendar' }).first().click().catch(() => {});
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 }).catch(() => {});
+  const ixlLabel = await page.evaluate(() => {
+    const tr = [...document.querySelectorAll('#rc-frame .la-grid tbody tr')]
+      .find((r) => !r.classList.contains('la-resource-row') && /IXL Regression Testing/.test(r.textContent));
+    return tr ? [...tr.querySelectorAll('td.la-meta')].map((td) => td.textContent).filter(Boolean).join(' · ') : null;
+  });
+  await page.evaluate(({ today, label }) => {
+    const S = window.__rc.rows;
+    const who = S.rc_people.filter((p) => p.active && p.role === 'member' && p.id !== 'p1')
+      .sort((a, b) => a.name.localeCompare(b.name))[0];
+    if (!who || !label) return;
+    /* The first day from today they work, which My day always shows — today,
+       or the next working day. Dan does not work one weekday in the stub, and
+       on a Monday that weekday is today. */
+    const works = Array.isArray(who.working_days) ? who.working_days : [1, 2, 3, 4, 5];
+    let ms = Date.parse(`${today}T00:00:00Z`);
+    for (let i = 0; i < 7 && !works.includes(new Date(ms).getUTCDay() || 7); i++) ms += 86400000;
+    const iso = new Date(ms).toISOString().slice(0, 10);
+    S.rc_lookahead_rows.push({
+      id: 'la-row-tap', snapshot_id: S.rc_lookahead_snapshots[0].id, week_start: iso, sheet_row: null,
+      row_key: 'tap', raw_label: label, raw_location: '', cells: {}, resources: {},
+    });
+    S.rc_plan_entries.push({
+      id: 'plan-la-tap', person_id: who.id, work_date: iso, shift: 'day', task: label,
+      location_id: null, category_id: null, lookahead_row_id: 'la-row-tap',
+      created_at: new Date().toISOString(), withdrawn: false,
+    });
+  }, { today: new Date().toISOString().slice(0, 10), label: ixlLabel });
+  await page.locator('#rc-frame .rc-head button', { hasText: 'View as' }).click();
+  await page.waitForFunction(() => document.activeElement?.matches('.cx-modal input[type="text"]'), null, { timeout: 3000 }).catch(() => {});
+  // Whoever is a member by now — earlier sections change people's roles.
+  const pick = page.locator('.cx-modal .cx-picker-item', { hasText: 'Member' }).first();
+  const asName = (await pick.locator('.pi-label').textContent()).trim();
+  await pick.click();
+  await page.waitForSelector('#rc-frame .rc-preview-banner', { timeout: 8000 }).catch(() => {});
+  const asPriya = await page.evaluate(() => ({
+    banner: document.querySelector('#rc-frame .rc-preview-banner')?.innerText || '',
+    tabs: [...document.querySelectorAll('#rc-frame .rc-head .rc-tab')].map((n) => n.textContent),
+    hello: document.querySelector('#rc-frame .rc-myday-hello')?.textContent || '',
+  }));
+  check('an administrator can see the calendar as a member', asPriya.banner.includes(`as ${asName} (member)`), asPriya.banner);
+  check('with a member\'s tabs', !asPriya.tabs.some((t) => /Organisation|Reports|Daily huddle/.test(t)) && asPriya.tabs.some((t) => /My day/.test(t)),
+    asPriya.tabs.join(', '));
+  check('starting on their day', asPriya.hello.includes(asName.split(' ')[0]), asPriya.hello);
+  await page.waitForSelector('#rc-frame .rc-myday-task', { timeout: 5000 }).catch(() => {});
+  const priyaDay = await page.locator('#rc-frame .rc-myday-cards').innerText().catch(() => '');
+  check('today and the next working day, as they would see them',
+    /Today/i.test(priyaDay) && /Tomorrow|Next working day/i.test(priyaDay), priyaDay.replace(/\s+/g, ' ').slice(0, 240));
+
+  /* Tap a task: the whole activity — its columns under the sheet's headings,
+     every day from this week on, who is on each, and your days marked. */
+  const openTask = page.locator('#rc-frame .rc-myday-task-open', { hasText: 'IXL Regression Testing' }).first();
+  check('a task on the look-ahead can be opened', (await openTask.count()) === 1);
+  if (await openTask.count()) {
+    await openTask.click();
+    await page.waitForSelector('.cx-modal .rc-activity', { timeout: 8000 }).catch(() => {});
+    const act = await page.evaluate(() => ({
+      title: document.querySelector('.cx-modal .cx-modal-head')?.textContent || '',
+      facts: [...document.querySelectorAll('.cx-modal .rc-activity-facts dt')].map((n) => n.textContent),
+      days: document.querySelectorAll('.cx-modal .rc-activity-day').length,
+      mine: document.querySelectorAll('.cx-modal .rc-activity-mine').length,
+      text: document.querySelector('.cx-modal .rc-activity')?.innerText || '',
+    }));
+    check('it opens on the whole activity, with its columns under their headings',
+      act.facts.length >= 2 && act.days >= 1, JSON.stringify({ ...act, text: act.text.slice(0, 120) }));
+    check('and the days they are on are marked as theirs', act.mine >= 1 && /You/.test(act.text), act.text.replace(/\s+/g, ' ').slice(0, 200));
+    await page.locator('.cx-modal button', { hasText: 'Close' }).click();
+  }
+
+  /* Only my rows, as a member sees the look-ahead: on by default, every names
+     row still under the activity line it belongs to, and the name marked. */
+  await page.locator('#rc-frame .rc-head .rc-tab', { hasText: 'Look-ahead' }).click();
+  await page.waitForSelector('#rc-frame .la-only-mine', { timeout: 10000 }).catch(() => {});
+  const mineView = await page.evaluate(() => {
+    const box = document.querySelector('#rc-frame .la-only-mine input');
+    const trs = [...document.querySelectorAll('#rc-frame .la-grid tbody tr')];
+    const orphans = trs.filter((tr, i) => tr.classList.contains('la-resource-row') && !tr.classList.contains('la-absence-row')
+      && (!trs[i - 1] || trs[i - 1].classList.contains('la-resource-row') || trs[i - 1].classList.contains('la-head-row'))).length;
+    return {
+      on: box?.checked ?? null,
+      rows: trs.length,
+      names: trs.filter((tr) => tr.classList.contains('la-resource-row') && !tr.classList.contains('la-absence-row')).length,
+      orphans,
+      marked: document.querySelectorAll('#rc-frame td.la-mine').length,
+      empty: !!document.querySelector('#rc-frame .cx-empty'),
+    };
+  });
+  check('a member\'s look-ahead opens on only their rows', mineView.on === true, JSON.stringify(mineView));
+  check('every names row is drawn under the activity line it belongs to',
+    mineView.names >= 1 && mineView.orphans === 0, JSON.stringify(mineView));
+  check('and their own name is marked on the days they are on', mineView.marked >= 1, JSON.stringify(mineView));
+  await page.locator('#rc-frame .la-openable[role="button"]').first().click();
+  await page.waitForSelector('.cx-modal .rc-activity', { timeout: 8000 }).catch(() => {});
+  check('an activity on the look-ahead opens the same way',
+    (await page.locator('.cx-modal .rc-activity-day').count()) >= 1);
+  await page.locator('.cx-modal button', { hasText: 'Close' }).click();
+  await page.locator('#rc-frame .la-only-mine input').uncheck();
+  await page.waitForTimeout(200);
+  const allRows = await page.locator('#rc-frame .la-grid tbody tr').count();
+  check('switching it off brings back the rest of the sheet', allRows > mineView.rows, `${mineView.rows} → ${allRows}`);
+  await page.locator('#rc-frame .la-only-mine input').check();
+
+  const plansBefore = await page.evaluate(() => window.__rc.rows.rc_plan_entries.length);
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Week plan' }).click();
+  await page.waitForSelector('#rc-frame .rc-resources', { timeout: 10000 });
+  await page.locator('#rc-frame button', { hasText: 'Assign work' }).click();
+  await page.waitForSelector('.cx-modal');
+  const pDates = page.locator('.cx-modal input[type="date"]');
+  const pFrom = await pDates.nth(0).inputValue();
+  await pDates.nth(1).fill(new Date(Date.parse(`${pFrom}T00:00:00Z`) + 6 * 86400000).toISOString().slice(0, 10));
+  await page.locator('.cx-modal input[placeholder="What they will do"]').fill('Preview write');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Assign' }).click();
+  await page.waitForTimeout(600);
+  check('nothing pressed while previewing is saved',
+    (await page.evaluate(() => window.__rc.rows.rc_plan_entries.length)) === plansBefore
+      && !(await page.evaluate(() => window.__rc.rows.rc_plan_entries.some((e) => e.task === 'Preview write'))));
+  const previewSaid = await page.evaluate(() => [...document.querySelectorAll('.cx-toast, .cx-modal .rc-error')].map((t) => t.textContent).join(' | '));
+  check('and it says why', /Preview only/.test(previewSaid), previewSaid.slice(0, 240));
+  await page.keyboard.press('Escape');
+  await page.locator('#rc-frame .rc-preview-banner button', { hasText: 'Back to my view' }).click();
+  await page.waitForTimeout(400);
+  check('and back to your own view in one press',
+    !(await page.locator('#rc-frame .rc-preview-banner').count())
+      && (await page.locator('#rc-frame .rc-head .rc-tab', { hasText: 'Organisation' }).count()) === 1);
+
+  /* ══════════════════════════════════════════════════════════════════════
      A read-only account
      ═══════════════════════════════════════════════════════════════════ */
   console.log('\nA viewer reads the schedule and writes nothing');
@@ -2070,6 +2389,7 @@ async function main() {
   // not per-context, and fakeSdk reads `__rc.role` when it builds the roster.
   await serveStubbedConfig(viewer);
   await viewer.addInitScript(() => { window.__rc = { role: 'viewer', signedIn: true }; });
+  await viewer.addInitScript(`window.__rcSchemaVersion = ${SCHEMA_VERSION};`);
   await viewer.addInitScript(fakeSdk);
   await viewer.goto(url_, { waitUntil: 'load' });
   // Attached rather than visible: a viewer lands on the calendar, so the canvas
@@ -2112,6 +2432,8 @@ async function main() {
 
   // The one that matters: a viewer has a person row, so "is this my row" is
   // true for them too. Only asking whether they may write at all stops this.
+  check('a viewer opens on their own day', await viewer.locator('#rc-frame .rc-myday-cards').count() === 1);
+  await viewer.locator('#rc-frame .rc-tab', { hasText: 'Week plan' }).click();
   await viewer.waitForSelector('#rc-frame .rc-resources');
   check('nothing to press anywhere, including on their own row',
     (await viewer.locator('#rc-frame .rc-resources tbody button').count()) === 0);
@@ -2124,7 +2446,14 @@ async function main() {
      writes. The Changes list, the snapshot history and the SARs are the claim
      evidence and stay with the people answerable for it. */
   await viewer.locator('#rc-frame .rc-tab', { hasText: 'Look-ahead' }).click();
-  await viewer.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
+  await viewer.waitForSelector('#rc-frame .la-grid, #rc-frame .la-only-mine ~ * .cx-empty, #rc-frame .cx-empty', { timeout: 10000 });
+  /* The team opens on their own rows. This viewer is on none, and is told so,
+     one press from the whole sheet. */
+  if (await viewer.locator('#rc-frame .cx-empty', { hasText: 'not on anything' }).count()) {
+    check('somebody on no row is told so, not shown an empty grid', true);
+    await viewer.locator('#rc-frame .cx-empty button', { hasText: 'Show every row' }).click();
+    await viewer.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
+  }
   check('and the 4WLA actually draws for them',
     (await viewer.locator('#rc-frame .la-grid tbody tr').count()) >= 1);
   const vLa = await viewer.locator('#rc-frame').innerText();
@@ -2149,6 +2478,7 @@ async function main() {
   member.on('pageerror', (e) => consoleErrors.push(String(e)));
   await serveStubbedConfig(member);
   await member.addInitScript(() => { window.__rc = { role: 'member', signedIn: true }; });
+  await member.addInitScript(`window.__rcSchemaVersion = ${SCHEMA_VERSION};`);
   await member.addInitScript(fakeSdk);
   await member.goto(url_, { waitUntil: 'load' });
   // A member is not read-only, so they land on the timeline like anybody else
@@ -2164,6 +2494,33 @@ async function main() {
 
   check('and not the meeting either — that is where an outcome is entered',
     !mTabs.includes('Daily huddle'), mTabs.join(', '));
+
+  /* My day: where the calendar opens for somebody on the team — their today,
+     their next working day and their week, read from the same index the week
+     plan reads. Nothing on it records an outcome: the huddle is the one path. */
+  await member.waitForSelector('#rc-frame .rc-myday-cards', { timeout: 10000 });
+  const myDay = await member.evaluate(() => {
+    const root = document.querySelector('#rc-frame');
+    return {
+      active: root.querySelector('.rc-tab[aria-pressed="true"]')?.textContent || '',
+      hello: root.querySelector('.rc-myday-hello')?.textContent || '',
+      cards: [...root.querySelectorAll('.rc-myday-card h3')].map((n) => n.textContent),
+      week: root.querySelectorAll('.rc-myday-week li').length,
+      today: root.querySelectorAll('.rc-myday-week li[aria-current="date"]').length,
+      text: root.querySelector('.rc-body')?.innerText || '',
+      statusButtons: [...root.querySelectorAll('.rc-body button')].filter((b) => /^(Completed|Partial|Blocked)$/.test(b.textContent.trim())).length,
+    };
+  });
+  check('a member opens the calendar on their own day', /My day/.test(myDay.active) && /Alex/.test(myDay.hello), `${myDay.active} | ${myDay.hello}`);
+  check('with today and the next working day side by side',
+    myDay.cards[0] === 'Today' && /Tomorrow|Next working day/.test(myDay.cards[1] || ''), myDay.cards.join(', '));
+  check('and the week at a glance, today marked', myDay.week === 7 && myDay.today === 1);
+  await member.waitForSelector('#rc-frame .rc-myday-uptodate', { timeout: 8000 }).catch(() => {});
+  check('the first time, the look-ahead on screen becomes the starting point, quietly',
+    /From now on/.test(await member.locator('#rc-frame .rc-myday-changes').innerText().catch(() => ''))
+      && await member.evaluate(() => window.__rc.rows.rc_la_seen.some((r) => r.person_id === 'p1' && r.changes === 0)));
+  check('what was recorded is shown, and nothing here records an outcome',
+    /Your last recorded day/i.test(myDay.text) && myDay.statusButtons === 0, `${myDay.statusButtons} | ${myDay.text.replace(/\s+/g, ' ').slice(0, 400)}`);
 
   await member.locator('#rc-frame .rc-tab', { hasText: 'Week plan' }).click();
   await member.waitForSelector('#rc-frame .rc-resources', { timeout: 10000 });
@@ -2189,11 +2546,60 @@ async function main() {
   const mDay = await mDates.nth(0).inputValue();
   await mDates.nth(1).fill(mDay);
   await member.locator('.cx-modal input[placeholder="What they will do"]').fill('Office — RFI log');
+  /* Meanwhile the look-ahead is published again, and this reading puts Alex on
+     a job tomorrow. Everything else about it is the reading before. */
+  const tomorrowIso = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  await member.evaluate((iso) => {
+    const S = window.__rc.rows;
+    const was = S.rc_lookahead_snapshots[0];
+    const fresh = { ...was, id: 'snap-newer', taken_at: new Date().toISOString(), file_hash: 'editor:newer' };
+    S.rc_lookahead_snapshots.unshift(fresh);
+    const copies = S.rc_lookahead_rows.filter((r) => r.snapshot_id === was.id)
+      .map((r, i) => ({ ...r, id: `newer-${i}`, snapshot_id: fresh.id }));
+    copies.push({
+      id: 'newer-alex', snapshot_id: fresh.id, week_start: iso, sheet_row: null, row_key: 'newer-alex',
+      raw_label: 'Possession prep · W30', raw_location: 'W30', cells: { [iso]: 'Day Shift' }, resources: { [iso]: 'Alex' },
+    });
+    S.rc_lookahead_rows.push(...copies);
+  }, tomorrowIso);
   await member.locator('.cx-modal .cx-modal-foot button', { hasText: 'Assign' }).click();
   await member.waitForTimeout(700);
   check('and the day they planned for themselves is written',
     await member.evaluate(() => window.__rc.rows.rc_plan_entries
       .some((e) => e.person_id === 'p1' && e.task === 'Office — RFI log')));
+  await member.locator('#rc-frame .rc-tab', { hasText: 'My day' }).click();
+  await member.waitForSelector('#rc-frame .rc-myday-cards', { timeout: 10000 });
+  const myPlanned = await member.evaluate((iso) => ({
+    card: document.querySelector(`#rc-frame .rc-myday-card[data-day="${iso}"]`)?.innerText || null,
+    strip: [...document.querySelectorAll('#rc-frame .rc-myday-week li')].map((li) => li.title).join(' | '),
+  }), mDay);
+  check('and My day shows it, marked as planned by hand',
+    myPlanned.card ? /Office — RFI log/.test(myPlanned.card) && /Planned by hand/.test(myPlanned.card) : /Office — RFI log/.test(myPlanned.strip),
+    `${mDay}: ${(myPlanned.card || myPlanned.strip).replace(/\s+/g, ' ').slice(0, 200)}`);
+
+  /* What changed for me: the newer reading put Alex on a job tomorrow. */
+  await member.waitForSelector('#rc-frame .rc-myday-changes-open', { timeout: 8000 }).catch(() => {});
+  const changed = await member.evaluate(() => ({
+    text: document.querySelector('#rc-frame .rc-myday-changes')?.innerText || '',
+    count: document.querySelector('#rc-frame .rc-head .rc-tab-count-info')?.textContent || '',
+  }));
+  check('a change to their days is the first thing on My day, in words',
+    /1 change to your days/i.test(changed.text) && /Added/.test(changed.text) && /Possession prep/.test(changed.text),
+    changed.text.replace(/\s+/g, ' ').slice(0, 200));
+  check('and the My day tab counts it', changed.count === '1', changed.count);
+  await member.locator('#rc-frame .rc-myday-changes button', { hasText: 'Got it' }).click();
+  await member.waitForTimeout(600);
+  check('Got it records that they have seen the latest reading, and how much changed',
+    await member.evaluate(() => {
+      const newest = window.__rc.rows.rc_la_seen[0];
+      return newest?.person_id === 'p1' && newest.snapshot_id === 'snap-newer' && newest.changes === 1;
+    }));
+  await member.waitForSelector('#rc-frame .rc-myday-uptodate', { timeout: 8000 }).catch(() => {});
+  check('and the panel settles to "up to date"',
+    /up to date/i.test(await member.locator('#rc-frame .rc-myday-changes').innerText().catch(() => ''))
+      && !(await member.locator('#rc-frame .rc-head .rc-tab-count-info').count()));
+  await member.locator('#rc-frame .rc-tab', { hasText: 'Week plan' }).click();
+  await member.waitForSelector('#rc-frame .rc-resources', { timeout: 10000 });
 
   /* A shift is routinely more than one job. The day already has a task and the
      button is still there — it used to skip the day and say so in a toast,
@@ -2319,6 +2725,64 @@ async function main() {
     }));
 
   await member.close();
+
+  await lookaheadEditor(page, { check, shot: process.env.CX_EDITOR_SHOT || null });
+
+  /* ── A tablet in the room ─────────────────────────────────────────────
+     The meeting is run standing, on a tablet, and a tablet in landscape is
+     wider than every narrow rule — so it got the desktop's 24px buttons. A
+     touch screen now gets 44px targets whatever its width, and in landscape
+     the question and the answer sit side by side. */
+  console.log('\nTablet');
+  const tabletContext = pinClock(await browser.newContext({
+    viewport: { width: 1180, height: 820 }, hasTouch: true,
+  }));
+  const tablet = await tabletContext.newPage();
+  tablet.on('pageerror', (e) => consoleErrors.push(String(e)));
+  await serveStubbedConfig(tablet);
+  await tablet.addInitScript(() => { window.__rc = { role: 'admin', signedIn: true }; });
+  await tablet.addInitScript(`window.__rcSchemaVersion = ${SCHEMA_VERSION};`);
+  await tablet.addInitScript(fakeSdk);
+  await tablet.goto(url_, { waitUntil: 'load' });
+  await tablet.waitForSelector('.ws-switch', { timeout: 20000 });
+  await tablet.locator('.ws-btn', { hasText: 'Calendar' }).tap();
+  await tablet.waitForSelector('#rc-frame .rc-tabs', { timeout: 15000 });
+  await tablet.locator('#rc-frame .rc-tab', { hasText: 'Daily huddle' }).tap();
+  await tablet.waitForSelector('#rc-frame .rc-huddle', { timeout: 10000 });
+  const smallTargets = () => tablet.evaluate(() => [...document.querySelectorAll('#rc-frame button, #rc-frame select, #rc-frame input[type="text"]')]
+    .filter((n) => {
+      const r = n.getBoundingClientRect();
+      return r.width && r.height && r.height < 43.5;
+    })
+    .map((n) => `${n.tagName.toLowerCase()} "${(n.textContent || n.getAttribute('aria-label') || '').trim().slice(0, 20)}" ${Math.round(n.getBoundingClientRect().height)}px`));
+  const small = await smallTargets();
+  check('every control in the huddle is a 44px target on a touch screen', small.length === 0, small.slice(0, 4).join(' | '));
+
+  await tablet.locator('#rc-frame button', { hasText: 'Run the meeting' }).tap();
+  await tablet.waitForSelector('#rc-frame .rc-present');
+  await tablet.waitForTimeout(200);
+  const sides = await tablet.evaluate(() => {
+    const who = document.querySelector('#rc-frame .rc-present-who').getBoundingClientRect();
+    const answer = document.querySelector('#rc-frame .rc-present-answer').getBoundingClientRect();
+    return { whoRight: who.right, answerLeft: answer.left, answerTop: answer.top, whoTop: who.top,
+      pageScroll: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+  });
+  check('in landscape the answer sits beside the question, not below it',
+    sides.answerLeft >= sides.whoRight - 1 && sides.answerTop <= sides.whoTop + 80, JSON.stringify(sides));
+  check('and the page never scrolls sideways', sides.pageScroll <= 0, `${sides.pageScroll}px`);
+  if (process.env.CX_TABLET_SHOT) await tablet.screenshot({ path: process.env.CX_TABLET_SHOT });
+  const smallInRoom = await smallTargets();
+  check('the room\'s own controls are touch-sized too', smallInRoom.length === 0, smallInRoom.slice(0, 4).join(' | '));
+
+  await tablet.setViewportSize({ width: 820, height: 1180 });
+  await tablet.waitForTimeout(300);
+  const portrait = await tablet.evaluate(() => {
+    const who = document.querySelector('#rc-frame .rc-present-who').getBoundingClientRect();
+    const answer = document.querySelector('#rc-frame .rc-present-answer').getBoundingClientRect();
+    return { answerTop: answer.top, whoBottom: who.bottom };
+  });
+  check('in portrait it stacks, answer under the question', portrait.answerTop >= portrait.whoBottom, JSON.stringify(portrait));
+  await tabletContext.close();
 
   /* ── Console ──────────────────────────────────────────────────────────── */
   console.log('\nConsole');

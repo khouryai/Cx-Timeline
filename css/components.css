@@ -1135,6 +1135,59 @@
   gap: 6px;
 }
 
+/* ── Progress from the calendar ─────────────────────────────────────────── */
+
+.la-progress-head {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+.la-progress-wait {
+  margin-top: 3px;
+  font-size: var(--fs-tiny);
+  color: var(--text-muted);
+}
+.la-progress-toggle {
+  margin-top: 6px;
+}
+.la-progress-acts {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.la-progress-acts[hidden] {
+  display: none;
+}
+.la-progress-act {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  font-size: var(--fs-tiny);
+}
+.la-progress-act-title {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.la-progress-act-facts {
+  font-family: var(--f-mono);
+  color: var(--text-subtle);
+}
+@media (max-width: 560px) {
+  .la-progress-act {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .la-progress-act-facts {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
 /* ── P6 register ───────────────────────────────────────────────────────── */
 
 .p6-stamps {

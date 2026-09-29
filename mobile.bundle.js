@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 19   Built: 2026-09-29T00:07:07.875Z
+ * Modules: 19   Built: 2026-09-29T02:26:46.221Z
  */
 (function () {
   'use strict';
@@ -746,8 +746,10 @@ __mods["core/events.js"] = function (__x, __req) {
     RC_AUTH_CHANGED: 'rc:auth', // { user, event }
     RC_CHANGED: 'rc:changed', // { what } — a row was written; panes reload
     RC_QUEUE_CHANGED: 'rc:queue', // { pending } — unsynced huddle entries
+    RC_SHOW_TAB: 'rc:tab', // { tab } — a tab asking for another; ui/rc.js owns the router
 
     /* Which whole interface is on screen: the timeline, or the calendar. */
+    CALENDAR_FAILED: 'calendar:failed', // { message } — the calendar's code could not be loaded or started
     WORKSPACE_CHANGED: 'workspace:changed', // { workspace }
 
     /* Selection & interaction */
@@ -771,6 +773,7 @@ __mods["core/events.js"] = function (__x, __req) {
     // that would be a cycle — and view-only state (a filter, a search) changes
     // nothing in the document, so no doc:changed fires to do it for them.
     PANE_REFRESH: 'panel:refresh',
+    PANE_OPEN: 'panel:open', // { pane } — a pane asking for another one; the dock owns showPane()
     TOAST: 'ui:toast',
     STATUS: 'ui:status',
     PRESENT_MODE: 'ui:present',
@@ -896,7 +899,7 @@ __mods["core/rc.js"] = function (__x, __req) {
       const next = session?.user || null;
       const changed = (next?.id || null) !== (user?.id || null);
       user = next;
-      if (!next) person = null;
+      if (!next) { person = null; preview = null; }
       if (changed) emit(EV.RC_AUTH_CHANGED, { user, event });
     });
 
@@ -930,7 +933,45 @@ __mods["core/rc.js"] = function (__x, __req) {
    * refuse their writes accordingly.
    */
   function me() {
-    return person;
+    return preview || person;
+  }
+
+  /* ── Seeing it as somebody else ─────────────────────────────────────────
+     An administrator can look at the calendar the way a member or a viewer
+     sees it, before telling the team to use it. Everything that decides what
+     to draw — `me()`, `role()`, `isAdmin()`, `canWrite()` — answers as that
+     person; every write is refused here, before it leaves the page, with an
+     error saying why (`err.preview`). The database is not asked to pretend:
+     it still answers as the administrator, so a preview shows the screens a
+     member gets, not a guarantee of the rows their account could read. */
+
+  let preview = null; // the rc_people row being looked through, or null
+
+  /** Look at the calendar as this person (a member or a viewer), or stop with null. */
+  function previewAs(who) {
+    if (who && person?.role !== 'admin') throw new Error('Only an administrator can see the calendar as somebody else.');
+    if (who && who.role === 'admin') throw new Error('Choose a member or a viewer — an administrator sees what you see.');
+    preview = who ? { id: who.id, name: who.name, email: who.email || null, title: who.title || null, subsystem: who.subsystem || null, role: who.role || 'member', active: true } : null;
+    forgetReads();
+    emit(EV.RC_AUTH_CHANGED, { user, event: who ? 'PREVIEW' : 'PREVIEW_ENDED' });
+  }
+
+  /** The person being looked through, or null. */
+  function previewing() {
+    return preview;
+  }
+
+  /** Whether the account actually signed in is an administrator, whoever it is previewing. */
+  function isRealAdmin() {
+    return person?.role === 'admin';
+  }
+
+  /** Refuse a write while previewing — before it reaches the network or a queue. */
+  function guardPreview() {
+    if (!preview) return;
+    const err = new Error(`Preview only — nothing is saved while you are seeing the calendar as ${preview.name}.`);
+    err.preview = true;
+    throw err;
   }
 
   /**
@@ -942,12 +983,12 @@ __mods["core/rc.js"] = function (__x, __req) {
    * something is missing, not to decide it.
    */
   function isAdmin() {
-    return person?.role === 'admin';
+    return me()?.role === 'admin';
   }
 
   /** 'admin' | 'member' | 'viewer', or null for somebody not on the team. */
   function role() {
-    return person?.role || null;
+    return me()?.role || null;
   }
 
   /**
@@ -959,11 +1000,11 @@ __mods["core/rc.js"] = function (__x, __req) {
    * the database, and that is the control; this decides what to draw.
    */
   function canWrite() {
-    return person?.role === 'admin' || person?.role === 'member';
+    return me()?.role === 'admin' || me()?.role === 'member';
   }
 
   function isViewer() {
-    return person?.role === 'viewer';
+    return me()?.role === 'viewer';
   }
 
   function accountLabel() {
@@ -976,6 +1017,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     // Runs on every sign-in and account change: same rule as sign-out.
     forgetReads();
     person = null;
+    preview = null;
     if (!client || !user) return null;
     const { data, error } = await client
       .from('rc_people')
@@ -1041,6 +1083,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     await client.auth.signOut();
     user = null;
     person = null;
+    preview = null;
     emit(EV.RC_AUTH_CHANGED, { user: null, event: 'SIGNED_OUT' });
   }
 
@@ -1214,7 +1257,8 @@ __mods["core/rc.js"] = function (__x, __req) {
     const tables = [
       'rc_people', 'rc_locations', 'rc_location_alias', 'rc_person_alias',
       'rc_categories', 'rc_parties',
-      'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries',
+      'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries', 'rc_client_errors',
+      'rc_la_rows', 'rc_la_cells', 'rc_la_edits', 'rc_support_codes', 'rc_la_seen',
       'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
       'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
     ];
@@ -1239,8 +1283,197 @@ __mods["core/rc.js"] = function (__x, __req) {
     return out;
   }
 
+  /* ── The look-ahead, edited here ───────────────────────────────────────── */
+
+  /**
+   * Every page of a read the server would otherwise cut off at its row limit.
+   *
+   * PostgREST answers a thousand rows at most, and a five-week look-ahead can
+   * hold more cells than that: a read that stopped at the limit would draw a
+   * sheet with its bottom rows blank and no sign anything was missing.
+   */
+  async function selectAll(table, build, pageSize = 1000) {
+    requireClient();
+    const key = `${table}|all|${describe(build)}`;
+    return remember(key, async () => {
+      const out = [];
+      for (let from = 0; ; from += pageSize) {
+        let query = client.from(table).select('*');
+        if (build) query = build(query);
+        const { data, error } = await query.range(from, from + pageSize - 1);
+        if (error) throw new Error(`${table}: ${error.message}`);
+        out.push(...(data || []));
+        if (!data || data.length < pageSize) break;
+      }
+      return out;
+    });
+  }
+
+  function listLaRows() {
+    return selectAll('rc_la_rows', (q) => q.order('sort').order('id'));
+  }
+
+  /** The cells between two dates, both inclusive. */
+  function listLaCells(fromISO, toISO) {
+    return selectAll('rc_la_cells', (q) => q.gte('day', fromISO).lte('day', toISO).order('day').order('row_id'));
+  }
+
+  /**
+   * Apply a batch of look-ahead ops (see `core/la_edit.js`), all or nothing.
+   * Answers with the version each op made; a stale op refuses the whole batch
+   * with a message starting "conflict:".
+   */
+  const applyLookaheadOps = (ops) => rpc('rc_la_apply', { p_ops: ops });
+
+  /**
+   * The newest change anybody has made, as a number — asked every few seconds by
+   * an open editor. A read, so it does not empty the read cache the way every
+   * other call to a function does.
+   */
+  async function lookaheadRevision() {
+    requireClient();
+    const { data, error } = await client.rpc('rc_la_revision', {});
+    if (error) throw new Error(`rc_la_revision: ${error.message}`);
+    return Number(data) || 0;
+  }
+
+  /**
+   * The edit log, newest first: the last `limit` changes, or every change from
+   * `sinceId` on. An administrator's read — the log is the evidence base.
+   */
+  function listLaEdits({ sinceId = null, limit = 2000 } = {}) {
+    if (sinceId != null) return selectAll('rc_la_edits', (q) => q.gte('id', sinceId).order('id', { ascending: false }));
+    return select('rc_la_edits', (q) => q.order('id', { ascending: false }).limit(limit));
+  }
+
+  /** Everything the log says about one row and its days, newest first. */
+  function listLaEditsForRow(rowId) {
+    return select('rc_la_edits', (q) => q.eq('row_id', rowId).order('id', { ascending: false }).limit(1000));
+  }
+
+  /**
+   * Slim the grids of superseded editor readings past the keep period, and say
+   * how many — see `rc_compact_snapshots()` for what is kept and why.
+   */
+  const compactSnapshots = () => rpc('rc_compact_snapshots', {});
+
+  /* ── Who has seen the changes to their days ─────────────────────────────── */
+
+  /** The newest "Got it" a person has given, or null — see `rc_la_seen`. */
+  function lastSeen(personId) {
+    return select('rc_la_seen', (q) => q.eq('person_id', personId).order('seen_at', { ascending: false }).limit(1))
+      .then((rows) => rows[0] || null);
+  }
+
+  /** Every "Got it", newest first — an administrator reads everybody's, anybody else their own. */
+  function listSeen() {
+    return select('rc_la_seen', (q) => q.order('seen_at', { ascending: false }).limit(2000));
+  }
+
+  /** Record that the person looking has seen the look-ahead as of this reading. */
+  function markSeen({ snapshotId, takenAt, changes = 0 }) {
+    const who = me();
+    if (!who) return Promise.reject(new Error('Only somebody on the team can say they have seen their days.'));
+    return insert('rc_la_seen', [{
+      person_id: who.id, snapshot_id: snapshotId, snapshot_taken_at: takenAt, changes,
+    }]).then((rows) => rows[0] || null);
+  }
+
+  /** One reading's stored rows — what "what changed for me" compares. */
+  function snapshotRows(snapshotId) {
+    return selectAll('rc_lookahead_rows', (q) => q.eq('snapshot_id', snapshotId).order('id'));
+  }
+
+  function listSupportCodes({ includeRetired = false } = {}) {
+    return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
+  }
+  const addSupportCode = (row) => insert('rc_support_codes', [row]).then((r) => r[0]);
+  const updateSupportCode = (id, patch) => update('rc_support_codes', id, patch);
+
+  /* ── Problems the calendar ran into ──────────────────────────────────── */
+
+  const REPORT_LIMIT = 20;
+  const reported = new Set();
+
+  /**
+   * Write one row to `rc_client_errors`, and never throw.
+   *
+   * Called from named places in the calendar's own code — a tab that failed to
+   * load, an offline outcome the server refused, a look-ahead read that went
+   * wrong — and never from a global handler: an error thrown anywhere in the page
+   * can carry plan text, and plan data must never reach this project. The same
+   * message is reported once per page, and at most twenty per page, so a screen
+   * failing on every re-render cannot fill the table. Reporting a failure must
+   * never be a second failure, so everything here is swallowed.
+   */
+  function reportError(area, err) {
+    try {
+      if (!client || !user || preview) return;
+      const message = String(err?.message || err || 'unknown').slice(0, 500) || 'unknown';
+      const key = `${area}\u0000${message}`;
+      if (reported.has(key) || reported.size >= REPORT_LIMIT) return;
+      reported.add(key);
+      const shell = typeof window !== 'undefined' ? window.CX_SHELL : null;
+      const row = {
+        area: String(area).slice(0, 60),
+        message,
+        created_by: user.id,
+        app_version: String(shell?.version || (typeof window !== 'undefined' && window.CX_CONFIG?.version) || '').slice(0, 40) || null,
+        user_agent: typeof navigator !== 'undefined' ? String(navigator.userAgent).slice(0, 300) : null,
+      };
+      Promise.resolve(client.from('rc_client_errors').insert([row]))
+        .then(() => forgetReads(), () => {})
+        .catch(() => {});
+    } catch {
+      /* reporting a failure must never be a second one */
+    }
+  }
+
+  /** The newest problems reported, for an administrator. */
+  function listClientErrors(limit = 100) {
+    return select('rc_client_errors', (q) => q.order('created_at', { ascending: false }).limit(limit));
+  }
+
+  /** Clear what was reported before a moment; answers how many rows went. */
+  const clearClientErrors = (before) => rpc('rc_clear_client_errors', { p_before: before });
+
   function listSettings() {
     return select('rc_settings');
+  }
+
+  /**
+   * The database version this build of the calendar expects.
+   *
+   * `rc_schema.sql` stamps its own number into `rc_settings.schema_version` as
+   * its very last statement, so a run that stopped half way does not claim to
+   * have finished. Raise both together — `tools/test_sql.js` fails when they
+   * differ. A column the database has never heard of used to surface as
+   * "could not update the legend", on one screen, weeks after the deploy that
+   * needed it; this turns it into one sentence at sign-in naming the two files.
+   */
+  const SCHEMA_VERSION = 5;
+
+  /**
+   * Whether the database is the one this build was written against.
+   *
+   * `behind` is the common case — the site deployed and nobody ran the SQL —
+   * and a project from before the stamp existed reads as version 0. `ahead`
+   * means the page is older than the database, which is a stale tab or a
+   * desktop copy that has not fetched its update yet. A read that fails answers
+   * `unknown` rather than guessing: the calendar has its own ways of saying the
+   * database is unreachable, and a second one here would only compete.
+   */
+  async function schemaStatus() {
+    let rows;
+    try {
+      rows = await listSettings();
+    } catch {
+      return { state: 'unknown', expected: SCHEMA_VERSION, found: null };
+    }
+    const row = (rows || []).find((r) => r.key === 'schema_version');
+    const found = row ? Number.parseInt(row.value, 10) || 0 : 0;
+    const state = found === SCHEMA_VERSION ? 'current' : found < SCHEMA_VERSION ? 'behind' : 'ahead';
+    return { state, expected: SCHEMA_VERSION, found };
   }
 
   function listLeaveKinds() {
@@ -1303,6 +1536,20 @@ __mods["core/rc.js"] = function (__x, __req) {
   function listActuals(fromISO, toISO) {
     return select('rc_actuals_current', (q) =>
       q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
+  }
+
+  /**
+   * Look-ahead rows by id — for tracing an outcome to the row it was recorded
+   * against. Asked in slices so a long list of ids never makes an overlong URL.
+   */
+  async function lookaheadRowsByIds(ids) {
+    const unique = [...new Set((ids || []).filter(Boolean))];
+    const out = [];
+    for (let i = 0; i < unique.length; i += 200) {
+      const slice = unique.slice(i, i + 200);
+      out.push(...(await select('rc_lookahead_rows', (q) => q.in('id', slice), { columns: 'id,raw_label,raw_location,snapshot_id,sheet_row' })));
+    }
+    return out;
   }
 
   /** Carried tasks, oldest first — a chain on its fifth day is the headline. */
@@ -1434,18 +1681,28 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function insert(table, rows) {
     requireClient();
+    guardPreview();
     forgetReads();
     const { data, error } = await client.from(table).insert(rows).select();
     if (error) throw new Error(`${table}: ${error.message}`);
     return data || [];
   }
 
+  /* Functions that only read, and so are allowed while previewing. */
+  const READ_ONLY_RPC = new Set(['rc_list_invitations', 'rc_resolve_location']);
+
   async function rpc(name, args) {
     requireClient();
-    // Every function here that is not a pure read writes something, and the
-    // reads are cheap; forgetting on all of them is simpler than a list that
-    // has to be kept right.
-    forgetReads();
+    /* Every function here that is not a pure read writes something, so it
+       forgets what was read. A pure read must not: the administrator's inbox
+       lists invitations every time it refreshes, and forgetting there emptied
+       the read memory on every tab switch — the calendar re-read the roster, the
+       plan and the sheet each time, which is the wait the memory exists to
+       remove. */
+    if (!READ_ONLY_RPC.has(name)) {
+      guardPreview();
+      forgetReads();
+    }
     const { data, error } = await client.rpc(name, args);
     if (error) throw new Error(`${name}: ${error.message}`);
     return data;
@@ -1461,6 +1718,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function update(table, id, patch) {
     requireClient();
+    guardPreview();
     forgetReads();
     const { data, error } = await client.from(table).update(patch).eq('id', id).select();
     if (error) throw new Error(`${table}: ${error.message}`);
@@ -1496,6 +1754,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function addLegend(rows) {
     requireClient();
+    guardPreview();
     forgetReads();
     const { data, error } = await client
       .from('rc_legend')
@@ -1537,6 +1796,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function setSetting(key, value) {
     requireClient();
+    guardPreview();
     forgetReads();
     const { data, error } = await client
       .from('rc_settings')
@@ -1770,6 +2030,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function uploadSar(path, blob) {
     requireClient();
+    guardPreview();
     const { error } = await client.storage.from('sars').upload(path, blob, {
       upsert: false,
       contentType: blob?.type || 'application/pdf',
@@ -1792,6 +2053,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function uploadEvidence(path, blob) {
     requireClient();
+    guardPreview();
     const { error } = await client.storage.from('evidence').upload(path, blob, {
       upsert: false,
       contentType: blob?.type || 'image/jpeg',
@@ -1820,6 +2082,9 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "currentUser", { get: () => currentUser, enumerable: true });
   Object.defineProperty(__x, "isSignedIn", { get: () => isSignedIn, enumerable: true });
   Object.defineProperty(__x, "me", { get: () => me, enumerable: true });
+  Object.defineProperty(__x, "previewAs", { get: () => previewAs, enumerable: true });
+  Object.defineProperty(__x, "previewing", { get: () => previewing, enumerable: true });
+  Object.defineProperty(__x, "isRealAdmin", { get: () => isRealAdmin, enumerable: true });
   Object.defineProperty(__x, "isAdmin", { get: () => isAdmin, enumerable: true });
   Object.defineProperty(__x, "role", { get: () => role, enumerable: true });
   Object.defineProperty(__x, "canWrite", { get: () => canWrite, enumerable: true });
@@ -1837,7 +2102,26 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listParties", { get: () => listParties, enumerable: true });
   Object.defineProperty(__x, "listLegend", { get: () => listLegend, enumerable: true });
   Object.defineProperty(__x, "exportEverything", { get: () => exportEverything, enumerable: true });
+  Object.defineProperty(__x, "listLaRows", { get: () => listLaRows, enumerable: true });
+  Object.defineProperty(__x, "listLaCells", { get: () => listLaCells, enumerable: true });
+  Object.defineProperty(__x, "applyLookaheadOps", { get: () => applyLookaheadOps, enumerable: true });
+  Object.defineProperty(__x, "lookaheadRevision", { get: () => lookaheadRevision, enumerable: true });
+  Object.defineProperty(__x, "listLaEdits", { get: () => listLaEdits, enumerable: true });
+  Object.defineProperty(__x, "listLaEditsForRow", { get: () => listLaEditsForRow, enumerable: true });
+  Object.defineProperty(__x, "compactSnapshots", { get: () => compactSnapshots, enumerable: true });
+  Object.defineProperty(__x, "lastSeen", { get: () => lastSeen, enumerable: true });
+  Object.defineProperty(__x, "listSeen", { get: () => listSeen, enumerable: true });
+  Object.defineProperty(__x, "markSeen", { get: () => markSeen, enumerable: true });
+  Object.defineProperty(__x, "snapshotRows", { get: () => snapshotRows, enumerable: true });
+  Object.defineProperty(__x, "listSupportCodes", { get: () => listSupportCodes, enumerable: true });
+  Object.defineProperty(__x, "addSupportCode", { get: () => addSupportCode, enumerable: true });
+  Object.defineProperty(__x, "updateSupportCode", { get: () => updateSupportCode, enumerable: true });
+  Object.defineProperty(__x, "reportError", { get: () => reportError, enumerable: true });
+  Object.defineProperty(__x, "listClientErrors", { get: () => listClientErrors, enumerable: true });
+  Object.defineProperty(__x, "clearClientErrors", { get: () => clearClientErrors, enumerable: true });
   Object.defineProperty(__x, "listSettings", { get: () => listSettings, enumerable: true });
+  Object.defineProperty(__x, "SCHEMA_VERSION", { get: () => SCHEMA_VERSION, enumerable: true });
+  Object.defineProperty(__x, "schemaStatus", { get: () => schemaStatus, enumerable: true });
   Object.defineProperty(__x, "listLeaveKinds", { get: () => listLeaveKinds, enumerable: true });
   Object.defineProperty(__x, "pendingLeave", { get: () => pendingLeave, enumerable: true });
   Object.defineProperty(__x, "leaveFor", { get: () => leaveFor, enumerable: true });
@@ -1845,6 +2129,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listPlan", { get: () => listPlan, enumerable: true });
   Object.defineProperty(__x, "planHistory", { get: () => planHistory, enumerable: true });
   Object.defineProperty(__x, "listActuals", { get: () => listActuals, enumerable: true });
+  Object.defineProperty(__x, "lookaheadRowsByIds", { get: () => lookaheadRowsByIds, enumerable: true });
   Object.defineProperty(__x, "listBlockers", { get: () => listBlockers, enumerable: true });
   Object.defineProperty(__x, "blockerHistory", { get: () => blockerHistory, enumerable: true });
   Object.defineProperty(__x, "raiseBlocker", { get: () => raiseBlocker, enumerable: true });
@@ -2357,7 +2642,10 @@ __mods["ui/components.js"] = function (__x, __req) {
 
   function ensureToastHost() {
     if (!toastHost) {
-      toastHost = el('div', { id: 'cx-toasts' });
+      /* The host is the live region, not each toast: a region added to the page
+         at the same moment as its words is announced by some screen readers and
+         not others. One that already exists is announced by all of them. */
+      toastHost = el('div', { id: 'cx-toasts', role: 'region', 'aria-label': 'Notifications', 'aria-live': 'polite' });
       document.body.appendChild(toastHost);
     }
     return toastHost;
@@ -2372,7 +2660,8 @@ __mods["ui/components.js"] = function (__x, __req) {
   function toast(opts) {
     const tone = opts.tone || 'info';
     const host = ensureToastHost();
-    const node = el('div', { class: `cx-toast ${tone}`, role: 'status' }, [
+    // A failure interrupts; everything else waits its turn.
+    const node = el('div', { class: `cx-toast ${tone}`, role: tone === 'bad' ? 'alert' : 'status' }, [
       el('span', { class: 't-icon', html: icon(TOAST_ICONS[tone] || 'info', { size: 16 }) }),
       el('div', { class: 't-body' }, [
         opts.title ? el('div', { class: 't-title', text: opts.title }) : null,
@@ -4983,10 +5272,13 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    */
   function titleColumnOf(view, locCol) {
     const headings = view?.headings || [];
+    /* In order of preference, and a heading shaped like an identifier is never
+       taken whichever word it carries — "Activity ID", "Task No.", "Scope Ref". */
     const identifier = /\b(id|no|nos|number|ref|code)\b|#/i;
-    for (const wanted of [/\bdescr/i, /\b(activit|task|scope)/i]) {
+    const wants = [/\bdescr/i, /\b(task|scope)/i, /\bactivit/i];
+    for (const re of wants) {
       for (let i = 0; i < headings.length; i++) {
-        if (i !== locCol && wanted.test(headings[i]) && !identifier.test(headings[i])) return i;
+        if (i !== locCol && re.test(headings[i]) && !identifier.test(headings[i])) return i;
       }
     }
     return -1;
@@ -5216,6 +5508,349 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     });
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     Progress from the calendar
+
+     The daily huddle records what each person actually did, and the timeline
+     has had `actualStart` / `actualEnd` fields nobody filled in. This joins the
+     two: an outcome is traced to the look-ahead row it was recorded against, the
+     row to the suggestion a bar is linked to, and the bar is offered the first
+     and last day anybody worked on it.
+
+     Offered, never written. The same rule as the rest of the register: a read of
+     the calendar proposes, and somebody says yes. A bar may stand for several
+     activities, and each is read on its own: the start is the first day any of
+     them was worked, and a finish is only offered when *every* one has nothing
+     left on the look-ahead and its own last word was "completed" — a gap in the
+     outcomes is not the end of the work, and one activity finishing is not the
+     bar finishing.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Statuses that say somebody worked on the task that day. */
+  const WORKED_STATUSES = ['completed', 'partial', 'carried'];
+
+  /**
+   * What the outcomes say about each linked bar.
+   *
+   * `objects` are the plan's objects (only those with `data.laIds` count);
+   * `activities` is the register's id → entry map; `actuals` are rows of
+   * `rc_actuals_current`; `rows` are the `rc_lookahead_rows` those outcomes (or
+   * their plan entries in `plan`) point at. An outcome with a row is matched
+   * through the row's label; one without falls back to its task text, which a
+   * day read off the sheet carries verbatim. Both go through `suggestionKey()`,
+   * so a match is exact or nothing.
+   *
+   * A bar's linked runs are grouped by that key — several runs of one row are one
+   * activity — and each activity is summarised on its own in `activities`:
+   * `{ key, title, days, first, last, lastStatus, ahead, recorded, done }`.
+   *
+   * Returns one proposal per bar with at least one worked day:
+   * `{ objectId, first, last, days, people, lastStatus, start, end, byRow,
+   *    byTask, activities, holding }` with `start` / `end` as UTC-midnight ms (end
+   * half-open, like the bar). `end` is null unless every activity is `done`;
+   * `holding` names the ones that are not.
+   */
+  function outcomeProgress({ objects = [], activities = {}, actuals = [], rows = [], plan = [], todayMs = Date.now() } = {}) {
+    const rowById = new Map(rows.map((r) => [r.id, r]));
+    const planById = new Map(plan.map((p) => [p.id, p]));
+
+    // Each bar's activities, by key, and the bars each key belongs to.
+    const barKeys = new Map(); // bar id → Map(key → { title, ahead })
+    const barsByKey = new Map();
+    for (const obj of objects) {
+      const ids = Array.isArray(obj?.data?.laIds) ? obj.data.laIds : [];
+      for (const id of ids) {
+        const entry = activities[id];
+        if (!entry?.key) continue;
+        if (!barKeys.has(obj.id)) barKeys.set(obj.id, new Map());
+        const keys = barKeys.get(obj.id);
+        const known = keys.get(entry.key) || { title: entry.title || entry.label || '', ahead: false };
+        if (!entry.dismissed && Number.isFinite(entry.end) && entry.end > todayMs) known.ahead = true;
+        keys.set(entry.key, known);
+        if (!barsByKey.has(entry.key)) barsByKey.set(entry.key, new Set());
+        barsByKey.get(entry.key).add(obj.id);
+      }
+    }
+    if (!barsByKey.size) return [];
+
+    // What was recorded against each key: the day's word, who, and how it matched.
+    const byKey = new Map();
+    for (const a of actuals) {
+      if (!WORKED_STATUSES.includes(a.status) || !a.work_date) continue;
+      const rowId = a.lookahead_row_id || planById.get(a.plan_entry_id)?.lookahead_row_id || null;
+      const row = rowId ? rowById.get(rowId) : null;
+      const key = suggestionKey(row ? row.raw_label : a.task);
+      if (!key || !barsByKey.has(key)) continue;
+      if (!byKey.has(key)) byKey.set(key, { dates: new Map(), people: new Set(), byRow: 0, byTask: 0 });
+      const acc = byKey.get(key);
+      const prev = acc.dates.get(a.work_date);
+      // Several people on one day: "completed" from anybody is the day's word.
+      if (!prev || a.status === 'completed') acc.dates.set(a.work_date, a.status);
+      if (a.person_id) acc.people.add(a.person_id);
+      if (row) acc.byRow++;
+      else acc.byTask++;
+    }
+
+    const out = [];
+    for (const obj of objects) {
+      const keys = barKeys.get(obj.id);
+      if (!keys || ![...keys.keys()].some((k) => byKey.has(k))) continue;
+      const people = new Set();
+      let byRow = 0;
+      let byTask = 0;
+      const summary = [];
+      for (const [key, { title, ahead }] of keys) {
+        const acc = byKey.get(key);
+        const dates = acc ? [...acc.dates.keys()].sort() : [];
+        const last = dates[dates.length - 1] || null;
+        const lastStatus = last ? acc.dates.get(last) : null;
+        if (acc) {
+          acc.people.forEach((p) => people.add(p));
+          byRow += acc.byRow;
+          byTask += acc.byTask;
+        }
+        summary.push({
+          key,
+          title,
+          days: dates.length,
+          first: dates[0] || null,
+          last,
+          lastStatus,
+          ahead,
+          recorded: dates.length > 0,
+          done: !ahead && lastStatus === 'completed',
+        });
+      }
+      const worked = summary.filter((a) => a.recorded);
+      const first = worked.map((a) => a.first).sort()[0];
+      const last = worked.map((a) => a.last).sort().pop();
+      const allDates = new Set();
+      for (const a of worked) for (const d of byKey.get(a.key).dates.keys()) allDates.add(d);
+      const done = summary.every((a) => a.done);
+      out.push({
+        objectId: obj.id,
+        first,
+        last,
+        days: allDates.size,
+        people: people.size,
+        lastStatus: worked.find((a) => a.last === last)?.lastStatus || null,
+        start: isoMs(first),
+        end: done ? isoMs(last) + 86400000 : null,
+        byRow,
+        byTask,
+        activities: summary,
+        holding: summary.filter((a) => !a.done).map((a) => a.title),
+      });
+    }
+    return out;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Only my rows
+
+     The look-ahead is a hundred-odd activities for the whole team, and somebody
+     on it wants the handful they are on. A names row belongs to the activity
+     line above it — that line is the work, and the names row says who lands on
+     each day of it — so the activity is what is kept, and it is drawn with its
+     names row under it as always. Section headings above a kept activity are
+     kept too, for the same reason they are in the editor's search: a row of work
+     with no section over it has lost where it sits in the plan.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The activities (and away rows) whose names name this person, in the days
+   * given, with the headings above them.
+   *
+   * `isMe(written)` answers whether a written name is this person — injected,
+   * because the register lives with the calendar. `cols`, when given, limits the
+   * question to the columns on screen: being named in a week nobody is looking
+   * at does not make a row yours this week. Rows with nothing scheduled are not
+   * dropped here: a row that names you is yours whether or not it is painted.
+   */
+  function rowsNaming(activities, isMe, cols = null) {
+    const rows = activities || [];
+    const inView = (col) => !cols || cols.has(col);
+    const names = (a) => (a.absence
+      ? (a.marks || []).filter((m) => m.value && inView(m.col)).flatMap((m) => resourceNames(m.value))
+      : (a.resource?.names || []).filter((n) => inView(n.col)).flatMap((n) => n.names));
+    const keep = new Array(rows.length).fill(false);
+    let sectionHasMine = false;
+    let belowIsKeptTitle = false;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const a = rows[i];
+      if (a.heading && !a.absence) {
+        keep[i] = sectionHasMine || belowIsKeptTitle;
+        sectionHasMine = false;
+        belowIsKeptTitle = keep[i];
+        continue;
+      }
+      keep[i] = names(a).some((n) => isMe(n));
+      if (keep[i] && !a.absence) sectionHasMine = true;
+      belowIsKeptTitle = false;
+    }
+    return rows.filter((_, i) => keep[i]);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     One activity, whole
+
+     What somebody sees when they tap a task: every column of the activity's
+     line under the sheet's own headings, and every day it has anything on —
+     the shift the paint means, whether it was cancelled, what is written in the
+     cell, and who the names row puts on it.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** The activity's name, found the way a suggestion's title is. */
+  function activityTitle(view, activity) {
+    const meta = activity?.meta || [];
+    const locCol = locationColumnOf(view);
+    const titleCol = titleColumnOf(view, locCol);
+    return (titleCol >= 0 ? meta[titleCol] : '') || longest(meta.filter((_, i) => i !== locCol)) || meta.find(Boolean) || '';
+  }
+
+  /**
+   * Every day the activity carries something on, from `fromISO` on (all of them
+   * when the axis is undated): `[{ date, col, meaning, hex, shift, cancelled,
+   * text, names, mine }]`. `shift` is true when the paint is work; `mine` when
+   * `isMe` answers yes for a name on that day.
+   */
+  function activityDays(view, activity, { fromISO = null, isMe = () => false } = {}) {
+    const marks = new Map((activity?.marks || []).map((m) => [m.col, m]));
+    const names = new Map((activity?.resource?.names || []).map((n) => [n.col, n.names]));
+    const out = [];
+    for (const d of view?.days || []) {
+      if (fromISO && d.date && d.date < fromISO) continue;
+      const mark = marks.get(d.col);
+      const who = names.get(d.col) || [];
+      const shift = Boolean(mark?.hex && mark.role === 'shift');
+      if (!shift && !mark?.value && !who.length && !(mark?.hex && isCancelMeaning(mark.meaning))) continue;
+      out.push({
+        date: d.date || null,
+        col: d.col,
+        label: d.date || `${d.month || ''} ${d.day || ''}`.trim(),
+        meaning: mark?.meaning || '',
+        hex: mark?.hex || null,
+        shift,
+        cancelled: Boolean(mark?.hex && isCancelMeaning(mark.meaning)),
+        text: mark?.value || '',
+        names: who,
+        mine: who.some((n) => isMe(n)),
+      });
+    }
+    return out;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     What changed for me
+
+     Somebody on the team opens the calendar and wants to know one thing before
+     anything else: has my week moved since I last looked? This compares two
+     readings of the look-ahead — the one they last said "got it" to, and the
+     latest — for the days that name them, and says what happened in the words a
+     person would use: a day added, a day taken away, a day moved, a day given
+     to somebody else, a day cancelled, a shift changed.
+
+     Both sides come from the stored rows (`rc_lookahead_rows`), which are never
+     compacted, so an old reading can always be compared. A reading is a complete
+     statement of the weeks it covers, so each side is one reading, whole.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The days a set of stored rows names somebody on, between `from` and `to`
+   * (ISO, inclusive): a map of `date|label` → `{ date, label, location, meaning,
+   * cancelled }`.
+   */
+  function myLookaheadDays(rows, isMe, { from = null, to = null } = {}) {
+    const out = new Map();
+    for (const row of rows || []) {
+      for (const [date, text] of Object.entries(row.resources || {})) {
+        const day = String(date).slice(0, 10);
+        if ((from && day < from) || (to && day > to)) continue;
+        if (!resourceNames(text).some((n) => isMe(n))) continue;
+        const meaning = row.cells?.[day] || row.cells?.[date] || '';
+        out.set(`${day}|${row.raw_label || ''}`, {
+          date: day,
+          label: row.raw_label || '',
+          location: row.raw_location || '',
+          meaning,
+          cancelled: isCancelMeaning(meaning),
+        });
+      }
+    }
+    return out;
+  }
+
+  /** How far apart a removed and an added day of one activity may be and still be one day moved. */
+  const MOVED_WITHIN_DAYS = 14;
+
+  /**
+   * What changed between two readings for the days that name this person:
+   * `[{ kind, date, label, location, from?, was?, now?, names? }]`, by date.
+   *
+   *   added      named on a day they were not before
+   *   removed    no longer named on a day they were, and nobody else took it
+   *   given      no longer named, and the row names somebody else that day
+   *   moved      removed from one day and added to another of the same activity
+   *   cancelled  still named, and the day is now painted as a cancellation
+   *   reinstated a day that was cancelled is back on
+   *   shift      still named, and the day is painted as a different shift
+   */
+  function changesForMe(beforeRows, afterRows, isMe, { from = null, to = null } = {}) {
+    const before = myLookaheadDays(beforeRows, isMe, { from, to });
+    const after = myLookaheadDays(afterRows, isMe, { from, to });
+    const afterRow = new Map();
+    for (const row of afterRows || []) {
+      for (const date of new Set([...Object.keys(row.resources || {}), ...Object.keys(row.cells || {})])) {
+        afterRow.set(`${String(date).slice(0, 10)}|${row.raw_label || ''}`, row);
+      }
+    }
+
+    const added = [...after.entries()].filter(([k]) => !before.has(k)).map(([, v]) => v);
+    const removed = [...before.entries()].filter(([k]) => !after.has(k)).map(([, v]) => v);
+    const out = [];
+
+    /* A day taken off and another of the same activity put on, close together,
+       is one day moved — nearest first, each day used once. */
+    const usedAdded = new Set();
+    const stillRemoved = [];
+    for (const r of removed.sort((a, b) => a.date.localeCompare(b.date))) {
+      let best = null;
+      let bestGap = Infinity;
+      added.forEach((a, i) => {
+        if (usedAdded.has(i) || a.label !== r.label) return;
+        const gap = Math.abs(Date.parse(`${a.date}T00:00:00Z`) - Date.parse(`${r.date}T00:00:00Z`)) / 86400000;
+        if (gap <= MOVED_WITHIN_DAYS && gap < bestGap) { best = i; bestGap = gap; }
+      });
+      if (best == null) { stillRemoved.push(r); continue; }
+      usedAdded.add(best);
+      const a = added[best];
+      out.push({ kind: 'moved', date: a.date, from: r.date, label: a.label, location: a.location, now: a.meaning, was: r.meaning });
+    }
+
+    added.forEach((a, i) => {
+      if (!usedAdded.has(i)) out.push({ kind: 'added', date: a.date, label: a.label, location: a.location, now: a.meaning });
+    });
+    for (const r of stillRemoved) {
+      const row = afterRow.get(`${r.date}|${r.label}`);
+      const names = resourceNames(row?.resources?.[r.date] || '').filter((n) => !isMe(n));
+      if (names.length) out.push({ kind: 'given', date: r.date, label: r.label, location: r.location, names });
+      else out.push({ kind: 'removed', date: r.date, label: r.label, location: r.location, was: r.meaning });
+    }
+    for (const [k, now] of after) {
+      const was = before.get(k);
+      if (!was) continue;
+      if (now.cancelled && !was.cancelled) {
+        out.push({ kind: 'cancelled', date: now.date, label: now.label, location: now.location, was: was.meaning });
+      } else if (was.cancelled && !now.cancelled) {
+        out.push({ kind: 'reinstated', date: now.date, label: now.label, location: now.location, now: now.meaning });
+      } else if (!now.cancelled && now.meaning !== was.meaning && now.meaning && was.meaning) {
+        out.push({ kind: 'shift', date: now.date, label: now.label, location: now.location, was: was.meaning, now: now.meaning });
+      }
+    }
+
+    return out.sort((a, b) => a.date.localeCompare(b.date) || a.label.localeCompare(b.label));
+  }
+
   Object.defineProperty(__x, "isResourceLabel", { get: () => isResourceLabel, enumerable: true });
   Object.defineProperty(__x, "absenceKind", { get: () => absenceKind, enumerable: true });
   Object.defineProperty(__x, "ABSENCE_KINDS", { get: () => ABSENCE_KINDS, enumerable: true });
@@ -5242,6 +5877,13 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "reconcileSuggestions", { get: () => reconcileSuggestions, enumerable: true });
   Object.defineProperty(__x, "cancellationEvents", { get: () => cancellationEvents, enumerable: true });
   Object.defineProperty(__x, "attachCancellationNotes", { get: () => attachCancellationNotes, enumerable: true });
+  Object.defineProperty(__x, "WORKED_STATUSES", { get: () => WORKED_STATUSES, enumerable: true });
+  Object.defineProperty(__x, "outcomeProgress", { get: () => outcomeProgress, enumerable: true });
+  Object.defineProperty(__x, "rowsNaming", { get: () => rowsNaming, enumerable: true });
+  Object.defineProperty(__x, "activityTitle", { get: () => activityTitle, enumerable: true });
+  Object.defineProperty(__x, "activityDays", { get: () => activityDays, enumerable: true });
+  Object.defineProperty(__x, "myLookaheadDays", { get: () => myLookaheadDays, enumerable: true });
+  Object.defineProperty(__x, "changesForMe", { get: () => changesForMe, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -6282,6 +6924,21 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /**
+   * Go to another calendar tab. A tab cannot import the router — `ui/rc.js`
+   * imports every tab — so it asks, the way a dock pane asks for another pane.
+   * This is what lets an empty screen point at the place its data comes from.
+   */
+  /**
+   * Which Organisation section to open next — set by whoever sends somebody
+   * there (the inbox), read once by the tab. A tab cannot import another tab.
+   */
+  const orgNav = { section: null };
+
+  function goToTab(tab) {
+    emit(EV.RC_SHOW_TAB, { tab });
+  }
+
+  /**
    * The five statuses, split into the two families that must never be averaged.
    *
    * Performance is what an individual did. Health is what was done to them — a
@@ -6451,6 +7108,33 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       else if (d === bestAt && best && best.id !== id) tied = true;
     }
     return tied ? null : best;
+  }
+
+  /**
+   * "Is this written name me?" — the same register the week plan reads names
+   * with (full name, alias, a first name only one person has, and the one
+   * unambiguous near miss), so what it picks out is what the week plan puts
+   * the person on. Resolves to null for an account with no person on the team.
+   */
+  async function meMatcher() {
+    const me = rc.me();
+    if (!me) return null;
+    const [people, aliases] = await Promise.all([
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+      rc.listPersonAliases().catch(() => []),
+    ]);
+    return personMatcher(nameRegister(people.length ? people : [me], aliases), me.id);
+  }
+
+  /** "Is this written name this person?" against a register — see `meMatcher()`. */
+  function personMatcher(register, personId) {
+    const memo = new Map();
+    return (written) => {
+      const key = foldName(written);
+      if (!key) return false;
+      if (!memo.has(key)) memo.set(key, (register.get(key) || nearestName(key, register)?.id || null) === personId);
+      return memo.get(key);
+    };
   }
 
   /**
@@ -7164,6 +7848,8 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "byId", { get: () => byId, enumerable: true });
   Object.defineProperty(__x, "groupBy", { get: () => groupBy, enumerable: true });
   Object.defineProperty(__x, "notifyChanged", { get: () => notifyChanged, enumerable: true });
+  Object.defineProperty(__x, "orgNav", { get: () => orgNav, enumerable: true });
+  Object.defineProperty(__x, "goToTab", { get: () => goToTab, enumerable: true });
   Object.defineProperty(__x, "STATUSES", { get: () => STATUSES, enumerable: true });
   Object.defineProperty(__x, "STATUS_BY_ID", { get: () => STATUS_BY_ID, enumerable: true });
   Object.defineProperty(__x, "SHIFTS", { get: () => SHIFTS, enumerable: true });
@@ -7172,6 +7858,8 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "nameRegister", { get: () => nameRegister, enumerable: true });
   Object.defineProperty(__x, "nameDistance", { get: () => nameDistance, enumerable: true });
   Object.defineProperty(__x, "nearestName", { get: () => nearestName, enumerable: true });
+  Object.defineProperty(__x, "meMatcher", { get: () => meMatcher, enumerable: true });
+  Object.defineProperty(__x, "personMatcher", { get: () => personMatcher, enumerable: true });
   Object.defineProperty(__x, "locationRegister", { get: () => locationRegister, enumerable: true });
   Object.defineProperty(__x, "unmatchedLocations", { get: () => unmatchedLocations, enumerable: true });
   Object.defineProperty(__x, "uniqueFirstNames", { get: () => uniqueFirstNames, enumerable: true });
@@ -8657,6 +9345,7 @@ __mods["mobile.js"] = function (__x, __req) {
 
 
 };
+
 
   __req("mobile.js");
 })();

@@ -1303,6 +1303,193 @@ console.log('\nThe cancellation log');
     noted.find((e) => e.label === 'IXL regression')?.note === null);
 }
 
+console.log('\nProgress from the calendar');
+{
+  const D = (iso) => Date.parse(`${iso}T00:00:00Z`);
+  const label = 'CDRL 9.04.27 · IXL Regression Testing · Tail Tracks';
+  const activities = {
+    r1: { id: 'r1', key: cls.suggestionKey(label), start: D('2026-09-14'), end: D('2026-09-19') },
+    r2: { id: 'r2', key: cls.suggestionKey('Night mode · Y10'), start: D('2026-09-21'), end: D('2026-10-03') },
+  };
+  const objects = [
+    { id: 'bar1', data: { laIds: ['r1'] } },
+    { id: 'bar2', data: { laIds: ['r2'] } },
+    { id: 'bar3', data: {} },
+  ];
+  const rows = [{ id: 'row-a', raw_label: label }, { id: 'row-b', raw_label: 'Night mode · Y10' }];
+  const plan = [{ id: 'plan-1', lookahead_row_id: 'row-b' }];
+  const actuals = [
+    { person_id: 'p1', work_date: '2026-09-15', status: 'partial', lookahead_row_id: 'row-a' },
+    { person_id: 'p2', work_date: '2026-09-15', status: 'completed', lookahead_row_id: 'row-a' },
+    { person_id: 'p1', work_date: '2026-09-16', status: 'blocked', lookahead_row_id: 'row-a' },
+    // No row: a day read off the sheet carries the row's words as its task.
+    { person_id: 'p1', work_date: '2026-09-18', status: 'completed', task: '  cdrl 9.04.27 ·  IXL Regression Testing · Tail Tracks ' },
+    // Through its plan entry.
+    { person_id: 'p3', work_date: '2026-09-22', status: 'carried', plan_entry_id: 'plan-1' },
+    // A different piece of work, and a near miss in wording: neither counts.
+    { person_id: 'p4', work_date: '2026-09-12', status: 'completed', task: 'IXL Regression Testing' },
+  ];
+  const out = cls.outcomeProgress({ objects, activities, actuals, rows, plan, todayMs: D('2026-09-24') });
+  const bar1 = out.find((p) => p.objectId === 'bar1');
+  const bar2 = out.find((p) => p.objectId === 'bar2');
+  check('an outcome reaches the bar linked to its row', !!bar1 && !!bar2 && out.length === 2, JSON.stringify(out.map((p) => p.objectId)));
+  check('the start is the first day anybody worked on it', bar1?.first === '2026-09-15' && bar1?.start === D('2026-09-15'));
+  check('a blocked day is not work, and a near miss in wording is not a match',
+    bar1?.days === 2 && bar1?.last === '2026-09-18', JSON.stringify(bar1));
+  check('a day off the sheet is matched on its exact words', bar1?.byTask === 1 && bar1?.byRow === 2);
+  check('a finish is offered once the run is over and the last word was completed',
+    bar1?.end === D('2026-09-19'), String(bar1?.end));
+  check('an outcome is traced through its plan entry', bar2?.first === '2026-09-22');
+  check('no finish while the look-ahead still has work for it', bar2?.end === null);
+  check('the people are counted, not the rows', bar1?.people === 2);
+  check('a bar linked to nothing is never offered anything',
+    cls.outcomeProgress({ objects: [objects[2]], activities, actuals, rows }).length === 0);
+
+  // One bar standing for two activities.
+  const acts2 = {
+    a: { id: 'a', key: cls.suggestionKey('IXL Regression'), title: 'IXL Regression', start: D('2026-09-07'), end: D('2026-09-12') },
+    b: { id: 'b', key: cls.suggestionKey('IXL Night Mode'), title: 'IXL Night Mode', start: D('2026-09-07'), end: D('2026-09-10') },
+    b2: { id: 'b2', key: cls.suggestionKey('IXL Night Mode'), title: 'IXL Night Mode', start: D('2026-09-14'), end: D('2026-09-15') },
+  };
+  const both = [{ id: 'combo', data: { laIds: ['a', 'b', 'b2'] } }];
+  const mixed = [
+    { person_id: 'p1', work_date: '2026-09-07', status: 'partial', task: 'IXL Night Mode' },
+    { person_id: 'p1', work_date: '2026-09-08', status: 'partial', task: 'IXL Night Mode' },
+    { person_id: 'p2', work_date: '2026-09-09', status: 'partial', task: 'IXL Regression' },
+    { person_id: 'p2', work_date: '2026-09-10', status: 'completed', task: 'IXL Regression' },
+  ];
+  const combo = cls.outcomeProgress({ objects: both, activities: acts2, actuals: mixed, todayMs: D('2026-09-24') })[0];
+  check('several runs of one row are one activity', combo?.activities.length === 2, JSON.stringify(combo?.activities.map((a) => a.title)));
+  check('the start is the earliest worked day across every activity', combo?.first === '2026-09-07');
+  check('one activity completing does not finish the bar', combo?.end === null);
+  check('and the one holding it back is named', combo?.holding.join() === 'IXL Night Mode', JSON.stringify(combo?.holding));
+  check('each activity is summarised on its own',
+    combo?.activities.find((a) => a.title === 'IXL Regression')?.done === true
+      && combo?.activities.find((a) => a.title === 'IXL Night Mode')?.lastStatus === 'partial');
+  const silent = cls.outcomeProgress({
+    objects: both, activities: acts2, todayMs: D('2026-09-24'),
+    actuals: mixed.filter((a) => a.task === 'IXL Regression'),
+  })[0];
+  check('an activity with nothing recorded holds the finish back too',
+    silent?.end === null && silent?.activities.find((a) => a.title === 'IXL Night Mode')?.recorded === false);
+  const finished = cls.outcomeProgress({
+    objects: both, activities: acts2, todayMs: D('2026-09-24'),
+    actuals: [...mixed,
+      { person_id: 'p1', work_date: '2026-09-14', status: 'completed', task: 'IXL Night Mode' },
+      { person_id: 'p2', work_date: '2026-09-08', status: 'partial', task: 'IXL Regression' }],
+  })[0];
+  check('once every activity is completed the finish is the last of them',
+    finished?.end === D('2026-09-15') && finished?.holding.length === 0, String(finished?.end));
+  check('and a day worked on both activities is one day', finished?.days === 5);
+}
+
+console.log('\nOnly my rows');
+{
+  const act = (label, names, extra = {}) => ({
+    meta: [label], marks: [], heading: false, highlighted: true, named: true,
+    resource: names ? { names: names.map(([col, list]) => ({ col, names: list })) } : null, ...extra,
+  });
+  const rows = [
+    { meta: ['PHASE 2'], heading: true, marks: [] },
+    { meta: ['W40 — Testing'], heading: true, marks: [] },
+    act('IXL Regression', [[10, ['Priya', 'Rosa']]]),
+    act('Cable pull', [[11, ['Tom']]]),
+    { meta: ['Y10 — Night works'], heading: true, marks: [] },
+    act('Night Mode', [[40, ['Priya']]]),
+    act('Unpainted, but mine', [[12, ['priya']]], { highlighted: false }),
+    { meta: ['Nothing of mine here'], heading: true, marks: [] },
+    act('Signals', [[10, ['Tom']]]),
+    { meta: ['PTO'], absence: 'pto', marks: [{ col: 10, value: 'Priya, Dana' }] },
+  ];
+  const isMe = (w) => String(w).trim().toLowerCase() === 'priya';
+  const kept = cls.rowsNaming(rows, isMe, new Set([10, 11, 12])).map((a) => a.meta[0]);
+  check('the activities whose names row names me are kept, with the sections above them',
+    kept.join(' | ') === 'PHASE 2 | W40 — Testing | IXL Regression | Y10 — Night works | Unpainted, but mine | PTO', kept.join(' | '));
+  check('a row that names me only in a week not on screen is not mine this week', !kept.includes('Night Mode'));
+  check('a section with none of mine under it goes, heading and all', !kept.includes('Nothing of mine here') && !kept.includes('Signals'));
+  check('a row naming me is kept even with nothing painted yet', kept.includes('Unpainted, but mine'));
+  check('the away row naming me is kept, and does not keep the section above it',
+    kept.includes('PTO') && !kept.includes('Nothing of mine here'));
+  check('with no columns given, every week counts', cls.rowsNaming(rows, isMe).some((a) => a.meta[0] === 'Night Mode'));
+  const ixl = cls.rowsNaming(rows, isMe, new Set([10])).find((a) => a.meta[0] === 'IXL Regression');
+  check('an activity is kept whole, so its names row is drawn under it', ixl?.resource?.names?.[0]?.names.includes('Rosa'));
+}
+
+console.log('\nOne activity, whole');
+{
+  const view = {
+    headings: ['Activity ID', 'Description of Work Activity', 'Location', 'SSWP#', 'Party to Action', 'Work Hours'],
+    days: [
+      { col: 8, date: '2026-09-18', day: '18', month: 'Sep' },
+      { col: 9, date: '2026-09-21', day: '21', month: 'Sep' },
+      { col: 10, date: '2026-09-22', day: '22', month: 'Sep' },
+      { col: 11, date: '2026-09-23', day: '23', month: 'Sep' },
+      { col: 12, date: '2026-09-24', day: '24', month: 'Sep' },
+    ],
+  };
+  const activity = {
+    meta: ['CDRL 9.04.27', 'IXL Regression Testing', 'W40', '660', 'STS', '0700-1500'],
+    marks: [
+      { col: 8, hex: 'FFFF00', role: 'shift', meaning: 'Day Shift', value: 'X' },
+      { col: 9, hex: 'FFFF00', role: 'shift', meaning: 'Day Shift', value: 'X.WIT' },
+      { col: 10, hex: 'FF0000', role: 'shift', meaning: 'Cancellation', value: '' },
+      { col: 11, hex: 'D9D9D9', role: 'ignore', meaning: 'Shading', value: '' },
+      { col: 12, hex: '000080', role: 'shift', meaning: 'Night Shift', value: '' },
+    ],
+    resource: { names: [{ col: 9, names: ['Priya', 'Rosa'] }, { col: 12, names: ['Tom'] }] },
+  };
+  check('the title is the description column, whatever order the columns are in',
+    cls.activityTitle(view, activity) === 'IXL Regression Testing');
+  const days = cls.activityDays(view, activity, { fromISO: '2026-09-21', isMe: (n) => n === 'Priya' });
+  check('the days from the given date on, and only those with something on them',
+    days.map((d) => d.date).join() === '2026-09-21,2026-09-22,2026-09-24', days.map((d) => d.date).join());
+  check('each day says which shift, and who is on it', days[0].meaning === 'Day Shift' && days[0].names.join() === 'Priya,Rosa'
+    && days[2].meaning === 'Night Shift' && days[2].names.join() === 'Tom');
+  check('a cancelled day is said to be, even with nobody named', days[1].cancelled && !days[1].names.length);
+  check('shading is not a day of work', !days.some((d) => d.date === '2026-09-23'));
+  check('the days I am on are marked, and only those', days[0].mine && !days[2].mine);
+  check('what is written in the cell comes along', days[0].text === 'X.WIT');
+}
+
+console.log('\nWhat changed for me');
+{
+  const row = (label, cells, resources, location = 'W40') => ({ raw_label: label, raw_location: location, cells, resources });
+  const before = [
+    row('IXL Regression', { '2026-09-22': 'Day Shift', '2026-09-23': 'Day Shift', '2026-09-24': 'Day Shift' },
+      { '2026-09-22': 'Priya, Rosa', '2026-09-23': 'Priya', '2026-09-24': 'Priya' }),
+    row('Night Mode', { '2026-09-25': 'Day Shift', '2026-09-28': 'Night Shift' }, { '2026-09-25': 'Priya', '2026-09-28': 'Priya' }, 'Y10'),
+    row('Cable pull', { '2026-09-29': 'Day Shift' }, { '2026-09-29': 'Priya' }),
+    row('Signals', { '2026-09-30': 'Cancellation' }, { '2026-09-30': 'Priya' }),
+    row('Long ago', { '2026-08-01': 'Day Shift' }, { '2026-08-01': 'Priya' }),
+  ];
+  const after = [
+    // 22nd unchanged; 23rd cancelled; 24th moved to the 26th.
+    row('IXL Regression', { '2026-09-22': 'Day Shift', '2026-09-23': 'Cancellation', '2026-09-26': 'Day Shift' },
+      { '2026-09-22': 'Priya, Rosa', '2026-09-23': 'Priya', '2026-09-26': 'Priya' }),
+    // 25th now a night shift; 28th given to Tom.
+    row('Night Mode', { '2026-09-25': 'Night Shift', '2026-09-28': 'Night Shift' }, { '2026-09-25': 'Priya', '2026-09-28': 'Tom' }, 'Y10'),
+    // Cable pull gone entirely; a new activity added; Signals back on.
+    row('Possession prep', { '2026-10-02': 'Day Shift' }, { '2026-10-02': 'priya' }),
+    row('Signals', { '2026-09-30': 'Day Shift' }, { '2026-09-30': 'Priya' }),
+  ];
+  const isMe = (n) => String(n).trim().toLowerCase() === 'priya';
+  const changes = cls.changesForMe(before, after, isMe, { from: '2026-09-21', to: '2026-10-18' });
+  const kinds = changes.map((c) => `${c.kind}:${c.label}:${c.date}`);
+  const has = (k) => kinds.includes(k);
+  check('a day that stayed as it was is not a change', !changes.some((c) => c.date === '2026-09-22'), kinds.join(' '));
+  check('a day painted as a cancellation is said to be cancelled', has('cancelled:IXL Regression:2026-09-23'));
+  check('a day taken off and another of the same activity put on is one day moved',
+    has('moved:IXL Regression:2026-09-26') && changes.find((c) => c.kind === 'moved')?.from === '2026-09-24');
+  check('a different shift is said, with what it was', changes.some((c) => c.kind === 'shift' && c.was === 'Day Shift' && c.now === 'Night Shift'));
+  check('a day given to somebody else says who', changes.some((c) => c.kind === 'given' && c.names.join() === 'Tom'));
+  check('a day that went with nobody taking it is removed', has('removed:Cable pull:2026-09-29'));
+  check('a new day is added, however the name is cased', has('added:Possession prep:2026-10-02'));
+  check('a cancelled day back on is reinstated', has('reinstated:Signals:2026-09-30'));
+  check('days outside the window are not the question', !changes.some((c) => c.label === 'Long ago'));
+  check('in date order', changes.map((c) => c.date).join() === [...changes.map((c) => c.date)].sort().join());
+  check('nothing changed is an empty list', cls.changesForMe(before, before, isMe, { from: '2026-09-21' }).length === 0);
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

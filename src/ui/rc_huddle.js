@@ -88,6 +88,8 @@ async function record(entry) {
     await rc.recordActual(entry);
     return { sent: true };
   } catch (err) {
+    // Refused because an administrator is only previewing: nothing to replay.
+    if (err?.preview) return { sent: false, error: err };
     const queue = readQueue();
     queue.push(entry);
     writeQueue(queue);
@@ -117,6 +119,8 @@ export async function flushQueue() {
       if (/fetch|network/i.test(String(err.message))) remaining.push(entry);
       else {
         console.warn('[cx-timeline] a queued outcome was refused and dropped:', err.message);
+        // The one failure here that loses somebody's words: it goes on the record.
+        rc.reportError('huddle:queue-dropped', `${entry.date}: ${err.message}`);
         toast({ tone: 'warn', message: `An entry from ${entry.date} was refused: ${err.message}` });
       }
     }
@@ -1381,7 +1385,7 @@ async function commitOutcome({
     blockedPartyId: keep?.blocked_party_id || null,
     supersedesId: supersedes?.id || null,
   });
-  if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
+  if (!sent) toast({ tone: 'warn', message: error?.preview ? error.message : `Saved locally — ${error.message}` });
 
   /* A carried task is going to be done tomorrow, and re-typing it is both slow
      and how the chain used to get broken. Rolling it forward here is the only
@@ -1555,7 +1559,7 @@ function blockedDialog(ctx, person, date, plannedEntry, redraw, current = null) 
         supersedesId: current?.id || null,
       };
       const { sent, error } = await record(entry);
-      if (!sent) toast({ tone: 'warn', message: `Saved locally — ${error.message}` });
+      if (!sent) toast({ tone: 'warn', message: error?.preview ? error.message : `Saved locally — ${error.message}` });
 
       /* The outcome says a day was lost; the blocker is the thing somebody has
          to do about it. Raised separately and after, so a failure here leaves

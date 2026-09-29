@@ -414,6 +414,12 @@ constraint shapes and nothing else; it is additive, safe to run twice, and safe
 to run on a project that is already current. It ends with a table of "ok" rows
 saying which steps took.
 
+**You do not have to remember to check.** `rc_schema.sql` stamps its version
+into `rc_settings.schema_version` as its last statement, and the calendar
+compares it with the version it was built for when somebody signs in. An
+administrator whose database is behind sees a banner naming these two files;
+everybody else is told that some changes may be refused until it is done.
+
 Then Settings → API, and copy **Project URL** and the **anon / public** key.
 The anon key is designed to be public: it identifies the project and grants
 nothing. Every rule is a row-level security policy tied to the signed-in

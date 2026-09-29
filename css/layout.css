@@ -79,7 +79,21 @@
   overflow-x: hidden;
 }
 
+.sidenav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+/* The heading is a button: it folds its section away. */
 .sidenav-section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
   font-family: var(--f-mono);
   font-size: var(--fs-micro);
   font-weight: 700;
@@ -88,10 +102,65 @@
   color: var(--text-subtle);
   opacity: 0.75;
   padding: 14px 14px 4px;
-  pointer-events: none;
+  border-radius: 6px;
+  transition: opacity var(--dur-fast) var(--easing), color var(--dur-fast) var(--easing);
 }
-.sidenav-section-label:first-child {
+.sidenav-section-label:hover,
+.sidenav-section-label:focus-visible {
+  opacity: 1;
+  color: var(--text-muted);
+}
+.sidenav-group:first-child .sidenav-section-label {
   padding-top: 6px;
+}
+.sidenav-fold {
+  display: inline-flex;
+  opacity: 0;
+  transition: transform var(--dur-fast) var(--easing), opacity var(--dur-fast) var(--easing);
+}
+.sidenav-section-label:hover .sidenav-fold,
+.sidenav-section-label:focus-visible .sidenav-fold,
+.sidenav-group.folded .sidenav-fold {
+  opacity: 1;
+}
+.sidenav-group.folded .sidenav-fold {
+  transform: rotate(-90deg);
+}
+/* Folded, but never hiding where you are: the open pane stays in view. */
+.sidenav-group.folded .nav-link:not(.active) {
+  display: none;
+}
+
+/* The command menu's entry point, above the list of places. */
+.sidenav-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 10px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-subtle);
+  font: inherit;
+  font-size: var(--fs-tiny);
+  cursor: pointer;
+  text-align: left;
+  transition: color var(--dur-fast) var(--easing), border-color var(--dur-fast) var(--easing);
+}
+.sidenav-command:hover,
+.sidenav-command:focus-visible {
+  color: var(--text-main);
+  border-color: var(--border-strong);
+}
+.sidenav-command .nav-label { flex: 1; }
+.sidenav-command kbd {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-subtle);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 5px;
 }
 
 .nav-link {
@@ -585,6 +654,20 @@ body.presenting #app {
     justify-content: center;
     padding: 15px 0;
   }
+  /* The headings that unfold a section are gone at this width, so nothing
+     may stay folded behind them. */
+  .sidenav-group.folded .nav-link:not(.active) {
+    display: flex;
+  }
+  .sidenav-command {
+    justify-content: center;
+    margin: 8px 6px 0;
+    padding: 7px 0;
+  }
+  .sidenav-command .nav-label,
+  .sidenav-command kbd {
+    display: none;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -834,4 +917,45 @@ body.read-only #inspector .cx-swatch {
   border-color: var(--info);
   color: var(--info);
   white-space: nowrap;
+}
+
+/* ── The canvas with nothing on it (ui/canvas_hint.js) ────────────────── */
+.canvas-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  /* Above the floating legend (40), which otherwise covers the card's buttons
+     on a short canvas; below menus and dialogs. */
+  z-index: 45;
+}
+.canvas-hint[hidden] { display: none; }
+.canvas-hint-card {
+  pointer-events: auto;
+  max-width: 420px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  text-align: center;
+}
+.canvas-hint .ch-title {
+  font-weight: 600;
+  color: var(--text-main);
+  margin-bottom: 6px;
+}
+.canvas-hint .ch-msg {
+  font-size: var(--fs-small);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.canvas-hint .ch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
 }

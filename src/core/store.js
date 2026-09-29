@@ -1388,6 +1388,10 @@ export function importLookahead(runs, meta = {}) {
       count: runs.length,
       windowStart: meta.windowStart ?? null,
       windowEnd: meta.windowEnd ?? null,
+      // 'calendar' when read from the resource calendar rather than a file, and
+      // which of its readings — so the pane can say when a newer one exists.
+      source: meta.source || 'file',
+      snapshotAt: meta.snapshotAt ?? null,
     };
     d.lookahead = {
       activities,
