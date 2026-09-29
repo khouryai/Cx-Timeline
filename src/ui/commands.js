@@ -964,6 +964,7 @@ export const SHORTCUTS = [
     ['F11  /  P', 'Presentation mode'],
   ]},
   { group: 'Application', items: [
+    ['mod+k', 'Go to anything — panes, actions, themes'],
     ['mod+f', 'Global search'],
     ['mod+s', 'Save a restore point'],
     ['mod+p', 'Print / export to PDF'],

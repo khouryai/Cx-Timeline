@@ -29,6 +29,7 @@ import { showPane, currentPane, PANES } from './panels.js';
 import * as workspace from './workspace.js';
 import { accountBlock, openShareDialog } from './auth.js';
 import * as cmd from './commands.js';
+import { openCommandMenu } from './command_menu.js';
 
 /** Sidebar structure — sections of dock panes. */
 const NAV = [
@@ -93,6 +94,17 @@ export function buildShell() {
 
 /* ── Side navigation ───────────────────────────────────────────────────── */
 
+const FOLDED_KEY = 'cxtl.nav.folded';
+
+/** The sidebar sections this browser has folded away. */
+function foldedGroups() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(FOLDED_KEY) || '[]'));
+  } catch {
+    return new Set();
+  }
+}
+
 function buildSidenav() {
   clear(dom.sidenav);
   const doc = store.getDoc();
@@ -121,9 +133,49 @@ function buildSidenav() {
     dom.sidenav.appendChild(workspaceSwitch());
   }
 
+  // One way in to everything, before the list of places: the command menu.
+  dom.sidenav.appendChild(el('button', {
+    class: 'sidenav-command',
+    type: 'button',
+    title: 'Every pane, action, object type and theme, by name',
+    onClick: () => openCommandMenu(),
+  }, [
+    el('span', { class: 'nav-icon', html: icon('search', { size: 14 }) }),
+    el('span', { class: 'nav-label', text: 'Go to…' }),
+    el('kbd', { text: navigator.platform.includes('Mac') ? '⌘K' : 'Ctrl K' }),
+  ]));
+
   dom.navLinks = el('div', { class: 'sidenav-links' });
+  const folded = foldedGroups();
   for (const group of NAV) {
-    dom.navLinks.appendChild(el('div', { class: 'sidenav-section-label', text: group.section }));
+    /* A section folds away on its heading, and stays folded across reloads.
+       Twenty panes is a long column on a laptop, and most people use five of
+       them; the pane that is open stays visible even in a folded section, so
+       folding never hides where you are. */
+    const box = el('div', { class: 'sidenav-group' + (folded.has(group.section) ? ' folded' : '') });
+    const head = el('button', {
+      class: 'sidenav-section-label',
+      type: 'button',
+      'aria-expanded': String(!folded.has(group.section)),
+      title: 'Fold or unfold this section',
+      onClick: () => {
+        const now = box.classList.toggle('folded');
+        head.setAttribute('aria-expanded', String(!now));
+        const set = foldedGroups();
+        if (now) set.add(group.section);
+        else set.delete(group.section);
+        try {
+          localStorage.setItem(FOLDED_KEY, JSON.stringify([...set]));
+        } catch {
+          /* a remembered fold is a convenience; without storage it simply resets */
+        }
+      },
+    }, [
+      el('span', { text: group.section }),
+      el('span', { class: 'sidenav-fold', html: icon('chevron-down', { size: 10 }) }),
+    ]);
+    box.appendChild(head);
+    dom.navLinks.appendChild(box);
     for (const item of group.items) {
       // Some panes only mean anything with a backend behind them, and one is
       // for administrators. Both are re-evaluated on auth:changed, which
@@ -143,7 +195,7 @@ function buildSidenav() {
         el('span', { class: 'nav-label', text: item.label }),
         el('span', { class: 'nav-count', dataset: { countFor: item.pane } }),
       ]);
-      dom.navLinks.appendChild(link);
+      box.appendChild(link);
     }
   }
   dom.sidenav.appendChild(dom.navLinks);
@@ -496,7 +548,11 @@ function buildStatusbar() {
 
   dom.saveDot = el('span', { class: 'sb-dot' });
   dom.saveText = el('span', { text: 'Saved' });
-  dom.statusbar.appendChild(el('span', { class: 'sb-item', title: 'Autosave status' }, [dom.saveDot, dom.saveText]));
+  // Announced when it changes — "Saving", "Saved", "Not saved" — and only this
+  // item: the rest of the bar follows the pointer and would never stop talking.
+  dom.statusbar.appendChild(el('span', {
+    class: 'sb-item', title: 'Autosave status', 'aria-live': 'polite', 'aria-atomic': 'true',
+  }, [dom.saveDot, dom.saveText]));
 
   dom.countText = el('span', { class: 'sb-item' });
   dom.statusbar.appendChild(dom.countText);
@@ -536,6 +592,18 @@ function buildStatusbar() {
     onClick: () => showPane('settings'),
   });
   dom.statusbar.appendChild(dom.storageText);
+
+  // The clickable items are buttons to a keyboard as well as a pointer.
+  for (const item of dom.statusbar.querySelectorAll('.sb-item.clickable')) {
+    item.setAttribute('role', 'button');
+    item.tabIndex = 0;
+    item.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        item.click();
+      }
+    });
+  }
 
   refreshStatus();
 }
@@ -628,6 +696,9 @@ function wireEvents() {
   on(EV.ACCESS_CHANGED, refresh);
   // The switch is two buttons; repainting the sidebar to move a highlight
   // would throw away the pane list and its scroll position for nothing.
+  on(EV.CALENDAR_FAILED, ({ message }) => {
+    toast({ tone: 'bad', title: 'The calendar did not open', message, timeout: 10000 });
+  });
   on(EV.WORKSPACE_CHANGED, ({ workspace: which }) => {
     for (const btn of dom.sidenav.querySelectorAll('.ws-btn')) {
       const label = btn.querySelector('span')?.textContent.toLowerCase();

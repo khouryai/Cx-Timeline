@@ -13,11 +13,14 @@
 
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
+import { pinClock, pinNodeClock } from './lib/clock.js';
 import { buildLookaheadWorkbook } from './fixtures/xlsx_fixture.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
+
+pinNodeClock();
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const PORT = 8231;
@@ -60,7 +63,7 @@ function check(name, ok, detail = '') {
 async function main() {
   const server = await serve();
   const browser = await chromium.launch(launchOptions());
-  const context = await browser.newContext({ viewport: { width: 1600, height: 950 } });
+  const context = pinClock(await browser.newContext({ viewport: { width: 1600, height: 950 } }));
   const page = await context.newPage();
 
   const consoleErrors = [];
@@ -1844,9 +1847,36 @@ async function main() {
     await page.waitForTimeout(500);
     check('clearing it brings everything back', !(await chip.isVisible())
       && (await page.locator('.tl-obj').count()) >= all, `${await page.locator('.tl-obj').count()} of ${all}`);
+
+    /* A window with nothing in it looked exactly like an empty plan: a ruler
+       over a blank field. The canvas now says which it is, and the way out. */
+    const hint = page.locator('#canvas-frame .canvas-hint:not([hidden])');
+    check('a canvas with things on it says nothing', (await hint.count()) === 0);
+    await page.locator('#toolbar button[aria-label="Show only a date range"]').click();
+    await page.waitForTimeout(300);
+    await page.locator('.cx-modal input[aria-label="Show from"]').fill('2031-01-01');
+    await page.locator('.cx-modal input[aria-label="Show to"]').fill('2031-01-31');
+    await page.locator('.cx-modal-foot .cx-btn.primary').click();
+    await page.waitForTimeout(600);
+    const hintText = (await hint.count()) ? await hint.innerText() : '';
+    check('a date range with nothing in it says so, rather than looking like an empty plan',
+      /Nothing in view/.test(hintText) && /date range is set/.test(hintText), hintText.replace(/\n/g, ' · '));
+    await hint.locator('button', { hasText: 'Clear the date range' }).click();
+    await page.waitForTimeout(600);
+    check('and its button ends it', (await hint.count()) === 0 && (await page.locator('.tl-obj').count()) > 0);
   }
 
   console.log('\nDock panes');
+  /* An icon-only button with no label is a button a screen reader announces
+     as "button". Checked across every pane and the chrome around it. */
+  const namelessControls = () => [...document.querySelectorAll('button, [role=button], a[href]')]
+    .filter((b) => {
+      const r = b.getBoundingClientRect();
+      if (!r.width || !r.height) return false;
+      return !(b.getAttribute('aria-label') || b.textContent || b.getAttribute('title') || '').trim();
+    })
+    .map((b) => b.outerHTML.slice(0, 120));
+  const unnamed = [];
   const panes = ['lookahead', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links', 'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists', 'settings'];
   for (const pane of panes) {
     const errorsBefore = consoleErrors.length;
@@ -1854,7 +1884,66 @@ async function main() {
     await page.waitForTimeout(220);
     const content = await page.locator('#dock .pane-scroll').innerHTML();
     check(`pane "${pane}" renders`, content.length > 40 && consoleErrors.length === errorsBefore);
+    unnamed.push(...(await page.evaluate(namelessControls)).map((html) => `${pane}: ${html}`));
   }
+  check('every control on screen has a name a screen reader can say', unnamed.length === 0,
+    unnamed.slice(0, 3).join(' | '));
+  check('notifications are announced: their host is a live region that is already there',
+    await page.evaluate(() => document.getElementById('cx-toasts')?.getAttribute('aria-live') === 'polite'));
+  check('and the status bar\'s shortcuts are buttons to a keyboard too',
+    await page.evaluate(() => [...document.querySelectorAll('#statusbar .sb-item.clickable')]
+      .every((n) => n.getAttribute('role') === 'button' && n.tabIndex === 0)));
+
+  /* ── The command menu, and folding the sidebar ──────────────────────
+     Everything is one keystroke and a word away, and every entry is a command
+     the menus already call — so opening a pane through it is the same as
+     clicking the pane. */
+  console.log('\nCommand menu');
+  await page.locator('#canvas-frame').click({ position: { x: 600, y: 12 } }).catch(() => {});
+  await page.keyboard.press('Control+k');
+  const menuFocused = () => page.waitForFunction(() => document.activeElement?.matches('.cx-modal input'), null, { timeout: 3000 });
+  await page.waitForSelector('.cx-modal .cx-picker-list', { timeout: 3000 }).catch(() => {});
+  await menuFocused().catch(() => {});
+  check('mod+K opens the command menu', (await page.locator('.cx-modal .cx-picker-list').count()) === 1);
+  const allEntries = await page.locator('.cx-modal .cx-picker-item').count();
+  await page.keyboard.type('baselines');
+  await page.waitForTimeout(120);
+  const narrowed = await page.locator('.cx-modal .cx-picker-item').count();
+  check('typing narrows it', narrowed > 0 && narrowed < allEntries, `${allEntries} → ${narrowed}`);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+  check('and Enter goes there — the same pane the sidebar opens',
+    (await page.locator('.cx-modal').count()) === 0
+      && (await page.locator('#sidenav .nav-link.active').getAttribute('data-pane')) === 'baselines');
+  await page.locator('#sidenav .sidenav-command').click();
+  await page.waitForSelector('.cx-modal .cx-picker-list');
+  await menuFocused();
+  await page.keyboard.type('light theme');
+  await page.waitForTimeout(120);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+  check('the sidebar button opens the same menu, and a theme is one entry in it',
+    (await page.evaluate(() => document.documentElement.dataset.theme)) === 'light');
+  await page.evaluate(() => document.querySelector('#sidenav .sidenav-command').click());
+  await page.waitForSelector('.cx-modal .cx-picker-list');
+  await menuFocused();
+  await page.keyboard.type('dark theme');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+
+  const reviewHead = page.locator('#sidenav .sidenav-section-label', { hasText: 'Review' });
+  await reviewHead.click();
+  await page.waitForTimeout(150);
+  check('a sidebar section folds away on its heading',
+    (await reviewHead.getAttribute('aria-expanded')) === 'false'
+      && !(await page.locator('#sidenav .nav-link[data-pane="legend"]').isVisible()));
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('.tl-obj', { timeout: 10000 });
+  check('and stays folded after a reload',
+    !(await page.locator('#sidenav .nav-link[data-pane="legend"]').isVisible()));
+  await page.locator('#sidenav .sidenav-section-label', { hasText: 'Review' }).click();
+  await page.waitForTimeout(150);
+  check('unfolding brings it back', await page.locator('#sidenav .nav-link[data-pane="legend"]').isVisible());
 
   /* The status palette, read from `core/model.js` rather than restated here —
      a status added without a colour of its own has to fail a check, not a

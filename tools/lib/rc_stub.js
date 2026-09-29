@@ -12,6 +12,19 @@
  * page; it must stay self-contained, with nothing captured from this module.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+import url from 'node:url';
+
+/**
+ * The calendar's schema version, as the application expects it — what the
+ * stub's database reports unless a suite says otherwise. Set it in the page
+ * before `fakeSdk`: `page.addInitScript(\`window.__rcSchemaVersion = ${SCHEMA_VERSION};\`)`.
+ */
+export const SCHEMA_VERSION = Number(fs.readFileSync(
+  path.join(path.dirname(url.fileURLToPath(import.meta.url)), '..', '..', 'src', 'core', 'rc.js'), 'utf8',
+).match(/export const SCHEMA_VERSION = (\d+);/)[1]);
+
 /**
  * A stand-in for `window.supabase`, installed before any page script runs.
  *
@@ -361,8 +374,18 @@ export function fakeSdk() {
          until somebody says otherwise. Getting from there to a usable
          calendar in one click is what the checks below are about. */
     ],
+    rc_support_codes: [
+      { id: 'sc1', code: 'X', name: 'EIC', party: 'BART', active: true, sort: 10 },
+      { id: 'sc2', code: 'WIT', name: 'BART witness', party: 'BART', active: true, sort: 20 },
+      { id: 'sc3', code: 'TCE', name: 'TCE', party: 'BART', active: true, sort: 30 },
+    ],
+    rc_la_rows: [],
+    rc_la_cells: [],
+    rc_la_edits: [],
     rc_settings: [
       { key: 'lookahead_sheet', value: '4WLA' },
+      // The version this build expects, so the banner below is the exception.
+      { key: 'schema_version', value: String(window.__rcSchemaVersion) },
       // Relative, like every other date here, so the log has a start whatever
       // day the suite runs on.
       { key: 'cancellation_log_from', value: iso(-40) },
@@ -578,6 +601,7 @@ export function fakeSdk() {
     rc_rows_without_sar: [],
     rc_sars_without_rows: [],
     rc_invitations: [],
+    rc_la_seen: [],
   };
 
   /* A filter chain thin enough to be obviously right, and no thinner. */
@@ -599,6 +623,8 @@ export function fakeSdk() {
       in(col, vs) { rows = rows.filter((r) => vs.includes(r[col])); return api; },
       order() { return api; },
       limit(n) { read.limit = n; return api; },
+      // Paging, as PostgREST does it: the editor reads every page of the cells.
+      range(from, to) { rows = rows.slice(from, to + 1); return api; },
       maybeSingle() { S.calls.push(read); return Promise.resolve({ data: rows[0] || null, error: null }); },
       then(resolve) { S.calls.push(read); return Promise.resolve({ data: rows, error: null }).then(resolve); },
     };
@@ -651,10 +677,16 @@ export function fakeSdk() {
             /* Column defaults. Postgres fills `active` in; a stub that did not
                would make a freshly inserted row invisible to every read that
                filters on it — which looks exactly like the write failing. */
-            const defaults = list.some((r) => 'active' in r) ? { active: true } : {};
+            const defaults = {
+              ...(list.some((r) => 'active' in r) ? { active: true } : {}),
+              ...(table === 'rc_client_errors' ? { created_at: new Date().toISOString() } : {}),
+              ...(table === 'rc_la_seen' ? { seen_at: new Date().toISOString() } : {}),
+            };
             const made = [].concat(rows).map((r, i) => (
               { id: `${table}-${list.length + i + 1}`, ...defaults, ...r }));
-            list.push(...made);
+            // The stub ignores order(): a "Got it" is read newest first, so it goes in first.
+            if (table === 'rc_la_seen') list.unshift(...made);
+            else list.push(...made);
             // rc_plan_current is a *view* over the entries, and the stub makes
             // it an alias rather than a copy — so pushing again here would
             // double every plan row.
@@ -711,6 +743,101 @@ export function fakeSdk() {
         },
         rpc(name, args) {
           S.calls.push({ kind: 'rpc', table: name, payload: args });
+          /* The look-ahead editor's one write: a batch of ops, all or nothing,
+             each checked against the version it expects — the function's rules,
+             modelled closely enough that a conflict here is a conflict there. */
+          if (name === 'rc_la_apply') {
+            if (S.role !== 'admin') {
+              return Promise.resolve({ data: null, error: { message: 'only an administrator may edit the look-ahead' } });
+            }
+            if (S.offline) return Promise.resolve({ data: null, error: { message: 'Failed to fetch' } });
+            const before = { rows: JSON.stringify(S.rows.rc_la_rows || []), cells: JSON.stringify(S.rows.rc_la_cells || []) };
+            const rows = S.rows.rc_la_rows || (S.rows.rc_la_rows = []);
+            let cells = S.rows.rc_la_cells || (S.rows.rc_la_cells = []);
+            const results = [];
+            const logLength = (S.rows.rc_la_edits || (S.rows.rc_la_edits = [])).length;
+            const fail = (message) => {
+              S.rows.rc_la_rows = JSON.parse(before.rows);
+              S.rows.rc_la_cells = JSON.parse(before.cells);
+              S.rows.rc_la_edits.length = logLength;
+              return Promise.resolve({ data: null, error: { message } });
+            };
+            // The edit log, as the function writes it: one row per change.
+            const batch = `batch-${Date.now()}-${Math.random()}`;
+            const log = (target, row_id, day, action, was, now) => {
+              S.editSeq = (S.editSeq || 0) + 1;
+              S.rows.rc_la_edits.push({
+                id: S.editSeq, at: new Date().toISOString(), by: 'user-rc-1', batch, target, row_id,
+                day: day || null, action, before: was ? JSON.parse(JSON.stringify(was)) : null,
+                after: now ? JSON.parse(JSON.stringify(now)) : null,
+              });
+            };
+            for (const op of args.p_ops || []) {
+              const expect = op.expect || 0;
+              if (op.op === 'row') {
+                const hit = rows.find((r) => r.id === op.id);
+                if (!hit) {
+                  if (expect) return fail('conflict: that row was removed by somebody else');
+                  const made = {
+                    id: op.id, kind: 'activity', parent_id: null, sort: 0, level: 0, activity_id: '', description: '',
+                    location: '', sswp: '', party: '', work_hours: '', absence_kind: null, archived: false,
+                    ...op.set, version: 1,
+                  };
+                  rows.push(made);
+                  log('row', op.id, null, 'insert', null, made);
+                  results.push({ kind: 'row', id: op.id, version: 1 });
+                } else {
+                  if ((hit.version || 0) !== expect) return fail('conflict: somebody else changed that row a moment ago');
+                  const was = { ...hit };
+                  Object.assign(hit, op.set);
+                  hit.version = (hit.version || 0) + 1;
+                  log('row', op.id, null, 'update', was, hit);
+                  results.push({ kind: 'row', id: op.id, version: hit.version });
+                }
+              } else if (op.op === 'delete_row') {
+                const at = rows.findIndex((r) => r.id === op.id);
+                if (at >= 0) {
+                  if ((rows[at].version || 0) !== expect) return fail('conflict: somebody else changed that row a moment ago');
+                  for (const c of cells.filter((x) => x.row_id === op.id)) log('cell', op.id, c.day, 'delete', c, null);
+                  log('row', op.id, null, 'delete', rows[at], null);
+                  rows.splice(at, 1);
+                  for (let i = rows.length - 1; i >= 0; i--) if (rows[i].parent_id === op.id) rows.splice(i, 1);
+                  cells = cells.filter((c) => c.row_id !== op.id && rows.some((r) => r.id === c.row_id));
+                  S.rows.rc_la_cells = cells;
+                }
+                results.push({ kind: 'row', id: op.id, version: 0, deleted: true });
+              } else if (op.op === 'cell') {
+                const at = cells.findIndex((c) => c.row_id === op.row_id && c.day === op.day);
+                const current = at >= 0 ? cells[at].version || 0 : 0;
+                if (current !== expect) return fail('conflict: somebody else changed that day a moment ago');
+                const color = op.color ? String(op.color).toUpperCase() : null;
+                const text = op.text || '';
+                if (!color && !text) {
+                  if (at >= 0) { log('cell', op.row_id, op.day, 'delete', cells[at], null); cells.splice(at, 1); }
+                  results.push({ kind: 'cell', row_id: op.row_id, day: op.day, version: 0 });
+                } else if (at >= 0) {
+                  const was = { ...cells[at] };
+                  Object.assign(cells[at], { color, text, version: current + 1 });
+                  log('cell', op.row_id, op.day, 'update', was, cells[at]);
+                  results.push({ kind: 'cell', row_id: op.row_id, day: op.day, version: current + 1 });
+                } else {
+                  const made = { row_id: op.row_id, day: op.day, color, text, version: 1 };
+                  cells.push(made);
+                  log('cell', op.row_id, op.day, 'insert', null, made);
+                  results.push({ kind: 'cell', row_id: op.row_id, day: op.day, version: 1 });
+                }
+              }
+              S.laRevision = (S.laRevision || 0) + 1;
+            }
+            return Promise.resolve({ data: results, error: null });
+          }
+          if (name === 'rc_la_revision') return Promise.resolve({ data: S.laRevision || 0, error: null });
+          if (name === 'rc_clear_client_errors') {
+            const list = S.rows.rc_client_errors || [];
+            const keep = list.filter((r) => (r.created_at || '') >= args.p_before);
+            S.rows.rc_client_errors = keep;
+            return Promise.resolve({ data: list.length - keep.length, error: null });
+          }
           if (name === 'rc_record_actual') {
             if (S.offline) return Promise.resolve({ data: null, error: { message: 'Failed to fetch' } });
             const existing = S.rows.rc_actuals.find((a) => a.client_uuid === args.p_client_uuid);
@@ -816,6 +943,10 @@ export function fakeSdk() {
             S.rows.rc_invitations = S.rows.rc_invitations.filter((i) => i.pending_email !== address);
             S.rows.rc_invitations.push(row);
             return Promise.resolve({ data: [row], error: null });
+          }
+          if (name === 'rc_compact_snapshots') {
+            S.compactCalls = (S.compactCalls || 0) + 1;
+            return Promise.resolve({ data: 0, error: null });
           }
           if (name === 'rc_list_invitations') {
             return Promise.resolve({ data: S.rows.rc_invitations.slice(), error: null });

@@ -53,6 +53,12 @@
 import { emit, EV } from './events.js';
 import * as desktop from './desktop.js';
 import { planLocked, lockReason } from './access.js';
+import * as rules from './folder_rules.js';
+/* The pure rules — names, digests, whose turn the pen is — tested in Node. */
+const {
+  basename, lockNameFor, isLockFile, claimNameFor, isClaimFor, isLockLitter,
+  fingerprint, hash64, parseClaim, penHolder, isStale,
+} = rules;
 
 /** How often a session restates its claim, in ms. */
 const HEARTBEAT_MS = 30000;
@@ -67,7 +73,7 @@ const HEARTBEAT_MS = 30000;
  * wrong. Eight heartbeats of margin costs a crashed session four minutes of
  * somebody else's patience, and `takeOver()` is there for anyone with less.
  */
-const STALE_MS = 240000;
+const STALE_MS = rules.STALE_MS;
 /**
  * A claim file this old is deleted rather than merely ignored.
  *
@@ -499,61 +505,6 @@ function adoptSettings(settings) {
   return settings;
 }
 
-function basename(path) {
-  const parts = String(path).split(/[\\/]+/).filter(Boolean);
-  return parts[parts.length - 1] || String(path);
-}
-
-function lockNameFor(name) {
-  return `${String(name).replace(/\.json$/i, '')}.lock.json`;
-}
-
-/**
- * A lock file — including the litter a sync client makes of one.
- *
- * The lock is rewritten every heartbeat, and OneDrive cannot merge two edits of
- * the same file: it keeps both and appends the machine name, giving
- * `plan.lock-HRUSPITLT02820.json`, then `-2`, `-3`, … A plan open on two
- * machines for an afternoon mints a pile of them.
- *
- * They matter for two reasons. They are `.json` files sitting beside the plan,
- * so anything listing plans has to know they are not plans — and nothing ever
- * reads them, so they would otherwise stay in the folder for ever.
- *
- * The `[-_. (]` after `.lock` is deliberate: it matches every sync client's
- * naming without swallowing a plan legitimately called `lockheed.json`.
- */
-function isLockFile(name) {
-  return /\.(?:lock|pen)(?:[-_. (][^\\/]*)?\.json$/i.test(String(name));
-}
-
-/** One session's claim on the pen: `<plan>.pen-<device>.json`. */
-function claimNameFor(plan, device) {
-  const stem = String(plan).replace(/\.json$/i, '');
-  return `${stem}.pen-${String(device).replace(/[^A-Za-z0-9_-]/g, '')}.json`;
-}
-
-/** True for any claim file belonging to this plan, whoever wrote it. */
-function isClaimFor(plan, name) {
-  const stem = String(plan).replace(/\.json$/i, '').toLowerCase();
-  const lower = String(name).toLowerCase();
-  return lower.startsWith(`${stem}.pen-`) && lower.endsWith('.json');
-}
-
-/**
- * A lock file no session will ever read: a conflict copy rather than the lock
- * itself. Nothing in either build opens a name like this, whichever plan it
- * belongs to, so it is safe to delete without knowing whose it was — while a
- * real `<plan>.lock.json` is left alone, because someone may be holding it.
- */
-function isLockLitter(name) {
-  const lower = String(name).toLowerCase();
-  // Copies of the old single lock file only. A claim file is *not* litter: it
-  // is somebody's turn, written by the one device allowed to write it, and it
-  // is retired by age below rather than on sight.
-  return /\.lock[-_. (][^\\/]*\.json$/.test(lower);
-}
-
 /* ── The browser's handle store ────────────────────────────────────────── */
 
 /**
@@ -963,46 +914,6 @@ export async function createPlan(name, doc) {
    identical plan look like a change, which is the very thing this is for.
    ═══════════════════════════════════════════════════════════════════════ */
 
-/**
- * A digest of the plan in `text`, or null if it is not a readable plan.
- *
- * Null is a real answer and the callers depend on it: a half-written file is
- * not a version to announce, not a conflict to refuse over, and not something
- * to overwrite the stamp with. It means "ask again next time".
- */
-function fingerprint(text) {
-  if (typeof text !== 'string' || !text) return null;
-  let doc;
-  try {
-    doc = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (!doc || typeof doc !== 'object') return null;
-  delete doc.exported;
-  return hash64(JSON.stringify(doc));
-}
-
-/**
- * Sixty-four bits of FNV-1a, in two lanes.
- *
- * Not a cryptographic digest and it does not need to be: the question is
- * whether a file we wrote is still the file on disk, and nobody is trying to
- * forge one. `crypto.subtle` would be the stronger answer and is asynchronous
- * and unavailable outside a secure context — the plan opens from `file://` with
- * no server, which is a shape of this application that has to keep working.
- */
-function hash64(text) {
-  let a = 0x811c9dc5;
-  let b = 0xcbf29ce4;
-  for (let i = 0; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    a = Math.imul(a ^ c, 0x01000193);
-    b = Math.imul(b ^ (c + i), 0x85ebca6b);
-  }
-  return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0');
-}
-
 /** Just the two fields the write guard compares — the backends expect no more. */
 function metaOf(st) {
   return st ? { size: st.size, modified: st.modified } : null;
@@ -1178,39 +1089,6 @@ async function readClaims() {
   if (legacy && !isOurs(legacy)) claims.push({ ...legacy, legacy: true });
 
   return claims;
-}
-
-function parseClaim(text) {
-  if (!text) return null;
-  try {
-    const claim = JSON.parse(text);
-    return claim && typeof claim === 'object' ? claim : null;
-  } catch {
-    return null; // truncated or mid-sync — it does not count this time round
-  }
-}
-
-/**
- * Which claim holds the pen.
- *
- * The earliest one still beating, so opening a plan to read it can never take
- * the pen off whoever was already working. An explicit takeover outranks that —
- * it is the one case where somebody has said "I know that session is gone" —
- * and the latest takeover wins, so two of them still settle on one answer. The
- * device id breaks a tie that is otherwise exact, only so that both sides break
- * it the same way.
- */
-function penHolder(claims) {
-  const live = claims.filter((claim) => !isStale(claim));
-  if (!live.length) return null;
-
-  return live.reduce((best, claim) => {
-    const a = claim.takeover || 0;
-    const b = best.takeover || 0;
-    if (a !== b) return a > b ? claim : best;
-    if ((claim.since || 0) !== (best.since || 0)) return (claim.since || 0) < (best.since || 0) ? claim : best;
-    return String(claim.device || '') < String(best.device || '') ? claim : best;
-  });
 }
 
 /**
@@ -1448,10 +1326,6 @@ function otherWindow(claim) {
   if (!claim || claim.id === sessionId) return false;
   if (!claim.device || claim.device !== deviceId()) return false;
   return Date.now() - (claim.beat || 0) <= OWN_WINDOW_STALE_MS;
-}
-
-function isStale(lock) {
-  return !lock || !lock.beat || Date.now() - lock.beat > STALE_MS;
 }
 
 /**
@@ -1762,13 +1636,7 @@ export async function intakeList(rel) {
  * agree or the desktop and the browser would ingest different files.
  */
 export function isConflictCopy(name) {
-  const stem = String(name).replace(/\.[^.]*$/, '');
-  const at = stem.lastIndexOf('-');
-  if (at < 0) return false;
-  const tail = stem.slice(at + 1);
-  if (!tail) return false;
-  if (/^\d{1,3}$/.test(tail)) return true;
-  return tail.length >= 8 && /^[A-Z0-9]+$/.test(tail) && /\d/.test(tail);
+  return rules.isConflictCopy(name);
 }
 
 /** Read an intake file as an ArrayBuffer. */

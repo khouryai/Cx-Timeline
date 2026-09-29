@@ -1108,7 +1108,7 @@ select assert((select value from public.rc_settings where key = 'lookahead_sheet
 select act_as(:'carol');
 select assert((select count(*) from public.rc_legend) = 5,
   'a member can read the legend — their own row is drawn against it');
-select assert((select count(*) from public.rc_settings) = 2, 'and the settings');
+select assert((select count(*) from public.rc_settings) = 3, 'and the settings, the version stamp among them');
 select assert((select value from public.rc_settings where key = 'cancellation_log_from') = '2026-09-01',
   'the cancellation log starts in September unless somebody says otherwise');
 select refuses(:'carol',
@@ -1417,6 +1417,193 @@ select assert((select task from public.rc_actuals_current where person_id = :'p_
   = 'Terminated cable at the north end', 'and correcting it is a new row the readers see');
 select assert((select task from public.rc_actuals where id = :'act_task') = 'Pulled cable at the north end',
   'while the first answer stays underneath');
+
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'Problems reported by the application'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+-- Anybody signed in reports what went wrong on their own screen, as themselves.
+select act_as(:'carol');
+insert into public.rc_client_errors (area, message, created_by)
+  values ('tab:week', 'rc_plan_current: permission denied', :'carol');
+select assert(true, 'a member can report a problem on their own screen');
+select refuses(:'carol',
+  format('insert into public.rc_client_errors (area, message, created_by) values (%L, %L, %L)',
+         'tab:week', 'forged', :'alice'),
+  'a member reporting a problem in somebody else''s name');
+select assert((select count(*) from public.rc_client_errors) = 0,
+  'and a member cannot read the log — it is an administrator''s');
+select refuses(:'carol', 'update public.rc_client_errors set message = ''nothing''',
+  'a member editing a report');
+select refuses(:'carol', 'select public.rc_clear_client_errors(now())',
+  'a member clearing the log');
+
+select act_as(:'alice');
+select assert((select count(*) from public.rc_client_errors) = 1,
+  'an administrator reads every report');
+select refuses(:'alice', 'update public.rc_client_errors set message = ''nothing''',
+  'even an administrator editing a report — it is a record');
+select refuses(:'alice', 'delete from public.rc_client_errors',
+  'or deleting one directly, where a refusal would look like success');
+select assert(public.rc_clear_client_errors(now() - interval '1 day') = 0,
+  'clearing older than yesterday leaves today''s report');
+select assert(public.rc_clear_client_errors(now() + interval '1 second') = 1,
+  'and clearing everything removes it, and says how many');
+
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'The look-ahead, edited here'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+select act_as(:'alice');
+select public.rc_la_apply(jsonb_build_array(
+  jsonb_build_object('op', 'row', 'id', '51000000-0000-0000-0000-000000000001', 'expect', 0,
+    'set', jsonb_build_object('kind', 'section', 'sort', 1024, 'description', 'W40 — Testing')),
+  jsonb_build_object('op', 'row', 'id', '51000000-0000-0000-0000-000000000002', 'expect', 0,
+    'set', jsonb_build_object('kind', 'activity', 'sort', 2048, 'description', 'IXL Regression Testing',
+                              'location', 'W40', 'work_hours', '0700-1500')),
+  jsonb_build_object('op', 'row', 'id', '51000000-0000-0000-0000-000000000003', 'expect', 0,
+    'set', jsonb_build_object('kind', 'resource', 'parent_id', '51000000-0000-0000-0000-000000000002', 'sort', 2049)),
+  jsonb_build_object('op', 'cell', 'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-21',
+    'color', 'ffff00', 'text', 'X.WIT', 'expect', 0),
+  jsonb_build_object('op', 'cell', 'row_id', '51000000-0000-0000-0000-000000000003', 'day', '2026-09-21',
+    'color', null, 'text', 'Victor, Rosa', 'expect', 0)
+)) as la_first \gset
+select assert((select count(*) from public.rc_la_rows) = 3, 'an administrator writes the look-ahead in one batch');
+select assert((select color from public.rc_la_cells where text = 'X.WIT') = 'FFFF00',
+  'a colour is stored as the sheet writes it, upper case');
+select assert(jsonb_array_length(:'la_first'::jsonb) = 5
+  and (:'la_first'::jsonb)->3->>'version' = '1', 'and every op answers with the version it made');
+select assert((select count(*) from public.rc_la_edits) = 5, 'every change is on the record, in the same breath');
+
+-- Two people, one cell: the second is refused rather than silently winning.
+select public.rc_la_apply(jsonb_build_array(jsonb_build_object('op', 'cell',
+  'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-21', 'color', 'FF0000', 'text', 'X.WIT', 'expect', 1)));
+select refuses(:'alice', format('select public.rc_la_apply(%L::jsonb)', jsonb_build_array(jsonb_build_object('op', 'cell',
+  'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-21', 'color', 'FFC000', 'text', 'X', 'expect', 1))),
+  'writing over a day somebody else changed since you last looked');
+select act_as(:'alice');
+select assert((select color from public.rc_la_cells where row_id = '51000000-0000-0000-0000-000000000002') = 'FF0000',
+  'and what they wrote is what stands');
+select refuses(:'alice', format('select public.rc_la_apply(%L::jsonb)', jsonb_build_array(jsonb_build_object('op', 'row',
+  'id', '51000000-0000-0000-0000-000000000002', 'expect', 7, 'set', jsonb_build_object('location', 'Y10')))),
+  'renaming a row from a stale copy of it');
+select act_as(:'alice');
+
+-- A refused batch leaves nothing of itself behind.
+select refuses(:'alice', format('select public.rc_la_apply(%L::jsonb)', jsonb_build_array(
+  jsonb_build_object('op', 'row', 'id', '51000000-0000-0000-0000-000000000009', 'expect', 0,
+    'set', jsonb_build_object('kind', 'activity', 'description', 'Half a batch')),
+  jsonb_build_object('op', 'cell', 'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-21',
+    'color', 'FFC000', 'text', '', 'expect', 1))),
+  'a batch with one stale op in it');
+select act_as(:'alice');
+select assert(not exists (select 1 from public.rc_la_rows where description = 'Half a batch'),
+  'and none of it happened — a batch is all or nothing');
+
+-- Clearing a cell and deleting a row are on the record too.
+select public.rc_la_apply(jsonb_build_array(jsonb_build_object('op', 'cell',
+  'row_id', '51000000-0000-0000-0000-000000000003', 'day', '2026-09-21', 'color', null, 'text', '', 'expect', 1)));
+select assert(not exists (select 1 from public.rc_la_cells where row_id = '51000000-0000-0000-0000-000000000003'),
+  'blanking a day removes it');
+select public.rc_la_apply(jsonb_build_array(jsonb_build_object('op', 'delete_row',
+  'id', '51000000-0000-0000-0000-000000000001', 'expect', 1)));
+select assert((select count(*) from public.rc_la_edits where action = 'delete') = 2,
+  'the removals are recorded with what was there');
+select assert(public.rc_la_revision() = (select max(id) from public.rc_la_edits),
+  'the revision is the newest change, for an open editor to compare against');
+
+select act_as(:'carol');
+select assert((select count(*) from public.rc_la_rows) = 2, 'a member reads the look-ahead');
+select assert((select count(*) from public.rc_la_edits) = 0, 'but not who changed what — that is the evidence base');
+select refuses(:'carol', format('select public.rc_la_apply(%L::jsonb)', jsonb_build_array(jsonb_build_object('op', 'cell',
+  'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-22', 'color', 'FFFF00', 'text', 'X', 'expect', 0))),
+  'a member editing the look-ahead');
+select refuses(:'carol', 'insert into public.rc_la_rows (id, kind) values (gen_random_uuid(), ''activity'')',
+  'a member writing a row directly');
+select refuses(:'carol', 'update public.rc_la_cells set text = ''X''', 'a member changing a day directly');
+select act_as(:'alice');
+select refuses(:'alice', 'update public.rc_la_cells set text = ''X''',
+  'even an administrator changing a day around the function, where it would not be recorded');
+select refuses(:'alice', 'delete from public.rc_la_edits', 'or deleting the record of a change');
+select refuses(:'alice', 'update public.rc_la_edits set after = null', 'or rewriting it');
+
+-- Support codes are the register, and managed like the colours.
+select act_as(:'alice');
+select assert((select string_agg(code, ',' order by sort) from public.rc_support_codes) = 'X,WIT,TCE',
+  'the support codes the sheet uses are seeded');
+insert into public.rc_support_codes (code, name, party, sort) values ('SEC', 'Security escort', 'BART', 40);
+select assert(exists (select 1 from public.rc_support_codes where code = 'SEC'), 'an administrator adds one');
+select refuses(:'alice', 'insert into public.rc_support_codes (code, name) values (''x'', ''Duplicate'')',
+  'a code that already exists, in any case');
+select act_as(:'carol');
+select assert((select count(*) from public.rc_support_codes) = 4, 'a member reads them');
+select refuses(:'carol', 'insert into public.rc_support_codes (code, name) values (''ZZ'', ''Mine'')',
+  'a member adding a code');
+select refuses(:'carol', 'update public.rc_support_codes set name = ''Changed''', 'a member renaming one');
+
+-- Keeping the readings in check: an old editor reading loses its grid, never
+-- itself; the last of each day, a workbook read and anything recent are whole.
+select act_as(:'alice');
+insert into public.rc_lookahead_snapshots (id, taken_at, file_hash, sheet_name, grid) values
+  ('52000000-0000-0000-0000-000000000001', date_trunc('day', now()) - interval '100 days' + interval '9 hours',  'editor:old-1', '4WLA',
+   '{"rows":[{"row":7},{"row":8}],"unknown":["ABCDEF"]}'),
+  ('52000000-0000-0000-0000-000000000002', date_trunc('day', now()) - interval '100 days' + interval '10 hours', 'editor:old-2', '4WLA',
+   '{"rows":[{"row":7}],"unknown":[]}'),
+  ('52000000-0000-0000-0000-000000000003', date_trunc('day', now()) - interval '100 days' + interval '11 hours', 'editor:old-3', '4WLA',
+   '{"rows":[{"row":7},{"row":8},{"row":9}],"unknown":[]}'),
+  ('52000000-0000-0000-0000-000000000004', date_trunc('day', now()) - interval '100 days' + interval '8 hours',  'workbook-old', '4WLA',
+   '{"rows":[{"row":7}],"unknown":[]}'),
+  ('52000000-0000-0000-0000-000000000005', date_trunc('day', now()) - interval '2 days' + interval '9 hours',   'editor:new-1', '4WLA',
+   '{"rows":[{"row":7}],"unknown":[]}'),
+  ('52000000-0000-0000-0000-000000000006', date_trunc('day', now()) - interval '2 days' + interval '10 hours',  'editor:new-2', '4WLA',
+   '{"rows":[{"row":7}],"unknown":[]}');
+insert into public.rc_lookahead_rows (id, snapshot_id, week_start, row_key, raw_label)
+values ('52100000-0000-0000-0000-000000000001', '52000000-0000-0000-0000-000000000001', current_date - 100, 'k1', 'IXL');
+
+select act_as(:'carol');
+select refuses(:'carol', 'select public.rc_compact_snapshots()', 'a member tidying the readings');
+select act_as(:'alice');
+select assert(public.rc_compact_snapshots() = 2, 'two superseded editor readings from an old day are compacted');
+select assert((select grid ->> 'compacted' from public.rc_lookahead_snapshots where id = '52000000-0000-0000-0000-000000000001') = 'true'
+    and (select grid ->> 'compacted' from public.rc_lookahead_snapshots where id = '52000000-0000-0000-0000-000000000002') = 'true',
+  'their grids go');
+select assert((select grid ->> 'compacted' from public.rc_lookahead_snapshots where id = '52000000-0000-0000-0000-000000000003') is null,
+  'the last editor reading of that day keeps its grid');
+select assert((select grid ->> 'compacted' from public.rc_lookahead_snapshots where id = '52000000-0000-0000-0000-000000000004') is null,
+  'a workbook read keeps its grid whatever its age — it cannot be rebuilt');
+select assert((select count(*) from public.rc_lookahead_snapshots
+                where id in ('52000000-0000-0000-0000-000000000005', '52000000-0000-0000-0000-000000000006')
+                  and grid ->> 'compacted' is null) = 2,
+  'a recent reading keeps its grid');
+select assert(exists (select 1 from public.rc_lookahead_rows where id = '52100000-0000-0000-0000-000000000001'),
+  'a compacted reading keeps its rows, so nothing pointing at them comes loose');
+select assert((select row_count from public.rc_lookahead_snapshot_meta where id = '52000000-0000-0000-0000-000000000001') = 2
+    and (select unmapped_count from public.rc_lookahead_snapshot_meta where id = '52000000-0000-0000-0000-000000000001') = 1
+    and (select compacted from public.rc_lookahead_snapshot_meta where id = '52000000-0000-0000-0000-000000000001'),
+  'and the history still says how big it was, what it could not explain, and that it was compacted');
+select assert(public.rc_compact_snapshots() = 0, 'running it again changes nothing');
+update public.rc_settings set value = '1' where key = 'snapshot_keep_days';
+insert into public.rc_settings (key, value) select 'snapshot_keep_days', '1'
+ where not exists (select 1 from public.rc_settings where key = 'snapshot_keep_days');
+select assert(public.rc_compact_snapshots() = 0, 'a keep period under a fortnight is read as a fortnight');
+
+-- "Got it": everybody on the team records having seen their own days, and
+-- nobody else's; nobody rewrites or removes one; only an administrator reads
+-- the team's.
+select act_as(:'carol');
+insert into public.rc_la_seen (person_id, snapshot_id, snapshot_taken_at, changes)
+values (public.rc_me(), '52000000-0000-0000-0000-000000000006', now(), 3);
+select assert((select count(*) from public.rc_la_seen) = 1, 'a member records that they have seen their changes');
+select refuses(:'carol', format('insert into public.rc_la_seen (person_id, snapshot_taken_at) values (%L, now())',
+  (select id from public.rc_people where name = 'Dan')), 'a member saying somebody else has seen theirs');
+select refuses(:'carol', 'update public.rc_la_seen set changes = 0', 'a member rewriting what they saw');
+select refuses(:'carol', 'delete from public.rc_la_seen', 'or removing it');
+select act_as(:'dave');
+insert into public.rc_la_seen (person_id, snapshot_taken_at) values (public.rc_me(), now());
+select assert((select count(*) from public.rc_la_seen) = 1, 'a viewer records their own too, and reads only their own');
+select act_as(:'alice');
+select assert((select count(*) from public.rc_la_seen) = 2, 'an administrator reads the whole team''s');
+select refuses(:'alice', 'delete from public.rc_la_seen', 'and cannot remove one either');
 
 reset role;
 do $$ begin raise notice ''; raise notice 'All resource calendar checks passed.'; end $$;

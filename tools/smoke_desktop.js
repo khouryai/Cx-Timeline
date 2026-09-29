@@ -31,11 +31,14 @@
 
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
+import { pinClock, pinNodeClock } from './lib/clock.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import { execFileSync } from 'node:child_process';
+
+pinNodeClock();
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const SHELL = path.join(ROOT, 'dist-desktop');
@@ -309,7 +312,7 @@ async function main() {
    */
   const launch = async (state = {}, extra = null) => {
     if (context) await context.close();
-    context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+    context = pinClock(await browser.newContext({ viewport: { width: 1400, height: 900 } }));
     page = await context.newPage();
     page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
     page.on('pageerror', (e) => consoleErrors.push(String(e)));

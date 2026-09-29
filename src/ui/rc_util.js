@@ -124,6 +124,21 @@ export function notifyChanged(what) {
 }
 
 /**
+ * Go to another calendar tab. A tab cannot import the router — `ui/rc.js`
+ * imports every tab — so it asks, the way a dock pane asks for another pane.
+ * This is what lets an empty screen point at the place its data comes from.
+ */
+/**
+ * Which Organisation section to open next — set by whoever sends somebody
+ * there (the inbox), read once by the tab. A tab cannot import another tab.
+ */
+export const orgNav = { section: null };
+
+export function goToTab(tab) {
+  emit(EV.RC_SHOW_TAB, { tab });
+}
+
+/**
  * The five statuses, split into the two families that must never be averaged.
  *
  * Performance is what an individual did. Health is what was done to them — a
@@ -293,6 +308,33 @@ export function nearestName(key, register) {
     else if (d === bestAt && best && best.id !== id) tied = true;
   }
   return tied ? null : best;
+}
+
+/**
+ * "Is this written name me?" — the same register the week plan reads names
+ * with (full name, alias, a first name only one person has, and the one
+ * unambiguous near miss), so what it picks out is what the week plan puts
+ * the person on. Resolves to null for an account with no person on the team.
+ */
+export async function meMatcher() {
+  const me = rc.me();
+  if (!me) return null;
+  const [people, aliases] = await Promise.all([
+    rc.listPeople({ includeInactive: true }).catch(() => []),
+    rc.listPersonAliases().catch(() => []),
+  ]);
+  return personMatcher(nameRegister(people.length ? people : [me], aliases), me.id);
+}
+
+/** "Is this written name this person?" against a register — see `meMatcher()`. */
+export function personMatcher(register, personId) {
+  const memo = new Map();
+  return (written) => {
+    const key = foldName(written);
+    if (!key) return false;
+    if (!memo.has(key)) memo.set(key, (register.get(key) || nearestName(key, register)?.id || null) === personId);
+    return memo.get(key);
+  };
 }
 
 /**

@@ -192,6 +192,17 @@ function main() {
     }
     console.log(`✓ all ${tables.length} tables and views core/rc.js reads exist in the schema`);
 
+    /* The version stamp and the constant the client compares it with. A
+       schema change that raised one and not the other would tell every
+       administrator to run SQL they had already run — or tell nobody. */
+    const expected = Number((client.match(/export const SCHEMA_VERSION = (\d+);/) || [])[1]);
+    const stamped = Number(psql(['-d', 'cxt', '-tAc',
+      "select value from public.rc_settings where key = 'schema_version'"]).trim());
+    if (!expected || stamped !== expected) {
+      throw new Error(`rc_schema.sql stamps schema_version ${stamped}, core/rc.js expects ${expected} — raise them together`);
+    }
+    console.log(`✓ the schema stamps version ${stamped}, which is the version core/rc.js expects`);
+
     const upgraded = psql(['-d', 'cxt', '-tAc', `
       select
         (select count(*) from information_schema.columns

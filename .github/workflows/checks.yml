@@ -43,17 +43,16 @@ jobs:
           # binary, and it then prints "binary file matches" instead of the
           # lines — which makes the comparison always succeed and the check
           # worthless in exactly the case it exists for.
-          #
-          # Both bundles: the phone app's `m/index.html` loads mobile.bundle.js,
-          # and a stale one ships a phone app that disagrees with its source in
-          # exactly the way a stale app.bundle.js would.
           strip() { grep -av '^ \* Modules:' "$1"; }
+          # Three bundles: the application, the calendar it fetches on first use,
+          # and the phone app under m/ — a stale one ships an app that disagrees
+          # with its source. Every stale one is reported, not just the first.
           status=0
-          for bundle in app.bundle.js mobile.bundle.js; do
-            git show "HEAD:$bundle" > /tmp/committed.js
-            if ! diff <(strip /tmp/committed.js) <(strip "$bundle") > /dev/null; then
+          for bundle in app.bundle.js calendar.bundle.js mobile.bundle.js; do
+            git show "HEAD:$bundle" > "/tmp/committed-$bundle"
+            if ! diff <(strip "/tmp/committed-$bundle") <(strip "$bundle") > /dev/null; then
               echo "::error::$bundle is out of date — run 'npm run build' and commit it"
-              diff <(strip /tmp/committed.js) <(strip "$bundle") | head -40
+              diff <(strip "/tmp/committed-$bundle") <(strip "$bundle") | head -40
               status=1
             else
               echo "$bundle: the committed bundle is the source, built"
@@ -83,15 +82,20 @@ jobs:
       # tools/lib/chrome.js. Only Chromium is used, so only Chromium is fetched.
       - run: npx playwright install --with-deps chromium
 
-      - run: node tools/test_dist.js
-      - run: node tools/test_lookahead.js
-      - run: node tools/smoke.js
-      - run: node tools/smoke_folder.js
-      - run: node tools/smoke_desktop.js
-      - run: node tools/smoke_hosted.js
-      - run: node tools/smoke_calendar.js
-      # The phone app, over HTTP: a service worker needs a real origin.
-      - run: node tools/smoke_mobile.js
+      # Side by side, where two suites do not share a directory — see the lanes
+      # in tools/run_tests.js. The clock is pinned to a Wednesday (tools/lib/clock.js),
+      # so a run on a Sunday is the same run as one on a Tuesday.
+      - name: Every browser and Node suite
+        run: >-
+          node tools/run_tests.js test_dist test_lookahead test_folder_rules test_la_edit
+          smoke smoke_folder smoke_desktop smoke_hosted smoke_calendar smoke_mobile
+      # …and the calendar once more on a Monday, the day its date arithmetic has
+      # gone wrong on before: yesterday is a Friday, and the week under review
+      # is not the week on screen. The phone app reads the same weeks.
+      - name: The calendar, on a Monday
+        env:
+          CX_TEST_NOW: '2026-09-21T08:00:00Z'
+        run: node tools/run_tests.js smoke_calendar smoke_mobile
 
       # A picture of the failure is worth more than the log when a layout
       # check goes red.
@@ -118,6 +122,21 @@ jobs:
       - name: Install PostgreSQL
         run: sudo apt-get update && sudo apt-get install -y postgresql
       - run: node tools/test_sql.js
+
+  # The Excel export, opened and re-saved by a spreadsheet program that did not
+  # write it. Microsoft Excel does not run on these runners; LibreOffice Calc is
+  # the nearest independent reader that does.
+  xlsx:
+    name: The Excel export opens in a spreadsheet program
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install LibreOffice Calc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-calc
+      - run: node tools/test_xlsx_compat.js
 
   rust:
     name: Plan and lock rules

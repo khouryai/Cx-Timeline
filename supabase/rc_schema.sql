@@ -1483,10 +1483,14 @@ create or replace view public.rc_sars_without_rows with (security_invoker = true
 -- the newest grid is fetched on its own, once, by `latestSnapshot()`.
 -- `security_invoker`, or the view would run as its owner and show a member a
 -- register the table refuses them.
+-- A compacted reading (see `rc_compact_snapshots()`) keeps its row count in
+-- the stub, so the history still says how big it was.
 create or replace view public.rc_lookahead_snapshot_meta with (security_invoker = true) as
   select s.id, s.taken_at, s.file_mtime, s.file_hash, s.legend_at, s.sheet_name,
-         jsonb_array_length(coalesce(s.grid -> 'rows', '[]'::jsonb))    as row_count,
-         jsonb_array_length(coalesce(s.grid -> 'unknown', '[]'::jsonb)) as unmapped_count
+         coalesce((s.grid ->> 'row_count')::integer,
+                  jsonb_array_length(coalesce(s.grid -> 'rows', '[]'::jsonb)))  as row_count,
+         jsonb_array_length(coalesce(s.grid -> 'unknown', '[]'::jsonb))       as unmapped_count,
+         coalesce((s.grid ->> 'compacted')::boolean, false)                     as compacted
     from public.rc_lookahead_snapshots s;
 
 /*
@@ -2181,3 +2185,481 @@ select v.name, v.color, v.counts from (values
   ('Unpaid',       '#6b7280', false)
 ) as v(name, color, counts)
 where not exists (select 1 from public.rc_leave_kinds where name = v.name);
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- The look-ahead, edited here
+--
+-- The 4WLA used to be a workbook the calendar *read*; it is now written in the
+-- calendar, and the .xlsx is something the calendar produces for whoever copies
+-- the rows into the project's master look-ahead. Two tables hold it as it
+-- stands — a row per line of the sheet, a cell per painted or written day — and
+-- a third, append-only, holds every change ever made to either, which is the
+-- record a claim is built from now that no two readings of a file need
+-- comparing to find out what moved.
+--
+-- Nobody writes the first two directly. Every edit goes through
+-- `rc_la_apply()`, one batch of ops in one transaction: it refuses anybody who
+-- is not an administrator (and says so, rather than matching nothing), refuses
+-- an op whose `expect` is not the version on the row — two people changing one
+-- cell at once get a refusal, not a silent winner — and writes the edit log in
+-- the same breath, so a change and its record cannot come apart.
+-- ══════════════════════════════════════════════════════════════════════════
+
+create table if not exists public.rc_la_rows (
+  id           uuid primary key,
+  kind         text not null check (kind in ('section', 'activity', 'resource', 'absence')),
+  parent_id    uuid references public.rc_la_rows(id) on delete cascade,
+  sort         double precision not null default 0,
+  level        smallint not null default 0 check (level between 0 and 3),
+  activity_id  text not null default '',
+  description  text not null default '',
+  location     text not null default '',
+  sswp         text not null default '',
+  party        text not null default '',
+  work_hours   text not null default '',
+  absence_kind text check (absence_kind in ('pto', 'office', 'other')),
+  archived     boolean not null default false,
+  version      integer not null default 1,
+  updated_at   timestamptz not null default now(),
+  updated_by   uuid references auth.users(id) on delete set null
+);
+
+create table if not exists public.rc_la_cells (
+  row_id     uuid not null references public.rc_la_rows(id) on delete cascade,
+  day        date not null,
+  color      text check (color ~ '^[0-9A-F]{6}$'),
+  text       text not null default '',
+  version    integer not null default 1,
+  updated_at timestamptz not null default now(),
+  updated_by uuid references auth.users(id) on delete set null,
+  primary key (row_id, day)
+);
+
+create index if not exists rc_la_cells_day_idx on public.rc_la_cells (day);
+
+create table if not exists public.rc_la_edits (
+  id      bigserial primary key,
+  at      timestamptz not null default now(),
+  by      uuid default auth.uid() references auth.users(id) on delete set null,
+  batch   uuid not null,
+  target  text not null check (target in ('row', 'cell')),
+  row_id  uuid not null,
+  day     date,
+  action  text not null check (action in ('insert', 'update', 'delete')),
+  before  jsonb,
+  after   jsonb
+);
+
+create index if not exists rc_la_edits_row_idx on public.rc_la_edits (row_id, at desc);
+
+-- What each support code on the sheet asks for: "X" an EIC, "WIT" a BART
+-- witness. Managed in the calendar — Legend → Support codes — like the colours.
+create table if not exists public.rc_support_codes (
+  id         uuid primary key default gen_random_uuid(),
+  code       text not null check (code ~ '^[A-Za-z0-9]{1,8}$'),
+  name       text not null default '',
+  party      text not null default 'BART',
+  active     boolean not null default true,
+  sort       integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists rc_support_codes_code_idx on public.rc_support_codes (upper(code));
+
+insert into public.rc_support_codes (code, name, party, sort)
+select v.code, v.name, v.party, v.sort from (values
+  ('X', 'EIC', 'BART', 10),
+  ('WIT', 'BART witness', 'BART', 20),
+  ('TCE', 'TCE', 'BART', 30)
+) as v(code, name, party, sort)
+where not exists (select 1 from public.rc_support_codes where upper(code) = v.code);
+
+alter table public.rc_la_rows       enable row level security;
+alter table public.rc_la_cells      enable row level security;
+alter table public.rc_la_edits      enable row level security;
+alter table public.rc_support_codes enable row level security;
+
+-- The look-ahead is the team's to read, as the calendar drawn from it is.
+drop policy if exists rc_la_rows_read on public.rc_la_rows;
+create policy rc_la_rows_read on public.rc_la_rows for select to authenticated using (true);
+drop policy if exists rc_la_cells_read on public.rc_la_cells;
+create policy rc_la_cells_read on public.rc_la_cells for select to authenticated using (true);
+-- Who changed what is the evidence base, and an administrator's.
+drop policy if exists rc_la_edits_read on public.rc_la_edits;
+create policy rc_la_edits_read on public.rc_la_edits for select to authenticated using (public.rc_is_admin());
+
+drop policy if exists rc_support_codes_read on public.rc_support_codes;
+create policy rc_support_codes_read on public.rc_support_codes for select to authenticated using (true);
+drop policy if exists rc_support_codes_write on public.rc_support_codes;
+create policy rc_support_codes_write on public.rc_support_codes for all to authenticated
+  using (public.rc_is_admin()) with check (public.rc_is_admin());
+
+-- Reading only. Every write to the look-ahead is `rc_la_apply()`; the log has
+-- no write grant at all, so nothing but that function can add to it and
+-- nothing can take from it.
+revoke all on public.rc_la_rows  from public, anon, authenticated;
+revoke all on public.rc_la_cells from public, anon, authenticated;
+revoke all on public.rc_la_edits from public, anon, authenticated;
+grant select on public.rc_la_rows  to authenticated;
+grant select on public.rc_la_cells to authenticated;
+grant select on public.rc_la_edits to authenticated;
+revoke all on public.rc_support_codes from public, anon;
+grant select, insert, update, delete on public.rc_support_codes to authenticated;
+
+create or replace function public.rc_la_apply(p_ops jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  op       jsonb;
+  results  jsonb := '[]'::jsonb;
+  v_batch  uuid := gen_random_uuid();
+  v_expect integer;
+  v_id     uuid;
+  v_day    date;
+  v_set    jsonb;
+  v_color  text;
+  v_text   text;
+  v_row    public.rc_la_rows;
+  v_after  public.rc_la_rows;
+  v_cell   public.rc_la_cells;
+  v_new    public.rc_la_cells;
+  v_found  boolean;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may edit the look-ahead' using errcode = '42501';
+  end if;
+
+  for op in select value from jsonb_array_elements(coalesce(p_ops, '[]'::jsonb)) loop
+    v_expect := coalesce((op->>'expect')::integer, 0);
+
+    if op->>'op' = 'row' then
+      v_id := (op->>'id')::uuid;
+      v_set := coalesce(op->'set', '{}'::jsonb);
+      select * into v_row from public.rc_la_rows where id = v_id for update;
+      v_found := found;
+
+      if not v_found then
+        if v_expect <> 0 then
+          raise exception 'conflict: that row was removed by somebody else — reload the look-ahead'
+            using errcode = '40001';
+        end if;
+        insert into public.rc_la_rows (id, kind, parent_id, sort, level, activity_id, description,
+                                       location, sswp, party, work_hours, absence_kind, archived,
+                                       version, updated_by)
+        values (v_id,
+                coalesce(v_set->>'kind', 'activity'),
+                nullif(v_set->>'parent_id', '')::uuid,
+                coalesce((v_set->>'sort')::double precision, 0),
+                coalesce((v_set->>'level')::smallint, 0),
+                coalesce(v_set->>'activity_id', ''),
+                coalesce(v_set->>'description', ''),
+                coalesce(v_set->>'location', ''),
+                coalesce(v_set->>'sswp', ''),
+                coalesce(v_set->>'party', ''),
+                coalesce(v_set->>'work_hours', ''),
+                nullif(v_set->>'absence_kind', ''),
+                coalesce((v_set->>'archived')::boolean, false),
+                1, auth.uid())
+        returning * into v_after;
+        insert into public.rc_la_edits (batch, target, row_id, action, after)
+        values (v_batch, 'row', v_id, 'insert', to_jsonb(v_after));
+      else
+        if v_row.version <> v_expect then
+          raise exception 'conflict: somebody else changed that row a moment ago — reload the look-ahead'
+            using errcode = '40001';
+        end if;
+        update public.rc_la_rows set
+          kind         = case when v_set ? 'kind' then v_set->>'kind' else kind end,
+          parent_id    = case when v_set ? 'parent_id' then nullif(v_set->>'parent_id', '')::uuid else parent_id end,
+          sort         = case when v_set ? 'sort' then (v_set->>'sort')::double precision else sort end,
+          level        = case when v_set ? 'level' then (v_set->>'level')::smallint else level end,
+          activity_id  = case when v_set ? 'activity_id' then coalesce(v_set->>'activity_id', '') else activity_id end,
+          description  = case when v_set ? 'description' then coalesce(v_set->>'description', '') else description end,
+          location     = case when v_set ? 'location' then coalesce(v_set->>'location', '') else location end,
+          sswp         = case when v_set ? 'sswp' then coalesce(v_set->>'sswp', '') else sswp end,
+          party        = case when v_set ? 'party' then coalesce(v_set->>'party', '') else party end,
+          work_hours   = case when v_set ? 'work_hours' then coalesce(v_set->>'work_hours', '') else work_hours end,
+          absence_kind = case when v_set ? 'absence_kind' then nullif(v_set->>'absence_kind', '') else absence_kind end,
+          archived     = case when v_set ? 'archived' then (v_set->>'archived')::boolean else archived end,
+          version      = version + 1,
+          updated_at   = now(),
+          updated_by   = auth.uid()
+        where id = v_id
+        returning * into v_after;
+        insert into public.rc_la_edits (batch, target, row_id, action, before, after)
+        values (v_batch, 'row', v_id, 'update', to_jsonb(v_row), to_jsonb(v_after));
+      end if;
+      results := results || jsonb_build_object('kind', 'row', 'id', v_id, 'version', v_after.version);
+
+    elsif op->>'op' = 'delete_row' then
+      v_id := (op->>'id')::uuid;
+      select * into v_row from public.rc_la_rows where id = v_id for update;
+      if found then
+        if v_row.version <> v_expect then
+          raise exception 'conflict: somebody else changed that row a moment ago — reload the look-ahead'
+            using errcode = '40001';
+        end if;
+        -- Its cells are logged one by one on the way out, so the record says
+        -- what was on the row as well as that the row went.
+        insert into public.rc_la_edits (batch, target, row_id, day, action, before)
+        select v_batch, 'cell', c.row_id, c.day, 'delete', to_jsonb(c)
+          from public.rc_la_cells c where c.row_id = v_id;
+        delete from public.rc_la_rows where id = v_id;
+        insert into public.rc_la_edits (batch, target, row_id, action, before)
+        values (v_batch, 'row', v_id, 'delete', to_jsonb(v_row));
+      end if;
+      results := results || jsonb_build_object('kind', 'row', 'id', v_id, 'version', 0, 'deleted', true);
+
+    elsif op->>'op' = 'cell' then
+      v_id := (op->>'row_id')::uuid;
+      v_day := (op->>'day')::date;
+      v_color := nullif(upper(coalesce(op->>'color', '')), '');
+      v_text := coalesce(op->>'text', '');
+      select * into v_cell from public.rc_la_cells where row_id = v_id and day = v_day for update;
+      v_found := found;
+      if coalesce(case when v_found then v_cell.version end, 0) <> v_expect then
+        raise exception 'conflict: somebody else changed that day a moment ago — reload the look-ahead'
+          using errcode = '40001';
+      end if;
+
+      if v_color is null and v_text = '' then
+        if v_found then
+          delete from public.rc_la_cells where row_id = v_id and day = v_day;
+          insert into public.rc_la_edits (batch, target, row_id, day, action, before)
+          values (v_batch, 'cell', v_id, v_day, 'delete', to_jsonb(v_cell));
+        end if;
+        results := results || jsonb_build_object('kind', 'cell', 'row_id', v_id, 'day', v_day, 'version', 0);
+      elsif v_found then
+        update public.rc_la_cells
+           set color = v_color, text = v_text, version = version + 1, updated_at = now(), updated_by = auth.uid()
+         where row_id = v_id and day = v_day
+        returning * into v_new;
+        insert into public.rc_la_edits (batch, target, row_id, day, action, before, after)
+        values (v_batch, 'cell', v_id, v_day, 'update', to_jsonb(v_cell), to_jsonb(v_new));
+        results := results || jsonb_build_object('kind', 'cell', 'row_id', v_id, 'day', v_day, 'version', v_new.version);
+      else
+        insert into public.rc_la_cells (row_id, day, color, text, version, updated_by)
+        values (v_id, v_day, v_color, v_text, 1, auth.uid())
+        returning * into v_new;
+        insert into public.rc_la_edits (batch, target, row_id, day, action, after)
+        values (v_batch, 'cell', v_id, v_day, 'insert', to_jsonb(v_new));
+        results := results || jsonb_build_object('kind', 'cell', 'row_id', v_id, 'day', v_day, 'version', 1);
+      end if;
+
+    else
+      raise exception 'unknown look-ahead op: %', op->>'op';
+    end if;
+  end loop;
+
+  return results;
+end;
+$$;
+
+-- The newest change, so an open editor can ask cheaply whether anybody else
+-- has written since it last looked. Anybody signed in may ask: it is a number.
+create or replace function public.rc_la_revision()
+returns bigint
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce(max(id), 0) from public.rc_la_edits;
+$$;
+
+revoke all on function public.rc_la_apply(jsonb) from public, anon;
+grant execute on function public.rc_la_apply(jsonb) to authenticated;
+revoke all on function public.rc_la_revision() from public, anon;
+grant execute on function public.rc_la_revision() to authenticated;
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- Problems the application ran into
+--
+-- A screen that failed to load, an offline outcome the server refused, a
+-- look-ahead read that went wrong: each used to be a toast on one person's
+-- screen and a console line nobody saw, so the first an administrator heard
+-- of it was "the huddle didn't save on Tuesday". The calendar writes one row
+-- here for each, and Organisation → Problems lists them.
+--
+-- Only the calendar writes here, from named places in its own code — never a
+-- global error handler — because the plan's data must never reach this
+-- project, and an error thrown anywhere in the page can carry plan text.
+-- Append-only like the rest of the evidence: anybody signed in may add their
+-- own row, only an administrator may read them, nobody edits one, and an
+-- administrator clears old rows through `rc_clear_client_errors()`.
+-- ══════════════════════════════════════════════════════════════════════════
+
+create table if not exists public.rc_client_errors (
+  id          uuid primary key default gen_random_uuid(),
+  created_at  timestamptz not null default now(),
+  created_by  uuid default auth.uid() references auth.users(id) on delete set null,
+  area        text not null check (char_length(area) between 1 and 60),
+  message     text not null check (char_length(message) between 1 and 500),
+  app_version text check (char_length(app_version) <= 40),
+  user_agent  text check (char_length(user_agent) <= 300)
+);
+
+create index if not exists rc_client_errors_created_idx
+  on public.rc_client_errors (created_at desc);
+
+alter table public.rc_client_errors enable row level security;
+
+drop policy if exists rc_client_errors_read on public.rc_client_errors;
+create policy rc_client_errors_read on public.rc_client_errors
+  for select to authenticated using (public.rc_is_admin());
+
+-- Your own row, as yourself: a report cannot be written in somebody else's name.
+drop policy if exists rc_client_errors_insert on public.rc_client_errors;
+create policy rc_client_errors_insert on public.rc_client_errors
+  for insert to authenticated with check (created_by = auth.uid());
+
+revoke all on public.rc_client_errors from public, anon, authenticated;
+grant select, insert on public.rc_client_errors to authenticated;
+
+-- Clearing is a function, not a DELETE grant, for the reason every removal
+-- here is: a DELETE that RLS refuses matches nothing and reports success.
+create or replace function public.rc_clear_client_errors(p_before timestamptz)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  removed integer;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may clear the problem log';
+  end if;
+  delete from public.rc_client_errors where created_at < coalesce(p_before, now());
+  get diagnostics removed = row_count;
+  return removed;
+end;
+$$;
+
+revoke all on function public.rc_clear_client_errors(timestamptz) from public, anon;
+grant execute on function public.rc_clear_client_errors(timestamptz) to authenticated;
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- Keeping the readings in check
+--
+-- The editor publishes a reading whenever its saves go quiet, which is many a
+-- day, and each carries the whole parsed grid — the one large column in the
+-- schema. Nothing is deleted to keep that in check: a reading's rows are what
+-- outcomes, plan entries, blockers and SARs point at, and the change register's
+-- events name both readings they compare, so removing one would unlink the
+-- evidence and cascade away the history of what changed.
+--
+-- What goes is the grid, and only where it can be rebuilt: an **editor**
+-- reading, whose every cell is in the append-only `rc_la_edits`. A workbook
+-- read's grid is the durable record of a file the application never stored,
+-- and is kept whatever its age. Past `snapshot_keep_days` (Organisation →
+-- Settings; 60 by default, never under 14) only the last editor reading of each
+-- day keeps its grid; the others keep a stub saying they were compacted, how
+-- many rows they had and which colours they could not explain.
+-- ══════════════════════════════════════════════════════════════════════════
+
+create or replace function public.rc_compact_snapshots()
+returns integer
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_setting text;
+  v_keep    integer;
+  v_count   integer;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may tidy the look-ahead readings'
+      using errcode = '42501';
+  end if;
+  select value into v_setting from public.rc_settings where key = 'snapshot_keep_days';
+  v_keep := greatest(14, coalesce(case when v_setting ~ '^[0-9]{1,5}$' then v_setting::integer end, 60));
+
+  with ranked as (
+    select s.id,
+           row_number() over (
+             partition by (s.taken_at at time zone 'UTC')::date
+             order by s.taken_at desc, s.id desc) as nth
+      from public.rc_lookahead_snapshots s
+     where s.file_hash like 'editor:%'
+  )
+  update public.rc_lookahead_snapshots s
+     set grid = jsonb_build_object(
+           'compacted',    true,
+           'compacted_at', now(),
+           'row_count',    jsonb_array_length(coalesce(s.grid -> 'rows', '[]'::jsonb)),
+           'unknown',      coalesce(s.grid -> 'unknown', '[]'::jsonb),
+           'rows',         '[]'::jsonb)
+    from ranked r
+   where r.id = s.id
+     and r.nth > 1
+     and s.taken_at < now() - make_interval(days => v_keep)
+     and coalesce((s.grid ->> 'compacted')::boolean, false) = false
+     -- Never the newest reading, whatever its age: it is the look-ahead.
+     and s.id <> (select id from public.rc_lookahead_snapshots order by taken_at desc, id desc limit 1);
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+revoke all on function public.rc_compact_snapshots() from public, anon;
+grant execute on function public.rc_compact_snapshots() to authenticated;
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- "Got it": who has seen the changes to their own days
+--
+-- My day shows somebody what changed on the look-ahead for the days that name
+-- them since the reading they last acknowledged, and "Got it" records that
+-- they have now seen the latest. It is the team's side of being told: the
+-- administrator's inbox lists who has changes they have not seen yet.
+--
+-- Append-only, like every other record of who knew what when: a person adds a
+-- row for themselves — a viewer too, since being told is not writing the
+-- plan — and nobody updates or deletes one. The current answer is the newest
+-- row per person. Only an administrator reads anybody else's.
+-- ══════════════════════════════════════════════════════════════════════════
+
+create table if not exists public.rc_la_seen (
+  id                bigserial primary key,
+  person_id         uuid not null references public.rc_people(id) on delete cascade,
+  snapshot_id       uuid references public.rc_lookahead_snapshots(id) on delete set null,
+  snapshot_taken_at timestamptz not null,
+  -- How many changes were on screen when they said so; 0 for the quiet
+  -- baseline recorded the first time, or when nothing affecting them changed.
+  changes           integer not null default 0 check (changes >= 0),
+  seen_at           timestamptz not null default now()
+);
+
+create index if not exists rc_la_seen_person_idx on public.rc_la_seen (person_id, seen_at desc);
+
+alter table public.rc_la_seen enable row level security;
+
+drop policy if exists rc_la_seen_read on public.rc_la_seen;
+create policy rc_la_seen_read on public.rc_la_seen for select to authenticated
+  using (public.rc_is_admin() or person_id = public.rc_me());
+
+drop policy if exists rc_la_seen_insert on public.rc_la_seen;
+create policy rc_la_seen_insert on public.rc_la_seen for insert to authenticated
+  with check (person_id = public.rc_me());
+
+revoke all on public.rc_la_seen from public, anon, authenticated;
+grant select, insert on public.rc_la_seen to authenticated;
+grant usage on sequence public.rc_la_seen_id_seq to authenticated;
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- The version stamp — last, on purpose.
+--
+-- The calendar reads this at sign-in and compares it with `SCHEMA_VERSION` in
+-- `src/core/rc.js`; an administrator whose database is behind is told which
+-- files to run, instead of finding out from a refused write weeks later. It is
+-- the final statement so that a run which stopped part of the way through does
+-- not claim to have finished. Raise it together with the constant whenever
+-- this file changes shape — `tools/test_sql.js` fails when the two disagree.
+-- ══════════════════════════════════════════════════════════════════════════
+
+insert into public.rc_settings (key, value) values ('schema_version', '5')
+on conflict (key) do update set value = excluded.value, updated_at = now();

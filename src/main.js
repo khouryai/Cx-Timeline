@@ -39,8 +39,10 @@ import { requireSignIn, installAccessMode } from './ui/auth.js';
 import { installP6Drops } from './ui/p6.js';
 import { installLookaheadDrops } from './ui/lookahead.js';
 import { installShortcuts } from './ui/shortcuts.js';
+import { installCommandMenu } from './ui/command_menu.js';
+import { installCanvasHint } from './ui/canvas_hint.js';
 import * as workspace from './ui/workspace.js';
-import * as rcUi from './ui/rc.js';
+import { loadCalendar } from './ui/calendar_loader.js';
 import * as rcClient from './core/rc.js';
 import { lockPlan, setAccount } from './core/access.js';
 import * as exporters from './io/exporters.js';
@@ -121,6 +123,7 @@ async function boot() {
   renderer.mount(frame);
   buildMinimap(frame);
   buildLegend(frame);
+  installCanvasHint(frame);
 
   const inspector = document.getElementById('inspector');
   const inspectorResizer = el('div', { class: 'resizer left' });
@@ -133,6 +136,7 @@ async function boot() {
   attachInteractions();
   installMenus();
   installShortcuts();
+  installCommandMenu();
   installHoverPreview();
   installAccessMode();
   installP6Drops();
@@ -162,7 +166,9 @@ async function boot() {
   // trial gate must not be waiting on either: a calendar that could not reach
   // its backend would otherwise look exactly like a broken update and get
   // rolled back.
-  workspace.registerCalendar(() => rcUi.build());
+  // Its code is a second bundle, fetched the first time it is opened — see
+  // ui/calendar_loader.js — so nobody who only uses the timeline downloads it.
+  workspace.registerCalendar(() => loadCalendar().then((calendar) => calendar.build()));
 
   // Resolve the calendar account, if there is a backend for one. This is the
   // only thing here that touches a network, and it deliberately sits after the
@@ -283,6 +289,8 @@ function installPenIdentity() {
     if (!filestore.isSupported()) return;
     const known = filestore.getDisplayName();
     if (known && known !== 'Someone') return;
+    // Never the name of somebody an administrator is only previewing as.
+    if (rcClient.previewing()) return;
     const name = rcClient.me()?.name;
     if (name) filestore.setDisplayName(name);
   };
@@ -323,10 +331,14 @@ function installPlanAccess() {
 
     const member = rcClient.isConfigured() && rcClient.isSignedIn()
       && Boolean(rcClient.me()) && !rcClient.isAdmin();
+    const previewing = rcClient.previewing();
     lockPlan(member
-      ? 'Your calendar account is not an administrator, so the plan opens read-only. '
-        + 'Everything you filter, hide or compare here is yours alone and stays with your '
-        + 'account.'
+      ? (previewing
+        ? `You are seeing the calendar as ${previewing.name}, who reads the plan and never writes it. `
+          + 'Go back to your own view in the calendar to edit.'
+        : 'Your calendar account is not an administrator, so the plan opens read-only. '
+          + 'Everything you filter, hide or compare here is yours alone and stays with your '
+          + 'account.')
       : '');
     emit(EV.ACCESS_CHANGED, { readOnly: store.isDocReadOnly() });
     emit(EV.FILE_STATE, filestore.state());

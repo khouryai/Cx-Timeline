@@ -29,7 +29,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import { launchOptions } from './lib/chrome.js';
-import { fakeSdk } from './lib/rc_stub.js';
+import { pinClock, pinNodeClock } from './lib/clock.js';
+import { fakeSdk, SCHEMA_VERSION } from './lib/rc_stub.js';
+
+pinNodeClock();
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const SHOT = (() => {
@@ -119,13 +122,14 @@ const browser = await chromium.launch(launchOptions());
 const consoleErrors = [];
 
 async function phone({ role = 'member', signedIn = true, colorScheme = 'light' } = {}) {
-  const context = await browser.newContext({
+  // The calendar's pinned "now" (tools/lib/clock.js), shared with every other suite.
+  const context = pinClock(await browser.newContext({
     viewport: { width: 390, height: 844 },
     colorScheme,
     deviceScaleFactor: 2,
     isMobile: true,
     hasTouch: true,
-  });
+  }));
   const page = await context.newPage();
   page.on('console', (m) => {
     if (m.type() === 'error') consoleErrors.push(`${role}: ${m.text()} ${m.location()?.url || ''}`.trim());
@@ -133,6 +137,7 @@ async function phone({ role = 'member', signedIn = true, colorScheme = 'light' }
   page.on('pageerror', (e) => consoleErrors.push(`${role}: ${e}`));
   await page.addInitScript(({ role: r, signedIn: s }) => { window.__rc = { role: r, signedIn: s }; },
     { role, signedIn });
+  await page.addInitScript(`window.__rcSchemaVersion = ${SCHEMA_VERSION};`);
   await page.addInitScript(fakeSdk);
   await page.addInitScript(nameAlexToday);
   return { context, page };
@@ -237,7 +242,14 @@ try {
   const chipCount = await chips.count();
   check('the week’s other working days are offered alongside', chipCount >= 1, `${chipCount}`);
   await page.locator('.cx-modal input[placeholder="What you will do"]').fill('Office — RFI log');
-  if (chipCount) await chips.last().click();
+  /* Any other day but today. Today carries the sheet's own task, which the
+     section after this changes — and an entry stored on it would replace that
+     task, as a stored entry is meant to. On a Friday the last chip is today. */
+  const todayLabel = `${new Date(`${todayISO}T00:00:00Z`)
+    .toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })},`;
+  const chipTitles = await chips.evaluateAll((els) => els.map((e) => e.title));
+  const alsoIdx = chipTitles.map((t, i) => (t.includes(todayLabel) ? -1 : i)).filter((i) => i >= 0).pop();
+  if (alsoIdx !== undefined) await chips.nth(alsoIdx).click();
   await page.locator('.cx-modal-foot').getByRole('button', { name: 'Add', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('.cx-modal'));
   await page.waitForTimeout(300);
@@ -251,7 +263,7 @@ try {
     shiftsWritten.join());
   check('the day is written as their own plan entry', written.includes(addDay), written.join(', '));
   check('and the other day ticked with it, one entry per day',
-    written.length === (chipCount ? 2 : 1), `${written.length} row(s)`);
+    written.length === (alsoIdx !== undefined ? 2 : 1), `${written.length} row(s)`);
   const added = page.locator(`.m-day[data-date="${addDay}"] .m-task`, { hasText: 'Office — RFI log' });
   check('it is drawn at once, flagged as typed rather than from the sheet',
     (await added.count()) === 1 && /Manual/.test(await added.innerText()));
@@ -497,13 +509,14 @@ try {
   check('the PTO tab opens with nothing asked for yet',
     /Nothing booked or requested/i.test(await page.locator('.m-view').innerText()));
 
-  /* A week after the first day from today that Alex works — so always a
-     weekday, always next week, and never today: the form opens on today, and
-     asking for a later day is what shows the last day following the first. */
+  /* Next week's Wednesday — so always a day Alex works, always one press of
+     "Next week" away, and never today: the form opens on today, and asking for
+     a later day is what shows the last day following the first. (A week after
+     the next working day was two weeks away on a weekend.) */
   const ptoDay = await page.evaluate(() => {
-    let ms = Date.parse(`${window.__rc.axis.today}T00:00:00Z`);
-    while ((new Date(ms).getUTCDay() || 7) > 5) ms += 86400000;
-    return new Date(ms + 7 * 86400000).toISOString().slice(0, 10);
+    const ms = Date.parse(`${window.__rc.axis.today}T00:00:00Z`);
+    const monday = ms - ((new Date(ms).getUTCDay() || 7) - 1) * 86400000;
+    return new Date(monday + 9 * 86400000).toISOString().slice(0, 10);
   });
 
   await page.getByRole('button', { name: 'Request PTO' }).click();

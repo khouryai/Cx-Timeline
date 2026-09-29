@@ -985,3 +985,1082 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 .rc-work .rc-work-task { flex: 1 1 200px; min-width: 160px; }
 .rc-work .rc-work-cat { flex: 0 1 160px; }
 .rc-outcome-task { margin-top: 3px; }
+
+/* The database is not the version this build expects — said once, at the top
+   of the calendar, and dismissible. See schemaBanner() in ui/rc.js. */
+.rc-schema-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-border);
+  border-radius: 8px;
+  background: var(--warn-light);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.rc-schema-banner[hidden] { display: none; }
+.rc-schema-icon { color: var(--warn); flex: none; margin-top: 1px; }
+.rc-schema-text { flex: 1; min-width: 0; }
+.rc-schema-banner .cx-btn { flex: none; }
+
+/* Organisation → Problems: a timestamp that does not wrap, and machine words
+   (where it happened, which build) set apart from what happened. */
+.rc-table td.rc-nowrap { white-space: nowrap; }
+.rc-table td.rc-mono { font-family: var(--f-mono); font-size: 12px; color: var(--text-muted); }
+
+/* ── One table behaviour (ui/rc_table.js) ─────────────────────────────── */
+
+/* A long table scrolls inside its frame, so its header can stay in view. The
+   page itself already scrolls vertically; a header made sticky to the page
+   would be caught by the frame's own horizontal scroll and never stick. */
+.rc-scroll.rc-scroll-tall {
+  max-height: min(70vh, 720px);
+  overflow: auto;
+}
+.rc-scroll .rc-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-2);
+}
+.rc-table th.rc-num { text-align: right; }
+.rc-table.rc-report th.rc-num { text-align: center; }
+
+.rc-table th.rc-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+.rc-table th.rc-sortable:hover,
+.rc-table th.rc-sortable:focus-visible { color: var(--text-main); }
+.rc-table th.rc-sortable::after {
+  content: '';
+  display: inline-block;
+  width: 0.9em;
+  margin-left: 4px;
+  opacity: 0.35;
+}
+.rc-table th.rc-sortable:hover::after { content: '↕'; }
+.rc-table th[aria-sort='ascending']::after { content: '↑'; opacity: 1; }
+.rc-table th[aria-sort='descending']::after { content: '↓'; opacity: 1; }
+
+.rc-table-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 6px;
+}
+
+/* A cancelled day is struck through as well as red, so it reads the same to
+   somebody who cannot tell red from the other shift colours. The line takes
+   the text colour the cell already chose for legibility over its paint. */
+.la-day.la-cancel {
+  background-image: linear-gradient(
+    to top right, transparent calc(50% - 1px), currentColor calc(50% - 1px),
+    currentColor calc(50% + 1px), transparent calc(50% + 1px));
+}
+
+/* ── A tablet in the room ────────────────────────────────────────────────
+   The huddle is run standing, on a tablet held in one hand, and a tablet in
+   landscape is wider than the 900px where the narrow rules begin — so none of
+   them applied to the device the meeting is most often run on. Touch is the
+   test here, not width: every control in the calendar reaches 44px, the size
+   a thumb hits without looking, and in landscape the meeting splits into the
+   question on the left and the answer on the right, so answering never means
+   scrolling past the question to find the buttons. */
+@media (pointer: coarse) {
+  .rc-frame .cx-btn,
+  #rc-frame .cx-btn,
+  #rc-frame .rc-tab {
+    min-height: 44px;
+  }
+  #rc-frame .cx-btn.mini { padding-inline: 14px; }
+  #rc-frame .cx-input,
+  #rc-frame select,
+  #rc-frame input[type='text'],
+  #rc-frame input[type='date'] {
+    min-height: 44px;
+    font-size: 16px; /* below 16px a tablet zooms the page on focus */
+  }
+  #rc-frame .rc-table td,
+  #rc-frame .rc-table th { padding: 10px 8px; }
+  /* A borderless button is a word on a desktop, where a pointer finds it by
+     hovering; a thumb has no hover, so each answer shows its edge. */
+  #rc-frame .rc-present-answer .cx-btn,
+  #rc-frame .rc-huddle .cx-btn { border: 1px solid var(--border-strong); }
+}
+
+@media (pointer: coarse) and (orientation: landscape) and (min-width: 900px) {
+  .rc-present {
+    max-width: 1180px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+    column-gap: var(--space-5);
+    row-gap: 0;
+    align-items: start;
+  }
+  .rc-present > * { grid-column: 1; }
+  .rc-present > .rc-present-top,
+  .rc-present > .rc-present-move { grid-column: 1 / -1; }
+  .rc-present > .rc-present-answer {
+    grid-column: 2;
+    grid-row: 2 / span 6;
+    border-top: 0;
+    padding-top: 0;
+  }
+  .rc-present-answer .cx-btn { min-height: 52px; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The look-ahead editor (ui/rc_la_editor.js)
+
+   The calendar grid, made writable: the same header rows, the same frozen
+   activity columns, the workbook's own colours on the days. The activity
+   columns have fixed widths so they can be frozen at known offsets.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.lae-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) 0 var(--space-3);
+}
+.lae-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.lae-right { margin-left: auto; }
+.lae-range {
+  font-family: var(--f-mono);
+  font-size: var(--fs-tiny);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-main);
+  padding: 0 6px;
+  white-space: nowrap;
+}
+.lae-search { width: 170px; }
+
+.lae-palette { gap: 4px; }
+.lae-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform var(--dur-fast) var(--easing), box-shadow var(--dur-fast) var(--easing);
+}
+.lae-swatch:hover,
+.lae-swatch:focus-visible { transform: translateY(-1px); box-shadow: var(--shadow-md); }
+.lae-swatch-none {
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.lae-codes { gap: 4px; }
+.lae-code {
+  min-width: 30px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-main);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--easing), border-color var(--dur-fast) var(--easing);
+}
+.lae-code:hover,
+.lae-code:focus-visible { background: var(--surface-3); border-color: var(--info-border); }
+
+.lae-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-tiny);
+  color: var(--text-muted);
+  white-space: nowrap;
+  padding: 0 4px;
+}
+.lae-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--good);
+}
+.lae-status-saving .lae-status-dot { background: var(--info); }
+.lae-status-retry .lae-status-dot,
+.lae-status-conflict .lae-status-dot { background: var(--warn); }
+.lae-status-retry { color: var(--warn); }
+
+/* ── The grid ── */
+
+.lae-scroll {
+  position: relative;
+  overflow: auto;
+  max-height: calc(100vh - 250px);
+  min-height: 320px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  outline: none;
+}
+.lae-scroll:focus,
+.lae-scroll:focus-visible { outline: none; }
+/* The caret cell is the focus indicator inside the grid; the frame only hints. */
+.lae-scroll:focus-visible { box-shadow: 0 0 0 1px var(--info-border); }
+
+.lae-grid {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--fs-tiny);
+  user-select: none;
+  table-layout: fixed;
+}
+.lae-grid th,
+.lae-grid td {
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 3px 6px;
+  height: 26px;
+  box-sizing: border-box;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* The header: three rows, frozen one under another. */
+.lae-grid thead th {
+  position: sticky;
+  z-index: 3;
+  background: var(--surface-2);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: center;
+}
+.lae-grid thead tr:nth-child(1) th { top: 0; height: 26px; }
+.lae-grid thead tr:nth-child(2) th { top: 26px; height: 22px; color: var(--text-main); font-size: 11px; }
+.lae-grid thead tr:nth-child(3) th { top: 48px; height: 22px; border-bottom: 1px solid var(--border-strong); }
+.lae-grid thead th.lae-meta,
+.lae-grid thead th.lae-handle-head {
+  top: 0;
+  z-index: 5;
+  vertical-align: bottom;
+  text-align: left;
+  white-space: normal;
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--f-ui);
+  font-size: var(--fs-tiny);
+  color: var(--text-main);
+  height: 70px;
+}
+.lae-grid thead th.lae-month {
+  background: var(--surface-3);
+  color: var(--text-main);
+  text-align: left;
+  letter-spacing: 0.1em;
+}
+.lae-grid thead th.lae-weekend { color: var(--text-faint); }
+.lae-grid thead th.lae-today { color: var(--hitachi-red); }
+
+/* The activity columns, frozen at fixed offsets. */
+.lae-grid .lae-handle,
+.lae-grid .lae-handle-head,
+.lae-grid .lae-meta {
+  position: sticky;
+  z-index: 2;
+  background: var(--surface);
+}
+.lae-grid .lae-handle,
+.lae-grid .lae-handle-head { left: 0; width: 44px; min-width: 44px; max-width: 44px; padding: 0 2px; }
+.lae-grid .lae-meta-activity_id { left: 44px; width: 104px; min-width: 104px; max-width: 104px; }
+.lae-grid .lae-meta-description { left: 148px; width: 280px; min-width: 280px; max-width: 280px; }
+.lae-grid .lae-meta-location { left: 428px; width: 112px; min-width: 112px; max-width: 112px; }
+.lae-grid .lae-meta-sswp { left: 540px; width: 58px; min-width: 58px; max-width: 58px; }
+.lae-grid .lae-meta-party { left: 598px; width: 72px; min-width: 72px; max-width: 72px; }
+.lae-grid .lae-meta-work_hours { left: 670px; width: 92px; min-width: 92px; max-width: 92px; }
+.lae-grid .lae-meta-last { border-right: 2px solid var(--border-strong); }
+.lae-grid td.lae-meta { text-overflow: ellipsis; }
+.lae-grid td.lae-meta-description { font-weight: 500; color: var(--text-main); }
+
+.lae-grid .lae-day {
+  width: 58px;
+  min-width: 58px;
+  max-width: 58px;
+  text-align: center;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--text-main);
+}
+.lae-grid .lae-weekend { background: var(--surface-2); }
+.lae-grid td.lae-today { box-shadow: inset 2px 0 0 var(--hitachi-red); }
+/* A painted day states its own colour, so its writing has to stay legible over
+   whatever the colour turns out to be — as on the calendar grid. */
+.lae-grid td.lae-painted { color: #111; font-weight: 700; }
+.lae-grid td.lae-painted.lae-dark { color: #fff; }
+.lae-grid td.lae-cancel {
+  background-image: linear-gradient(
+    to top right, transparent calc(50% - 1px), currentColor calc(50% - 1px),
+    currentColor calc(50% + 1px), transparent calc(50% + 1px));
+}
+.lae-grid td.lae-unknown-code {
+  text-decoration: underline wavy var(--warn);
+  text-underline-offset: 3px;
+}
+
+/* Row kinds. */
+.lae-grid tr.lae-section td {
+  background: var(--surface-3);
+  border-top: 2px solid var(--border-strong);
+  font-weight: 700;
+  color: var(--text-main);
+}
+.lae-grid tr.lae-section td.lae-meta-description { font-size: var(--fs-small); overflow: visible; }
+.lae-grid tr.lae-resource td.lae-meta { font-style: italic; color: var(--text-muted); }
+.lae-grid tr.lae-resource td { border-bottom-color: var(--border-strong); }
+.lae-grid tr.lae-resource td.lae-day { font-family: var(--f-ui); font-weight: 500; text-align: left; }
+.lae-grid tr.lae-absence td.lae-meta-description { font-weight: 700; }
+.lae-grid tr.lae-absence td.lae-day { font-family: var(--f-ui); text-align: left; }
+.lae-grid tr.lae-archived td { opacity: 0.45; }
+.lae-grid td.lae-fixed.lae-meta { color: var(--text-muted); }
+
+.lae-grip {
+  display: inline-flex;
+  width: 18px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  cursor: grab;
+}
+.lae-grid tr:hover .lae-grip { color: var(--text-muted); }
+.lae-fold {
+  display: inline-flex;
+  width: 18px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+/* Selection: the range washed, the cell with the caret outlined, the corner
+   square that drags a fill. */
+.lae-grid td.lae-sel { box-shadow: inset 0 0 0 100px var(--info-light); }
+.lae-grid td.lae-sel.lae-painted { box-shadow: inset 0 0 0 2px var(--info); }
+.lae-grid td.lae-cur { outline: 2px solid var(--info); outline-offset: -2px; }
+.lae-grid tr.lae-sel-row td.lae-handle { background: var(--info-light); }
+.lae-grid td.lae-clip { outline: 1px dashed var(--info); outline-offset: -3px; }
+.lae-grid td.lae-fill-preview { box-shadow: inset 0 0 0 100px var(--info-light); outline: 1px dashed var(--info); outline-offset: -2px; }
+.lae-grid td { position: relative; }
+.lae-grid td.lae-meta,
+.lae-grid td.lae-handle { position: sticky; }
+.lae-fill-handle {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 7px;
+  height: 7px;
+  background: var(--info);
+  border: 1px solid var(--surface);
+  cursor: crosshair;
+  z-index: 1;
+}
+
+.lae-drop-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--hitachi-red);
+  pointer-events: none;
+  z-index: 6;
+}
+
+/* Typing into a cell. */
+.lae-editor {
+  position: absolute;
+  z-index: 7;
+  box-sizing: border-box;
+  padding: 2px 6px;
+  border: 2px solid var(--info);
+  border-radius: 0;
+  background: var(--surface);
+  color: var(--text-main);
+  font: inherit;
+  font-size: var(--fs-tiny);
+  outline: none;
+  box-shadow: var(--shadow-md);
+}
+.lae-edit-hint {
+  position: absolute;
+  z-index: 7;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+}
+
+/* What is asked for, per day, pinned under the grid. */
+.lae-grid tfoot td {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border-strong);
+  height: auto;
+  min-height: 26px;
+  vertical-align: top;
+}
+.lae-grid tfoot td.lae-handle,
+.lae-grid tfoot td.lae-meta { z-index: 4; }
+.lae-grid tfoot td.lae-totals-label {
+  left: 44px;
+  width: 718px;
+  min-width: 718px;
+  max-width: 718px;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.lae-grid tfoot td.lae-total {
+  white-space: pre-line;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--text-main);
+  text-align: center;
+}
+
+/* Starting: from the workbook, a file, or nothing. */
+.lae-start {
+  max-width: 720px;
+  margin: var(--space-4) auto;
+  text-align: center;
+}
+.lae-start h2 { margin: var(--space-2) 0; }
+.lae-start-icon { color: var(--text-muted); }
+.lae-start-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  text-align: left;
+}
+.lae-start-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.lae-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-2) var(--space-3);
+}
+.lae-summary { margin-top: var(--space-4); }
+.lae-summary-total {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--text-main);
+  margin: 4px 0 var(--space-2);
+}
+
+@media (pointer: coarse) {
+  .lae-swatch, .lae-code { min-height: 36px; min-width: 36px; }
+  .lae-grid th, .lae-grid td { height: 32px; }
+}
+
+/* Names from the roster, offered under a names cell while typing. */
+.lae-edit-hint.lae-names { flex-direction: column; min-width: 160px; padding: 4px; gap: 2px; }
+.lae-edit-hint[hidden] { display: none; }
+.lae-name {
+  text-align: left;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-main);
+  font: inherit;
+  font-size: var(--fs-tiny);
+  cursor: pointer;
+}
+.lae-name:hover,
+.lae-name.lae-name-on { background: var(--info-light); }
+.lae-cancel-form { grid-template-columns: 1fr; }
+.lae-cancel-runs {
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--fs-small);
+  color: var(--text-main);
+}
+
+/* Take me back: the saves, newest first. */
+.lae-restore { grid-template-columns: 1fr; }
+.lae-restore-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 4px;
+}
+.lae-restore-point {
+  display: grid;
+  grid-template-columns: 170px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-main);
+  font: inherit;
+  font-size: var(--fs-small);
+  text-align: left;
+  cursor: pointer;
+}
+.lae-restore-point:hover { background: var(--surface-2); }
+.lae-restore-point.on { background: var(--info-light); outline: 1px solid var(--info-border); }
+.lae-restore-when { font-family: var(--f-mono); font-size: var(--fs-tiny); }
+
+/* ── Staffing clashes ────────────────────────────────────────────────────
+   A names cell with somebody in it who cannot be there: on leave, on the PTO
+   row, or on two shifts. Marked with an inset outline and a corner so it reads
+   without colour too, and the reason is in the cell's tooltip. */
+.lae-grid td.lae-clash {
+  box-shadow: inset 0 0 0 2px var(--bad);
+  background-image: linear-gradient(225deg, var(--bad) 0 6px, transparent 6px);
+}
+.lae-clash-btn {
+  color: var(--bad);
+  border-color: var(--bad-border);
+  background: var(--bad-light);
+}
+.lae-clashes {
+  display: grid;
+  gap: 6px;
+  max-height: 60vh;
+  overflow: auto;
+}
+.lae-clash-day {
+  margin-top: 6px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.lae-clash-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  font-size: var(--fs-tiny);
+}
+.lae-clash-detail {
+  overflow-wrap: anywhere;
+}
+
+/* ── History of a day or a row ─────────────────────────────────────────── */
+.lae-history {
+  display: grid;
+  gap: 4px;
+  max-height: 60vh;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+.lae-history-item {
+  display: grid;
+  grid-template-columns: 150px 120px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-tiny);
+}
+.lae-history-item:nth-child(odd) {
+  background: var(--surface-2);
+}
+.lae-history-when {
+  font-family: var(--f-mono);
+  color: var(--text-subtle);
+}
+.lae-history-what {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  overflow-wrap: anywhere;
+}
+.lae-history-from {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+.lae-history-arrow {
+  display: inline-flex;
+  color: var(--text-subtle);
+}
+@media (max-width: 640px) {
+  .lae-history-item {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+
+/* ── The administrator's inbox ───────────────────────────────────────── */
+.rc-tab-count {
+  display: inline-block;
+  min-width: 18px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 9px;
+  border: 1px solid var(--bad-border);
+  background: var(--bad-light);
+  color: var(--bad);
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+.rc-inbox-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rc-inbox-item {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.rc-inbox-bad { border-left-color: var(--bad); }
+.rc-inbox-warn { border-left-color: var(--warn); }
+.rc-inbox-info { border-left-color: var(--info); }
+.rc-inbox-title {
+  font-weight: 600;
+  color: var(--text-main);
+}
+.rc-inbox-detail {
+  margin-top: 2px;
+  font-size: var(--fs-tiny);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.rc-inbox-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.rc-inbox-failed {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--warn);
+}
+@media (max-width: 700px) {
+  .rc-inbox-item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .rc-inbox-actions { justify-content: flex-start; }
+}
+
+/* ── Settings ─────────────────────────────────────────────────────────── */
+.rc-settings {
+  display: grid;
+  max-width: 880px;
+}
+.rc-settings-group {
+  margin: 18px 0 6px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.rc-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.rc-settings-name {
+  font-weight: 600;
+  color: var(--text-main);
+}
+.rc-settings-row .rc-hint { margin: 2px 0 0; }
+.rc-settings-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.rc-settings-inline .cx-input { flex: 1 1 160px; min-width: 0; }
+.rc-settings-mono { font-family: var(--f-mono); }
+@media (max-width: 700px) {
+  .rc-settings-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+}
+
+/* ── Seeing it as somebody else ──────────────────────────────────────── */
+.rc-preview-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--info-border);
+  border-radius: 8px;
+  background: var(--info-light);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.rc-preview-banner > span:first-child { color: var(--info); flex: none; display: inline-flex; }
+.rc-preview-text { flex: 1; min-width: 0; }
+@media (max-width: 640px) {
+  .rc-preview-banner { flex-wrap: wrap; }
+}
+
+/* ── My day ───────────────────────────────────────────────────────────── */
+.rc-myday-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.rc-myday-hello {
+  margin: 2px 0 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+.rc-myday-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+.rc-myday-card {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.rc-myday-card:first-child {
+  border-color: var(--primary);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+.rc-myday-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.rc-myday-card-head h3,
+.rc-myday-weekwrap h3,
+.rc-myday-note h3 {
+  margin: 0;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.rc-myday-card-head .rc-hint { margin: 0; }
+.rc-myday-task {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.rc-myday-task-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+.rc-myday-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+.rc-myday-fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-tiny);
+  color: var(--text-muted);
+}
+.rc-myday-off {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+.rc-myday-off > span:first-child { color: var(--warn); display: inline-flex; }
+.rc-myday-weekwrap {
+  margin-top: 18px;
+}
+.rc-myday-week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.rc-myday-day {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  min-width: 0;
+}
+.rc-myday-today {
+  border-color: var(--primary);
+}
+.rc-myday-quiet {
+  background: var(--surface-2);
+}
+.rc-myday-wd {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.rc-myday-where {
+  font-size: var(--fs-tiny);
+  font-weight: 600;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+.rc-myday-quiet .rc-myday-where { color: var(--text-muted); font-weight: 400; }
+.rc-myday-foot {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+.rc-myday-note {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.rc-myday-note .rc-hint { margin: 0; }
+.rc-myday-outcome,
+.rc-myday-blocker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.rc-myday-said {
+  flex-basis: 100%;
+  font-style: italic;
+  color: var(--text-muted);
+}
+@media (max-width: 640px) {
+  .rc-myday-week { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .rc-myday-head { flex-wrap: wrap; }
+}
+
+/* ── Only my rows ─────────────────────────────────────────────────────────
+   Your own name on a names row: outlined in the primary colour and bold, so
+   it reads without the colour too. */
+.la-grid td.la-mine {
+  box-shadow: inset 0 0 0 2px var(--primary);
+  font-weight: 700;
+  color: var(--text-main);
+}
+.la-only-mine { font-weight: 600; }
+
+/* ── A task opens its whole activity ─────────────────────────────────── */
+button.rc-myday-task-open {
+  position: relative;
+  width: 100%;
+  border: 1px solid transparent;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--easing), background var(--dur-fast) var(--easing);
+}
+button.rc-myday-task-open:hover { border-color: var(--border-strong); }
+button.rc-myday-task-open:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.rc-myday-more {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.la-grid td.la-openable { cursor: pointer; }
+.la-grid td.la-openable:hover { text-decoration: underline; text-underline-offset: 3px; }
+.la-grid td.la-openable:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+
+.rc-activity { display: grid; gap: 14px; }
+.rc-activity-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 16px;
+  margin: 0;
+}
+.rc-activity-facts dt {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+  padding-top: 2px;
+}
+.rc-activity-facts dd {
+  margin: 0;
+  color: var(--text-main);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.rc-activity-sub { display: flex; align-items: baseline; gap: 10px; }
+.rc-activity-sub h4 {
+  margin: 0;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.rc-activity-sub .rc-hint { margin: 0; }
+.rc-activity-days {
+  display: grid;
+  gap: 4px;
+  max-height: 50vh;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+.rc-activity-day {
+  display: grid;
+  grid-template-columns: 110px 150px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-tiny);
+}
+.rc-activity-mine { border-color: var(--primary); box-shadow: inset 3px 0 0 var(--primary); }
+.rc-activity-today .rc-activity-when { color: var(--primary); font-weight: 700; }
+.rc-activity-cancelled .rc-activity-shift { color: var(--bad); text-decoration: line-through; }
+.rc-activity-when { font-family: var(--f-mono); color: var(--text-muted); }
+.rc-activity-shift, .rc-activity-who { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.rc-activity-who { flex-wrap: wrap; overflow-wrap: anywhere; }
+.rc-activity-swatch {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+}
+.rc-activity-text { font-family: var(--f-mono); color: var(--text-subtle); }
+.rc-activity-why { grid-column: 1 / -1; color: var(--bad); }
+@media (max-width: 640px) {
+  .rc-activity-day { grid-template-columns: 1fr 1fr; }
+  .rc-activity-who { grid-column: 1 / -1; }
+}
+
+/* ── What changed for you ─────────────────────────────────────────────── */
+.rc-tab-count.rc-tab-count-info {
+  border-color: var(--info-border);
+  background: var(--info-light);
+  color: var(--info);
+}
+.rc-myday-changes { margin-bottom: 14px; }
+.rc-myday-changes[hidden] { display: none; }
+.rc-myday-uptodate { margin: 0; }
+.rc-myday-changes-open {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--warn-border);
+  border-left-width: 3px;
+  border-radius: 10px;
+  background: var(--warn-light);
+}
+.rc-myday-changes-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.rc-myday-changes-head h3 { margin: 0; font-size: 15px; font-weight: 700; color: var(--text-main); }
+.rc-myday-changes-head .rc-hint { margin: 0; }
+.rc-myday-change-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.rc-myday-change {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--fs-small, 13px);
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+.rc-myday-change .cx-badge { flex: none; }
+.rc-myday-changes-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.rc-myday-changes-foot .rc-hint { margin: 0; }
