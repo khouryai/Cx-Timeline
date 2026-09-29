@@ -455,11 +455,38 @@ try {
 
   await mContext.setOffline(true);
   await page.reload({ waitUntil: 'load' });
-  await page.waitForSelector('#m-head', { timeout: 10000 });
-  check('with the network gone it still opens', (await page.title()) === 'CX Calendar');
-  await page.waitForSelector('.m-offline', { timeout: 10000 }).catch(() => {});
-  check('and says it is offline, in the chrome', (await page.locator('.m-offline').count()) === 1);
+  /* The tab bar, not the header: `#m-head` is in the page's own markup, so it
+     is there even when none of the app's code ran — which is exactly what an
+     app that failed to come out of the cache would look like. The tabs are
+     drawn by the bundle, so this proves the whole app opened from the phone. */
+  const opened = await page.waitForSelector('#m-tabs .m-tab', { timeout: 10000 }).then(() => true, () => false);
+  check('with the network gone it still opens — the app itself, not just its page',
+    opened && (await page.title()) === 'CX Calendar');
+
+  /* The chip reads `navigator.onLine`, which is what a phone with no signal
+     reports. Playwright's offline switch sets it on some Chromium builds and
+     not on others — CI's newer one did not, and the check failed on a page
+     that had opened perfectly well — so where the browser under test does not
+     say it, the suite says it the way the phone would, and checks what this
+     app does about it, which is the part that is ours. */
+  const saidOffline = await page.evaluate(() => navigator.onLine === false);
+  if (!saidOffline) {
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+      window.dispatchEvent(new Event('offline'));
+    });
+  }
+  const chip = await page.waitForSelector('.m-offline', { timeout: 10000 }).then(() => true, () => false);
+  check('and says it is offline, in the chrome', chip && (await page.locator('.m-offline').count()) === 1,
+    saidOffline ? 'the browser reported it' : 'the browser did not report it, so the suite did');
   await mContext.setOffline(false);
+  // Hand the answer back to the browser, or every check after this one runs offline.
+  if (!saidOffline) {
+    await page.evaluate(() => {
+      delete navigator.onLine;
+      window.dispatchEvent(new Event('online'));
+    });
+  }
 
   /* ── Time off ───────────────────────────────────────────────────────── */
 
