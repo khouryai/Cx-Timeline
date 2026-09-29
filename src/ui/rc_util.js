@@ -142,11 +142,25 @@ export const STATUSES = [
 
 export const STATUS_BY_ID = new Map(STATUSES.map((s) => [s.id, s]));
 
+/**
+ * The three shifts, in the words the team uses.
+ *
+ * The third is a **blanket** — the possession the track is handed over for. It
+ * is stored as `possession`, because that is the value `rc_plan_entries` and
+ * `rc_actuals` check for and a rename would be a migration of every row ever
+ * written for nothing a reader can see; it is *called* Blanket everywhere it
+ * is drawn. `shiftFor()` already reads "blanket" on the workbook as this one.
+ */
 export const SHIFTS = [
   { id: 'day', label: 'Day' },
   { id: 'night', label: 'Night' },
-  { id: 'possession', label: 'Possession' },
+  { id: 'possession', label: 'Blanket' },
 ];
+
+/** What a stored shift is called on screen. One place, so three views cannot differ. */
+export function shiftLabel(id) {
+  return SHIFTS.find((s) => s.id === id)?.label || id || '';
+}
 
 /* ══════════════════════════════════════════════════════════════════════════
    Names written in a spreadsheet, and the people they are

@@ -14,7 +14,7 @@ import * as rc from '../core/rc.js';
 import { icon } from '../ui/icons.js';
 import { segmented, toast } from '../ui/components.js';
 import { THEME_CHOICES, themePreference, setThemePreference } from './theme.js';
-import { isStandalone, canPrompt, promptInstall, isIos, onInstallChange } from './pwa.js';
+import { isInstalled, canPrompt, promptInstall, isIos, onInstallChange } from './pwa.js';
 
 const ROLES = {
   admin: 'Administrator — you can plan anybody’s days.',
@@ -58,17 +58,22 @@ export function render(root) {
     el('p', { class: 'm-note', text: '"Phone" follows the light or dark setting of the phone itself.' }),
   ]));
 
+  /* Only while there is something to do about it. Once the app is on the home
+     screen the card has nothing left to say, and a card saying so is a card
+     somebody reads every time for no reason. */
   const install = el('div');
+  const installCard = card('On this phone', [install]);
   const drawInstall = () => {
     clear(install);
-    install.append(...installHelp());
+    installCard.hidden = isInstalled();
+    if (!installCard.hidden) install.append(...installHelp());
   };
   drawInstall();
   stopListening?.();
   stopListening = onInstallChange(() => {
     if (install.isConnected) drawInstall();
   });
-  root.appendChild(card('On this phone', [install]));
+  root.appendChild(installCard);
 
   root.appendChild(card('Everything else', [
     el('p', {
@@ -98,9 +103,6 @@ function initials(name) {
 }
 
 function installHelp() {
-  if (isStandalone()) {
-    return [el('p', { class: 'm-note', text: 'Installed — it opens from your home screen like any other app.' })];
-  }
   if (canPrompt()) {
     return [
       el('p', { class: 'm-note', text: 'Put it on your home screen so it opens like an app, full screen.' }),

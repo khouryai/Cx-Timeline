@@ -568,13 +568,17 @@ It is the resource calendar for somebody in the field, and nothing else:
 - **Look-ahead** — the four-week sheet read one day at a time: what is on, where,
   the shift, who is named on it, and who is off site. **Only mine** narrows it
   to what names them.
+- **PTO** — ask for time off and see the answer. A request lands on the full
+  site's **PTO** tab for an administrator to approve or decline, and shows as
+  *Leave requested* on those days until they do; it can be withdrawn while it is
+  still unanswered. An administrator's own entry is booked straight away.
 - **More** — their account, light or dark, and how to install it.
 
 **The timeline is not in it** — not hidden, absent. `tools/build.js` builds the
 phone app from its own entry point and refuses to link the timeline, the plan's
 storage or anything that reads a plan file, so nothing of the P6 project is ever
-loaded on a phone. The huddle, PTO, reports and Organisation stay on a computer
-too.
+loaded on a phone. The huddle, answering leave requests, reports and
+Organisation stay on a computer too.
 
 **Installing it.** Send the team the link. On Android, open it in Chrome and use
 **More → Install the app** (or the browser's own *Install app* menu). On an

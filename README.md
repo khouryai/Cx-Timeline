@@ -381,6 +381,11 @@ nothing else:
   colleague's week can be looked at, not changed.
 - **Look-ahead** — the four-week sheet read one day at a time, with who is on
   each activity, who is off site, and an *Only mine* switch.
+- **PTO** — ask for time off (dates, kind, an optional note) and see the answer:
+  waiting, approved or declined. A request can be withdrawn until somebody
+  answers it; administrators answer on the full site's PTO tab.
+
+Shifts are Day, Night and **Blanket**.
 
 The timeline is not in it at all: the phone app is built from its own entry
 point, and the build refuses to link the timeline or anything that reads the

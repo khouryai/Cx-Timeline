@@ -1,13 +1,14 @@
 /**
  * The phone app's chrome: a header, a view, and a tab bar under the thumb.
  *
- * Three tabs, because that is what the phone is for. **My week** is the reason
+ * Four tabs, because that is what the phone is for. **My week** is the reason
  * anybody opens it — what am I on, where, and did the meeting record how it
- * went — and the one place the phone writes anything. **Look-ahead** is the
- * sheet read one day at a time. **More** is the account and the install. The
- * huddle, PTO, reports, the organisation and the timeline stay on a computer:
- * they are an administrator's screens or a wall-sized plan, and the build
- * refuses to link them into this bundle at all (`tools/build.js`).
+ * went — and where somebody changes their own plan. **Look-ahead** is the sheet
+ * read one day at a time. **PTO** asks for time off and shows the answer.
+ * **More** is the account and the install. The huddle, answering leave, reports,
+ * the organisation and the timeline stay on a computer: they are an
+ * administrator's screens or a wall-sized plan, and the build refuses to link
+ * them into this bundle at all (`tools/build.js`).
  *
  * The account states — no backend, signed out, not on the team — are the
  * desktop calendar's own (`ui/rc_gate.js`), so there is one door and not two.
@@ -29,11 +30,13 @@ import { emptyState } from '../ui/components.js';
 import { notConfigured, signInForm, notOnTheTeam } from '../ui/rc_gate.js';
 import * as week from './week.js';
 import * as lookahead from './lookahead.js';
+import * as timeoff from './timeoff.js';
 import * as more from './more.js';
 
 const TABS = [
   { id: 'week', label: 'My week', icon: 'calendar-check', render: week.render },
   { id: 'lookahead', label: 'Look-ahead', icon: 'calendar', render: lookahead.render },
+  { id: 'pto', label: 'PTO', icon: 'sun', render: timeoff.render },
   { id: 'more', label: 'More', icon: 'user', render: more.render },
 ];
 

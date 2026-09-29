@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 18   Built: 2026-09-28T21:10:32.537Z
+ * Modules: 19   Built: 2026-09-29T00:07:07.875Z
  */
 (function () {
   'use strict';
@@ -120,6 +120,7 @@ __mods["mobile/pwa.js"] = function (__x, __req) {
    */
 
   let deferredPrompt = null;
+  let installedHere = false;
   const listeners = new Set();
 
   /** Register the worker and listen for the browser offering to install. */
@@ -136,6 +137,7 @@ __mods["mobile/pwa.js"] = function (__x, __req) {
     });
     window.addEventListener('appinstalled', () => {
       deferredPrompt = null;
+      installedHere = true;
       changed();
     });
 
@@ -162,6 +164,14 @@ __mods["mobile/pwa.js"] = function (__x, __req) {
   function isStandalone() {
     return (typeof matchMedia === 'function' && matchMedia('(display-mode: standalone)').matches)
       || navigator.standalone === true;
+  }
+
+  /**
+   * True once it is on the home screen: opened from there, or installed from this
+   * tab a moment ago (which is still a browser tab, so `display-mode` says no).
+   */
+  function isInstalled() {
+    return isStandalone() || installedHere;
   }
 
   /** True when the browser has offered to install and nobody has answered yet. */
@@ -193,6 +203,7 @@ __mods["mobile/pwa.js"] = function (__x, __req) {
   Object.defineProperty(__x, "installPwa", { get: () => installPwa, enumerable: true });
   Object.defineProperty(__x, "onInstallChange", { get: () => onInstallChange, enumerable: true });
   Object.defineProperty(__x, "isStandalone", { get: () => isStandalone, enumerable: true });
+  Object.defineProperty(__x, "isInstalled", { get: () => isInstalled, enumerable: true });
   Object.defineProperty(__x, "canPrompt", { get: () => canPrompt, enumerable: true });
   Object.defineProperty(__x, "promptInstall", { get: () => promptInstall, enumerable: true });
   Object.defineProperty(__x, "isIos", { get: () => isIos, enumerable: true });
@@ -1249,6 +1260,17 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_leave', (q) => q.eq('status', 'requested').order('start_date'));
   }
 
+  /**
+   * One person's leave from a date on, whatever its answer — the phone's "your
+   * time off". Declined rows stay in, because "they said no" is the answer
+   * somebody opened this to find; withdrawn ones do not, because the person who
+   * withdrew it already knows.
+   */
+  function leaveFor(personId, fromISO) {
+    return select('rc_leave', (q) =>
+      q.eq('person_id', personId).gte('end_date', fromISO).neq('status', 'cancelled').order('start_date'));
+  }
+
   function listLeave(fromISO, toISO) {
     return select('rc_leave', (q) =>
       q.lte('start_date', toISO).gte('end_date', fromISO).neq('status', 'cancelled'));
@@ -1818,6 +1840,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listSettings", { get: () => listSettings, enumerable: true });
   Object.defineProperty(__x, "listLeaveKinds", { get: () => listLeaveKinds, enumerable: true });
   Object.defineProperty(__x, "pendingLeave", { get: () => pendingLeave, enumerable: true });
+  Object.defineProperty(__x, "leaveFor", { get: () => leaveFor, enumerable: true });
   Object.defineProperty(__x, "listLeave", { get: () => listLeave, enumerable: true });
   Object.defineProperty(__x, "listPlan", { get: () => listPlan, enumerable: true });
   Object.defineProperty(__x, "planHistory", { get: () => planHistory, enumerable: true });
@@ -6277,11 +6300,25 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
 
   const STATUS_BY_ID = new Map(STATUSES.map((s) => [s.id, s]));
 
+  /**
+   * The three shifts, in the words the team uses.
+   *
+   * The third is a **blanket** — the possession the track is handed over for. It
+   * is stored as `possession`, because that is the value `rc_plan_entries` and
+   * `rc_actuals` check for and a rename would be a migration of every row ever
+   * written for nothing a reader can see; it is *called* Blanket everywhere it
+   * is drawn. `shiftFor()` already reads "blanket" on the workbook as this one.
+   */
   const SHIFTS = [
     { id: 'day', label: 'Day' },
     { id: 'night', label: 'Night' },
-    { id: 'possession', label: 'Possession' },
+    { id: 'possession', label: 'Blanket' },
   ];
+
+  /** What a stored shift is called on screen. One place, so three views cannot differ. */
+  function shiftLabel(id) {
+    return SHIFTS.find((s) => s.id === id)?.label || id || '';
+  }
 
   /* ══════════════════════════════════════════════════════════════════════════
      Names written in a spreadsheet, and the people they are
@@ -7130,6 +7167,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "STATUSES", { get: () => STATUSES, enumerable: true });
   Object.defineProperty(__x, "STATUS_BY_ID", { get: () => STATUS_BY_ID, enumerable: true });
   Object.defineProperty(__x, "SHIFTS", { get: () => SHIFTS, enumerable: true });
+  Object.defineProperty(__x, "shiftLabel", { get: () => shiftLabel, enumerable: true });
   Object.defineProperty(__x, "foldName", { get: () => foldName, enumerable: true });
   Object.defineProperty(__x, "nameRegister", { get: () => nameRegister, enumerable: true });
   Object.defineProperty(__x, "nameDistance", { get: () => nameDistance, enumerable: true });
@@ -7195,7 +7233,7 @@ __mods["mobile/week.js"] = function (__x, __req) {
   const { textInput, selectInput, segmented, toast, badge, field, confirmDialog } = __req("ui/components.js");
 
 
-  const { SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, isoToMs, byId, availability, notifyChanged, formModal, nameRegister, lookaheadWithResources, assignmentIndex, outcomeLookup } = __req("ui/rc_util.js");
+  const { SHIFTS, shiftLabel, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, isoToMs, byId, availability, notifyChanged, formModal, nameRegister, lookaheadWithResources, assignmentIndex, outcomeLookup } = __req("ui/rc_util.js");
 
 
 
@@ -7328,14 +7366,6 @@ __mods["mobile/week.js"] = function (__x, __req) {
     }));
     root.appendChild(list);
 
-    root.appendChild(el('p', {
-      class: 'm-note m-foot',
-      text: 'Where the 4WLA names you, that is your plan for the day and nothing needs typing. '
-        + 'Anything you add or change here is saved as your own entry, which the daily huddle and '
-        + 'the week plan read exactly as they read the sheet — and nothing is ever deleted: a '
-        + 'changed or removed task stays on the record.',
-    }));
-
     /* Today, in view — once per week and person, so a re-read after an edit does
        not yank the screen back up to it. */
     const key = `${person.id}|${from}`;
@@ -7422,7 +7452,7 @@ __mods["mobile/week.js"] = function (__x, __req) {
     const outcome = outcomeFor(entry, person.id, iso);
     const status = outcome ? STATUS_BY_ID.get(outcome.status) : null;
     const where = locs.get(entry.location_id)?.name || entry.raw_location;
-    const shift = entry.shift && entry.shift !== 'day' ? SHIFTS.find((s) => s.id === entry.shift)?.label : null;
+    const shift = entry.shift && entry.shift !== 'day' ? shiftLabel(entry.shift) : null;
 
     const flags = [
       /* The workbook is the assumption, so only a day somebody typed carries a
@@ -8019,6 +8049,201 @@ __mods["mobile/lookahead.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// mobile/timeoff.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["mobile/timeoff.js"] = function (__x, __req) {
+  /**
+   * PTO — asking for time off from a phone, and seeing the answer.
+   *
+   * The same single `rc_leave` row the desktop's PTO tab writes, never a second
+   * list: a request is the row it will become, with `status = 'requested'` saying
+   * nobody has answered it yet (`rc.requestLeave()`). The policies are what make
+   * that safe — a member may insert `requested` for themselves and nobody else, and
+   * the only change they may make afterwards is to withdraw it while it is still
+   * unanswered — so this draws what the database allows and nothing more. An
+   * administrator's own entry is booked straight away, as the desktop books it.
+   *
+   * A request is not leave yet. `availability()` carries it as `asked`, so My week
+   * shows "Leave requested" on those days without taking them out of the plan;
+   * approving it on a computer turns the same row into leave everywhere at once.
+   *
+   * Imports: util, dates, rc, icons, components, rc_util.
+   */
+
+  const { el } = __req("core/util.js");
+  const { MS_DAY } = __req("core/dates.js");
+  const rc = __req("core/rc.js");
+  const { icon } = __req("ui/icons.js");
+  const { textInput, selectInput, toast, badge, field, confirmDialog } = __req("ui/components.js");
+  const { todayISO, dayLabel, isoToMs, byId, notifyChanged, formModal } = __req("ui/rc_util.js");
+
+  /** What each answer is called, in the words of somebody waiting for one. */
+  const ANSWERS = {
+    requested: { label: 'Waiting for approval', tone: 'warn' },
+    approved: { label: 'Approved', tone: 'good' },
+    declined: { label: 'Declined', tone: 'bad' },
+  };
+
+  async function render(root) {
+    const me = rc.me();
+    const today = todayISO();
+    const [rows, kinds, people] = await Promise.all([
+      rc.leaveFor(me.id, today),
+      rc.listLeaveKinds().catch(() => []),
+      rc.listPeople().catch(() => []),
+    ]);
+    const admin = rc.isAdmin();
+    // The roster row, for the working days; `me()` carries the account, not them.
+    const self = people.find((p) => p.id === me.id) || me;
+    const kindById = byId(kinds);
+
+    if (rc.canWrite()) {
+      root.appendChild(el('button', {
+        class: 'cx-btn primary m-wide',
+        type: 'button',
+        html: `${icon('plus', { size: 16 })}<span>Request PTO</span>`,
+        onClick: () => requestForm({ self, kinds, admin, existing: rows }),
+      }));
+      root.appendChild(el('p', {
+        class: 'm-note m-under',
+        text: admin
+          ? 'As an administrator, what you enter here is booked straight away.'
+          : 'It goes to an administrator as a request. You can withdraw it until it is answered.',
+      }));
+    } else {
+      root.appendChild(el('p', { class: 'm-note', text: 'Your account can read the calendar but not change it.' }));
+    }
+
+    root.appendChild(el('h2', { class: 'm-card-title m-list-title', text: 'Your PTO' }));
+    if (!rows.length) {
+      root.appendChild(el('p', { class: 'm-empty-day', text: 'Nothing booked or requested from today on.' }));
+      return;
+    }
+    root.appendChild(el('div', { class: 'm-leave-list' },
+      rows.map((row) => leaveCard(row, { kindById, self }))));
+  }
+
+  function leaveCard(row, { kindById, self }) {
+    const answer = ANSWERS[row.status] || { label: row.status, tone: 'neutral' };
+    const days = workingDays(self, row.start_date, row.end_date);
+    return el('article', { class: `m-leave m-leave-${row.status}` }, [
+      el('div', { class: 'm-leave-head' }, [
+        el('div', { class: 'm-task-title', text: span(row.start_date, row.end_date) }),
+        badge(answer.label, answer.tone),
+      ]),
+      el('div', { class: 'm-task-meta' }, [
+        el('span', { text: kindById.get(row.kind_id)?.name || 'Time off' }),
+        el('span', { text: `${days} working day${days === 1 ? '' : 's'}` }),
+      ]),
+      row.note ? el('div', { class: 'm-hint', text: row.note }) : null,
+      row.status === 'requested' && rc.canWrite()
+        ? el('div', { class: 'm-task-acts' }, [
+          el('button', {
+            class: 'cx-btn ghost danger',
+            type: 'button',
+            html: `${icon('x', { size: 14 })}<span>Withdraw</span>`,
+            'aria-label': `Withdraw the request for ${span(row.start_date, row.end_date)}`,
+            onClick: () => withdraw(row),
+          }),
+        ])
+        : null,
+    ]);
+  }
+
+  /** "Mon, Oct 12 – Fri, Oct 16, 2026", or the one day. */
+  function span(from, to) {
+    return from === to ? dayLabel(from, 'dayFull') : `${dayLabel(from, 'day')} – ${dayLabel(to, 'dayFull')}`;
+  }
+
+  /** The days in a span somebody would otherwise have worked — what they are asking for. */
+  function workingDays(person, from, to) {
+    const working = Array.isArray(person?.working_days) ? person.working_days : [1, 2, 3, 4, 5];
+    let n = 0;
+    for (let ms = isoToMs(from); ms <= isoToMs(to); ms += MS_DAY) {
+      if (working.includes(new Date(ms).getUTCDay() || 7)) n++;
+    }
+    return n;
+  }
+
+  function requestForm({ self, kinds, admin, existing }) {
+    const today = todayISO();
+    const start = el('input', { type: 'date', class: 'cx-input' });
+    const end = el('input', { type: 'date', class: 'cx-input' });
+    start.value = today;
+    end.value = today;
+    // Moving the start past the end drags the end with it: the commonest request
+    // is one day, and the second commonest is a run starting where it was set.
+    start.addEventListener('change', () => {
+      if (!end.value || end.value < start.value) end.value = start.value;
+    });
+    const kind = selectInput({
+      value: kinds[0]?.id || '',
+      options: kinds.map((k) => ({ value: k.id, label: k.name })),
+    });
+    const note = textInput({ placeholder: 'Optional' });
+
+    formModal({
+      title: admin ? 'Book PTO' : 'Request PTO',
+      body: el('div', { class: 'cx-form m-form' }, [
+        field('From', start),
+        field('To', end, 'The last day you are off.'),
+        kinds.length ? field('Kind', kind) : null,
+        field('Note', note),
+      ].filter(Boolean)),
+      confirmLabel: admin ? 'Book it' : 'Send request',
+      onConfirm: async () => {
+        if (!start.value || !end.value) throw new Error('Both dates are needed.');
+        if (end.value < start.value) throw new Error('The last day is before the first.');
+        if (!workingDays(self, start.value, end.value)) {
+          throw new Error('None of those days is one you work, so there is nothing to take off.');
+        }
+        /* A second request over days already asked for or booked is the same
+           question twice, and whoever answers it would have to notice. */
+        const clash = existing.find((r) => r.status !== 'declined'
+          && r.start_date <= end.value && r.end_date >= start.value);
+        if (clash) {
+          throw new Error(`You already have PTO over those days: ${span(clash.start_date, clash.end_date)}.`);
+        }
+        const row = {
+          person_id: self.id,
+          start_date: start.value,
+          end_date: end.value,
+          kind_id: kind.value || null,
+          note: note.value.trim() || null,
+        };
+        if (admin) await rc.addLeave({ ...row, status: 'approved' });
+        else await rc.requestLeave(row);
+        notifyChanged('leave');
+        toast({
+          tone: 'good',
+          message: admin ? 'Booked.' : 'Sent. It shows as waiting until an administrator answers it.',
+        });
+      },
+    });
+  }
+
+  async function withdraw(row) {
+    const ok = await confirmDialog({
+      title: 'Withdraw this request?',
+      message: `${span(row.start_date, row.end_date)}. Nobody has answered it yet, so it simply comes off `
+        + 'the list — you can ask again later.',
+      confirmLabel: 'Withdraw',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await rc.updateLeave(row.id, { status: 'cancelled' });
+      notifyChanged('leave');
+      toast({ tone: 'good', message: 'Withdrawn.' });
+    } catch (err) {
+      toast({ tone: 'bad', message: err?.message || String(err) });
+    }
+  }
+
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // mobile/more.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["mobile/more.js"] = function (__x, __req) {
@@ -8038,7 +8263,7 @@ __mods["mobile/more.js"] = function (__x, __req) {
   const { icon } = __req("ui/icons.js");
   const { segmented, toast } = __req("ui/components.js");
   const { THEME_CHOICES, themePreference, setThemePreference } = __req("mobile/theme.js");
-  const { isStandalone, canPrompt, promptInstall, isIos, onInstallChange } = __req("mobile/pwa.js");
+  const { isInstalled, canPrompt, promptInstall, isIos, onInstallChange } = __req("mobile/pwa.js");
 
   const ROLES = {
     admin: 'Administrator — you can plan anybody’s days.',
@@ -8082,17 +8307,22 @@ __mods["mobile/more.js"] = function (__x, __req) {
       el('p', { class: 'm-note', text: '"Phone" follows the light or dark setting of the phone itself.' }),
     ]));
 
+    /* Only while there is something to do about it. Once the app is on the home
+       screen the card has nothing left to say, and a card saying so is a card
+       somebody reads every time for no reason. */
     const install = el('div');
+    const installCard = card('On this phone', [install]);
     const drawInstall = () => {
       clear(install);
-      install.append(...installHelp());
+      installCard.hidden = isInstalled();
+      if (!installCard.hidden) install.append(...installHelp());
     };
     drawInstall();
     stopListening?.();
     stopListening = onInstallChange(() => {
       if (install.isConnected) drawInstall();
     });
-    root.appendChild(card('On this phone', [install]));
+    root.appendChild(installCard);
 
     root.appendChild(card('Everything else', [
       el('p', {
@@ -8122,9 +8352,6 @@ __mods["mobile/more.js"] = function (__x, __req) {
   }
 
   function installHelp() {
-    if (isStandalone()) {
-      return [el('p', { class: 'm-note', text: 'Installed — it opens from your home screen like any other app.' })];
-    }
     if (canPrompt()) {
       return [
         el('p', { class: 'm-note', text: 'Put it on your home screen so it opens like an app, full screen.' }),
@@ -8163,13 +8390,14 @@ __mods["mobile/shell.js"] = function (__x, __req) {
   /**
    * The phone app's chrome: a header, a view, and a tab bar under the thumb.
    *
-   * Three tabs, because that is what the phone is for. **My week** is the reason
+   * Four tabs, because that is what the phone is for. **My week** is the reason
    * anybody opens it — what am I on, where, and did the meeting record how it
-   * went — and the one place the phone writes anything. **Look-ahead** is the
-   * sheet read one day at a time. **More** is the account and the install. The
-   * huddle, PTO, reports, the organisation and the timeline stay on a computer:
-   * they are an administrator's screens or a wall-sized plan, and the build
-   * refuses to link them into this bundle at all (`tools/build.js`).
+   * went — and where somebody changes their own plan. **Look-ahead** is the sheet
+   * read one day at a time. **PTO** asks for time off and shows the answer.
+   * **More** is the account and the install. The huddle, answering leave, reports,
+   * the organisation and the timeline stay on a computer: they are an
+   * administrator's screens or a wall-sized plan, and the build refuses to link
+   * them into this bundle at all (`tools/build.js`).
    *
    * The account states — no backend, signed out, not on the team — are the
    * desktop calendar's own (`ui/rc_gate.js`), so there is one door and not two.
@@ -8191,11 +8419,13 @@ __mods["mobile/shell.js"] = function (__x, __req) {
   const { notConfigured, signInForm, notOnTheTeam } = __req("ui/rc_gate.js");
   const week = __req("mobile/week.js");
   const lookahead = __req("mobile/lookahead.js");
+  const timeoff = __req("mobile/timeoff.js");
   const more = __req("mobile/more.js");
 
   const TABS = [
     { id: 'week', label: 'My week', icon: 'calendar-check', render: week.render },
     { id: 'lookahead', label: 'Look-ahead', icon: 'calendar', render: lookahead.render },
+    { id: 'pto', label: 'PTO', icon: 'sun', render: timeoff.render },
     { id: 'more', label: 'More', icon: 'user', render: more.render },
   ];
 

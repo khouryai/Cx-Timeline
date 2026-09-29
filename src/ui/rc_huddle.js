@@ -43,7 +43,7 @@ import { selectInput, textInput, toast, badge, checkbox } from './components.js'
    see is the one action with no visible result. */
 import { saveFile } from '../io/exporters.js';
 import {
-  STATUSES, STATUS_BY_ID, SHIFTS, weekStart, todayISO, isoToMs,
+  STATUSES, STATUS_BY_ID, SHIFTS, shiftLabel, weekStart, todayISO, isoToMs,
   dayLabel, byId, availability, notifyChanged, formModal,
   nameRegister, lookaheadWithResources, assignmentIndex,
 } from './rc_util.js';
@@ -919,7 +919,7 @@ function personRow(ctx) {
         el('div', { class: 'rc-hint' }, [
           el('span', { text: [locs.get(task.location_id)?.name,
             cats.get(task.category_id)?.name,
-            task.shift !== 'day' ? task.shift : null].filter(Boolean).join(' · ') }),
+            task.shift && task.shift !== 'day' ? shiftLabel(task.shift) : null].filter(Boolean).join(' · ') }),
         ]),
         // The chain belongs to the task it was carried on, which is the first.
         i === 0 && chain && chain.carries >= 2

@@ -140,7 +140,7 @@ ui/rc_gate                                the calendar's front door (no backend,
 main.js                                    the only module that may import freely
 
 mobile/theme · mobile/pwa                 the phone app (m/): leaves
-mobile/week · mobile/lookahead · mobile/more
+mobile/week · mobile/lookahead · mobile/timeoff · mobile/more
   → mobile/shell → mobile.js              reads through ui/rc_util, ui/rc_gate
                                           and ui/components — never the store,
                                           the timeline or any plan I/O, which
@@ -1434,8 +1434,10 @@ subscribes. That is what keeps the graph acyclic.
   letting them scroll. The page itself must never scroll sideways, and there is
   a check for exactly that.
 - **The phone app is the calendar alone, and the linker keeps it that way.**
-  `m/` is CX Calendar: **My week** (one person's days, and the only place the
-  phone writes), **Look-ahead** (the sheet one day at a time) and **More**. It is
+  `m/` is CX Calendar: **My week** (one person's days, and where they change
+  their own plan), **Look-ahead** (the sheet one day at a time), **PTO** (ask
+  for time off, see the answer, withdraw it while it is unanswered) and
+  **More**. It is
   a second entry point, `src/mobile.js`, rather than a responsive mode of the
   application, because what it must *not* carry is the point — and a bundle can
   only be kept free of the timeline by never linking it in. `tools/build.js`
@@ -1450,6 +1452,16 @@ subscribes. That is what keeps the graph acyclic.
   and overriding a derived day by writing the first stored entry with its
   `lookahead_row_id`. So a task added on a phone is in the huddle exactly as one
   added at a desk, and `rc_can_act_for()` in Postgres is the control, as ever.
+  PTO is the same single `rc_leave` row the desktop PTO tab answers:
+  `requestLeave()` for a member, booked `approved` for an administrator's own,
+  `updateLeave(…, { status: 'cancelled' })` to withdraw — never a second list of
+  requests, and the policies already pin what each role may write. It reads
+  through `leaveFor()`, one person's rows from today on. **The third shift is
+  called Blanket and stored as `possession`**: the column's check constraint
+  names `possession`, and renaming a stored value to change a word on screen
+  would be a migration of every row for nothing a reader sees. Draw a shift with
+  `shiftLabel()`, never the raw value — the week plan and the huddle printed
+  "possession" beside tasks until they did.
   **Its service worker keeps the app, never the data**: `m/sw.js` precaches the
   page, the bundle, the stylesheets and `config.js`, asks the network first for
   anything unhashed, never touches the calendar's origin, and is scoped to `m/`
@@ -1573,7 +1585,7 @@ node tools/smoke.js                  # 305 checks — the application, local mod
 node tools/smoke_calendar.js         # 331 checks — the resource calendar, accounts, the
                                      #              look-ahead grid, and the assertion that
                                      #              plan data never leaves
-node tools/smoke_mobile.js           #  79 checks — the phone app: its week, its writes,
+node tools/smoke_mobile.js           #  98 checks — the phone app: its week, its writes, PTO,
                                      #              the look-ahead by day, installing,
                                      #              offline, and that no timeline loads
 node tools/smoke_folder.js           #  89 checks — the shared folder, in a browser

@@ -182,9 +182,11 @@ try {
   check('the timeline is nowhere on it',
     await page.evaluate(() => !document.querySelector('.tl-obj, #canvas-frame, #sidenav')));
   const tabs = await page.locator('#m-tabs .m-tab').allInnerTexts();
-  check('three tabs, under the thumb', tabs.join('|').replace(/\n/g, '') === 'My week|Look-ahead|More',
+  check('four tabs, under the thumb', tabs.join('|').replace(/\n/g, '') === 'My week|Look-ahead|PTO|More',
     tabs.join(' | ').replace(/\n/g, ''));
   check('the week is drawn as its seven days', (await page.locator('.m-day').count()) === 7);
+  check('with no paragraph of explanation under it',
+    !/nothing needs typing|stays on the record/i.test(await page.locator('.m-view').innerText()));
 
   const todayISO = await page.evaluate(() => window.__rc.axis.today);
   const todayCard = page.locator(`.m-day[data-date="${todayISO}"]`);
@@ -227,6 +229,10 @@ try {
     els.map((e) => parseFloat(getComputedStyle(e).fontSize)));
   check('its fields are 16px, so the phone does not zoom on focus', fontSizes.every((s) => s >= 16),
     fontSizes.join(', '));
+  const shiftNames = await page.locator('.cx-modal .cx-seg button').allTextContents();
+  check('the shifts are Day, Night and Blanket', shiftNames.join('|') === 'Day|Night|Blanket',
+    shiftNames.join(' | '));
+  await page.locator('.cx-modal .cx-seg button', { hasText: 'Blanket' }).click();
   const chips = page.locator('.cx-modal .m-daychips .m-chip');
   const chipCount = await chips.count();
   check('the week’s other working days are offered alongside', chipCount >= 1, `${chipCount}`);
@@ -239,12 +245,17 @@ try {
   const written = await rcState(page, () => window.__rc.rows.rc_plan_entries
     .filter((e) => e.person_id === 'p1' && e.task === 'Office — RFI log')
     .map((e) => e.work_date));
+  const shiftsWritten = await rcState(page, () => [...new Set(window.__rc.rows.rc_plan_entries
+    .filter((e) => e.person_id === 'p1' && e.task === 'Office — RFI log').map((e) => e.shift))]);
+  check('a blanket is stored as the value the database checks for', shiftsWritten.join() === 'possession',
+    shiftsWritten.join());
   check('the day is written as their own plan entry', written.includes(addDay), written.join(', '));
   check('and the other day ticked with it, one entry per day',
     written.length === (chipCount ? 2 : 1), `${written.length} row(s)`);
   const added = page.locator(`.m-day[data-date="${addDay}"] .m-task`, { hasText: 'Office — RFI log' });
   check('it is drawn at once, flagged as typed rather than from the sheet',
     (await added.count()) === 1 && /Manual/.test(await added.innerText()));
+  check('and its shift reads as Blanket', /Blanket/.test(await added.innerText()));
 
   /* ── Changing ───────────────────────────────────────────────────────── */
 
@@ -444,11 +455,121 @@ try {
 
   await mContext.setOffline(true);
   await page.reload({ waitUntil: 'load' });
-  await page.waitForSelector('#m-head', { timeout: 10000 });
-  check('with the network gone it still opens', (await page.title()) === 'CX Calendar');
-  await page.waitForSelector('.m-offline', { timeout: 10000 }).catch(() => {});
-  check('and says it is offline, in the chrome', (await page.locator('.m-offline').count()) === 1);
+  /* The tab bar, not the header: `#m-head` is in the page's own markup, so it
+     is there even when none of the app's code ran — which is exactly what an
+     app that failed to come out of the cache would look like. The tabs are
+     drawn by the bundle, so this proves the whole app opened from the phone. */
+  const opened = await page.waitForSelector('#m-tabs .m-tab', { timeout: 10000 }).then(() => true, () => false);
+  check('with the network gone it still opens — the app itself, not just its page',
+    opened && (await page.title()) === 'CX Calendar');
+
+  /* The chip reads `navigator.onLine`, which is what a phone with no signal
+     reports. Playwright's offline switch sets it on some Chromium builds and
+     not on others — CI's newer one did not, and the check failed on a page
+     that had opened perfectly well — so where the browser under test does not
+     say it, the suite says it the way the phone would, and checks what this
+     app does about it, which is the part that is ours. */
+  const saidOffline = await page.evaluate(() => navigator.onLine === false);
+  if (!saidOffline) {
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+      window.dispatchEvent(new Event('offline'));
+    });
+  }
+  const chip = await page.waitForSelector('.m-offline', { timeout: 10000 }).then(() => true, () => false);
+  check('and says it is offline, in the chrome', chip && (await page.locator('.m-offline').count()) === 1,
+    saidOffline ? 'the browser reported it' : 'the browser did not report it, so the suite did');
   await mContext.setOffline(false);
+  // Hand the answer back to the browser, or every check after this one runs offline.
+  if (!saidOffline) {
+    await page.evaluate(() => {
+      delete navigator.onLine;
+      window.dispatchEvent(new Event('online'));
+    });
+  }
+
+  /* ── Time off ───────────────────────────────────────────────────────── */
+
+  console.log('\nAsking for PTO');
+
+  await page.locator('#m-tabs .m-tab', { hasText: 'PTO' }).click();
+  await page.waitForSelector('.m-view[data-view="pto"] .m-list-title');
+  check('the PTO tab opens with nothing asked for yet',
+    /Nothing booked or requested/i.test(await page.locator('.m-view').innerText()));
+
+  /* A week after the first day from today that Alex works — so always a
+     weekday, always next week, and never today: the form opens on today, and
+     asking for a later day is what shows the last day following the first. */
+  const ptoDay = await page.evaluate(() => {
+    let ms = Date.parse(`${window.__rc.axis.today}T00:00:00Z`);
+    while ((new Date(ms).getUTCDay() || 7) > 5) ms += 86400000;
+    return new Date(ms + 7 * 86400000).toISOString().slice(0, 10);
+  });
+
+  await page.getByRole('button', { name: 'Request PTO' }).click();
+  await page.waitForSelector('.cx-modal');
+  const ptoDates = page.locator('.cx-modal input[type="date"]');
+  check('the request opens on today, as one day',
+    (await ptoDates.nth(0).inputValue()) === todayISO && (await ptoDates.nth(1).inputValue()) === todayISO);
+  await ptoDates.nth(0).fill(ptoDay);
+  await ptoDates.nth(0).dispatchEvent('change');
+  check('and moving the first day drags the last one with it', (await ptoDates.nth(1).inputValue()) === ptoDay);
+  check('its date fields are 16px too', (await ptoDates.evaluateAll((els) =>
+    els.map((e) => parseFloat(getComputedStyle(e).fontSize)))).every((px) => px >= 16));
+  if (SHOT) await page.screenshot({ path: SHOT.replace(/(\.png)?$/, '-pto-form.png') });
+  await page.locator('.cx-modal input[placeholder="Optional"]').fill('Family wedding');
+  await page.locator('.cx-modal-foot').getByRole('button', { name: 'Send request' }).click();
+  await page.waitForFunction(() => !document.querySelector('.cx-modal'));
+  await page.waitForTimeout(300);
+
+  const asked = await rcState(page, () => window.__rc.rows.rc_leave.filter((l) => l.person_id === 'p1'));
+  check('it is one leave row, theirs, sent as a request — the row the desktop PTO tab answers',
+    asked.length === 1 && asked[0].status === 'requested' && asked[0].start_date === ptoDay
+      && asked[0].end_date === ptoDay && asked[0].kind_id === 'k1' && asked[0].note === 'Family wedding',
+    JSON.stringify(asked.map(({ status, start_date, kind_id }) => ({ status, start_date, kind_id }))));
+  const leaveCard = page.locator('.m-leave');
+  const leaveText = await leaveCard.innerText().catch(() => '');
+  check('it is listed as waiting for approval, with what was asked',
+    (await leaveCard.count()) === 1 && /Waiting for approval/.test(leaveText)
+      && /1 working day/.test(leaveText) && /Annual leave/.test(leaveText) && /Family wedding/.test(leaveText),
+    leaveText.replace(/\n/g, ' | '));
+  if (SHOT) await page.screenshot({ path: SHOT.replace(/(\.png)?$/, '-pto.png') });
+
+  await page.getByRole('button', { name: 'Request PTO' }).click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal input[type="date"]').nth(0).fill(ptoDay);
+  await page.locator('.cx-modal input[type="date"]').nth(1).fill(ptoDay);
+  await page.locator('.cx-modal-foot').getByRole('button', { name: 'Send request' }).click();
+  await page.waitForSelector('.cx-modal .rc-error:not([hidden])');
+  check('the same days cannot be asked for twice',
+    /already have PTO/i.test(await page.locator('.cx-modal .rc-error').innerText()));
+  await page.locator('.cx-modal-foot').getByRole('button', { name: 'Cancel' }).click();
+  await page.waitForFunction(() => !document.querySelector('.cx-modal'));
+
+  await page.locator('#m-tabs .m-tab', { hasText: 'My week' }).click();
+  await page.waitForSelector('.m-day');
+  if (!(await page.locator(`.m-day[data-date="${ptoDay}"]`).count())) {
+    await page.getByRole('button', { name: 'Next week' }).click();
+    await page.waitForSelector(`.m-day[data-date="${ptoDay}"]`);
+  }
+  const requestedDay = await page.locator(`.m-day[data-date="${ptoDay}"]`).innerText();
+  check('My week shows the day as requested — and still planned, because nobody has said yes',
+    /Leave requested/.test(requestedDay) && !/On leave/.test(requestedDay));
+  if (await page.locator('text=Back to this week').count()) await page.locator('text=Back to this week').click();
+
+  await page.locator('#m-tabs .m-tab', { hasText: 'PTO' }).click();
+  await page.waitForSelector('.m-leave');
+  await page.locator('.m-leave').getByRole('button', { name: /^Withdraw/ }).click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal-foot').getByRole('button', { name: 'Withdraw', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('.cx-modal'));
+  await page.waitForTimeout(300);
+  check('withdrawing it changes its answer and deletes nothing',
+    await rcState(page, () => {
+      const mine = window.__rc.rows.rc_leave.filter((l) => l.person_id === 'p1');
+      return mine.length === 1 && mine[0].status === 'cancelled';
+    }));
+  check('and it leaves the list', (await page.locator('.m-leave').count()) === 0);
 
   /* ── The account ────────────────────────────────────────────────────── */
 
@@ -461,6 +582,7 @@ try {
   check('it says who is signed in and what they may do',
     /Alex/.test(moreText) && /plan your own days/i.test(moreText));
   check('and points at the full site for everything else', /full site/i.test(moreText));
+  check('in a browser tab it says how to install', /On this phone/i.test(moreText));
   if (SHOT) await page.screenshot({ path: SHOT.replace(/(\.png)?$/, '-more.png') });
   await page.getByRole('button', { name: 'Sign out' }).click();
   await page.waitForSelector('.rc-signin');
@@ -499,6 +621,10 @@ try {
   check('and is offered nothing to change',
     (await viewer.page.locator('.m-add, .m-task-acts button').count()) === 0);
   check('and told why', /read the calendar but not change it/i.test(await viewer.page.locator('.m-view').innerText()));
+  await viewer.page.locator('#m-tabs .m-tab', { hasText: 'PTO' }).click();
+  await viewer.page.waitForSelector('.m-view[data-view="pto"] .m-list-title');
+  check('nor offered a PTO request the database would refuse',
+    (await viewer.page.getByRole('button', { name: 'Request PTO' }).count()) === 0);
   await viewer.context.close();
 
   const admin = await phone({ role: 'admin' });
@@ -511,7 +637,43 @@ try {
   await admin.page.waitForSelector('.m-task');
   check('and may plan anybody’s', (await admin.page.locator('.m-view .m-task-acts button').count()) >= 1
     && (await admin.page.locator('.m-view .m-note', { hasText: 'read-only' }).count()) === 0);
+
+  await admin.page.locator('#m-tabs .m-tab', { hasText: 'PTO' }).click();
+  await admin.page.getByRole('button', { name: 'Request PTO' }).click();
+  await admin.page.waitForSelector('.cx-modal');
+  check('an administrator\u2019s own PTO is booked rather than asked for',
+    /Book PTO/.test(await admin.page.locator('.cx-modal-title').innerText()));
+  const adminDay = await admin.page.evaluate(() => {
+    let ms = Date.parse(`${window.__rc.axis.today}T00:00:00Z`);
+    while ((new Date(ms).getUTCDay() || 7) > 5) ms += 86400000;
+    return new Date(ms).toISOString().slice(0, 10);
+  });
+  await admin.page.locator('.cx-modal input[type="date"]').nth(0).fill(adminDay);
+  await admin.page.locator('.cx-modal input[type="date"]').nth(1).fill(adminDay);
+  await admin.page.locator('.cx-modal-foot').getByRole('button', { name: 'Book it' }).click();
+  await admin.page.waitForFunction(() => !document.querySelector('.cx-modal'));
+  await admin.page.waitForSelector('.m-leave');
+  check('and lands approved', await admin.page.evaluate(() => window.__rc.rows.rc_leave
+    .some((l) => l.person_id === 'p1' && l.status === 'approved'))
+    && /Approved/.test(await admin.page.locator('.m-leave').innerText()));
   await admin.context.close();
+
+  /* Installed: opened from the home screen. The phone says so through
+     `display-mode`, which is stood in for here — no browser under test can be
+     put on a home screen. */
+  const installed = await phone({ role: 'member' });
+  await installed.page.addInitScript(() => {
+    const real = window.matchMedia.bind(window);
+    window.matchMedia = (query) => (/display-mode:\s*standalone/.test(query)
+      ? { matches: true, media: query, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }
+      : real(query));
+  });
+  await installed.page.goto(`${APP}#more`, { waitUntil: 'load' });
+  await installed.page.waitForSelector('.m-card');
+  const installedText = await installed.page.locator('.m-view').innerText();
+  check('once installed, More says nothing about installing',
+    !/On this phone|Installed/i.test(installedText), installedText.replace(/\n/g, ' | ').slice(0, 120));
+  await installed.context.close();
 
   /* ══════════════════════════════════════════════════════════════════════
      Nobody signed in

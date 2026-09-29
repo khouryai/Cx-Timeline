@@ -38,7 +38,7 @@ import {
   textInput, selectInput, segmented, toast, badge, field, confirmDialog,
 } from '../ui/components.js';
 import {
-  SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, isoToMs, byId, availability,
+  SHIFTS, shiftLabel, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, isoToMs, byId, availability,
   notifyChanged, formModal, nameRegister, lookaheadWithResources, assignmentIndex, outcomeLookup,
 } from '../ui/rc_util.js';
 
@@ -170,14 +170,6 @@ export async function render(root) {
   }));
   root.appendChild(list);
 
-  root.appendChild(el('p', {
-    class: 'm-note m-foot',
-    text: 'Where the 4WLA names you, that is your plan for the day and nothing needs typing. '
-      + 'Anything you add or change here is saved as your own entry, which the daily huddle and '
-      + 'the week plan read exactly as they read the sheet — and nothing is ever deleted: a '
-      + 'changed or removed task stays on the record.',
-  }));
-
   /* Today, in view — once per week and person, so a re-read after an edit does
      not yank the screen back up to it. */
   const key = `${person.id}|${from}`;
@@ -264,7 +256,7 @@ function taskCard(entry, iso, ctx) {
   const outcome = outcomeFor(entry, person.id, iso);
   const status = outcome ? STATUS_BY_ID.get(outcome.status) : null;
   const where = locs.get(entry.location_id)?.name || entry.raw_location;
-  const shift = entry.shift && entry.shift !== 'day' ? SHIFTS.find((s) => s.id === entry.shift)?.label : null;
+  const shift = entry.shift && entry.shift !== 'day' ? shiftLabel(entry.shift) : null;
 
   const flags = [
     /* The workbook is the assumption, so only a day somebody typed carries a

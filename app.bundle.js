@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-28T21:10:32.494Z
+ * Modules: 59   Built: 2026-09-29T00:07:07.839Z
  */
 (function () {
   'use strict';
@@ -16310,6 +16310,17 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_leave', (q) => q.eq('status', 'requested').order('start_date'));
   }
 
+  /**
+   * One person's leave from a date on, whatever its answer — the phone's "your
+   * time off". Declined rows stay in, because "they said no" is the answer
+   * somebody opened this to find; withdrawn ones do not, because the person who
+   * withdrew it already knows.
+   */
+  function leaveFor(personId, fromISO) {
+    return select('rc_leave', (q) =>
+      q.eq('person_id', personId).gte('end_date', fromISO).neq('status', 'cancelled').order('start_date'));
+  }
+
   function listLeave(fromISO, toISO) {
     return select('rc_leave', (q) =>
       q.lte('start_date', toISO).gte('end_date', fromISO).neq('status', 'cancelled'));
@@ -16879,6 +16890,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listSettings", { get: () => listSettings, enumerable: true });
   Object.defineProperty(__x, "listLeaveKinds", { get: () => listLeaveKinds, enumerable: true });
   Object.defineProperty(__x, "pendingLeave", { get: () => pendingLeave, enumerable: true });
+  Object.defineProperty(__x, "leaveFor", { get: () => leaveFor, enumerable: true });
   Object.defineProperty(__x, "listLeave", { get: () => listLeave, enumerable: true });
   Object.defineProperty(__x, "listPlan", { get: () => listPlan, enumerable: true });
   Object.defineProperty(__x, "planHistory", { get: () => planHistory, enumerable: true });
@@ -32829,11 +32841,25 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
 
   const STATUS_BY_ID = new Map(STATUSES.map((s) => [s.id, s]));
 
+  /**
+   * The three shifts, in the words the team uses.
+   *
+   * The third is a **blanket** — the possession the track is handed over for. It
+   * is stored as `possession`, because that is the value `rc_plan_entries` and
+   * `rc_actuals` check for and a rename would be a migration of every row ever
+   * written for nothing a reader can see; it is *called* Blanket everywhere it
+   * is drawn. `shiftFor()` already reads "blanket" on the workbook as this one.
+   */
   const SHIFTS = [
     { id: 'day', label: 'Day' },
     { id: 'night', label: 'Night' },
-    { id: 'possession', label: 'Possession' },
+    { id: 'possession', label: 'Blanket' },
   ];
+
+  /** What a stored shift is called on screen. One place, so three views cannot differ. */
+  function shiftLabel(id) {
+    return SHIFTS.find((s) => s.id === id)?.label || id || '';
+  }
 
   /* ══════════════════════════════════════════════════════════════════════════
      Names written in a spreadsheet, and the people they are
@@ -33682,6 +33708,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "STATUSES", { get: () => STATUSES, enumerable: true });
   Object.defineProperty(__x, "STATUS_BY_ID", { get: () => STATUS_BY_ID, enumerable: true });
   Object.defineProperty(__x, "SHIFTS", { get: () => SHIFTS, enumerable: true });
+  Object.defineProperty(__x, "shiftLabel", { get: () => shiftLabel, enumerable: true });
   Object.defineProperty(__x, "foldName", { get: () => foldName, enumerable: true });
   Object.defineProperty(__x, "nameRegister", { get: () => nameRegister, enumerable: true });
   Object.defineProperty(__x, "nameDistance", { get: () => nameDistance, enumerable: true });
@@ -34629,7 +34656,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
      announces itself the same way — a file that lands somewhere the page cannot
      see is the one action with no visible result. */
   const { saveFile } = __req("io/exporters.js");
-  const { STATUSES, STATUS_BY_ID, SHIFTS, weekStart, todayISO, isoToMs, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, lookaheadWithResources, assignmentIndex } = __req("ui/rc_util.js");
+  const { STATUSES, STATUS_BY_ID, SHIFTS, shiftLabel, weekStart, todayISO, isoToMs, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, lookaheadWithResources, assignmentIndex } = __req("ui/rc_util.js");
 
 
 
@@ -35506,7 +35533,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
           el('div', { class: 'rc-hint' }, [
             el('span', { text: [locs.get(task.location_id)?.name,
               cats.get(task.category_id)?.name,
-              task.shift !== 'day' ? task.shift : null].filter(Boolean).join(' · ') }),
+              task.shift && task.shift !== 'day' ? shiftLabel(task.shift) : null].filter(Boolean).join(' · ') }),
           ]),
           // The chain belongs to the task it was carried on, which is the first.
           i === 0 && chain && chain.carries >= 2
@@ -39197,7 +39224,7 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
 
 
 
-  const { SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, foldName, ambiguousFirstNames, lookaheadWithResources, assignmentIndex, locationRegister, unmatchedLocations, outcomeLookup } = __req("ui/rc_util.js");
+  const { SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, foldName, ambiguousFirstNames, lookaheadWithResources, assignmentIndex, locationRegister, unmatchedLocations, outcomeLookup, shiftLabel } = __req("ui/rc_util.js");
 
 
 
@@ -39396,7 +39423,7 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
             el('div', { class: 'rc-hint', text: [
               locs.get(entry.location_id)?.name || entry.raw_location,
               cats.get(entry.category_id)?.name,
-              entry.shift !== 'day' ? entry.shift : null,
+              entry.shift && entry.shift !== 'day' ? shiftLabel(entry.shift) : null,
             ].filter(Boolean).join(' · ') }),
             el('div', { class: 'rc-res-flags' }, [
               /* The workbook is the assumption, so only a day somebody typed in
