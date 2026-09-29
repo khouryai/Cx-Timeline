@@ -43,14 +43,23 @@ jobs:
           # binary, and it then prints "binary file matches" instead of the
           # lines — which makes the comparison always succeed and the check
           # worthless in exactly the case it exists for.
+          #
+          # Both bundles: the phone app's `m/index.html` loads mobile.bundle.js,
+          # and a stale one ships a phone app that disagrees with its source in
+          # exactly the way a stale app.bundle.js would.
           strip() { grep -av '^ \* Modules:' "$1"; }
-          git show HEAD:app.bundle.js > /tmp/committed.js
-          if ! diff <(strip /tmp/committed.js) <(strip app.bundle.js) > /dev/null; then
-            echo "::error::app.bundle.js is out of date — run 'npm run build' and commit it"
-            diff <(strip /tmp/committed.js) <(strip app.bundle.js) | head -40
-            exit 1
-          fi
-          echo "the committed bundle is the source, built"
+          status=0
+          for bundle in app.bundle.js mobile.bundle.js; do
+            git show "HEAD:$bundle" > /tmp/committed.js
+            if ! diff <(strip /tmp/committed.js) <(strip "$bundle") > /dev/null; then
+              echo "::error::$bundle is out of date — run 'npm run build' and commit it"
+              diff <(strip /tmp/committed.js) <(strip "$bundle") | head -40
+              status=1
+            else
+              echo "$bundle: the committed bundle is the source, built"
+            fi
+          done
+          exit $status"
 
   # This job needs `package-lock.json` committed, and for a long time it was
   # not: `.gitignore` held it, so `cache: npm` failed at setup, every suite step
@@ -81,6 +90,8 @@ jobs:
       - run: node tools/smoke_desktop.js
       - run: node tools/smoke_hosted.js
       - run: node tools/smoke_calendar.js
+      # The phone app, over HTTP: a service worker needs a real origin.
+      - run: node tools/smoke_mobile.js
 
       # A picture of the failure is worth more than the log when a layout
       # check goes red.
