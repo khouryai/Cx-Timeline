@@ -57,7 +57,7 @@ import {
   SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability,
   notifyChanged, formModal, nameRegister, foldName,
   ambiguousFirstNames, lookaheadWithResources, assignmentIndex,
-  locationRegister, unmatchedLocations, outcomeLookup,
+  locationRegister, unmatchedLocations, outcomeLookup, shiftLabel,
 } from './rc_util.js';
 
 /** Which week is on screen. Null means the one containing today. */
@@ -252,7 +252,7 @@ export async function render(root) {
           el('div', { class: 'rc-hint', text: [
             locs.get(entry.location_id)?.name || entry.raw_location,
             cats.get(entry.category_id)?.name,
-            entry.shift !== 'day' ? entry.shift : null,
+            entry.shift && entry.shift !== 'day' ? shiftLabel(entry.shift) : null,
           ].filter(Boolean).join(' · ') }),
           el('div', { class: 'rc-res-flags' }, [
             /* The workbook is the assumption, so only a day somebody typed in

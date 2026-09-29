@@ -539,10 +539,6 @@ body.m-app {
   border-radius: var(--radius-sm);
 }
 
-.m-foot {
-  margin-top: var(--space-4);
-}
-
 /* ── The look-ahead ─────────────────────────────────────────────────────── */
 
 .m-sheet-age {
@@ -747,6 +743,40 @@ body.m-app {
 .m-away-office,
 .m-away-other {
   color: var(--rc-offproject);
+}
+
+/* ── PTO ────────────────────────────────────────────────────────────────── */
+
+.m-under {
+  margin-top: var(--space-2);
+}
+.m-list-title {
+  margin-top: var(--space-5);
+}
+.m-leave-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.m-leave {
+  padding: 10px 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--rc-pto);
+  border-radius: var(--radius-sm);
+}
+.m-leave.m-leave-requested {
+  border-left-color: var(--warn);
+}
+.m-leave.m-leave-declined {
+  border-left-color: var(--bad);
+}
+.m-leave-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px var(--space-2);
 }
 
 /* ── More ───────────────────────────────────────────────────────────────── */

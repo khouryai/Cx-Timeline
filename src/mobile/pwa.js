@@ -16,6 +16,7 @@
  */
 
 let deferredPrompt = null;
+let installedHere = false;
 const listeners = new Set();
 
 /** Register the worker and listen for the browser offering to install. */
@@ -32,6 +33,7 @@ export function installPwa() {
   });
   window.addEventListener('appinstalled', () => {
     deferredPrompt = null;
+    installedHere = true;
     changed();
   });
 
@@ -58,6 +60,14 @@ function changed() {
 export function isStandalone() {
   return (typeof matchMedia === 'function' && matchMedia('(display-mode: standalone)').matches)
     || navigator.standalone === true;
+}
+
+/**
+ * True once it is on the home screen: opened from there, or installed from this
+ * tab a moment ago (which is still a browser tab, so `display-mode` says no).
+ */
+export function isInstalled() {
+  return isStandalone() || installedHere;
 }
 
 /** True when the browser has offered to install and nobody has answered yet. */

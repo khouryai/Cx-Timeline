@@ -470,6 +470,17 @@ export function pendingLeave() {
   return select('rc_leave', (q) => q.eq('status', 'requested').order('start_date'));
 }
 
+/**
+ * One person's leave from a date on, whatever its answer — the phone's "your
+ * time off". Declined rows stay in, because "they said no" is the answer
+ * somebody opened this to find; withdrawn ones do not, because the person who
+ * withdrew it already knows.
+ */
+export function leaveFor(personId, fromISO) {
+  return select('rc_leave', (q) =>
+    q.eq('person_id', personId).gte('end_date', fromISO).neq('status', 'cancelled').order('start_date'));
+}
+
 export function listLeave(fromISO, toISO) {
   return select('rc_leave', (q) =>
     q.lte('start_date', toISO).gte('end_date', fromISO).neq('status', 'cancelled'));
