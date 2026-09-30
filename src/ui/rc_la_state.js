@@ -28,6 +28,12 @@ export const la = {
   calendarWeeks: 4,
   /** 'workbook' until the look-ahead is written in the calendar, then 'editor'. */
   source: 'workbook',
+  /**
+   * Whether the calendar is switched to editing. The editor used to be a
+   * section of its own, drawing the same four weeks as the calendar beside it;
+   * it is the calendar's Edit switch now, an administrator's, off by default.
+   */
+  editing: false,
   /** Whether somebody picked a section, so the tab stops choosing one for them. */
   sectionChosen: false,
   /** How many weeks the editor shows: four, or five to see one more ahead. */

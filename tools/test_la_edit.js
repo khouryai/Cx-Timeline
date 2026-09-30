@@ -93,6 +93,12 @@ console.log('\nDays and rows');
   check('names follow their activity whatever their own sort key says',
     ed.orderedRows(m.rows).map((r) => r.id).join(',') === 's1,a1,r1,a2,p1');
 
+  // Archiving an activity takes its names off the sheet with it.
+  const archivedParent = { ...m, rows: m.rows.map((r) => (r.id === 'a1' ? { ...r, archived: true } : r)) };
+  check('an archived activity\'s names are not left behind as a loose row',
+    ed.orderedRows(archivedParent.rows).map((r) => r.id).join(',') === 's1,a2,p1'
+      && ed.orderedRows(archivedParent.rows, { archived: true }).map((r) => r.id).join(',') === 's1,a1,r1,a2,p1');
+
   const ordered = ed.orderedRows(m.rows);
   check('a section\'s block runs to the next section', ed.sectionBlock(ordered, 0).join() === '0,4');
   check('an activity\'s block carries its Resource row', ed.rowBlock(ordered, 1).join() === '1,2');

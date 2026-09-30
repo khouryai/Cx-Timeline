@@ -80,6 +80,7 @@ const E = {
   revision: 0,
   dirtySincePublish: false,
   publishTimer: null,
+  publishing: null, // the publish under way, so a flush can wait for it
   pollTimer: null,
   clip: null,
   editing: null,
@@ -104,7 +105,7 @@ export async function renderEditor(host) {
     host.appendChild(emptyState({
       iconName: 'lock',
       title: 'Administrators only',
-      message: 'The look-ahead is written by its two owners. Everybody else sees it under Calendar.',
+      message: 'The look-ahead is written by its two owners. Everybody else sees it with Edit switched off.',
     }));
     return;
   }
@@ -167,7 +168,11 @@ export async function renderEditor(host) {
  */
 export async function flushEditor() {
   await drain();
-  if (E.dirtySincePublish) await publish();
+  /* Always through `publish()`, which waits for one already under way. Only
+     starting a publish when one was pending let the calendar open while the
+     previous publish was still writing — and it drew the reading from before
+     the edit, so a row taken off stayed on. */
+  await publish();
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -390,7 +395,8 @@ async function adopt(model, title = null) {
   if (title) await rc.setSetting('lookahead_title', title).catch(() => {});
   await rc.setSetting('lookahead_source', EDITOR_SOURCE);
   la.source = EDITOR_SOURCE;
-  la.section = 'editor';
+  la.section = 'calendar';
+  la.editing = true;
   E.model = null;
   await load();
   E.dirtySincePublish = true;
@@ -2023,6 +2029,7 @@ async function revertDialog() {
   await rc.setSetting('lookahead_source', 'workbook');
   la.source = 'workbook';
   la.section = 'calendar';
+  la.editing = false;
   notifyChanged('lookahead');
 }
 
@@ -2354,9 +2361,22 @@ function schedulePublish() {
   E.publishTimer = setTimeout(() => { publish(); }, PUBLISH_QUIET_MS);
 }
 
-async function publish() {
+/**
+ * Publish what the model holds, one publish at a time: a second waits for the
+ * first, then publishes only if something changed since it began. Two running
+ * at once could land out of order and leave the older sheet as the newest
+ * reading.
+ */
+function publish() {
   clearTimeout(E.publishTimer);
-  if (!E.model || E.queue.length) return;
+  const run = (E.publishing || Promise.resolve()).catch(() => {}).then(publishNow);
+  E.publishing = run;
+  run.finally(() => { if (E.publishing === run) E.publishing = null; }).catch(() => {});
+  return run;
+}
+
+async function publishNow() {
+  if (!E.model || E.queue.length || !E.dirtySincePublish) return;
   E.dirtySincePublish = false;
   try {
     await publishFromEditor({ model: E.model, title: E.title, silent: true });

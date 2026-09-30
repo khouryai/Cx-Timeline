@@ -45,7 +45,7 @@ export async function renderSettings(host) {
     label: 'Where it is written',
     hint: source === 'editor'
       ? 'In the calendar\'s own editor. "Check now" does not read the workbook while this is set.'
-      : 'In the Excel workbook, read on "Check now". Start writing it in the calendar from Look-ahead → Editor.',
+      : 'In the Excel workbook, read on "Check now". Start writing it in the calendar from Look-ahead → Calendar → Edit.',
     control: el('div', { class: 'rc-settings-inline' }, [
       badge(source === 'editor' ? 'The editor' : 'The workbook', source === 'editor' ? 'good' : 'neutral'),
       source === 'editor'
@@ -63,12 +63,14 @@ export async function renderSettings(host) {
             await save('lookahead_source', 'workbook', 'The look-ahead is read from the workbook again.');
             la.source = 'workbook';
             la.section = 'calendar';
+            la.editing = false;
           },
         })
         : el('button', {
           class: 'cx-btn mini', type: 'button', text: 'Open the editor',
           onClick: () => {
-            la.section = 'editor';
+            la.section = 'calendar';
+            la.editing = true;
             la.sectionChosen = true;
             goToTab('lookahead');
           },

@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-29T02:54:32.798Z
+ * Modules: 59   Built: 2026-09-30T16:04:45.612Z
  */
 (function () {
   'use strict';
@@ -17065,6 +17065,19 @@ __mods["core/rc.js"] = function (__x, __req) {
   }
 
   /**
+   * The newest reading's id, asked afresh every time — an open calendar asks it
+   * every few seconds, to notice that the editor published, and a remembered
+   * answer would hide exactly that. A read, so it leaves the cache alone.
+   */
+  async function newestSnapshotId() {
+    requireClient();
+    const { data, error } = await client.from('rc_lookahead_snapshot_meta')
+      .select('id').order('taken_at', { ascending: false }).limit(1);
+    if (error) throw new Error(`rc_lookahead_snapshot_meta: ${error.message}`);
+    return data?.[0]?.id ?? null;
+  }
+
+  /**
    * Snapshots with their grids. Kept for anything that genuinely needs several
    * — nothing in the interface does any more, and a caller reaching for this
    * with a limit above one should read `listSnapshotMeta()` instead.
@@ -17593,6 +17606,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listIngestRuns", { get: () => listIngestRuns, enumerable: true });
   Object.defineProperty(__x, "listSnapshotMeta", { get: () => listSnapshotMeta, enumerable: true });
   Object.defineProperty(__x, "latestSnapshot", { get: () => latestSnapshot, enumerable: true });
+  Object.defineProperty(__x, "newestSnapshotId", { get: () => newestSnapshotId, enumerable: true });
   Object.defineProperty(__x, "listSnapshots", { get: () => listSnapshots, enumerable: true });
   Object.defineProperty(__x, "snapshotById", { get: () => snapshotById, enumerable: true });
   Object.defineProperty(__x, "listSnapshotRows", { get: () => listSnapshotRows, enumerable: true });

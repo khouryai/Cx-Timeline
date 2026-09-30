@@ -294,6 +294,7 @@ alternative shipped once and went wrong.
 
 ### The look-ahead editor
 
+- The editor is the calendar with **Edit** switched on (`la.editing`), not a section beside it; switching off saves and publishes, waiting for a publish already under way, and the read view redraws when a newer reading lands. [→](docs/ARCHITECTURE.md#the-editor-is-the-calendar-with-edit-switched-on)
 - The calendar is the look-ahead's source once the editor is adopted (`rc_settings.lookahead_source = 'editor'`); "Check now" then refuses to read the workbook. [→](docs/ARCHITECTURE.md#the-calendar-is-the-look-aheads-source-and-the-workbook-is-something-it-produces)
 - The editor publishes the grid a workbook read used to produce (`gridFromModel()` → `publishGrid()`), so nothing downstream reads a second source. Never teach a screen to read `rc_la_*` directly. [→](docs/ARCHITECTURE.md#the-editor-publishes-the-grid-the-workbook-used-to-produce)
 - Every edit is an op from `core/la_edit.js` with an inverse, written only through `rc_la_apply()`, stamped at send time with the version it expects. [→](docs/ARCHITECTURE.md#every-edit-is-an-op-with-an-inverse-sent-with-the-version-it-expects)
@@ -411,9 +412,9 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | `test_dist.js` | 59 | every deployment shape, every bundle fingerprinted, that the plan has no backend in any of them, and the phone app in the calendar shape only |
 | `test_lookahead.js` | 251 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
-| `test_la_edit.js` | 120 | the look-ahead editor's model, undo, support codes, the published grid, cell history, staffing clashes, and the Excel export read back |
+| `test_la_edit.js` | 121 | the look-ahead editor's model, undo, support codes, the published grid, cell history, staffing clashes, and the Excel export read back |
 | `smoke.js` | 318 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 488 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 494 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 98 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 64 | the desktop shell and its updates |

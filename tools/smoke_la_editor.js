@@ -56,8 +56,15 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   }
   await page.locator('#rc-frame .rc-tab', { hasText: 'Look-ahead' }).click();
   await page.waitForTimeout(400);
-  await page.locator('#rc-frame .rc-tab', { hasText: 'Editor' }).click();
+  check('the editor is not a section of its own',
+    (await page.locator('#rc-frame .rc-tab', { hasText: /^Editor$/ }).count()) === 0);
+  check('the calendar carries an Edit switch, off',
+    (await page.locator('#rc-frame .la-edit-switch').getAttribute('aria-pressed')) === 'false');
+  await page.locator('#rc-frame .la-edit-switch').click();
   await page.waitForSelector('#rc-frame .lae-start', { timeout: 10000 });
+  check('switching it on opens the editor in the calendar',
+    (await page.locator('#rc-frame .la-edit-switch').getAttribute('aria-pressed')) === 'true'
+      && (await page.locator('#rc-frame .rc-tab[aria-pressed="true"]', { hasText: 'Calendar' }).count()) === 1);
   await snap('start');
   const startText = await page.locator('#rc-frame .lae-start').innerText();
   check('the editor starts by offering to carry the workbook across', /Start from the last reading of the workbook/.test(startText));
@@ -571,23 +578,53 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await page.waitForTimeout(500);
   check('a support code is added from the calendar',
     await page.evaluate(() => window.__rc.rows.rc_support_codes.some((c) => c.code === 'ZZ' && c.name === 'Zone controller')));
-  await page.locator('#rc-frame .rc-tab', { hasText: 'Editor' }).click();
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Calendar' }).click();
   await page.waitForSelector('#rc-frame .lae-grid');
   check('and the editor knows it at once — the marked day is no longer unknown',
     !(await cell('IXL Regression Testing', day(2)).evaluate((n) => n.classList.contains('lae-unknown-code')))
       && (await page.locator('#rc-frame .lae-codes .lae-code').allInnerTexts()).includes('ZZ'));
 
   /* ── Publishing: the rest of the calendar reads what was written ──── */
-  await page.locator('#rc-frame .rc-tab', { hasText: 'Calendar' }).click();
+  /* Names written, published, then taken off and Edit switched off at once:
+     the calendar used to open while the first publish was still writing, and
+     drew the names that had just been removed. */
+  const passing = rowLoc('Resource').locator(`td[data-c="${col(day(9))}"]`);
+  await passing.dblclick();
+  await page.locator('#rc-frame .lae-editor').fill('Quillon Passing');
+  await page.keyboard.press('Tab');
+  await saved();
+  await page.waitForTimeout(2600);
+  await passing.click();
+  await page.keyboard.press('Delete');
+  await page.locator('#rc-frame .la-edit-switch').click();
   await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
   await page.waitForTimeout(300);
   const calendarText = await page.locator('#rc-frame .la-grid').innerText();
   check('the calendar shows what the editor wrote — the days pasted in from Excel included',
     /X\.TCE/.test(calendarText) && /ATS Site Test/.test(calendarText), calendarText.slice(0, 200).replace(/\n/g, ' '));
+  check('names taken off in the editor are off the calendar as soon as Edit is switched off',
+    !/Quillon Passing/.test(calendarText));
   check('and it no longer offers to read the workbook',
     (await page.locator('#rc-frame button', { hasText: 'Check now' }).count()) === 0
-      && (await page.locator('#rc-frame button', { hasText: 'Edit the look-ahead' }).count()) === 1);
-  await page.locator('#rc-frame button', { hasText: 'Edit the look-ahead' }).click();
+      && (await page.locator('#rc-frame .la-edit-switch[aria-pressed="false"]').count()) === 1);
+  // Another window publishing is picked up without leaving the tab — and so
+  // is the reading after it, which puts the sheet back as it was.
+  const publishElsewhere = (label) => page.evaluate((to) => {
+    const snaps = window.__rc.rows.rc_lookahead_snapshots;
+    const last = snaps.reduce((a, b) => (String(a.taken_at) > String(b.taken_at) ? a : b));
+    const grid = JSON.parse(JSON.stringify(last.grid));
+    const row = grid.rows.find((r) => r.cells.some((c) => /^ATS Site Test/.test(c.value)));
+    row.cells.find((c) => /^ATS Site Test/.test(c.value)).value = to;
+    const later = new Date(Math.max(Date.now(), ...snaps.map((x) => Date.parse(x.taken_at) || 0)) + 1000).toISOString();
+    snaps.push({ ...last, id: `${last.id}-${snaps.length}`, taken_at: later, file_hash: `editor:elsewhere-${snaps.length}`, grid });
+  }, label);
+  const calendarSays = (re) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector('#rc-frame .la-grid')?.innerText || ''), re.source, { timeout: 15000 }).then(() => true, () => false);
+  await publishElsewhere('ATS Site Test, from elsewhere');
+  check('a reading published elsewhere redraws the open calendar', await calendarSays(/from elsewhere/));
+  await publishElsewhere('ATS Site Test');
+  check('and so does the next', await calendarSays(/ATS Site Test(?!, from)/)
+    && !/from elsewhere/.test(await page.locator('#rc-frame .la-grid').innerText()));
+  await page.locator('#rc-frame .la-edit-switch').click();
   await page.waitForSelector('#rc-frame .lae-grid', { timeout: 8000 });
 
   /* ── Export to Excel ──────────────────────────────────────────────── */

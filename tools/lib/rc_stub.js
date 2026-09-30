@@ -621,7 +621,16 @@ export function fakeSdk() {
       lte(col, v) { rows = rows.filter((r) => r[col] <= v); return api; },
       is() { return api; },
       in(col, vs) { rows = rows.filter((r) => vs.includes(r[col])); return api; },
-      order() { return api; },
+      /* Ordered only where the order is the answer: the newest reading is
+         what the calendar draws, and a stub handing back the first reading
+         ever taken made every "the calendar shows what was just published"
+         check pass whatever was published. */
+      order(col, { ascending = true } = {}) {
+        if (/^rc_lookahead_snapshot/.test(table) && col === 'taken_at') {
+          rows.sort((a, b) => String(a.taken_at || '').localeCompare(String(b.taken_at || '')) * (ascending ? 1 : -1));
+        }
+        return api;
+      },
       limit(n) { read.limit = n; return api; },
       // Paging, as PostgREST does it: the editor reads every page of the cells.
       range(from, to) { rows = rows.slice(from, to + 1); return api; },
@@ -681,6 +690,7 @@ export function fakeSdk() {
               ...(list.some((r) => 'active' in r) ? { active: true } : {}),
               ...(table === 'rc_client_errors' ? { created_at: new Date().toISOString() } : {}),
               ...(table === 'rc_la_seen' ? { seen_at: new Date().toISOString() } : {}),
+              ...(table === 'rc_lookahead_snapshots' ? { taken_at: new Date().toISOString() } : {}),
             };
             const made = [].concat(rows).map((r, i) => (
               { id: `${table}-${list.length + i + 1}`, ...defaults, ...r }));

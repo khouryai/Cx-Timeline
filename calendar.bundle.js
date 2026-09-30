@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 25   Built: 2026-09-29T02:54:33.255Z
+ * Modules: 25   Built: 2026-09-30T16:04:45.689Z
  */
 (function () {
   'use strict';
@@ -1390,7 +1390,11 @@ __mods["core/la_edit.js"] = function (__x, __req) {
    * move them too, which is the mistake the workbook invited every week.
    */
   function orderedRows(rows, { archived = false } = {}) {
-    const live = rows.filter((r) => archived || !r.archived);
+    /* A names row goes with its activity: archiving the activity archives what
+       is written under it too, or its names would surface as a loose row on the
+       published sheet — still on the calendar after the work was taken off. */
+    const gone = new Set(rows.filter((r) => r.archived).map((r) => r.id));
+    const live = rows.filter((r) => archived || !(r.archived || (r.kind === 'resource' && gone.has(r.parent_id))));
     const bySort = (a, b) => (a.sort - b.sort) || String(a.id).localeCompare(String(b.id));
     const children = new Map();
     for (const r of live) {
@@ -2475,6 +2479,12 @@ __mods["ui/rc_la_state.js"] = function (__x, __req) {
     calendarWeeks: 4,
     /** 'workbook' until the look-ahead is written in the calendar, then 'editor'. */
     source: 'workbook',
+    /**
+     * Whether the calendar is switched to editing. The editor used to be a
+     * section of its own, drawing the same four weeks as the calendar beside it;
+     * it is the calendar's Edit switch now, an administrator's, off by default.
+     */
+    editing: false,
     /** Whether somebody picked a section, so the tab stops choosing one for them. */
     sectionChosen: false,
     /** How many weeks the editor shows: four, or five to see one more ahead. */
@@ -2983,7 +2993,7 @@ __mods["ui/rc_settings.js"] = function (__x, __req) {
       label: 'Where it is written',
       hint: source === 'editor'
         ? 'In the calendar\'s own editor. "Check now" does not read the workbook while this is set.'
-        : 'In the Excel workbook, read on "Check now". Start writing it in the calendar from Look-ahead → Editor.',
+        : 'In the Excel workbook, read on "Check now". Start writing it in the calendar from Look-ahead → Calendar → Edit.',
       control: el('div', { class: 'rc-settings-inline' }, [
         badge(source === 'editor' ? 'The editor' : 'The workbook', source === 'editor' ? 'good' : 'neutral'),
         source === 'editor'
@@ -3001,12 +3011,14 @@ __mods["ui/rc_settings.js"] = function (__x, __req) {
               await save('lookahead_source', 'workbook', 'The look-ahead is read from the workbook again.');
               la.source = 'workbook';
               la.section = 'calendar';
+              la.editing = false;
             },
           })
           : el('button', {
             class: 'cx-btn mini', type: 'button', text: 'Open the editor',
             onClick: () => {
-              la.section = 'editor';
+              la.section = 'calendar';
+              la.editing = true;
               la.sectionChosen = true;
               goToTab('lookahead');
             },
@@ -7466,7 +7478,7 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
       return el('button', {
         class: 'cx-btn mini primary',
         html: icon('edit', { size: 12 }) + '<span>Edit the look-ahead</span>',
-        onClick: () => { la.section = 'editor'; notifyChanged('lookahead'); },
+        onClick: () => { la.section = 'calendar'; la.editing = true; notifyChanged('lookahead'); },
       });
     }
     return el('button', {
@@ -8114,6 +8126,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     revision: 0,
     dirtySincePublish: false,
     publishTimer: null,
+    publishing: null, // the publish under way, so a flush can wait for it
     pollTimer: null,
     clip: null,
     editing: null,
@@ -8138,7 +8151,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       host.appendChild(emptyState({
         iconName: 'lock',
         title: 'Administrators only',
-        message: 'The look-ahead is written by its two owners. Everybody else sees it under Calendar.',
+        message: 'The look-ahead is written by its two owners. Everybody else sees it with Edit switched off.',
       }));
       return;
     }
@@ -8201,7 +8214,11 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
    */
   async function flushEditor() {
     await drain();
-    if (E.dirtySincePublish) await publish();
+    /* Always through `publish()`, which waits for one already under way. Only
+       starting a publish when one was pending let the calendar open while the
+       previous publish was still writing — and it drew the reading from before
+       the edit, so a row taken off stayed on. */
+    await publish();
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -8424,7 +8441,8 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     if (title) await rc.setSetting('lookahead_title', title).catch(() => {});
     await rc.setSetting('lookahead_source', EDITOR_SOURCE);
     la.source = EDITOR_SOURCE;
-    la.section = 'editor';
+    la.section = 'calendar';
+    la.editing = true;
     E.model = null;
     await load();
     E.dirtySincePublish = true;
@@ -10057,6 +10075,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     await rc.setSetting('lookahead_source', 'workbook');
     la.source = 'workbook';
     la.section = 'calendar';
+    la.editing = false;
     notifyChanged('lookahead');
   }
 
@@ -10388,9 +10407,22 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     E.publishTimer = setTimeout(() => { publish(); }, PUBLISH_QUIET_MS);
   }
 
-  async function publish() {
+  /**
+   * Publish what the model holds, one publish at a time: a second waits for the
+   * first, then publishes only if something changed since it began. Two running
+   * at once could land out of order and leave the older sheet as the newest
+   * reading.
+   */
+  function publish() {
     clearTimeout(E.publishTimer);
-    if (!E.model || E.queue.length) return;
+    const run = (E.publishing || Promise.resolve()).catch(() => {}).then(publishNow);
+    E.publishing = run;
+    run.finally(() => { if (E.publishing === run) E.publishing = null; }).catch(() => {});
+    return run;
+  }
+
+  async function publishNow() {
+    if (!E.model || E.queue.length || !E.dirtySincePublish) return;
     E.dirtySincePublish = false;
     try {
       await publishFromEditor({ model: E.model, title: E.title, silent: true });
@@ -11831,7 +11863,10 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { renderSars } = __req("ui/rc_la_sars.js");
   const { openActivity } = __req("ui/rc_activity.js");
 
-  const SECTIONS = ['editor', 'calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'sars'];
+  const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'sars'];
+
+  /** How often an open calendar asks whether a newer reading has been published. */
+  const WATCH_MS = 10000;
 
   async function render(root) {
     /* The calendar is the team's; the register around it is not.
@@ -11844,11 +11879,15 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
        come back empty is a door onto a wall. */
     const admin = rc.isAdmin();
     la.source = await lookaheadSource();
-    /* The editor is an administrator's — the look-ahead is written by the two
-       people who own it — and it is where they land once it is the source. */
+    /* The editor is the calendar with Edit switched on, not a section beside it.
+       Two grids of the same four weeks meant an edit had to be carried from one
+       to the other, and the calendar could be looked at before it arrived. The
+       editor is an administrator's — the look-ahead is written by the two people
+       who own it — so for anybody else the switch is not there and never on. */
+    if (la.section === 'editor') { la.section = 'calendar'; la.editing = true; }
+    if (!admin) la.editing = false;
     const sections = admin ? SECTIONS : ['calendar'];
-    if (admin && !la.sectionChosen && la.source === EDITOR_SOURCE) la.section = 'editor';
-    if (!sections.includes(la.section)) la.section = admin ? 'calendar' : sections[0];
+    if (!sections.includes(la.section)) la.section = sections[0];
 
     const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
     for (const id of sections) {
@@ -11856,14 +11895,14 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         class: 'rc-tab',
         type: 'button',
         text: {
-          editor: 'Editor', calendar: 'Calendar', cancellations: 'Cancellations', changes: 'Changes',
+          calendar: 'Calendar', cancellations: 'Cancellations', changes: 'Changes',
           snapshots: 'Snapshots', legend: 'Legend', sars: 'Site access',
         }[id],
         'aria-pressed': String(id === la.section),
         onClick: async () => {
           // Leaving the editor publishes what it holds first, so the section
           // being opened reads the look-ahead as it now stands.
-          if (la.section === 'editor' && id !== 'editor') await flushEditor();
+          if (la.section === 'calendar' && la.editing && id !== 'calendar') await flushEditor();
           la.section = id;
           la.sectionChosen = true;
           clear(root);
@@ -11876,13 +11915,77 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     const host = el('div');
     root.appendChild(host);
 
-    if (la.section === 'editor') await renderEditor(host);
-    else if (la.section === 'calendar') await renderCalendar(host);
+    if (la.section === 'calendar') await (la.editing ? renderEditing(host) : renderCalendar(host));
     else if (la.section === 'cancellations') await renderCancellations(host);
     else if (la.section === 'changes') await renderChanges(host);
     else if (la.section === 'snapshots') await renderSnapshots(host);
     else if (la.section === 'legend') await renderLegend(host);
     else await renderSars(host);
+  }
+
+  /**
+   * The switch between reading the calendar and writing it.
+   *
+   * Switching off saves and publishes first and waits for both, so the calendar
+   * it opens onto is the one just written — never the reading from a moment
+   * before, which is how a row taken off in the editor stayed on the calendar.
+   */
+  function editSwitch() {
+    const on = la.editing;
+    return el('button', {
+      class: `cx-btn mini${on ? ' primary' : ''} la-edit-switch`,
+      type: 'button',
+      'aria-pressed': String(on),
+      title: on ? 'Save, publish, and go back to reading the calendar' : 'Edit the look-ahead in place',
+      html: icon(on ? 'check' : 'edit', { size: 12 }) + `<span>${on ? 'Done editing' : 'Edit'}</span>`,
+      onClick: async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        try {
+          if (on) await flushEditor();
+        } catch (err) {
+          rc.reportError('lookahead:publish', err);
+        }
+        la.editing = !on;
+        notifyChanged('lookahead');
+      },
+    });
+  }
+
+  /** The calendar with Edit on: the same heading, then the editor in full. */
+  async function renderEditing(host) {
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'The look-ahead' }),
+      editSwitch(),
+    ]));
+    const body = el('div');
+    host.appendChild(body);
+    await renderEditor(body);
+  }
+
+  /**
+   * Redraw the calendar when somebody publishes a newer reading — the other
+   * administrator editing, or this one in another window. Asked every few
+   * seconds while it is on screen, and never while somebody is typing into its
+   * filter or has a dialog open, because redrawing takes the field away.
+   */
+  function watchForNewReading(host, seenId) {
+    const timer = setInterval(async () => {
+      if (!host.isConnected) { clearInterval(timer); return; }
+      if (document.hidden || document.querySelector('.cx-modal-overlay')) return;
+      const active = document.activeElement;
+      if (active && host.contains(active)
+        && active.matches('input:not([type=checkbox]):not([type=radio]), textarea, select')) return;
+      try {
+        const id = await rc.newestSnapshotId();
+        if (id == null || id === seenId || !host.isConnected) return;
+        clearInterval(timer);
+        rc.forgetReads();
+        notifyChanged('lookahead');
+      } catch {
+        /* the next tick asks again */
+      }
+    }, WATCH_MS);
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -11917,16 +12020,21 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
        ingestion writes the register. Everybody else is looking at the snapshot,
        which is the whole reason it is a snapshot. */
     const admin = rc.isAdmin();
+    const written = la.source === EDITOR_SOURCE;
     host.appendChild(el('div', { class: 'rc-section-head' }, [
       el('h3', { text: 'The look-ahead' }),
-      admin ? checkNowButton() : null,
+      // Once it is written here there is nothing to check; Edit is the way in.
+      admin && !written ? checkNowButton() : null,
+      admin ? editSwitch() : null,
     ].filter(Boolean)));
+    watchForNewReading(host, snapshot?.id ?? null);
 
     if (!snapshot?.grid?.rows?.length) {
       host.appendChild(emptyState({
         iconName: 'calendar',
         title: 'Nothing read yet',
-        message: admin
+        message: written ? 'Nothing has been written yet. Press Edit to write the look-ahead; it is drawn '
+          + 'here as soon as it is saved.' : admin
           ? 'Put the workbook in the lookahead folder beside your plan and press Check now. '
             + 'This draws the snapshot rather than the file, so once it has been read once it stays '
             + 'readable on any machine — including the ones that have never been given the folder.'

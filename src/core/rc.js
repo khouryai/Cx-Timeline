@@ -818,6 +818,19 @@ export function latestSnapshot() {
 }
 
 /**
+ * The newest reading's id, asked afresh every time — an open calendar asks it
+ * every few seconds, to notice that the editor published, and a remembered
+ * answer would hide exactly that. A read, so it leaves the cache alone.
+ */
+export async function newestSnapshotId() {
+  requireClient();
+  const { data, error } = await client.from('rc_lookahead_snapshot_meta')
+    .select('id').order('taken_at', { ascending: false }).limit(1);
+  if (error) throw new Error(`rc_lookahead_snapshot_meta: ${error.message}`);
+  return data?.[0]?.id ?? null;
+}
+
+/**
  * Snapshots with their grids. Kept for anything that genuinely needs several
  * — nothing in the interface does any more, and a caller reaching for this
  * with a limit above one should read `listSnapshotMeta()` instead.

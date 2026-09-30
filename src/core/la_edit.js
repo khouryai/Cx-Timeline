@@ -134,7 +134,11 @@ export function newId() {
  * move them too, which is the mistake the workbook invited every week.
  */
 export function orderedRows(rows, { archived = false } = {}) {
-  const live = rows.filter((r) => archived || !r.archived);
+  /* A names row goes with its activity: archiving the activity archives what
+     is written under it too, or its names would surface as a loose row on the
+     published sheet — still on the calendar after the work was taken off. */
+  const gone = new Set(rows.filter((r) => r.archived).map((r) => r.id));
+  const live = rows.filter((r) => archived || !(r.archived || (r.kind === 'resource' && gone.has(r.parent_id))));
   const bySort = (a, b) => (a.sort - b.sort) || String(a.id).localeCompare(String(b.id));
   const children = new Map();
   for (const r of live) {

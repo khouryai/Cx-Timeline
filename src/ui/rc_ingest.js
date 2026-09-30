@@ -579,7 +579,7 @@ export function checkNowButton() {
     return el('button', {
       class: 'cx-btn mini primary',
       html: icon('edit', { size: 12 }) + '<span>Edit the look-ahead</span>',
-      onClick: () => { la.section = 'editor'; notifyChanged('lookahead'); },
+      onClick: () => { la.section = 'calendar'; la.editing = true; notifyChanged('lookahead'); },
     });
   }
   return el('button', {

@@ -1818,12 +1818,12 @@ name.
 The 4WLA used to be an Excel file two administrators kept by hand, which the
 calendar *read*: a snapshot on every "Check now", the change register built
 by comparing one reading with the last. It is now written in the calendar
-itself — Look-ahead → Editor — and an .xlsx in the 4WLA layout is something the
+itself — Look-ahead → Calendar, with Edit switched on — and an .xlsx in the 4WLA layout is something the
 calendar exports for whoever copies the rows into the project's master
 look-ahead. `rc_settings.lookahead_source` says which: `workbook` until the
 editor is adopted, then `editor`, after which "Check now" refuses (reading the
-archived file would overwrite a week of edits) and becomes the way to the
-editor. Going back is one menu item and deletes nothing.
+archived file would overwrite a week of edits) and the calendar offers only its
+Edit switch. Going back is one menu item and deletes nothing.
 
 ### The editor publishes the grid the workbook used to produce
 
@@ -1841,6 +1841,36 @@ covering the week just gone and the five ahead. The editor publishes a couple of
 seconds after its saves go quiet, and immediately when another section is
 opened, *quietly* (no `RC_CHANGED`), because a redraw of the whole tab every time
 it saved would throw away the cell somebody is typing in.
+
+### The editor is the calendar with Edit switched on
+
+The editor used to be a section of its own beside the Calendar section, both
+drawing the same four weeks. That made the look-ahead two screens with a
+translation between them, and the gap showed: names typed onto a Resource row
+and taken off again were still on the calendar, because leaving the editor only
+started a publish when one was pending — if the previous publish was still
+writing, nothing waited for it and the calendar drew the reading from before
+the edit.
+
+So there is one section, Calendar, with an administrator's **Edit** switch
+(`la.editing`, off by default). On, the section is the editor in full; off, it
+is the read view with its filter, week range, "Show resource names", "Only my
+rows" and the key. Switching off — or opening another section — goes through
+`flushEditor()`, which drains the save queue and then `publish()`, and
+`publish()` runs one at a time and waits for any already under way. A
+`la.section = 'editor'` from an older caller is still honoured, as Calendar
+with Edit on.
+
+The read view also watches for newer readings (`watchForNewReading()`,
+`rc.newestSnapshotId()`, uncached, every ten seconds) and redraws when one
+lands — so the other administrator editing, or a member keeping the calendar
+open on a tablet, sees the look-ahead move without leaving the tab. It stands
+down while somebody is typing in the filter or a dialog is open, for the same
+reason every pane does.
+
+An archived activity takes its names row with it (`orderedRows()`): the names
+row is never archived on its own, so without that it surfaced as a loose row
+on the published sheet.
 
 ### Every edit is an op, with an inverse, sent with the version it expects
 
