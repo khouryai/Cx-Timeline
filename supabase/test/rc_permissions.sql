@@ -740,6 +740,30 @@ select assert((select count(*) from public.rc_cancelled_days
                 where raw_label = 'Cable pull' and day = date '2026-09-09') = 1,
   'a day stored as the bare red is a cancellation once red is mapped as one');
 
+-- What BART had been asked for goes with a red day: the newest read's marks.
+update public.rc_lookahead_rows set bart_marks = '{"2026-09-07":"X.WIT"}'::jsonb where row_key = 'cx|a';
+update public.rc_lookahead_rows set bart_marks = '{"2026-09-07":"X.X.WIT"}'::jsonb where row_key = 'cx|b';
+select assert((select marks from public.rc_cancelled_days
+                where raw_label = 'Cable pull' and day = date '2026-09-07') = 'X.X.WIT',
+  'a red day carries the BART resources it cancelled, from the newest read');
+
+-- A witness struck out of an activity that still goes ahead is its own entry;
+-- a struck code on a day that is itself red is left to the day.
+insert into public.rc_lookahead_rows (snapshot_id, week_start, row_key, raw_location, raw_label, cells, bart_marks) values
+  (:'cx2', date '2026-09-14', 'cx|c', 'W40', 'ATS Site Test',
+   '{"2026-09-14":"Day Shift","2026-09-15":"Day Shift","2026-09-16":"Cancellation"}'::jsonb,
+   '{"2026-09-14":"X.~WIT","2026-09-15":"X.WIT","2026-09-16":"X.~WIT"}'::jsonb);
+select assert((select count(*) from public.rc_cancelled_support_days where raw_label = 'ATS Site Test') = 1,
+  'a BART resource struck out of a day that went ahead is in the log, and only that day');
+select assert((select marks from public.rc_cancelled_support_days
+                where raw_label = 'ATS Site Test') = 'X.~WIT',
+  'with what the day still asked for beside what was struck out');
+
+insert into public.rc_cancellation_notes (raw_label, raw_location, start_date, end_date, party, reason, codes)
+values ('ATS Site Test', 'W40', date '2026-09-14', date '2026-09-14', 'BART', 'Witness not required for testing', 'WIT');
+select assert((select codes from public.rc_cancellation_notes where raw_label = 'ATS Site Test') = 'WIT',
+  'a note can say it is about the BART resources, not the day');
+
 insert into public.rc_cancellation_notes (raw_label, raw_location, start_date, end_date, party, reason)
 values ('Cable pull', 'TPSS 12', date '2026-09-07', date '2026-09-09', 'BART', 'Possession withdrawn');
 select id as cx_note from public.rc_cancellation_notes where raw_label = 'Cable pull' \gset
@@ -758,7 +782,7 @@ select act_as(:'alice');
 
 insert into public.rc_cancellation_notes (raw_label, raw_location, start_date, end_date, party, reason, supersedes_id)
 values ('Cable pull', 'TPSS 12', date '2026-09-07', date '2026-09-09', 'Hitachi', 'Our crew was reallocated', :'cx_note');
-select assert((select count(*) from public.rc_cancellation_notes) = 2,
+select assert((select count(*) from public.rc_cancellation_notes where raw_label = 'Cable pull') = 2,
   'a correction is an additional row');
 
 select refuses(:'carol',

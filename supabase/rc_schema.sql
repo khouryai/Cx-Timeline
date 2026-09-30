@@ -399,6 +399,19 @@ create table if not exists public.rc_cancellation_notes (
 create index if not exists rc_cancel_note_label_idx
   on public.rc_cancellation_notes (raw_label, raw_location);
 
+/*
+ * Which BART resources a note is about, or null for the activity itself.
+ *
+ * An activity can stay on the sheet while part of what BART was asked for is
+ * taken away — one EIC and one witness, then the witness is not needed. The
+ * editor writes that as the code struck out ("X.~WIT"), `rc_cancelled_support_days`
+ * finds it, and a note about *that* is a different judgement from a note about
+ * the day being cancelled, even on the same activity and the same dates. The
+ * codes, dot-separated as the sheet writes them ("WIT", "TCE.WIT"), are what
+ * tells the two apart.
+ */
+alter table public.rc_cancellation_notes add column if not exists codes text;
+
 -- ══════════════════════════════════════════════════════════════════════════
 -- Site Access Requests
 -- ══════════════════════════════════════════════════════════════════════════
@@ -1515,12 +1528,45 @@ create or replace view public.rc_cancelled_days with (security_invoker = true) a
          d.key::date                  as day,
          min(s.taken_at)              as first_seen,
          max(s.taken_at)              as last_seen,
-         count(distinct r.snapshot_id) as reads
+         count(distinct r.snapshot_id) as reads,
+         -- What BART had been asked for that day ("X.WIT"), from the newest
+         -- read that showed it red: cancelling the day cancelled those too.
+         (array_agg(r.bart_marks ->> d.key order by s.taken_at desc)
+            filter (where r.bart_marks ? d.key))[1] as marks
     from public.rc_lookahead_rows r
     join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
     cross join lateral jsonb_each_text(r.cells) d
    where d.value ilike '%cancel%'
       or d.value in (select '#' || l.argb from public.rc_legend l where l.meaning ilike '%cancel%')
+   group by 1, 2, d.key;
+
+/*
+ * Every day a read showed a BART resource struck out on an activity that was
+ * still going ahead.
+ *
+ * The editor writes a cancelled support code with a leading tilde — "X.~WIT"
+ * is one EIC still wanted and a witness no longer — and `bart_marks` carries
+ * that text as typed. A day that is itself red is left to `rc_cancelled_days`:
+ * the whole day went, and its resources with it. Derived like that view, never
+ * stored, and for the same reason it keeps a day whose code was later
+ * reinstated: it was struck out when those reads were taken.
+ */
+create or replace view public.rc_cancelled_support_days with (security_invoker = true) as
+  select coalesce(r.raw_label, '')    as raw_label,
+         coalesce(r.raw_location, '') as raw_location,
+         (array_agg(r.location_id) filter (where r.location_id is not null))[1] as location_id,
+         d.key::date                  as day,
+         min(s.taken_at)              as first_seen,
+         max(s.taken_at)              as last_seen,
+         count(distinct r.snapshot_id) as reads,
+         (array_agg(d.value order by s.taken_at desc))[1] as marks
+    from public.rc_lookahead_rows r
+    join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
+    cross join lateral jsonb_each_text(r.bart_marks) d
+   where d.value ~ '(^|\.)\s*~'
+     and coalesce(r.cells ->> d.key, '') not ilike '%cancel%'
+     and coalesce(r.cells ->> d.key, '') not in
+         (select '#' || l.argb from public.rc_legend l where l.meaning ilike '%cancel%')
    group by 1, 2, d.key;
 
 -- ══════════════════════════════════════════════════════════════════════════
@@ -2096,11 +2142,11 @@ grant select, insert on public.rc_cancellation_notes to authenticated;
 revoke all on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
               public.rc_rows_without_sar, public.rc_sars_without_rows,
               public.rc_lookahead_snapshot_meta, public.rc_actuals_current,
-              public.rc_cancelled_days from public, anon;
+              public.rc_cancelled_days, public.rc_cancelled_support_days from public, anon;
 grant select on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
                 public.rc_rows_without_sar, public.rc_sars_without_rows,
                 public.rc_lookahead_snapshot_meta, public.rc_actuals_current,
-                public.rc_cancelled_days to authenticated;
+                public.rc_cancelled_days, public.rc_cancelled_support_days to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Storage: the two things that are files
@@ -2661,5 +2707,5 @@ grant usage on sequence public.rc_la_seen_id_seq to authenticated;
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '5')
+insert into public.rc_settings (key, value) values ('schema_version', '6')
 on conflict (key) do update set value = excluded.value, updated_at = now();

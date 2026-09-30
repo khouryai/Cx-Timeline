@@ -35,7 +35,7 @@ import {
 } from './components.js';
 import {
   notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
-  isoToMs, nameRegister, foldName, meMatcher,
+  isoToMs, nameRegister, foldName, meMatcher, codeNodes,
 } from './rc_util.js';
 import { toISO, addDays } from '../core/dates.js';
 
@@ -669,12 +669,11 @@ function grid_(view, today, isMe = null, snapshotId = null) {
       return el('td', {
         class: classes.join(' '),
         style: mark?.hex ? `background-color:#${mark.hex}` : '',
-        text: mark?.value || '',
         title: [what, d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
           mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value,
           yours ? 'you are on this day' : null]
           .filter(Boolean).join(' · '),
-      });
+      }, resource ? [mark?.value || ''] : codeNodes(mark?.value || '', 'la-code-cancelled'));
     }),
   ]);
 

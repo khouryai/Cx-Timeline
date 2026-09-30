@@ -25,13 +25,14 @@
 
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
-import { cancellationEvents, attachCancellationNotes, changesForMe } from '../core/lookahead.js';
+import { changesForMe } from '../core/lookahead.js';
 import * as ed from '../core/la_edit.js';
 import { icon } from './icons.js';
 import { toast, badge, emptyState } from './components.js';
 import {
   notifyChanged, goToTab, dayLabel, todayISO, orgNav, nameRegister, resourceAssignments,
   absenceAssignments, lookaheadWithResources, locationRegister, unmatchedLocations, personMatcher,
+  cancellationLog,
 } from './rc_util.js';
 import { la } from './rc_la_state.js';
 
@@ -186,15 +187,14 @@ export async function inboxItems() {
     attempt('Cancellations', async () => {
       const settings = await rc.listSettings().catch(() => []);
       const from = settings.find((x) => x.key === 'cancellation_log_from')?.value || `${today.slice(0, 4)}-09-01`;
-      const [days, notes] = await Promise.all([rc.listCancelledDays(from), rc.listCancellationNotes().catch(() => [])]);
-      const open = attachCancellationNotes(cancellationEvents(days, { from }), notes).filter((e) => !e.note);
+      const open = (await cancellationLog(from)).filter((e) => !e.note);
       if (open.length) {
         items.push({
           id: 'cancellations',
           area: 'Look-ahead',
           tone: 'bad',
           title: `${plural(open.length, 'cancellation')} with no reason yet`,
-          detail: open.slice(0, 4).map((e) => `${e.label || 'An activity'} (${dayLabel(e.start)})`).join('; ')
+          detail: open.slice(0, 4).map((e) => `${e.kind === 'support' ? `${e.codes} off ` : ''}${e.label || 'An activity'} (${dayLabel(e.start)})`).join('; ')
             + (open.length > 4 ? `; and ${open.length - 4} more` : '')
             + ' — the log is the claim, and a cancellation with no party is one nobody can argue.',
           actions: [{ label: 'Open the log', primary: true, run: () => openLookahead('cancellations') }],

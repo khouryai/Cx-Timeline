@@ -1301,6 +1301,39 @@ console.log('\nThe cancellation log');
     noted.find((e) => e.start === '2026-09-13')?.note === null);
   check('a note on one activity is not another\'s',
     noted.find((e) => e.label === 'IXL regression')?.note === null);
+
+  /* BART resources: what a red day took with it, and a witness struck out of
+     a day that went ahead. */
+  const withMarks = cls.cancellationEvents([
+    { ...red('Cable pull', 'TPSS 12', '2026-09-07'), marks: 'X.WIT' },
+    { ...red('Cable pull', 'TPSS 12', '2026-09-08'), marks: 'X.X' },
+  ], { from: '2026-09-01' });
+  check('a cancelled day lists the BART resources it cancelled',
+    cls.describeCodeCounts(withMarks[0].resources) === '3 X · 1 WIT', cls.describeCodeCounts(withMarks[0].resources));
+  const struck = (day, marks) => ({ raw_label: 'ATS Site Test', raw_location: 'W40', location_id: null, day, marks,
+    first_seen: `${day}T08:00:00Z`, last_seen: `${day}T08:00:00Z`, reads: 1 });
+  const support = cls.supportCancellationEvents([
+    struck('2026-09-14', 'X.~WIT'), struck('2026-09-15', 'X.~WIT'),
+    struck('2026-09-16', 'X.~TCE'),
+    struck('2026-09-18', 'X.~WIT'),
+  ], { from: '2026-09-01' });
+  const wit = support.filter((e) => e.codes === 'WIT');
+  check('a witness struck out two days running is one event',
+    wit[0]?.start === '2026-09-14' && wit[0]?.end === '2026-09-15' && wit[0]?.kind === 'support'
+      && cls.describeCodeCounts(wit[0].resources) === '2 WIT', JSON.stringify(wit[0] && [wit[0].start, wit[0].end]));
+  check('a different resource struck out is its own event, and so is a gap',
+    support.some((e) => e.codes === 'TCE') && wit.length === 2);
+  const both = cls.attachCancellationNotes([...withMarks, ...support], [
+    { id: 'd1', raw_label: 'ATS Site Test', raw_location: 'W40', start_date: '2026-09-14', end_date: '2026-09-15',
+      codes: 'WIT', party: 'BART', reason: 'Witness not required for testing', created_at: '2026-09-14T09:00:00Z' },
+    { id: 'd2', raw_label: 'Cable pull', raw_location: 'TPSS 12', start_date: '2026-09-07', end_date: '2026-09-07',
+      codes: 'WIT', party: 'Hitachi', reason: 'about the witness only', created_at: '2026-09-07T09:00:00Z' },
+  ]);
+  check('a note about a struck-out witness lands on that witness',
+    both.find((e) => e.codes === 'WIT' && e.start === '2026-09-14')?.note?.id === 'd1');
+  check('and never on another resource struck out on the same activity',
+    both.find((e) => e.codes === 'TCE')?.note === null);
+  check('nor on a day cancelled outright', both.find((e) => e.kind === 'activity')?.note === null);
 }
 
 console.log('\nProgress from the calendar');

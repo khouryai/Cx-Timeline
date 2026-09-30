@@ -371,6 +371,28 @@ console.log('\nCancellations, as the log will know them');
     check(`a note recorded in the editor is keyed as the log keys "${row.description}"`, Boolean(hit),
       `${key.raw_label} @ ${key.raw_location}`);
   }
+  /* BART resources struck out of a day that went ahead. */
+  check('a struck-out code is written with a tilde and no longer asked for',
+    ed.supportTokens('X.~WIT').join() === 'X' && ed.cancelledTokens('X.~WIT').join() === 'WIT');
+  check('and typing it with spaces tidies the same way', ed.normaliseSupport(' x . ~ wit ') === 'X.~WIT');
+  check('striking a code keeps it on the day', ed.strikeCodes('X.WIT', ['WIT']) === 'X.~WIT');
+  check('striking one already removed puts it back struck out', ed.strikeCodes('X', ['WIT']) === 'X.~WIT');
+  check('two of a code, one struck', ed.strikeCodes('X.X', ['X']) === '~X.X');
+  check('and reinstating puts it back as asked for', ed.reinstateCodes('X.~WIT') === 'X.WIT');
+  const gone = ed.removedCodes('X.WIT', 'X');
+  check('a code taken off a day is noticed', gone.length === 1 && gone[0].code === 'WIT' && !gone[0].struck);
+  const typed = ed.removedCodes('X.WIT', 'X.~WIT');
+  check('and one struck out by typing the tilde is noticed as already cancelled',
+    typed.length === 1 && typed[0].code === 'WIT' && typed[0].struck);
+  check('one of two EICs going is one removal', ed.removedCodes('X.X.WIT', 'X.WIT').map((r) => r.code).join() === 'X');
+  check('reordering takes nothing off', !ed.removedCodes('X.WIT', 'WIT.X').length);
+  check('a code already struck out is not taken off again', !ed.removedCodes('X.~WIT', 'X').length);
+  const struckModel = ed.makeModel([ed.blankRow('activity', { id: 'a', sort: 1, description: 'IXL' })],
+    [{ row_id: 'a', day: '2026-09-21', color: 'FFFF00', text: 'X.~WIT' }]);
+  check('a struck-out code is not counted as support requested',
+    ed.describeCounts(ed.supportTotals(struckModel, ['2026-09-21']).byDay.get('2026-09-21'), CODES) === '1 X');
+  check('nor chased as an unknown code', !ed.parseSupport('X.~ZZ', CODES).unknown.length);
+
   const runs = ed.dayRuns([
     { row: { id: 'a' }, day: '2026-09-21' }, { row: { id: 'a' }, day: '2026-09-22' },
     { row: { id: 'a' }, day: '2026-09-24' }, { row: { id: 'b' }, day: '2026-09-22' },
@@ -490,6 +512,19 @@ console.log('\nThe Excel export');
   check('the same look-ahead makes the same file', bytes.length === xl.lookaheadWorkbook({
     model: m, days, legend: LEGEND, codes: CODES, title: 'CBTC Four Week Look-Ahead',
   }).length);
+
+  // A witness struck out of a day: red strikethrough in the file, tilde kept.
+  const struck = ed.makeModel([ed.blankRow('activity', { id: 'a', sort: 1, description: 'IXL' })],
+    [{ row_id: 'a', day: '2026-09-21', color: 'FFFF00', text: 'X.~WIT' }]);
+  const struckBytes = xl.lookaheadWorkbook({ model: struck, days, legend: LEGEND, codes: CODES });
+  const struckSheet = new TextDecoder().decode(la.readZip(struckBytes.buffer.slice(struckBytes.byteOffset,
+    struckBytes.byteOffset + struckBytes.byteLength)).get('xl/worksheets/sheet1.xml'));
+  check('a cancelled BART resource is exported struck through in red',
+    /<r><rPr><b\/><strike\/><sz val="10"\/><color rgb="FFFF0000"\/>[^]*?<t xml:space="preserve">~WIT<\/t><\/r>/.test(struckSheet));
+  const struckBack = la.parseSheet(struckBytes.buffer.slice(struckBytes.byteOffset, struckBytes.byteOffset + struckBytes.byteLength), '4WLA');
+  check('and reads back still cancelled, so a re-read never brings the witness back',
+    struckBack.rows.some((r) => r.cells.some((c) => c.value === 'X.~WIT' && c.hex === 'FFFF00')));
+  check('and the key says what the strike means', /taken off/.test(struckSheet));
 
   check('the ZIP checksum is the standard one', xw.crc32(new TextEncoder().encode('123456789')) === 0xcbf43926);
   check('control characters cannot corrupt the file', xw.xmlEscape('a\u0001b<c>') === 'ab&lt;c&gt;');

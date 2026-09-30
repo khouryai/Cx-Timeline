@@ -409,25 +409,45 @@ export function fakeSdk() {
        colour of a legend entry that means it. */
     get rc_cancelled_days() {
       const red = new Set(this.rc_legend.filter((l) => /cancel/i.test(l.meaning)).map((l) => `#${l.argb}`));
+      return this._daysOver((r) => r.cells, (value) => /cancel/i.test(value) || red.has(value),
+        (r, day) => (r.bart_marks || {})[day]);
+    },
+    /* `rc_cancelled_support_days`: a code struck out ("X.~WIT") on a day that
+       is not itself red, with the newest read's marks. */
+    get rc_cancelled_support_days() {
+      const red = new Set(this.rc_legend.filter((l) => /cancel/i.test(l.meaning)).map((l) => `#${l.argb}`));
+      return this._daysOver((r) => r.bart_marks, (value, r, day) => {
+        const paint = (r.cells || {})[day] || '';
+        return /(^|\.)\s*~/.test(value) && !/cancel/i.test(paint) && !red.has(paint);
+      }, (r, day) => (r.bart_marks || {})[day]);
+    },
+    /* One row per activity, location and day that `pick` shows and `keep`
+       accepts, across every read — the shape both views share. */
+    _daysOver(pick, keep, marksOf) {
       const taken = new Map(this.rc_lookahead_snapshots.map((x) => [x.id, x.taken_at]));
       const out = new Map();
       for (const r of [...this.rc_lookahead_rows, ...this._earlierReads]) {
-        for (const [day, value] of Object.entries(r.cells || {})) {
-          if (!/cancel/i.test(value) && !red.has(value)) continue;
+        for (const [day, value] of Object.entries(pick(r) || {})) {
+          if (!keep(value, r, day)) continue;
           const key = `${r.raw_label || ''}|${r.raw_location || ''}|${day}`;
           const at = r.taken_at || taken.get(r.snapshot_id) || null;
           const row = out.get(key) || {
             raw_label: r.raw_label || '', raw_location: r.raw_location || '', location_id: r.location_id || null,
-            day, first_seen: at, last_seen: at, reads: 0, _snaps: new Set(),
+            day, first_seen: at, last_seen: at, reads: 0, marks: null, _snaps: new Set(), _marksAt: null,
           };
           row._snaps.add(r.snapshot_id);
           row.reads = row._snaps.size;
           if (at && (!row.first_seen || at < row.first_seen)) row.first_seen = at;
           if (at && (!row.last_seen || at > row.last_seen)) row.last_seen = at;
+          const marks = marksOf(r, day);
+          if (marks != null && (row._marksAt == null || String(at) >= String(row._marksAt))) {
+            row.marks = marks;
+            row._marksAt = at;
+          }
           out.set(key, row);
         }
       }
-      return [...out.values()].map(({ _snaps, ...row }) => row);
+      return [...out.values()].map(({ _snaps, _marksAt, ...row }) => row);
     },
     rc_blockers: [],
     rc_blocker_updates: [],

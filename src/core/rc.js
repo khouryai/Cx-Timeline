@@ -658,7 +658,7 @@ export function listSettings() {
  * "could not update the legend", on one screen, weeks after the deploy that
  * needed it; this turns it into one sentence at sign-in naming the two files.
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /**
  * Whether the database is the one this build was written against.
@@ -864,6 +864,14 @@ export function listAnnotations(eventIds) {
  */
 export function listCancelledDays(fromISO) {
   return select('rc_cancelled_days', (q) => q.gte('day', fromISO).order('day'));
+}
+
+/**
+ * Every day a read showed a BART resource struck out ("X.~WIT") on an activity
+ * that was not itself cancelled — `supportCancellationEvents()` joins them.
+ */
+export function listCancelledSupportDays(fromISO) {
+  return select('rc_cancelled_support_days', (q) => q.gte('day', fromISO).order('day'));
 }
 
 /** What somebody said about a cancellation, every version. Newest last. */

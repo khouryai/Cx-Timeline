@@ -983,6 +983,12 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   border-radius: 2px;
   background: var(--bad);
 }
+/* A resource struck out of a day that went ahead: an outline, not a fill —
+   the day was not cancelled, part of what it asked for was. */
+.rc-cancel-cell.rc-cancel-cell-support {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--bad);
+}
 
 /* What somebody did that day, and the kind of work it was: a line of its own
    above the status buttons in the huddle, in the table and in the room. */
@@ -1339,6 +1345,24 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   text-decoration: underline wavy var(--warn);
   text-underline-offset: 3px;
 }
+
+/* A BART resource cancelled while the activity went ahead ("X.~WIT"): the
+   code stays where it was, struck through in red, so the day still says what
+   was asked for and what was taken off. Over a painted day the red is the
+   brand's own, which reads on the legend's light fills where the theme's
+   softer status red does not. */
+.lae-code-cancelled,
+.la-code-cancelled,
+.rc-code-cancelled {
+  color: var(--bad);
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+  font-weight: 700;
+}
+.lae-grid td.lae-painted .lae-code-cancelled,
+.la-grid td.la-painted .la-code-cancelled { color: var(--hitachi-red); }
+.lae-grid td.lae-painted.lae-dark .lae-code-cancelled,
+.la-grid td.la-painted.la-dark .la-code-cancelled { color: var(--surface); background: var(--hitachi-red); padding: 0 2px; }
 
 /* Row kinds. */
 .lae-grid tr.lae-section td {

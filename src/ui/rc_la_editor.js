@@ -29,7 +29,7 @@ import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
 import * as ed from '../core/la_edit.js';
-import { readGrid, isCancelMeaning } from '../core/lookahead.js';
+import { readGrid, isCancelMeaning, countCodes, describeCodeCounts, cellTokens } from '../core/lookahead.js';
 import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
 import { lookaheadWorkbook, lookaheadFileName } from '../io/la_xlsx.js';
 import { saveFile } from '../io/exporters.js';
@@ -38,7 +38,7 @@ import {
   toast, confirmDialog, contextMenu, openModal, textInput, selectInput, segmented, emptyState,
   attachTooltip,
 } from './components.js';
-import { notifyChanged, todayISO, nameRegister, foldName } from './rc_util.js';
+import { notifyChanged, todayISO, nameRegister, foldName, codeNodes } from './rc_util.js';
 import { publishFromEditor, publishDays, EDITOR_SOURCE } from './rc_ingest.js';
 import { la } from './rc_la_state.js';
 
@@ -805,6 +805,10 @@ function bodyRow(row, r, days, today) {
       } else if (parsed.tokens.length && looksLikeCodes(cell.text)) {
         title = parsed.tokens.map((t) => codeName(t.code)).join(' + ');
       }
+      const struck = ed.cancelledTokens(cell.text);
+      if (struck.length && looksLikeCodes(cell.text)) {
+        title = [title, `Cancelled: ${struck.map(codeName).join(' + ')}`].filter(Boolean).join(' · ');
+      }
     }
     if (cell?.color) {
       const meaning = E.legendAll.find((e) => e.argb === cell.color)?.meaning;
@@ -817,7 +821,9 @@ function bodyRow(row, r, days, today) {
       cls.push('lae-clash');
       title = [...new Set(clashes.map((x) => x.detail))].join('\n') + (title ? `\n${title}` : '');
     }
-    const td = el('td', { class: cls.join(' '), dataset: { c: String(c) }, text: cell?.text || '', title });
+    const td = el('td', {
+      class: cls.join(' '), dataset: { c: String(c) }, title,
+    }, row.kind === 'activity' ? codeNodes(cell?.text || '', 'lae-code-cancelled') : [cell?.text || '']);
     if (cell?.color) td.style.backgroundColor = `#${cell.color}`;
     if (!editable(row, c)) td.classList.add('lae-fixed');
     tr.appendChild(td);
@@ -831,7 +837,7 @@ function codeName(code) {
 }
 
 function looksLikeCodes(text) {
-  return /^[A-Za-z0-9]{1,8}(\.[A-Za-z0-9]{1,8})*$/.test(String(text).trim());
+  return /^~?[A-Za-z0-9]{1,8}(\.~?[A-Za-z0-9]{1,8})*$/.test(String(text).trim());
 }
 
 /** What may be typed where. */
@@ -1259,7 +1265,7 @@ function commitEdit() {
   if (row.kind === 'activity' && looksLikeCodes(value.replace(/\s+/g, ''))) value = ed.normaliseSupport(value);
   value = value.trim();
   if ((cell?.text || '') === value) return;
-  commit([{ op: 'cell', row_id: row.id, day, color: cell?.color || null, text: value }]);
+  commit([{ op: 'cell', row_id: row.id, day, color: cell?.color || null, text: value }], { ask: true });
   if (row.kind === 'activity') warnUnknown([value]);
 }
 
@@ -1284,19 +1290,176 @@ function warnUnknown(texts) {
    ═══════════════════════════════════════════════════════════════════════ */
 
 /** Apply ops here, remember how to undo them, and queue them for saving. */
-function commit(ops, { keepRedo = false } = {}) {
+function commit(ops, { keepRedo = false, ask = false } = {}) {
   const useful = ops.filter((op) => {
     if (op.op !== 'cell') return true;
     const was = ed.getCell(E.model, op.row_id, op.day);
     return (was?.color || null) !== (op.color ? String(op.color).toUpperCase() : null) || (was?.text || '') !== String(op.text ?? '');
   });
   if (!useful.length) return;
+  // Only a targeted edit asks — typing in a day, or taking a code off with
+  // its button. A paste, a fill or a cleared week is not somebody deciding a
+  // witness is no longer needed; "Cancel BART resources…" is the way to say so.
+  const removed = ask ? resourcesRemovedBy(useful) : [];
   const inverse = ed.applyOps(E.model, useful);
   E.undo.push({ ops: useful, inverse });
   if (E.undo.length > 200) E.undo.shift();
   if (!keepRedo) E.redo = [];
   enqueue(useful);
   draw();
+  if (removed.length) askAboutRemovedResources(removed);
+}
+
+/**
+ * The BART resources a set of cell edits takes off activities that still go
+ * ahead — a registered code gone from a day, or struck out by typing its tilde.
+ *
+ * Only registered codes: a typo corrected is not a witness withdrawn. Only
+ * activity rows, and never a day these edits paint as cancelled — that day's
+ * resources go with it and the cancellation question covers them.
+ */
+function resourcesRemovedBy(ops) {
+  const rows = new Map(E.model.rows.map((r) => [r.id, r]));
+  const registered = new Set(E.codes.map((c) => String(c.code).toUpperCase()));
+  const cancelColour = (hex) => {
+    const meaning = hex ? E.legendAll.find((e) => e.argb === String(hex).toUpperCase())?.meaning : null;
+    return !!meaning && isCancelMeaning(meaning);
+  };
+  const out = [];
+  for (const op of ops) {
+    if (op.op !== 'cell') continue;
+    const row = rows.get(op.row_id);
+    if (!row || row.kind !== 'activity' || cancelColour(op.color)) continue;
+    const was = ed.getCell(E.model, op.row_id, op.day);
+    for (const r of ed.removedCodes(was?.text || '', op.text || '')) {
+      if (registered.has(r.code)) out.push({ row, day: op.day, code: r.code, struck: r.struck });
+    }
+  }
+  return out;
+}
+
+/**
+ * A resource came off an activity: was it cancelled, or simply taken off?
+ *
+ * Both are real answers and the difference matters to a claim. **Cancel and
+ * log** strikes the code back into the day ("X.~WIT"), drawn through in red on
+ * every screen, and records who and why against the cancellation log, where
+ * it is listed beside the days that were cancelled outright. **Just remove**
+ * leaves the day as it was edited — a correction, a plan that changed before
+ * anybody was booked — and nothing is tracked. A code struck out by typing
+ * the tilde was already cancelled; only the why is asked.
+ */
+function askAboutRemovedResources(removed, { chosen = null } = {}) {
+  // One line per activity, code and run of days, as the log will list it.
+  const byCode = new Map();
+  for (const r of removed) {
+    const key = `${r.row.id}|${r.code}`;
+    if (!byCode.has(key)) byCode.set(key, { code: r.code, items: [] });
+    byCode.get(key).items.push(r);
+  }
+  const runs = [];
+  for (const { code, items } of byCode.values()) {
+    for (const run of ed.dayRuns(items)) {
+      const inRun = items.filter((i) => i.day >= run.start && i.day <= run.end);
+      runs.push({ ...run, code, items: inRun });
+    }
+  }
+  const pending = removed.filter((r) => !r.struck);
+  const party = selectInput({ value: 'BART', options: ['BART', 'Hitachi', 'Other'] });
+  const reason = el('textarea', { class: 'cx-input', rows: 3, placeholder: 'Why — e.g. witness not required for testing' });
+  const list = el('ul', { class: 'lae-cancel-runs' }, runs.map((r) => el('li', {}, [
+    el('span', { class: 'lae-code-cancelled', text: `${r.items.length > 1 ? `${r.items.length} × ` : ''}${r.code}` }),
+    ` ${codeName(r.code) !== r.code ? `(${codeName(r.code)}) ` : ''}— ${r.row.description || 'Activity'}`
+      + `${r.row.location ? ` at ${r.row.location}` : ''}, `
+      + `${r.start === r.end ? fmt(r.start) : `${fmt(r.start)} – ${fmt(r.end)}`}`,
+  ])));
+  /* From the menu nothing has been removed yet: somebody picks which of the
+     codes on those days to cancel, and the rest stay as they are. */
+  const picks = chosen
+    ? [...new Set(removed.map((r) => r.code))].map((code) => {
+      const box = el('input', { type: 'checkbox', checked: true, value: code });
+      return { code, box, label: el('label', { class: 'lae-code-pick' }, [box, ` ${code}${codeName(code) !== code ? ` — ${codeName(code)}` : ''}`]) };
+    })
+    : [];
+  const record = async () => {
+    if (chosen) {
+      const keep = new Set(picks.filter((p) => p.box.checked).map((p) => p.code));
+      if (!keep.size) {
+        toast({ message: 'Tick at least one resource to cancel.' });
+        return false;
+      }
+      for (let i = removed.length - 1; i >= 0; i--) if (!keep.has(removed[i].code)) removed.splice(i, 1);
+      for (let i = runs.length - 1; i >= 0; i--) if (!keep.has(runs[i].code)) runs.splice(i, 1);
+      for (let i = pending.length - 1; i >= 0; i--) if (!keep.has(pending[i].code)) pending.splice(i, 1);
+    }
+    try {
+      if (pending.length) {
+        const byCell = new Map();
+        for (const r of pending) {
+          const key = ed.cellKey(r.row.id, r.day);
+          if (!byCell.has(key)) byCell.set(key, { r, codes: [] });
+          byCell.get(key).codes.push(r.code);
+        }
+        const ops = [];
+        for (const { r, codes } of byCell.values()) {
+          const cell = ed.getCell(E.model, r.row.id, r.day);
+          ops.push({ op: 'cell', row_id: r.row.id, day: r.day, color: cell?.color || null, text: ed.strikeCodes(cell?.text || '', codes) });
+        }
+        commit(ops);
+      }
+      for (const run of runs) {
+        await rc.addCancellationNote({
+          ...ed.cancellationKey(run.row),
+          start_date: run.start,
+          end_date: run.end,
+          codes: run.code,
+          party: party.value,
+          reason: reason.value.trim() || null,
+        });
+      }
+      toast({ tone: 'good', message: `Cancelled and logged — ${[...new Set(runs.map((r) => r.code))].join(', ')}, ${party.value}.` });
+    } catch (err) {
+      toast({ tone: 'bad', message: err.message, timeout: 10000 });
+      rc.reportError('lookahead:resource-note', err);
+    }
+  };
+  const n = runs.length;
+  openModal({
+    title: chosen
+      ? 'Cancel BART resources'
+      : pending.length
+        ? (n === 1 ? 'A BART resource came off this activity' : `${n} BART resources came off activities`)
+        : (n === 1 ? 'Why was this resource cancelled?' : `Why were these ${n} resources cancelled?`),
+    subtitle: chosen
+      ? 'Each one stays on its day struck through in red, and goes in the cancellation log'
+      : pending.length
+        ? 'Cancel it to keep it on the day struck through and in the cancellation log — or just remove it'
+        : 'Recorded in the cancellation log, attributed and dated',
+    body: el('div', { class: 'lae-form lae-cancel-form lae-resource-form' }, [
+      chosen ? el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Which resources' }), el('div', { class: 'lae-code-picks' }, picks.map((p) => p.label))]) : list,
+      el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Responsible party' }), party]),
+      el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Reason' }), reason]),
+    ]),
+    actions: [
+      { label: chosen ? 'Close' : pending.length ? 'Just remove — not tracked' : 'Not now' },
+      { label: chosen || pending.length ? 'Cancel and log' : 'Record', kind: 'primary', autofocus: true, onClick: record },
+    ],
+  });
+}
+
+/** Right-click → "Cancel BART resources…": strike chosen codes off the selected days. */
+function cancelResourcesOnSelection() {
+  const items = [];
+  for (const s of selectedCells()) {
+    if (s.row?.kind !== 'activity' || s.c < META) continue;
+    const cell = ed.getCell(E.model, s.row.id, s.day);
+    for (const code of ed.supportTokens(cell?.text || '')) items.push({ row: s.row, day: s.day, code, struck: false });
+  }
+  if (!items.length) {
+    toast({ message: 'Select activity days that ask for support first.' });
+    return;
+  }
+  askAboutRemovedResources(items, { chosen: true });
 }
 
 function undo() {
@@ -1356,10 +1519,21 @@ function askWhyCancelled(runs) {
   if (!runs.length) return;
   const party = selectInput({ value: 'BART', options: ['BART', 'Hitachi', 'Other'] });
   const reason = el('textarea', { class: 'cx-input', rows: 3, placeholder: 'What happened — e.g. possession withdrawn by BART' });
-  const list = el('ul', { class: 'lae-cancel-runs' }, runs.map((r) => el('li', {
-    text: `${r.row.description || 'Activity'}${r.row.location ? ` at ${r.row.location}` : ''} — `
-      + `${r.start === r.end ? fmt(r.start) : `${fmt(r.start)} – ${fmt(r.end)}`}`,
-  })));
+  /* What BART had been asked for on those days goes with them — said here so
+     nobody has to work out afterwards that a witness was cancelled too. */
+  const resourcesOf = (r) => {
+    const texts = [];
+    for (let d = r.start; d <= r.end; d = ed.addDaysISO(d, 1)) texts.push(ed.getCell(E.model, r.row.id, d)?.text || '');
+    return describeCodeCounts(countCodes(texts));
+  };
+  const list = el('ul', { class: 'lae-cancel-runs' }, runs.map((r) => {
+    const resources = resourcesOf(r);
+    return el('li', {
+      text: `${r.row.description || 'Activity'}${r.row.location ? ` at ${r.row.location}` : ''} — `
+        + `${r.start === r.end ? fmt(r.start) : `${fmt(r.start)} – ${fmt(r.end)}`}`
+        + `${resources ? ` · BART resources cancelled with it: ${resources}` : ''}`,
+    });
+  }));
   openModal({
     title: runs.length === 1 ? 'Why was this cancelled?' : `Why were these ${runs.length} cancelled?`,
     subtitle: 'Recorded in the cancellation log, attributed and dated',
@@ -1398,18 +1572,34 @@ function addCode(code, direction) {
   for (const s of selectedCells()) {
     if (!paintable(s.row, s.c)) continue;
     const cell = ed.getCell(E.model, s.row.id, s.day);
-    const tokens = ed.supportTokens(cell?.text || '');
-    if (direction > 0) tokens.push(code);
+    const tokens = cellTokens(cell?.text || '');
+    if (direction > 0) tokens.push({ code, cancelled: false });
     else {
-      const at = tokens.lastIndexOf(code);
+      const at = tokens.map((t) => (t.cancelled ? null : t.code)).lastIndexOf(code);
       if (at < 0) continue;
       tokens.splice(at, 1);
     }
-    ops.push({ op: 'cell', row_id: s.row.id, day: s.day, color: cell?.color || null, text: tokens.join('.') });
+    ops.push({ op: 'cell', row_id: s.row.id, day: s.day, color: cell?.color || null, text: ed.writeTokens(tokens) });
   }
   if (!ops.length) {
     toast({ message: 'Select an activity\'s days first — support is asked for on activities.' });
     return;
+  }
+  commit(ops, { ask: direction < 0 });
+}
+
+/**
+ * Put struck-out resources back on the selected days: "X.~WIT" → "X.WIT". The
+ * cancellation log keeps the days it was struck out on — it was cancelled when
+ * those readings were taken — and says so if the reason no longer applies.
+ */
+function reinstateSelection() {
+  const ops = [];
+  for (const s of selectedCells()) {
+    if (s.row?.kind !== 'activity' || s.c < META) continue;
+    const cell = ed.getCell(E.model, s.row.id, s.day);
+    if (!cell || !ed.cancelledTokens(cell.text).length) continue;
+    ops.push({ op: 'cell', row_id: s.row.id, day: s.day, color: cell.color || null, text: ed.reinstateCodes(cell.text) });
   }
   commit(ops);
 }
@@ -1819,6 +2009,10 @@ function cellMenu(x, y, row) {
     E.clip ? { label: 'Paste', icon: 'clipboard', key: 'mod+v', onClick: () => pasteInternal() } : null,
     days ? { label: 'Clear text', icon: 'x', key: 'del', onClick: () => clearSelection() } : null,
     days ? { label: 'Clear text and colour', icon: 'x', onClick: () => clearSelection({ colour: true }) } : null,
+    days && selectedCells().some((c) => c.row?.kind === 'activity' && ed.cancelledTokens(ed.getCell(E.model, c.row.id, c.day)?.text || '').length)
+      ? { label: 'Reinstate cancelled resources', icon: 'refresh', onClick: () => reinstateSelection() } : null,
+    days && selectedCells().some((c) => c.row?.kind === 'activity' && ed.supportTokens(ed.getCell(E.model, c.row.id, c.day)?.text || '').length)
+      ? { label: 'Cancel BART resources…', icon: 'x', onClick: () => cancelResourcesOnSelection() } : null,
     one && one.kind !== 'section' && days
       ? { label: 'History of this day…', icon: 'history', onClick: () => historyDialog(one, E.view.days[E.focus.c - META]) }
       : null,

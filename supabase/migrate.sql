@@ -139,6 +139,12 @@ alter table public.rc_actuals
   add column if not exists supersedes_id uuid
   references public.rc_actuals(id) on delete set null;
 
+-- ── A cancellation note can be about BART resources, not the day ──────────
+-- Null for a note about the activity's day; the struck-out codes ("WIT") for
+-- one about support taken off an activity that still goes ahead.
+alter table public.rc_cancellation_notes
+  add column if not exists codes text;
+
 -- ── The team can read the look-ahead, and plan their own days ─────────────
 -- Both are policy changes, and `rc_schema.sql` drops and recreates every policy
 -- it owns, so there is nothing to alter here. They are listed because the

@@ -131,9 +131,15 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await saved();
   check('a code button adds to what is being typed', (await serverCell('IXL Regression Testing', day(1)))?.text === 'X.WIT');
 
+  const hadCodes = /\b(X|WIT|TCE)\b/.test((await serverCell('IXL Regression Testing', day(2)))?.text || '');
   await cell('IXL Regression Testing', day(2)).click();
   await page.keyboard.type('ZZ');
   await page.keyboard.press('Enter');
+  // Typing over a day that asked for support asks whether it was cancelled.
+  await page.waitForSelector('.cx-modal', { timeout: hadCodes ? 3000 : 300 }).catch(() => {});
+  const overwrote = page.locator('.cx-modal', { hasText: 'BART resource' });
+  if (hadCodes) check('typing over a day\u2019s codes asks whether they were cancelled', (await overwrote.count()) === 1);
+  if (await overwrote.count()) await overwrote.locator('button', { hasText: 'Just remove' }).click();
   await saved();
   check('a code nobody registered is kept as typed, and marked',
     await cell('IXL Regression Testing', day(2)).evaluate((n) => n.classList.contains('lae-unknown-code')));
@@ -258,6 +264,10 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     (await serverCell('IXL Regression Testing', day(0)))?.text === 'X.WIT.WIT'
       && (await serverCell('IXL Regression Testing', day(2)))?.text === 'ZZ.WIT');
   await page.locator('#rc-frame .lae-codes .lae-code', { hasText: 'WIT' }).click({ modifiers: ['Shift'] });
+  await page.waitForSelector('.cx-modal', { timeout: 3000 }).catch(() => {});
+  const shiftAsked = page.locator('.cx-modal', { hasText: 'BART resource' });
+  check('taking a code away with its button asks whether it was cancelled', (await shiftAsked.count()) === 1);
+  await shiftAsked.locator('button', { hasText: 'Just remove' }).click();
   await saved();
   check('and Shift takes one away again', (await serverCell('IXL Regression Testing', day(0)))?.text === 'X.WIT');
 
@@ -503,6 +513,8 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await cell('ATS Site Test', day(20)).click();
   await page.keyboard.type('WIT');
   await page.keyboard.press('Enter');
+  // Typing over the codes asks; a plan that changed is "Just remove".
+  await page.locator('.cx-modal button', { hasText: 'Just remove' }).click({ timeout: 3000 }).catch(() => {});
   await saved();
   check('two saves to go back through', (await serverCell('ATS Site Test', day(20)))?.text === 'WIT');
   await page.locator('#rc-frame .lae-toolbar button[aria-label="More"]').click();
@@ -550,6 +562,7 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await cell('IXL Regression Testing', day(4)).click();
   await page.keyboard.type('X.X');
   await page.keyboard.press('Enter');
+  await page.locator('.cx-modal button', { hasText: 'Just remove' }).click({ timeout: 1500 }).catch(() => {});
   await page.waitForTimeout(1200);
   check('writing over a day somebody else just changed is refused, and says so',
     (await page.locator('.cx-toast', { hasText: 'Somebody else changed the same thing' }).count()) >= 1);
@@ -584,6 +597,87 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     !(await cell('IXL Regression Testing', day(2)).evaluate((n) => n.classList.contains('lae-unknown-code')))
       && (await page.locator('#rc-frame .lae-codes .lae-code').allInnerTexts()).includes('ZZ'));
 
+  /* ── A BART resource off an activity that still goes ahead ─────────── */
+  const witDay = day(1);
+  const witCell = () => cell('IXL Regression Testing', witDay);
+  const notesAt = () => page.evaluate(() => (window.__rc.rows.rc_cancellation_notes || []).length);
+  check('the day starts with an EIC and a witness', (await serverCell('IXL Regression Testing', witDay))?.text === 'X.WIT');
+  const takeWitnessOff = async () => {
+    await witCell().dblclick();
+    await page.waitForSelector('#rc-frame .lae-editor');
+    await page.locator('#rc-frame .lae-editor').fill('X');
+    await page.keyboard.press('Tab');
+    await page.waitForSelector('.cx-modal', { timeout: 4000 }).catch(() => {});
+  };
+  // "Just remove": the witness goes, and nothing is tracked.
+  let notesBeforeRemove = await notesAt();
+  await takeWitnessOff();
+  const asked = page.locator('.cx-modal', { hasText: 'BART resource' });
+  check('taking a witness off asks whether it was cancelled or just removed',
+    (await asked.count()) === 1 && /WIT/.test(await asked.innerText())
+      && (await asked.locator('button', { hasText: 'Just remove' }).count()) === 1
+      && (await asked.locator('button', { hasText: 'Cancel and log' }).count()) === 1);
+  await asked.locator('button', { hasText: 'Just remove' }).click();
+  await saved();
+  check('"Just remove" takes it off and tracks nothing',
+    (await serverCell('IXL Regression Testing', witDay))?.text === 'X' && (await notesAt()) === notesBeforeRemove);
+  // Put it back — adding a resource asks nothing.
+  await witCell().dblclick();
+  await page.locator('#rc-frame .lae-editor').fill('X.WIT');
+  await page.keyboard.press('Tab');
+  await saved();
+  check('adding a resource back asks nothing', (await page.locator('.cx-modal').count()) === 0
+    && (await serverCell('IXL Regression Testing', witDay))?.text === 'X.WIT');
+  // "Cancel and log": struck through on the day, and in the log with its reason.
+  notesBeforeRemove = await notesAt();
+  await takeWitnessOff();
+  await asked.locator('select').selectOption('BART');
+  await asked.locator('textarea').fill('Witness not required for testing');
+  await asked.locator('button', { hasText: 'Cancel and log' }).click();
+  await page.waitForTimeout(400);
+  await saved();
+  const witNote = await page.evaluate(() => (window.__rc.rows.rc_cancellation_notes || []).slice(-1)[0]);
+  check('"Cancel and log" keeps the witness on the day, struck out',
+    (await serverCell('IXL Regression Testing', witDay))?.text === 'X.~WIT',
+    (await serverCell('IXL Regression Testing', witDay))?.text);
+  await snap('struck');
+  check('drawn through in red on the grid',
+    (await witCell().locator('.lae-code-cancelled').innerText()).trim() === 'WIT');
+  check('and logged as a BART resource, with who and why',
+    (await notesAt()) === notesBeforeRemove + 1 && witNote?.codes === 'WIT' && witNote?.party === 'BART'
+      && witNote?.reason === 'Witness not required for testing' && witNote?.start_date === witDay
+      && /IXL Regression Testing/.test(witNote?.raw_label), JSON.stringify(witNote));
+  await witCell().click({ button: 'right' });
+  await page.waitForSelector('.cx-menu', { timeout: 3000 }).catch(() => {});
+  check('a struck-out resource can be reinstated from the day\u2019s menu',
+    (await page.locator('.cx-menu .cx-menu-item', { hasText: 'Reinstate cancelled resources' }).count()) === 1);
+  await page.keyboard.press('Escape');
+  await grid().focus();
+
+  // Several days at once: right-click → "Cancel BART resources…", pick which.
+  const bulkDay = day(0);
+  const bulkBefore = (await serverCell('IXL Regression Testing', bulkDay))?.text;
+  await cell('IXL Regression Testing', bulkDay).click({ button: 'right' });
+  await page.locator('.cx-menu .cx-menu-item', { hasText: 'Cancel BART resources' }).click();
+  const bulk = page.locator('.cx-modal', { hasText: 'Cancel BART resources' });
+  await bulk.waitFor({ timeout: 3000 }).catch(() => {});
+  check('several days\u2019 resources can be cancelled from the menu, choosing which',
+    (await bulk.locator('.lae-code-picks input[type="checkbox"]').count()) >= 2, bulkBefore);
+  await bulk.locator('.lae-code-picks input[value="X"]').uncheck();
+  await bulk.locator('textarea').fill('Witness not required that week');
+  await bulk.locator('button', { hasText: 'Cancel and log' }).click();
+  await page.waitForTimeout(400);
+  await saved();
+  check('only the ones ticked are struck out',
+    (await serverCell('IXL Regression Testing', bulkDay))?.text === 'X.~WIT',
+    (await serverCell('IXL Regression Testing', bulkDay))?.text);
+  await cell('IXL Regression Testing', bulkDay).click({ button: 'right' });
+  await page.locator('.cx-menu .cx-menu-item', { hasText: 'Reinstate cancelled resources' }).click();
+  await saved();
+  check('and reinstating puts the witness back as asked for, asking nothing',
+    (await serverCell('IXL Regression Testing', bulkDay))?.text === bulkBefore && (await page.locator('.cx-modal').count()) === 0);
+  await grid().focus();
+
   /* ── Publishing: the rest of the calendar reads what was written ──── */
   /* Names written, published, then taken off and Edit switched off at once:
      the calendar used to open while the first publish was still writing, and
@@ -604,6 +698,8 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     /X\.TCE/.test(calendarText) && /ATS Site Test/.test(calendarText), calendarText.slice(0, 200).replace(/\n/g, ' '));
   check('names taken off in the editor are off the calendar as soon as Edit is switched off',
     !/Quillon Passing/.test(calendarText));
+  check('the calendar draws the cancelled witness struck through in red',
+    (await page.locator('#rc-frame .la-grid .la-code-cancelled', { hasText: 'WIT' }).count()) >= 1);
   check('and it no longer offers to read the workbook',
     (await page.locator('#rc-frame button', { hasText: 'Check now' }).count()) === 0
       && (await page.locator('#rc-frame .la-edit-switch[aria-pressed="false"]').count()) === 1);
@@ -652,6 +748,28 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await publishElsewhere('ATS Site Test');
   check('and so does the next', await calendarSays(/ATS Site Test(?!, from)/)
     && !/from elsewhere/.test(await page.locator('#rc-frame .la-grid').innerText()));
+
+  /* The cancellation log lists the witness beside the days cancelled outright. */
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Cancellations' }).click();
+  await page.waitForSelector('#rc-frame .rc-cancel-row', { timeout: 10000 });
+  const witRow = page.locator('#rc-frame .rc-cancel-row[data-kind="support"][data-codes="WIT"]', { hasText: 'IXL Regression Testing' });
+  await snap('log');
+  check('the cancellation log lists the BART resource struck out',
+    (await witRow.count()) >= 1 && /BART resource cancelled/.test(await witRow.first().innerText()));
+  check('with the reason given when it was cancelled',
+    /Witness not required for testing/.test(await witRow.first().innerText()));
+  const dayRow = page.locator('#rc-frame .rc-cancel-row[data-kind="activity"]', { hasText: 'IXL Regression Testing' });
+  check('and a day cancelled outright lists what BART had been asked for',
+    (await dayRow.count()) >= 1 && /\d+ X/.test(await dayRow.first().innerText()), (await dayRow.first().innerText().catch(() => '')).replace(/\s+/g, ' '));
+  await page.locator('#rc-frame .la-cancel-kinds .rc-tab', { hasText: 'BART resources' }).click();
+  await page.waitForTimeout(300);
+  check('and the log can show only the BART resources',
+    (await page.locator('#rc-frame .rc-cancel-row[data-kind="activity"]').count()) === 0
+      && (await page.locator('#rc-frame .rc-cancel-row[data-kind="support"]').count()) >= 1);
+  await page.locator('#rc-frame .la-cancel-kinds .rc-tab', { hasText: 'Everything' }).click();
+  await page.waitForTimeout(200);
+  await page.locator('#rc-frame .rc-tab', { hasText: /^Calendar$/ }).click();
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
   await page.locator('#rc-frame .la-edit-switch').click();
   await page.waitForSelector('#rc-frame .lae-grid', { timeout: 8000 });
 

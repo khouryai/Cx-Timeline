@@ -966,6 +966,42 @@ snapshots" re-derives `cells` for every read since six weeks before the start
 is how the Resource-row rule reached reads taken before it existed. It rewrites
 the derivation and nothing else: the snapshot is the record.
 
+### A BART resource can be cancelled without the day, and both are in the log
+
+An activity can go ahead while part of what BART was asked for is taken off
+it — one EIC and one witness, then the witness is not needed. That is written
+into the day's text as the code **struck out with a leading tilde**: "X.~WIT"
+is an EIC still wanted and a witness cancelled. Text rather than a column of
+its own, so it travels wherever the cell already does — undo, copy, the
+published grid, `bart_marks` on every stored read — and `cellTokens()` in
+`core/lookahead.js` is the one reader. A struck-out code is never counted as
+support requested, never chased as an unknown code, drawn struck through in
+red on the editor and the calendar alike (`codeNodes()`), and exported to
+Excel as red strikethrough rich text with the tilde kept, so reading the file
+back never brings a cancelled witness back as wanted.
+
+The editor offers **both answers** whenever a registered code comes off an
+activity by a targeted edit — typed over in one day, or taken away with its
+button: *Cancel and log* strikes it back onto the day and records who and why;
+*Just remove* leaves it gone and tracks nothing. A paste, a fill, a cleared
+range or going back to an earlier moment asks nothing — none of those is
+somebody deciding a witness is not needed — and right-click → "Cancel BART
+resources…" is the way to cancel across many days on purpose, choosing which
+codes. "Reinstate cancelled resources" takes the tilde off again.
+
+The log is derived exactly like red days: `rc_cancelled_support_days` reads
+`bart_marks` for a tilde on a day that is not itself red, and
+`supportCancellationEvents()` joins consecutive days striking out the same
+codes into one event. `rc_cancelled_days` now also carries each red day's
+`marks`, so a cancelled day lists the BART resources it cancelled with it. A
+note about a resource carries `codes` ("WIT") on `rc_cancellation_notes`, and
+`attachCancellationNotes()` gives it only to a resource event striking out one
+of those codes — never to the day's own cancellation on the same dates, which
+is a different judgement. Both kinds are read in one place,
+`cancellationLog()` in `ui/rc_util.js`, which is what the log and the
+administrator's inbox both count from. The printed calendar still shows the
+tilde as typed; it has no per-code styling.
+
 ### The week plan is one tab, and it used to be two
 
 **The week plan is one tab, and it used to be two.** "Week plan" drew the
@@ -1915,6 +1951,9 @@ left off with the text kept and a message saying how many — never snapped to
 the nearest colour, for the reason `applyLegend()` never guesses one.
 
 ### Support codes are a register, like the colours
+
+(A code struck out with a tilde — "X.~WIT" — is a cancelled resource: see *A
+BART resource can be cancelled without the day, and both are in the log*.)
 
 "X.WIT" is one EIC and one BART witness; "X.X" is two EICs. `rc_support_codes`
 (Legend → Support codes) says what each code asks for and who provides it. The

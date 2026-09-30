@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 25   Built: 2026-09-30T17:26:04.362Z
+ * Modules: 25   Built: 2026-09-30T23:14:31.457Z
  */
 (function () {
   'use strict';
@@ -186,7 +186,8 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   const { el } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { toISO, todayMs, fmtDate, addDays, MS_DAY } = __req("core/dates.js");
-  const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS } = __req("core/lookahead.js");
+  const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS, cellTokens, cancellationEvents, supportCancellationEvents, attachCancellationNotes } = __req("core/lookahead.js");
+
 
 
   const { applyLegend } = __req("io/lookahead.js");
@@ -293,6 +294,43 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /** A row was written. Whatever is on screen reloads. */
+  /**
+   * A day's codes as nodes, with every struck-out code ("~WIT") in a span of its
+   * own so it can be drawn struck through in red — the calendar's grid and the
+   * editor's both draw a cell this way. Text with no tilde is returned as it is:
+   * names, notes, anything that is not codes.
+   */
+  function codeNodes(value, klass = 'rc-code-cancelled') {
+    const text = String(value ?? '');
+    if (!text.includes('~') || !/^[\s~A-Za-z0-9.]+$/.test(text)) return [text];
+    const parts = [];
+    cellTokens(text).forEach((t, i) => {
+      if (i) parts.push('.');
+      parts.push(t.cancelled
+        ? el('span', { class: klass, text: t.code, title: `${t.code} — cancelled` })
+        : t.code);
+    });
+    return parts;
+  }
+
+  /**
+   * The cancellation log from `from` on: days cancelled outright and BART
+   * resources struck out of activities that went ahead, as one list oldest
+   * first, each with its note. The log and the administrator's inbox both read
+   * it here, so they cannot count differently. A database from before resource
+   * cancellations were derived simply has none of them.
+   */
+  async function cancellationLog(from) {
+    const [days, support, notes] = await Promise.all([
+      rc.listCancelledDays(from),
+      rc.listCancelledSupportDays(from).catch(() => []),
+      rc.listCancellationNotes().catch(() => []),
+    ]);
+    const events = [...cancellationEvents(days, { from }), ...supportCancellationEvents(support, { from })]
+      .sort((a, b) => a.start.localeCompare(b.start) || a.label.localeCompare(b.label) || a.kind.localeCompare(b.kind));
+    return attachCancellationNotes(events, notes);
+  }
+
   function notifyChanged(what) {
     emit(EV.RC_CHANGED, { what });
   }
@@ -1221,6 +1259,8 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "dayLabel", { get: () => dayLabel, enumerable: true });
   Object.defineProperty(__x, "byId", { get: () => byId, enumerable: true });
   Object.defineProperty(__x, "groupBy", { get: () => groupBy, enumerable: true });
+  Object.defineProperty(__x, "codeNodes", { get: () => codeNodes, enumerable: true });
+  Object.defineProperty(__x, "cancellationLog", { get: () => cancellationLog, enumerable: true });
   Object.defineProperty(__x, "notifyChanged", { get: () => notifyChanged, enumerable: true });
   Object.defineProperty(__x, "orgNav", { get: () => orgNav, enumerable: true });
   Object.defineProperty(__x, "goToTab", { get: () => goToTab, enumerable: true });
@@ -1294,7 +1334,7 @@ __mods["core/la_edit.js"] = function (__x, __req) {
    * Imports: core/lookahead (a leaf).
    */
 
-  const { absenceKind, ABSENCE_LABELS, resourceNames } = __req("core/lookahead.js");
+  const { absenceKind, ABSENCE_LABELS, resourceNames, cellTokens } = __req("core/lookahead.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      Days
@@ -1525,10 +1565,66 @@ __mods["core/la_edit.js"] = function (__x, __req) {
    * code is a request nobody can staff until somebody says what it is.
    */
   function supportTokens(text) {
-    return String(text ?? '')
-      .split('.')
-      .map((t) => t.trim().toUpperCase())
-      .filter(Boolean);
+    // A struck-out code ("~WIT") is no longer asked for: never counted, never
+    // staffed, never an unknown code to chase.
+    return cellTokens(text).filter((t) => !t.cancelled).map((t) => t.code);
+  }
+
+  /** The codes struck out of a cell — "X.~WIT" → ["WIT"]. */
+  function cancelledTokens(text) {
+    return cellTokens(text).filter((t) => t.cancelled).map((t) => t.code);
+  }
+
+  /** Tokens back into the sheet's form: `[{code:'X'},{code:'WIT',cancelled:true}]` → "X.~WIT". */
+  function writeTokens(tokens) {
+    return tokens.map((t) => `${t.cancelled ? '~' : ''}${t.code}`).join('.');
+  }
+
+  /**
+   * Strike codes out of a cell rather than remove them: each code in `codes`
+   * turns one of its live occurrences into "~CODE", and a code no longer live in
+   * the text is added struck out — the removal already happened, and this is
+   * the record that it was a cancellation. "X" with ["WIT"] → "X.~WIT".
+   */
+  function strikeCodes(text, codes) {
+    const tokens = cellTokens(text);
+    for (const code of codes) {
+      const live = tokens.find((t) => t.code === code && !t.cancelled);
+      if (live) live.cancelled = true;
+      else tokens.push({ code, cancelled: true });
+    }
+    return writeTokens(tokens);
+  }
+
+  /** Put struck-out codes back: "X.~WIT" → "X.WIT". */
+  function reinstateCodes(text) {
+    return writeTokens(cellTokens(text).map((t) => ({ ...t, cancelled: false })));
+  }
+
+  /**
+   * What a change to one cell took away: the live codes in `before` with no
+   * live counterpart in `after`, one per occurrence ("X.X" → "X" removed one X).
+   * A code that was struck out rather than deleted is in the answer too, with
+   * `struck: true` — it was cancelled by typing the tilde.
+   */
+  function removedCodes(before, after) {
+    const left = new Map();
+    for (const code of supportTokens(after)) left.set(code, (left.get(code) || 0) + 1);
+    const struck = new Map();
+    for (const code of cancelledTokens(after)) struck.set(code, (struck.get(code) || 0) + 1);
+    const was = new Map();
+    for (const code of cancelledTokens(before)) was.set(code, (was.get(code) || 0) + 1);
+    const out = [];
+    for (const code of supportTokens(before)) {
+      if (left.get(code)) { left.set(code, left.get(code) - 1); continue; }
+      // Struck out in this edit: more struck occurrences now than before.
+      const newlyStruck = (struck.get(code) || 0) - (was.get(code) || 0);
+      if (newlyStruck > 0) {
+        was.set(code, (was.get(code) || 0) + 1);
+        out.push({ code, struck: true });
+      } else out.push({ code, struck: false });
+    }
+    return out;
   }
 
   function parseSupport(text, codes) {
@@ -1539,8 +1635,7 @@ __mods["core/la_edit.js"] = function (__x, __req) {
 
   /** Tidy what was typed into the form the sheet writes: "x . wit" → "X.WIT". */
   function normaliseSupport(text) {
-    const tokens = supportTokens(text);
-    return tokens.length ? tokens.join('.') : '';
+    return writeTokens(cellTokens(text));
   }
 
   /**
@@ -2221,7 +2316,7 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   /** "X " → "X", "x.wit" → "X.WIT" — but only when it *looks* like codes, so a note survives. */
   function normaliseSupportIfCodes(text) {
     const t = String(text).trim();
-    return /^[A-Za-z]{1,6}(\s*\.\s*[A-Za-z]{1,6})*\.?$/.test(t) ? normaliseSupport(t) : t;
+    return /^~?\s*[A-Za-z]{1,6}(\s*\.\s*~?\s*[A-Za-z]{1,6})*\.?$/.test(t) ? normaliseSupport(t) : t;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -2411,6 +2506,11 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   Object.defineProperty(__x, "respace", { get: () => respace, enumerable: true });
   Object.defineProperty(__x, "rowsWithWork", { get: () => rowsWithWork, enumerable: true });
   Object.defineProperty(__x, "supportTokens", { get: () => supportTokens, enumerable: true });
+  Object.defineProperty(__x, "cancelledTokens", { get: () => cancelledTokens, enumerable: true });
+  Object.defineProperty(__x, "writeTokens", { get: () => writeTokens, enumerable: true });
+  Object.defineProperty(__x, "strikeCodes", { get: () => strikeCodes, enumerable: true });
+  Object.defineProperty(__x, "reinstateCodes", { get: () => reinstateCodes, enumerable: true });
+  Object.defineProperty(__x, "removedCodes", { get: () => removedCodes, enumerable: true });
   Object.defineProperty(__x, "parseSupport", { get: () => parseSupport, enumerable: true });
   Object.defineProperty(__x, "normaliseSupport", { get: () => normaliseSupport, enumerable: true });
   Object.defineProperty(__x, "supportTotals", { get: () => supportTotals, enumerable: true });
@@ -2552,11 +2652,12 @@ __mods["ui/rc_inbox.js"] = function (__x, __req) {
 
   const { el, clear } = __req("core/util.js");
   const rc = __req("core/rc.js");
-  const { cancellationEvents, attachCancellationNotes, changesForMe } = __req("core/lookahead.js");
+  const { changesForMe } = __req("core/lookahead.js");
   const ed = __req("core/la_edit.js");
   const { icon } = __req("ui/icons.js");
   const { toast, badge, emptyState } = __req("ui/components.js");
-  const { notifyChanged, goToTab, dayLabel, todayISO, orgNav, nameRegister, resourceAssignments, absenceAssignments, lookaheadWithResources, locationRegister, unmatchedLocations, personMatcher } = __req("ui/rc_util.js");
+  const { notifyChanged, goToTab, dayLabel, todayISO, orgNav, nameRegister, resourceAssignments, absenceAssignments, lookaheadWithResources, locationRegister, unmatchedLocations, personMatcher, cancellationLog } = __req("ui/rc_util.js");
+
 
 
 
@@ -2713,15 +2814,14 @@ __mods["ui/rc_inbox.js"] = function (__x, __req) {
       attempt('Cancellations', async () => {
         const settings = await rc.listSettings().catch(() => []);
         const from = settings.find((x) => x.key === 'cancellation_log_from')?.value || `${today.slice(0, 4)}-09-01`;
-        const [days, notes] = await Promise.all([rc.listCancelledDays(from), rc.listCancellationNotes().catch(() => [])]);
-        const open = attachCancellationNotes(cancellationEvents(days, { from }), notes).filter((e) => !e.note);
+        const open = (await cancellationLog(from)).filter((e) => !e.note);
         if (open.length) {
           items.push({
             id: 'cancellations',
             area: 'Look-ahead',
             tone: 'bad',
             title: `${plural(open.length, 'cancellation')} with no reason yet`,
-            detail: open.slice(0, 4).map((e) => `${e.label || 'An activity'} (${dayLabel(e.start)})`).join('; ')
+            detail: open.slice(0, 4).map((e) => `${e.kind === 'support' ? `${e.codes} off ` : ''}${e.label || 'An activity'} (${dayLabel(e.start)})`).join('; ')
               + (open.length > 4 ? `; and ${open.length - 4} more` : '')
               + ' — the log is the claim, and a cancellation with no party is one nobody can argue.',
             actions: [{ label: 'Open the log', primary: true, run: () => openLookahead('cancellations') }],
@@ -7802,12 +7902,13 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
    * Imports: core/la_edit, io/xlsx_write, io/lookahead.
    */
 
-  const { FIELDS, LAYOUT, SECTION_BAND, rowsWithWork, getCell, metaValues, colLetters, isWeekend, weekdayLetter, monthLabel } = __req("core/la_edit.js");
+  const { FIELDS, LAYOUT, SECTION_BAND, rowsWithWork, getCell, metaValues, colLetters, isWeekend, weekdayLetter, monthLabel, cancelledTokens } = __req("core/la_edit.js");
 
 
 
   const { zipStore, xmlEscape, styleBook, workbookParts } = __req("io/xlsx_write.js");
   const { isDark } = __req("io/lookahead.js");
+  const { cellTokens } = __req("core/lookahead.js");
 
   const WEEKEND = '7F7F7F';
   const DAY_WIDTH = 12.7109375;
@@ -7881,6 +7982,27 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
     const str = (col, row, text, s) => (text === '' || text == null
       ? `<c r="${colLetters(col)}${row}" s="${s}"/>`
       : `<c r="${colLetters(col)}${row}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(text)}</t></is></c>`);
+    /* A day with a struck-out resource ("X.~WIT") is written as rich text: the
+       live codes in the cell's own font, each cancelled one — tilde kept, so the
+       file reads back as cancelled — struck through in red, as the calendar
+       draws it. Whoever pastes the row into the master sees what was taken off. */
+    const struckRun = (text, dark) => `<r><rPr><b/><strike/><sz val="10"/><color rgb="${dark ? 'FFFFFFFF' : 'FFFF0000'}"/>`
+      + `<rFont val="Arial"/><family val="2"/></rPr><t xml:space="preserve">${xmlEscape(text)}</t></r>`;
+    const plainRun = (text) => `<r><t xml:space="preserve">${xmlEscape(text)}</t></r>`;
+    const codesCell = (col, row, text, s, dark = false) => {
+      const runs = [];
+      let pending = '';
+      cellTokens(text).forEach((t, i) => {
+        if (i) pending += '.';
+        if (t.cancelled) {
+          if (pending) runs.push(plainRun(pending));
+          pending = '';
+          runs.push(struckRun(`~${t.code}`, dark));
+        } else pending += t.code;
+      });
+      if (pending) runs.push(plainRun(pending));
+      return `<c r="${colLetters(col)}${row}" s="${s}" t="inlineStr"><is>${runs.join('')}</is></c>`;
+    };
     const num = (col, row, n, s) => `<c r="${colLetters(col)}${row}" s="${s}"><v>${n}</v></c>`;
     const blank = (col, row, s) => `<c r="${colLetters(col)}${row}" s="${s}"/>`;
     const addRow = (r, cells, { ht = null, hidden = false } = {}) => {
@@ -7927,7 +8049,13 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
     /* ── The body ── */
     let r = L.firstBodyRow;
     const metaStyle = [S.metaCenter, S.metaLeft, S.metaCenter, S.metaShrink, S.metaCenter, S.metaCenter];
+    let anyStruck = false;
     const dayCell = (col, row, cell, { names = false } = {}, iso) => {
+      if (!names && cell?.text && cancelledTokens(cell.text).length) {
+        anyStruck = true;
+        if (cell.color) return codesCell(col, row, cell.text, paint(cell.color), isDark(cell.color));
+        return codesCell(col, row, cell.text, isWeekend(iso) ? S.weekend : S.day);
+      }
       if (cell?.color) return str(col, row, cell.text || '', paint(cell.color));
       if (isWeekend(iso)) return str(col, row, cell?.text || '', S.weekend);
       return str(col, row, cell?.text || '', names ? S.names : S.day);
@@ -7992,6 +8120,13 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
           addRow(r, [
             str(L.firstMetaCol, r, String(c.code).toUpperCase(), S.code),
             str(L.firstMetaCol + 1, r, [c.name, c.party ? `(${c.party})` : ''].filter(Boolean).join(' '), S.keyText),
+          ]);
+          r++;
+        }
+        if (anyStruck) {
+          addRow(r, [
+            codesCell(L.firstMetaCol, r, '~WIT', S.code),
+            str(L.firstMetaCol + 1, r, 'Struck through in red, with a ~: cancelled — asked for, then taken off', S.keyText),
           ]);
           r++;
         }
@@ -8075,7 +8210,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
   const ed = __req("core/la_edit.js");
-  const { readGrid, isCancelMeaning } = __req("core/lookahead.js");
+  const { readGrid, isCancelMeaning, countCodes, describeCodeCounts, cellTokens } = __req("core/lookahead.js");
   const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
   const { lookaheadWorkbook, lookaheadFileName } = __req("io/la_xlsx.js");
   const { saveFile } = __req("io/exporters.js");
@@ -8084,7 +8219,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
 
 
 
-  const { notifyChanged, todayISO, nameRegister, foldName } = __req("ui/rc_util.js");
+  const { notifyChanged, todayISO, nameRegister, foldName, codeNodes } = __req("ui/rc_util.js");
   const { publishFromEditor, publishDays, EDITOR_SOURCE } = __req("ui/rc_ingest.js");
   const { la } = __req("ui/rc_la_state.js");
 
@@ -8851,6 +8986,10 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
         } else if (parsed.tokens.length && looksLikeCodes(cell.text)) {
           title = parsed.tokens.map((t) => codeName(t.code)).join(' + ');
         }
+        const struck = ed.cancelledTokens(cell.text);
+        if (struck.length && looksLikeCodes(cell.text)) {
+          title = [title, `Cancelled: ${struck.map(codeName).join(' + ')}`].filter(Boolean).join(' · ');
+        }
       }
       if (cell?.color) {
         const meaning = E.legendAll.find((e) => e.argb === cell.color)?.meaning;
@@ -8863,7 +9002,9 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
         cls.push('lae-clash');
         title = [...new Set(clashes.map((x) => x.detail))].join('\n') + (title ? `\n${title}` : '');
       }
-      const td = el('td', { class: cls.join(' '), dataset: { c: String(c) }, text: cell?.text || '', title });
+      const td = el('td', {
+        class: cls.join(' '), dataset: { c: String(c) }, title,
+      }, row.kind === 'activity' ? codeNodes(cell?.text || '', 'lae-code-cancelled') : [cell?.text || '']);
       if (cell?.color) td.style.backgroundColor = `#${cell.color}`;
       if (!editable(row, c)) td.classList.add('lae-fixed');
       tr.appendChild(td);
@@ -8877,7 +9018,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   }
 
   function looksLikeCodes(text) {
-    return /^[A-Za-z0-9]{1,8}(\.[A-Za-z0-9]{1,8})*$/.test(String(text).trim());
+    return /^~?[A-Za-z0-9]{1,8}(\.~?[A-Za-z0-9]{1,8})*$/.test(String(text).trim());
   }
 
   /** What may be typed where. */
@@ -9305,7 +9446,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     if (row.kind === 'activity' && looksLikeCodes(value.replace(/\s+/g, ''))) value = ed.normaliseSupport(value);
     value = value.trim();
     if ((cell?.text || '') === value) return;
-    commit([{ op: 'cell', row_id: row.id, day, color: cell?.color || null, text: value }]);
+    commit([{ op: 'cell', row_id: row.id, day, color: cell?.color || null, text: value }], { ask: true });
     if (row.kind === 'activity') warnUnknown([value]);
   }
 
@@ -9330,19 +9471,176 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
      ═══════════════════════════════════════════════════════════════════════ */
 
   /** Apply ops here, remember how to undo them, and queue them for saving. */
-  function commit(ops, { keepRedo = false } = {}) {
+  function commit(ops, { keepRedo = false, ask = false } = {}) {
     const useful = ops.filter((op) => {
       if (op.op !== 'cell') return true;
       const was = ed.getCell(E.model, op.row_id, op.day);
       return (was?.color || null) !== (op.color ? String(op.color).toUpperCase() : null) || (was?.text || '') !== String(op.text ?? '');
     });
     if (!useful.length) return;
+    // Only a targeted edit asks — typing in a day, or taking a code off with
+    // its button. A paste, a fill or a cleared week is not somebody deciding a
+    // witness is no longer needed; "Cancel BART resources…" is the way to say so.
+    const removed = ask ? resourcesRemovedBy(useful) : [];
     const inverse = ed.applyOps(E.model, useful);
     E.undo.push({ ops: useful, inverse });
     if (E.undo.length > 200) E.undo.shift();
     if (!keepRedo) E.redo = [];
     enqueue(useful);
     draw();
+    if (removed.length) askAboutRemovedResources(removed);
+  }
+
+  /**
+   * The BART resources a set of cell edits takes off activities that still go
+   * ahead — a registered code gone from a day, or struck out by typing its tilde.
+   *
+   * Only registered codes: a typo corrected is not a witness withdrawn. Only
+   * activity rows, and never a day these edits paint as cancelled — that day's
+   * resources go with it and the cancellation question covers them.
+   */
+  function resourcesRemovedBy(ops) {
+    const rows = new Map(E.model.rows.map((r) => [r.id, r]));
+    const registered = new Set(E.codes.map((c) => String(c.code).toUpperCase()));
+    const cancelColour = (hex) => {
+      const meaning = hex ? E.legendAll.find((e) => e.argb === String(hex).toUpperCase())?.meaning : null;
+      return !!meaning && isCancelMeaning(meaning);
+    };
+    const out = [];
+    for (const op of ops) {
+      if (op.op !== 'cell') continue;
+      const row = rows.get(op.row_id);
+      if (!row || row.kind !== 'activity' || cancelColour(op.color)) continue;
+      const was = ed.getCell(E.model, op.row_id, op.day);
+      for (const r of ed.removedCodes(was?.text || '', op.text || '')) {
+        if (registered.has(r.code)) out.push({ row, day: op.day, code: r.code, struck: r.struck });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * A resource came off an activity: was it cancelled, or simply taken off?
+   *
+   * Both are real answers and the difference matters to a claim. **Cancel and
+   * log** strikes the code back into the day ("X.~WIT"), drawn through in red on
+   * every screen, and records who and why against the cancellation log, where
+   * it is listed beside the days that were cancelled outright. **Just remove**
+   * leaves the day as it was edited — a correction, a plan that changed before
+   * anybody was booked — and nothing is tracked. A code struck out by typing
+   * the tilde was already cancelled; only the why is asked.
+   */
+  function askAboutRemovedResources(removed, { chosen = null } = {}) {
+    // One line per activity, code and run of days, as the log will list it.
+    const byCode = new Map();
+    for (const r of removed) {
+      const key = `${r.row.id}|${r.code}`;
+      if (!byCode.has(key)) byCode.set(key, { code: r.code, items: [] });
+      byCode.get(key).items.push(r);
+    }
+    const runs = [];
+    for (const { code, items } of byCode.values()) {
+      for (const run of ed.dayRuns(items)) {
+        const inRun = items.filter((i) => i.day >= run.start && i.day <= run.end);
+        runs.push({ ...run, code, items: inRun });
+      }
+    }
+    const pending = removed.filter((r) => !r.struck);
+    const party = selectInput({ value: 'BART', options: ['BART', 'Hitachi', 'Other'] });
+    const reason = el('textarea', { class: 'cx-input', rows: 3, placeholder: 'Why — e.g. witness not required for testing' });
+    const list = el('ul', { class: 'lae-cancel-runs' }, runs.map((r) => el('li', {}, [
+      el('span', { class: 'lae-code-cancelled', text: `${r.items.length > 1 ? `${r.items.length} × ` : ''}${r.code}` }),
+      ` ${codeName(r.code) !== r.code ? `(${codeName(r.code)}) ` : ''}— ${r.row.description || 'Activity'}`
+        + `${r.row.location ? ` at ${r.row.location}` : ''}, `
+        + `${r.start === r.end ? fmt(r.start) : `${fmt(r.start)} – ${fmt(r.end)}`}`,
+    ])));
+    /* From the menu nothing has been removed yet: somebody picks which of the
+       codes on those days to cancel, and the rest stay as they are. */
+    const picks = chosen
+      ? [...new Set(removed.map((r) => r.code))].map((code) => {
+        const box = el('input', { type: 'checkbox', checked: true, value: code });
+        return { code, box, label: el('label', { class: 'lae-code-pick' }, [box, ` ${code}${codeName(code) !== code ? ` — ${codeName(code)}` : ''}`]) };
+      })
+      : [];
+    const record = async () => {
+      if (chosen) {
+        const keep = new Set(picks.filter((p) => p.box.checked).map((p) => p.code));
+        if (!keep.size) {
+          toast({ message: 'Tick at least one resource to cancel.' });
+          return false;
+        }
+        for (let i = removed.length - 1; i >= 0; i--) if (!keep.has(removed[i].code)) removed.splice(i, 1);
+        for (let i = runs.length - 1; i >= 0; i--) if (!keep.has(runs[i].code)) runs.splice(i, 1);
+        for (let i = pending.length - 1; i >= 0; i--) if (!keep.has(pending[i].code)) pending.splice(i, 1);
+      }
+      try {
+        if (pending.length) {
+          const byCell = new Map();
+          for (const r of pending) {
+            const key = ed.cellKey(r.row.id, r.day);
+            if (!byCell.has(key)) byCell.set(key, { r, codes: [] });
+            byCell.get(key).codes.push(r.code);
+          }
+          const ops = [];
+          for (const { r, codes } of byCell.values()) {
+            const cell = ed.getCell(E.model, r.row.id, r.day);
+            ops.push({ op: 'cell', row_id: r.row.id, day: r.day, color: cell?.color || null, text: ed.strikeCodes(cell?.text || '', codes) });
+          }
+          commit(ops);
+        }
+        for (const run of runs) {
+          await rc.addCancellationNote({
+            ...ed.cancellationKey(run.row),
+            start_date: run.start,
+            end_date: run.end,
+            codes: run.code,
+            party: party.value,
+            reason: reason.value.trim() || null,
+          });
+        }
+        toast({ tone: 'good', message: `Cancelled and logged — ${[...new Set(runs.map((r) => r.code))].join(', ')}, ${party.value}.` });
+      } catch (err) {
+        toast({ tone: 'bad', message: err.message, timeout: 10000 });
+        rc.reportError('lookahead:resource-note', err);
+      }
+    };
+    const n = runs.length;
+    openModal({
+      title: chosen
+        ? 'Cancel BART resources'
+        : pending.length
+          ? (n === 1 ? 'A BART resource came off this activity' : `${n} BART resources came off activities`)
+          : (n === 1 ? 'Why was this resource cancelled?' : `Why were these ${n} resources cancelled?`),
+      subtitle: chosen
+        ? 'Each one stays on its day struck through in red, and goes in the cancellation log'
+        : pending.length
+          ? 'Cancel it to keep it on the day struck through and in the cancellation log — or just remove it'
+          : 'Recorded in the cancellation log, attributed and dated',
+      body: el('div', { class: 'lae-form lae-cancel-form lae-resource-form' }, [
+        chosen ? el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Which resources' }), el('div', { class: 'lae-code-picks' }, picks.map((p) => p.label))]) : list,
+        el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Responsible party' }), party]),
+        el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Reason' }), reason]),
+      ]),
+      actions: [
+        { label: chosen ? 'Close' : pending.length ? 'Just remove — not tracked' : 'Not now' },
+        { label: chosen || pending.length ? 'Cancel and log' : 'Record', kind: 'primary', autofocus: true, onClick: record },
+      ],
+    });
+  }
+
+  /** Right-click → "Cancel BART resources…": strike chosen codes off the selected days. */
+  function cancelResourcesOnSelection() {
+    const items = [];
+    for (const s of selectedCells()) {
+      if (s.row?.kind !== 'activity' || s.c < META) continue;
+      const cell = ed.getCell(E.model, s.row.id, s.day);
+      for (const code of ed.supportTokens(cell?.text || '')) items.push({ row: s.row, day: s.day, code, struck: false });
+    }
+    if (!items.length) {
+      toast({ message: 'Select activity days that ask for support first.' });
+      return;
+    }
+    askAboutRemovedResources(items, { chosen: true });
   }
 
   function undo() {
@@ -9402,10 +9700,21 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     if (!runs.length) return;
     const party = selectInput({ value: 'BART', options: ['BART', 'Hitachi', 'Other'] });
     const reason = el('textarea', { class: 'cx-input', rows: 3, placeholder: 'What happened — e.g. possession withdrawn by BART' });
-    const list = el('ul', { class: 'lae-cancel-runs' }, runs.map((r) => el('li', {
-      text: `${r.row.description || 'Activity'}${r.row.location ? ` at ${r.row.location}` : ''} — `
-        + `${r.start === r.end ? fmt(r.start) : `${fmt(r.start)} – ${fmt(r.end)}`}`,
-    })));
+    /* What BART had been asked for on those days goes with them — said here so
+       nobody has to work out afterwards that a witness was cancelled too. */
+    const resourcesOf = (r) => {
+      const texts = [];
+      for (let d = r.start; d <= r.end; d = ed.addDaysISO(d, 1)) texts.push(ed.getCell(E.model, r.row.id, d)?.text || '');
+      return describeCodeCounts(countCodes(texts));
+    };
+    const list = el('ul', { class: 'lae-cancel-runs' }, runs.map((r) => {
+      const resources = resourcesOf(r);
+      return el('li', {
+        text: `${r.row.description || 'Activity'}${r.row.location ? ` at ${r.row.location}` : ''} — `
+          + `${r.start === r.end ? fmt(r.start) : `${fmt(r.start)} – ${fmt(r.end)}`}`
+          + `${resources ? ` · BART resources cancelled with it: ${resources}` : ''}`,
+      });
+    }));
     openModal({
       title: runs.length === 1 ? 'Why was this cancelled?' : `Why were these ${runs.length} cancelled?`,
       subtitle: 'Recorded in the cancellation log, attributed and dated',
@@ -9444,18 +9753,34 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     for (const s of selectedCells()) {
       if (!paintable(s.row, s.c)) continue;
       const cell = ed.getCell(E.model, s.row.id, s.day);
-      const tokens = ed.supportTokens(cell?.text || '');
-      if (direction > 0) tokens.push(code);
+      const tokens = cellTokens(cell?.text || '');
+      if (direction > 0) tokens.push({ code, cancelled: false });
       else {
-        const at = tokens.lastIndexOf(code);
+        const at = tokens.map((t) => (t.cancelled ? null : t.code)).lastIndexOf(code);
         if (at < 0) continue;
         tokens.splice(at, 1);
       }
-      ops.push({ op: 'cell', row_id: s.row.id, day: s.day, color: cell?.color || null, text: tokens.join('.') });
+      ops.push({ op: 'cell', row_id: s.row.id, day: s.day, color: cell?.color || null, text: ed.writeTokens(tokens) });
     }
     if (!ops.length) {
       toast({ message: 'Select an activity\'s days first — support is asked for on activities.' });
       return;
+    }
+    commit(ops, { ask: direction < 0 });
+  }
+
+  /**
+   * Put struck-out resources back on the selected days: "X.~WIT" → "X.WIT". The
+   * cancellation log keeps the days it was struck out on — it was cancelled when
+   * those readings were taken — and says so if the reason no longer applies.
+   */
+  function reinstateSelection() {
+    const ops = [];
+    for (const s of selectedCells()) {
+      if (s.row?.kind !== 'activity' || s.c < META) continue;
+      const cell = ed.getCell(E.model, s.row.id, s.day);
+      if (!cell || !ed.cancelledTokens(cell.text).length) continue;
+      ops.push({ op: 'cell', row_id: s.row.id, day: s.day, color: cell.color || null, text: ed.reinstateCodes(cell.text) });
     }
     commit(ops);
   }
@@ -9865,6 +10190,10 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       E.clip ? { label: 'Paste', icon: 'clipboard', key: 'mod+v', onClick: () => pasteInternal() } : null,
       days ? { label: 'Clear text', icon: 'x', key: 'del', onClick: () => clearSelection() } : null,
       days ? { label: 'Clear text and colour', icon: 'x', onClick: () => clearSelection({ colour: true }) } : null,
+      days && selectedCells().some((c) => c.row?.kind === 'activity' && ed.cancelledTokens(ed.getCell(E.model, c.row.id, c.day)?.text || '').length)
+        ? { label: 'Reinstate cancelled resources', icon: 'refresh', onClick: () => reinstateSelection() } : null,
+      days && selectedCells().some((c) => c.row?.kind === 'activity' && ed.supportTokens(ed.getCell(E.model, c.row.id, c.day)?.text || '').length)
+        ? { label: 'Cancel BART resources…', icon: 'x', onClick: () => cancelResourcesOnSelection() } : null,
       one && one.kind !== 'section' && days
         ? { label: 'History of this day…', icon: 'history', onClick: () => historyDialog(one, E.view.days[E.focus.c - META]) }
         : null,
@@ -11252,7 +11581,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
   const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
   const { calendarPdf, calendarFit, PAGE_CHOICES } = __req("io/rc_pdf.js");
   const { saveFile } = __req("io/exporters.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes } = __req("core/lookahead.js");
+  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, describeCodeCounts } = __req("core/lookahead.js");
 
 
 
@@ -11260,7 +11589,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
   const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
 
 
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName } = __req("ui/rc_util.js");
+  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName, cancellationLog } = __req("ui/rc_util.js");
 
 
 
@@ -11281,6 +11610,10 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
   let cancellationsFrom = null;
   let cancellationsTo = '';
   let cancellationsUnansweredOnly = false;
+  /** Which kind of cancellation is listed: everything, whole days, or BART resources. */
+  let cancellationsKind = 'all';
+
+  const KIND_LABEL = { activity: 'Day cancelled', support: 'BART resource cancelled' };
 
   /**
    * Every red run the look-ahead has shown, since the log's start, with whose it
@@ -11303,16 +11636,13 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
     const configured = settings.find((x) => x.key === 'cancellation_log_from')?.value;
     const from = cancellationsFrom || configured || `${new Date().getUTCFullYear()}-09-01`;
 
-    const [days, notes] = await Promise.all([
-      rc.listCancelledDays(from).catch((err) => { toast({ tone: 'bad', title: 'Could not read the cancellations', message: err.message }); return []; }),
-      rc.listCancellationNotes().catch(() => []),
-    ]);
+    const all = await cancellationLog(from)
+      .catch((err) => { toast({ tone: 'bad', title: 'Could not read the cancellations', message: err.message }); return []; });
     const to = cancellationsTo && cancellationsTo >= from ? cancellationsTo : '';
     /* An event is in the span when it starts inside it. One that runs past the
        end is kept whole rather than cut at the boundary: a cancelled week is one
        event, and half of it in a report is a different claim. */
-    const events = attachCancellationNotes(cancellationEvents(days, { from }), notes)
-      .filter((e) => !to || e.start <= to);
+    const events = all.filter((e) => !to || e.start <= to);
 
     const dateBox = (value, label, onPick) => {
       const box = el('input', {
@@ -11351,17 +11681,20 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
 
     host.appendChild(el('p', {
       class: 'rc-hint',
-      text: `Every run of red cells any read of the look-ahead has shown ${span}. Cells side by `
+      text: `Every run of red cells any read of the look-ahead has shown ${span}, with the BART `
+        + 'resources those days had asked for — and every BART resource struck out of an activity that '
+        + 'still went ahead ("X.~WIT": the witness cancelled, the EIC still wanted). Cells side by '
         + 'side on one activity are one event, and red on a Resource row is never a cancellation. '
-        + 'A cancellation stays in the log after the sheet moves on — it was red when those reads '
-        + 'were taken.',
+        + 'A cancellation stays in the log after the sheet moves on — it was cancelled when those '
+        + 'reads were taken. A resource removed in the editor with "Just remove" is not tracked.',
     }));
 
     if (!events.length) {
       host.appendChild(emptyState({
         iconName: 'calendar',
         title: 'No cancellations',
-        message: `No read of the look-ahead ${span} has a cell painted in the colour the Legend calls a cancellation.`,
+        message: `No read of the look-ahead ${span} has a cell painted in the colour the Legend calls a `
+          + 'cancellation, or a BART resource struck out of an activity.',
       }));
       return;
     }
@@ -11374,8 +11707,11 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
       if (e.note) tally[e.note.party] = (tally[e.note.party] || 0) + 1;
       else open++;
     }
+    const resourceEvents = events.filter((e) => e.kind === 'support').length;
     host.appendChild(el('div', { class: 'cx-chipstats', style: 'margin:0 0 12px' }, [
       chipStat('Events', events.length, 'info'),
+      chipStat('Days cancelled', events.length - resourceEvents, 'muted'),
+      chipStat('BART resources', resourceEvents, resourceEvents ? 'warn' : 'muted'),
       chipStat('Days', dayCount, 'muted'),
       ...CANCEL_PARTIES.map((p) => chipStat(p, tally[p], tally[p] ? PARTY_TONE[p] : 'muted')),
       chipStat('No reason yet', open, open ? 'bad' : 'muted'),
@@ -11387,7 +11723,18 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
       onChange: (on) => { cancellationsUnansweredOnly = on; notifyChanged('cancellations'); },
     }));
 
-    const shown = cancellationsUnansweredOnly ? events.filter((e) => !e.note) : events;
+    host.appendChild(el('div', { class: 'rc-tabs la-cancel-kinds', style: 'margin:8px 0 0' },
+      [['all', 'Everything'], ['activity', 'Days cancelled'], ['support', 'BART resources']].map(([id, label]) => el('button', {
+        class: 'rc-tab',
+        type: 'button',
+        text: label,
+        'aria-pressed': String(cancellationsKind === id),
+        onClick: () => { cancellationsKind = id; notifyChanged('cancellations'); },
+      }))));
+
+    const shown = events
+      .filter((e) => cancellationsKind === 'all' || e.kind === cancellationsKind)
+      .filter((e) => !cancellationsUnansweredOnly || !e.note);
 
     /* The extract is what is on screen: the span above, and the "no reason yet"
        narrowing when it is ticked. The file says which span in its name, because
@@ -11404,15 +11751,33 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
         ),
       }),
     ]));
-    const rows = shown.map((e) => el('tr', { class: 'rc-cancel-row', dataset: { start: e.start, label: e.label } }, [
+    const rows = shown.map((e) => el('tr', {
+      class: `rc-cancel-row rc-cancel-${e.kind}`,
+      dataset: { start: e.start, label: e.label, kind: e.kind, codes: e.codes || '' },
+    }, [
       el('td', {}, [
         el('div', { class: 'rc-cancel-cells', 'aria-hidden': 'true' },
-          [...Array(Math.min(e.days, 14))].map(() => el('span', { class: 'rc-cancel-cell' }))),
+          [...Array(Math.min(e.days, 14))].map(() => el('span', { class: `rc-cancel-cell${e.kind === 'support' ? ' rc-cancel-cell-support' : ''}` }))),
       ]),
       el('td', {}, [
         el('div', { text: e.label || '—' }),
         e.location ? el('div', { class: 'rc-hint', text: e.location }) : null,
       ].filter(Boolean)),
+      el('td', {}, [
+        badge(KIND_LABEL[e.kind], e.kind === 'support' ? 'warn' : 'bad'),
+      ]),
+      /* What BART had been asked for and lost. On a cancelled day, everything the
+         day asked for; on an activity that went ahead, the codes struck out —
+         drawn struck through, as the grid draws them. */
+      el('td', {}, e.resources?.size
+        ? [el('span', {
+          class: e.kind === 'support' ? 'rc-code-cancelled' : '',
+          text: describeCodeCounts(e.resources),
+          title: e.kind === 'support'
+            ? 'Struck out of the day while the activity went ahead'
+            : 'What those days had asked BART for — cancelled with them',
+        })]
+        : [el('span', { class: 'rc-hint', text: '—' })]),
       el('td', { text: e.start === e.end ? dayLabel(e.start) : `${dayLabel(e.start)} – ${dayLabel(e.end)}` }),
       el('td', { text: `${e.days} day${e.days === 1 ? '' : 's'}` }),
       el('td', {
@@ -11451,7 +11816,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
       ]),
     ]));
 
-    host.appendChild(table(['', 'Activity', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
+    host.appendChild(table(['', 'Activity', 'What', 'BART resources', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
   }
 
   /**
@@ -11521,12 +11886,14 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
     const reason = el('textarea', { class: 'cx-input', rows: 3, placeholder: 'Why it was cancelled' });
     reason.value = current?.reason || '';
 
+    const support = event.kind === 'support';
     formModal({
-      title: current ? 'Correct the cancellation' : 'Why was this cancelled?',
+      title: current ? 'Correct the cancellation' : support ? `Why was ${event.codes} cancelled?` : 'Why was this cancelled?',
       body: el('div', { class: 'cx-form' }, [
         el('p', {
           class: 'rc-hint',
-          text: `${event.label}${event.location ? ` at ${event.location}` : ''}, `
+          text: `${support ? `${describeCodeCounts(event.resources)} struck out of ` : ''}`
+            + `${event.label}${event.location ? ` at ${event.location}` : ''}, `
             + `${event.start === event.end ? dayLabel(event.start) : `${dayLabel(event.start)} – ${dayLabel(event.end)}`}. `
             + 'This is the record a claim gets challenged on, so it is attributed and dated and cannot '
             + 'be edited afterwards — a correction is a new entry that supersedes this one.',
@@ -11546,6 +11913,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
           end_date: event.end,
           party: party.value,
           reason: said || null,
+          codes: support ? event.codes : null,
           supersedes_id: current?.id || null,
         });
         notifyChanged('cancellations');
@@ -11555,10 +11923,11 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
 
   function cancellationCsv(events) {
     const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const lines = [['activity', 'location', 'start', 'end', 'days', 'reads', 'first_seen', 'last_seen', 'responsible', 'reason', 'recorded_at'].join(',')];
+    const lines = [['activity', 'location', 'kind', 'bart_resources', 'start', 'end', 'days', 'reads', 'first_seen', 'last_seen', 'responsible', 'reason', 'recorded_at'].join(',')];
     for (const e of events) {
       lines.push([
-        e.label, e.location, e.start, e.end, e.days, e.reads,
+        e.label, e.location, e.kind === 'support' ? 'bart resource' : 'day', describeCodeCounts(e.resources),
+        e.start, e.end, e.days, e.reads,
         e.firstSeen || '', e.lastSeen || '', e.note?.party || '', e.note?.reason || '', e.note?.created_at || '',
       ].map(q).join(','));
     }
@@ -11903,7 +12272,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
 
 
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName, meMatcher } = __req("ui/rc_util.js");
+  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName, meMatcher, codeNodes } = __req("ui/rc_util.js");
 
 
 
@@ -12539,12 +12908,11 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         return el('td', {
           class: classes.join(' '),
           style: mark?.hex ? `background-color:#${mark.hex}` : '',
-          text: mark?.value || '',
           title: [what, d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
             mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value,
             yours ? 'you are on this day' : null]
             .filter(Boolean).join(' · '),
-        });
+        }, resource ? [mark?.value || ''] : codeNodes(mark?.value || '', 'la-code-cancelled'));
       }),
     ]);
 

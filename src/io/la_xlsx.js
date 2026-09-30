@@ -23,10 +23,11 @@
 
 import {
   FIELDS, LAYOUT, SECTION_BAND, rowsWithWork, getCell, metaValues, colLetters,
-  isWeekend, weekdayLetter, monthLabel,
+  isWeekend, weekdayLetter, monthLabel, cancelledTokens,
 } from '../core/la_edit.js';
 import { zipStore, xmlEscape, styleBook, workbookParts } from './xlsx_write.js';
 import { isDark } from './lookahead.js';
+import { cellTokens } from '../core/lookahead.js';
 
 const WEEKEND = '7F7F7F';
 const DAY_WIDTH = 12.7109375;
@@ -100,6 +101,27 @@ export function lookaheadWorkbook({ model, days, legend = [], codes = [], title 
   const str = (col, row, text, s) => (text === '' || text == null
     ? `<c r="${colLetters(col)}${row}" s="${s}"/>`
     : `<c r="${colLetters(col)}${row}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(text)}</t></is></c>`);
+  /* A day with a struck-out resource ("X.~WIT") is written as rich text: the
+     live codes in the cell's own font, each cancelled one — tilde kept, so the
+     file reads back as cancelled — struck through in red, as the calendar
+     draws it. Whoever pastes the row into the master sees what was taken off. */
+  const struckRun = (text, dark) => `<r><rPr><b/><strike/><sz val="10"/><color rgb="${dark ? 'FFFFFFFF' : 'FFFF0000'}"/>`
+    + `<rFont val="Arial"/><family val="2"/></rPr><t xml:space="preserve">${xmlEscape(text)}</t></r>`;
+  const plainRun = (text) => `<r><t xml:space="preserve">${xmlEscape(text)}</t></r>`;
+  const codesCell = (col, row, text, s, dark = false) => {
+    const runs = [];
+    let pending = '';
+    cellTokens(text).forEach((t, i) => {
+      if (i) pending += '.';
+      if (t.cancelled) {
+        if (pending) runs.push(plainRun(pending));
+        pending = '';
+        runs.push(struckRun(`~${t.code}`, dark));
+      } else pending += t.code;
+    });
+    if (pending) runs.push(plainRun(pending));
+    return `<c r="${colLetters(col)}${row}" s="${s}" t="inlineStr"><is>${runs.join('')}</is></c>`;
+  };
   const num = (col, row, n, s) => `<c r="${colLetters(col)}${row}" s="${s}"><v>${n}</v></c>`;
   const blank = (col, row, s) => `<c r="${colLetters(col)}${row}" s="${s}"/>`;
   const addRow = (r, cells, { ht = null, hidden = false } = {}) => {
@@ -146,7 +168,13 @@ export function lookaheadWorkbook({ model, days, legend = [], codes = [], title 
   /* ── The body ── */
   let r = L.firstBodyRow;
   const metaStyle = [S.metaCenter, S.metaLeft, S.metaCenter, S.metaShrink, S.metaCenter, S.metaCenter];
+  let anyStruck = false;
   const dayCell = (col, row, cell, { names = false } = {}, iso) => {
+    if (!names && cell?.text && cancelledTokens(cell.text).length) {
+      anyStruck = true;
+      if (cell.color) return codesCell(col, row, cell.text, paint(cell.color), isDark(cell.color));
+      return codesCell(col, row, cell.text, isWeekend(iso) ? S.weekend : S.day);
+    }
     if (cell?.color) return str(col, row, cell.text || '', paint(cell.color));
     if (isWeekend(iso)) return str(col, row, cell?.text || '', S.weekend);
     return str(col, row, cell?.text || '', names ? S.names : S.day);
@@ -211,6 +239,13 @@ export function lookaheadWorkbook({ model, days, legend = [], codes = [], title 
         addRow(r, [
           str(L.firstMetaCol, r, String(c.code).toUpperCase(), S.code),
           str(L.firstMetaCol + 1, r, [c.name, c.party ? `(${c.party})` : ''].filter(Boolean).join(' '), S.keyText),
+        ]);
+        r++;
+      }
+      if (anyStruck) {
+        addRow(r, [
+          codesCell(L.firstMetaCol, r, '~WIT', S.code),
+          str(L.firstMetaCol + 1, r, 'Struck through in red, with a ~: cancelled — asked for, then taken off', S.keyText),
         ]);
         r++;
       }

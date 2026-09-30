@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 19   Built: 2026-09-30T17:26:04.383Z
+ * Modules: 19   Built: 2026-09-30T23:14:31.486Z
  */
 (function () {
   'use strict';
@@ -1451,7 +1451,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 5;
+  const SCHEMA_VERSION = 6;
 
   /**
    * Whether the database is the one this build was written against.
@@ -1657,6 +1657,14 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   function listCancelledDays(fromISO) {
     return select('rc_cancelled_days', (q) => q.gte('day', fromISO).order('day'));
+  }
+
+  /**
+   * Every day a read showed a BART resource struck out ("X.~WIT") on an activity
+   * that was not itself cancelled — `supportCancellationEvents()` joins them.
+   */
+  function listCancelledSupportDays(fromISO) {
+    return select('rc_cancelled_support_days', (q) => q.gte('day', fromISO).order('day'));
   }
 
   /** What somebody said about a cancellation, every version. Newest last. */
@@ -2159,6 +2167,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listChangeEvents", { get: () => listChangeEvents, enumerable: true });
   Object.defineProperty(__x, "listAnnotations", { get: () => listAnnotations, enumerable: true });
   Object.defineProperty(__x, "listCancelledDays", { get: () => listCancelledDays, enumerable: true });
+  Object.defineProperty(__x, "listCancelledSupportDays", { get: () => listCancelledSupportDays, enumerable: true });
   Object.defineProperty(__x, "listCancellationNotes", { get: () => listCancellationNotes, enumerable: true });
   Object.defineProperty(__x, "listSars", { get: () => listSars, enumerable: true });
   Object.defineProperty(__x, "listSarLinks", { get: () => listSarLinks, enumerable: true });
@@ -4849,6 +4858,40 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   }
 
   /**
+   * The codes typed on an activity's day, each with whether it is struck out.
+   *
+   * "X.WIT" is one EIC and one BART witness, pieces between dots, spacing and
+   * case ignored. A piece with a leading tilde — "X.~WIT" — is a resource that
+   * was asked for and then cancelled while the activity itself went ahead: the
+   * editor writes it, the calendar draws it struck through in red, and
+   * `rc_cancelled_support_days` puts it in the cancellation log. Written into the
+   * text rather than a column of its own so that it travels wherever the cell
+   * already does — undo, copy, the published grid, every stored read.
+   */
+  function cellTokens(text) {
+    const out = [];
+    for (const piece of String(text ?? '').split('.')) {
+      const t = piece.trim();
+      const cancelled = t.startsWith('~');
+      const code = (cancelled ? t.slice(1) : t).trim().toUpperCase();
+      if (code) out.push({ code, cancelled });
+    }
+    return out;
+  }
+
+  /** "3 X · 1 WIT" — codes counted across days, in the order first met. */
+  function countCodes(values, { cancelled = false } = {}) {
+    const counts = new Map();
+    for (const v of values || []) {
+      for (const t of cellTokens(v)) {
+        if (t.cancelled !== cancelled) continue;
+        counts.set(t.code, (counts.get(t.code) || 0) + 1);
+      }
+    }
+    return counts;
+  }
+
+  /**
    * Whether a legend meaning says a day was cancelled — the one rule, the same
    * word `ingest()` looks for in the legend and `rc_cancelled_days` looks for in
    * the stored cells.
@@ -5460,11 +5503,14 @@ __mods["core/lookahead.js"] = function (__x, __req) {
           event.lastSeen = later(event.lastSeen, d.last_seen);
           event.reads = Math.max(event.reads, d.reads || 0);
           event.locationId = event.locationId || d.location_id || null;
+          event.marks.push(d.marks || '');
           continue;
         }
         if (event) out.push(event);
         event = {
           key,
+          kind: 'activity',
+          codes: '',
           label: d.raw_label || '',
           location: d.raw_location || '',
           locationId: d.location_id || null,
@@ -5474,11 +5520,81 @@ __mods["core/lookahead.js"] = function (__x, __req) {
           firstSeen: d.first_seen || null,
           lastSeen: d.last_seen || null,
           reads: d.reads || 0,
+          marks: [d.marks || ''],
         };
       }
       if (event) out.push(event);
     }
+    /* What BART had been asked for on those days went with them: "X.WIT" on a
+       red day is an EIC and a witness cancelled as well as the work. */
+    for (const e of out) e.resources = countCodes(e.marks);
     return out.sort((a, b) => a.start.localeCompare(b.start) || a.label.localeCompare(b.label));
+  }
+
+  /**
+   * BART resources struck out of an activity that still went ahead, as events.
+   *
+   * `days` is what `rc_cancelled_support_days` returns. Consecutive days on one
+   * activity and location that struck out the same codes are one event — the
+   * witness taken off Monday to Wednesday is one thing that happened — and a day
+   * that struck out something else starts another. Shaped like
+   * `cancellationEvents()`, with `kind: 'support'`, `codes` ("WIT", "TCE.WIT")
+   * and `resources`, the struck codes counted across the days.
+   */
+  function supportCancellationEvents(days, { from = null } = {}) {
+    const groups = new Map();
+    for (const d of days || []) {
+      const day = String(d.day || '').slice(0, 10);
+      if (!day || (from && day < from)) continue;
+      const codes = [...new Set(cellTokens(d.marks).filter((t) => t.cancelled).map((t) => t.code))].sort().join('.');
+      if (!codes) continue;
+      const key = `${suggestionKey(d.raw_label)}|${suggestionKey(d.raw_location)}`;
+      const group = `${key}|${codes}`;
+      if (!groups.has(group)) groups.set(group, { key, codes, list: [] });
+      groups.get(group).list.push({ ...d, day });
+    }
+
+    const out = [];
+    for (const { key, codes, list } of groups.values()) {
+      list.sort((a, b) => a.day.localeCompare(b.day));
+      let event = null;
+      for (const d of list) {
+        if (event && isoMs(d.day) - isoMs(event.end) === 86400000) {
+          event.end = d.day;
+          event.days++;
+          event.firstSeen = earlier(event.firstSeen, d.first_seen);
+          event.lastSeen = later(event.lastSeen, d.last_seen);
+          event.reads = Math.max(event.reads, d.reads || 0);
+          event.locationId = event.locationId || d.location_id || null;
+          event.marks.push(d.marks || '');
+          continue;
+        }
+        if (event) out.push(event);
+        event = {
+          key,
+          kind: 'support',
+          codes,
+          label: d.raw_label || '',
+          location: d.raw_location || '',
+          locationId: d.location_id || null,
+          start: d.day,
+          end: d.day,
+          days: 1,
+          firstSeen: d.first_seen || null,
+          lastSeen: d.last_seen || null,
+          reads: d.reads || 0,
+          marks: [d.marks || ''],
+        };
+      }
+      if (event) out.push(event);
+    }
+    for (const e of out) e.resources = countCodes(e.marks, { cancelled: true });
+    return out.sort((a, b) => a.start.localeCompare(b.start) || a.label.localeCompare(b.label));
+  }
+
+  /** "3 X · 1 WIT" from a count of codes. */
+  function describeCodeCounts(counts) {
+    return [...(counts || new Map()).entries()].map(([code, n]) => `${n} ${code}`).join(' · ');
   }
 
   function earlier(a, b) {
@@ -5513,8 +5629,20 @@ __mods["core/lookahead.js"] = function (__x, __req) {
       if (!byKey.has(key)) byKey.set(key, []);
       byKey.get(key).push(n);
     }
+    /* A note about struck-out resources ("WIT") belongs to a resource event that
+       struck out one of those codes, never to the day's own cancellation, and a
+       note about the day never to a resource event — the same activity and the
+       same dates can carry both, and they are different judgements. */
+    const codesOf = (v) => new Set(String(v || '').split('.').map((c) => c.trim().toUpperCase()).filter(Boolean));
+    const sameKind = (n, event) => {
+      const mine = codesOf(event.codes);
+      const theirs = codesOf(n.codes);
+      if (!mine.size || !theirs.size) return !mine.size && !theirs.size;
+      return [...theirs].some((c) => mine.has(c));
+    };
     return events.map((event) => {
       const touching = (byKey.get(event.key) || [])
+        .filter((n) => sameKind(n, event))
         .filter((n) => String(n.start_date) <= event.end && String(n.end_date) >= event.start)
         .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
       const current = touching.filter((n) => !superseded.has(n.id));
@@ -5878,6 +6006,8 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "absencesFrom", { get: () => absencesFrom, enumerable: true });
   Object.defineProperty(__x, "locationColumnOf", { get: () => locationColumnOf, enumerable: true });
   Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
+  Object.defineProperty(__x, "cellTokens", { get: () => cellTokens, enumerable: true });
+  Object.defineProperty(__x, "countCodes", { get: () => countCodes, enumerable: true });
   Object.defineProperty(__x, "isCancelMeaning", { get: () => isCancelMeaning, enumerable: true });
   Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
   Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
@@ -5890,6 +6020,8 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "suggestionKey", { get: () => suggestionKey, enumerable: true });
   Object.defineProperty(__x, "reconcileSuggestions", { get: () => reconcileSuggestions, enumerable: true });
   Object.defineProperty(__x, "cancellationEvents", { get: () => cancellationEvents, enumerable: true });
+  Object.defineProperty(__x, "supportCancellationEvents", { get: () => supportCancellationEvents, enumerable: true });
+  Object.defineProperty(__x, "describeCodeCounts", { get: () => describeCodeCounts, enumerable: true });
   Object.defineProperty(__x, "attachCancellationNotes", { get: () => attachCancellationNotes, enumerable: true });
   Object.defineProperty(__x, "WORKED_STATUSES", { get: () => WORKED_STATUSES, enumerable: true });
   Object.defineProperty(__x, "outcomeProgress", { get: () => outcomeProgress, enumerable: true });
@@ -6826,7 +6958,8 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   const { el } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { toISO, todayMs, fmtDate, addDays, MS_DAY } = __req("core/dates.js");
-  const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS } = __req("core/lookahead.js");
+  const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS, cellTokens, cancellationEvents, supportCancellationEvents, attachCancellationNotes } = __req("core/lookahead.js");
+
 
 
   const { applyLegend } = __req("io/lookahead.js");
@@ -6933,6 +7066,43 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /** A row was written. Whatever is on screen reloads. */
+  /**
+   * A day's codes as nodes, with every struck-out code ("~WIT") in a span of its
+   * own so it can be drawn struck through in red — the calendar's grid and the
+   * editor's both draw a cell this way. Text with no tilde is returned as it is:
+   * names, notes, anything that is not codes.
+   */
+  function codeNodes(value, klass = 'rc-code-cancelled') {
+    const text = String(value ?? '');
+    if (!text.includes('~') || !/^[\s~A-Za-z0-9.]+$/.test(text)) return [text];
+    const parts = [];
+    cellTokens(text).forEach((t, i) => {
+      if (i) parts.push('.');
+      parts.push(t.cancelled
+        ? el('span', { class: klass, text: t.code, title: `${t.code} — cancelled` })
+        : t.code);
+    });
+    return parts;
+  }
+
+  /**
+   * The cancellation log from `from` on: days cancelled outright and BART
+   * resources struck out of activities that went ahead, as one list oldest
+   * first, each with its note. The log and the administrator's inbox both read
+   * it here, so they cannot count differently. A database from before resource
+   * cancellations were derived simply has none of them.
+   */
+  async function cancellationLog(from) {
+    const [days, support, notes] = await Promise.all([
+      rc.listCancelledDays(from),
+      rc.listCancelledSupportDays(from).catch(() => []),
+      rc.listCancellationNotes().catch(() => []),
+    ]);
+    const events = [...cancellationEvents(days, { from }), ...supportCancellationEvents(support, { from })]
+      .sort((a, b) => a.start.localeCompare(b.start) || a.label.localeCompare(b.label) || a.kind.localeCompare(b.kind));
+    return attachCancellationNotes(events, notes);
+  }
+
   function notifyChanged(what) {
     emit(EV.RC_CHANGED, { what });
   }
@@ -7861,6 +8031,8 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "dayLabel", { get: () => dayLabel, enumerable: true });
   Object.defineProperty(__x, "byId", { get: () => byId, enumerable: true });
   Object.defineProperty(__x, "groupBy", { get: () => groupBy, enumerable: true });
+  Object.defineProperty(__x, "codeNodes", { get: () => codeNodes, enumerable: true });
+  Object.defineProperty(__x, "cancellationLog", { get: () => cancellationLog, enumerable: true });
   Object.defineProperty(__x, "notifyChanged", { get: () => notifyChanged, enumerable: true });
   Object.defineProperty(__x, "orgNav", { get: () => orgNav, enumerable: true });
   Object.defineProperty(__x, "goToTab", { get: () => goToTab, enumerable: true });

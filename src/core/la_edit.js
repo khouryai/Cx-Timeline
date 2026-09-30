@@ -38,7 +38,7 @@
  * Imports: core/lookahead (a leaf).
  */
 
-import { absenceKind, ABSENCE_LABELS, resourceNames } from './lookahead.js';
+import { absenceKind, ABSENCE_LABELS, resourceNames, cellTokens } from './lookahead.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
    Days
@@ -269,10 +269,66 @@ export function rowsWithWork(model, days) {
  * code is a request nobody can staff until somebody says what it is.
  */
 export function supportTokens(text) {
-  return String(text ?? '')
-    .split('.')
-    .map((t) => t.trim().toUpperCase())
-    .filter(Boolean);
+  // A struck-out code ("~WIT") is no longer asked for: never counted, never
+  // staffed, never an unknown code to chase.
+  return cellTokens(text).filter((t) => !t.cancelled).map((t) => t.code);
+}
+
+/** The codes struck out of a cell — "X.~WIT" → ["WIT"]. */
+export function cancelledTokens(text) {
+  return cellTokens(text).filter((t) => t.cancelled).map((t) => t.code);
+}
+
+/** Tokens back into the sheet's form: `[{code:'X'},{code:'WIT',cancelled:true}]` → "X.~WIT". */
+export function writeTokens(tokens) {
+  return tokens.map((t) => `${t.cancelled ? '~' : ''}${t.code}`).join('.');
+}
+
+/**
+ * Strike codes out of a cell rather than remove them: each code in `codes`
+ * turns one of its live occurrences into "~CODE", and a code no longer live in
+ * the text is added struck out — the removal already happened, and this is
+ * the record that it was a cancellation. "X" with ["WIT"] → "X.~WIT".
+ */
+export function strikeCodes(text, codes) {
+  const tokens = cellTokens(text);
+  for (const code of codes) {
+    const live = tokens.find((t) => t.code === code && !t.cancelled);
+    if (live) live.cancelled = true;
+    else tokens.push({ code, cancelled: true });
+  }
+  return writeTokens(tokens);
+}
+
+/** Put struck-out codes back: "X.~WIT" → "X.WIT". */
+export function reinstateCodes(text) {
+  return writeTokens(cellTokens(text).map((t) => ({ ...t, cancelled: false })));
+}
+
+/**
+ * What a change to one cell took away: the live codes in `before` with no
+ * live counterpart in `after`, one per occurrence ("X.X" → "X" removed one X).
+ * A code that was struck out rather than deleted is in the answer too, with
+ * `struck: true` — it was cancelled by typing the tilde.
+ */
+export function removedCodes(before, after) {
+  const left = new Map();
+  for (const code of supportTokens(after)) left.set(code, (left.get(code) || 0) + 1);
+  const struck = new Map();
+  for (const code of cancelledTokens(after)) struck.set(code, (struck.get(code) || 0) + 1);
+  const was = new Map();
+  for (const code of cancelledTokens(before)) was.set(code, (was.get(code) || 0) + 1);
+  const out = [];
+  for (const code of supportTokens(before)) {
+    if (left.get(code)) { left.set(code, left.get(code) - 1); continue; }
+    // Struck out in this edit: more struck occurrences now than before.
+    const newlyStruck = (struck.get(code) || 0) - (was.get(code) || 0);
+    if (newlyStruck > 0) {
+      was.set(code, (was.get(code) || 0) + 1);
+      out.push({ code, struck: true });
+    } else out.push({ code, struck: false });
+  }
+  return out;
 }
 
 export function parseSupport(text, codes) {
@@ -283,8 +339,7 @@ export function parseSupport(text, codes) {
 
 /** Tidy what was typed into the form the sheet writes: "x . wit" → "X.WIT". */
 export function normaliseSupport(text) {
-  const tokens = supportTokens(text);
-  return tokens.length ? tokens.join('.') : '';
+  return writeTokens(cellTokens(text));
 }
 
 /**
@@ -965,7 +1020,7 @@ export function modelFromView(view, { fromISO, toISO = null, legend = [] } = {})
 /** "X " → "X", "x.wit" → "X.WIT" — but only when it *looks* like codes, so a note survives. */
 function normaliseSupportIfCodes(text) {
   const t = String(text).trim();
-  return /^[A-Za-z]{1,6}(\s*\.\s*[A-Za-z]{1,6})*\.?$/.test(t) ? normaliseSupport(t) : t;
+  return /^~?\s*[A-Za-z]{1,6}(\s*\.\s*~?\s*[A-Za-z]{1,6})*\.?$/.test(t) ? normaliseSupport(t) : t;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

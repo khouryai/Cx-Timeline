@@ -13,7 +13,8 @@ import { el } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
 import { toISO, todayMs, fmtDate, addDays, MS_DAY } from '../core/dates.js';
 import {
-  resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS,
+  resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS, cellTokens,
+  cancellationEvents, supportCancellationEvents, attachCancellationNotes,
 } from '../core/lookahead.js';
 import { applyLegend } from '../io/lookahead.js';
 import * as rc from '../core/rc.js';
@@ -119,6 +120,43 @@ export function groupBy(rows, key) {
 }
 
 /** A row was written. Whatever is on screen reloads. */
+/**
+ * A day's codes as nodes, with every struck-out code ("~WIT") in a span of its
+ * own so it can be drawn struck through in red — the calendar's grid and the
+ * editor's both draw a cell this way. Text with no tilde is returned as it is:
+ * names, notes, anything that is not codes.
+ */
+export function codeNodes(value, klass = 'rc-code-cancelled') {
+  const text = String(value ?? '');
+  if (!text.includes('~') || !/^[\s~A-Za-z0-9.]+$/.test(text)) return [text];
+  const parts = [];
+  cellTokens(text).forEach((t, i) => {
+    if (i) parts.push('.');
+    parts.push(t.cancelled
+      ? el('span', { class: klass, text: t.code, title: `${t.code} — cancelled` })
+      : t.code);
+  });
+  return parts;
+}
+
+/**
+ * The cancellation log from `from` on: days cancelled outright and BART
+ * resources struck out of activities that went ahead, as one list oldest
+ * first, each with its note. The log and the administrator's inbox both read
+ * it here, so they cannot count differently. A database from before resource
+ * cancellations were derived simply has none of them.
+ */
+export async function cancellationLog(from) {
+  const [days, support, notes] = await Promise.all([
+    rc.listCancelledDays(from),
+    rc.listCancelledSupportDays(from).catch(() => []),
+    rc.listCancellationNotes().catch(() => []),
+  ]);
+  const events = [...cancellationEvents(days, { from }), ...supportCancellationEvents(support, { from })]
+    .sort((a, b) => a.start.localeCompare(b.start) || a.label.localeCompare(b.label) || a.kind.localeCompare(b.kind));
+  return attachCancellationNotes(events, notes);
+}
+
 export function notifyChanged(what) {
   emit(EV.RC_CHANGED, { what });
 }

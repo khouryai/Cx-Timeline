@@ -13,7 +13,7 @@ import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
 import { saveFile } from '../io/exporters.js';
 import {
   keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
-  reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes,
+  reassignments, ABSENCE_LABELS, describeCodeCounts,
 } from '../core/lookahead.js';
 import { icon } from './icons.js';
 import {
@@ -21,7 +21,7 @@ import {
 } from './components.js';
 import {
   notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
-  isoToMs, nameRegister, foldName,
+  isoToMs, nameRegister, foldName, cancellationLog,
 } from './rc_util.js';
 import { toISO, addDays } from '../core/dates.js';
 
@@ -40,6 +40,10 @@ const PARTY_TONE = { BART: 'warn', Hitachi: 'bad', Other: 'neutral' };
 let cancellationsFrom = null;
 let cancellationsTo = '';
 let cancellationsUnansweredOnly = false;
+/** Which kind of cancellation is listed: everything, whole days, or BART resources. */
+let cancellationsKind = 'all';
+
+const KIND_LABEL = { activity: 'Day cancelled', support: 'BART resource cancelled' };
 
 /**
  * Every red run the look-ahead has shown, since the log's start, with whose it
@@ -62,16 +66,13 @@ export async function renderCancellations(host) {
   const configured = settings.find((x) => x.key === 'cancellation_log_from')?.value;
   const from = cancellationsFrom || configured || `${new Date().getUTCFullYear()}-09-01`;
 
-  const [days, notes] = await Promise.all([
-    rc.listCancelledDays(from).catch((err) => { toast({ tone: 'bad', title: 'Could not read the cancellations', message: err.message }); return []; }),
-    rc.listCancellationNotes().catch(() => []),
-  ]);
+  const all = await cancellationLog(from)
+    .catch((err) => { toast({ tone: 'bad', title: 'Could not read the cancellations', message: err.message }); return []; });
   const to = cancellationsTo && cancellationsTo >= from ? cancellationsTo : '';
   /* An event is in the span when it starts inside it. One that runs past the
      end is kept whole rather than cut at the boundary: a cancelled week is one
      event, and half of it in a report is a different claim. */
-  const events = attachCancellationNotes(cancellationEvents(days, { from }), notes)
-    .filter((e) => !to || e.start <= to);
+  const events = all.filter((e) => !to || e.start <= to);
 
   const dateBox = (value, label, onPick) => {
     const box = el('input', {
@@ -110,17 +111,20 @@ export async function renderCancellations(host) {
 
   host.appendChild(el('p', {
     class: 'rc-hint',
-    text: `Every run of red cells any read of the look-ahead has shown ${span}. Cells side by `
+    text: `Every run of red cells any read of the look-ahead has shown ${span}, with the BART `
+      + 'resources those days had asked for — and every BART resource struck out of an activity that '
+      + 'still went ahead ("X.~WIT": the witness cancelled, the EIC still wanted). Cells side by '
       + 'side on one activity are one event, and red on a Resource row is never a cancellation. '
-      + 'A cancellation stays in the log after the sheet moves on — it was red when those reads '
-      + 'were taken.',
+      + 'A cancellation stays in the log after the sheet moves on — it was cancelled when those '
+      + 'reads were taken. A resource removed in the editor with "Just remove" is not tracked.',
   }));
 
   if (!events.length) {
     host.appendChild(emptyState({
       iconName: 'calendar',
       title: 'No cancellations',
-      message: `No read of the look-ahead ${span} has a cell painted in the colour the Legend calls a cancellation.`,
+      message: `No read of the look-ahead ${span} has a cell painted in the colour the Legend calls a `
+        + 'cancellation, or a BART resource struck out of an activity.',
     }));
     return;
   }
@@ -133,8 +137,11 @@ export async function renderCancellations(host) {
     if (e.note) tally[e.note.party] = (tally[e.note.party] || 0) + 1;
     else open++;
   }
+  const resourceEvents = events.filter((e) => e.kind === 'support').length;
   host.appendChild(el('div', { class: 'cx-chipstats', style: 'margin:0 0 12px' }, [
     chipStat('Events', events.length, 'info'),
+    chipStat('Days cancelled', events.length - resourceEvents, 'muted'),
+    chipStat('BART resources', resourceEvents, resourceEvents ? 'warn' : 'muted'),
     chipStat('Days', dayCount, 'muted'),
     ...CANCEL_PARTIES.map((p) => chipStat(p, tally[p], tally[p] ? PARTY_TONE[p] : 'muted')),
     chipStat('No reason yet', open, open ? 'bad' : 'muted'),
@@ -146,7 +153,18 @@ export async function renderCancellations(host) {
     onChange: (on) => { cancellationsUnansweredOnly = on; notifyChanged('cancellations'); },
   }));
 
-  const shown = cancellationsUnansweredOnly ? events.filter((e) => !e.note) : events;
+  host.appendChild(el('div', { class: 'rc-tabs la-cancel-kinds', style: 'margin:8px 0 0' },
+    [['all', 'Everything'], ['activity', 'Days cancelled'], ['support', 'BART resources']].map(([id, label]) => el('button', {
+      class: 'rc-tab',
+      type: 'button',
+      text: label,
+      'aria-pressed': String(cancellationsKind === id),
+      onClick: () => { cancellationsKind = id; notifyChanged('cancellations'); },
+    }))));
+
+  const shown = events
+    .filter((e) => cancellationsKind === 'all' || e.kind === cancellationsKind)
+    .filter((e) => !cancellationsUnansweredOnly || !e.note);
 
   /* The extract is what is on screen: the span above, and the "no reason yet"
      narrowing when it is ticked. The file says which span in its name, because
@@ -163,15 +181,33 @@ export async function renderCancellations(host) {
       ),
     }),
   ]));
-  const rows = shown.map((e) => el('tr', { class: 'rc-cancel-row', dataset: { start: e.start, label: e.label } }, [
+  const rows = shown.map((e) => el('tr', {
+    class: `rc-cancel-row rc-cancel-${e.kind}`,
+    dataset: { start: e.start, label: e.label, kind: e.kind, codes: e.codes || '' },
+  }, [
     el('td', {}, [
       el('div', { class: 'rc-cancel-cells', 'aria-hidden': 'true' },
-        [...Array(Math.min(e.days, 14))].map(() => el('span', { class: 'rc-cancel-cell' }))),
+        [...Array(Math.min(e.days, 14))].map(() => el('span', { class: `rc-cancel-cell${e.kind === 'support' ? ' rc-cancel-cell-support' : ''}` }))),
     ]),
     el('td', {}, [
       el('div', { text: e.label || '—' }),
       e.location ? el('div', { class: 'rc-hint', text: e.location }) : null,
     ].filter(Boolean)),
+    el('td', {}, [
+      badge(KIND_LABEL[e.kind], e.kind === 'support' ? 'warn' : 'bad'),
+    ]),
+    /* What BART had been asked for and lost. On a cancelled day, everything the
+       day asked for; on an activity that went ahead, the codes struck out —
+       drawn struck through, as the grid draws them. */
+    el('td', {}, e.resources?.size
+      ? [el('span', {
+        class: e.kind === 'support' ? 'rc-code-cancelled' : '',
+        text: describeCodeCounts(e.resources),
+        title: e.kind === 'support'
+          ? 'Struck out of the day while the activity went ahead'
+          : 'What those days had asked BART for — cancelled with them',
+      })]
+      : [el('span', { class: 'rc-hint', text: '—' })]),
     el('td', { text: e.start === e.end ? dayLabel(e.start) : `${dayLabel(e.start)} – ${dayLabel(e.end)}` }),
     el('td', { text: `${e.days} day${e.days === 1 ? '' : 's'}` }),
     el('td', {
@@ -210,7 +246,7 @@ export async function renderCancellations(host) {
     ]),
   ]));
 
-  host.appendChild(table(['', 'Activity', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
+  host.appendChild(table(['', 'Activity', 'What', 'BART resources', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
 }
 
 /**
@@ -280,12 +316,14 @@ function recordCancellation(event) {
   const reason = el('textarea', { class: 'cx-input', rows: 3, placeholder: 'Why it was cancelled' });
   reason.value = current?.reason || '';
 
+  const support = event.kind === 'support';
   formModal({
-    title: current ? 'Correct the cancellation' : 'Why was this cancelled?',
+    title: current ? 'Correct the cancellation' : support ? `Why was ${event.codes} cancelled?` : 'Why was this cancelled?',
     body: el('div', { class: 'cx-form' }, [
       el('p', {
         class: 'rc-hint',
-        text: `${event.label}${event.location ? ` at ${event.location}` : ''}, `
+        text: `${support ? `${describeCodeCounts(event.resources)} struck out of ` : ''}`
+          + `${event.label}${event.location ? ` at ${event.location}` : ''}, `
           + `${event.start === event.end ? dayLabel(event.start) : `${dayLabel(event.start)} – ${dayLabel(event.end)}`}. `
           + 'This is the record a claim gets challenged on, so it is attributed and dated and cannot '
           + 'be edited afterwards — a correction is a new entry that supersedes this one.',
@@ -305,6 +343,7 @@ function recordCancellation(event) {
         end_date: event.end,
         party: party.value,
         reason: said || null,
+        codes: support ? event.codes : null,
         supersedes_id: current?.id || null,
       });
       notifyChanged('cancellations');
@@ -314,10 +353,11 @@ function recordCancellation(event) {
 
 function cancellationCsv(events) {
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const lines = [['activity', 'location', 'start', 'end', 'days', 'reads', 'first_seen', 'last_seen', 'responsible', 'reason', 'recorded_at'].join(',')];
+  const lines = [['activity', 'location', 'kind', 'bart_resources', 'start', 'end', 'days', 'reads', 'first_seen', 'last_seen', 'responsible', 'reason', 'recorded_at'].join(',')];
   for (const e of events) {
     lines.push([
-      e.label, e.location, e.start, e.end, e.days, e.reads,
+      e.label, e.location, e.kind === 'support' ? 'bart resource' : 'day', describeCodeCounts(e.resources),
+      e.start, e.end, e.days, e.reads,
       e.firstSeen || '', e.lastSeen || '', e.note?.party || '', e.note?.reason || '', e.note?.created_at || '',
     ].map(q).join(','));
   }
