@@ -182,7 +182,7 @@ alternative shipped once and went wrong.
 - A ghost is packed, not painted over. [→](docs/ARCHITECTURE.md#a-ghost-is-packed-not-painted-over)
 - A P6 baseline is derived; a taken baseline is frozen. [→](docs/ARCHITECTURE.md#a-p6-baseline-is-derived-a-taken-baseline-is-frozen)
 - P6 data is a register, not objects. [→](docs/ARCHITECTURE.md#p6-data-is-a-register-not-objects)
-- The look-ahead reaches the timeline as suggestions, read from the file. [→](docs/ARCHITECTURE.md#the-look-ahead-reaches-the-timeline-as-suggestions-read-from-the-file)
+- The look-ahead reaches the timeline as suggestions, read from the calendar only — there is no workbook import in the timeline. [→](docs/ARCHITECTURE.md#the-look-ahead-reaches-the-timeline-as-suggestions-read-from-the-file)
 - A document and a release are read for their state, not their kind. [→](docs/ARCHITECTURE.md#a-document-and-a-release-are-read-for-their-state-not-their-kind)
 - Derived state is never stored. [→](docs/ARCHITECTURE.md#derived-state-is-never-stored)
 - A hidden dependency line is a choice that does not survive going wrong. [→](docs/ARCHITECTURE.md#a-hidden-dependency-line-is-a-choice-that-does-not-survive-going-wrong)
@@ -231,7 +231,7 @@ alternative shipped once and went wrong.
 - The sheet says who is away as well as who is on what, and none of it is scope. [→](docs/ARCHITECTURE.md#the-sheet-says-who-is-away-as-well-as-who-is-on-what-and-none-of-it-is-scope)
 - `ABSENCE_KINDS` holds three facts about each kind, in one table. [→](docs/ARCHITECTURE.md#absence_kinds-holds-three-facts-about-each-kind-in-one-table)
 - A day off and a day spent elsewhere are different answers. [→](docs/ARCHITECTURE.md#a-day-off-and-a-day-spent-elsewhere-are-different-answers)
-- PTO is a third reading, not a second store. [→](docs/ARCHITECTURE.md#pto-is-a-third-reading-not-a-second-store)
+- PTO is a third reading, not a second store — and it shows leave and other-group work, never the Office row. [→](docs/ARCHITECTURE.md#pto-is-a-third-reading-not-a-second-store)
 - Who takes shifts decides who is in a view about work. [→](docs/ARCHITECTURE.md#who-takes-shifts-decides-who-is-in-a-view-about-work)
 - The names come off the snapshot, not off the stored column. [→](docs/ARCHITECTURE.md#the-names-come-off-the-snapshot-not-off-the-stored-column)
 - A name in a spreadsheet is matched exactly, corrected out loud, or reported — never guessed. [→](docs/ARCHITECTURE.md#a-name-in-a-spreadsheet-is-matched-exactly-corrected-out-loud-or-reported--never-guessed)
@@ -413,8 +413,8 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | `test_lookahead.js` | 251 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_la_edit.js` | 121 | the look-ahead editor's model, undo, support codes, the published grid, cell history, staffing clashes, and the Excel export read back |
-| `smoke.js` | 318 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 494 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
+| `smoke.js` | 301 | the application, local mode — **any console error fails the run** |
+| `smoke_calendar.js` | 497 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 98 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 64 | the desktop shell and its updates |

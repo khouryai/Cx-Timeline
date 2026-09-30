@@ -128,13 +128,7 @@ export async function renderEditor(host) {
     return id ? { id, name: byId.get(id)?.name || String(written).trim() } : null;
   };
   E.leaveKinds = new Map(leaveKinds.map((k) => [k.id, k.name]));
-  E.legendAll = legend.map((r) => ({ argb: String(r.argb).toUpperCase(), meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
-  const inForce = new Map();
-  for (const r of E.legendAll) {
-    const held = inForce.get(r.argb);
-    if (!held || String(r.valid_from || '') > String(held.valid_from || '')) inForce.set(r.argb, r);
-  }
-  E.legend = [...inForce.values()].filter((r) => r.role === 'shift' && r.meaning);
+  ({ all: E.legendAll, shifts: E.legend } = legendInForce(legend));
   E.codes = codes;
   E.names = ed.nameChoices(people);
   E.title = settings.find((r) => r.key === 'lookahead_title')?.value || '';
@@ -160,6 +154,17 @@ export async function renderEditor(host) {
   }
   draw();
   startPolling();
+}
+
+/** The legend as the editor paints with it: every row, and the shifts in force. */
+function legendInForce(rows) {
+  const all = rows.map((r) => ({ argb: String(r.argb).toUpperCase(), meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
+  const inForce = new Map();
+  for (const r of all) {
+    const held = inForce.get(r.argb);
+    if (!held || String(r.valid_from || '') > String(held.valid_from || '')) inForce.set(r.argb, r);
+  }
+  return { all, shifts: [...inForce.values()].filter((r) => r.role === 'shift' && r.meaning) };
 }
 
 /**
@@ -2178,37 +2183,86 @@ async function restoreDialog() {
 /* ── Export ────────────────────────────────────────────────────────────── */
 
 function openExport() {
+  openExcelExport();
+}
+
+/**
+ * What an export is built from. The editor's own state when it is open — it
+ * holds exactly what was just typed — and otherwise the same rows and cells
+ * read afresh, so the calendar's read view offers the identical workbook
+ * without opening the editor, to anybody who can see the look-ahead.
+ */
+async function exportSource() {
+  if (E.model) {
+    return { model: E.model, legend: E.legend, codes: E.codes, title: E.title, weeks: E.weeks, ensure: ensureWindow };
+  }
+  const [settings, legend, codes, rows] = await Promise.all([
+    rc.listSettings().catch(() => []),
+    rc.listLegend().catch(() => []),
+    rc.listSupportCodes({ includeRetired: true }).catch(() => []),
+    rc.listLaRows(),
+  ]);
+  const src = {
+    model: ed.makeModel(rows.map(cleanRow), []),
+    legend: legendInForce(legend).shifts,
+    codes,
+    title: settings.find((r) => r.key === 'lookahead_title')?.value || '',
+    weeks: ed.WINDOW_WEEKS.includes(la.editorWeeks) ? la.editorWeeks : 4,
+    loaded: null,
+  };
+  src.ensure = async (days) => {
+    const from = days[0];
+    const to = days[days.length - 1];
+    if (src.loaded && from >= src.loaded.from && to <= src.loaded.to) return;
+    const cells = await rc.listLaCells(from, to);
+    src.model = ed.makeModel(rows.map(cleanRow), cells.map(cleanCell));
+    src.loaded = { from, to };
+  };
+  return src;
+}
+
+/** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
+export async function openExcelExport() {
+  let src;
+  try {
+    src = await exportSource();
+  } catch (err) {
+    toast({ tone: 'bad', message: err.message, timeout: 10000 });
+    rc.reportError('lookahead:export', err);
+    return;
+  }
   const thisMonday = ed.mondayOf(todayISO());
   const starts = [-7, 0, 7, 14].map((d) => ed.addDaysISO(thisMonday, d));
   const start = selectInput({
     value: thisMonday,
     options: starts.map((d, i) => ({ value: d, label: `${['Last week', 'This week', 'Next week', 'In two weeks'][i]} — from ${fmt(d)}` })),
   });
-  let weeks = E.weeks;
+  let weeks = src.weeks;
   const size = segmented({
     value: weeks,
     options: ed.WINDOW_WEEKS.map((w) => ({ value: w, label: `${w} weeks` })),
     onChange: (w) => { weeks = w; update(); },
   });
   const summary = el('div', { class: 'rc-hint' });
-  const update = () => {
+  const update = async () => {
     const days = ed.windowDays(start.value, weeks);
-    const rows = ed.rowsWithWork(E.model, days);
+    await src.ensure(days).catch(() => {});
+    const rows = ed.rowsWithWork(src.model, days);
     const n = rows.filter((r) => r.kind === 'activity').length;
     summary.textContent = `${n} activit${n === 1 ? 'y' : 'ies'} with work between ${fmt(days[0])} and ${fmt(days[days.length - 1])}, `
       + 'with their sections, names rows and the PTO / Office rows — in the 4WLA layout, ready to copy into the master file.';
   };
   start.addEventListener('change', update);
-  update();
+  await update();
 
   const canFolder = filestore.hasFolder?.();
   const build = async () => {
     const days = ed.windowDays(start.value, weeks);
-    await ensureWindow(days);
+    await src.ensure(days);
     const settings = await rc.listSettings().catch(() => []);
     const sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
     const bytes = lookaheadWorkbook({
-      model: E.model, days, legend: E.legend, codes: E.codes.filter((c) => c.active !== false), title: E.title, sheetName,
+      model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
     });
     return { bytes, name: lookaheadFileName(days, sheetName) };
   };

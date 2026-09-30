@@ -14,7 +14,6 @@
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
 import { pinClock, pinNodeClock } from './lib/clock.js';
-import { buildLookaheadWorkbook } from './fixtures/xlsx_fixture.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -1694,99 +1693,20 @@ async function main() {
   await page.waitForTimeout(300);
 
   console.log('\nLook-ahead suggestions');
-  const laSaved = () => page.evaluate(() => new Promise((res) => {
-    const r = indexedDB.open('cx-timeline');
-    r.onsuccess = () => {
-      const g = r.result.transaction('projects').objectStore('projects').getAll();
-      g.onsuccess = () => res(g.result.sort((a, b) => b.savedAt - a.savedAt)[0]?.doc || null);
-    };
-  }));
-  const laObjects = (doc) => (doc?.objects || []).filter((o) => (o.data?.laIds || []).length);
-  const laDay = (iso) => Date.parse(`${iso}T00:00:00Z`);
-
+  /* The look-ahead reaches the timeline from the resource calendar and from
+     nowhere else — reading it there, placing and following a suggestion, is
+     covered in smoke_la_editor.js against the calendar's stub. There is no
+     workbook import to offer: a second look-ahead read from a file could
+     disagree with the one the calendar publishes. */
   await page.locator('#sidenav .nav-link[data-pane="lookahead"]').click();
   await page.waitForTimeout(400);
   check('the look-ahead pane explains itself when empty',
-    /no look-ahead imported/i.test(await page.locator('#dock .ce-title').innerText()));
-
-  const openLaImport = async (shift) => {
-    await page.locator('#dock .cx-btn', { hasText: /import look-ahead/i }).click();
-    await page.waitForTimeout(400);
-    await page.locator('.cx-modal input[type="file"]').setInputFiles({
-      name: '4WLA.xlsx',
-      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      buffer: buildLookaheadWorkbook({ shift }),
-    });
-    await page.waitForTimeout(900);
-  };
-  const runsChip = async () => (await page.locator('.cx-modal .cx-chipstat').allTextContents()).find((c) => /^Runs/.test(c)) || '';
-
-  await openLaImport(0);
-  check('the sheet with the calendar is found, not the cover', /Runs3/.test(await runsChip()), await runsChip());
-  check('every fill on the calendar is listed for somebody to answer',
-    (await page.locator('.cx-modal .la-colour').count()) === 3, `${await page.locator('.cx-modal .la-colour').count()} colour(s)`);
-  check('the workbook key names the colours it explains',
-    /swing shift/i.test(await page.locator('.cx-modal .la-colour[data-hex="FFC000"]').innerText()));
-
-  check('a colour the legend does not call Work is not imported',
-    !(await page.locator('.cx-modal .la-colour[data-hex="D9D9D9"] input[type="checkbox"]').isChecked())
-      && /not in the legend/i.test(await page.locator('.cx-modal .la-colour[data-hex="D9D9D9"]').innerText()));
-  await page.locator('.cx-modal .la-colour[data-hex="D9D9D9"] input[type="checkbox"]').click();
-  await page.waitForTimeout(300);
-  check('categorising it as Work reads what it painted', /Runs4/.test(await runsChip()), await runsChip());
-  await page.locator('.cx-modal .la-colour[data-hex="D9D9D9"] input[type="checkbox"]').click();
-  await page.waitForTimeout(300);
-  check('and as Shading again drops it', /Runs3/.test(await runsChip()), await runsChip());
-
-  await page.locator('.cx-modal-foot .cx-btn.primary').click();
-  await page.waitForTimeout(1200);
-  check('the import lists the suggestions', (await page.locator('#dock .la-row[data-la]').count()) === 3,
-    `${await page.locator('#dock .la-row[data-la]').count()} row(s)`);
-  let laDoc = await laSaved();
-  check('and puts nothing on the timeline by itself', laObjects(laDoc).length === 0);
-  check('the answer about the grey is kept with the plan', laDoc?.lookahead?.colors?.D9D9D9 === 'ignore',
-    JSON.stringify(laDoc?.lookahead?.colors));
-
-  await page.locator('#dock button[aria-label="Add IXL Regression to the timeline"]').first().click();
-  await page.waitForTimeout(400);
-  await page.locator('.cx-modal-foot .cx-btn.primary').click();
-  await page.waitForTimeout(1200);
-  laDoc = await laSaved();
-  const placedLa = laObjects(laDoc)[0];
-  check('placing a suggestion makes a bar on its dates',
-    placedLa && placedLa.start === laDay('2026-09-07') && placedLa.end === laDay('2026-09-10'),
-    placedLa ? `${new Date(placedLa.start).toISOString().slice(0, 10)} → ${new Date(placedLa.end).toISOString().slice(0, 10)}` : 'none');
-  check('and it is no longer a suggestion', (await page.locator('#dock .la-row[data-la]').count()) === 2);
-
-  await page.locator('#dock button[aria-label="Dismiss Cable pull"]').click();
-  await page.waitForTimeout(600);
-  check('dismissing takes a suggestion off the list', (await page.locator('#dock .la-row[data-la]').count()) === 1);
-
-  await openLaImport(1);
-  check('a re-read says what moved', (await page.locator('.cx-modal .cx-chipstat').allTextContents()).some((c) => /^Moved1/.test(c)));
-  check('the colours answered last time are answered already',
-    !(await page.locator('.cx-modal .la-colour[data-hex="D9D9D9"] input[type="checkbox"]').isChecked()));
-  await page.locator('.cx-modal-foot .cx-btn.primary').click();
-  await page.waitForTimeout(900);
-  check('a bar whose run moved is offered, not moved',
-    /follow the look-ahead/i.test(await page.locator('.cx-modal-title').innerText()));
-  laDoc = await laSaved();
-  check('and stays where it was until somebody says', laObjects(laDoc)[0]?.start === laDay('2026-09-07'));
-  await page.locator('.cx-modal .cx-listrow input[type="checkbox"]').first().click();
-  await page.locator('.cx-modal-foot .cx-btn.primary').click();
-  await page.waitForTimeout(1200);
-  laDoc = await laSaved();
-  check('following moves it onto the new dates', laObjects(laDoc)[0]?.start === laDay('2026-09-08')
-    && laObjects(laDoc)[0]?.end === laDay('2026-09-11'));
-  check('the link survived the re-read', laObjects(laDoc).length === 1
-    && !!laDoc.lookahead.activities[laObjects(laDoc)[0].data.laIds[0]]);
-
-  await page.locator('#dock .cx-seg button', { hasText: 'Dismissed' }).click();
-  await page.waitForTimeout(300);
-  check('a dismissal survives the next read', (await page.locator('#dock .la-row[data-la]').count()) === 1);
-
-  await page.locator('#dock .cx-seg button', { hasText: 'Suggested' }).click();
-  await page.waitForTimeout(300);
+    /no look-ahead read yet/i.test(await page.locator('#dock .ce-title').innerText()));
+  check('and points at the calendar rather than a file',
+    /resource calendar/i.test(await page.locator('#dock').innerText()));
+  check('there is no way to import a look-ahead workbook into the timeline',
+    (await page.locator('#dock button', { hasText: /import/i }).count()) === 0
+      && (await page.locator('#dock input[type="file"]').count()) === 0);
 
   console.log('\nHiding objects, and a date window');
   {

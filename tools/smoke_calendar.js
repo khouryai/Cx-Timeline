@@ -28,7 +28,6 @@
 import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
 import { pinClock, pinNodeClock } from './lib/clock.js';
-import { buildLookaheadWorkbook } from './fixtures/xlsx_fixture.js';
 import { lookaheadEditor } from './smoke_la_editor.js';
 import { fakeSdk, SCHEMA_VERSION } from './lib/rc_stub.js';
 import path from 'node:path';
@@ -1609,10 +1608,19 @@ async function main() {
       const off = paint('#rc-frame .rc-pto-cell.rc-pto-elsewhere');
       return !off || off !== paint('#rc-frame .rc-pto-cell.rc-pto-booked');
     }));
+  const elsewhereFor = (name) => page.evaluate((who) => {
+    const row = [...document.querySelectorAll('#rc-frame .rc-pto-grid tbody tr')]
+      .find((tr) => tr.querySelector('.rc-pto-name')?.textContent === who);
+    return row ? row.querySelectorAll('.rc-pto-elsewhere').length : -1;
+  }, name);
+  check('a day on another group\u2019s project is on the PTO calendar',
+    (await elsewhereFor('Tom')) >= 1, String(await elsewhereFor('Tom')));
+  check('and a day the 4WLA puts somebody in the office is not — that is this project\u2019s work',
+    (await elsewhereFor('Uma')) === 0, String(await elsewhereFor('Uma')));
   check('the key says the two things it draws, and not three',
-    /PTO/.test(ptoText) && /Off the project/i.test(ptoText)
+    /PTO/.test(ptoText) && /Other group \/ project/i.test(ptoText)
     && !/On the 4WLA only/.test(ptoText),
-    ptoText.split('\n').filter((l) => /PTO —|Off the project/i.test(l)).join(' | '));
+    ptoText.split('\n').filter((l) => /PTO —|Other group/i.test(l)).join(' | '));
   check('and the count of each is said out loud',
     /the 4WLA says are PTO with nothing booked/.test(ptoText),
     ptoText.split('\n').find((l) => /booked day/.test(l))?.slice(0, 100) || '');
@@ -2091,32 +2099,13 @@ async function main() {
   await page.locator('.ws-btn', { hasText: 'Timeline' }).click();
   await page.waitForTimeout(200);
 
-  /* The timeline's look-ahead import reads the calendar's Legend and nothing
-     else, and only a colour it categorises as Work becomes a suggestion. The
-     fixture paints in yellow (Day Shift here), orange (named by the workbook's
-     own key but not in this register) and grey (a Section band here). It runs
-     before the edits below, so the checks that follow also cover it: reading
-     the legend sends nothing of the plan. */
+  /* The timeline reads the look-ahead from the calendar and from nowhere else:
+     no workbook import, even with the calendar signed in beside it. */
   await page.locator('#sidenav .nav-link[data-pane="lookahead"]').click();
   await page.waitForTimeout(300);
-  await page.locator('#dock .cx-btn', { hasText: /import look-ahead/i }).click();
-  await page.waitForTimeout(300);
-  await page.locator('.cx-modal input[type="file"]').setInputFiles({
-    name: '4WLA.xlsx', mimeType: 'application/octet-stream', buffer: buildLookaheadWorkbook(),
-  });
-  await page.waitForTimeout(900);
-  check('the timeline\'s look-ahead import is categorised by the calendar\'s Legend',
-    /calendar’s legend/i.test(await page.locator('.cx-modal .la-legend-source').innerText().catch(() => '')));
-  const laRuns = (await page.locator('.cx-modal .cx-chipstat').allTextContents()).find((c) => /^Runs/.test(c)) || '';
-  check('and only the colours it calls Work are imported', /^Runs2$/.test(laRuns), laRuns);
-  check('a colour the workbook names but the Legend does not is not work',
-    (await page.locator('.cx-modal .la-colour[data-hex="FFC000"][data-role="ignore"]').count()) === 1);
-  check('nor is a Section band', (await page.locator('.cx-modal .la-colour[data-hex="D9D9D9"][data-role="divider"]').count()) === 1);
-  check('and the categories are not editable from the timeline',
-    (await page.locator('.cx-modal .la-colour input[type="checkbox"]').count()) === 0);
-  await page.locator('.cx-modal-foot .cx-btn.primary').click();
-  await page.waitForTimeout(600);
-  check('the Work runs arrive as suggestions', (await page.locator('#dock .la-row[data-la]').count()) === 2);
+  check('the timeline offers the calendar\u2019s look-ahead, and no workbook import',
+    (await page.locator('#dock button', { hasText: 'Update from the calendar' }).count()) === 1
+      && (await page.locator('#dock button', { hasText: /import/i }).count()) === 0);
 
   // Edit the plan hard: create, move, rename, undo, redo. If any of it were
   // going to reach a backend, this is when.
@@ -2465,6 +2454,8 @@ async function main() {
   // But the export is theirs: it is a drawing of what they can already see.
   check('the calendar can still be printed, because it is what they can see',
     (await viewer.locator('#rc-frame button', { hasText: 'Export PDF' }).count()) === 1);
+  check('the Excel export waits until the look-ahead is written in the calendar — the workbook is the file until then',
+    (await viewer.locator('#rc-frame .la-export-xlsx').count()) === 0);
 
   await viewer.close();
 

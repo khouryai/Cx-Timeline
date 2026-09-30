@@ -41,7 +41,7 @@ import { toISO, addDays } from '../core/dates.js';
 
 import { la, table, WEEK_CHOICES } from './rc_la_state.js';
 import { checkNowButton, lookaheadSource, EDITOR_SOURCE } from './rc_ingest.js';
-import { renderEditor, flushEditor } from './rc_la_editor.js';
+import { renderEditor, flushEditor, openExcelExport } from './rc_la_editor.js';
 import { renderLegend } from './rc_la_legend.js';
 import { renderChanges, renderSnapshots } from './rc_la_changes.js';
 import { renderCancellations } from './rc_la_cancellations.js';
@@ -335,6 +335,17 @@ async function renderCalendar(host) {
        handing it what is on screen would quietly cap the export at whatever the
        range buttons were last set to. */
     exportButton({ view, legendRows, today, sheetName: snapshot.sheet_name, isMe }),
+    /* The editor's own export, offered here too: the same workbook in the 4WLA
+       layout, built from what the editor holds rather than from this reading.
+       Only once the look-ahead is written here — before that, the workbook in
+       the folder is the file, and the editor's tables would be an old copy. */
+    written ? el('button', {
+      class: 'cx-btn mini primary la-export-xlsx',
+      type: 'button',
+      html: icon('download', { size: 12 }) + '<span>Export to Excel</span>',
+      title: 'The look-ahead as an .xlsx in the 4WLA layout — the same export as in Edit.',
+      onClick: () => openExcelExport(),
+    }) : null,
   ].filter(Boolean)));
   host.appendChild(body);
   draw();
@@ -958,7 +969,8 @@ function exportDialog({ view, legendRows, today, sheetName, isMe = null }) {
 
 function exportButton(context) {
   return el('button', {
-    class: 'cx-btn mini ghost',
+    class: 'cx-btn mini primary la-export-pdf',
+    type: 'button',
     html: icon('download', { size: 12 }) + '<span>Export PDF</span>',
     title: 'Draw this calendar on one page — weeks, names and paper size are all choices.',
     onClick: () => exportDialog(context),

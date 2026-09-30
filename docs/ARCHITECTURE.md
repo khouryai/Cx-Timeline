@@ -207,11 +207,11 @@ timeline may point at it.
 
 ### The look-ahead reaches the timeline as suggestions, read from the file
 
-**The look-ahead reaches the timeline as suggestions, read from the file.**
-`ui/lookahead.js` reads the 4WLA workbook itself — the calendar's own parser
-(`parseSheet`, `readLegend`, `applyLegend`, `readGrid`), with no calendar
-sign-in and nothing sent anywhere, so it works in file mode and in a desktop
-build with no calendar keys. `suggestionsFrom()` in `core/lookahead.js` makes
+**The look-ahead reaches the timeline as suggestions** — now read from the
+calendar's published reading only ("Update from the calendar"; see *The
+timeline reads the calendar's look-ahead in one step*). It used to read the
+4WLA workbook itself as well, with the calendar's own parser; that import was
+removed so there is one look-ahead, not two. `suggestionsFrom()` in `core/lookahead.js` makes
 one suggestion per **run of painted cells** on a described row — consecutive
 day columns whose paint is `role === 'shift'`, adjacent *on the sheet* — and
 `store.importLookahead()` writes them into `doc.lookahead`, the P6 register's
@@ -811,11 +811,16 @@ leave would be a second answer to "is Dana off on Tuesday". The Organisation
 list stays as the full record; this is the weeks anybody is actually staffing.
 It is the one calendar view that does **not** filter on `scheduled`: managers
 take leave too, and dropping them would be wrong on exactly the weeks it
-matters. The office and another group's project are drawn there as well, in a
-colour of their own (`--rc-offproject`) — a day the sheet accounted for should
-not read as a blank on the one screen about where people are — but never as
-leave, because those are days somebody worked. That is the one distinction
-this grid does spend a colour on, and both tokens are defined in every theme.
+matters. Another group's project is drawn there as well, in a colour of its
+own (`--rc-offproject`) — a day off this project should not read as a blank on
+the one screen about where people are — but never as leave, because it is a
+day somebody worked. That is the one distinction this grid does spend a colour
+on, and both tokens are defined in every theme. **The Office row is not drawn
+here at all.** It used to be, in the off-project colour, and a team whose
+office days are scheduled on the look-ahead saw the PTO calendar fill with
+people who were exactly where the plan put them, read as lent to another
+group. An office day is this project's work; it reaches the week plan, the
+huddle and the reports as one, and PTO is only leave and work elsewhere.
 
 ### Who takes shifts decides who is in a view about work
 
@@ -1991,7 +1996,12 @@ same `derive()` as a workbook import, written with `source: 'calendar'` on the
 register's stamp. It is a read — nothing of the plan goes the other way, and the
 smoke suite counts the writes to prove it. A note above the list says when the
 calendar holds a newer reading than the suggestions were made from. Importing a
-workbook is still there, for file mode and for anybody without a sign-in.
+workbook used to be offered beside it; it is gone. A plan read from a file
+next to the one the calendar publishes was a second look-ahead that could
+disagree with the first, so the pane reads the calendar or says to open it —
+in file mode too, where it now has nothing to read until the calendar is
+signed in. The editor's own Excel export is the way a file leaves; nothing
+comes back in through the timeline.
 
 ### Progress comes back from the huddle as actual dates, offered
 

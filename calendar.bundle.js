@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 25   Built: 2026-09-30T16:04:45.689Z
+ * Modules: 25   Built: 2026-09-30T17:26:04.362Z
  */
 (function () {
   'use strict';
@@ -8174,13 +8174,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       return id ? { id, name: byId.get(id)?.name || String(written).trim() } : null;
     };
     E.leaveKinds = new Map(leaveKinds.map((k) => [k.id, k.name]));
-    E.legendAll = legend.map((r) => ({ argb: String(r.argb).toUpperCase(), meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
-    const inForce = new Map();
-    for (const r of E.legendAll) {
-      const held = inForce.get(r.argb);
-      if (!held || String(r.valid_from || '') > String(held.valid_from || '')) inForce.set(r.argb, r);
-    }
-    E.legend = [...inForce.values()].filter((r) => r.role === 'shift' && r.meaning);
+    ({ all: E.legendAll, shifts: E.legend } = legendInForce(legend));
     E.codes = codes;
     E.names = ed.nameChoices(people);
     E.title = settings.find((r) => r.key === 'lookahead_title')?.value || '';
@@ -8206,6 +8200,17 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     }
     draw();
     startPolling();
+  }
+
+  /** The legend as the editor paints with it: every row, and the shifts in force. */
+  function legendInForce(rows) {
+    const all = rows.map((r) => ({ argb: String(r.argb).toUpperCase(), meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
+    const inForce = new Map();
+    for (const r of all) {
+      const held = inForce.get(r.argb);
+      if (!held || String(r.valid_from || '') > String(held.valid_from || '')) inForce.set(r.argb, r);
+    }
+    return { all, shifts: [...inForce.values()].filter((r) => r.role === 'shift' && r.meaning) };
   }
 
   /**
@@ -10224,37 +10229,86 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   /* ── Export ────────────────────────────────────────────────────────────── */
 
   function openExport() {
+    openExcelExport();
+  }
+
+  /**
+   * What an export is built from. The editor's own state when it is open — it
+   * holds exactly what was just typed — and otherwise the same rows and cells
+   * read afresh, so the calendar's read view offers the identical workbook
+   * without opening the editor, to anybody who can see the look-ahead.
+   */
+  async function exportSource() {
+    if (E.model) {
+      return { model: E.model, legend: E.legend, codes: E.codes, title: E.title, weeks: E.weeks, ensure: ensureWindow };
+    }
+    const [settings, legend, codes, rows] = await Promise.all([
+      rc.listSettings().catch(() => []),
+      rc.listLegend().catch(() => []),
+      rc.listSupportCodes({ includeRetired: true }).catch(() => []),
+      rc.listLaRows(),
+    ]);
+    const src = {
+      model: ed.makeModel(rows.map(cleanRow), []),
+      legend: legendInForce(legend).shifts,
+      codes,
+      title: settings.find((r) => r.key === 'lookahead_title')?.value || '',
+      weeks: ed.WINDOW_WEEKS.includes(la.editorWeeks) ? la.editorWeeks : 4,
+      loaded: null,
+    };
+    src.ensure = async (days) => {
+      const from = days[0];
+      const to = days[days.length - 1];
+      if (src.loaded && from >= src.loaded.from && to <= src.loaded.to) return;
+      const cells = await rc.listLaCells(from, to);
+      src.model = ed.makeModel(rows.map(cleanRow), cells.map(cleanCell));
+      src.loaded = { from, to };
+    };
+    return src;
+  }
+
+  /** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
+  async function openExcelExport() {
+    let src;
+    try {
+      src = await exportSource();
+    } catch (err) {
+      toast({ tone: 'bad', message: err.message, timeout: 10000 });
+      rc.reportError('lookahead:export', err);
+      return;
+    }
     const thisMonday = ed.mondayOf(todayISO());
     const starts = [-7, 0, 7, 14].map((d) => ed.addDaysISO(thisMonday, d));
     const start = selectInput({
       value: thisMonday,
       options: starts.map((d, i) => ({ value: d, label: `${['Last week', 'This week', 'Next week', 'In two weeks'][i]} — from ${fmt(d)}` })),
     });
-    let weeks = E.weeks;
+    let weeks = src.weeks;
     const size = segmented({
       value: weeks,
       options: ed.WINDOW_WEEKS.map((w) => ({ value: w, label: `${w} weeks` })),
       onChange: (w) => { weeks = w; update(); },
     });
     const summary = el('div', { class: 'rc-hint' });
-    const update = () => {
+    const update = async () => {
       const days = ed.windowDays(start.value, weeks);
-      const rows = ed.rowsWithWork(E.model, days);
+      await src.ensure(days).catch(() => {});
+      const rows = ed.rowsWithWork(src.model, days);
       const n = rows.filter((r) => r.kind === 'activity').length;
       summary.textContent = `${n} activit${n === 1 ? 'y' : 'ies'} with work between ${fmt(days[0])} and ${fmt(days[days.length - 1])}, `
         + 'with their sections, names rows and the PTO / Office rows — in the 4WLA layout, ready to copy into the master file.';
     };
     start.addEventListener('change', update);
-    update();
+    await update();
 
     const canFolder = filestore.hasFolder?.();
     const build = async () => {
       const days = ed.windowDays(start.value, weeks);
-      await ensureWindow(days);
+      await src.ensure(days);
       const settings = await rc.listSettings().catch(() => []);
       const sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
       const bytes = lookaheadWorkbook({
-        model: E.model, days, legend: E.legend, codes: E.codes.filter((c) => c.active !== false), title: E.title, sheetName,
+        model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
       });
       return { bytes, name: lookaheadFileName(days, sheetName) };
     };
@@ -10480,6 +10534,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "renderEditor", { get: () => renderEditor, enumerable: true });
   Object.defineProperty(__x, "flushEditor", { get: () => flushEditor, enumerable: true });
+  Object.defineProperty(__x, "openExcelExport", { get: () => openExcelExport, enumerable: true });
 };
 
 // ui/rc_la_legend.js
@@ -11856,7 +11911,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
   const { la, table, WEEK_CHOICES } = __req("ui/rc_la_state.js");
   const { checkNowButton, lookaheadSource, EDITOR_SOURCE } = __req("ui/rc_ingest.js");
-  const { renderEditor, flushEditor } = __req("ui/rc_la_editor.js");
+  const { renderEditor, flushEditor, openExcelExport } = __req("ui/rc_la_editor.js");
   const { renderLegend } = __req("ui/rc_la_legend.js");
   const { renderChanges, renderSnapshots } = __req("ui/rc_la_changes.js");
   const { renderCancellations } = __req("ui/rc_la_cancellations.js");
@@ -12150,6 +12205,17 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
          handing it what is on screen would quietly cap the export at whatever the
          range buttons were last set to. */
       exportButton({ view, legendRows, today, sheetName: snapshot.sheet_name, isMe }),
+      /* The editor's own export, offered here too: the same workbook in the 4WLA
+         layout, built from what the editor holds rather than from this reading.
+         Only once the look-ahead is written here — before that, the workbook in
+         the folder is the file, and the editor's tables would be an old copy. */
+      written ? el('button', {
+        class: 'cx-btn mini primary la-export-xlsx',
+        type: 'button',
+        html: icon('download', { size: 12 }) + '<span>Export to Excel</span>',
+        title: 'The look-ahead as an .xlsx in the 4WLA layout — the same export as in Edit.',
+        onClick: () => openExcelExport(),
+      }) : null,
     ].filter(Boolean)));
     host.appendChild(body);
     draw();
@@ -12773,7 +12839,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
   function exportButton(context) {
     return el('button', {
-      class: 'cx-btn mini ghost',
+      class: 'cx-btn mini primary la-export-pdf',
+      type: 'button',
       html: icon('download', { size: 12 }) + '<span>Export PDF</span>',
       title: 'Draw this calendar on one page — weeks, names and paper size are all choices.',
       onClick: () => exportDialog(context),
@@ -14069,7 +14136,11 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
     /* The same register and the same matching rules the Resource row gets: a name
        on the PTO row is the same kind of thing as a name on a Resource row, so
        there is one answer to "who is Victor" and not two that could differ. */
-    const away = absenceAssignments(sheet.absences, register);
+    /* PTO and work somewhere else — never the Office row. A day in the office
+       is a day on this project's work, scheduled like any other; drawn here it
+       read as somebody lent to another group, and filled the calendar with
+       people who were exactly where the look-ahead put them. */
+    const away = absenceAssignments((sheet.absences || []).filter((a) => a.kind !== 'office'), register);
     const redraw = () => { clear(root); render(root); };
     const admin = rc.isAdmin();
 
@@ -14194,7 +14265,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
            does not read as a blank here, and in a colour of its own rather than a
            shade of the leave one, so the two can never be mistaken: these are days
            somebody worked. */
-        if (sheetSays === 'office' || sheetSays === 'other') {
+        if (sheetSays === 'other') {
           classes.push('rc-pto-elsewhere');
           return el('td', {
             class: classes.join(' '),
@@ -14242,7 +14313,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
     host.appendChild(el('div', { class: 'rc-pto-key' }, [
       key('rc-pto-booked', 'PTO — booked or on the 4WLA'),
       key('rc-pto-asked', 'Asked for, not answered'),
-      key('rc-pto-elsewhere', 'Off the project, not off work'),
+      key('rc-pto-elsewhere', 'Other group / project — off this project, not off work'),
     ]));
 
     host.appendChild(el('p', {

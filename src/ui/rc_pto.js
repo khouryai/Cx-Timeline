@@ -88,7 +88,11 @@ export async function render(root) {
   /* The same register and the same matching rules the Resource row gets: a name
      on the PTO row is the same kind of thing as a name on a Resource row, so
      there is one answer to "who is Victor" and not two that could differ. */
-  const away = absenceAssignments(sheet.absences, register);
+  /* PTO and work somewhere else — never the Office row. A day in the office
+     is a day on this project's work, scheduled like any other; drawn here it
+     read as somebody lent to another group, and filled the calendar with
+     people who were exactly where the look-ahead put them. */
+  const away = absenceAssignments((sheet.absences || []).filter((a) => a.kind !== 'office'), register);
   const redraw = () => { clear(root); render(root); };
   const admin = rc.isAdmin();
 
@@ -213,7 +217,7 @@ export async function render(root) {
          does not read as a blank here, and in a colour of its own rather than a
          shade of the leave one, so the two can never be mistaken: these are days
          somebody worked. */
-      if (sheetSays === 'office' || sheetSays === 'other') {
+      if (sheetSays === 'other') {
         classes.push('rc-pto-elsewhere');
         return el('td', {
           class: classes.join(' '),
@@ -261,7 +265,7 @@ export async function render(root) {
   host.appendChild(el('div', { class: 'rc-pto-key' }, [
     key('rc-pto-booked', 'PTO — booked or on the 4WLA'),
     key('rc-pto-asked', 'Asked for, not answered'),
-    key('rc-pto-elsewhere', 'Off the project, not off work'),
+    key('rc-pto-elsewhere', 'Other group / project — off this project, not off work'),
   ]));
 
   host.appendChild(el('p', {

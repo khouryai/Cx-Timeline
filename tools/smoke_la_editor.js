@@ -607,6 +607,34 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   check('and it no longer offers to read the workbook',
     (await page.locator('#rc-frame button', { hasText: 'Check now' }).count()) === 0
       && (await page.locator('#rc-frame .la-edit-switch[aria-pressed="false"]').count()) === 1);
+  // The editor's Excel export, offered in the read view too, dressed as the PDF one is.
+  const xlsxBtn = page.locator('#rc-frame .la-export-xlsx');
+  check('the calendar offers the Excel export without switching Edit on', (await xlsxBtn.count()) === 1);
+  await snap('readview');
+  check('the calendar\u2019s names wrap by word, never a letter to a line',
+    await page.evaluate(() => [...document.querySelectorAll('#rc-frame .la-grid td.la-day')]
+      .every((td) => td.getBoundingClientRect().width >= 56)));
+  check('and its PDF button is dressed the same way',
+    await page.evaluate(() => {
+      const a = document.querySelector('#rc-frame .la-export-xlsx');
+      const b = document.querySelector('#rc-frame .la-export-pdf');
+      return !!a && !!b && a.className.replace('la-export-xlsx', '') === b.className.replace('la-export-pdf', '');
+    }));
+  await page.evaluate(() => { window.__saved = {}; });
+  await xlsxBtn.click();
+  await page.waitForSelector('.cx-modal');
+  check('it is the same export', /4WLA layout/.test(await page.locator('.cx-modal').innerText()));
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Download' }).click();
+  await page.waitForTimeout(800);
+  const fromCalendarFile = await page.evaluate(async () => ({
+    name: window.__saved?.name || '',
+    bytes: Array.from(new Uint8Array(await window.__lastBlob.arrayBuffer())),
+  }));
+  const backFromCalendar = la.parseSheet(new Uint8Array(fromCalendarFile.bytes).buffer, '4WLA');
+  check('and it downloads the 4WLA from the read view',
+    /^4WLA .*\.xlsx$/.test(fromCalendarFile.name)
+      && backFromCalendar.rows.some((r) => r.cells.some((c) => c.value === 'ATS Site Test')), fromCalendarFile.name);
+
   // Another window publishing is picked up without leaving the tab — and so
   // is the reading after it, which puts the sheet back as it was.
   const publishElsewhere = (label) => page.evaluate((to) => {

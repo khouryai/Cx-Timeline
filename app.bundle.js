@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-09-30T16:04:45.612Z
+ * Modules: 59   Built: 2026-09-30T17:26:04.285Z
  */
 (function () {
   'use strict';
@@ -23721,15 +23721,14 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
 
   const store = __req("core/store.js");
   const renderer = __req("timeline/renderer.js");
-  const { readGrid, marksOf, suggestionsFrom, reconcileSuggestions, outcomeProgress } = __req("core/lookahead.js");
-  const { readZip, readSheets, parseSheet, applyLegend, inForce, workOnlyLegend, fileLegend } = __req("io/lookahead.js");
+  const { readGrid, marksOf, suggestionsFrom, outcomeProgress } = __req("core/lookahead.js");
+  const { applyLegend, inForce, workOnlyLegend } = __req("io/lookahead.js");
 
 
   const rc = __req("core/rc.js");
   const cmd = __req("ui/commands.js");
   const { icon } = __req("ui/icons.js");
-  const { openModal, openPicker, field, textInput, selectInput, segmented, checkbox, toggle, emptyState, badge, chipStat, toast, confirmDialog, skeleton } = __req("ui/components.js");
-
+  const { openModal, openPicker, field, textInput, selectInput, segmented, checkbox, toggle, emptyState, badge, chipStat, toast, confirmDialog } = __req("ui/components.js");
 
 
 
@@ -23770,8 +23769,14 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
       root.appendChild(
         emptyState({
           iconName: 'calendar',
-          title: 'No look-ahead imported',
-          message: 'Import the four-week look-ahead workbook. Each run of painted cells becomes a suggestion, and nothing goes on the timeline until you place it.',
+          title: 'No look-ahead read yet',
+          /* The look-ahead comes from the resource calendar and nowhere else.
+             There used to be a workbook import here as well, and a plan read
+             from a file beside the one the calendar publishes was a second
+             look-ahead that could disagree with the first. */
+          message: calendarAvailable()
+            ? 'Press Update from the calendar. Each run of painted days becomes a suggestion, and nothing goes on the timeline until you place it.'
+            : 'The look-ahead is read from the resource calendar. Open Calendar and sign in, then come back and press Update from the calendar.',
         })
       );
       return;
@@ -23814,12 +23819,6 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
               onClick: () => updateFromCalendar(),
             })
           : null,
-        el('button', {
-          class: `cx-btn mini${calendar ? '' : ' primary'}`,
-          html: icon('upload', { size: 12 }) + '<span>Import look-ahead</span>',
-          title: 'Read a look-ahead workbook from a file',
-          onClick: () => openLookaheadImport(),
-        }),
         calendar && laPlacedIds(store.getDoc()).size
           ? el('button', {
               class: 'cx-btn mini',
@@ -24173,32 +24172,6 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
   }
 
   /**
-   * Read a workbook: every visible sheet that has a calendar on it.
-   *
-   * The calendar finds its sheet by a name kept in its database; a file picked
-   * off a disk has no such setting, so the sheet is *found* — the one whose
-   * weekday row `readGrid()` recognises. Where several qualify the dialog asks,
-   * starting from whichever was used last time.
-   */
-  async function readWorkbook(file) {
-    const buffer = await file.arrayBuffer();
-    const names = readSheets(readZip(buffer))
-      .filter((s) => s.state === 'visible' && s.zipPath)
-      .map((s) => s.name);
-
-    const sheets = [];
-    for (const name of names) {
-      try {
-        const grid = parseSheet(buffer, name);
-        if (readGrid(grid).days.length) sheets.push({ name, grid });
-      } catch {
-        // A sheet that will not parse is not the calendar; the others may be.
-      }
-    }
-    return sheets;
-  }
-
-  /**
    * Read one sheet as suggestions, against a legend.
    *
    * `legend` is `[{ argb, meaning, role }]` — the calendar's register or the
@@ -24242,241 +24215,6 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
       windowStart: dated ? Date.parse(`${days[0].date}T00:00:00Z`) : null,
       windowEnd: dated ? Date.parse(`${days[days.length - 1].date}T00:00:00Z`) + MS_DAY : null,
     };
-  }
-
-  const CATEGORY = {
-    shift: ['Work', 'info'],
-    ignore: ['Shading', 'neutral'],
-    divider: ['Section band', 'neutral'],
-  };
-
-  /**
-   * The import dialog.
-   *
-   * Nothing is written until the reading has been shown — what it found, what is
-   * new, what moved, and which bars on the timeline that affects. Placing and
-   * moving bars are separate steps after it.
-   */
-  function openLookaheadImport() {
-    let file = null;
-    let sheets = [];
-    let sheetName = '';
-    let derived = null;
-    const register = lookaheadRegister(store.getDoc());
-    const choices = { ...register.colors };
-
-    /* The calendar's legend, when there is one to read. Fetched once, and only
-       the colours: `listLegend()` is a read, and nothing of the plan is sent. An
-       empty register or a refusal leaves `calendarLegend` null, which is the
-       workbook-key path below. */
-    let calendarLegend = null;
-    const legendRead = rc.isConfigured() && rc.isSignedIn()
-      ? rc.listLegend()
-          .then((rows) => { calendarLegend = rows?.length ? rows : null; })
-          .catch(() => { calendarLegend = null; })
-      : Promise.resolve();
-
-    const status = el('div', { class: 'cx-hint', style: { minHeight: '18px' } });
-    const preview = el('div');
-    const input = el('input', {
-      type: 'file',
-      accept: '.xlsx,.xlsm',
-      style: { display: 'none' },
-      onChange: async (e) => {
-        file = e.target.files?.[0];
-        if (file) await read();
-      },
-    });
-
-    const anchorISO = () => new Date(file?.lastModified || Date.now()).toISOString().slice(0, 10);
-
-    async function read() {
-      clear(preview);
-      preview.appendChild(skeleton(2));
-      status.textContent = `Reading ${file.name}…`;
-      try {
-        await legendRead;
-        sheets = await readWorkbook(file);
-        if (!sheets.length) throw new Error('none of its visible sheets has a row of weekday letters (M, Tu, W…) to read a calendar from.');
-        const last = register.imported?.sheet;
-        sheetName = sheets.some((s) => s.name === last) ? last : sheets[0].name;
-        rederive();
-      } catch (err) {
-        sheets = [];
-        derived = null;
-        clear(preview);
-        status.textContent = '';
-        preview.appendChild(el('div', { class: 'cx-gate-msg bad', text: `Could not read the file: ${err.message}` }));
-      }
-    }
-
-    function rederive() {
-      const sheet = sheets.find((s) => s.name === sheetName);
-      const legend = calendarLegend || (sheet ? fileLegend(sheet.grid, choices) : []);
-      derived = sheet ? derive(sheet.grid, legend, anchorISO()) : null;
-      renderPreview();
-    }
-
-    function renderPreview() {
-      clear(preview);
-      status.textContent = '';
-      if (!derived) return;
-
-      if (sheets.length > 1) {
-        preview.appendChild(field('Sheet', selectInput({
-          value: sheetName,
-          options: sheets.map((s) => s.name),
-          onChange: (v) => { sheetName = v; rederive(); },
-        }), 'Every visible sheet with a calendar on it.'));
-      }
-
-      if (!derived.dated) {
-        preview.appendChild(el('div', { class: 'cx-gate-msg bad', text:
-          'The calendar on this sheet could not be dated: its weekday letters do not agree with any year near when the file was saved. Nothing would be placed at a guessed date, so there is nothing to import.' }));
-        return;
-      }
-
-      const doc = store.getDoc();
-      const linked = laPlacedIds(doc);
-      const plan = reconcileSuggestions(lookaheadRegister(doc).activities, derived.runs, {
-        linked, windowStart: derived.windowStart,
-      });
-      const affected = plan.moved.filter((m) => linked.has(m.id)).length;
-
-      preview.append(
-        el('div', { class: 'cx-chipstats', style: { marginBottom: '10px' } }, [
-          chipStat('Runs', derived.runs.length, 'info'),
-          chipStat('New', plan.added.length, plan.added.length ? 'good' : 'muted'),
-          chipStat('Moved', plan.moved.length, plan.moved.length ? 'warn' : 'muted'),
-          chipStat('Unchanged', plan.unchanged.length, 'muted'),
-          plan.missing.length ? chipStat('Gone', plan.missing.length, 'bad') : null,
-        ].filter(Boolean)),
-        el('div', { class: 'cx-hint', text:
-          `${fmtDate(derived.windowStart, 'medium')} → ${fmtDate(derived.windowEnd - MS_DAY, 'medium')}. One suggestion per run of cells painted in a Work colour on a described row.` })
-      );
-
-      if (affected) {
-        preview.appendChild(el('div', { class: 'cx-gate-msg', style: { borderColor: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 12%, transparent)', marginTop: '9px' },
-          text: `${affected} of the runs that moved have bars on your timeline. After importing you can choose which of them follow.` }));
-      }
-      if (plan.missing.length) {
-        preview.appendChild(el('div', { class: 'cx-gate-msg bad', style: { marginTop: '9px' },
-          text: `${plan.missing.length} run(s) your bars are linked to are no longer on the sheet — they will be marked, not removed.` }));
-      }
-
-      preview.appendChild(colourList());
-
-      const sample = derived.runs.slice(0, 4);
-      if (sample.length) {
-        preview.appendChild(el('div', { style: { marginTop: '11px' } }, [
-          el('div', { class: 'cx-section-label', text: 'First runs' }),
-          el('div', { class: 'cx-list' }, sample.map((run) =>
-            el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
-              el('div', { class: 'lr-main' }, [
-                el('div', { class: 'lr-title', text: run.title }),
-                el('div', { class: 'lr-meta', text: runMeta(run) }),
-              ]),
-            ])
-          )),
-        ]));
-      }
-    }
-
-    /**
-     * What each fill on the calendar is categorised as, and so whether it is read.
-     * Read-only against the calendar's legend — that is changed in Calendar →
-     * Legend, where it changes the calendar too. Against the workbook's key the
-     * categories are answered here and kept with the plan.
-     */
-    function colourList() {
-      if (!derived.colours.length) return el('div');
-      const fromCalendar = !!calendarLegend;
-      return el('div', { style: { marginTop: '11px' } }, [
-        el('div', { class: 'cx-section-label', text: 'Colours on the calendar' }),
-        el('div', { class: 'cx-hint la-legend-source', style: { marginBottom: '6px' }, text: fromCalendar
-          ? 'Categorised by the calendar’s Legend. Only Work colours are imported; change a colour’s category in Calendar → Legend and import again.'
-          : 'No calendar legend is available, so the workbook’s own key starts as Work and every other colour as Shading. Only Work colours are imported; your categories are kept with the plan.' }),
-        el('div', { class: 'cx-list' }, derived.colours.map((c) => {
-          const [word, tone] = c.known ? (CATEGORY[c.role] || CATEGORY.shift) : ['Not in the legend', 'neutral'];
-          return el('div', { class: 'cx-listrow la-colour', dataset: { hex: c.hex, role: c.role }, style: { cursor: 'default' } }, [
-            fromCalendar
-              ? null
-              : checkbox({
-                  label: 'Work',
-                  checked: c.role === 'shift',
-                  onChange: (v) => {
-                    choices[c.hex] = v ? 'shift' : 'ignore';
-                    rederive();
-                  },
-                }),
-            el('span', { class: 'la-swatch', style: `background:#${c.hex.slice(-6)}` }),
-            el('div', { class: 'lr-main' }, [
-              el('div', { class: 'lr-title', text: c.meaning || (c.known ? word : 'Not in the legend') }),
-              el('div', { class: 'lr-meta', text: `${c.count} cell${c.count === 1 ? '' : 's'} · #${c.hex.slice(-6)}${c.role === 'shift' ? '' : ' · not imported'}` }),
-            ]),
-            badge(word, tone),
-          ].filter(Boolean));
-        })),
-      ]);
-    }
-
-    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
-      el('button', {
-        class: 'cx-btn mini',
-        style: { justifyContent: 'flex-start' },
-        html: icon('upload', { size: 12 }) + '<span>Choose the look-ahead workbook…</span>',
-        onClick: () => input.click(),
-      }),
-      input,
-      status,
-      preview,
-    ]);
-
-    return openModal({
-      title: 'Import the look-ahead',
-      subtitle: 'Read from the .xlsx itself. Suggestions only — nothing is placed or moved until you say so.',
-      size: 'wide',
-      body,
-      actions: [
-        { label: 'Cancel' },
-        {
-          label: 'Import',
-          kind: 'primary',
-          onClick: () => {
-            if (!derived?.dated) {
-              toast({ tone: 'warn', title: 'Nothing to import', message: 'Choose a look-ahead workbook first.' });
-              return false;
-            }
-            // Categories answered here are kept with the plan. Against the
-            // calendar's legend nothing is: that register is the answer, and a
-            // second copy in the plan would be a second answer to "is it work".
-            const colors = {};
-            if (!calendarLegend) for (const c of derived.colours) colors[c.hex] = c.role === 'shift' ? 'shift' : 'ignore';
-
-            const report = store.importLookahead(derived.runs, {
-              fileName: file?.name || '',
-              sheet: sheetName,
-              colors,
-              windowStart: derived.windowStart,
-              windowEnd: derived.windowEnd,
-            });
-            if (!report) return false;
-            renderer.requestRender();
-            refresh();
-            emit(EV.LOOKAHEAD_IMPORTED, { report });
-            toast({
-              tone: 'good',
-              title: 'Look-ahead imported',
-              message: `${derived.runs.length} runs · ${report.added.length} new · ${report.moved.length} moved.`,
-            });
-            const linked = laPlacedIds(store.getDoc());
-            const follow = report.moved.filter((m) => linked.has(m.id));
-            if (follow.length) setTimeout(() => openFollowDialog(follow), 350);
-            return undefined;
-          },
-        },
-      ],
-    });
   }
 
   /**
@@ -24866,7 +24604,6 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "paneLookahead", { get: () => paneLookahead, enumerable: true });
   Object.defineProperty(__x, "updateFromCalendar", { get: () => updateFromCalendar, enumerable: true });
   Object.defineProperty(__x, "progressFromCalendar", { get: () => progressFromCalendar, enumerable: true });
-  Object.defineProperty(__x, "openLookaheadImport", { get: () => openLookaheadImport, enumerable: true });
   Object.defineProperty(__x, "LA_MIME", { get: () => LA_MIME, enumerable: true });
   Object.defineProperty(__x, "installLookaheadDrops", { get: () => installLookaheadDrops, enumerable: true });
 };

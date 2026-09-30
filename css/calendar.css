@@ -302,10 +302,21 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   background: var(--surface);
   text-align: left;
   max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .la-grid thead .la-meta { z-index: 4; }
+/* The body wraps, as the editor's does: an activity's description and a day's
+   names are read whole, and the row grows to hold them. A day column stops
+   widening at a readable measure and wraps the names inside it instead. */
+.la-grid tbody td {
+  white-space: normal;
+  overflow-wrap: break-word;
+  line-height: 1.3;
+}
+/* A floor as well as a ceiling. Without the floor, "Everything" — seven weeks
+   of columns — let the browser squeeze a day down to one letter and spell the
+   names down the cell. `break-word` keeps a name whole unless it alone is
+   wider than the column. */
+.la-grid tbody td.la-day { min-width: 58px; max-width: 110px; }
 /* The names the workbook gives its own left-hand columns — Location, SSWP,
    Party to action, and whatever else that sheet carries. They sit in the day-
    number row, one per column, so they have to take the header's background
@@ -1294,7 +1305,14 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 .lae-grid .lae-meta-party { left: 598px; width: 72px; min-width: 72px; max-width: 72px; }
 .lae-grid .lae-meta-work_hours { left: 670px; width: 92px; min-width: 92px; max-width: 92px; }
 .lae-grid .lae-meta-last { border-right: 2px solid var(--border-strong); }
-.lae-grid td.lae-meta { text-overflow: ellipsis; }
+/* Every cell wraps: names, descriptions, locations and codes are read whole,
+   and a row grows to hold its longest cell rather than clipping it. 26px stays
+   the least a row is — a table cell's height is a minimum, not a cap. */
+.lae-grid tbody td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+}
 .lae-grid td.lae-meta-description { font-weight: 500; color: var(--text-main); }
 
 .lae-grid .lae-day {
