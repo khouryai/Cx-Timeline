@@ -738,6 +738,30 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   box-shadow: inset 2px 0 0 var(--info), inset -2px 0 0 var(--info);
 }
 .rc-res-today-head { color: var(--info); }
+
+/* ── The weekend ─────────────────────────────────────────────────────────
+   Every week shows all seven days, and Saturday and Sunday are shaded down the
+   whole column — the look-ahead's weekend grey, washed so the badges and tasks
+   on a possession weekend stay readable. Today's tint wins on the day it is a
+   weekend, because that is the column somebody is following. */
+.rc-table.rc-resources td.rc-res-weekend:not(.rc-res-today),
+.rc-table.rc-resources tbody tr:hover td.rc-res-weekend:not(.rc-res-today) {
+  background: color-mix(in srgb, var(--la-weekend) 32%, transparent);
+}
+.rc-table.rc-resources th.rc-res-weekend:not(.rc-res-today) {
+  background: color-mix(in srgb, var(--la-weekend) 45%, var(--surface-2));
+  color: var(--text-main);
+}
+
+/* Back, the week, forward: one group, held together. */
+.rc-week-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1, 4px);
+}
+.rc-week-nav h3 { padding: 0 var(--space-1, 4px); white-space: nowrap; }
+.rc-section-head .rc-week-nav .cx-btn { margin-left: 0; }
+.rc-section-head .rc-week-nav + .cx-btn { margin-left: auto; }
 .rc-today-tag {
   display: block;
   font-family: var(--f-mono);

@@ -204,6 +204,11 @@ function fakeShell() {
       shell.titles.push(title);
       return null;
     },
+    // The window's own zoom — what Ctrl + and Ctrl − do in a browser.
+    'plugin:webview|set_webview_zoom': ({ label, value }) => {
+      shell.zoom = { label, value };
+      return null;
+    },
   };
 
   window.__TAURI_INTERNALS__ = {
@@ -739,6 +744,28 @@ async function main() {
      `tauri.localhost/#join=…` to the clipboard — an address that means nothing
      in anybody else's browser, and whose only symptom is a colleague saying
      the link does not work. */
+  /* Page zoom, as a browser has it ─────────────────────────────────────── */
+  console.log('\nPage zoom');
+  const zoomOf = () => page.evaluate(() => window.__desktop.zoom?.value ?? null);
+  const zoomControl = page.locator('#statusbar .sb-page-zoom');
+  check('the desktop app has a page zoom in the status bar', (await zoomControl.count()) === 1);
+  await zoomControl.locator('button[aria-label="Zoom in"]').click();
+  await page.waitForTimeout(150);
+  check('+ zooms the window itself, not the page\u2019s CSS',
+    (await zoomOf()) === 1.1 && /110%/.test(await zoomControl.innerText()), String(await zoomOf()));
+  await page.locator('#statusbar').click({ position: { x: 5, y: 5 } }).catch(() => {});
+  await page.keyboard.press('Control+Equal');
+  await page.waitForTimeout(150);
+  check('Ctrl + zooms in, as in a browser', (await zoomOf()) === 1.25, String(await zoomOf()));
+  await page.keyboard.press('Control+Minus');
+  await page.waitForTimeout(150);
+  check('Ctrl − zooms out', (await zoomOf()) === 1.1, String(await zoomOf()));
+  check('and the zoom is remembered for next time',
+    (await page.evaluate(() => localStorage.getItem('cx.desktop.pageZoom'))) === '1.1');
+  await zoomControl.locator('.sb-zoom-reset').click();
+  await page.waitForTimeout(150);
+  check('the percentage puts it back to 100%', (await zoomOf()) === 1);
+
   console.log('\nAn invitation link points at the site, not at this window');
 
   const joinFrom = (host) => page.evaluate((h) => {

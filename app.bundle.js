@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-10-02T18:34:23.098Z
+ * Modules: 59   Built: 2026-10-02T19:01:03.511Z
  */
 (function () {
   'use strict';
@@ -3689,6 +3689,21 @@ __mods["core/desktop.js"] = function (__x, __req) {
     }
   }
 
+  /* ── Zoom ──────────────────────────────────────────────────────────────── */
+
+  /**
+   * Zoom the whole page, as Ctrl + and Ctrl − do in a browser.
+   *
+   * The window's own zoom, not CSS: the timeline measures pointer positions
+   * against the canvas, and a CSS zoom would put every drag off by the zoom
+   * factor. A shell built before the webview-zoom permission was granted refuses
+   * the call; the caller treats that as "not available here" and hides its
+   * control.
+   */
+  function setPageZoom(scale) {
+    return call('plugin:webview|set_webview_zoom', { label: 'main', value: scale });
+  }
+
   /* ── Settings: which folder, which plan, who you are ───────────────────── */
 
   function readSettings() {
@@ -3869,6 +3884,7 @@ __mods["core/desktop.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "isAvailable", { get: () => isAvailable, enumerable: true });
+  Object.defineProperty(__x, "setPageZoom", { get: () => setPageZoom, enumerable: true });
   Object.defineProperty(__x, "readSettings", { get: () => readSettings, enumerable: true });
   Object.defineProperty(__x, "writeSettings", { get: () => writeSettings, enumerable: true });
   Object.defineProperty(__x, "pickFolder", { get: () => pickFolder, enumerable: true });
@@ -31057,6 +31073,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const filestore = __req("core/filestore.js");
   const cloud = __req("core/cloud.js");
   const rcClient = __req("core/rc.js");
+  const desktop = __req("core/desktop.js");
   const { linkViolations } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
@@ -31579,6 +31596,78 @@ __mods["ui/shell.js"] = function (__x, __req) {
     renderer.requestRender();
   }
 
+  /* ── Page zoom, in the desktop app ─────────────────────────────────────────
+     A browser zooms the page with Ctrl + / Ctrl − and Ctrl + wheel; the desktop
+     window had no such thing, so the timeline and the calendar were stuck at one
+     size. This gives it the same keys and a control in the status bar, through
+     the window's own zoom (see `setPageZoom()`), remembered for next time. Ctrl +
+     wheel over the timeline still zooms the timeline — that handler claims the
+     event first — and zooms the page everywhere else. */
+
+  const PAGE_ZOOMS = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+  const PAGE_ZOOM_KEY = 'cx.desktop.pageZoom';
+  let pageZoom = 1;
+  let pageZoomLabel = null;
+  let pageZoomWired = false;
+
+  function storedPageZoom() {
+    try {
+      const n = Number(localStorage.getItem(PAGE_ZOOM_KEY));
+      return PAGE_ZOOMS.includes(n) ? n : 1;
+    } catch {
+      return 1;
+    }
+  }
+
+  async function applyPageZoom(scale, holder) {
+    try {
+      await desktop.setPageZoom(scale);
+    } catch {
+      // An older shell without the permission: no control rather than a dead one.
+      holder?.remove();
+      return false;
+    }
+    pageZoom = scale;
+    if (pageZoomLabel) pageZoomLabel.textContent = `${Math.round(scale * 100)}%`;
+    try { localStorage.setItem(PAGE_ZOOM_KEY, String(scale)); } catch { /* remembered for this session only */ }
+    return true;
+  }
+
+  function stepPageZoom(dir, holder) {
+    const at = PAGE_ZOOMS.findIndex((z) => z >= pageZoom - 1e-6);
+    const next = PAGE_ZOOMS[Math.max(0, Math.min(PAGE_ZOOMS.length - 1, (at < 0 ? 5 : at) + dir))];
+    if (next !== pageZoom) applyPageZoom(next, holder);
+  }
+
+  function pageZoomControl() {
+    const holder = el('span', { class: 'sb-item sb-page-zoom', title: 'Page zoom — Ctrl + and Ctrl −, or Ctrl and the wheel' });
+    pageZoomLabel = el('button', {
+      class: 'sb-zoom-reset', type: 'button', text: '100%',
+      title: 'Back to 100%', 'aria-label': 'Reset page zoom to 100%',
+      onClick: () => applyPageZoom(1, holder),
+    });
+    holder.append(
+      el('button', { class: 'sb-zoom-step', type: 'button', text: '−', 'aria-label': 'Zoom out', title: 'Zoom out (Ctrl −)', onClick: () => stepPageZoom(-1, holder) }),
+      pageZoomLabel,
+      el('button', { class: 'sb-zoom-step', type: 'button', text: '+', 'aria-label': 'Zoom in', title: 'Zoom in (Ctrl +)', onClick: () => stepPageZoom(1, holder) }),
+    );
+    applyPageZoom(storedPageZoom(), holder);
+    if (!pageZoomWired) {
+      pageZoomWired = true;
+      window.addEventListener('keydown', (e) => {
+        if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+        if (e.key === '=' || e.key === '+') { e.preventDefault(); stepPageZoom(1, holder); }
+        else if (e.key === '-' || e.key === '_') { e.preventDefault(); stepPageZoom(-1, holder); }
+      });
+      window.addEventListener('wheel', (e) => {
+        if (!e.ctrlKey || e.defaultPrevented) return;
+        e.preventDefault();
+        stepPageZoom(e.deltaY < 0 ? 1 : -1, holder);
+      }, { passive: false });
+    }
+    return holder;
+  }
+
   /* ── Status bar ────────────────────────────────────────────────────────── */
 
   function buildStatusbar() {
@@ -31630,6 +31719,8 @@ __mods["ui/shell.js"] = function (__x, __req) {
       onClick: () => showPane('settings'),
     });
     dom.statusbar.appendChild(dom.storageText);
+
+    if (desktop.isAvailable()) dom.statusbar.appendChild(pageZoomControl());
 
     // The clickable items are buttons to a keyboard as well as a pointer.
     for (const item of dom.statusbar.querySelectorAll('.sb-item.clickable')) {

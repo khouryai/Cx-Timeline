@@ -63,6 +63,21 @@ async function call(command, args = {}) {
   }
 }
 
+/* ── Zoom ──────────────────────────────────────────────────────────────── */
+
+/**
+ * Zoom the whole page, as Ctrl + and Ctrl − do in a browser.
+ *
+ * The window's own zoom, not CSS: the timeline measures pointer positions
+ * against the canvas, and a CSS zoom would put every drag off by the zoom
+ * factor. A shell built before the webview-zoom permission was granted refuses
+ * the call; the caller treats that as "not available here" and hides its
+ * control.
+ */
+export function setPageZoom(scale) {
+  return call('plugin:webview|set_webview_zoom', { label: 'main', value: scale });
+}
+
 /* ── Settings: which folder, which plan, who you are ───────────────────── */
 
 export function readSettings() {

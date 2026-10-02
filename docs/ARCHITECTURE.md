@@ -474,6 +474,21 @@ back. Publishing the site is the whole release: `tools/dist.js` writes
 `dist/desktop/{version,payload}.json` alongside it. Rebuild the installer only
 when the Rust side changes.
 
+### The desktop app zooms the page as a browser does
+
+A browser zooms with Ctrl + / Ctrl − and Ctrl + wheel; the desktop window had
+nothing, so the timeline and the calendar were fixed at one size. The status
+bar now carries − 100% + in the desktop app, and the same keys work, through
+`setPageZoom()` in `core/desktop.js` — the window's own zoom
+(`plugin:webview|set_webview_zoom`), never CSS `zoom`, because the timeline
+measures pointer positions against the canvas and a CSS zoom puts every drag off
+by the factor. The level is remembered (`cx.desktop.pageZoom`). Ctrl + wheel
+over the timeline still zooms the timeline; its handler claims the event first.
+It needs the `core:webview:allow-set-webview-zoom` permission in
+`src-tauri/capabilities/default.json`, so it reaches an installed copy only with
+a rebuilt installer; an older shell refuses the call and the control is simply
+not shown.
+
 ### The published assets are named after their contents; the repository's are not
 
 **The published assets are named after their contents; the repository's are
@@ -1034,6 +1049,11 @@ becomes a cancellation at all. An administrator opens the calendar on the
 look-ahead; everybody else still opens on My day.
 
 ### The week plan is one tab, and it used to be two
+
+(All seven days are drawn every week, Saturday and Sunday shaded down the whole
+column — commissioning runs possessions on exactly those days, and a switch to
+show them meant they were usually hidden. Each column is headed with the day's
+name beside its date.)
 
 **The week plan is one tab, and it used to be two.** "Week plan" drew the
 team's week from the plan's side; "Resources" drew the same rows per person

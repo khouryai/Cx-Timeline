@@ -729,6 +729,25 @@ async function main() {
   await page.waitForSelector('#rc-frame .rc-table');
   const weekText = await page.locator('#rc-frame').innerText();
   check('the week is people down and days across', /Can be staffed/.test(weekText));
+  const weekHead = await page.evaluate(() => [...document.querySelectorAll('#rc-frame .rc-resources thead th')]
+    .slice(1).map((th) => ({ text: th.textContent, weekend: th.classList.contains('rc-res-weekend') })));
+  check('all seven days are drawn, the weekend with them', weekHead.length === 7, String(weekHead.length));
+  check('and Saturday and Sunday are marked as the weekend, header and cells',
+    weekHead.filter((h) => h.weekend).length === 2 && /^Sat/.test(weekHead[5]?.text) && /^Sun/.test(weekHead[6]?.text)
+      && (await page.locator('#rc-frame .rc-resources tbody td.rc-res-weekend').count()) > 0,
+    weekHead.map((h) => h.text).join(' | '));
+  check('each day is headed with its name beside its date',
+    weekHead.every((h, i) => h.text.startsWith(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][i])),
+    weekHead.map((h) => h.text).join(' | '));
+  const navBox = await page.evaluate(() => {
+    const r = (sel) => document.querySelector(sel)?.getBoundingClientRect();
+    return { prev: r('#rc-frame .rc-week-nav button[aria-label="Previous week"]'), title: r('#rc-frame .rc-week-nav h3'),
+      next: r('#rc-frame .rc-week-nav button[aria-label="Next week"]') };
+  });
+  if (process.env.CX_WEEK_SHOT) await page.screenshot({ path: process.env.CX_WEEK_SHOT });
+  check('the week arrows sit either side of the week, not at the far edges',
+    navBox.prev && navBox.next && navBox.title.left - navBox.prev.right < 16 && navBox.next.left - navBox.title.right < 16,
+    JSON.stringify(navBox && { gapL: navBox.title?.left - navBox.prev?.right, gapR: navBox.next?.left - navBox.title?.right }));
   // Four people can be staffed with, and the manager is not one of them — they
   // run the meeting rather than taking work from it.
   check('and says how many can actually be staffed each day',

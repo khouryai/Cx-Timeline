@@ -207,6 +207,7 @@ alternative shipped once and went wrong.
 - `core/filestore.js` has two backends and one set of rules. [→](docs/ARCHITECTURE.md#corefilestorejs-has-two-backends-and-one-set-of-rules)
 - The desktop build has no backend for the plan, and may have one for the calendar. [→](docs/ARCHITECTURE.md#the-desktop-build-has-no-backend-for-the-plan-and-may-have-one-for-the-calendar)
 - The desktop app is fed by the deployment, not by reinstalling. [→](docs/ARCHITECTURE.md#the-desktop-app-is-fed-by-the-deployment-not-by-reinstalling)
+- The desktop app zooms the page as a browser does (Ctrl + / −, Ctrl + wheel, − 100% + in the status bar) through the window's own zoom, never CSS zoom. [→](docs/ARCHITECTURE.md#the-desktop-app-zooms-the-page-as-a-browser-does)
 - The published assets are named after their contents; the repository's are not. [→](docs/ARCHITECTURE.md#the-published-assets-are-named-after-their-contents-the-repositorys-are-not)
 - A download is the one action with no visible result, so it says so. [→](docs/ARCHITECTURE.md#a-download-is-the-one-action-with-no-visible-result-so-it-says-so)
 
@@ -418,10 +419,10 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_la_edit.js` | 144 | the look-ahead editor's model, undo, support codes, the published grid, cell history, staffing clashes, and the Excel export read back |
 | `smoke.js` | 301 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 532 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 536 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 98 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
-| `smoke_desktop.js` | 64 | the desktop shell and its updates |
+| `smoke_desktop.js` | 70 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
 | `test_sql.js` | 378 | both permission models, snapshot compaction, Got it, the schema stamp, and that `migrate.sql` upgrades an old project |
 | `test_xlsx_compat.js` | 14 | the Excel export opened, re-saved and printed by LibreOffice Calc (skips where Calc is absent; the `xlsx` CI job installs it) |

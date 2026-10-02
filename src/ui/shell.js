@@ -19,6 +19,7 @@ import { isFallback, isHosted, isFileMode } from '../core/storage.js';
 import * as filestore from '../core/filestore.js';
 import * as cloud from '../core/cloud.js';
 import * as rcClient from '../core/rc.js';
+import * as desktop from '../core/desktop.js';
 import { linkViolations } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
@@ -541,6 +542,78 @@ export function goToToday() {
   renderer.requestRender();
 }
 
+/* ── Page zoom, in the desktop app ─────────────────────────────────────────
+   A browser zooms the page with Ctrl + / Ctrl − and Ctrl + wheel; the desktop
+   window had no such thing, so the timeline and the calendar were stuck at one
+   size. This gives it the same keys and a control in the status bar, through
+   the window's own zoom (see `setPageZoom()`), remembered for next time. Ctrl +
+   wheel over the timeline still zooms the timeline — that handler claims the
+   event first — and zooms the page everywhere else. */
+
+const PAGE_ZOOMS = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+const PAGE_ZOOM_KEY = 'cx.desktop.pageZoom';
+let pageZoom = 1;
+let pageZoomLabel = null;
+let pageZoomWired = false;
+
+function storedPageZoom() {
+  try {
+    const n = Number(localStorage.getItem(PAGE_ZOOM_KEY));
+    return PAGE_ZOOMS.includes(n) ? n : 1;
+  } catch {
+    return 1;
+  }
+}
+
+async function applyPageZoom(scale, holder) {
+  try {
+    await desktop.setPageZoom(scale);
+  } catch {
+    // An older shell without the permission: no control rather than a dead one.
+    holder?.remove();
+    return false;
+  }
+  pageZoom = scale;
+  if (pageZoomLabel) pageZoomLabel.textContent = `${Math.round(scale * 100)}%`;
+  try { localStorage.setItem(PAGE_ZOOM_KEY, String(scale)); } catch { /* remembered for this session only */ }
+  return true;
+}
+
+function stepPageZoom(dir, holder) {
+  const at = PAGE_ZOOMS.findIndex((z) => z >= pageZoom - 1e-6);
+  const next = PAGE_ZOOMS[Math.max(0, Math.min(PAGE_ZOOMS.length - 1, (at < 0 ? 5 : at) + dir))];
+  if (next !== pageZoom) applyPageZoom(next, holder);
+}
+
+function pageZoomControl() {
+  const holder = el('span', { class: 'sb-item sb-page-zoom', title: 'Page zoom — Ctrl + and Ctrl −, or Ctrl and the wheel' });
+  pageZoomLabel = el('button', {
+    class: 'sb-zoom-reset', type: 'button', text: '100%',
+    title: 'Back to 100%', 'aria-label': 'Reset page zoom to 100%',
+    onClick: () => applyPageZoom(1, holder),
+  });
+  holder.append(
+    el('button', { class: 'sb-zoom-step', type: 'button', text: '−', 'aria-label': 'Zoom out', title: 'Zoom out (Ctrl −)', onClick: () => stepPageZoom(-1, holder) }),
+    pageZoomLabel,
+    el('button', { class: 'sb-zoom-step', type: 'button', text: '+', 'aria-label': 'Zoom in', title: 'Zoom in (Ctrl +)', onClick: () => stepPageZoom(1, holder) }),
+  );
+  applyPageZoom(storedPageZoom(), holder);
+  if (!pageZoomWired) {
+    pageZoomWired = true;
+    window.addEventListener('keydown', (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      if (e.key === '=' || e.key === '+') { e.preventDefault(); stepPageZoom(1, holder); }
+      else if (e.key === '-' || e.key === '_') { e.preventDefault(); stepPageZoom(-1, holder); }
+    });
+    window.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey || e.defaultPrevented) return;
+      e.preventDefault();
+      stepPageZoom(e.deltaY < 0 ? 1 : -1, holder);
+    }, { passive: false });
+  }
+  return holder;
+}
+
 /* ── Status bar ────────────────────────────────────────────────────────── */
 
 function buildStatusbar() {
@@ -592,6 +665,8 @@ function buildStatusbar() {
     onClick: () => showPane('settings'),
   });
   dom.statusbar.appendChild(dom.storageText);
+
+  if (desktop.isAvailable()) dom.statusbar.appendChild(pageZoomControl());
 
   // The clickable items are buttons to a keyboard as well as a pointer.
   for (const item of dom.statusbar.querySelectorAll('.sb-item.clickable')) {

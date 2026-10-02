@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 25   Built: 2026-10-02T18:34:23.173Z
+ * Modules: 25   Built: 2026-10-02T19:01:03.595Z
  */
 (function () {
   'use strict';
@@ -13650,7 +13650,7 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
   const { toISO, addDays, todayMs } = __req("core/dates.js");
   const rc = __req("core/rc.js");
   const { icon } = __req("ui/icons.js");
-  const { textInput, selectInput, toast, badge, checkbox, field, emptyState, promptDialog, confirmDialog } = __req("ui/components.js");
+  const { textInput, selectInput, toast, badge, field, emptyState, promptDialog, confirmDialog } = __req("ui/components.js");
 
 
 
@@ -13664,15 +13664,13 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
   /** Which week is on screen. Null means the one containing today. */
   let weekOf = null;
 
-  /**
-   * Whether the days nobody works are drawn.
-   *
-   * Off by default: a seven-column grid where two columns are dots for most of the
-   * team is two columns of nothing. It is a switch rather than a rule because
-   * commissioning runs weekend possessions, and the weekend is where some of the
-   * most expensive work happens.
-   */
-  let showQuietDays = false;
+  const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  /** Saturday or Sunday. */
+  const isWeekendISO = (iso) => [0, 6].includes(new Date(`${iso}T00:00:00Z`).getUTCDay());
+
+  /** "Sat Oct 3" — the day's name beside its date, so a column needs no counting. */
+  const columnLabel = (iso) => `${WEEKDAYS[new Date(`${iso}T00:00:00Z`).getUTCDay()]} ${dayLabel(iso, 'short').replace(/, \d+$/, '')}`;
 
   async function render(root) {
     const startMs = weekOf ?? weekStart(todayMs());
@@ -13746,35 +13744,39 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
     const soon = leave.filter((l) => l.start_date > to
       && l.status !== 'cancelled' && l.status !== 'declined');
 
-    /* Only the days somebody works, unless asked otherwise. `showQuietDays` is
-       about the columns; a person who works none of them still has a row, because
-       a row that vanishes is a person nobody remembers to plan. */
-    const shown = showQuietDays
-      ? days
-      : days.filter((iso) => people.some((p) => availability(p, iso, thisWeek).state !== 'non-working'));
-    const columns = shown.length ? shown : days;
+    /* All seven days, always. The weekend used to be hidden unless somebody
+       ticked a box, and commissioning runs possessions on exactly those days —
+       so they are drawn every week, shaded so they read as the weekend. */
+    const columns = days;
 
     const redraw = () => { clear(root); render(root); };
 
+    /* Back, the week, forward — one group, held together, so the arrows sit
+       either side of the date they move instead of being pushed to the far edges
+       of the header by the rule that right-aligns its buttons. */
     root.appendChild(el('div', { class: 'rc-section-head' }, [
-      el('button', {
-        class: 'cx-btn icon mini ghost',
-        'aria-label': 'Previous week',
-        html: icon('chevron-left', { size: 13 }),
-        onClick: () => { weekOf = startMs - 7 * 86400000; redraw(); },
-      }),
-      el('h3', { text: `Week of ${dayLabel(from, 'medium')}` }),
-      weekOf === null ? null : el('button', {
-        class: 'cx-btn mini ghost',
-        text: 'This week',
-        onClick: () => { weekOf = null; redraw(); },
-      }),
-      el('button', {
-        class: 'cx-btn icon mini ghost',
-        'aria-label': 'Next week',
-        html: icon('chevron-right', { size: 13 }),
-        onClick: () => { weekOf = startMs + 7 * 86400000; redraw(); },
-      }),
+      el('div', { class: 'rc-week-nav' }, [
+        el('button', {
+          class: 'cx-btn icon mini ghost',
+          'aria-label': 'Previous week',
+          title: 'Previous week',
+          html: icon('chevron-left', { size: 14 }),
+          onClick: () => { weekOf = startMs - 7 * 86400000; redraw(); },
+        }),
+        el('h3', { text: `Week of ${dayLabel(from, 'medium')}` }),
+        el('button', {
+          class: 'cx-btn icon mini ghost',
+          'aria-label': 'Next week',
+          title: 'Next week',
+          html: icon('chevron-right', { size: 14 }),
+          onClick: () => { weekOf = startMs + 7 * 86400000; redraw(); },
+        }),
+        weekOf === null ? null : el('button', {
+          class: 'cx-btn mini ghost',
+          text: 'This week',
+          onClick: () => { weekOf = null; redraw(); },
+        }),
+      ].filter(Boolean)),
       rc.canWrite()
         ? el('button', {
           class: 'cx-btn mini primary',
@@ -13798,15 +13800,6 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
       return;
     }
 
-    root.appendChild(el('div', {
-      style: 'display:flex;align-items:center;gap:16px;margin:0 0 10px;flex-wrap:wrap',
-    }, [
-      checkbox({
-        label: 'Show days nobody works',
-        checked: showQuietDays,
-        onChange: (on) => { showQuietDays = on; redraw(); },
-      }),
-    ]));
 
     /* ── The grid ─────────────────────────────────────────────────────────── */
 
@@ -13818,6 +13811,7 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
         const asked = wanted.get(iso) || [];
         const classes = ['rc-res-cell'];
         if (iso === today) classes.push('rc-res-today');
+        if (isWeekendISO(iso)) classes.push('rc-res-weekend');
 
         if (state.state === 'leave') {
           return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [
@@ -14026,7 +14020,7 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
     body.appendChild(el('tr', { class: 'rc-res-coverage' }, [
       el('td', {}, [el('strong', { text: 'Can be staffed' })]),
       ...coverage.map((n, i) => el('td', {
-        class: ['rc-num', columns[i] === today ? 'rc-res-today' : ''].filter(Boolean).join(' '),
+        class: ['rc-num', columns[i] === today ? 'rc-res-today' : '', isWeekendISO(columns[i]) ? 'rc-res-weekend' : ''].filter(Boolean).join(' '),
         'data-label': dayLabel(columns[i]),
       }, [el('span', { text: `${n} of ${people.length}` })])),
     ]));
@@ -14042,11 +14036,12 @@ __mods["ui/rc_week.js"] = function (__x, __req) {
                  nearly always looking for is this one — it used to be a two-pixel
                  rule on the left edge of the cells, which is invisible against a
                  table that has borders anyway. */
-              class: iso === today ? 'rc-res-today rc-res-today-head' : '',
+              class: [iso === today ? 'rc-res-today rc-res-today-head' : '', isWeekendISO(iso) ? 'rc-res-weekend' : '']
+                .filter(Boolean).join(' '),
               html: iso === today
-                ? `${dayLabel(iso)}<span class="rc-today-tag">Today</span>`
+                ? `${columnLabel(iso)}<span class="rc-today-tag">Today</span>`
                 : undefined,
-              text: iso === today ? undefined : dayLabel(iso),
+              text: iso === today ? undefined : columnLabel(iso),
             })),
           ]),
         ]),

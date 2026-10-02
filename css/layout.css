@@ -556,6 +556,20 @@
 .sb-spacer {
   flex: 1 1 auto;
 }
+/* The desktop app's page zoom: − 100% +, the browser's Ctrl + / Ctrl − made
+   visible, since the window has no browser chrome to show it. */
+.sb-page-zoom { gap: 0; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+.sb-page-zoom button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  padding: 1px 7px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--easing);
+}
+.sb-page-zoom button:hover { background: var(--surface-2); }
+.sb-page-zoom .sb-zoom-reset { min-width: 44px; font-family: var(--f-mono); border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
 .sb-item.sb-warn {
   color: var(--bad);
   font-weight: 700;
