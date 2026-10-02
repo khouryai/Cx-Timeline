@@ -144,6 +144,9 @@ alter table public.rc_actuals
 -- one about support taken off an activity that still goes ahead.
 alter table public.rc_cancellation_notes
   add column if not exists codes text;
+-- And whether the note takes the cancellation out of the log altogether.
+alter table public.rc_cancellation_notes
+  add column if not exists dismissed boolean not null default false;
 
 -- ── The team can read the look-ahead, and plan their own days ─────────────
 -- Both are policy changes, and `rc_schema.sql` drops and recreates every policy

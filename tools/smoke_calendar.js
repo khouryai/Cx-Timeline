@@ -266,6 +266,9 @@ async function main() {
   await page.locator('#rc-frame .rc-signin button.primary').click();
   await page.waitForSelector('#rc-frame .rc-tabs', { timeout: 10000 });
   check('signing in reveals the calendar', (await page.locator('#rc-frame .rc-tab').count()) >= 3);
+  check('an administrator opens the calendar on the look-ahead',
+    (await page.locator('#rc-frame .rc-tab[aria-pressed="true"]').first().innerText()).trim() === 'Look-ahead',
+    await page.locator('#rc-frame .rc-tab[aria-pressed="true"]').first().innerText().catch(() => ''));
 
   /* One login, two modules. The plan's lock has always carried a name typed
      into a field, defaulting to "Someone" — the least useful thing the

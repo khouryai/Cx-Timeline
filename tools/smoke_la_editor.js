@@ -819,6 +819,29 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   const dayRow = page.locator('#rc-frame .rc-cancel-row[data-kind="activity"]', { hasText: 'IXL Regression Testing' });
   check('and a day cancelled outright lists what BART had been asked for',
     (await dayRow.count()) >= 1 && /\d+ X/.test(await dayRow.first().innerText()), (await dayRow.first().innerText().catch(() => '')).replace(/\s+/g, ' '));
+  // A cancellation that should never have been there can be removed, and put back.
+  const removable = page.locator('#rc-frame .rc-cancel-row[data-kind="activity"]').first();
+  const removableLabel = await removable.getAttribute('data-label');
+  const removableStart = await removable.getAttribute('data-start');
+  const rowsBefore = await page.locator('#rc-frame .rc-cancel-row').count();
+  await removable.locator('.rc-cancel-remove').click();
+  await page.waitForSelector('.cx-modal');
+  await page.locator('.cx-modal textarea').fill('Painted red by mistake');
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Remove from log' }).click();
+  await page.waitForTimeout(600);
+  check('a cancellation added by mistake can be removed from the log',
+    (await page.locator('#rc-frame .rc-cancel-row').count()) === rowsBefore - 1
+      && await page.evaluate(() => (window.__rc.rows.rc_cancellation_notes || []).slice(-1)[0]?.dismissed === true));
+  await page.locator('#rc-frame label', { hasText: 'removed from the log' }).click();
+  await page.waitForTimeout(500);
+  const removedRow = page.locator(`#rc-frame .rc-cancel-row.rc-cancel-removed[data-start="${removableStart}"]`);
+  check('and listed again on asking, marked removed', (await removedRow.count()) === 1
+    && (await removedRow.getAttribute('data-label')) === removableLabel);
+  await removedRow.locator('button', { hasText: 'Put back' }).click();
+  await page.waitForTimeout(600);
+  check('and put back', (await page.locator('#rc-frame .rc-cancel-row.rc-cancel-removed').count()) === 0
+    && (await page.locator('#rc-frame .rc-cancel-row').count()) === rowsBefore);
+
   await page.locator('#rc-frame .la-cancel-kinds .rc-tab', { hasText: 'BART support only' }).click();
   await page.waitForTimeout(300);
   check('and the log can show only the BART support struck out',

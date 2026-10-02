@@ -412,6 +412,15 @@ create index if not exists rc_cancel_note_label_idx
  */
 alter table public.rc_cancellation_notes add column if not exists codes text;
 
+/*
+ * A cancellation taken out of the log because it should never have been in it
+ * — a names row read as an activity, a red cell painted by mistake. The log is
+ * derived, so there is no row to delete; this is the judgement that it is not a
+ * cancellation, attributed and dated like every other one and undone the same
+ * way, by a note that supersedes it.
+ */
+alter table public.rc_cancellation_notes add column if not exists dismissed boolean not null default false;
+
 -- ══════════════════════════════════════════════════════════════════════════
 -- Site Access Requests
 -- ══════════════════════════════════════════════════════════════════════════
@@ -2739,5 +2748,5 @@ grant usage on sequence public.rc_la_seen_id_seq to authenticated;
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '7')
+insert into public.rc_settings (key, value) values ('schema_version', '8')
 on conflict (key) do update set value = excluded.value, updated_at = now();

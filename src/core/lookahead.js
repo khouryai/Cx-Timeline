@@ -1408,11 +1408,20 @@ function counterId() {
  * days, firstSeen, lastSeen, reads }`, with `start` and `end` as ISO dates, both
  * inclusive, because that is how a person reads "cancelled 7–11 September".
  */
+/**
+ * Whether a stored label is a names row rather than an activity — "Resource",
+ * or a row whose columns include it. Readings taken before orphaned names rows
+ * were dropped stored some as activities; they are never cancellations.
+ */
+function isNamesLabel(label) {
+  return String(label || '').split(' · ').some(isResourceLabel);
+}
+
 export function cancellationEvents(days, { from = null } = {}) {
   const groups = new Map();
   for (const d of days || []) {
     const day = String(d.day || '').slice(0, 10);
-    if (!day || (from && day < from)) continue;
+    if (!day || (from && day < from) || isNamesLabel(d.raw_label)) continue;
     const key = `${suggestionKey(d.raw_label)}|${suggestionKey(d.raw_location)}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push({ ...d, day });
@@ -1472,7 +1481,7 @@ export function supportCancellationEvents(days, { from = null } = {}) {
   const groups = new Map();
   for (const d of days || []) {
     const day = String(d.day || '').slice(0, 10);
-    if (!day || (from && day < from)) continue;
+    if (!day || (from && day < from) || isNamesLabel(d.raw_label)) continue;
     const codes = [...new Set(cellTokens(d.marks).filter((t) => t.cancelled).map((t) => t.code))].sort().join('.');
     if (!codes) continue;
     const key = `${suggestionKey(d.raw_label)}|${suggestionKey(d.raw_location)}`;
@@ -1592,7 +1601,9 @@ export function attachCancellationNotes(events, notes) {
       .filter((n) => String(n.start_date) <= event.end && String(n.end_date) >= event.start)
       .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
     const current = touching.filter((n) => !superseded.has(n.id));
-    return { ...event, note: current[current.length - 1] || null, history: touching };
+    const note = current[current.length - 1] || null;
+    // Taken out of the log by somebody who said it was never a cancellation.
+    return { ...event, note, history: touching, dismissed: !!note?.dismissed };
   });
 }
 

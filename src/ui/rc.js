@@ -62,7 +62,10 @@ const RENDERERS = {
 let frame = null;
 let bodyEl = null;
 let headEl = null;
-let active = 'huddle';
+/* Chosen the first time the tabs are drawn: an administrator opens on the
+   look-ahead — the plan they write and run the team from — and everybody else
+   on My day, their own day and week. */
+let active = null;
 let started = false;
 
 /* ── Build ─────────────────────────────────────────────────────────────── */
@@ -149,6 +152,7 @@ function render() {
 
   const view = el('div');
   bodyEl.append(previewBanner(), schemaBanner(), view);
+  if (!RENDERERS[active]) active = rc.isAdmin() ? 'lookahead' : 'myday';
   Promise.resolve(RENDERERS[active](view)).catch((err) => {
     rc.reportError(`tab:${active}`, err);
     clear(view);
@@ -187,6 +191,7 @@ function renderHead() {
        their work — is now in the week plan, beside the rest of their week. */
     const ADMIN_ONLY = new Set(['huddle', 'reports', 'org']);
     const visible = rc.isAdmin() ? TABS : TABS.filter((t) => !ADMIN_ONLY.has(t.id));
+    if (!active) active = rc.isAdmin() ? 'lookahead' : visible[0].id;
     if (!visible.some((t) => t.id === active)) active = visible[0].id;
     for (const tab of visible) {
       const button = el('button', {

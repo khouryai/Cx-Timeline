@@ -42,6 +42,8 @@ const PARTY_TONE = { BART: 'warn', Hitachi: 'bad', Other: 'neutral' };
 let cancellationsFrom = null;
 let cancellationsTo = '';
 let cancellationsUnansweredOnly = false;
+/** Whether cancellations somebody removed from the log are listed too. */
+let cancellationsShowRemoved = false;
 /** Which kind of cancellation is listed: everything, whole days, or BART resources. */
 let cancellationsKind = 'all';
 /** The log as a list, or as a calendar of the period like the look-ahead. */
@@ -76,7 +78,11 @@ export async function renderCancellations(host) {
   /* An event is in the span when it starts inside it. One that runs past the
      end is kept whole rather than cut at the boundary: a cancelled week is one
      event, and half of it in a report is a different claim. */
-  const events = all.filter((e) => !to || e.start <= to);
+  const inSpan = all.filter((e) => !to || e.start <= to);
+  /* Removed from the log — "this was never a cancellation" — is a judgement
+     like any other: kept, and listed again when somebody asks to see them. */
+  const removedCount = inSpan.filter((e) => e.dismissed).length;
+  const events = inSpan.filter((e) => cancellationsShowRemoved || !e.dismissed);
 
   const dateBox = (value, label, onPick) => {
     const box = el('input', {
@@ -153,11 +159,18 @@ export async function renderCancellations(host) {
     chipStat('No reason yet', open, open ? 'bad' : 'muted'),
   ]));
 
-  host.appendChild(checkbox({
-    label: 'Only the ones with no reason yet',
-    checked: cancellationsUnansweredOnly,
-    onChange: (on) => { cancellationsUnansweredOnly = on; notifyChanged('cancellations'); },
-  }));
+  host.appendChild(el('div', { style: 'display:flex;gap:18px;flex-wrap:wrap' }, [
+    checkbox({
+      label: 'Only the ones with no reason yet',
+      checked: cancellationsUnansweredOnly,
+      onChange: (on) => { cancellationsUnansweredOnly = on; notifyChanged('cancellations'); },
+    }),
+    removedCount || cancellationsShowRemoved ? checkbox({
+      label: `Show the ${removedCount} removed from the log`,
+      checked: cancellationsShowRemoved,
+      onChange: (on) => { cancellationsShowRemoved = on; notifyChanged('cancellations'); },
+    }) : null,
+  ].filter(Boolean)));
 
   const tabs = (klass, choices, current, pick) => el('div', { class: `rc-tabs ${klass}`, style: 'margin:0' },
     choices.map(([id, label]) => el('button', {
@@ -200,7 +213,7 @@ export async function renderCancellations(host) {
     }),
   ]));
   const rows = shown.map((e) => el('tr', {
-    class: `rc-cancel-row rc-cancel-${e.kind}`,
+    class: `rc-cancel-row rc-cancel-${e.kind}${e.dismissed ? ' rc-cancel-removed' : ''}`,
     dataset: { start: e.start, label: e.label, kind: e.kind, codes: e.codes || '' },
   }, [
     el('td', {}, [
@@ -241,13 +254,27 @@ export async function renderCancellations(host) {
         : null,
     ].filter(Boolean)),
     el('td', {}, [
-      el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, [
+      el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap' }, e.dismissed ? [
+        badge('Removed from the log', 'neutral'),
+        rc.isAdmin() ? el('button', {
+          class: 'cx-btn mini ghost',
+          text: 'Put back',
+          title: 'Count it as a cancellation again. The removal stays in its history.',
+          onClick: () => restoreCancellation(e),
+        }) : null,
+      ].filter(Boolean) : [
         el('button', {
           class: 'cx-btn mini' + (e.note ? ' ghost' : ' primary'),
           text: e.note ? 'Correct' : 'Add reason',
           title: e.note ? 'A correction is a new entry that supersedes this one. Nothing is edited away.' : '',
           onClick: () => recordCancellation(e),
         }),
+        rc.isAdmin() ? el('button', {
+          class: 'cx-btn mini ghost danger rc-cancel-remove',
+          text: 'Remove from log',
+          title: 'It should never have been here — a names row, a cell painted red by mistake',
+          onClick: () => removeCancellation(e),
+        }) : null,
         el('button', {
           class: 'cx-btn mini ghost',
           text: 'Show cells',
@@ -260,7 +287,7 @@ export async function renderCancellations(host) {
             notifyChanged('cancellations');
           },
         }),
-      ]),
+      ].filter(Boolean)),
     ]),
   ]));
 
@@ -456,6 +483,64 @@ async function rederiveCancellations(from) {
 }
 
 /** Say whose it was and why — or correct what was said. */
+/**
+ * Take a cancellation out of the log — it should never have been in it.
+ *
+ * The log is derived from the look-ahead, so there is nothing to delete; what
+ * is written is a note saying so, attributed and dated, and the event drops out
+ * of the list, the calendar, the counts, the exports and the inbox. "Show the
+ * removed" lists it again with "Put back".
+ */
+function removeCancellation(event) {
+  const reason = el('textarea', { class: 'cx-input', rows: 3, placeholder: 'Why it is not a cancellation — e.g. a names row read as an activity' });
+  formModal({
+    title: 'Remove from the cancellation log?',
+    body: el('div', { class: 'cx-form' }, [
+      el('p', {
+        class: 'rc-hint',
+        text: `${event.kind === 'support' ? `${describeCodeCounts(event.resources)} struck out of ` : ''}`
+          + `${event.label}${event.location ? ` at ${event.location}` : ''}, `
+          + `${event.start === event.end ? dayLabel(event.start) : `${dayLabel(event.start)} – ${dayLabel(event.end)}`}. `
+          + 'It leaves the log, the calendar, the counts and the exports. Nothing on the look-ahead changes, '
+          + 'and it can be put back.',
+      }),
+      el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Why (optional)' }), reason]),
+    ]),
+    confirmLabel: 'Remove from log',
+    onConfirm: async () => {
+      await rc.addCancellationNote({
+        raw_label: event.label,
+        raw_location: event.location,
+        start_date: event.start,
+        end_date: event.end,
+        party: event.note?.party || 'Other',
+        reason: reason.value.trim() || 'Removed from the log: not a cancellation',
+        codes: event.kind === 'support' ? event.codes : null,
+        dismissed: true,
+        supersedes_id: event.note?.id || null,
+      });
+      notifyChanged('cancellations');
+    },
+  });
+}
+
+/** Count a removed cancellation again: a note superseding the removal. */
+async function restoreCancellation(event) {
+  const before = event.history.filter((n) => !n.dismissed).slice(-1)[0] || null;
+  await rc.addCancellationNote({
+    raw_label: event.label,
+    raw_location: event.location,
+    start_date: event.start,
+    end_date: event.end,
+    party: before?.party || event.note?.party || 'Other',
+    reason: before?.reason || null,
+    codes: event.kind === 'support' ? event.codes : null,
+    dismissed: false,
+    supersedes_id: event.note?.id || null,
+  });
+  notifyChanged('cancellations');
+}
+
 function recordCancellation(event) {
   const current = event.note;
   const party = selectInput({

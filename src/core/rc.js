@@ -658,7 +658,7 @@ export function listSettings() {
  * "could not update the legend", on one screen, weeks after the deploy that
  * needed it; this turns it into one sentence at sign-in naming the two files.
  */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /**
  * Whether the database is the one this build was written against.

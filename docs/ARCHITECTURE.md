@@ -1020,6 +1020,19 @@ each run one cell across its days with the party and reason in it, clickable to
 give or correct the reason — exported by `cancellationWorkbook()` as merged
 cells in the 4WLA's greys.
 
+### A cancellation can be removed from the log, and put back
+
+The log is derived, so a wrong entry — a names row an old reading stored as an
+activity called "Resource", a cell painted red by mistake — has no row to
+delete. **Remove from log** writes a note with `dismissed = true` (attributed,
+dated, superseding any note before it), and `attachCancellationNotes()` marks
+the event `dismissed`, which takes it out of the list, the calendar, the counts,
+the exports and the inbox. "Show the N removed from the log" lists them again
+with **Put back**, which is a note superseding the removal. Separately, a stored
+label that is a names row (`isResourceLabel()` on any of its columns) never
+becomes a cancellation at all. An administrator opens the calendar on the
+look-ahead; everybody else still opens on My day.
+
 ### The week plan is one tab, and it used to be two
 
 **The week plan is one tab, and it used to be two.** "Week plan" drew the

@@ -1340,6 +1340,13 @@ console.log('\nThe cancellation log');
     cls.describeCodeCounts(cls.bartCodes(mixed, register)) === '1 X · 1 WIT · 1 ZZ',
     cls.describeCodeCounts(cls.bartCodes(mixed, register)));
   check('and a code nobody registered is kept, not guessed away', cls.bartCodes(mixed, register).has('ZZ'));
+  check('a names row stored as an activity is never a cancellation',
+    !cls.cancellationEvents([red('Resource', '', '2026-09-08'), red('CDRL 9.04 · Resource · T12', 'T12', '2026-09-09')], { from: '2026-09-01' }).length);
+  const removedOne = cls.attachCancellationNotes(cls.cancellationEvents([red('Cable pull', 'TPSS 12', '2026-09-21')], { from: '2026-09-01' }), [
+    { id: 'r1', raw_label: 'Cable pull', raw_location: 'TPSS 12', start_date: '2026-09-21', end_date: '2026-09-21',
+      party: 'Other', reason: 'Painted by mistake', dismissed: true, created_at: '2026-09-21T09:00:00Z' },
+  ]);
+  check('a cancellation somebody removed from the log says so', removedOne[0]?.dismissed === true);
 }
 
 console.log('\nProgress from the calendar');

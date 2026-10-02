@@ -778,6 +778,10 @@ insert into public.rc_cancellation_notes (raw_label, raw_location, start_date, e
 values ('ATS Site Test', 'W40', date '2026-09-14', date '2026-09-14', 'BART', 'Witness not required for testing', 'WIT');
 select assert((select codes from public.rc_cancellation_notes where raw_label = 'ATS Site Test') = 'WIT',
   'a note can say it is about the BART resources, not the day');
+insert into public.rc_cancellation_notes (raw_label, raw_location, start_date, end_date, party, reason, dismissed)
+values ('Resource', '', date '2026-09-14', date '2026-09-14', 'Other', 'A names row read as an activity', true);
+select assert((select dismissed from public.rc_cancellation_notes where raw_label = 'Resource'),
+  'a cancellation can be taken out of the log, by a note that says so');
 
 insert into public.rc_cancellation_notes (raw_label, raw_location, start_date, end_date, party, reason)
 values ('Cable pull', 'TPSS 12', date '2026-09-07', date '2026-09-09', 'BART', 'Possession withdrawn');
