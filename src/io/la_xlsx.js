@@ -64,7 +64,7 @@ function lines(text, width) {
  * @param {string} o.title
  * @param {string} o.sheetName
  */
-export function lookaheadWorkbook({ model, days, legend = [], codes = [], title = '', sheetName = '4WLA' }) {
+export function lookaheadWorkbook({ model, days, legend = [], codes = [], title = '', sheetName = '4WLA', resources = true }) {
   const L = LAYOUT;
   const styles = styleBook();
   const all = 'lrtb';
@@ -185,7 +185,11 @@ export function lookaheadWorkbook({ model, days, legend = [], codes = [], title 
     return n > 1 ? +(n * LINE + 1.5).toFixed(2) : null;
   };
 
+  /* Without resources the sheet is the work alone: no names rows under the
+     activities, and none of the rows that are about people rather than work —
+     PTO, Office, Other group / project. */
   for (const row of rowsWithWork(model, days)) {
+    if (!resources && (row.kind === 'resource' || row.kind === 'absence')) continue;
     if (row.kind === 'section') {
       const cells = FIELDS.map((f, i) => str(L.firstMetaCol + i, r, i === 1 ? row.description : '', i === 1 ? S.bandTitle : S.band));
       days.forEach((d, i) => cells.push(blank(L.firstDayCol + i, r, isWeekend(d) ? S.weekend : S.band)));

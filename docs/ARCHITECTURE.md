@@ -1988,7 +1988,10 @@ and 3 hidden with the headings merged B2:B6 … G2:G6, the month band merged per
 month on row 4, section headings bold on the `D9D9D9` band, weekends `7F7F7F`,
 painted days bold and centred with white writing on a dark fill, and each PTO /
 Office / Other group written as a grey label band over its row of names — the
-pair BART's file uses. Only the chosen window (four or five weeks from a
+pair BART's file uses. "Show resources" in the export dialog (on by default,
+remembered for the session) can leave out every row about people — the names
+rows under the activities and the PTO / Office / Other group rows — for a copy
+that is the work alone (`lookaheadWorkbook({ resources: false })`). Only the chosen window (four or five weeks from a
 Monday) and only rows with something in it (`rowsWithWork()`), with the colour
 and code keys underneath. Row heights are computed, because Excel does not grow
 a row for wrapped text when it opens a file. `io/xlsx_write.js` is a stored ZIP

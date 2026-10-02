@@ -513,6 +513,18 @@ console.log('\nThe Excel export');
     model: m, days, legend: LEGEND, codes: CODES, title: 'CBTC Four Week Look-Ahead',
   }).length);
 
+  // Resources hidden: the work alone, without names or PTO / Office / Other rows.
+  const bare = xl.lookaheadWorkbook({ model: m, days, legend: LEGEND, codes: CODES, resources: false });
+  const bareBack = la.parseSheet(bare.buffer.slice(bare.byteOffset, bare.byteOffset + bare.byteLength), '4WLA');
+  const bareView = cls.readGrid(la.applyLegend(bareBack, LEGEND), { anchorISO: '2026-09-23' });
+  const bareText = bareBack.rows.flatMap((r) => r.cells.map((c) => c.value)).join('|');
+  check('with resources hidden, the activities are still there with their codes',
+    bareView.activities.some((a) => a.meta.includes('IXL Regression Testing') && a.marks.some((mk) => mk.value === 'X.WIT')));
+  check('but no names under them', !/Victor|Rosa|Oleksandr/.test(bareText) && !bareView.activities.some((a) => a.resource));
+  check('and no PTO, Office or Other group / project rows',
+    !bareView.activities.some((a) => a.absence) && !/\bPTO\b|Dana/.test(bareText));
+  check('while the default still carries them', /Dana/.test(sheet) && /Victor/.test(sheet));
+
   // A witness struck out of a day: red strikethrough in the file, tilde kept.
   const struck = ed.makeModel([ed.blankRow('activity', { id: 'a', sort: 1, description: 'IXL' })],
     [{ row_id: 'a', day: '2026-09-21', color: 'FFFF00', text: 'X.~WIT' }]);

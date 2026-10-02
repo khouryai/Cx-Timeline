@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 25   Built: 2026-10-02T15:07:55.995Z
+ * Modules: 25   Built: 2026-10-02T16:12:10.394Z
  */
 (function () {
   'use strict';
@@ -2589,6 +2589,8 @@ __mods["ui/rc_la_state.js"] = function (__x, __req) {
     sectionChosen: false,
     /** How many weeks the editor shows: four, or five to see one more ahead. */
     editorWeeks: 4,
+    /** Whether the Excel export carries the names rows and the PTO / Office / Other rows. */
+    exportResources: true,
     /**
      * Only the rows that name the person looking. Null until somebody chooses:
      * then it is on for the team and off for an administrator, who is usually
@@ -7945,7 +7947,7 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
    * @param {string} o.title
    * @param {string} o.sheetName
    */
-  function lookaheadWorkbook({ model, days, legend = [], codes = [], title = '', sheetName = '4WLA' }) {
+  function lookaheadWorkbook({ model, days, legend = [], codes = [], title = '', sheetName = '4WLA', resources = true }) {
     const L = LAYOUT;
     const styles = styleBook();
     const all = 'lrtb';
@@ -8066,7 +8068,11 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
       return n > 1 ? +(n * LINE + 1.5).toFixed(2) : null;
     };
 
+    /* Without resources the sheet is the work alone: no names rows under the
+       activities, and none of the rows that are about people rather than work —
+       PTO, Office, Other group / project. */
     for (const row of rowsWithWork(model, days)) {
+      if (!resources && (row.kind === 'resource' || row.kind === 'absence')) continue;
       if (row.kind === 'section') {
         const cells = FIELDS.map((f, i) => str(L.firstMetaCol + i, r, i === 1 ? row.description : '', i === 1 ? S.bandTitle : S.band));
         days.forEach((d, i) => cells.push(blank(L.firstDayCol + i, r, isWeekend(d) ? S.weekend : S.band)));
@@ -8215,7 +8221,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   const { lookaheadWorkbook, lookaheadFileName } = __req("io/la_xlsx.js");
   const { saveFile } = __req("io/exporters.js");
   const { icon } = __req("ui/icons.js");
-  const { toast, confirmDialog, contextMenu, openModal, textInput, selectInput, segmented, emptyState, attachTooltip } = __req("ui/components.js");
+  const { toast, confirmDialog, contextMenu, openModal, textInput, selectInput, segmented, emptyState, attachTooltip, checkbox } = __req("ui/components.js");
 
 
 
@@ -10625,8 +10631,17 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       const rows = ed.rowsWithWork(src.model, days);
       const n = rows.filter((r) => r.kind === 'activity').length;
       summary.textContent = `${n} activit${n === 1 ? 'y' : 'ies'} with work between ${fmt(days[0])} and ${fmt(days[days.length - 1])}, `
-        + 'with their sections, names rows and the PTO / Office rows — in the 4WLA layout, ready to copy into the master file.';
+        + (la.exportResources
+          ? 'with their sections, names rows and the PTO / Office / Other group rows'
+          : 'with their sections — no names rows, and no PTO / Office / Other group rows')
+        + ' — in the 4WLA layout, ready to copy into the master file.';
     };
+    const resourcesBox = checkbox({
+      label: 'Show resources — names under each activity, and the PTO, Office and Other group / project rows',
+      checked: la.exportResources,
+      onChange: (on) => { la.exportResources = on; update(); },
+    });
+    resourcesBox.classList.add('lae-export-resources');
     start.addEventListener('change', update);
     await update();
 
@@ -10638,6 +10653,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       const sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
       const bytes = lookaheadWorkbook({
         model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
+        resources: la.exportResources,
       });
       return { bytes, name: lookaheadFileName(days, sheetName) };
     };
@@ -10647,6 +10663,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       body: el('div', { class: 'lae-form' }, [
         el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Starting' }), start]),
         el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Weeks' }), size]),
+        resourcesBox,
         summary,
       ]),
       actions: [

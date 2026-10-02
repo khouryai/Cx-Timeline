@@ -761,6 +761,23 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await xlsxBtn.click();
   await page.waitForSelector('.cx-modal');
   check('it is the same export', /4WLA layout/.test(await page.locator('.cx-modal').innerText()));
+  // Resources can be left out: no names, and no PTO / Office / Other rows.
+  const resourcesToggle = page.locator('.cx-modal .lae-export-resources input');
+  check('the export offers to show or hide resources, shown by default',
+    (await resourcesToggle.count()) === 1 && (await resourcesToggle.isChecked()));
+  await resourcesToggle.uncheck();
+  await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Download' }).click();
+  await page.waitForTimeout(800);
+  const bareFile = await page.evaluate(async () => Array.from(new Uint8Array(await window.__lastBlob.arrayBuffer())));
+  const bareSheet = la.parseSheet(new Uint8Array(bareFile).buffer, '4WLA');
+  const bareValues = bareSheet.rows.flatMap((r) => r.cells.map((c) => c.value));
+  check('with resources hidden, the workbook has the work and none of the names or PTO / Office / Other rows',
+    bareValues.includes('ATS Site Test') && !bareValues.some((v) => /^(PTO|Office|Other Group \/ Project|Resource)$/.test(v))
+      && !bareValues.some((v) => /Rosa|Priya|Uma|Tom\b/.test(v)), bareValues.filter((v) => /PTO|Office|Rosa|Uma/.test(v)).join(', '));
+  await xlsxBtn.click();
+  await page.waitForSelector('.cx-modal');
+  check('and the choice is kept for the next export', !(await page.locator('.cx-modal .lae-export-resources input').isChecked()));
+  await page.locator('.cx-modal .lae-export-resources input').check();
   await page.locator('.cx-modal .cx-modal-foot button', { hasText: 'Download' }).click();
   await page.waitForTimeout(800);
   const fromCalendarFile = await page.evaluate(async () => ({

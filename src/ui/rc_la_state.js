@@ -38,6 +38,8 @@ export const la = {
   sectionChosen: false,
   /** How many weeks the editor shows: four, or five to see one more ahead. */
   editorWeeks: 4,
+  /** Whether the Excel export carries the names rows and the PTO / Office / Other rows. */
+  exportResources: true,
   /**
    * Only the rows that name the person looking. Null until somebody chooses:
    * then it is on for the team and off for an administrator, who is usually

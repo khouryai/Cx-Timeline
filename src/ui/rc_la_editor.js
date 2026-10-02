@@ -36,7 +36,7 @@ import { saveFile } from '../io/exporters.js';
 import { icon } from './icons.js';
 import {
   toast, confirmDialog, contextMenu, openModal, textInput, selectInput, segmented, emptyState,
-  attachTooltip,
+  attachTooltip, checkbox,
 } from './components.js';
 import { notifyChanged, todayISO, nameRegister, foldName, codeNodes } from './rc_util.js';
 import { publishFromEditor, publishDays, EDITOR_SOURCE } from './rc_ingest.js';
@@ -2444,8 +2444,17 @@ export async function openExcelExport() {
     const rows = ed.rowsWithWork(src.model, days);
     const n = rows.filter((r) => r.kind === 'activity').length;
     summary.textContent = `${n} activit${n === 1 ? 'y' : 'ies'} with work between ${fmt(days[0])} and ${fmt(days[days.length - 1])}, `
-      + 'with their sections, names rows and the PTO / Office rows — in the 4WLA layout, ready to copy into the master file.';
+      + (la.exportResources
+        ? 'with their sections, names rows and the PTO / Office / Other group rows'
+        : 'with their sections — no names rows, and no PTO / Office / Other group rows')
+      + ' — in the 4WLA layout, ready to copy into the master file.';
   };
+  const resourcesBox = checkbox({
+    label: 'Show resources — names under each activity, and the PTO, Office and Other group / project rows',
+    checked: la.exportResources,
+    onChange: (on) => { la.exportResources = on; update(); },
+  });
+  resourcesBox.classList.add('lae-export-resources');
   start.addEventListener('change', update);
   await update();
 
@@ -2457,6 +2466,7 @@ export async function openExcelExport() {
     const sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
     const bytes = lookaheadWorkbook({
       model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
+      resources: la.exportResources,
     });
     return { bytes, name: lookaheadFileName(days, sheetName) };
   };
@@ -2466,6 +2476,7 @@ export async function openExcelExport() {
     body: el('div', { class: 'lae-form' }, [
       el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Starting' }), start]),
       el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Weeks' }), size]),
+      resourcesBox,
       summary,
     ]),
     actions: [
