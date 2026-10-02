@@ -1519,6 +1519,25 @@ export function supportCancellationEvents(days, { from = null } = {}) {
   return out.sort((a, b) => a.start.localeCompare(b.start) || a.label.localeCompare(b.label));
 }
 
+/**
+ * Only the codes BART provides, from a count of codes.
+ *
+ * The support-code register says who provides each code (`party`). The
+ * cancellation log is about what BART was asked for and lost, so a code the
+ * register gives to Hitachi — or anybody else — is left out. A code the
+ * register has never heard of is kept: dropping it would be guessing who it
+ * belongs to.
+ */
+export function bartCodes(counts, codes) {
+  const party = new Map((codes || []).map((c) => [String(c.code).toUpperCase(), String(c.party || 'BART')]));
+  const out = new Map();
+  for (const [code, n] of counts || new Map()) {
+    const who = party.get(code);
+    if (who == null || /^bart$/i.test(who)) out.set(code, n);
+  }
+  return out;
+}
+
 /** "3 X · 1 WIT" from a count of codes. */
 export function describeCodeCounts(counts) {
   return [...(counts || new Map()).entries()].map(([code, n]) => `${n} ${code}`).join(' · ');

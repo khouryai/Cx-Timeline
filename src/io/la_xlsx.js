@@ -295,3 +295,123 @@ export function lookaheadFileName(days, sheetName = '4WLA') {
   const safe = String(sheetName || '4WLA').replace(/[\\/:*?"<>|]+/g, ' ').trim() || '4WLA';
   return `${safe} ${days[0]} to ${days[days.length - 1]}.xlsx`;
 }
+
+/**
+ * The cancellations as a calendar workbook: one row per activity, the days of
+ * the period across, and each cancelled run one merged cell carrying what was
+ * cancelled, who was responsible and why.
+ *
+ * `rows` is `[{ label, location, events: [{ start, end, kind, text }] }]` —
+ * `kind` 'activity' for a day cancelled outright (filled red, as on the sheet)
+ * or 'support' for a BART resource struck out of an activity that went ahead
+ * (red writing, no fill, because the work itself went ahead). `text` is what
+ * the cell says. Weekends are the sheet's grey, like the look-ahead export.
+ *
+ * @param {object} o
+ * @param {string[]} o.days     ISO dates, both ends inclusive
+ * @param {object[]} o.rows
+ * @param {string} o.title
+ * @param {string} o.subtitle
+ * @param {string} o.red        the legend's cancellation colour, `RRGGBB`
+ */
+export function cancellationWorkbook({ days, rows, title = 'Cancellations', subtitle = '', red = 'FF0000' }) {
+  const styles = styleBook();
+  const all = 'lrtb';
+  const S = {
+    title: styles.id({ bold: true, size: 14, v: 'center' }),
+    sub: styles.id({ v: 'center' }),
+    head: styles.id({ border: all, bold: true, h: 'left', v: 'center', wrap: true }),
+    month: styles.id({ border: all, bold: true, h: 'left', v: 'center' }),
+    num: styles.id({ border: all, h: 'center', v: 'center' }),
+    meta: styles.id({ border: all, h: 'left', v: 'top', wrap: true }),
+    day: styles.id({ border: all }),
+    weekend: styles.id({ border: all, fill: WEEKEND }),
+    cancelled: styles.id({ border: all, fill: red, bold: true, color: isDark(red) ? 'FFFFFF' : '000000', h: 'center', v: 'center', wrap: true }),
+    support: styles.id({ border: all, bold: true, color: 'FF0000', h: 'center', v: 'center', wrap: true }),
+    keyText: styles.id({ h: 'left', v: 'center' }),
+  };
+  const META = [{ heading: 'Activity', width: 44 }, { heading: 'Location', width: 14 }];
+  const first = META.length + 1;
+  const str = (col, row, text, s) => (text === '' || text == null
+    ? `<c r="${colLetters(col)}${row}" s="${s}"/>`
+    : `<c r="${colLetters(col)}${row}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(text)}</t></is></c>`);
+  const num = (col, row, n, s) => `<c r="${colLetters(col)}${row}" s="${s}"><v>${n}</v></c>`;
+  const rowsXml = [];
+  const merges = [];
+  const addRow = (r, cells, ht = null) => rowsXml.push(`<row r="${r}"${ht ? ` ht="${ht}" customHeight="1"` : ''}>${cells.join('')}</row>`);
+
+  addRow(1, [str(1, 1, title, S.title)], 21);
+  addRow(2, [str(1, 2, subtitle, S.sub)]);
+
+  // The month band, day numbers and weekday letters, as the look-ahead has them.
+  const monthCells = [str(1, 4, '', S.head), str(2, 4, '', S.head)];
+  let runStart = 0;
+  days.forEach((d, i) => {
+    const head = i === 0 || monthLabel(days[i - 1]) !== monthLabel(d);
+    monthCells.push(head ? str(first + i, 4, monthLabel(d), S.month) : str(first + i, 4, '', S.month));
+    const last = i === days.length - 1 || monthLabel(days[i + 1]) !== monthLabel(d);
+    if (last) {
+      if (i > runStart) merges.push(`${colLetters(first + runStart)}4:${colLetters(first + i)}4`);
+      runStart = i + 1;
+    }
+  });
+  addRow(4, monthCells);
+  addRow(5, [str(1, 5, META[0].heading, S.head), str(2, 5, META[1].heading, S.head),
+    ...days.map((d, i) => num(first + i, 5, Number(d.slice(8, 10)), S.num))]);
+  addRow(6, [str(1, 6, '', S.head), str(2, 6, '', S.head),
+    ...days.map((d, i) => str(first + i, 6, weekdayLetter(d), S.num))]);
+  merges.push('A5:A6', 'B5:B6');
+
+  let r = 7;
+  const index = new Map(days.map((d, i) => [d, i]));
+  for (const row of rows) {
+    const cells = [str(1, r, row.label, S.meta), str(2, r, row.location || '', S.meta)];
+    let height = Math.max(lines(row.label, META[0].width), lines(row.location, META[1].width));
+    const covered = new Map(); // day index → { event, startIndex, endIndex }
+    for (const e of row.events) {
+      const a = index.get(e.start < days[0] ? days[0] : e.start);
+      const b = index.get(e.end > days[days.length - 1] ? days[days.length - 1] : e.end);
+      if (a == null || b == null || b < a) continue;
+      for (let i = a; i <= b; i++) covered.set(i, { e, a, b });
+      if (b > a) merges.push(`${colLetters(first + a)}${r}:${colLetters(first + b)}${r}`);
+      height = Math.max(height, lines(e.text, DAY_WIDTH * (b - a + 1)));
+    }
+    days.forEach((d, i) => {
+      const hit = covered.get(i);
+      if (hit) {
+        const s = hit.e.kind === 'support' ? S.support : S.cancelled;
+        cells.push(i === hit.a ? str(first + i, r, hit.e.text, s) : str(first + i, r, '', s));
+      } else cells.push(str(first + i, r, '', isWeekend(d) ? S.weekend : S.day));
+    });
+    addRow(r, cells, height > 1 ? +(height * LINE + 1.5).toFixed(2) : null);
+    r++;
+  }
+
+  r++;
+  addRow(r, [str(first, r, '', S.cancelled), str(first + 1, r, 'Day cancelled — the activity did not go ahead', S.keyText)]);
+  r++;
+  addRow(r, [str(first, r, 'WIT', S.support), str(first + 1, r, 'BART resource cancelled — the activity went ahead without it', S.keyText)]);
+
+  const lastCol = first + Math.max(days.length, 2) - 1;
+  const colsXml = [
+    ...META.map((m, i) => `<col min="${i + 1}" max="${i + 1}" width="${m.width}" customWidth="1"/>`),
+    days.length ? `<col min="${first}" max="${first + days.length - 1}" width="${DAY_WIDTH}" customWidth="1"/>` : '',
+  ].join('');
+  const sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+    + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+    + '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
+    + `<dimension ref="A1:${colLetters(lastCol)}${r}"/>`
+    + '<sheetViews><sheetView tabSelected="1" zoomScale="80" zoomScaleNormal="80" workbookViewId="0">'
+    + `<pane xSplit="${first - 1}" ySplit="6" topLeftCell="${colLetters(first)}7" activePane="bottomRight" state="frozen"/>`
+    + '</sheetView></sheetViews>'
+    + `<sheetFormatPr defaultRowHeight="${LINE}"/>`
+    + `<cols>${colsXml}</cols>`
+    + `<sheetData>${rowsXml.join('')}</sheetData>`
+    + (merges.length ? `<mergeCells count="${merges.length}">${merges.map((m) => `<mergeCell ref="${m}"/>`).join('')}</mergeCells>` : '')
+    + '<pageMargins left="0.25" right="0.25" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>'
+    + '<pageSetup paperSize="17" orientation="landscape" fitToWidth="1" fitToHeight="0"/>'
+    + '</worksheet>';
+
+  return zipStore(workbookParts({ sheetName: 'Cancellations', sheetXml, stylesXml: styles.xml(), printTitles: '$4:$6', title }));
+}

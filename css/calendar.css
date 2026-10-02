@@ -2122,3 +2122,28 @@ button.rc-myday-task-open:focus-visible { outline: 2px solid var(--primary); out
 .rc-myday-change .cx-badge { flex: none; }
 .rc-myday-changes-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .rc-myday-changes-foot .rc-hint { margin: 0; }
+
+/* ── The cancellation log as a calendar ──────────────────────────────────
+   One row per activity, each cancelled run one cell across its days with who
+   and why written in it: red for a day cancelled outright, red writing in a
+   red outline for a BART resource struck out of work that went ahead. */
+.la-cancel-grid .la-cancel-meta {
+  text-align: left;
+  min-width: 90px;
+  max-width: 260px;
+  vertical-align: top;
+}
+.la-cancel-grid tbody .la-cancel-meta:first-child { min-width: 200px; font-weight: 500; }
+.la-cancel-grid .la-cancel-run {
+  white-space: pre-line;
+  text-align: center;
+  vertical-align: middle;
+  font-family: var(--f-ui);
+  font-size: var(--fs-tiny);
+  line-height: 1.3;
+}
+.la-cancel-grid tbody td.la-day.la-cancel-run { min-width: 120px; max-width: none; }
+.la-cancel-grid .la-cancel-run-support { box-shadow: inset 0 0 0 2px var(--bad); color: var(--text-main); }
+.la-cancel-grid .la-cancel-why { font-weight: 600; }
+.la-cancel-grid .la-cancel-run.la-cancel-open { font-style: italic; }
+#rc-frame .la-cancel-grid td.la-cancel-run[title] { cursor: pointer; }

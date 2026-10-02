@@ -740,6 +740,21 @@ select assert((select count(*) from public.rc_cancelled_days
                 where raw_label = 'Cable pull' and day = date '2026-09-09') = 1,
   'a day stored as the bare red is a cancellation once red is mapped as one');
 
+-- Current, not ever: a day a newer read covers and no longer shows red is out
+-- of the log; a day no newer read covers is still the last word on it.
+insert into public.rc_lookahead_snapshots (file_hash, sheet_name, grid, taken_at)
+values ('hash-cx-0', '4WLA', '{"rows":[]}'::jsonb, timestamptz '2026-09-01 08:00+00');
+select id as cx0 from public.rc_lookahead_snapshots where file_hash = 'hash-cx-0' \gset
+insert into public.rc_lookahead_rows (snapshot_id, week_start, row_key, raw_location, raw_label, cells) values
+  (:'cx0', date '2026-08-31', 'cx|z', 'W34', 'IXL night mode testing',
+   '{"2026-09-04":"Cancellation","2026-09-08":"Cancellation"}'::jsonb);
+select assert((select count(*) from public.rc_cancelled_days
+                where raw_label = 'IXL night mode testing' and day = date '2026-09-08') = 0,
+  'a day a newer reading no longer shows red is not in the log');
+select assert((select count(*) from public.rc_cancelled_days
+                where raw_label = 'IXL night mode testing' and day = date '2026-09-04') = 1,
+  'a day no newer reading covers keeps the last word it had');
+
 -- What BART had been asked for goes with a red day: the newest read's marks.
 update public.rc_lookahead_rows set bart_marks = '{"2026-09-07":"X.WIT"}'::jsonb where row_key = 'cx|a';
 update public.rc_lookahead_rows set bart_marks = '{"2026-09-07":"X.X.WIT"}'::jsonb where row_key = 'cx|b';
@@ -797,8 +812,8 @@ select assert((select count(*) from public.rc_cancelled_days where raw_label = '
 select act_as(:'alice');
 
 -- Leave the register as the sections below expect it: their counts know
--- nothing of these two reads or of red being mapped this early.
-delete from public.rc_lookahead_snapshots where id in (:'cx1', :'cx2');
+-- nothing of these three reads or of red being mapped this early.
+delete from public.rc_lookahead_snapshots where id in (:'cx0', :'cx1', :'cx2');
 delete from public.rc_legend where argb = 'FF0000' and valid_from = date '2026-02-02';
 
 -- ══════════════════════════════════════════════════════════════════════════

@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-10-02T16:12:10.323Z
+ * Modules: 59   Built: 2026-10-02T17:08:08.783Z
  */
 (function () {
   'use strict';
@@ -7839,6 +7839,25 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     return out.sort((a, b) => a.start.localeCompare(b.start) || a.label.localeCompare(b.label));
   }
 
+  /**
+   * Only the codes BART provides, from a count of codes.
+   *
+   * The support-code register says who provides each code (`party`). The
+   * cancellation log is about what BART was asked for and lost, so a code the
+   * register gives to Hitachi — or anybody else — is left out. A code the
+   * register has never heard of is kept: dropping it would be guessing who it
+   * belongs to.
+   */
+  function bartCodes(counts, codes) {
+    const party = new Map((codes || []).map((c) => [String(c.code).toUpperCase(), String(c.party || 'BART')]));
+    const out = new Map();
+    for (const [code, n] of counts || new Map()) {
+      const who = party.get(code);
+      if (who == null || /^bart$/i.test(who)) out.set(code, n);
+    }
+    return out;
+  }
+
   /** "3 X · 1 WIT" from a count of codes. */
   function describeCodeCounts(counts) {
     return [...(counts || new Map()).entries()].map(([code, n]) => `${n} ${code}`).join(' · ');
@@ -8268,6 +8287,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "reconcileSuggestions", { get: () => reconcileSuggestions, enumerable: true });
   Object.defineProperty(__x, "cancellationEvents", { get: () => cancellationEvents, enumerable: true });
   Object.defineProperty(__x, "supportCancellationEvents", { get: () => supportCancellationEvents, enumerable: true });
+  Object.defineProperty(__x, "bartCodes", { get: () => bartCodes, enumerable: true });
   Object.defineProperty(__x, "describeCodeCounts", { get: () => describeCodeCounts, enumerable: true });
   Object.defineProperty(__x, "attachCancellationNotes", { get: () => attachCancellationNotes, enumerable: true });
   Object.defineProperty(__x, "WORKED_STATUSES", { get: () => WORKED_STATUSES, enumerable: true });
@@ -17028,7 +17048,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 6;
+  const SCHEMA_VERSION = 7;
 
   /**
    * Whether the database is the one this build was written against.

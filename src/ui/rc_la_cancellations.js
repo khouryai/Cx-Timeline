@@ -13,8 +13,10 @@ import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
 import { saveFile } from '../io/exporters.js';
 import {
   keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
-  reassignments, ABSENCE_LABELS, describeCodeCounts,
+  reassignments, ABSENCE_LABELS, describeCodeCounts, isCancelMeaning,
 } from '../core/lookahead.js';
+import { cancellationWorkbook } from '../io/la_xlsx.js';
+import { monthLabel, weekdayLetter, isWeekend } from '../core/la_edit.js';
 import { icon } from './icons.js';
 import {
   selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat,
@@ -42,8 +44,10 @@ let cancellationsTo = '';
 let cancellationsUnansweredOnly = false;
 /** Which kind of cancellation is listed: everything, whole days, or BART resources. */
 let cancellationsKind = 'all';
+/** The log as a list, or as a calendar of the period like the look-ahead. */
+let cancellationsView = 'list';
 
-const KIND_LABEL = { activity: 'Day cancelled', support: 'BART resource cancelled' };
+const KIND_LABEL = { activity: 'Activity cancelled', support: 'BART support cancelled' };
 
 /**
  * Every red run the look-ahead has shown, since the log's start, with whose it
@@ -111,12 +115,14 @@ export async function renderCancellations(host) {
 
   host.appendChild(el('p', {
     class: 'rc-hint',
-    text: `Every run of red cells any read of the look-ahead has shown ${span}, with the BART `
-      + 'resources those days had asked for — and every BART resource struck out of an activity that '
-      + 'still went ahead ("X.~WIT": the witness cancelled, the EIC still wanted). Cells side by '
-      + 'side on one activity are one event, and red on a Resource row is never a cancellation. '
-      + 'A cancellation stays in the log after the sheet moves on — it was cancelled when those '
-      + 'reads were taken. A resource removed in the editor with "Just remove" is not tracked.',
+    text: `Every red cell the look-ahead currently has ${span}, with the BART resources those days `
+      + 'had asked for — and every BART resource currently struck out of an activity that still goes '
+      + 'ahead ("X.~WIT": the witness cancelled, the EIC still wanted). Only what the look-ahead says '
+      + 'now: a day turned back from red, a row taken off the sheet or a resource reinstated drops '
+      + 'out. For a day the window has rolled past, it is what the last reading to show that day '
+      + 'said. Cells side by side on one activity are one event; red on a Resource row is never a '
+      + 'cancellation; only resources BART provides are listed; and a resource removed in the '
+      + 'editor with "Just remove" is not tracked.',
   }));
 
   if (!events.length) {
@@ -140,8 +146,8 @@ export async function renderCancellations(host) {
   const resourceEvents = events.filter((e) => e.kind === 'support').length;
   host.appendChild(el('div', { class: 'cx-chipstats', style: 'margin:0 0 12px' }, [
     chipStat('Events', events.length, 'info'),
-    chipStat('Days cancelled', events.length - resourceEvents, 'muted'),
-    chipStat('BART resources', resourceEvents, resourceEvents ? 'warn' : 'muted'),
+    chipStat('Cancelled activities', events.length - resourceEvents, 'muted'),
+    chipStat('BART support', resourceEvents, resourceEvents ? 'warn' : 'muted'),
     chipStat('Days', dayCount, 'muted'),
     ...CANCEL_PARTIES.map((p) => chipStat(p, tally[p], tally[p] ? PARTY_TONE[p] : 'muted')),
     chipStat('No reason yet', open, open ? 'bad' : 'muted'),
@@ -153,18 +159,30 @@ export async function renderCancellations(host) {
     onChange: (on) => { cancellationsUnansweredOnly = on; notifyChanged('cancellations'); },
   }));
 
-  host.appendChild(el('div', { class: 'rc-tabs la-cancel-kinds', style: 'margin:8px 0 0' },
-    [['all', 'Everything'], ['activity', 'Days cancelled'], ['support', 'BART resources']].map(([id, label]) => el('button', {
+  const tabs = (klass, choices, current, pick) => el('div', { class: `rc-tabs ${klass}`, style: 'margin:0' },
+    choices.map(([id, label]) => el('button', {
       class: 'rc-tab',
       type: 'button',
       text: label,
-      'aria-pressed': String(cancellationsKind === id),
-      onClick: () => { cancellationsKind = id; notifyChanged('cancellations'); },
-    }))));
+      'aria-pressed': String(current === id),
+      onClick: () => { pick(id); notifyChanged('cancellations'); },
+    })));
+  host.appendChild(el('div', { style: 'display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin:8px 0 0' }, [
+    tabs('la-cancel-kinds',
+      [['all', 'Everything'], ['activity', 'Cancelled activities'], ['support', 'BART support only']],
+      cancellationsKind, (id) => { cancellationsKind = id; }),
+    tabs('la-cancel-views', [['list', 'As a list'], ['calendar', 'As a calendar']],
+      cancellationsView, (id) => { cancellationsView = id; }),
+  ]));
 
   const shown = events
     .filter((e) => cancellationsKind === 'all' || e.kind === cancellationsKind)
     .filter((e) => !cancellationsUnansweredOnly || !e.note);
+
+  if (cancellationsView === 'calendar') {
+    host.appendChild(await cancellationCalendar(shown, from, to));
+    return;
+  }
 
   /* The extract is what is on screen: the span above, and the "no reason yet"
      narrowing when it is ticked. The file says which span in its name, because
@@ -247,6 +265,137 @@ export async function renderCancellations(host) {
   ]));
 
   host.appendChild(table(['', 'Activity', 'What', 'BART resources', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The cancellations as a calendar
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** What one cancelled run says on the calendar and in its Excel cell. */
+function runText(e) {
+  const what = e.kind === 'support'
+    ? `${describeCodeCounts(e.resources)} cancelled`
+    : describeCodeCounts(e.resources);
+  const why = e.note ? `${e.note.party}${e.note.reason ? `: ${e.note.reason}` : ''}` : 'No reason yet';
+  return [what, why].filter(Boolean).join('\n');
+}
+
+/** The same as nodes: only the struck-out codes are drawn through, never the reason. */
+function runNodes(e) {
+  const [what, ...why] = runText(e).split('\n');
+  return [
+    e.kind === 'support'
+      ? el('div', {}, [el('span', { class: 'la-code-cancelled', text: describeCodeCounts(e.resources) }), ' cancelled'])
+      : el('div', { text: what }),
+    ...why.map((line) => el('div', { class: 'la-cancel-why', text: line })),
+  ].filter((n) => n.textContent);
+}
+
+/**
+ * The log drawn like the look-ahead: one row per activity, the days of the
+ * period across, each cancelled run one cell spanning its days — red for a day
+ * cancelled outright, red writing for a BART resource struck out of work that
+ * went ahead — carrying who was responsible and why. Exactly what is listed
+ * (the period, the kind, "no reason yet"), and exportable to Excel as it is.
+ */
+async function cancellationCalendar(events, from, to) {
+  const wrap = el('div', { class: 'la-cancel-calendar' });
+  const legendRows = await rc.listLegend().catch(() => []);
+  const red = String(legendRows.find((l) => isCancelMeaning(l.meaning || ''))?.argb || 'FF0000').toUpperCase();
+  const last = to || events.reduce((m, e) => (e.end > m ? e.end : m), from);
+  const days = [];
+  for (let d = from; d <= last && days.length < 400; d = toISO(addDays(isoToMs(d), 1))) days.push(d);
+
+  const byActivity = new Map();
+  for (const e of events) {
+    if (!byActivity.has(e.key)) byActivity.set(e.key, { label: e.label, location: e.location, events: [] });
+    byActivity.get(e.key).events.push(e);
+  }
+  const rows = [...byActivity.values()].sort((a, b) => a.label.localeCompare(b.label) || a.location.localeCompare(b.location));
+
+  const span = `${dayLabel(from)} to ${dayLabel(last)}`;
+  wrap.appendChild(el('div', { style: 'display:flex;gap:8px;align-items:center;margin:8px 0 10px;flex-wrap:wrap' }, [
+    el('button', {
+      class: 'cx-btn mini primary la-cancel-xlsx',
+      type: 'button',
+      html: `${icon('download', { size: 12 })}<span>Export to Excel</span>`,
+      title: 'This calendar as an .xlsx: one row per activity, each cancelled run one cell with who and why',
+      onClick: () => {
+        const bytes = cancellationWorkbook({
+          days,
+          red,
+          title: 'Cancellation log',
+          subtitle: `${span} · ${events.length} cancellation(s)`,
+          rows: rows.map((r) => ({ ...r, events: r.events.map((e) => ({ start: e.start, end: e.end, kind: e.kind, text: runText(e) })) })),
+        });
+        saveFile(`cancellations ${from} to ${last}.xlsx`, bytes,
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Cancellation calendar');
+      },
+    }),
+    el('span', { class: 'rc-hint', style: 'margin:0', text: `${rows.length} activit${rows.length === 1 ? 'y' : 'ies'}, ${span}` }),
+  ]));
+
+  if (!rows.length) {
+    wrap.appendChild(emptyState({ iconName: 'calendar', title: 'Nothing cancelled in this period', message: 'Widen the dates above, or show every kind.' }));
+    return wrap;
+  }
+
+  const head = el('thead', {}, [
+    el('tr', {}, [
+      el('th', { class: 'la-cancel-meta', text: '' }),
+      el('th', { class: 'la-cancel-meta', text: '' }),
+      ...days.map((d, i) => el('th', {
+        class: 'la-month',
+        text: i === 0 || monthLabel(days[i - 1]) !== monthLabel(d) ? monthLabel(d) : '',
+      })),
+    ]),
+    el('tr', {}, [
+      el('th', { class: 'la-cancel-meta', text: 'Activity' }),
+      el('th', { class: 'la-cancel-meta', text: 'Location' }),
+      ...days.map((d) => el('th', {
+        class: `la-num${isWeekend(d) ? ' la-weekend' : ''}`,
+        html: `${Number(d.slice(8, 10))}<br>${weekdayLetter(d)}`,
+        title: dayLabel(d),
+      })),
+    ]),
+  ]);
+  const body = el('tbody');
+  for (const r of rows) {
+    const tr = el('tr', { class: 'la-cancel-line' }, [
+      el('td', { class: 'la-cancel-meta', text: r.label }),
+      el('td', { class: 'la-cancel-meta rc-hint', text: r.location || '' }),
+    ]);
+    const at = new Map();
+    for (const e of r.events) {
+      const a = days.indexOf(e.start < from ? from : e.start);
+      const b = days.indexOf(e.end > last ? last : e.end);
+      if (a >= 0 && b >= a) at.set(a, { e, b });
+    }
+    for (let i = 0; i < days.length; i++) {
+      const hit = at.get(i);
+      if (!hit) {
+        tr.appendChild(el('td', { class: `la-day${isWeekend(days[i]) ? ' la-weekend' : ''}` }));
+        continue;
+      }
+      const { e, b } = hit;
+      const activity = e.kind === 'activity';
+      tr.appendChild(el('td', {
+        class: `la-day la-cancel-run la-cancel-run-${e.kind}${activity ? ` la-painted${isDark(red) ? ' la-dark' : ''}` : ''}${e.note ? '' : ' la-cancel-open'}`,
+        colSpan: String(b - i + 1),
+        style: activity ? `background-color:#${red}` : '',
+        title: `${e.label}${e.location ? ` at ${e.location}` : ''} — ${e.start === e.end ? dayLabel(e.start) : `${dayLabel(e.start)} – ${dayLabel(e.end)}`}\n${runText(e)}`
+          + (rc.isAdmin() ? '\nClick to give or correct the reason.' : ''),
+        dataset: { kind: e.kind, start: e.start },
+        onClick: rc.isAdmin() ? () => recordCancellation(e) : null,
+      }, runNodes(e)));
+      i = b;
+    }
+    body.appendChild(tr);
+  }
+  wrap.appendChild(el('div', { class: 'rc-scroll', style: 'max-height:65vh' }, [
+    el('table', { class: 'rc-table la-grid la-cancel-grid', dataset: { plain: '1' } }, [head, body]),
+  ]));
+  return wrap;
 }
 
 /**

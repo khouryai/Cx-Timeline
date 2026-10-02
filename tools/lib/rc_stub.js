@@ -422,11 +422,32 @@ export function fakeSdk() {
       }, (r, day) => (r.bart_marks || {})[day]);
     },
     /* One row per activity, location and day that `pick` shows and `keep`
-       accepts, across every read — the shape both views share. */
+       accepts — kept only when the newest read covering that date still shows
+       it, as the views do (`rc_lookahead_cover`). */
     _daysOver(pick, keep, marksOf) {
       const taken = new Map(this.rc_lookahead_snapshots.map((x) => [x.id, x.taken_at]));
+      const all = [...this.rc_lookahead_rows, ...this._earlierReads];
+      const readOf = (r) => `${r.snapshot_id}|${r.taken_at || taken.get(r.snapshot_id) || ''}`;
+      const cover = new Map();
+      for (const r of all) {
+        const key = readOf(r);
+        const at = r.taken_at || taken.get(r.snapshot_id) || '';
+        const c = cover.get(key) || { at, lo: null, hi: null };
+        for (const d of Object.keys({ ...(r.cells || {}), ...(r.bart_marks || {}) })) {
+          if (!c.lo || d < c.lo) c.lo = d;
+          if (!c.hi || d > c.hi) c.hi = d;
+        }
+        cover.set(key, c);
+      }
+      const newestFor = (day) => {
+        let best = null;
+        for (const [key, c] of cover) {
+          if (c.lo && day >= c.lo && day <= c.hi && (!best || String(c.at) > String(best.at))) best = { key, at: c.at };
+        }
+        return best?.key || null;
+      };
       const out = new Map();
-      for (const r of [...this.rc_lookahead_rows, ...this._earlierReads]) {
+      for (const r of all) {
         for (const [day, value] of Object.entries(pick(r) || {})) {
           if (!keep(value, r, day)) continue;
           const key = `${r.raw_label || ''}|${r.raw_location || ''}|${day}`;
@@ -437,6 +458,7 @@ export function fakeSdk() {
           };
           row._snaps.add(r.snapshot_id);
           row.reads = row._snaps.size;
+          if (readOf(r) === newestFor(day)) row._current = true;
           if (at && (!row.first_seen || at < row.first_seen)) row.first_seen = at;
           if (at && (!row.last_seen || at > row.last_seen)) row.last_seen = at;
           const marks = marksOf(r, day);
@@ -447,7 +469,7 @@ export function fakeSdk() {
           out.set(key, row);
         }
       }
-      return [...out.values()].map(({ _snaps, _marksAt, ...row }) => row);
+      return [...out.values()].filter((row) => row._current).map(({ _snaps, _marksAt, _current, ...row }) => row);
     },
     rc_blockers: [],
     rc_blocker_updates: [],

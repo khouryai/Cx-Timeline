@@ -945,9 +945,9 @@ is a `security_invoker` view over the `cells` every ingest already writes to
 a legend entry that does, which is how a day read before red was mapped comes
 back — and `cancellationEvents()` in `core/lookahead.js` joins consecutive days
 on one activity and location into one event, so a cancelled week is one line.
-It reads every snapshot, not the latest, so a week that has rolled off the
-sheet or turned back from red is still there: it *was* cancelled when those
-reads were taken. This is a different question from the Changes list's
+It reads every snapshot but keeps only what the newest reading covering each
+date says — see *The cancellation log is what the look-ahead says now, and
+BART's*. This is a different question from the Changes list's
 `cancellation` events, which only catch a cell turning red *between* two reads
 — a cell already red the first time the sheet was read was never an event
 there. What is stored is the judgement: `rc_cancellation_notes`, a party
@@ -1001,6 +1001,24 @@ is a different judgement. Both kinds are read in one place,
 `cancellationLog()` in `ui/rc_util.js`, which is what the log and the
 administrator's inbox both count from. The printed calendar still shows the
 tilde as typed; it has no per-code styling.
+
+### The cancellation log is what the look-ahead says now, and BART's
+
+It used to keep every day *any* reading had shown red, so a day turned back,
+an activity renamed or a row taken off the sheet stayed in the log as a
+cancellation the look-ahead no longer had. Now `rc_cancelled_days` and
+`rc_cancelled_support_days` keep a day only when the **newest reading covering
+that date** still shows it red or struck — for a day on the sheet that is the
+latest reading; for a day the window has rolled past, the last reading that had
+it. A reading covers the dates between the first and last day its rows carry
+(`rc_lookahead_cover`). Only resources the support-code register gives to BART
+are listed (`bartCodes()`); a code it does not know is kept rather than guessed
+away, and a struck-out Hitachi code is no BART cancellation at all. The kind
+filter reads Everything / Cancelled activities / BART support only, and "As a
+calendar" draws the same events like the look-ahead — one row per activity,
+each run one cell across its days with the party and reason in it, clickable to
+give or correct the reason — exported by `cancellationWorkbook()` as merged
+cells in the 4WLA's greys.
 
 ### The week plan is one tab, and it used to be two
 

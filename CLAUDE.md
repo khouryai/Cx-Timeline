@@ -240,6 +240,7 @@ alternative shipped once and went wrong.
 - The Changes list is about the weeks anybody can still act on. [→](docs/ARCHITECTURE.md#the-changes-list-is-about-the-weeks-anybody-can-still-act-on)
 - Every red run is a cancellation, and the log is derived from every read. [→](docs/ARCHITECTURE.md#every-red-run-is-a-cancellation-and-the-log-is-derived-from-every-read)
 - A BART resource can be cancelled without the day: "X.~WIT" strikes the witness out, the editor asks *Cancel and log* or *Just remove*, and `rc_cancelled_support_days` puts it in the log beside the days cancelled outright. [→](docs/ARCHITECTURE.md#a-bart-resource-can-be-cancelled-without-the-day-and-both-are-in-the-log)
+- The cancellation log is what the look-ahead says now (the newest reading covering each date), lists only BART's resources, and draws as a calendar exportable to Excel. [→](docs/ARCHITECTURE.md#the-cancellation-log-is-what-the-look-ahead-says-now-and-barts)
 - The week plan is one tab, and it used to be two. [→](docs/ARCHITECTURE.md#the-week-plan-is-one-tab-and-it-used-to-be-two)
 - Today is a column, not a hairline. [→](docs/ARCHITECTURE.md#today-is-a-column-not-a-hairline)
 - The workbook is the assumption, so only a hand-typed day is flagged. [→](docs/ARCHITECTURE.md#the-workbook-is-the-assumption-so-only-a-hand-typed-day-is-flagged)
@@ -412,16 +413,16 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | Suite | Checks | What it covers |
 |---|---|---|
 | `test_dist.js` | 59 | every deployment shape, every bundle fingerprinted, that the plan has no backend in any of them, and the phone app in the calendar shape only |
-| `test_lookahead.js` | 257 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
+| `test_lookahead.js` | 259 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
-| `test_la_edit.js` | 141 | the look-ahead editor's model, undo, support codes, the published grid, cell history, staffing clashes, and the Excel export read back |
+| `test_la_edit.js` | 144 | the look-ahead editor's model, undo, support codes, the published grid, cell history, staffing clashes, and the Excel export read back |
 | `smoke.js` | 301 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 524 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 528 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 98 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 64 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
-| `test_sql.js` | 375 | both permission models, snapshot compaction, Got it, the schema stamp, and that `migrate.sql` upgrades an old project |
+| `test_sql.js` | 377 | both permission models, snapshot compaction, Got it, the schema stamp, and that `migrate.sql` upgrades an old project |
 | `test_xlsx_compat.js` | 14 | the Excel export opened, re-saved and printed by LibreOffice Calc (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**

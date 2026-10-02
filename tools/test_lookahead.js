@@ -1334,6 +1334,12 @@ console.log('\nThe cancellation log');
   check('and never on another resource struck out on the same activity',
     both.find((e) => e.codes === 'TCE')?.note === null);
   check('nor on a day cancelled outright', both.find((e) => e.kind === 'activity')?.note === null);
+  const register = [{ code: 'X', party: 'BART' }, { code: 'WIT', party: 'BART' }, { code: 'HTT', party: 'Hitachi' }];
+  const mixed = cls.countCodes(['X.HTT.WIT', 'HTT.ZZ']);
+  check('the log lists only BART\u2019s resources — a Hitachi code is left out',
+    cls.describeCodeCounts(cls.bartCodes(mixed, register)) === '1 X · 1 WIT · 1 ZZ',
+    cls.describeCodeCounts(cls.bartCodes(mixed, register)));
+  check('and a code nobody registered is kept, not guessed away', cls.bartCodes(mixed, register).has('ZZ'));
 }
 
 console.log('\nProgress from the calendar');

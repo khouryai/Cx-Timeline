@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 19   Built: 2026-10-02T16:12:10.416Z
+ * Modules: 19   Built: 2026-10-02T17:08:08.873Z
  */
 (function () {
   'use strict';
@@ -1451,7 +1451,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 6;
+  const SCHEMA_VERSION = 7;
 
   /**
    * Whether the database is the one this build was written against.
@@ -5592,6 +5592,25 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     return out.sort((a, b) => a.start.localeCompare(b.start) || a.label.localeCompare(b.label));
   }
 
+  /**
+   * Only the codes BART provides, from a count of codes.
+   *
+   * The support-code register says who provides each code (`party`). The
+   * cancellation log is about what BART was asked for and lost, so a code the
+   * register gives to Hitachi — or anybody else — is left out. A code the
+   * register has never heard of is kept: dropping it would be guessing who it
+   * belongs to.
+   */
+  function bartCodes(counts, codes) {
+    const party = new Map((codes || []).map((c) => [String(c.code).toUpperCase(), String(c.party || 'BART')]));
+    const out = new Map();
+    for (const [code, n] of counts || new Map()) {
+      const who = party.get(code);
+      if (who == null || /^bart$/i.test(who)) out.set(code, n);
+    }
+    return out;
+  }
+
   /** "3 X · 1 WIT" from a count of codes. */
   function describeCodeCounts(counts) {
     return [...(counts || new Map()).entries()].map(([code, n]) => `${n} ${code}`).join(' · ');
@@ -6021,6 +6040,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "reconcileSuggestions", { get: () => reconcileSuggestions, enumerable: true });
   Object.defineProperty(__x, "cancellationEvents", { get: () => cancellationEvents, enumerable: true });
   Object.defineProperty(__x, "supportCancellationEvents", { get: () => supportCancellationEvents, enumerable: true });
+  Object.defineProperty(__x, "bartCodes", { get: () => bartCodes, enumerable: true });
   Object.defineProperty(__x, "describeCodeCounts", { get: () => describeCodeCounts, enumerable: true });
   Object.defineProperty(__x, "attachCancellationNotes", { get: () => attachCancellationNotes, enumerable: true });
   Object.defineProperty(__x, "WORKED_STATUSES", { get: () => WORKED_STATUSES, enumerable: true });
@@ -6958,7 +6978,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   const { el } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { toISO, todayMs, fmtDate, addDays, MS_DAY } = __req("core/dates.js");
-  const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS, cellTokens, cancellationEvents, supportCancellationEvents, attachCancellationNotes } = __req("core/lookahead.js");
+  const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS, cellTokens, cancellationEvents, supportCancellationEvents, attachCancellationNotes, bartCodes } = __req("core/lookahead.js");
 
 
 
@@ -7093,12 +7113,18 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * cancellations were derived simply has none of them.
    */
   async function cancellationLog(from) {
-    const [days, support, notes] = await Promise.all([
+    const [days, support, notes, codes] = await Promise.all([
       rc.listCancelledDays(from),
       rc.listCancelledSupportDays(from).catch(() => []),
       rc.listCancellationNotes().catch(() => []),
+      rc.listSupportCodes({ includeRetired: true }).catch(() => []),
     ]);
+    /* BART's resources only: a cancelled day lists what BART had been asked for
+       with it, and a struck-out code is in the log only when it was BART's. A
+       Hitachi resource taken off an activity is not a BART cancellation. */
     const events = [...cancellationEvents(days, { from }), ...supportCancellationEvents(support, { from })]
+      .map((e) => ({ ...e, resources: bartCodes(e.resources, codes) }))
+      .filter((e) => e.kind !== 'support' || e.resources.size)
       .sort((a, b) => a.start.localeCompare(b.start) || a.label.localeCompare(b.label) || a.kind.localeCompare(b.kind));
     return attachCancellationNotes(events, notes);
   }

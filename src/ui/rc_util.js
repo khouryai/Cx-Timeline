@@ -14,7 +14,7 @@ import { emit, EV } from '../core/events.js';
 import { toISO, todayMs, fmtDate, addDays, MS_DAY } from '../core/dates.js';
 import {
   resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS, cellTokens,
-  cancellationEvents, supportCancellationEvents, attachCancellationNotes,
+  cancellationEvents, supportCancellationEvents, attachCancellationNotes, bartCodes,
 } from '../core/lookahead.js';
 import { applyLegend } from '../io/lookahead.js';
 import * as rc from '../core/rc.js';
@@ -147,12 +147,18 @@ export function codeNodes(value, klass = 'rc-code-cancelled') {
  * cancellations were derived simply has none of them.
  */
 export async function cancellationLog(from) {
-  const [days, support, notes] = await Promise.all([
+  const [days, support, notes, codes] = await Promise.all([
     rc.listCancelledDays(from),
     rc.listCancelledSupportDays(from).catch(() => []),
     rc.listCancellationNotes().catch(() => []),
+    rc.listSupportCodes({ includeRetired: true }).catch(() => []),
   ]);
+  /* BART's resources only: a cancelled day lists what BART had been asked for
+     with it, and a struck-out code is in the log only when it was BART's. A
+     Hitachi resource taken off an activity is not a BART cancellation. */
   const events = [...cancellationEvents(days, { from }), ...supportCancellationEvents(support, { from })]
+    .map((e) => ({ ...e, resources: bartCodes(e.resources, codes) }))
+    .filter((e) => e.kind !== 'support' || e.resources.size)
     .sort((a, b) => a.start.localeCompare(b.start) || a.label.localeCompare(b.label) || a.kind.localeCompare(b.kind));
   return attachCancellationNotes(events, notes);
 }

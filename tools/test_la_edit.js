@@ -538,6 +538,25 @@ console.log('\nThe Excel export');
     struckBack.rows.some((r) => r.cells.some((c) => c.value === 'X.~WIT' && c.hex === 'FFFF00')));
   check('and the key says what the strike means', /taken off/.test(struckSheet));
 
+  // The cancellation log as a calendar workbook.
+  const cw = xl.cancellationWorkbook({
+    days: ['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04'],
+    rows: [{ label: 'IXL night mode testing', location: 'W34', events: [
+      { start: '2026-10-01', end: '2026-10-02', kind: 'activity', text: '1 X\nBART: possession withdrawn' },
+      { start: '2026-10-04', end: '2026-10-04', kind: 'support', text: '1 WIT cancelled\nBART: witness not required' },
+    ] }],
+    title: 'Cancellation log',
+  });
+  const cwBack = la.parseSheet(cw.buffer.slice(cw.byteOffset, cw.byteOffset + cw.byteLength), 'Cancellations');
+  const cwCells = cwBack.rows.flatMap((r) => r.cells);
+  check('the cancellation calendar exports one merged cell per cancelled run',
+    cwBack.merges.includes('C7:D7') && cwCells.some((c) => c.ref === 'C7' && /possession withdrawn/.test(c.value) && c.hex === 'FF0000'),
+    cwBack.merges.join(' '));
+  check('with who and why written in the cell, and a resource cancelled in red writing, not a fill',
+    cwCells.some((c) => c.ref === 'F7' && /WIT cancelled/.test(c.value) && /witness not required/.test(c.value) && !c.hex));
+  check('and the weekend grey on the days nothing was cancelled',
+    !cwCells.some((c) => c.ref === 'E7' && c.hex && c.hex !== '7F7F7F'));
+
   check('the ZIP checksum is the standard one', xw.crc32(new TextEncoder().encode('123456789')) === 0xcbf43926);
   check('control characters cannot corrupt the file', xw.xmlEscape('a\u0001b<c>') === 'ab&lt;c&gt;');
 }

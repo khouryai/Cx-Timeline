@@ -813,18 +813,48 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   const witRow = page.locator('#rc-frame .rc-cancel-row[data-kind="support"][data-codes="WIT"]', { hasText: 'IXL Regression Testing' });
   await snap('log');
   check('the cancellation log lists the BART resource struck out',
-    (await witRow.count()) >= 1 && /BART resource cancelled/.test(await witRow.first().innerText()));
+    (await witRow.count()) >= 1 && /BART support cancelled/.test(await witRow.first().innerText()));
   check('with the reason given when it was cancelled',
     /Witness not required for testing/.test(await witRow.first().innerText()));
   const dayRow = page.locator('#rc-frame .rc-cancel-row[data-kind="activity"]', { hasText: 'IXL Regression Testing' });
   check('and a day cancelled outright lists what BART had been asked for',
     (await dayRow.count()) >= 1 && /\d+ X/.test(await dayRow.first().innerText()), (await dayRow.first().innerText().catch(() => '')).replace(/\s+/g, ' '));
-  await page.locator('#rc-frame .la-cancel-kinds .rc-tab', { hasText: 'BART resources' }).click();
+  await page.locator('#rc-frame .la-cancel-kinds .rc-tab', { hasText: 'BART support only' }).click();
   await page.waitForTimeout(300);
-  check('and the log can show only the BART resources',
+  check('and the log can show only the BART support struck out',
     (await page.locator('#rc-frame .rc-cancel-row[data-kind="activity"]').count()) === 0
       && (await page.locator('#rc-frame .rc-cancel-row[data-kind="support"]').count()) >= 1);
+  await page.locator('#rc-frame .la-cancel-kinds .rc-tab', { hasText: 'Cancelled activities' }).click();
+  await page.waitForTimeout(300);
+  check('or only the cancelled activities, hiding BART support taken off work that went ahead',
+    (await page.locator('#rc-frame .rc-cancel-row[data-kind="support"]').count()) === 0
+      && (await page.locator('#rc-frame .rc-cancel-row[data-kind="activity"]').count()) >= 1);
   await page.locator('#rc-frame .la-cancel-kinds .rc-tab', { hasText: 'Everything' }).click();
+  await page.waitForTimeout(200);
+
+  /* The same log as a calendar, exportable. */
+  await page.locator('#rc-frame .la-cancel-views .rc-tab', { hasText: 'As a calendar' }).click();
+  await page.waitForSelector('#rc-frame .la-cancel-grid', { timeout: 8000 });
+  await snap('cancel-calendar');
+  const witRun = page.locator('#rc-frame .la-cancel-grid td.la-cancel-run-support', { hasText: 'WIT cancelled' });
+  check('the log can be drawn as a calendar, one row per activity',
+    (await page.locator('#rc-frame .la-cancel-grid tbody tr').count()) >= 1
+      && (await page.locator('#rc-frame .la-cancel-grid td.la-cancel-run-activity').count()) >= 1);
+  check('with the responsible party and reason in the cancelled cell',
+    (await witRun.count()) >= 1 && /BART: Witness not required for testing/.test(await witRun.first().innerText()),
+    await witRun.first().innerText().catch(() => ''));
+  await page.evaluate(() => { window.__saved = {}; });
+  await page.locator('#rc-frame .la-cancel-xlsx').click();
+  await page.waitForTimeout(800);
+  const cancelFile = await page.evaluate(async () => ({
+    name: window.__saved?.name || '',
+    bytes: Array.from(new Uint8Array(await window.__lastBlob.arrayBuffer())),
+  }));
+  const cancelSheet = la.parseSheet(new Uint8Array(cancelFile.bytes).buffer, 'Cancellations');
+  check('and exported to Excel as that calendar, reasons in the cells',
+    /^cancellations .*\.xlsx$/.test(cancelFile.name)
+      && cancelSheet.rows.some((r) => r.cells.some((c) => /Witness not required for testing/.test(c.value))), cancelFile.name);
+  await page.locator('#rc-frame .la-cancel-views .rc-tab', { hasText: 'As a list' }).click();
   await page.waitForTimeout(200);
   await page.locator('#rc-frame .rc-tab', { hasText: /^Calendar$/ }).click();
   await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });

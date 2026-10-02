@@ -1507,7 +1507,7 @@ create or replace view public.rc_lookahead_snapshot_meta with (security_invoker 
     from public.rc_lookahead_snapshots s;
 
 /*
- * Every day any read of the look-ahead showed painted as a cancellation.
+ * Every day the look-ahead *currently* shows painted as a cancellation.
  *
  * Read off `rc_lookahead_rows.cells`, which every ingest already writes (date →
  * what the colour means), so no grid is re-parsed and nothing new is stored. A
@@ -1516,58 +1516,90 @@ create or replace view public.rc_lookahead_snapshot_meta with (security_invoker 
  * bare colour of a legend entry that says so, which is how a day read before
  * red was mapped comes back.
  *
- * One row per activity, location and day however many reads saw it, with the
- * first and last read that did: a day that stopped being red is still in the
- * log, because it *was* cancelled when those reads were taken. `security_invoker`
- * so the rows' own policies decide who sees it.
+ * **Current, not ever.** It used to keep every day *any* read had shown red,
+ * so a day turned back, an activity renamed or a row taken off the sheet stayed
+ * in the log as a cancellation the look-ahead no longer had. Now a day counts
+ * only when the newest read that covered that date still shows it red: for a
+ * day still on the sheet that is the latest reading, and for a day the window
+ * has rolled past it is the last reading that had it. A read covers the dates
+ * between the first and last day any of its rows carries (`rc_lookahead_cover`).
+ *
+ * One row per activity, location and day, with the first and last read that
+ * showed it and the newest read's marks — what BART had been asked for that
+ * day, cancelled with it. `security_invoker` so the rows' own policies decide
+ * who sees it.
  */
-create or replace view public.rc_cancelled_days with (security_invoker = true) as
-  select coalesce(r.raw_label, '')    as raw_label,
-         coalesce(r.raw_location, '') as raw_location,
-         (array_agg(r.location_id) filter (where r.location_id is not null))[1] as location_id,
-         d.key::date                  as day,
-         min(s.taken_at)              as first_seen,
-         max(s.taken_at)              as last_seen,
-         count(distinct r.snapshot_id) as reads,
-         -- What BART had been asked for that day ("X.WIT"), from the newest
-         -- read that showed it red: cancelling the day cancelled those too.
-         (array_agg(r.bart_marks ->> d.key order by s.taken_at desc)
-            filter (where r.bart_marks ? d.key))[1] as marks
+create or replace view public.rc_lookahead_cover with (security_invoker = true) as
+  select r.snapshot_id, s.taken_at, min(k::date) as first_day, max(k::date) as last_day
     from public.rc_lookahead_rows r
     join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
-    cross join lateral jsonb_each_text(r.cells) d
-   where d.value ilike '%cancel%'
-      or d.value in (select '#' || l.argb from public.rc_legend l where l.meaning ilike '%cancel%')
-   group by 1, 2, d.key;
+    cross join lateral jsonb_object_keys(r.cells || r.bart_marks) k
+   group by r.snapshot_id, s.taken_at;
+
+create or replace view public.rc_cancelled_days with (security_invoker = true) as
+  with red as (
+    select coalesce(r.raw_label, '') as raw_label, coalesce(r.raw_location, '') as raw_location,
+           r.location_id, r.snapshot_id, s.taken_at, d.key::date as day, r.bart_marks ->> d.key as marks
+      from public.rc_lookahead_rows r
+      join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
+      cross join lateral jsonb_each_text(r.cells) d
+     where d.value ilike '%cancel%'
+        or d.value in (select '#' || l.argb from public.rc_legend l where l.meaning ilike '%cancel%')
+  ), newest as (
+    select x.day, (select c.snapshot_id from public.rc_lookahead_cover c
+                    where x.day between c.first_day and c.last_day
+                    order by c.taken_at desc limit 1) as snapshot_id
+      from (select distinct day from red) x
+  )
+  select red.raw_label, red.raw_location,
+         (array_agg(red.location_id) filter (where red.location_id is not null))[1] as location_id,
+         red.day,
+         min(red.taken_at)               as first_seen,
+         max(red.taken_at)               as last_seen,
+         count(distinct red.snapshot_id) as reads,
+         (array_agg(red.marks) filter (where red.snapshot_id = newest.snapshot_id))[1] as marks
+    from red join newest on newest.day = red.day
+   group by red.raw_label, red.raw_location, red.day
+  having bool_or(red.snapshot_id = newest.snapshot_id);
 
 /*
- * Every day a read showed a BART resource struck out on an activity that was
- * still going ahead.
+ * Every day the look-ahead currently shows a BART resource struck out on an
+ * activity that is still going ahead.
  *
  * The editor writes a cancelled support code with a leading tilde — "X.~WIT"
  * is one EIC still wanted and a witness no longer — and `bart_marks` carries
  * that text as typed. A day that is itself red is left to `rc_cancelled_days`:
- * the whole day went, and its resources with it. Derived like that view, never
- * stored, and for the same reason it keeps a day whose code was later
- * reinstated: it was struck out when those reads were taken.
+ * the whole day went, and its resources with it. Current in the same sense as
+ * that view: the newest read covering the date has to still strike it out, so
+ * a witness reinstated is out of the log.
  */
 create or replace view public.rc_cancelled_support_days with (security_invoker = true) as
-  select coalesce(r.raw_label, '')    as raw_label,
-         coalesce(r.raw_location, '') as raw_location,
-         (array_agg(r.location_id) filter (where r.location_id is not null))[1] as location_id,
-         d.key::date                  as day,
-         min(s.taken_at)              as first_seen,
-         max(s.taken_at)              as last_seen,
-         count(distinct r.snapshot_id) as reads,
-         (array_agg(d.value order by s.taken_at desc))[1] as marks
-    from public.rc_lookahead_rows r
-    join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
-    cross join lateral jsonb_each_text(r.bart_marks) d
-   where d.value ~ '(^|\.)\s*~'
-     and coalesce(r.cells ->> d.key, '') not ilike '%cancel%'
-     and coalesce(r.cells ->> d.key, '') not in
-         (select '#' || l.argb from public.rc_legend l where l.meaning ilike '%cancel%')
-   group by 1, 2, d.key;
+  with struck as (
+    select coalesce(r.raw_label, '') as raw_label, coalesce(r.raw_location, '') as raw_location,
+           r.location_id, r.snapshot_id, s.taken_at, d.key::date as day, d.value as marks
+      from public.rc_lookahead_rows r
+      join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
+      cross join lateral jsonb_each_text(r.bart_marks) d
+     where d.value ~ '(^|\.)\s*~'
+       and coalesce(r.cells ->> d.key, '') not ilike '%cancel%'
+       and coalesce(r.cells ->> d.key, '') not in
+           (select '#' || l.argb from public.rc_legend l where l.meaning ilike '%cancel%')
+  ), newest as (
+    select x.day, (select c.snapshot_id from public.rc_lookahead_cover c
+                    where x.day between c.first_day and c.last_day
+                    order by c.taken_at desc limit 1) as snapshot_id
+      from (select distinct day from struck) x
+  )
+  select struck.raw_label, struck.raw_location,
+         (array_agg(struck.location_id) filter (where struck.location_id is not null))[1] as location_id,
+         struck.day,
+         min(struck.taken_at)               as first_seen,
+         max(struck.taken_at)               as last_seen,
+         count(distinct struck.snapshot_id) as reads,
+         (array_agg(struck.marks) filter (where struck.snapshot_id = newest.snapshot_id))[1] as marks
+    from struck join newest on newest.day = struck.day
+   group by struck.raw_label, struck.raw_location, struck.day
+  having bool_or(struck.snapshot_id = newest.snapshot_id);
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Deleting a reference row, where deleting it is honest
@@ -2142,11 +2174,11 @@ grant select, insert on public.rc_cancellation_notes to authenticated;
 revoke all on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
               public.rc_rows_without_sar, public.rc_sars_without_rows,
               public.rc_lookahead_snapshot_meta, public.rc_actuals_current,
-              public.rc_cancelled_days, public.rc_cancelled_support_days from public, anon;
+              public.rc_cancelled_days, public.rc_cancelled_support_days, public.rc_lookahead_cover from public, anon;
 grant select on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
                 public.rc_rows_without_sar, public.rc_sars_without_rows,
                 public.rc_lookahead_snapshot_meta, public.rc_actuals_current,
-                public.rc_cancelled_days, public.rc_cancelled_support_days to authenticated;
+                public.rc_cancelled_days, public.rc_cancelled_support_days, public.rc_lookahead_cover to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Storage: the two things that are files
@@ -2707,5 +2739,5 @@ grant usage on sequence public.rc_la_seen_id_seq to authenticated;
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '6')
+insert into public.rc_settings (key, value) values ('schema_version', '7')
 on conflict (key) do update set value = excluded.value, updated_at = now();
