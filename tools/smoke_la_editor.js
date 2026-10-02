@@ -310,6 +310,35 @@ export async function lookaheadEditor(page, { check, shot = null }) {
       && ((await serverCell('IXL Regression Testing', altDay))?.text || '') === beforeAlt,
     JSON.stringify(await serverCell('IXL Regression Testing', altDay)));
 
+  /* Weekends are fixed grey on every row; a shift covers it, and taking the
+     shift off brings it back. A section band is its own fixed grey. */
+  const bg = (loc) => loc.evaluate((n) => getComputedStyle(n).backgroundColor);
+  let weekendDay = null;
+  for (const d of [day(5), day(6), day(12), day(13), day(19), day(20)]) {
+    if (!(await serverCell('ATS Site Test', d))?.color) { weekendDay = d; break; }
+  }
+  const weekendCell = cell('ATS Site Test', weekendDay);
+  check('a weekend day is grey before anything is painted on it',
+    (await bg(weekendCell)) === 'rgb(127, 127, 127)', await bg(weekendCell));
+  await weekendCell.click();
+  await page.keyboard.press('Alt+2');
+  await saved();
+  const shiftHex = (await serverCell('ATS Site Test', weekendDay))?.color;
+  const hexRgb = (h) => `rgb(${parseInt(h.slice(0, 2), 16)}, ${parseInt(h.slice(2, 4), 16)}, ${parseInt(h.slice(4, 6), 16)})`;
+  check('painting a shift on it shows the shift\u2019s colour, not the grey',
+    !!shiftHex && (await bg(weekendCell)) === hexRgb(shiftHex), `${shiftHex} → ${await bg(weekendCell)}`);
+  await grid().focus();
+  await page.keyboard.press('Alt+0');
+  await saved();
+  check('and taking the shift off puts the weekend grey back',
+    !(await serverCell('ATS Site Test', weekendDay))?.color && (await bg(weekendCell)) === 'rgb(127, 127, 127)', await bg(weekendCell));
+  const sectionRow = page.locator('#rc-frame .lae-grid tbody tr.lae-section').first();
+  const weekdayIdx = [0, 1, 2, 3, 4].map((n) => col(day(n)));
+  check('a section band shades its whole row, days included',
+    (await bg(sectionRow.locator('td.lae-meta-description'))) === 'rgb(217, 217, 217)'
+      && (await bg(sectionRow.locator(`td[data-c="${weekdayIdx[0]}"]`))) === 'rgb(217, 217, 217)',
+    await bg(sectionRow.locator(`td[data-c="${weekdayIdx[0]}"]`)));
+
   const names = rowLoc('Resource').locator(`td[data-c="${col(day(0))}"]`);
   await names.click();
   await yellow.click();
@@ -698,6 +727,18 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     /X\.TCE/.test(calendarText) && /ATS Site Test/.test(calendarText), calendarText.slice(0, 200).replace(/\n/g, ' '));
   check('names taken off in the editor are off the calendar as soon as Edit is switched off',
     !/Quillon Passing/.test(calendarText));
+  check('the calendar\u2019s view shades weekends the same grey as the editor',
+    await page.evaluate(() => {
+      const cells = [...document.querySelectorAll('#rc-frame .la-grid tbody td.la-day.la-weekend:not(.la-painted)')];
+      return cells.length > 0 && cells.every((c) => getComputedStyle(c).backgroundColor === 'rgb(127, 127, 127)');
+    }));
+  check('and draws a section band across the whole row, as the editor does',
+    await page.evaluate(() => {
+      const row = document.querySelector('#rc-frame .la-grid tbody tr.la-head-row');
+      const day = row?.querySelector('td.la-day:not(.la-weekend)');
+      return !!day && getComputedStyle(day).backgroundColor === 'rgb(217, 217, 217)'
+        && getComputedStyle(row.querySelector('td.la-meta')).backgroundColor === 'rgb(217, 217, 217)';
+    }));
   check('the calendar draws the cancelled witness struck through in red',
     (await page.locator('#rc-frame .la-grid .la-code-cancelled', { hasText: 'WIT' }).count()) >= 1);
   check('and it no longer offers to read the workbook',

@@ -356,7 +356,11 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   font-size: 10px;
   color: var(--text-main);
 }
-.la-day.la-weekend { background: var(--surface-2); }
+/* Weekends are grey on every row, always — fixed shading, as on the sheet,
+   never a colour from the legend and never in the key. A day painted with a
+   shift carries its colour inline, which covers the grey; clear the shift and
+   the grey is back. */
+.la-grid tbody td.la-day.la-weekend:not(.la-painted) { background-color: var(--la-weekend); color: var(--la-weekend-ink); }
 /* A painted cell states its own colour, so the text has to stay legible over
    whatever that turns out to be rather than over a token we chose. */
 .la-day.la-painted { color: #111; font-weight: 700; }
@@ -394,11 +398,15 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   font-size: var(--fs-small);
   font-weight: 700;
   letter-spacing: 0.01em;
-  color: var(--text-main);
-  background: var(--surface-3, var(--surface-2));
   border-top: 2px solid var(--border-strong);
 }
 .la-grid tr.la-head-row .la-day { border-top: 2px solid var(--border-strong); }
+/* A section band runs the whole width of the calendar, the activity columns
+   and every day, so the rows under it read as one group — the band BART's
+   sheet draws and the export writes. Fixed shading, like the weekends, which
+   still show through it as they do on the sheet. */
+.la-grid tbody tr.la-head-row > td { background-color: var(--la-band); color: var(--la-band-ink); }
+.la-grid tbody tr.la-head-row > td.la-day.la-weekend { background-color: var(--la-weekend); }
 
 /* The Resource row the workbook writes under an activity: who is on it.
    Drawn as a continuation of the line above rather than as a row of its own —
@@ -1330,7 +1338,12 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   font-size: 10px;
   color: var(--text-main);
 }
-.lae-grid .lae-weekend { background: var(--surface-2); }
+/* The same fixed greys as the calendar's view: a weekend column on every
+   row, and the section band across the whole row with the weekends showing
+   through. A painted day's colour is inline and covers the grey; take the
+   shift off and the grey comes back. */
+.lae-grid tbody td.lae-day.lae-weekend:not(.lae-painted) { background-color: var(--la-weekend); color: var(--la-weekend-ink); }
+.lae-grid tfoot td.lae-weekend { background: var(--surface-2); }
 .lae-grid td.lae-today { box-shadow: inset 2px 0 0 var(--hitachi-red); }
 /* A painted day states its own colour, so its writing has to stay legible over
    whatever the colour turns out to be — as on the calendar grid. */
@@ -1360,17 +1373,20 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   font-weight: 700;
 }
 .lae-grid td.lae-painted .lae-code-cancelled,
-.la-grid td.la-painted .la-code-cancelled { color: var(--hitachi-red); }
+.la-grid td.la-painted .la-code-cancelled,
+.lae-grid td.lae-weekend .lae-code-cancelled,
+.la-grid td.la-weekend .la-code-cancelled { color: var(--hitachi-red); }
 .lae-grid td.lae-painted.lae-dark .lae-code-cancelled,
 .la-grid td.la-painted.la-dark .la-code-cancelled { color: var(--surface); background: var(--hitachi-red); padding: 0 2px; }
 
 /* Row kinds. */
 .lae-grid tr.lae-section td {
-  background: var(--surface-3);
+  background-color: var(--la-band);
   border-top: 2px solid var(--border-strong);
   font-weight: 700;
-  color: var(--text-main);
+  color: var(--la-band-ink);
 }
+.lae-grid tr.lae-section td.lae-day.lae-weekend { background-color: var(--la-weekend); }
 .lae-grid tr.lae-section td.lae-meta-description { font-size: var(--fs-small); overflow: visible; }
 .lae-grid tr.lae-resource td.lae-meta { font-style: italic; color: var(--text-muted); }
 .lae-grid tr.lae-resource td { border-bottom-color: var(--border-strong); }

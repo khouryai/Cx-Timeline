@@ -33,6 +33,17 @@
 :root {
   /* ── 1. INVARIANTS ─────────────────────────────────────────────────────── */
 
+  /* The look-ahead's own two greys, the ones BART's 4WLA workbook paints and
+     the Excel export writes: a weekend column, and a section band. The same in
+     every theme on purpose — they are the sheet's shading, not the
+     interface's, and a weekend that changed shade with the theme would stop
+     reading as the weekend on the sheet it came from. Writing on them is dark
+     whatever the theme. */
+  --la-weekend: #7f7f7f;
+  --la-weekend-ink: #111111;
+  --la-band: #d9d9d9;
+  --la-band-ink: #111111;
+
   /* Brand — Hitachi red (shared with cx-portal) */
   --hitachi-red: #e60012;
   --hitachi-red-hover: #b80010;

@@ -1883,6 +1883,20 @@ seconds after its saves go quiet, and immediately when another section is
 opened, *quietly* (no `RC_CHANGED`), because a redraw of the whole tab every time
 it saved would throw away the cell somebody is typing in.
 
+### Weekends and section bands are fixed shading, the same in both views
+
+A weekend column is grey (`--la-weekend`, the sheet's `7F7F7F`) on every row,
+and a section band is a lighter grey (`--la-band`, `D9D9D9`) across its whole
+row, activity columns and days alike, with the weekends showing through it —
+exactly what BART's workbook paints and the Excel export writes. Both are CSS
+on the editor's grid and the calendar's view, never a legend colour, never in
+the key. A shift painted on a Saturday is inline and covers the grey; take the
+shift off and the grey is back. The calendar's view used to get its grey from
+the workbook having painted the weekends, so once the editor became the source
+— which publishes no paint for a weekend — the view lost it while the editor
+still showed a faint tint; the two greys are the same in every theme so the
+weekend never changes shade from one screen to the other.
+
 ### The editor is the calendar with Edit switched on
 
 The editor used to be a section of its own beside the Calendar section, both
