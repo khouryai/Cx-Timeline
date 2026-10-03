@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-10-03T05:01:31.907Z
+ * Modules: 59   Built: 2026-10-03T05:18:11.351Z
  */
 (function () {
   'use strict';
@@ -17817,6 +17817,9 @@ __mods["core/rc.js"] = function (__x, __req) {
     guardPreview();
     const { error } = await client.storage.from('tawr').upload(TAWR_TEMPLATE, blob, {
       upsert: true,
+      // A replaced form must be the one the next download fills, not a copy a
+      // cache kept for the default hour.
+      cacheControl: '0',
       contentType: 'application/pdf',
     });
     if (error) throw new Error(`upload: ${error.message}`);

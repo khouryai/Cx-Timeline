@@ -341,6 +341,13 @@ for (const variant of ['classic', 'compressed']) {
   const crowded = pdf.fillForm(blank, { row1_area: 'Train Control Room, Lake Merritt, Tracks M1 and M2' }, { textSize: 9 });
   check('only text too wide for its box is shrunk', crowded.report.fields.row1_area.size < 9 && crowded.report.fields.row1_area.fits);
 
+  const stamped = pdf.readForm(uniform.bytes);
+  check('the download says which filler wrote it', stamped.filler === `TAWR filler ${pdf.FILLER_VERSION}`);
+  const asking = buildFormPdf(fieldSpecs, { needAppearances: true });
+  check('a template that tells viewers to redraw every box…', pdf.readForm(asking).needAppearances === true);
+  check('…downloads telling them not to — the boxes are already drawn at 9 pt',
+    pdf.readForm(pdf.fillForm(asking, { row1_area: 'C-156' }, { textSize: 9 }).bytes).needAppearances === false);
+
   const dated = pdf.readForm(pdf.fillForm(blank, { row1_date: '10/19/26', row2_date: '2026-10-20', row3_date: 'TBD' }).bytes);
   const dv = (name) => dated.fields.find((f) => f.name === name)?.value;
   check('a date is written the way the box\'s own date check asks — 10/19/26 would show blank',

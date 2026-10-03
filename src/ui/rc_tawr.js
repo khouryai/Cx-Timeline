@@ -28,7 +28,7 @@
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import * as T from '../core/tawr.js';
-import { readForm, missingFields, fillForm } from '../io/tawr_pdf.js';
+import { readForm, missingFields, fillForm, FILLER_VERSION } from '../io/tawr_pdf.js';
 import { zipStore } from '../io/xlsx_write.js';
 import { saveFile } from '../io/exporters.js';
 import { icon } from './icons.js';
@@ -911,6 +911,12 @@ async function renderSetup(host) {
       hint: 'By the shift, not the colour — re-mapping a colour in Legend does not move these.',
     }));
   }
+
+  list.appendChild(row({
+    label: 'Form filler',
+    hint: 'The version of the code that fills the form, stamped inside every PDF it writes. If a download looks wrong, check this matches — an older number means this page or the desktop app has not picked up the latest version yet (reload, or close and reopen the app twice).',
+    control: el('span', { class: 'rc-settings-mono', dataset: { tawrFiller: String(FILLER_VERSION) }, text: `TAWR filler ${FILLER_VERSION}` }),
+  }));
 
   list.appendChild(group('Where each place is'));
   list.appendChild(row({

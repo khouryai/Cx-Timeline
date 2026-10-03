@@ -1400,6 +1400,9 @@ export async function uploadTawrTemplate(blob) {
   guardPreview();
   const { error } = await client.storage.from('tawr').upload(TAWR_TEMPLATE, blob, {
     upsert: true,
+    // A replaced form must be the one the next download fills, not a copy a
+    // cache kept for the default hour.
+    cacheControl: '0',
     contentType: 'application/pdf',
   });
   if (error) throw new Error(`upload: ${error.message}`);

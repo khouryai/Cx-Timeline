@@ -437,6 +437,14 @@ function pdfText(text) {
    The form
    ═══════════════════════════════════════════════════════════════════════ */
 
+/**
+ * Which version of this filler wrote a PDF — stamped into every form it fills
+ * (`/CxTimelineFiller` on the AcroForm) and shown in TAWR → Setup, so a download
+ * that looks wrong can be traced to the code that made it. Raise it whenever
+ * what this module writes changes.
+ */
+export const FILLER_VERSION = 5;
+
 const KIND = { Tx: 'text', Btn: 'check', Ch: 'choice', Sig: 'sig' };
 
 /**
@@ -567,8 +575,10 @@ function walkFields(doc) {
 export function readForm(bytes) {
   const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   const doc = new Doc(data);
-  const { fields } = walkFields(doc);
+  const { fields, acro } = walkFields(doc);
   return {
+    filler: textOf(doc.get(acro?.d?.CxTimelineFiller)) || null,
+    needAppearances: doc.get(acro?.d?.NeedAppearances) === true,
     fields: fields.map(({ name, kind, value, onState, options, multiline, rect, da, widgets }) => ({
       name, kind, value, onState, options, multiline, rect, da,
       // The size each of its boxes says it is, where a box says one of its own.
@@ -900,16 +910,22 @@ export function fillForm(bytes, values, { signature = null, textSize = null } = 
       }
       if (fieldObj.d.DA) fieldObj.d.DA = { s: sizedDA(textOf(fieldObj.d.DA), size0) };
     }
-    const rootRef = doc.trailer.d.Root;
-    const catalog = doc.get(rootRef);
-    const acroRef = catalog?.d?.AcroForm;
-    if (acroRef?.r !== undefined) {
-      const ao = objectOf(acroRef);
-      ao.d.DA = { s: sizedDA(textOf(doc.get(ao.d.DA)), size0) };
-    } else if (acroRef?.d) {
-      objectOf(rootRef).d.AcroForm = { d: { ...acroRef.d, DA: { s: sizedDA(textOf(doc.get(acroRef.d.DA)), size0) } } };
-    }
   }
+
+  /* The form itself. NeedAppearances is switched off: every filled box has its
+     appearance drawn here, at the size asked for, and a viewer told to redraw
+     them all (BART's re-saved template says so) draws them its own way instead.
+     And which filler wrote the file is stamped in it, so a download can say. */
+  const rootRef = doc.trailer.d.Root;
+  const acroRef = doc.get(rootRef)?.d?.AcroForm;
+  const acroObj = acroRef?.r !== undefined
+    ? objectOf(acroRef)
+    : (objectOf(rootRef).d.AcroForm = { d: { ...(acroRef?.d || {}) } });
+  const formDA = textOf(doc.get(acroObj.d.DA));
+  // Never left on auto (0): the form's default is what a box without a size of its own uses.
+  if (size0 || !parseDA(formDA || '').size) acroObj.d.DA = { s: sizedDA(formDA, size0 || 9) };
+  acroObj.d.NeedAppearances = false;
+  acroObj.d.CxTimelineFiller = { s: `TAWR filler ${FILLER_VERSION}` };
 
   if (signature?.strokes?.length) {
     const field = byName.get(signature.field);

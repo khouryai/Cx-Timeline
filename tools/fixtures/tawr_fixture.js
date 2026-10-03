@@ -25,7 +25,7 @@ const str = (s) => `(${String(s).replace(/[\\()]/g, (c) => `\\${c}`)})`;
  * `fields`: `[{ name, kind }]`, kind text | check | choice | sig. Answers the
  * PDF as a Uint8Array.
  */
-export function buildFormPdf(fields, { compressed = false, auto = false } = {}) {
+export function buildFormPdf(fields, { compressed = false, auto = false, needAppearances = false } = {}) {
   // `auto`: every box, and the form's default, left at font size 0 — "auto".
   const tf = (n) => (auto ? 0 : n);
   const objects = []; // index = object number - 1; { body, stream? }
@@ -79,7 +79,7 @@ export function buildFormPdf(fields, { compressed = false, auto = false } = {}) 
 
   const contents = add('<< >>', 'BT /Helv 12 Tf 30 780 Td (SYSTEM ACCESS / TRACK ALLOCATION WORK REQUEST FORM) Tj ET');
   const acro = add(`<< /Fields [${roots.map((n) => `${n} 0 R`).join(' ')}] /DA (/Helv 0 Tf 0 g) `
-    + `/DR << /Font << /Helv ${helv} 0 R /ZaDb ${zadb} 0 R >> >> /SigFlags 1 >>`);
+    + `/DR << /Font << /Helv ${helv} 0 R /ZaDb ${zadb} 0 R >> >> /SigFlags 1${needAppearances ? ' /NeedAppearances true' : ''} >>`);
   set(catalog, `<< /Type /Catalog /Pages ${pages} 0 R${fields.length ? ` /AcroForm ${acro} 0 R` : ''} >>`);
   set(pages, `<< /Type /Pages /Kids [${page} 0 R] /Count 1 >>`);
   set(page, `<< /Type /Page /Parent ${pages} 0 R /MediaBox [0 0 612 792] /Contents ${contents} 0 R `

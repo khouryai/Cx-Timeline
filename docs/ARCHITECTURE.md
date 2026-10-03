@@ -2394,7 +2394,13 @@ dropdown is set to that size, filled or blank, on the box, on its field and as
 the form's own default: BART's form defaults to auto, Acrobat falls back to the
 default for any box that states no size of its own (and splits a box from its
 field when the form is edited), so a template edited to 9 pt still came out on
-auto until all three were written. Each
+auto until all three were written. `NeedAppearances` is switched off in every
+download — a template re-saved by Excel or Acrobat can arrive with it on, which
+tells a viewer to discard the drawn boxes and redraw them its own way — and the
+filler stamps its version (`FILLER_VERSION`, shown in TAWR → Setup) into the
+form as `/CxTimelineFiller`, so a download that looks wrong can be traced to the
+code that wrote it. A replaced template is uploaded with no cache lifetime, so
+the next download fills the new one. Each
 field is also told the size it was drawn at: Acrobat redraws a
 field from its own declared size when it saves the form, and setting one to auto
 size (tried once) redrew those boxes at four points. A date is written in the

@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-03T05:01:32.020Z
+ * Modules: 28   Built: 2026-10-03T05:18:11.577Z
  */
 (function () {
   'use strict';
@@ -16899,6 +16899,14 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
      The form
      ═══════════════════════════════════════════════════════════════════════ */
 
+  /**
+   * Which version of this filler wrote a PDF — stamped into every form it fills
+   * (`/CxTimelineFiller` on the AcroForm) and shown in TAWR → Setup, so a download
+   * that looks wrong can be traced to the code that made it. Raise it whenever
+   * what this module writes changes.
+   */
+  const FILLER_VERSION = 5;
+
   const KIND = { Tx: 'text', Btn: 'check', Ch: 'choice', Sig: 'sig' };
 
   /**
@@ -17029,8 +17037,10 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
   function readForm(bytes) {
     const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     const doc = new Doc(data);
-    const { fields } = walkFields(doc);
+    const { fields, acro } = walkFields(doc);
     return {
+      filler: textOf(doc.get(acro?.d?.CxTimelineFiller)) || null,
+      needAppearances: doc.get(acro?.d?.NeedAppearances) === true,
       fields: fields.map(({ name, kind, value, onState, options, multiline, rect, da, widgets }) => ({
         name, kind, value, onState, options, multiline, rect, da,
         // The size each of its boxes says it is, where a box says one of its own.
@@ -17362,16 +17372,22 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
         }
         if (fieldObj.d.DA) fieldObj.d.DA = { s: sizedDA(textOf(fieldObj.d.DA), size0) };
       }
-      const rootRef = doc.trailer.d.Root;
-      const catalog = doc.get(rootRef);
-      const acroRef = catalog?.d?.AcroForm;
-      if (acroRef?.r !== undefined) {
-        const ao = objectOf(acroRef);
-        ao.d.DA = { s: sizedDA(textOf(doc.get(ao.d.DA)), size0) };
-      } else if (acroRef?.d) {
-        objectOf(rootRef).d.AcroForm = { d: { ...acroRef.d, DA: { s: sizedDA(textOf(doc.get(acroRef.d.DA)), size0) } } };
-      }
     }
+
+    /* The form itself. NeedAppearances is switched off: every filled box has its
+       appearance drawn here, at the size asked for, and a viewer told to redraw
+       them all (BART's re-saved template says so) draws them its own way instead.
+       And which filler wrote the file is stamped in it, so a download can say. */
+    const rootRef = doc.trailer.d.Root;
+    const acroRef = doc.get(rootRef)?.d?.AcroForm;
+    const acroObj = acroRef?.r !== undefined
+      ? objectOf(acroRef)
+      : (objectOf(rootRef).d.AcroForm = { d: { ...(acroRef?.d || {}) } });
+    const formDA = textOf(doc.get(acroObj.d.DA));
+    // Never left on auto (0): the form's default is what a box without a size of its own uses.
+    if (size0 || !parseDA(formDA || '').size) acroObj.d.DA = { s: sizedDA(formDA, size0 || 9) };
+    acroObj.d.NeedAppearances = false;
+    acroObj.d.CxTimelineFiller = { s: `TAWR filler ${FILLER_VERSION}` };
 
     if (signature?.strokes?.length) {
       const field = byName.get(signature.field);
@@ -17485,6 +17501,7 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
     return out;
   }
 
+  Object.defineProperty(__x, "FILLER_VERSION", { get: () => FILLER_VERSION, enumerable: true });
   Object.defineProperty(__x, "formatDateAs", { get: () => formatDateAs, enumerable: true });
   Object.defineProperty(__x, "readForm", { get: () => readForm, enumerable: true });
   Object.defineProperty(__x, "missingFields", { get: () => missingFields, enumerable: true });
@@ -17523,7 +17540,7 @@ __mods["ui/rc_tawr.js"] = function (__x, __req) {
   const { el, clear } = __req("core/util.js");
   const rc = __req("core/rc.js");
   const T = __req("core/tawr.js");
-  const { readForm, missingFields, fillForm } = __req("io/tawr_pdf.js");
+  const { readForm, missingFields, fillForm, FILLER_VERSION } = __req("io/tawr_pdf.js");
   const { zipStore } = __req("io/xlsx_write.js");
   const { saveFile } = __req("io/exporters.js");
   const { icon } = __req("ui/icons.js");
@@ -18406,6 +18423,12 @@ __mods["ui/rc_tawr.js"] = function (__x, __req) {
         hint: 'By the shift, not the colour — re-mapping a colour in Legend does not move these.',
       }));
     }
+
+    list.appendChild(row({
+      label: 'Form filler',
+      hint: 'The version of the code that fills the form, stamped inside every PDF it writes. If a download looks wrong, check this matches — an older number means this page or the desktop app has not picked up the latest version yet (reload, or close and reopen the app twice).',
+      control: el('span', { class: 'rc-settings-mono', dataset: { tawrFiller: String(FILLER_VERSION) }, text: `TAWR filler ${FILLER_VERSION}` }),
+    }));
 
     list.appendChild(group('Where each place is'));
     list.appendChild(row({
