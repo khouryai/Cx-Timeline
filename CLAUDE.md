@@ -507,8 +507,9 @@ Each of these has caused a real bug:
 **Work on the default branch, `claude/timeline-planner-app-y1t1nm`, and push
 to it directly** — the owner's standing instruction, whatever branch a session
 was started on. No feature branches and no pull requests: a change is merged
-the moment it is pushed, and a push there is a production deploy (Cloudflare
-builds that branch only; preview builds are off). So `npm run build` and
+the moment it is pushed, and a push there is a production deploy (`.github/workflows/deploy.yml`
+publishes that branch to Cloudflare once Checks passes on it; nothing else is
+deployed, and its log is in the Actions tab). So `npm run build` and
 `npm test` pass before every push, not after. Keep the rebuilt
 `app.bundle.js`, `calendar.bundle.js` **and** `mobile.bundle.js` in the same
 commit as the `src/` change that produced them, otherwise the running

@@ -88,7 +88,24 @@ Cloudflare offers two products here and they are easy to mix up. **Workers**
 to; **Pages** is the older one. Either serves this app fine. The repository
 carries a [`wrangler.jsonc`](wrangler.jsonc) configured for **Workers**.
 
-### Workers (what the dashboard gives you today)
+### From GitHub Actions (how the live site is deployed now)
+
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) runs the same
+build and `wrangler deploy` on GitHub's machines, after **Checks** passes on the
+default branch (or by hand: Actions → Deploy → Run workflow). Its log is in the
+Actions tab, readable by anyone with the repository, and a red check now stops
+the deploy instead of following it. It needs four repository secrets
+(Settings → Secrets and variables → Actions): `CLOUDFLARE_API_TOKEN` (a token
+with *Edit Cloudflare Workers*), `CLOUDFLARE_ACCOUNT_ID`, and the build
+variables the shape needs — `RC_SUPABASE_URL` and `RC_SUPABASE_ANON_KEY` for the
+calendar shape. Switch Cloudflare's own automatic builds off (Worker →
+Settings → Build → disconnect the repository), or every push deploys twice.
+
+Cloudflare's builder was replaced in October 2026, when it began failing every
+build within seconds — before any of this repository ran — with one build
+frozen "in progress" that could be neither cancelled nor retried.
+
+### Workers (Cloudflare's own builder)
 
 **Workers & Pages** → **Create** → **Import a repository** → pick this repo.
 

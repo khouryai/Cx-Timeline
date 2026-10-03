@@ -1,0 +1,86 @@
+# Publish the site to Cloudflare from GitHub, once the checks are green.
+#
+# Cloudflare's own builder (Workers Builds) used to build every push. It stopped
+# building in October 2026 — failing in seconds, before the repository's code ran,
+# with one build frozen "in progress" that the dashboard could neither cancel
+# nor retry — and its log can only be read in the dashboard. This does the same
+# two steps (`npm run build:dist`, `wrangler deploy`) on GitHub's machines, where
+# the log is readable by anyone with the repository, and only for a commit
+# whose checks passed — so a red tick now prevents the deploy instead of
+# arriving after it. Switch Cloudflare's automatic builds off, or every push
+# deploys twice.
+#
+# Repository secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   a token with "Edit Cloudflare Workers"
+#   CLOUDFLARE_ACCOUNT_ID  the account that holds the cx-timeline Worker
+#   RC_SUPABASE_URL        the calendar's Supabase project — the same two values
+#   RC_SUPABASE_ANON_KEY   Cloudflare's build variables held
+#
+# `tools/dist.js` refuses to publish the calendar shape without the last two, so
+# a missing secret fails the build rather than publishing a calendar nobody can
+# sign in to.
+
+name: Deploy
+
+on:
+  # After Checks finishes on the default branch; the job runs only if it passed.
+  workflow_run:
+    workflows: [Checks]
+    types: [completed]
+    branches: [claude/timeline-planner-app-y1t1nm]
+  # By hand, from the Actions tab — deploys the head of the default branch.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; a newer commit waits for the one before it rather than
+# racing it to the edge.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Publish to Cloudflare
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://cx-timeline.aik-khoury.workers.dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The commit the checks passed on, not whatever the branch says now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build
+        env:
+          RC_SUPABASE_URL: ${{ secrets.RC_SUPABASE_URL }}
+          RC_SUPABASE_ANON_KEY: ${{ secrets.RC_SUPABASE_ANON_KEY }}
+        # No `npm ci`: the build needs nothing from node_modules, and the only
+        # dependency is the browser the test suites drive.
+        run: npm run build:dist
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 deploy
+      - name: Check the site is serving this build
+        run: |
+          # dist/index.html names the app bundle by its content hash; the live
+          # page should name the same one once the deploy has reached the edge.
+          want=$(grep -oE 'app\.[a-f0-9]+\.js' dist/index.html | head -1)
+          for i in 1 2 3 4 5 6; do
+            got=$(curl -fsS https://cx-timeline.aik-khoury.workers.dev/ | grep -oE 'app\.[a-f0-9]+\.js' | head -1 || true)
+            echo "want $want, live $got"
+            [ "$got" = "$want" ] && exit 0
+            sleep 10
+          done
+          echo "::error::the live site is not serving $want"
+          exit 1
