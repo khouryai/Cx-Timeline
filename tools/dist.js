@@ -293,7 +293,21 @@ function fingerprint(dir) {
   return [...renamed.values()];
 }
 
+/**
+ * One line at the top of the build log saying what the build ran on and which
+ * variables it was given — present or absent, never their values — so a failed
+ * Cloudflare build can be read without access to its settings.
+ */
+function describeBuild() {
+  const vars = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'RC_SUPABASE_URL', 'RC_SUPABASE_ANON_KEY']
+    .map((name) => `${name} ${process.env[name] ? 'set' : 'unset'}`)
+    .join(', ');
+  const npm = (process.env.npm_config_user_agent || '').split(' ')[0] || 'npm ?';
+  console.log(`  build         — node ${process.version}, ${npm}, ${SHAPE} shape; ${vars}`);
+}
+
 function main() {
+  describeBuild();
   fs.rmSync(OUT, { recursive: true, force: true });
   fs.mkdirSync(OUT, { recursive: true });
 
