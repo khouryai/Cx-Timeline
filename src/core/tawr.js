@@ -303,10 +303,10 @@ export function formDay(iso) {
   return FORM_DAYS[new Date(msOf(iso)).getUTCDay()];
 }
 
-/** "2026-10-19" → "10/19/26". */
+/** "2026-10-19" → "10/19/2026" — the mm/dd/yyyy BART's date boxes check for. */
 export function formDate(iso) {
   const [y, m, d] = String(iso).slice(0, 10).split('-');
-  return `${m}/${d}/${y.slice(2)}`;
+  return `${m}/${d}/${y}`;
 }
 
 /** The last day the request can go in: seventeen calendar days before its first day. */

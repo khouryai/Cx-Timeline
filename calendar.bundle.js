@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-03T03:19:28.588Z
+ * Modules: 28   Built: 2026-10-03T04:03:29.725Z
  */
 (function () {
   'use strict';
@@ -11341,10 +11341,10 @@ __mods["core/tawr.js"] = function (__x, __req) {
     return FORM_DAYS[new Date(msOf(iso)).getUTCDay()];
   }
 
-  /** "2026-10-19" → "10/19/26". */
+  /** "2026-10-19" → "10/19/2026" — the mm/dd/yyyy BART's date boxes check for. */
   function formDate(iso) {
     const [y, m, d] = String(iso).slice(0, 10).split('-');
-    return `${m}/${d}/${y.slice(2)}`;
+    return `${m}/${d}/${y}`;
   }
 
   /** The last day the request can go in: seventeen calendar days before its first day. */
@@ -16901,6 +16901,45 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
 
   const KIND = { Tx: 'text', Btn: 'check', Ch: 'choice', Sig: 'sig' };
 
+  /**
+   * The date format a field's own script insists on — `AFDate_FormatEx("mm/dd/yyyy")`
+   * on BART's date boxes — or null.
+   *
+   * Acrobat runs that script whenever it shows the field, and a value it cannot
+   * read as a date in that format is shown as *nothing*: "10/19/26" in an
+   * mm/dd/yyyy box was a blank date until somebody clicked into it. So a date is
+   * written the way the box asks for it.
+   */
+  function dateFormatOf(doc, aaRef) {
+    const aa = doc.get(aaRef);
+    const action = doc.get(aa?.d?.F);
+    let js = doc.get(action?.d?.JS);
+    if (js?.stream) js = { s: latin1(doc.decode(js)) };
+    const text = textOf(js) || '';
+    return (text.match(/AFDate_FormatEx\(\s*"([^"]+)"\s*\)/) || [])[1] || null;
+  }
+
+  /**
+   * A date written as "10/19/26", "10/19/2026" or "2026-10-19", in a format
+   * spelled the Acrobat way (mm, m, dd, d, yyyy, yy). Anything that is not a
+   * date is left exactly as it was typed.
+   */
+  function formatDateAs(value, format) {
+    const t = String(value ?? '').trim();
+    let y; let m; let d;
+    let hit = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (hit) [, y, m, d] = hit.map(Number);
+    else if ((hit = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/))) {
+      [, m, d, y] = hit.map(Number);
+      if (hit[3].length === 2) y += 2000;
+    } else return t;
+    if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31)) return t;
+    const pad = (n) => String(n).padStart(2, '0');
+    return format.replace(/yyyy|yy|mm|m|dd|d/g, (tok) => ({
+      yyyy: String(y), yy: pad(y % 100), mm: pad(m), m: String(m), dd: pad(d), d: String(d),
+    })[tok]);
+  }
+
   function walkFields(doc) {
     const catalog = doc.get(doc.trailer.d.Root);
     const acro = doc.get(catalog?.d?.AcroForm);
@@ -16971,6 +17010,7 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
           page: doc.get(w)?.d?.P || pageOf.get(w.r) || null,
         })),
         readOnly: Boolean(ff & 1),
+        dateFormat: dateFormatOf(doc, d.AA || first?.d?.AA),
         rect: (doc.get(first?.d?.Rect) || [0, 0, 0, 0]).map((x) => Number(doc.get(x))),
       });
     };
@@ -17114,7 +17154,8 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
       return { size: MIN_SIZE, lines: wrap(text, MIN_SIZE, w - pad * 2), fits: false };
     }
     const flat = String(text).replace(/\s*[\r\n]+\s*/g, ' ');
-    const byHeight = Math.max(MIN_SIZE, (h - 0.5) / 0.93);
+    // Letters top to tail are 0.93 of the size; let them use the whole box.
+    const byHeight = Math.max(MIN_SIZE, (h - 0.2) / 0.9);
     let size = Math.min(start, byHeight);
     const avail = w - pad * 2;
     const full = widthOf(flat, size);
@@ -17243,7 +17284,7 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
       }
       if (field.kind !== 'text' && field.kind !== 'choice') continue;
 
-      const text = String(value ?? '');
+      const text = field.dateFormat ? formatDateAs(value, field.dateFormat) : String(value ?? '');
       fieldObj.d.V = pdfText(text);
       const { font: fontName } = parseDA(field.da);
       for (const w of field.widgets) {
@@ -17260,10 +17301,13 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
           stream: bytesOf(ap.content),
         });
         wo.d.AP = { d: { N: stream } };
-        // Drawn smaller than the form asks: say so in the field too, as "fit to
-        // box", so a later edit in Acrobat keeps fitting rather than overflowing.
-        if (text && ap.daSize && ap.size < ap.daSize) {
-          wo.d.DA = { s: field.da.replace(/(\/[^\s/]+\s+)[\d.]+(\s+Tf)/, '$10$2') };
+        /* The size it was drawn at is written into the field as well. Acrobat
+           redraws a field from its own declared size whenever it saves or edits
+           the form, so a field left at the form's 9 pt redrew too big for its box,
+           and one set to auto size — tried once — redrew at 4 pt. Declaring the
+           size drawn here makes the two agree. */
+        if (text && Math.abs(ap.size - (ap.daSize || 0)) > 0.01) {
+          wo.d.DA = { s: field.da.replace(/(\/[^\s/]+\s+)[\d.]+(\s+Tf)/, `$1${num(ap.size)}$2`) };
         }
         report.appearances++;
         if (text) report.fields[name] = { size: ap.size, fits: ap.fits };
@@ -17382,6 +17426,7 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
     return out;
   }
 
+  Object.defineProperty(__x, "formatDateAs", { get: () => formatDateAs, enumerable: true });
   Object.defineProperty(__x, "readForm", { get: () => readForm, enumerable: true });
   Object.defineProperty(__x, "missingFields", { get: () => missingFields, enumerable: true });
   Object.defineProperty(__x, "fillForm", { get: () => fillForm, enumerable: true });
@@ -18143,7 +18188,7 @@ __mods["ui/rc_tawr.js"] = function (__x, __req) {
     const rows = [];
     for (let n = 1; n <= T.FORM_ROWS; n++) {
       rows.push(el('tr', {}, [
-        el('td', {}, [text(`row${n}_date`, { placeholder: 'MM/DD/YY', width: '84px' })]),
+        el('td', {}, [text(`row${n}_date`, { placeholder: 'MM/DD/YYYY', width: '96px' })]),
         el('td', {}, [choice(`row${n}_day`, DAY_OPTIONS)]),
         el('td', {}, [text(`row${n}_time_start`, { placeholder: '0700', width: '60px' })]),
         el('td', {}, [text(`row${n}_time_end`, { placeholder: '1500', width: '60px' })]),

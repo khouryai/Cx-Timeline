@@ -439,6 +439,45 @@ function pdfText(text) {
 
 const KIND = { Tx: 'text', Btn: 'check', Ch: 'choice', Sig: 'sig' };
 
+/**
+ * The date format a field's own script insists on — `AFDate_FormatEx("mm/dd/yyyy")`
+ * on BART's date boxes — or null.
+ *
+ * Acrobat runs that script whenever it shows the field, and a value it cannot
+ * read as a date in that format is shown as *nothing*: "10/19/26" in an
+ * mm/dd/yyyy box was a blank date until somebody clicked into it. So a date is
+ * written the way the box asks for it.
+ */
+function dateFormatOf(doc, aaRef) {
+  const aa = doc.get(aaRef);
+  const action = doc.get(aa?.d?.F);
+  let js = doc.get(action?.d?.JS);
+  if (js?.stream) js = { s: latin1(doc.decode(js)) };
+  const text = textOf(js) || '';
+  return (text.match(/AFDate_FormatEx\(\s*"([^"]+)"\s*\)/) || [])[1] || null;
+}
+
+/**
+ * A date written as "10/19/26", "10/19/2026" or "2026-10-19", in a format
+ * spelled the Acrobat way (mm, m, dd, d, yyyy, yy). Anything that is not a
+ * date is left exactly as it was typed.
+ */
+export function formatDateAs(value, format) {
+  const t = String(value ?? '').trim();
+  let y; let m; let d;
+  let hit = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (hit) [, y, m, d] = hit.map(Number);
+  else if ((hit = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/))) {
+    [, m, d, y] = hit.map(Number);
+    if (hit[3].length === 2) y += 2000;
+  } else return t;
+  if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31)) return t;
+  const pad = (n) => String(n).padStart(2, '0');
+  return format.replace(/yyyy|yy|mm|m|dd|d/g, (tok) => ({
+    yyyy: String(y), yy: pad(y % 100), mm: pad(m), m: String(m), dd: pad(d), d: String(d),
+  })[tok]);
+}
+
 function walkFields(doc) {
   const catalog = doc.get(doc.trailer.d.Root);
   const acro = doc.get(catalog?.d?.AcroForm);
@@ -509,6 +548,7 @@ function walkFields(doc) {
         page: doc.get(w)?.d?.P || pageOf.get(w.r) || null,
       })),
       readOnly: Boolean(ff & 1),
+      dateFormat: dateFormatOf(doc, d.AA || first?.d?.AA),
       rect: (doc.get(first?.d?.Rect) || [0, 0, 0, 0]).map((x) => Number(doc.get(x))),
     });
   };
@@ -652,7 +692,8 @@ function layoutText(text, field, w, h) {
     return { size: MIN_SIZE, lines: wrap(text, MIN_SIZE, w - pad * 2), fits: false };
   }
   const flat = String(text).replace(/\s*[\r\n]+\s*/g, ' ');
-  const byHeight = Math.max(MIN_SIZE, (h - 0.5) / 0.93);
+  // Letters top to tail are 0.93 of the size; let them use the whole box.
+  const byHeight = Math.max(MIN_SIZE, (h - 0.2) / 0.9);
   let size = Math.min(start, byHeight);
   const avail = w - pad * 2;
   const full = widthOf(flat, size);
@@ -781,7 +822,7 @@ export function fillForm(bytes, values, { signature = null } = {}) {
     }
     if (field.kind !== 'text' && field.kind !== 'choice') continue;
 
-    const text = String(value ?? '');
+    const text = field.dateFormat ? formatDateAs(value, field.dateFormat) : String(value ?? '');
     fieldObj.d.V = pdfText(text);
     const { font: fontName } = parseDA(field.da);
     for (const w of field.widgets) {
@@ -798,10 +839,13 @@ export function fillForm(bytes, values, { signature = null } = {}) {
         stream: bytesOf(ap.content),
       });
       wo.d.AP = { d: { N: stream } };
-      // Drawn smaller than the form asks: say so in the field too, as "fit to
-      // box", so a later edit in Acrobat keeps fitting rather than overflowing.
-      if (text && ap.daSize && ap.size < ap.daSize) {
-        wo.d.DA = { s: field.da.replace(/(\/[^\s/]+\s+)[\d.]+(\s+Tf)/, '$10$2') };
+      /* The size it was drawn at is written into the field as well. Acrobat
+         redraws a field from its own declared size whenever it saves or edits
+         the form, so a field left at the form's 9 pt redrew too big for its box,
+         and one set to auto size — tried once — redrew at 4 pt. Declaring the
+         size drawn here makes the two agree. */
+      if (text && Math.abs(ap.size - (ap.daSize || 0)) > 0.01) {
+        wo.d.DA = { s: field.da.replace(/(\/[^\s/]+\s+)[\d.]+(\s+Tf)/, `$1${num(ap.size)}$2`) };
       }
       report.appearances++;
       if (text) report.fields[name] = { size: ap.size, fits: ap.fits };

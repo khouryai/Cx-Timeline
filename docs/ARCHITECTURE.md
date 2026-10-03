@@ -2386,10 +2386,13 @@ is rewritten, so the result is still fillable in Acrobat and its signature boxes
 still signable. Every filled box gets its own appearance, because most viewers
 and every printer show only that: a single line shrinks until it fits across and
 inside its box, the work description wraps and shrinks a quarter point at a
-time, and a field drawn smaller than the form asked is set to auto size so a
-later edit in Acrobat keeps fitting. What does not fit at four points is
-reported, and the review says so before anybody downloads. An encrypted file is
-refused with a reason.
+time. Each field is also told the size it was drawn at: Acrobat redraws a
+field from its own declared size when it saves the form, and setting one to auto
+size (tried once) redrew those boxes at four points. A date is written in the
+format the box's own `AFDate_FormatEx` script checks for — BART's are
+mm/dd/yyyy, and "10/19/26" in one shows as blank until somebody clicks it. What
+does not fit at four points is reported, and the review says so before anybody
+downloads. An encrypted file is refused with a reason.
 
 ### The blank form and every signature are an administrator's alone
 

@@ -231,7 +231,7 @@ console.log('\nThe form values');
   check('the description is the activity with its expanded wording',
     v.work_description.startsWith('IXL SIM Testing — IXL team will perform functional testing') && v.work_description.includes('\nDCS Testing'));
   check('an activity with no wording mapped is listed by name, and said to be', g.unexpanded.join() === 'DCS Testing');
-  check('rows carry date, day, hours and area', v.row1_date === '10/19/26' && v.row1_day === 'MON'
+  check('rows carry date, day, hours and area', v.row1_date === '10/19/2026' && v.row1_day === 'MON'
     && v.row1_time_start === '0700' && v.row1_time_end === '1700' && v.row1_area === 'Train Control Room, W34');
   check('the form\'s own day spellings', tawr.formDay(day(1)) === 'TUES' && tawr.formDay(day(3)) === 'THURS' && tawr.formDay(day(6)) === 'SUN');
   check('an unused row stays empty', v.row5_date === undefined);
@@ -318,9 +318,30 @@ for (const variant of ['classic', 'compressed']) {
   check('the form stays fillable', !/\/Ff\s+1\b/.test(text.slice(blank.length)) && back.fields.length === 141);
   check('the output ends as a PDF does', /%%EOF\s*$/.test(text));
 
+  const tail = Buffer.from(out.subarray(blank.length)).toString('latin1');
+  check('no field is left to auto size — a viewer redraws those at 4 pt', !/\/Helv 0 Tf/.test(tail));
+  const area = report.fields.row1_area;
+  check('a one-line box is drawn as large as its height allows', area && area.size >= 8.2, JSON.stringify(area));
+  check('and declares that size, so a viewer redrawing it draws the same',
+    new RegExp(`/Helv ${Math.round(area.size * 10000) / 10000} Tf`).test(tail));
+
+  const dated = pdf.readForm(pdf.fillForm(blank, { row1_date: '10/19/26', row2_date: '2026-10-20', row3_date: 'TBD' }).bytes);
+  const dv = (name) => dated.fields.find((f) => f.name === name)?.value;
+  check('a date is written the way the box\'s own date check asks — 10/19/26 would show blank',
+    dv('row1_date') === '10/19/2026' && dv('row2_date') === '10/20/2026', `${dv('row1_date')} ${dv('row2_date')}`);
+  check('and anything that is not a date is left as typed', dv('row3_date') === 'TBD');
+
   const refilled = pdf.readForm(pdf.fillForm(out, { row1_area: 'Changed' }).bytes);
   check('a filled form can be filled again', refilled.fields.find((f) => f.name === 'row1_area').value === 'Changed'
     && refilled.fields.find((f) => f.name === 'requestor_name').value === 'Alex Morgan');
+}
+
+console.log('\nDates in the form\'s own format');
+{
+  check('mm/dd/yyyy from a short year', pdf.formatDateAs('10/19/26', 'mm/dd/yyyy') === '10/19/2026');
+  check('from an ISO date', pdf.formatDateAs('2026-01-05', 'mm/dd/yyyy') === '01/05/2026');
+  check('into a short format too', pdf.formatDateAs('01/05/2026', 'm/d/yy') === '1/5/26');
+  check('not a date is not touched', pdf.formatDateAs('13/45/26', 'mm/dd/yyyy') === '13/45/26');
 }
 
 console.log('\nChecking a template');

@@ -752,7 +752,7 @@ function formEditor(record, { readOnly = false } = {}) {
   const rows = [];
   for (let n = 1; n <= T.FORM_ROWS; n++) {
     rows.push(el('tr', {}, [
-      el('td', {}, [text(`row${n}_date`, { placeholder: 'MM/DD/YY', width: '84px' })]),
+      el('td', {}, [text(`row${n}_date`, { placeholder: 'MM/DD/YYYY', width: '96px' })]),
       el('td', {}, [choice(`row${n}_day`, DAY_OPTIONS)]),
       el('td', {}, [text(`row${n}_time_start`, { placeholder: '0700', width: '60px' })]),
       el('td', {}, [text(`row${n}_time_end`, { placeholder: '1500', width: '60px' })]),

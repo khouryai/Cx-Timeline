@@ -53,8 +53,12 @@ export function buildFormPdf(fields, { compressed = false } = {}) {
     x += w + 8;
     let body;
     if (f.kind === 'text') {
+      // BART's date boxes carry Acrobat's own date check, and so do these.
+      const aa = f.name.endsWith('_date')
+        ? ' /AA << /F << /S /JavaScript /JS (AFDate_FormatEx\\("mm/dd/yyyy"\\);) >> /K << /S /JavaScript /JS (AFDate_KeystrokeEx\\("mm/dd/yyyy"\\);) >> >>'
+        : '';
       body = `<< /Type /Annot /Subtype /Widget /FT /Tx /T ${str(f.name)} /Rect ${rect} /P ${page} 0 R /F 4 `
-        + `/DA (0 0 0 rg /Helv ${multiline ? 14 : 9} Tf)${multiline ? ' /Ff 4096' : ''} /AP << /N ${blankAp} 0 R >> >>`;
+        + `/DA (0 0 0 rg /Helv ${multiline ? 14 : 9} Tf)${multiline ? ' /Ff 4096' : ''}${aa} /AP << /N ${blankAp} 0 R >> >>`;
     } else if (f.kind === 'check') {
       body = `<< /Type /Annot /Subtype /Widget /FT /Btn /T ${str(f.name)} /Rect ${rect} /P ${page} 0 R /F 4 `
         + `/DA (0 0 1 rg /ZaDb 12 Tf) /V /Off /AS /Off /AP << /N << /Yes ${on} 0 R /Off ${off} 0 R >> >> >>`;
