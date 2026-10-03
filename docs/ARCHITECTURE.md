@@ -2386,7 +2386,10 @@ is rewritten, so the result is still fillable in Acrobat and its signature boxes
 still signable. Every filled box gets its own appearance, because most viewers
 and every printer show only that: a single line shrinks until it fits across and
 inside its box, the work description wraps and shrinks a quarter point at a
-time. Each field is also told the size it was drawn at: Acrobat redraws a
+time. The calendar asks for one size for every box — the Requestor's, 9 pt —
+so the form reads in one hand: a box too short for it is made taller, upwards
+from the line it sits on, and only text too wide for its box is shrunk. Each
+field is also told the size it was drawn at: Acrobat redraws a
 field from its own declared size when it saves the form, and setting one to auto
 size (tried once) redrew those boxes at four points. A date is written in the
 format the box's own `AFDate_FormatEx` script checks for — BART's are

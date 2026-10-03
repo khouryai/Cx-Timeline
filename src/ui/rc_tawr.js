@@ -511,12 +511,16 @@ async function discard(record) {
 
 /* ── The PDF ───────────────────────────────────────────────────────────── */
 
+/* Every filled box is printed at the Requestor's size, so the form reads as one
+   hand rather than a different size in every box. */
+const TEXT_SIZE = 'requestor_name';
+
 function filled(ctx, bytes, record) {
   const profile = ctx.profiles.get(record.created_by);
   const signature = profile?.signature?.strokes?.length
     ? { field: 'requestor_signature', ...profile.signature }
     : null;
-  return { ...fillForm(bytes, record.fields || {}, { signature }), signed: Boolean(signature), profile };
+  return { ...fillForm(bytes, record.fields || {}, { signature, textSize: TEXT_SIZE }), signed: Boolean(signature), profile };
 }
 
 async function templateOrSay() {
@@ -624,7 +628,7 @@ function openReview(ctx, record, group, { readOnly = false } = {}) {
       try { bytes = await getTemplate(); } catch { /* said on download */ }
       if (!bytes) { fitBox.textContent = ''; return; }
       try {
-        const { report } = fillForm(bytes, editor.read());
+        const { report } = fillForm(bytes, editor.read(), { textSize: TEXT_SIZE });
         const over = Object.entries(report.fields).filter(([, r]) => !r.fits).map(([k]) => label(k));
         const shrunk = report.fields.work_description;
         fitBox.className = `rc-tawr-fit${over.length ? ' rc-warn' : ''}`;

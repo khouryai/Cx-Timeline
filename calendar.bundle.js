@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-03T04:03:29.725Z
+ * Modules: 28   Built: 2026-10-03T04:17:01.827Z
  */
 (function () {
   'use strict';
@@ -17142,31 +17142,33 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
    * and its glyphs fit inside it top to bottom. Multi-line: wrapped, and shrunk a
    * quarter point at a time until every line is inside the box.
    */
-  function layoutText(text, field, w, h) {
+  function layoutText(text, field, w, h, size0 = null) {
     const { size: daSize } = parseDA(field.da);
-    const start = daSize || 12;
+    const start = size0 || daSize || 12;
     const pad = 2;
     if (field.multiline) {
       for (let size = start; size >= MIN_SIZE; size -= 0.25) {
         const lines = wrap(text, size, w - pad * 2);
-        if (lines.length * size * 1.15 <= h - pad) return { size, lines, fits: true };
+        if (lines.length * size * 1.15 <= h - pad) return { size, lines, fits: true, h };
       }
-      return { size: MIN_SIZE, lines: wrap(text, MIN_SIZE, w - pad * 2), fits: false };
+      return { size: MIN_SIZE, lines: wrap(text, MIN_SIZE, w - pad * 2), fits: false, h };
     }
     const flat = String(text).replace(/\s*[\r\n]+\s*/g, ' ');
-    // Letters top to tail are 0.93 of the size; let them use the whole box.
-    const byHeight = Math.max(MIN_SIZE, (h - 0.2) / 0.9);
-    let size = Math.min(start, byHeight);
+    /* Letters top to tail are 0.93 of the size. With a size asked for, a box too
+       short for it is made taller (upwards, so the text stays on its line);
+       without one, the text shrinks to the box. Width only ever shrinks it. */
+    let size = size0 ? start : Math.min(start, Math.max(MIN_SIZE, (h - 0.2) / 0.9));
     const avail = w - pad * 2;
     const full = widthOf(flat, size);
     if (full > avail) size = Math.max(MIN_SIZE, Math.floor((size * avail / full) * 4) / 4);
-    return { size, lines: [flat], fits: widthOf(flat, size) <= avail + 0.01 };
+    const tall = size0 ? Math.max(h, size * 0.93 + 0.4) : h;
+    return { size, lines: [flat], fits: widthOf(flat, size) <= avail + 0.01, h: tall };
   }
 
-  function textAppearance(text, field, w, h, fontName) {
+  function textAppearance(text, field, w, h0, fontName, size0 = null) {
     const { color } = parseDA(field.da);
-    const layout = layoutText(text, field, w, h);
-    const { size, lines } = layout;
+    const layout = layoutText(text, field, w, h0, size0);
+    const { size, lines, h } = layout;
     const pad = 2;
     // A single line is clipped to the box itself: its boxes are barely taller
     // than the text, and an inset clip cuts the tops and tails off the letters.
@@ -17184,7 +17186,7 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
       ops.push(`${stringOut(encoded)} Tj`);
     });
     ops.push('ET', 'Q', 'EMC');
-    return { content: ops.join('\n'), size: layout.size, fits: layout.fits, daSize: parseDA(field.da).size };
+    return { content: ops.join('\n'), size: layout.size, fits: layout.fits, daSize: parseDA(field.da).size, h };
   }
 
   /* ── The signature ─────────────────────────────────────────────────────── */
@@ -17231,17 +17233,24 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
    *              dropdown, true or false for a checkbox. A field not named is
    *              left exactly as it was.
    *   signature  `{ field, width, height, strokes }` — drawn in that field's box.
+   *   textSize   one size for every filled box — a number, or the name of a field
+   *              whose size to match ('requestor_name'). A box too short for it is
+   *              made taller, upwards; only text too wide for its box is shrunk.
    *
    * `report.fields[name]` says, for every text box filled, the size it was drawn
    * at and whether it fitted; `report.unknown` names values for fields the form
    * does not have.
    */
-  function fillForm(bytes, values, { signature = null } = {}) {
+  function fillForm(bytes, values, { signature = null, textSize = null } = {}) {
     const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     const doc = new Doc(data);
     const { acro, fields } = walkFields(doc);
     if (!acro) throw new Error('This PDF has no fillable fields.');
     const byName = new Map(fields.map((f) => [f.name, f]));
+    // One size for every filled box: a number, or the size another field is set at.
+    const size0 = typeof textSize === 'string'
+      ? (parseDA(byName.get(textSize)?.da || '').size || null)
+      : (Number(textSize) || null);
 
     let next = doc.size();
     const changed = new Map(); // num → { gen, value }
@@ -17292,10 +17301,15 @@ __mods["io/tawr_pdf.js"] = function (__x, __req) {
         const [x1, y1, x2, y2] = w.rect;
         const bw = Math.abs(x2 - x1);
         const bh = Math.abs(y2 - y1);
-        const ap = textAppearance(text, field, bw, bh, fontName);
+        const ap = textAppearance(text, field, bw, bh, fontName, size0);
+        if (ap.h > bh + 0.001) {
+          // Taller upwards from its bottom edge — the line the text sits on.
+          const left = Math.min(x1, x2); const bottom = Math.min(y1, y2);
+          wo.d.Rect = [left, bottom, left + bw, bottom + ap.h];
+        }
         const stream = addObject({
           d: {
-            Type: { n: 'XObject' }, Subtype: { n: 'Form' }, BBox: [0, 0, bw, bh],
+            Type: { n: 'XObject' }, Subtype: { n: 'Form' }, BBox: [0, 0, bw, ap.h],
             Resources: { d: { Font: { d: { [fontName]: font } } } },
           },
           stream: bytesOf(ap.content),
@@ -17947,12 +17961,16 @@ __mods["ui/rc_tawr.js"] = function (__x, __req) {
 
   /* ── The PDF ───────────────────────────────────────────────────────────── */
 
+  /* Every filled box is printed at the Requestor's size, so the form reads as one
+     hand rather than a different size in every box. */
+  const TEXT_SIZE = 'requestor_name';
+
   function filled(ctx, bytes, record) {
     const profile = ctx.profiles.get(record.created_by);
     const signature = profile?.signature?.strokes?.length
       ? { field: 'requestor_signature', ...profile.signature }
       : null;
-    return { ...fillForm(bytes, record.fields || {}, { signature }), signed: Boolean(signature), profile };
+    return { ...fillForm(bytes, record.fields || {}, { signature, textSize: TEXT_SIZE }), signed: Boolean(signature), profile };
   }
 
   async function templateOrSay() {
@@ -18060,7 +18078,7 @@ __mods["ui/rc_tawr.js"] = function (__x, __req) {
         try { bytes = await getTemplate(); } catch { /* said on download */ }
         if (!bytes) { fitBox.textContent = ''; return; }
         try {
-          const { report } = fillForm(bytes, editor.read());
+          const { report } = fillForm(bytes, editor.read(), { textSize: TEXT_SIZE });
           const over = Object.entries(report.fields).filter(([, r]) => !r.fits).map(([k]) => label(k));
           const shrunk = report.fields.work_description;
           fitBox.className = `rc-tawr-fit${over.length ? ' rc-warn' : ''}`;

@@ -325,6 +325,22 @@ for (const variant of ['classic', 'compressed']) {
   check('and declares that size, so a viewer redrawing it draws the same',
     new RegExp(`/Helv ${Math.round(area.size * 10000) / 10000} Tf`).test(tail));
 
+  const uniform = pdf.fillForm(blank, { ...values, work_description: 'IXL SIM Testing', row1_day: 'MON' }, { textSize: 'requestor_name' });
+  const sizes = Object.entries(uniform.report.fields);
+  check('with one size asked for, every filled box is printed at the Requestor\'s size',
+    sizes.length > 10 && sizes.every(([, r]) => r.size === 9),
+    sizes.filter(([, r]) => r.size !== 9).map(([k, r]) => `${k}:${r.size}`).join(', '));
+  const grown = pdf.readForm(uniform.bytes).fields.find((f) => f.name === 'row1_area');
+  const before = form.fields.find((f) => f.name === 'row1_area');
+  check('a box too short for it is made taller, upwards, keeping the line it sits on',
+    grown.rect[1] === before.rect[1] && grown.rect[3] - grown.rect[1] >= 9 * 0.93 && before.rect[3] - before.rect[1] < 9,
+    `${before.rect} → ${grown.rect}`);
+  check('and declares the size, so a viewer redrawing it draws the same',
+    /\/Helv 9 Tf/.test(Buffer.from(uniform.bytes.subarray(blank.length)).toString('latin1'))
+      && !/\/Helv (?!9 )[\d.]+ Tf/.test(Buffer.from(uniform.bytes.subarray(blank.length)).toString('latin1').replace(/\/Helv 14 Tf/g, '')));
+  const crowded = pdf.fillForm(blank, { row1_area: 'Train Control Room, Lake Merritt, Tracks M1 and M2' }, { textSize: 9 });
+  check('only text too wide for its box is shrunk', crowded.report.fields.row1_area.size < 9 && crowded.report.fields.row1_area.fits);
+
   const dated = pdf.readForm(pdf.fillForm(blank, { row1_date: '10/19/26', row2_date: '2026-10-20', row3_date: 'TBD' }).bytes);
   const dv = (name) => dated.fields.find((f) => f.name === name)?.value;
   check('a date is written the way the box\'s own date check asks — 10/19/26 would show blank',
