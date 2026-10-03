@@ -352,6 +352,26 @@ for (const variant of ['classic', 'compressed']) {
     && refilled.fields.find((f) => f.name === 'requestor_name').value === 'Alex Morgan');
 }
 
+console.log('\nA template left on auto size');
+{
+  // How BART's form arrives with its boxes on auto, and how one edited in
+  // Acrobat can still read: the form's own default is auto, so any box that does
+  // not state a size of its own falls back to it.
+  const auto = buildFormPdf(fieldSpecs, { auto: true });
+  const before = pdf.readForm(auto);
+  check('the test form really is on auto', before.fields.filter((f) => f.kind === 'text').every((f) => /\s0 Tf/.test(f.da)));
+  const { bytes, report } = pdf.fillForm(auto, { row1_area: 'C-156', requestor_cell_phone: '415-285-5679', work_description: 'IXL SIM Testing' }, { textSize: 9 });
+  check('filled boxes print at 9 pt, not whatever auto picks',
+    Object.values(report.fields).every((r) => r.size === 9), JSON.stringify(report.fields));
+  const after = pdf.readForm(bytes);
+  const boxes = after.fields.filter((f) => f.kind === 'text' || f.kind === 'choice');
+  const sizeOf = (da) => Number((String(da).match(/\/[^\s/]+\s+([\d.]+)\s+Tf/) || [])[1]);
+  check('every text box and dropdown says 9 pt, filled or blank — nothing left on auto',
+    boxes.every((f) => f.widgetDa.every((da) => sizeOf(da) === 9)),
+    boxes.filter((f) => !f.widgetDa.every((da) => sizeOf(da) === 9)).map((f) => `${f.name}:${f.widgetDa}`).slice(0, 5).join(', '));
+  check('and so does the form\'s own default', /\/Helv 9 Tf/.test(Buffer.from(bytes.subarray(auto.length)).toString('latin1').match(/\/Fields[^]*?\/DA \(([^)]*)\)/)?.[1] || ''));
+}
+
 console.log('\nDates in the form\'s own format');
 {
   check('mm/dd/yyyy from a short year', pdf.formatDateAs('10/19/26', 'mm/dd/yyyy') === '10/19/2026');

@@ -511,9 +511,10 @@ async function discard(record) {
 
 /* ── The PDF ───────────────────────────────────────────────────────────── */
 
-/* Every filled box is printed at the Requestor's size, so the form reads as one
-   hand rather than a different size in every box. */
-const TEXT_SIZE = 'requestor_name';
+/* Every box is printed at 9 pt — the Requestor's size on BART's form — so the
+   form reads as one hand. A number, not read off the template: an uploaded
+   copy whose boxes were left on auto must not decide it. */
+const TEXT_SIZE = 9;
 
 function filled(ctx, bytes, record) {
   const profile = ctx.profiles.get(record.created_by);

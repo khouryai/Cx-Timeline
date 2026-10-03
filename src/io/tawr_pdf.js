@@ -544,6 +544,9 @@ function walkFields(doc) {
       q: Number(doc.get(inh.Q) || 0),
       widgets: widgets.map((w) => ({
         ref: w,
+        // A box may state its own size apart from its field — Acrobat splits
+        // them when a form is edited — and the box's own word wins.
+        da: textOf(doc.get(doc.get(w)?.d?.DA)) || null,
         rect: (doc.get(doc.get(w)?.d?.Rect) || [0, 0, 0, 0]).map((x) => Number(doc.get(x))),
         page: doc.get(w)?.d?.P || pageOf.get(w.r) || null,
       })),
@@ -566,8 +569,10 @@ export function readForm(bytes) {
   const doc = new Doc(data);
   const { fields } = walkFields(doc);
   return {
-    fields: fields.map(({ name, kind, value, onState, options, multiline, rect, da }) => ({
+    fields: fields.map(({ name, kind, value, onState, options, multiline, rect, da, widgets }) => ({
       name, kind, value, onState, options, multiline, rect, da,
+      // The size each of its boxes says it is, where a box says one of its own.
+      widgetDa: widgets.map((w) => w.da),
     })),
   };
 }
@@ -645,6 +650,14 @@ function parseDA(da) {
   const gray = da.match(/([\d.]+)\s+g\b/);
   const color = rgb ? `${rgb[1]} ${rgb[2]} ${rgb[3]} rg` : gray ? `${gray[1]} g` : '0 g';
   return { font, size, color };
+}
+
+/** A DA with its font size set — added if the DA names none. Never 0, which is "auto". */
+function sizedDA(da, size) {
+  const text = String(da || '/Helv 9 Tf 0 g');
+  return /\/[^\s/]+\s+[\d.]+\s+Tf/.test(text)
+    ? text.replace(/(\/[^\s/]+\s+)[\d.]+(\s+Tf)/, `$1${num(size)}$2`)
+    : `/Helv ${num(size)} Tf ${text}`.trim();
 }
 
 /** Lines of text that fit `width` at `size`, keeping the line breaks that were typed. */
@@ -771,9 +784,11 @@ function signatureContent(sig, [x1, y1, x2, y2]) {
  *              dropdown, true or false for a checkbox. A field not named is
  *              left exactly as it was.
  *   signature  `{ field, width, height, strokes }` — drawn in that field's box.
- *   textSize   one size for every filled box — a number, or the name of a field
- *              whose size to match ('requestor_name'). A box too short for it is
- *              made taller, upwards; only text too wide for its box is shrunk.
+ *   textSize   one size for every box — a number, or the name of a field whose
+ *              size to match. Every text box and dropdown is set to it, filled or
+ *              blank, and so is the form's default, so nothing is left on auto.
+ *              A box too short for it is made taller, upwards; only text too wide
+ *              for its box is shrunk.
  *
  * `report.fields[name]` says, for every text box filled, the size it was drawn
  * at and whether it fitted; `report.unknown` names values for fields the form
@@ -833,13 +848,14 @@ export function fillForm(bytes, values, { signature = null, textSize = null } = 
 
     const text = field.dateFormat ? formatDateAs(value, field.dateFormat) : String(value ?? '');
     fieldObj.d.V = pdfText(text);
-    const { font: fontName } = parseDA(field.da);
     for (const w of field.widgets) {
       const wo = objectOf(w.ref);
+      const da = w.da || field.da;
+      const { font: fontName } = parseDA(da);
       const [x1, y1, x2, y2] = w.rect;
       const bw = Math.abs(x2 - x1);
       const bh = Math.abs(y2 - y1);
-      const ap = textAppearance(text, field, bw, bh, fontName, size0);
+      const ap = textAppearance(text, { ...field, da }, bw, bh, fontName, size0);
       if (ap.h > bh + 0.001) {
         // Taller upwards from its bottom edge — the line the text sits on.
         const left = Math.min(x1, x2); const bottom = Math.min(y1, y2);
@@ -858,11 +874,40 @@ export function fillForm(bytes, values, { signature = null, textSize = null } = 
          the form, so a field left at the form's 9 pt redrew too big for its box,
          and one set to auto size — tried once — redrew at 4 pt. Declaring the
          size drawn here makes the two agree. */
-      if (text && Math.abs(ap.size - (ap.daSize || 0)) > 0.01) {
-        wo.d.DA = { s: field.da.replace(/(\/[^\s/]+\s+)[\d.]+(\s+Tf)/, `$1${num(ap.size)}$2`) };
+      if (text || size0) {
+        wo.d.DA = { s: sizedDA(da, text ? ap.size : size0) };
+        if (fieldObj !== wo && fieldObj.d.DA) fieldObj.d.DA = { s: sizedDA(textOf(fieldObj.d.DA), text ? ap.size : size0) };
       }
       report.appearances++;
       if (text) report.fields[name] = { size: ap.size, fits: ap.fits };
+    }
+  }
+
+  /* With one size asked for, every box on the form says it — filled or not, on
+     the box, on its field, and as the form's own default. BART's form defaults
+     to auto (0), and Acrobat falls back to that default for any box that does
+     not state a size of its own; a box filled later by hand in Acrobat then came
+     out in whatever size auto chose. */
+  if (size0) {
+    for (const field of fields) {
+      if (field.kind !== 'text' && field.kind !== 'choice') continue;
+      const filled = Object.prototype.hasOwnProperty.call(values || {}, field.name) && String(values[field.name] ?? '') !== '';
+      if (filled) continue;
+      const fieldObj = objectOf(field.ref);
+      for (const w of field.widgets) {
+        const wo = objectOf(w.ref);
+        wo.d.DA = { s: sizedDA(w.da || field.da, size0) };
+      }
+      if (fieldObj.d.DA) fieldObj.d.DA = { s: sizedDA(textOf(fieldObj.d.DA), size0) };
+    }
+    const rootRef = doc.trailer.d.Root;
+    const catalog = doc.get(rootRef);
+    const acroRef = catalog?.d?.AcroForm;
+    if (acroRef?.r !== undefined) {
+      const ao = objectOf(acroRef);
+      ao.d.DA = { s: sizedDA(textOf(doc.get(ao.d.DA)), size0) };
+    } else if (acroRef?.d) {
+      objectOf(rootRef).d.AcroForm = { d: { ...acroRef.d, DA: { s: sizedDA(textOf(doc.get(acroRef.d.DA)), size0) } } };
     }
   }
 

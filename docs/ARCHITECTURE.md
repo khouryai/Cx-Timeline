@@ -2386,9 +2386,15 @@ is rewritten, so the result is still fillable in Acrobat and its signature boxes
 still signable. Every filled box gets its own appearance, because most viewers
 and every printer show only that: a single line shrinks until it fits across and
 inside its box, the work description wraps and shrinks a quarter point at a
-time. The calendar asks for one size for every box — the Requestor's, 9 pt —
-so the form reads in one hand: a box too short for it is made taller, upwards
-from the line it sits on, and only text too wide for its box is shrunk. Each
+time. The calendar asks for one size for every box — 9 pt, the Requestor's on
+BART's form, fixed in the code rather than read off the template — so the form
+reads in one hand: a box too short for it is made taller, upwards from the line
+it sits on, and only text too wide for its box is shrunk. Every text box and
+dropdown is set to that size, filled or blank, on the box, on its field and as
+the form's own default: BART's form defaults to auto, Acrobat falls back to the
+default for any box that states no size of its own (and splits a box from its
+field when the form is edited), so a template edited to 9 pt still came out on
+auto until all three were written. Each
 field is also told the size it was drawn at: Acrobat redraws a
 field from its own declared size when it saves the form, and setting one to auto
 size (tried once) redrew those boxes at four points. A date is written in the

@@ -25,7 +25,9 @@ const str = (s) => `(${String(s).replace(/[\\()]/g, (c) => `\\${c}`)})`;
  * `fields`: `[{ name, kind }]`, kind text | check | choice | sig. Answers the
  * PDF as a Uint8Array.
  */
-export function buildFormPdf(fields, { compressed = false } = {}) {
+export function buildFormPdf(fields, { compressed = false, auto = false } = {}) {
+  // `auto`: every box, and the form's default, left at font size 0 — "auto".
+  const tf = (n) => (auto ? 0 : n);
   const objects = []; // index = object number - 1; { body, stream? }
   const add = (body, stream = null) => { objects.push({ body, stream }); return objects.length; };
   const set = (n, body, stream = null) => { objects[n - 1] = { body, stream }; };
@@ -58,7 +60,7 @@ export function buildFormPdf(fields, { compressed = false } = {}) {
         ? ' /AA << /F << /S /JavaScript /JS (AFDate_FormatEx\\("mm/dd/yyyy"\\);) >> /K << /S /JavaScript /JS (AFDate_KeystrokeEx\\("mm/dd/yyyy"\\);) >> >>'
         : '';
       body = `<< /Type /Annot /Subtype /Widget /FT /Tx /T ${str(f.name)} /Rect ${rect} /P ${page} 0 R /F 4 `
-        + `/DA (0 0 0 rg /Helv ${multiline ? 14 : 9} Tf)${multiline ? ' /Ff 4096' : ''}${aa} /AP << /N ${blankAp} 0 R >> >>`;
+        + `/DA (0 0 0 rg /Helv ${tf(multiline ? 14 : 9)} Tf)${multiline ? ' /Ff 4096' : ''}${aa} /AP << /N ${blankAp} 0 R >> >>`;
     } else if (f.kind === 'check') {
       body = `<< /Type /Annot /Subtype /Widget /FT /Btn /T ${str(f.name)} /Rect ${rect} /P ${page} 0 R /F 4 `
         + `/DA (0 0 1 rg /ZaDb 12 Tf) /V /Off /AS /Off /AP << /N << /Yes ${on} 0 R /Off ${off} 0 R >> >> >>`;
@@ -66,7 +68,7 @@ export function buildFormPdf(fields, { compressed = false } = {}) {
       const opts = f.name === 'category_of_work' ? CATEGORIES : DAYS;
       body = `<< /Type /Annot /Subtype /Widget /FT /Ch /T ${str(f.name)} /Rect ${rect} /P ${page} 0 R /F 4 `
         + `/Ff ${f.name === 'category_of_work' ? 393216 : 131072} /Opt [${opts.map(str).join(' ')}] `
-        + `/DA (0 0 0 rg /Helv ${f.name === 'category_of_work' ? 12 : 8} Tf) /V ( ) /AP << /N ${blankAp} 0 R >> >>`;
+        + `/DA (0 0 0 rg /Helv ${tf(f.name === 'category_of_work' ? 12 : 8)} Tf) /V ( ) /AP << /N ${blankAp} 0 R >> >>`;
     } else {
       body = `<< /Type /Annot /Subtype /Widget /FT /Sig /T ${str(f.name)} /Rect ${rect} /P ${page} 0 R /F 4 >>`;
     }
