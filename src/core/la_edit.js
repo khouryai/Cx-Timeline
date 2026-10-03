@@ -841,7 +841,10 @@ export function gridFromModel(model, days, { title = '' } = {}) {
         if (c && (c.text || c.color)) cells.push(cell(r, L.firstDayCol + i, c.text || '', c.color || null));
       });
     }
-    rows.push({ row: r, label: '', cells });
+    /* The row's own id rides along, unseen. A workbook has no such thing, so
+       a reading of one matches rows by where they sit; a reading published from
+       here can match them by what they are, and so name who changed them. */
+    rows.push({ row: r, label: '', id: row.id, cells });
     r++;
   }
 
@@ -1091,6 +1094,166 @@ export function describeCellValue(value, meaningOf = () => '') {
   if (!value) return 'empty';
   const colour = value.color ? (meaningOf(value.color) || `#${value.color}`) : '';
   return [colour, value.text].filter(Boolean).join(' · ') || 'empty';
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Who changed what
+
+   The edit log read across the whole look-ahead rather than for one place:
+   every change as a line somebody can read ("Mon 12 Oct: Day → Cancelled"),
+   and, for each change found between two readings, the edits that made it.
+   Nothing here is stored — `rc_la_edits` keeps both sides of every change,
+   and a reading published from the editor carries each row's id, which is
+   the whole join.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Every row the log mentions, by id: the rows as they are now, and — for one
+ * since deleted — the last thing the log saw of it. A deleted activity is
+ * still somebody's change, and "Row" is no way to describe it.
+ */
+export function rowsKnown(rows, edits) {
+  const known = new Map((rows || []).map((r) => [r.id, r]));
+  const current = new Set(known.keys());
+  for (const e of [...(edits || [])].sort((a, b) => Number(a.id) - Number(b.id))) {
+    if (e.target !== 'row' || current.has(e.row_id)) continue;
+    const seen = e.after || e.before;
+    if (seen) known.set(e.row_id, { ...seen, id: e.row_id, gone: e.action === 'delete' });
+  }
+  return known;
+}
+
+/** What a row is called in a sentence about it. */
+export function rowTitle(row, known = new Map()) {
+  if (!row) return 'A row since deleted';
+  if (row.kind === 'resource') {
+    const parent = known.get(row.parent_id);
+    return parent ? `Names under ${rowTitle(parent, known)}` : 'Names row';
+  }
+  if (row.kind === 'absence') return row.description || ABSENCE_LABELS[row.absence_kind] || 'PTO';
+  if (row.kind === 'section') return `Section: ${row.description || 'untitled'}`;
+  return row.description || row.activity_id || 'Untitled activity';
+}
+
+/**
+ * The edit log as lines somebody can read, oldest first.
+ *
+ * One line per thing that changed: a row update that touched three fields is
+ * three lines, so "who changed the location" has an answer of its own. Moving a
+ * row (`sort`) or indenting it (`level`) is left out — it is where the row
+ * sits, not what it says, the rule `rowHistory()` already keeps.
+ *
+ * `{ id, at, by, batch, rowId, activityId, title, location, day, what, from, to }`
+ * — `activityId` is the activity a names row sits under, so filtering on an
+ * activity finds who was put on it too. `meaningOf(hex)` is the legend's.
+ */
+export function editLines(edits, { rows = [], meaningOf = () => '' } = {}) {
+  const known = rowsKnown(rows, edits);
+  const out = [];
+  for (const e of [...(edits || [])].sort((a, b) => Number(a.id) - Number(b.id))) {
+    const row = known.get(e.row_id) || null;
+    const activityId = row?.kind === 'resource' && row.parent_id ? row.parent_id : e.row_id;
+    const base = {
+      id: e.id, at: e.at, by: e.by || null, batch: e.batch || null, rowId: e.row_id, activityId,
+      title: rowTitle(row, known), location: known.get(activityId)?.location || '',
+      day: e.day ? String(e.day).slice(0, 10) : null,
+    };
+    if (e.target === 'cell') {
+      out.push({
+        ...base,
+        what: row?.kind === 'resource' ? 'Names' : 'Day',
+        from: e.action === 'insert' ? 'empty' : describeCellValue(cellValue(e.before), meaningOf),
+        to: e.action === 'delete' ? 'empty' : describeCellValue(cellValue(e.after), meaningOf),
+      });
+      continue;
+    }
+    if (e.action === 'insert') { out.push({ ...base, what: 'Added', from: '', to: base.title }); continue; }
+    if (e.action === 'delete') { out.push({ ...base, what: 'Deleted', from: base.title, to: '' }); continue; }
+    const before = e.before || {};
+    const after = e.after || {};
+    for (const f of HISTORY_FIELDS) {
+      const was = before[f.key] ?? '';
+      const now = after[f.key] ?? '';
+      if (String(was) === String(now)) continue;
+      if (f.key === 'archived') {
+        out.push({ ...base, what: now ? 'Taken off the look-ahead' : 'Put back', from: '', to: '' });
+      } else {
+        out.push({ ...base, what: f.label, from: String(was), to: String(now) });
+      }
+    }
+  }
+  return out;
+}
+
+function dayOfEvent(event) {
+  return String(event.before?.date || event.after?.date || event.date || '').slice(0, 10) || null;
+}
+
+function inWeek(day, weekStart) {
+  if (!day || !weekStart) return false;
+  const start = Date.parse(`${String(weekStart).slice(0, 10)}T00:00:00Z`);
+  const at = Date.parse(`${String(day).slice(0, 10)}T00:00:00Z`);
+  return at >= start && at < start + 7 * 86400000;
+}
+
+/**
+ * The edits that made one change, found between two readings.
+ *
+ * `event` is a stored change (`rc_change_events`): it names the editor's row
+ * (`la_row_id`), the week, and — for a day — the date. The edits are the ones
+ * written after the earlier reading was taken and no later than the later one
+ * (`fromAt`, `toAt`), on that row, narrowed to what the change was about: the
+ * day itself for a shift, the names row underneath for who is on it, the
+ * row's own fields for a move or a new description. A change between two
+ * workbook reads has no row id, and nothing is guessed for it.
+ */
+export function editsBehind(event, edits, { rows = [], fromAt = null, toAt = null } = {}) {
+  const rowId = event?.la_row_id;
+  if (!rowId) return [];
+  const from = fromAt ? Date.parse(fromAt) : -Infinity;
+  const to = toAt ? Date.parse(toAt) : Infinity;
+  const known = rowsKnown(rows, edits);
+  const children = new Set([...known.values()]
+    .filter((r) => r.kind === 'resource' && r.parent_id === rowId).map((r) => r.id));
+  const day = dayOfEvent(event);
+  const week = event.week_start;
+  const names = Boolean(event.before?.resources || event.after?.resources);
+
+  const wanted = (e) => {
+    const cell = e.target === 'cell';
+    const ownCell = cell && e.row_id === rowId;
+    switch (event.kind) {
+      case 'shift_changed':
+      case 'cancellation':
+        return ownCell && String(e.day).slice(0, 10) === day;
+      case 'resource_changed':
+        return names
+          ? cell && children.has(e.row_id) && inWeek(e.day, week)
+          : ownCell && inWeek(e.day, week);
+      case 'scope_added':
+      case 'scope_removed':
+        return (e.target === 'row' && e.row_id === rowId) || (ownCell && inWeek(e.day, week));
+      case 'location_shift':
+      case 'details_changed':
+        return e.target === 'row' && e.row_id === rowId && e.action === 'update';
+      default:
+        return false;
+    }
+  };
+
+  return (edits || [])
+    .filter((e) => {
+      const at = Date.parse(e.at);
+      return at > from && at <= to && wanted(e);
+    })
+    .sort((a, b) => Number(a.id) - Number(b.id));
+}
+
+/** Who made a set of edits, in the order they first did, without repeats. */
+export function editors(edits) {
+  const out = [];
+  for (const e of edits || []) if (!out.includes(e.by || null)) out.push(e.by || null);
+  return out;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

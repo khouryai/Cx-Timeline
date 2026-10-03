@@ -317,6 +317,14 @@ create table if not exists public.rc_lookahead_rows (
 alter table public.rc_lookahead_rows
   add column if not exists resources jsonb not null default '{}'::jsonb;
 
+-- The look-ahead editor's id for the activity (`rc_la_rows.id`), on a reading
+-- the editor published; null on a workbook read. Two readings that both carry
+-- it are compared on it rather than on `row_key`'s position in the group, and
+-- Changes reads `rc_la_edits` by it to say who made each change. No foreign
+-- key: a reading outlives the row it describes, as `rc_la_edits.row_id` does.
+alter table public.rc_lookahead_rows
+  add column if not exists la_row_id uuid;
+
 create index if not exists rc_la_rows_snapshot_idx on public.rc_lookahead_rows (snapshot_id);
 create index if not exists rc_la_rows_key_idx      on public.rc_lookahead_rows (week_start, row_key);
 
@@ -333,7 +341,11 @@ create table if not exists public.rc_change_events (
                   -- work as deleted — inflating the very numbers a claim would
                   -- rest on. They are recorded, and excluded from the KPIs.
                   'window_advanced', 'window_retired',
-                  'location_shift')),
+                  'location_shift',
+                  -- What an activity says about itself (its description, ID,
+                  -- SSWP, party or hours), seen only when two readings are
+                  -- matched on the editor's row id. Not scope.
+                  'details_changed')),
   week_start    date,
   row_key       text,
   location_id   uuid references public.rc_locations(id),
@@ -341,6 +353,19 @@ create table if not exists public.rc_change_events (
   after         jsonb,
   detected_at   timestamptz not null default now()
 );
+
+-- Which of the editor's rows a change is about, so Changes can read the edit
+-- log for it and say who made it. Null for a change between workbook reads.
+alter table public.rc_change_events
+  add column if not exists la_row_id uuid;
+
+-- The kinds a change can be. Re-stated rather than left to the `create table`
+-- above, which does nothing to a table that already exists: a project built
+-- before `details_changed` would otherwise refuse every reading that has one.
+alter table public.rc_change_events drop constraint if exists rc_change_events_kind_check;
+alter table public.rc_change_events add constraint rc_change_events_kind_check check (kind in (
+  'scope_added', 'scope_removed', 'cancellation', 'resource_changed', 'shift_changed',
+  'window_advanced', 'window_retired', 'location_shift', 'details_changed'));
 
 create index if not exists rc_change_week_idx on public.rc_change_events (week_start);
 create index if not exists rc_change_kind_idx on public.rc_change_events (kind, detected_at);
@@ -2340,6 +2365,9 @@ create table if not exists public.rc_la_edits (
 );
 
 create index if not exists rc_la_edits_row_idx on public.rc_la_edits (row_id, at desc);
+-- Changes reads the log by time — every edit between two readings, and the
+-- edit log over a span of days.
+create index if not exists rc_la_edits_at_idx on public.rc_la_edits (at);
 
 -- What each support code on the sheet asks for: "X" an EIC, "WIT" a BART
 -- witness. Managed in the calendar — Legend → Support codes — like the colours.
@@ -3003,5 +3031,5 @@ create policy rc_tawr_files_remove on storage.objects
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '9')
+insert into public.rc_settings (key, value) values ('schema_version', '10')
 on conflict (key) do update set value = excluded.value, updated_at = now();

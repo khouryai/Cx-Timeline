@@ -289,17 +289,30 @@ async function publishGrid({ grid, legend, declared = [], hash, run, previous, s
          `resources` column — and PostgREST refuses the whole insert over it.
          The rest of the row is still worth having, so it goes without that one
          field and the gap is *said*, rather than costing the read. */
-      const missingColumn = /resources/.test(err.message)
-        && /(column|schema cache)/i.test(err.message);
-      if (missingColumn) {
+      let missing = missingColumns(err, ['resources', 'la_row_id']);
+      if (missing.length) {
         try {
-          const rows = (await lookaheadRows(snapshot.id, grid))
-            .map(({ resources, ...rest }) => rest);
-          if (rows.length) written = await rc.addSnapshotRows(rows);
-          rowTrouble = 'This database has no rc_lookahead_rows.resources column, so who the '
-            + 'Resource row names was not stored. Run supabase/migrate.sql and then '
-            + 'supabase/rc_schema.sql. The calendar still shows the names — it re-reads the '
-            + 'snapshot — but the Resources tab and the week plan read the stored column.';
+          const all = await lookaheadRows(snapshot.id, grid);
+          /* PostgREST names one missing column at a time, so a project behind on
+             both is asked twice rather than losing the rows on the second. */
+          for (;;) {
+            try {
+              if (all.length) written = await rc.addSnapshotRows(all.map((row) => withoutKeys(row, missing)));
+              break;
+            } catch (again) {
+              const more = missingColumns(again, ['resources', 'la_row_id']).filter((c) => !missing.includes(c));
+              if (!more.length) throw again;
+              missing = [...missing, ...more];
+            }
+          }
+          rowTrouble = missing.includes('resources')
+            ? 'This database has no rc_lookahead_rows.resources column, so who the '
+              + 'Resource row names was not stored. Run supabase/migrate.sql and then '
+              + 'supabase/rc_schema.sql. The calendar still shows the names — it re-reads the '
+              + 'snapshot — but the Resources tab and the week plan read the stored column.'
+            : 'This database has no rc_lookahead_rows.la_row_id column, so this reading was '
+              + 'compared by position and Changes cannot say who made it. Run '
+              + 'supabase/migrate.sql and then supabase/rc_schema.sql.';
         } catch (second) {
           rowTrouble = second.message;
         }
@@ -511,6 +524,7 @@ async function recordChanges(previous, snapshot, rows, legend) {
   // database columns are named for what they are on disk.
   const shape = (r) => ({
     rowKey: r.row_key,
+    rowId: r.la_row_id || null,
     weekStart: r.week_start,
     location: r.raw_location || '',
     subsystem: r.subsystem || '',
@@ -531,18 +545,71 @@ async function recordChanges(previous, snapshot, rows, legend) {
   if (!events.length) return [];
 
   const byKey = new Map(rows.map((r) => [r.row_key, r]));
-  await rc.addChangeEvents(events.map((e) => ({
+  const records = events.map((e) => ({
     from_snapshot: previous.id,
     to_snapshot: snapshot.id,
     kind: e.kind,
     week_start: e.weekStart || null,
     row_key: e.rowKey || null,
+    // The editor's id for the row, which is what Changes reads the edit log by
+    // to say who did it. Null for a change between two workbook reads.
+    la_row_id: e.rowId || null,
     location_id: byKey.get(e.rowKey)?.location_id || null,
     before: sideOf(e, 'before'),
     after: sideOf(e, 'after'),
-  })));
+  }));
 
-  return events;
+  /* A database that has not been brought up to date: no column for the id, or
+     a kind its check constraint does not know yet. Every change it *can* hold
+     is still written — losing the cancellations over a details edit would be
+     the wrong way round — and what it could not is reported. */
+  let dropId = false;
+  let dropNewer = false;
+  let first = null;
+  for (;;) {
+    const sending = records
+      .filter((r) => !dropNewer || !NEWER_KINDS.includes(r.kind))
+      .map((r) => (dropId ? withoutKeys(r, ['la_row_id']) : r));
+    try {
+      if (sending.length) await rc.addChangeEvents(sending);
+      break;
+    } catch (err) {
+      const idRefused = !dropId && missingColumns(err, ['la_row_id']).length > 0;
+      const kindRefused = !dropNewer && /check constraint|violates check/i.test(err.message);
+      if (!idRefused && !kindRefused) throw err;
+      dropId = dropId || idRefused;
+      dropNewer = dropNewer || kindRefused;
+      first = first || err;
+    }
+  }
+  if (first) {
+    rc.reportError('lookahead:changes', new Error(
+      `rc_change_events is behind the application (${first.message}); run supabase/migrate.sql `
+      + 'and then supabase/rc_schema.sql so Changes can say who made each change.'));
+  }
+  return events.filter((e) => !dropNewer || !NEWER_KINDS.includes(e.kind));
+}
+
+/** Kinds a schema older than version 10 refuses. */
+const NEWER_KINDS = ['details_changed'];
+
+/**
+ * Which of `names` a PostgREST error says the table has no column for.
+ *
+ * `create table if not exists` does nothing to a table that already exists, so
+ * a project that has not run `migrate.sql` lacks every column added since — and
+ * PostgREST refuses the whole insert over one of them.
+ */
+function missingColumns(err, names) {
+  const message = String(err?.message || '');
+  if (!/(column|schema cache)/i.test(message)) return [];
+  return names.filter((name) => new RegExp(`\\b${name}\\b`).test(message));
+}
+
+function withoutKeys(row, keys) {
+  const out = { ...row };
+  for (const k of keys) delete out[k];
+  return out;
 }
 
 /**
@@ -560,6 +627,11 @@ function sideOf(event, which) {
   // A whole row arrived or left: what it was is the useful part.
   if (event.kind === 'scope_added' || event.kind === 'scope_removed') {
     return { label: value.label || null, location: value.location || null, week: value.weekStart || null };
+  }
+  /* What the activity said about itself, before and after — the whole label
+     and where it was, so a moved activity reads "from W30 to Y10". */
+  if (event.kind === 'location_shift' || event.kind === 'details_changed') {
+    return { label: value.label || null, location: value.location || '' };
   }
   /* A resource request, as a map of date to what was asked for. Two shapes,
      because there are two places it can be written: a mark on the activity line

@@ -2182,6 +2182,43 @@ keeps both sides of every change, and a row's move (`sort`) is left out because
 it is where the row sits, not what it says. Only an administrator can read the
 log, which is also who the editor is for.
 
+### Changes say who made them, by the row's id
+
+The look-ahead has no row identifier of its own — a workbook row is "the second
+activity at W40 in that week" (`row_key`) — so two readings were compared by
+position, and nothing in a reading says who changed it. The editor's rows do
+have one (`rc_la_rows.id`), and every edit is logged against it with who made
+it (`rc_la_edits`). Changes now joins the two, and the id is never shown.
+
+- **The id rides through the publish, unseen.** `gridFromModel()` puts each
+  row's id on its grid row, `applyLegend()` and `readGrid()` keep it, and
+  `rowsFrom()` writes it as `rc_lookahead_rows.la_row_id`. `row_key` is still
+  written: links made before ids existed point at it.
+- **Two readings that both carry ids are compared on them** (`classify()`). A
+  row inserted mid-group is one addition, not the row under it reading as
+  changed; an activity moved to another site is one `location_shift` naming
+  both places, and new wording is one `details_changed` — once per activity,
+  however many weeks it spans, and neither counted as scope. Only when *every*
+  row on both sides has an id: the first reading after ids began is compared
+  with one that had none, and goes by position as before.
+- **Who is read, never stored.** Each change records the row
+  (`rc_change_events.la_row_id`); `editsBehind()` finds the edits to that row
+  written after the earlier reading was taken and no later than the later one,
+  narrowed to what the change was about — the day for a shift, the names row
+  underneath for who is on it, the row's own fields for a move. The By column
+  names them, and the edits themselves are one press away. A change between
+  two workbook reads has no id and names nobody; nothing is guessed.
+- **Every edit** is the edit log itself across the whole look-ahead
+  (`editLines()`): one line per thing changed — who, when, the activity, the
+  day, the field, from and to — with the colours read as the legend names
+  them, a names row described as the activity it sits under, and a deleted
+  row still called what it was called. A row moved or indented is left out,
+  as in a row's own history. It filters by person and by words without
+  redrawing the search box, and exports as CSV like every calendar table.
+- **An older database keeps working.** A reading whose insert is refused over
+  `la_row_id` is written without it and says so; a change refused over the
+  column or the new kind is written without them, and reported. Schema 10.
+
 ### An administrator works from one list
 
 Organisation opens on **Inbox** the first time in a session (`ui/rc_inbox.js`):

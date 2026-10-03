@@ -346,6 +346,7 @@ alternative shipped once and went wrong.
 - **Only my rows keeps the activity line with its names**: an activity is kept whole, never a names row alone, with the sections above (`rowsNaming()`). [→](docs/ARCHITECTURE.md#only-my-rows-keeps-the-activity-line-with-its-names)
 - **A task opens its whole activity**, found by its row only while the row still says the same thing; an identifier column is never a title. [→](docs/ARCHITECTURE.md#a-task-opens-its-whole-activity)
 - **What changed for me is two readings' stored rows compared** (`changesForMe()`), and **Got it is append-only** (`rc_la_seen`). [→](docs/ARCHITECTURE.md#what-changed-for-me-is-two-readings-compared-and-got-it-is-append-only)
+- **Changes say who made them**: a published reading carries each editor row's id (`la_row_id`, never shown), two readings that both carry ids are compared on them, and `editsBehind()` names who from `rc_la_edits`; **Every edit** is the log itself, one line per thing changed (`editLines()`). [→](docs/ARCHITECTURE.md#changes-say-who-made-them-by-the-rows-id)
 
 ## Extending it
 
@@ -430,14 +431,14 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | `test_lookahead.js` | 261 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
-| `test_la_edit.js` | 144 | the look-ahead editor's model, undo, support codes, the published grid, cell history, staffing clashes, and the Excel export read back |
+| `test_la_edit.js` | 165 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back |
 | `smoke.js` | 301 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 576 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 587 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 98 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 70 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
-| `test_sql.js` | 409 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, the schema stamp, and that `migrate.sql` upgrades an old project |
+| `test_sql.js` | 413 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, changes naming the editor's row, the schema stamp, and that `migrate.sql` upgrades an old project |
 | `test_xlsx_compat.js` | 14 | the Excel export opened, re-saved and printed by LibreOffice Calc (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**

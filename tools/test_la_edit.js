@@ -584,6 +584,131 @@ console.log('\nWhat happened to a cell');
     JSON.stringify(rh));
 }
 
+console.log('\nWho changed what');
+{
+  const days = ed.windowDays('2026-09-21', 2);
+  /* A model as the editor holds it, published and read back exactly as the
+     ingest does — then shaped the way `recordChanges()` hands rows to
+     `classify()`. */
+  const publish = async (m) => {
+    const view = cls.readGrid(la.applyLegend(ed.gridFromModel(m, days), LEGEND), { anchorISO: '2026-09-23' });
+    return cls.rowsFrom(view, { snapshotId: 's', locate: async () => null });
+  };
+  const shape = (r) => ({
+    rowKey: r.row_key, rowId: r.la_row_id || null, weekStart: r.week_start, location: r.raw_location || '',
+    subsystem: '', label: r.raw_label || '', cells: r.cells || {}, marks: r.bart_marks || {}, resources: r.resources || {},
+  });
+  const positional = (r) => ({ ...shape(r), rowId: null });
+  const twoWeeks = () => {
+    const m = sample();
+    // The cable pull runs into the next week too, so a change to it spans two.
+    m.cells.set(ed.cellKey('a2', '2026-09-29'), { row_id: 'a2', day: '2026-09-29', color: '000000', text: '' });
+    return m;
+  };
+
+  const base = await publish(twoWeeks());
+  check('a reading published from the editor carries each activity\'s id',
+    base.some((r) => r.la_row_id === 'a1') && base.filter((r) => r.la_row_id === 'a2').length === 2
+      && base.every((r) => r.la_row_id),
+    base.map((r) => r.la_row_id).join());
+
+  /* A new activity at the same location, above the one already there. By
+     position the old one's ordinal moves: the new row takes its key, and every
+     day of it reads as changed. */
+  const inserted = twoWeeks();
+  inserted.rows.push(ed.blankRow('activity', { id: 'a3', sort: 1500, description: 'Axle counter reset', location: 'W40' }));
+  inserted.cells.set(ed.cellKey('a3', '2026-09-22'), { row_id: 'a3', day: '2026-09-22', color: 'FFFF00', text: '' });
+  const after = await publish(inserted);
+  const byId = cls.classify(base.map(shape), after.map(shape), { cancelledMeaning: 'Cancellation' });
+  check('a row inserted mid-group is one addition, matched by id',
+    byId.length === 1 && byId[0].kind === 'scope_added' && byId[0].rowId === 'a3',
+    byId.map((e) => `${e.kind}:${e.rowId}`).join(' '));
+  const byPlace = cls.classify(base.map(positional), after.map(positional), { cancelledMeaning: 'Cancellation' });
+  check('where by position the row under it took the new one\'s place, and read as changed when nobody touched it',
+    byPlace.length > 1 && byPlace.some((e) => e.kind !== 'scope_added'), byPlace.map((e) => e.kind).join(' '));
+
+  /* Moved to another site: one event naming both places, not one per week. */
+  const moved = twoWeeks();
+  moved.rows.find((r) => r.id === 'a2').location = 'Y20';
+  const movedEvents = cls.classify(base.map(shape), (await publish(moved)).map(shape), { cancelledMeaning: 'Cancellation' });
+  const shift = movedEvents.filter((e) => e.kind === 'location_shift');
+  check('an activity moved to another site is one event, however many weeks it spans',
+    movedEvents.length === 1 && shift.length === 1 && shift[0].rowId === 'a2', movedEvents.map((e) => e.kind).join(' '));
+  check('and it says where from and where to',
+    /from Y10 to Y20/.test(cls.describe({ ...shift[0], before: { label: shift[0].before.label, location: 'Y10' }, after: { label: shift[0].after.label, location: 'Y20' } })));
+
+  const reworded = twoWeeks();
+  reworded.rows.find((r) => r.id === 'a2').description = 'Cable pull and terminate';
+  const worded = cls.classify(base.map(shape), (await publish(reworded)).map(shape), { cancelledMeaning: 'Cancellation' });
+  check('new wording is one details change, not scope',
+    worded.length === 1 && worded[0].kind === 'details_changed' && !cls.countable(worded).length,
+    worded.map((e) => e.kind).join(' '));
+  check('and it reads as what it said and what it says',
+    /Cable pull.*→.*Cable pull and terminate/.test(cls.describe({ kind: 'details_changed', before: { label: worded[0].before.label }, after: { label: worded[0].after.label } })));
+
+  const mixed = cls.classify(base.map(positional), after.map(shape), { cancelledMeaning: 'Cancellation' });
+  check('the first reading after ids began is still compared by position, not booked as all moved',
+    JSON.stringify(mixed.map((e) => e.kind)) === JSON.stringify(byPlace.map((e) => e.kind)), mixed.map((e) => e.kind).join(' '));
+
+  /* The edit log, read as lines. */
+  const rows = sample().rows;
+  const at = (min) => `2026-09-23T10:${String(min).padStart(2, '0')}:00Z`;
+  const edits = [
+    { id: 1, at: at(1), by: 'u1', batch: 'b1', target: 'cell', row_id: 'a1', day: '2026-09-23', action: 'update',
+      before: { color: 'FFFF00', text: 'X.WIT' }, after: { color: 'FF0000', text: 'X.WIT' } },
+    { id: 2, at: at(2), by: 'u2', batch: 'b2', target: 'row', row_id: 'a2', day: null, action: 'update',
+      before: { ...rows.find((r) => r.id === 'a2'), sort: 3072 }, after: { ...rows.find((r) => r.id === 'a2'), location: 'Y20', sort: 3100 } },
+    { id: 3, at: at(3), by: 'u2', batch: 'b2', target: 'row', row_id: 'a2', day: null, action: 'update',
+      before: { ...rows.find((r) => r.id === 'a2') }, after: { ...rows.find((r) => r.id === 'a2'), sort: 9000, level: 1 } },
+    { id: 4, at: at(4), by: 'u1', batch: 'b3', target: 'cell', row_id: 'r1', day: '2026-09-22', action: 'insert',
+      before: null, after: { color: null, text: 'Dana' } },
+    { id: 5, at: at(5), by: 'u1', batch: 'b4', target: 'cell', row_id: 'z9', day: '2026-09-24', action: 'delete',
+      before: { color: 'FFFF00', text: '' }, after: null },
+    { id: 6, at: at(6), by: 'u1', batch: 'b4', target: 'row', row_id: 'z9', day: null, action: 'delete',
+      before: { id: 'z9', kind: 'activity', description: 'Old trench work', location: 'B12' }, after: null },
+    { id: 7, at: at(7), by: 'u2', batch: 'b5', target: 'row', row_id: 'a1', day: null, action: 'update',
+      before: { ...rows.find((r) => r.id === 'a1') }, after: { ...rows.find((r) => r.id === 'a1'), archived: true } },
+    { id: 8, at: '2026-09-25T09:00:00Z', by: 'u1', batch: 'b6', target: 'cell', row_id: 'a1', day: '2026-09-23', action: 'update',
+      before: { color: 'FF0000', text: 'X.WIT' }, after: { color: 'FFFF00', text: 'X.WIT' } },
+  ];
+  const meaningOf = (hex) => LEGEND.find((l) => l.argb === hex)?.meaning || '';
+  const lines = ed.editLines(edits, { rows, meaningOf });
+  const line = (id) => lines.filter((l) => l.id === id);
+  check('a painted day reads as the legend names it, both sides',
+    line(1).length === 1 && line(1)[0].what === 'Day' && line(1)[0].from === 'Day Shift · X.WIT'
+      && line(1)[0].to === 'Cancellation · X.WIT' && line(1)[0].title === 'IXL Regression Testing' && line(1)[0].day === '2026-09-23',
+    JSON.stringify(line(1)[0]));
+  check('a field changed is its own line, and moving the row is not a change',
+    line(2).length === 1 && line(2)[0].what === 'Location' && line(2)[0].from === 'Y10' && line(2)[0].to === 'Y20',
+    line(2).map((l) => l.what).join());
+  check('a row only moved up, down or indented leaves no line', line(3).length === 0);
+  check('names typed are about the activity they sit under',
+    line(4)[0]?.what === 'Names' && line(4)[0].activityId === 'a1' && line(4)[0].title === 'Names under IXL Regression Testing'
+      && line(4)[0].from === 'empty' && line(4)[0].to === 'Dana', JSON.stringify(line(4)[0]));
+  check('a deleted activity is still called what it was called, with where it was',
+    line(5)[0]?.title === 'Old trench work' && line(5)[0].location === 'B12' && line(6)[0]?.what === 'Deleted',
+    `${line(5)[0]?.title} / ${line(6)[0]?.what}`);
+  check('taking an activity off says so', line(7)[0]?.what === 'Taken off the look-ahead');
+  check('who made which edits, first to last, without repeats', ed.editors(edits).join() === 'u1,u2');
+
+  /* The edits behind one change between two readings. */
+  const window_ = { rows, fromAt: '2026-09-23T10:00:00Z', toAt: '2026-09-23T11:00:00Z' };
+  const cancel = { kind: 'cancellation', la_row_id: 'a1', week_start: '2026-09-21', before: { date: '2026-09-23', value: 'Day Shift' }, after: { date: '2026-09-23', value: 'Cancellation' } };
+  check('a cancellation is the edit to that day, between those readings — not the later one putting it back',
+    ed.editsBehind(cancel, edits, window_).map((e) => e.id).join() === '1',
+    ed.editsBehind(cancel, edits, window_).map((e) => e.id).join());
+  check('and the later edit belongs to the later pair of readings',
+    ed.editsBehind(cancel, edits, { rows, fromAt: '2026-09-24T00:00:00Z', toAt: '2026-09-26T00:00:00Z' }).map((e) => e.id).join() === '8');
+  const names = { kind: 'resource_changed', la_row_id: 'a1', week_start: '2026-09-21', before: { resources: {} }, after: { resources: { '2026-09-22': 'Dana' } } };
+  check('who is on it is the names row underneath', ed.editsBehind(names, edits, window_).map((e) => e.id).join() === '4');
+  const move = { kind: 'location_shift', la_row_id: 'a2', week_start: '2026-09-21', before: { location: 'Y10' }, after: { location: 'Y20' } };
+  check('a move is the row\'s own update', ed.editsBehind(move, edits, window_).map((e) => e.id).join() === '2,3');
+  const removed = { kind: 'scope_removed', la_row_id: 'a1', week_start: '2026-09-21', before: { label: 'IXL' }, after: null };
+  check('work taken off is the row being archived', ed.editsBehind(removed, edits, window_).map((e) => e.id).includes(7));
+  check('a change between two workbook reads names nobody — nothing is guessed',
+    ed.editsBehind({ ...cancel, la_row_id: null }, edits, window_).length === 0);
+}
+
 console.log('\nIs everybody named where they can be');
 {
   const monday = '2026-09-21';

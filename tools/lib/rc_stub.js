@@ -731,6 +731,16 @@ export function fakeSdk() {
             if (S.offline) {
               return { select: () => Promise.resolve({ data: null, error: { message: 'Failed to fetch' } }) };
             }
+            /* A project behind the application: a column it has never heard
+               of, refused as PostgREST refuses it — the whole insert, naming
+               one column — and a kind its check constraint does not know. */
+            const unknownColumn = (S.missingColumns || []).find((c) => [].concat(rows).some((r) => r && c in r));
+            if (unknownColumn) {
+              return { select: () => Promise.resolve({ data: null, error: { message: `Could not find the '${unknownColumn}' column of '${table}' in the schema cache` } }) };
+            }
+            if (table === 'rc_change_events' && [].concat(rows).some((r) => (S.refusedKinds || []).includes(r.kind))) {
+              return { select: () => Promise.resolve({ data: null, error: { message: 'new row for relation "rc_change_events" violates check constraint "rc_change_events_kind_check"' } }) };
+            }
             const list = S.rows[table] || (S.rows[table] = []);
             /* Column defaults. Postgres fills `active` in; a stub that did not
                would make a freshly inserted row invisible to every read that
@@ -740,6 +750,8 @@ export function fakeSdk() {
               ...(table === 'rc_client_errors' ? { created_at: new Date().toISOString() } : {}),
               ...(table === 'rc_la_seen' ? { seen_at: new Date().toISOString() } : {}),
               ...(table === 'rc_lookahead_snapshots' ? { taken_at: new Date().toISOString() } : {}),
+              // Postgres stamps when a change was found; Changes lists by it.
+              ...(table === 'rc_change_events' ? { detected_at: new Date().toISOString() } : {}),
               /* rc_tawr_guard(): a request starts as a draft, raised by whoever made it. */
               ...(table === 'rc_tawrs' ? {
                 status: 'draft', created_by: S.rows.rc_people[0].id, created_at: new Date().toISOString(),

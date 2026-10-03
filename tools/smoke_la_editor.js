@@ -789,6 +789,47 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     /^4WLA .*\.xlsx$/.test(fromCalendarFile.name)
       && backFromCalendar.rows.some((r) => r.cells.some((c) => c.value === 'ATS Site Test')), fromCalendarFile.name);
 
+  /* A database that has not had migrate.sql run: no column for the row id.
+     The reading is still written, without it, and the changes with it — a
+     project behind the application loses who, never what. */
+  const readingsBefore = await page.evaluate(() => window.__rc.rows.rc_lookahead_snapshots.length);
+  await page.evaluate(() => { window.__rc.missingColumns = ['la_row_id']; });
+  await page.locator('#rc-frame .la-edit-switch').click();
+  await page.waitForSelector('#rc-frame .lae-grid', { timeout: 10000 });
+  await rowLoc('ATS Site Test').locator('td.lae-meta-location').dblclick();
+  await page.locator('#rc-frame .lae-editor').fill('Q77');
+  await page.keyboard.press('Tab');
+  await saved();
+  await page.locator('#rc-frame .la-edit-switch').click();
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
+  await page.waitForTimeout(400);
+  const older = await page.evaluate((n) => {
+    const S = window.__rc.rows;
+    const last = S.rc_lookahead_snapshots.slice(n).at(-1);
+    const rows = S.rc_lookahead_rows.filter((r) => r.snapshot_id === last?.id);
+    const events = S.rc_change_events.filter((e) => e.to_snapshot === last?.id);
+    return {
+      published: Boolean(last), rows: rows.length, withId: rows.filter((r) => 'la_row_id' in r).length,
+      events: events.length, eventsWithId: events.filter((e) => 'la_row_id' in e).length,
+      moved: events.some((e) => /Q77/.test(JSON.stringify(e.after || {}))),
+      reported: (S.rc_client_errors || []).some((x) => x.area === 'lookahead:changes' && /migrate\.sql/.test(x.message)),
+    };
+  }, readingsBefore);
+  check('on a database without the new column the reading is still published, its rows without the id',
+    older.published && older.rows > 0 && older.withId === 0, JSON.stringify(older));
+  check('and what changed is still recorded — the move to Q77 — just not who',
+    older.events > 0 && older.eventsWithId === 0 && older.moved, JSON.stringify(older));
+  check('and the database being behind is reported, with what to run', older.reported);
+  await page.evaluate(() => { window.__rc.missingColumns = []; });
+  await page.locator('#rc-frame .la-edit-switch').click();
+  await page.waitForSelector('#rc-frame .lae-grid', { timeout: 10000 });
+  await rowLoc('ATS Site Test').locator('td.lae-meta-location').dblclick();
+  await page.locator('#rc-frame .lae-editor').fill('W40');
+  await page.keyboard.press('Tab');
+  await saved();
+  await page.locator('#rc-frame .la-edit-switch').click();
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
+
   // Another window publishing is picked up without leaving the tab — and so
   // is the reading after it, which puts the sheet back as it was.
   const publishElsewhere = (label) => page.evaluate((to) => {
@@ -806,6 +847,54 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await publishElsewhere('ATS Site Test');
   check('and so does the next', await calendarSays(/ATS Site Test(?!, from)/)
     && !/from elsewhere/.test(await page.locator('#rc-frame .la-grid').innerText()));
+
+  /* ── Who changed what ─────────────────────────────────────────────────
+     Every reading the editor published carries its rows' ids, so each change
+     between two of them is joined to the edit log and names who made it. */
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Changes' }).click();
+  await page.waitForSelector('#rc-frame .rc-table', { timeout: 10000 });
+  const editedBy = page.locator('#rc-frame .rc-table tbody tr', {
+    has: page.locator('button', { hasText: /^The (edit|\d+ edits)$/ }),
+  });
+  check('a change between two of the editor\'s readings says who made it',
+    (await editedBy.count()) >= 1 && /Alex/.test(await editedBy.first().innerText()),
+    (await editedBy.first().innerText().catch(() => '')).replace(/\s+/g, ' ').slice(0, 160));
+  await snap('changes');
+  await editedBy.first().locator('button', { hasText: /^The / }).click();
+  await page.waitForSelector('.cx-modal .lae-history-item', { timeout: 5000 }).catch(() => {});
+  await snap('changes-edits');
+  const behind = (await page.locator('.cx-modal .lae-history-item').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
+  check('and exactly what they changed, from what to what',
+    behind.length >= 1 && behind.every((t) => /Alex/.test(t) && /→|Added|Deleted|Taken off|Put back/.test(t)),
+    behind.join(' | ').slice(0, 240));
+  await page.locator('.cx-modal button', { hasText: 'Close' }).click();
+
+  await page.locator('#rc-frame .cx-seg button', { hasText: 'Every edit' }).click();
+  await page.waitForSelector('#rc-frame table[data-csv="lookahead-edits"]', { timeout: 10000 });
+  const editRows = page.locator('#rc-frame table[data-csv="lookahead-edits"] tbody tr');
+  const allEdits = await editRows.count();
+  await snap('edit-log');
+  const editText = await page.locator('#rc-frame table[data-csv="lookahead-edits"]').innerText();
+  check('every edit is a line of its own: who, the activity, the field, from and to',
+    allEdits > 5 && /Alex/.test(editText) && /ATS Site Test/.test(editText) && /Location/.test(editText) && /W40/.test(editText),
+    `${allEdits} line(s)`);
+  check('a day reads as the legend names its colour', /Day Shift/.test(editText));
+  check('names typed under an activity are about that activity', /Names under /.test(editText));
+  check('and the log can be taken out as a spreadsheet',
+    (await page.locator('#rc-frame .rc-table-tools button', { hasText: 'Export CSV' }).count()) >= 1);
+  const find = page.locator('#rc-frame input[aria-label="Find edits mentioning"]');
+  await find.click();
+  await page.keyboard.type('ATS Site');
+  await page.waitForTimeout(200);
+  const found = await editRows.allInnerTexts();
+  check('finding an activity narrows the lines to it',
+    found.length >= 1 && found.length < allEdits && found.every((t) => /ATS Site/i.test(t)), `${found.length} of ${allEdits}`);
+  check('and the box keeps the caret while it narrows',
+    await page.evaluate(() => document.activeElement?.getAttribute('aria-label') === 'Find edits mentioning'));
+  await find.fill('');
+  await page.locator('#rc-frame .cx-seg button', { hasText: 'Summary' }).click();
+  await page.locator('#rc-frame .rc-tab', { hasText: 'Calendar' }).click();
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
 
   /* The cancellation log lists the witness beside the days cancelled outright. */
   await page.locator('#rc-frame .rc-tab', { hasText: 'Cancellations' }).click();

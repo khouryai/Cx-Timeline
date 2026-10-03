@@ -537,6 +537,8 @@ export function applyLegend(grid, legend) {
   const rows = grid.rows.map((row) => ({
     row: row.row,
     label: row.label || '',
+    // The editor's id for the row, where it published one — see `gridFromModel()`.
+    ...(row.id ? { id: row.id } : {}),
     cells: row.cells.map((cell) => {
       if (!cell.hex) return { ...cell, meaning: null, role: null };
       const entry = byColour.get(cell.hex);

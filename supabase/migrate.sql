@@ -238,6 +238,18 @@ begin
 end;
 $$;
 
+-- ── Who changed the look-ahead ────────────────────────────────────────────
+-- The editor's row id, carried on each reading it publishes and on each change
+-- found between two of them, so Changes can read the edit log for the row and
+-- name who did it. `details_changed` is the kind an activity's own wording
+-- changing is recorded as; `rc_schema.sql` re-states the whole list too.
+alter table public.rc_lookahead_rows add column if not exists la_row_id uuid;
+alter table public.rc_change_events  add column if not exists la_row_id uuid;
+alter table public.rc_change_events drop constraint if exists rc_change_events_kind_check;
+alter table public.rc_change_events add constraint rc_change_events_kind_check check (kind in (
+  'scope_added', 'scope_removed', 'cancellation', 'resource_changed', 'shift_changed',
+  'window_advanced', 'window_retired', 'location_shift', 'details_changed'));
+
 /*
  * Nothing is dropped here any more.
  *
@@ -406,6 +418,12 @@ union all
 select 'rc_tawrs',
        case when to_regclass('public.rc_tawrs') is not null then 'ok'
             else 'RUN rc_schema.sql — track access work requests cannot be saved' end
+union all
+select 'changes say who made them',
+       case when exists (
+         select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'rc_change_events' and column_name = 'la_row_id'
+       ) then 'ok' else 'MISSING' end
 union all
 select 'managers stood down',
        coalesce((select count(*)::text || ' not scheduled' from public.rc_people where not scheduled), '0');

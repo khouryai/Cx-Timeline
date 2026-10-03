@@ -1281,7 +1281,7 @@ async function main() {
   check('and a row arriving in a week already in view is named',
     /NMS testing/.test(laText));
   check('the window moving is counted apart from real scope movement',
-    /2 change\(s\) that count, 1 window movement/.test(laText),
+    /2 change\(s\) that count, 1 that do not/.test(laText),
     laText.split('\n').find((l) => /that count/.test(l)) || '');
   // Written and never read back: an attribution recorded in a meeting was
   // invisible the moment the dialog closed.

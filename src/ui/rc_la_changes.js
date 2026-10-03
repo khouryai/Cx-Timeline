@@ -18,6 +18,7 @@ import {
 import { icon } from './icons.js';
 import {
   selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat,
+  segmented, openModal,
 } from './components.js';
 import {
   notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
@@ -27,6 +28,8 @@ import { toISO, addDays } from '../core/dates.js';
 
 import { la, table, WEEK_CHOICES } from './rc_la_state.js';
 import { checkNowButton } from './rc_ingest.js';
+import { enhanceTable } from './rc_table.js';
+import { editLines, editsBehind, editors } from '../core/la_edit.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
    Changes
@@ -64,7 +67,29 @@ function changeWindow(view, today) {
 /** Whether the changes list is narrowed to that window. It is, by default. */
 let changesInWindow = true;
 
+/** Which of the two the Changes section shows: the summary, or every edit. */
+let changesView = 'summary';
+
 export async function renderChanges(host) {
+  host.appendChild(el('div', { class: 'rc-section-head' }, [
+    el('h3', { text: 'What the look-ahead did' }),
+    el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end' }, [
+      segmented({
+        value: changesView,
+        options: [
+          { value: 'summary', label: 'Summary', title: 'What changed between one reading and the next, and who changed it' },
+          { value: 'edits', label: 'Every edit', title: 'Every change made in the editor, one line each — who, when, from what to what' },
+        ],
+        onChange: (v) => { changesView = v; notifyChanged('changes'); },
+      }),
+      checkNowButton(),
+    ]),
+  ]));
+  if (changesView === 'edits') {
+    await renderEditLog(host);
+    return;
+  }
+
   const today = todayISO();
   const from = `${Number(today.slice(0, 4)) - 1}-01-01`;
   const [all, runs, parties, snapshot, legendRows] = await Promise.all([
@@ -96,11 +121,6 @@ export async function renderChanges(host) {
   for (const a of [...annotations].sort((x, y) => String(x.created_at).localeCompare(y.created_at))) {
     saidOf.set(a.change_event_id, a);
   }
-
-  host.appendChild(el('div', { class: 'rc-section-head' }, [
-    el('h3', { text: 'What the look-ahead did' }),
-    checkNowButton(),
-  ]));
 
   /* Coverage before content. Ingestion only happens when somebody has the
      application open, so the history has holes — and a hole that is not drawn
@@ -146,13 +166,23 @@ export async function renderChanges(host) {
   const counted = countable(events);
   host.appendChild(el('p', { class: 'rc-hint' }, [
     el('span', { text: `${counted.length} change(s) that count, ` }),
-    el('span', { text: `${events.length - counted.length} window movement(s) that do not.` }),
+    el('span', { text: `${events.length - counted.length} that do not — the window moving, an activity `
+      + 'moving site or its wording changing.' }),
   ]));
+
+  /* Who made each change, from the edit log. Read only for changes found
+     between two readings the editor published — they name the row — and a
+     failure here costs the column, never the list. */
+  const by = await whoMadeThem(events, legendRows).catch((err) => {
+    console.warn('[cx-timeline] who made the changes:', err.message);
+    return null;
+  });
 
   const rows = events.map((e) => el('tr', {}, [
     el('td', { text: e.week_start || '—' }),
     el('td', {}, [badge(kindLabel(e.kind), kindTone(e.kind))]),
     el('td', { text: describe({ ...e, weekStart: e.week_start, rowKey: e.row_key }) }),
+    byCell(e, by),
     el('td', { class: 'rc-hint', text: e.detected_at ? dayLabel(e.detected_at.slice(0, 10)) : '' }),
     el('td', {}, [(() => {
       const said = saidOf.get(e.id);
@@ -179,7 +209,14 @@ export async function renderChanges(host) {
     })()]),
   ]));
 
-  host.appendChild(table(['Week', 'Kind', 'What', 'Seen', 'Down to'], rows));
+  host.appendChild(table(['Week', 'Kind', 'What', 'By', 'Seen', 'Down to'], rows));
+  if (events.some((e) => !e.la_row_id && KPI_SHOWN.includes(e.kind))) {
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'A change with no name against it was found before readings carried the editor\'s row '
+        + 'ids, so the edit log cannot be joined to it. Every change from now on names who made it.',
+    }));
+  }
 
   const unanswered = events.filter((e) => e.kind === 'cancellation' && !saidOf.has(e.id)).length;
   if (unanswered) {
@@ -264,8 +301,254 @@ function attribute(event, parties) {
 const KIND_LABELS = {
   scope_added: 'Scope added', scope_removed: 'Scope removed', cancellation: 'Cancelled',
   shift_changed: 'Shift changed', resource_changed: 'Resources', location_shift: 'Moved site',
-  window_advanced: 'Window advanced', window_retired: 'Window retired',
+  details_changed: 'Details', window_advanced: 'Window advanced', window_retired: 'Window retired',
 };
+
+/** The kinds a person makes — the window moving is the calendar's, not anybody's. */
+const KPI_SHOWN = ['scope_added', 'scope_removed', 'cancellation', 'shift_changed',
+  'resource_changed', 'location_shift', 'details_changed'];
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Who made each change
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** How a timestamp reads in the log: "Fri 2 Oct, 14:05". */
+const whenLabel = (iso) => new Date(iso).toLocaleString(undefined, {
+  weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+});
+
+/** The legend's meaning for a colour, newest row for it first. */
+function meaningLookup(legendRows) {
+  const byHex = new Map();
+  for (const r of [...(legendRows || [])].sort((a, b) => String(a.valid_from || '').localeCompare(String(b.valid_from || '')))) {
+    byHex.set(String(r.argb).toUpperCase(), r.meaning || '');
+  }
+  return (hex) => byHex.get(String(hex || '').toUpperCase()) || '';
+}
+
+/** A person's name for an account id, from the roster (including people who have left). */
+function nameLookup(people) {
+  const names = new Map((people || []).filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
+  return (id) => (id ? names.get(id) || 'An account no longer on the roster' : 'Unknown');
+}
+
+/**
+ * For every change that names an editor row, the edits that made it.
+ *
+ * The edges are the two readings' own times: an edit after the earlier one
+ * was taken and no later than the later one is between them. One read of the
+ * log covers the lot — from the earliest edge to the latest.
+ */
+async function whoMadeThem(events, legendRows) {
+  const named = events.filter((e) => e.la_row_id && e.from_snapshot && e.to_snapshot);
+  if (!named.length) return null;
+  const [metas, laRows, people] = await Promise.all([
+    rc.snapshotMetaByIds(named.flatMap((e) => [e.from_snapshot, e.to_snapshot])),
+    rc.listLaRows().catch(() => []),
+    rc.listPeople({ includeInactive: true }).catch(() => []),
+  ]);
+  const takenAt = new Map(metas.map((m) => [m.id, m.taken_at]));
+  const spans = named
+    .map((e) => ({ e, from: takenAt.get(e.from_snapshot), to: takenAt.get(e.to_snapshot) }))
+    .filter((x) => x.from && x.to);
+  if (!spans.length) return null;
+  const earliest = spans.map((x) => x.from).sort()[0];
+  const latest = spans.map((x) => x.to).sort().pop();
+  const edits = await rc.listLaEditsBetween(earliest, latest);
+
+  const behind = new Map();
+  for (const { e, from, to } of spans) {
+    behind.set(e.id, editsBehind(e, edits, { rows: laRows, fromAt: from, toAt: to }));
+  }
+  return { behind, rows: laRows, nameOf: nameLookup(people), meaningOf: meaningLookup(legendRows) };
+}
+
+/** The "By" cell: who made the change, and the edits themselves one press away. */
+function byCell(event, by) {
+  const edits = by?.behind.get(event.id);
+  if (!edits || !edits.length) {
+    return el('td', {
+      class: 'rc-hint',
+      text: '—',
+      title: !event.la_row_id
+        ? 'Found before readings carried the editor\'s row ids — the edit log cannot be joined to it'
+        : 'No edit between these two readings matched this change',
+    });
+  }
+  const people = editors(edits).map(by.nameOf);
+  return el('td', { dataset: { sort: people.join(', '), csv: people.join(', ') } }, [
+    el('div', { text: people.join(', ') }),
+    el('button', {
+      class: 'cx-btn mini ghost',
+      text: edits.length === 1 ? 'The edit' : `The ${edits.length} edits`,
+      title: 'Exactly what was changed, by whom and when',
+      onClick: () => showEdits(event, edits, by),
+    }),
+  ]);
+}
+
+function showEdits(event, edits, by) {
+  const lines = editLines(edits, { rows: by.rows, meaningOf: by.meaningOf });
+  openModal({
+    title: 'What was changed',
+    subtitle: describe({ ...event, weekStart: event.week_start, rowKey: event.row_key }),
+    body: el('div', { class: 'lae-form' }, [editList(lines, by.nameOf)]),
+    actions: [{ label: 'Close' }],
+  });
+}
+
+/** Edit lines as a list, newest first — the shape the editor's own history uses. */
+function editList(lines, nameOf) {
+  const list = el('ol', { class: 'lae-history', 'aria-label': 'Edits, newest first' });
+  for (const line of [...lines].reverse()) {
+    list.appendChild(el('li', { class: 'lae-history-item' }, [
+      el('span', { class: 'lae-history-when', text: whenLabel(line.at) }),
+      el('span', { class: 'lae-history-who', text: nameOf(line.by) }),
+      el('span', { class: 'lae-history-what', text: sentence(line) }),
+    ]));
+  }
+  return list;
+}
+
+/** One edit as one sentence: "Mon 12 Oct: Day shift → Cancelled". */
+function sentence(line) {
+  const where = line.day ? `${dayLabel(line.day)} · ` : '';
+  if (line.what === 'Added' || line.what === 'Deleted') return `${line.what}: ${line.title}`;
+  if (!line.from && !line.to) return `${line.title}: ${line.what}`;
+  return `${line.title}: ${where}${line.what} ${line.from || 'empty'} → ${line.to || 'empty'}`;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Every edit
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** The edit log's span and filters — kept while the calendar is open. */
+const editLog = { from: null, to: null, person: '', text: '' };
+
+/**
+ * Every change made in the editor, one line each.
+ *
+ * The summary says what moved between two readings; this is what was done to
+ * get there — a cell painted and painted back again inside one save is two
+ * lines here and nothing there. Read straight from `rc_la_edits`, which keeps
+ * both sides of every change, so nothing is reconstructed. An administrator's,
+ * like the log itself.
+ */
+async function renderEditLog(host) {
+  const today = todayISO();
+  if (!editLog.from) editLog.from = toISO(addDays(isoToMs(today), -13));
+  const from = editLog.from;
+  const to = editLog.to && editLog.to >= from ? editLog.to : today;
+
+  let edits;
+  let laRows;
+  let people;
+  let legendRows;
+  try {
+    [edits, laRows, people, legendRows] = await Promise.all([
+      rc.listLaEditsBetween(`${from}T00:00:00Z`, `${to}T23:59:59.999Z`),
+      rc.listLaRows().catch(() => []),
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+      rc.listLegend().catch(() => []),
+    ]);
+  } catch (err) {
+    host.appendChild(el('p', { class: 'rc-error', text: `The edit log could not be read: ${err.message}` }));
+    return;
+  }
+
+  const nameOf = nameLookup(people);
+  const lines = editLines(edits, { rows: laRows, meaningOf: meaningLookup(legendRows) }).reverse();
+
+  const dateBox = (value, label, onPick) => {
+    const box = el('input', { type: 'date', class: 'cx-input mini', value, 'aria-label': label, style: 'width:150px' });
+    box.addEventListener('change', () => onPick(box.value));
+    return box;
+  };
+  const authors = [...new Set(lines.map((l) => l.by))];
+  if (editLog.person && !authors.includes(editLog.person)) editLog.person = '';
+  const person = selectInput({
+    value: editLog.person,
+    mini: true,
+    options: [
+      { value: '', label: 'Everybody' },
+      ...authors.map((id) => ({ value: id || '', label: nameOf(id) }))
+        .sort((a, b) => a.label.localeCompare(b.label)),
+    ],
+    onChange: (v) => { editLog.person = v; drawRows(); },
+  });
+  person.style.width = '200px';
+  person.setAttribute('aria-label', 'Edits made by');
+  const search = textInput({
+    value: editLog.text,
+    mini: true,
+    placeholder: 'Activity, location, day…',
+    'aria-label': 'Find edits mentioning',
+    style: 'width:260px',
+    onInput: (v) => { editLog.text = typeof v === 'string' ? v : search.value; drawRows(); },
+  });
+
+  host.appendChild(el('div', {
+    style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 10px',
+  }, [
+    el('span', { class: 'rc-hint', style: 'margin:0', text: 'From' }),
+    dateBox(from, 'Edits made from', (v) => { if (v) { editLog.from = v; notifyChanged('changes'); } }),
+    el('span', { class: 'rc-hint', style: 'margin:0', text: 'To' }),
+    dateBox(to, 'Edits made up to', (v) => { editLog.to = v; notifyChanged('changes'); }),
+    person,
+    search,
+  ]));
+
+  if (!lines.length) {
+    host.appendChild(emptyState({
+      iconName: 'edit',
+      title: 'Nothing was edited',
+      message: `No change was made in the look-ahead editor between ${dayLabel(from)} and ${dayLabel(to)}. `
+        + 'Widen the dates to look further back.',
+    }));
+    return;
+  }
+
+  const summary = el('p', { class: 'rc-hint' });
+  const holder = el('div');
+  host.append(summary, holder);
+  host.appendChild(el('p', {
+    class: 'rc-hint',
+    text: 'One line for each thing changed, newest first. A row moved up or down, or indented, is '
+      + 'left out — that is where it sits, not what it says. The colours read as the legend names them.',
+  }));
+
+  /* Only the rows are redrawn as the filters change — the search box stays put,
+     so typing in it never loses the caret. */
+  function drawRows() {
+    const words = String(editLog.text || '').toLowerCase().split(/[\s,]+/).filter(Boolean);
+    const shown = lines.filter((l) => {
+      if (editLog.person && (l.by || '') !== editLog.person) return false;
+      if (!words.length) return true;
+      const hay = [l.title, l.location, l.what, l.from, l.to, l.day, l.day ? dayLabel(l.day) : '']
+        .join(' ').toLowerCase();
+      return words.every((w) => hay.includes(w));
+    });
+    const people = new Set(shown.map((l) => l.by)).size;
+    summary.textContent = `${shown.length} edit(s) by ${people} ${people === 1 ? 'person' : 'people'}`
+      + ` between ${dayLabel(from)} and ${dayLabel(to)}${shown.length < lines.length ? ` — ${lines.length} in all` : ''}.`;
+    clear(holder);
+    const t = table(['When', 'Who', 'Activity', 'Location', 'Day', 'Changed', 'From', 'To'], shown.map((l) => el('tr', {}, [
+      el('td', { text: whenLabel(l.at), dataset: { sort: l.at, csv: l.at } }),
+      el('td', { text: nameOf(l.by) }),
+      el('td', { text: l.title }),
+      el('td', { text: l.location || '—' }),
+      el('td', { text: l.day ? dayLabel(l.day) : '—', dataset: { sort: l.day || '', csv: l.day || '' } }),
+      el('td', { text: l.what }),
+      el('td', { text: l.from || '—' }),
+      el('td', { text: l.to || '—' }),
+    ])));
+    const tableEl = t.querySelector('table');
+    tableEl.dataset.csv = 'lookahead-edits';
+    holder.appendChild(t);
+    enhanceTable(tableEl);
+  }
+  drawRows();
+}
 const kindLabel = (k) => KIND_LABELS[k] || k;
 const kindTone = (k) => ({
   cancellation: 'bad', scope_removed: 'warn', scope_added: 'info',

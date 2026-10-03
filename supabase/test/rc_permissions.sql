@@ -842,6 +842,23 @@ select assert(
     where kind in ('window_advanced', 'window_retired')) = 2,
   'the window moving is recorded, and recorded separately');
 
+-- A change between two readings the editor published names the editor's row,
+-- which is what Changes reads the edit log by to say who made it. Wording
+-- changing is recorded as its own kind, and is not scope.
+insert into public.rc_change_events (kind, week_start, la_row_id) values
+  ('details_changed', date '2026-09-07', gen_random_uuid()),
+  ('location_shift',  date '2026-09-07', gen_random_uuid());
+select assert(
+  (select count(*) from public.rc_change_events where la_row_id is not null) = 2,
+  'a change can name the editor''s row it is about');
+select assert(
+  (select count(*) from public.rc_change_events
+    where kind in ('scope_added', 'scope_removed', 'cancellation')) = 2,
+  'and a new description or a move is not counted as scope');
+select refuses(:'alice',
+  'insert into public.rc_change_events (kind) values (''renamed_by_hand'')',
+  'a change of a kind the schema does not know');
+
 -- ══════════════════════════════════════════════════════════════════════════
 do $$ begin raise notice 'A viewer reads the schedule and writes nothing'; end $$;
 -- ══════════════════════════════════════════════════════════════════════════

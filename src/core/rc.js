@@ -554,6 +554,15 @@ export function listLaEdits({ sinceId = null, limit = 2000 } = {}) {
   return select('rc_la_edits', (q) => q.order('id', { ascending: false }).limit(limit));
 }
 
+/**
+ * Every edit made in a span of time, oldest first — what Changes reads to say
+ * who made each change between two readings, and the edit log itself. Paged,
+ * because a busy afternoon in the editor is more than one page of it.
+ */
+export function listLaEditsBetween(fromISO, toISO) {
+  return selectAll('rc_la_edits', (q) => q.gte('at', fromISO).lte('at', toISO).order('id'));
+}
+
 /** Everything the log says about one row and its days, newest first. */
 export function listLaEditsForRow(rowId) {
   return select('rc_la_edits', (q) => q.eq('row_id', rowId).order('id', { ascending: false }).limit(1000));
@@ -659,7 +668,7 @@ export function listSettings() {
  * "could not update the legend", on one screen, weeks after the deploy that
  * needed it; this turns it into one sentence at sign-in naming the two files.
  */
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 /**
  * Whether the database is the one this build was written against.
@@ -810,6 +819,21 @@ export function listIngestRuns({ limit = 100 } = {}) {
  */
 export function listSnapshotMeta({ limit = 50 } = {}) {
   return select('rc_lookahead_snapshot_meta', (q) => q.order('taken_at', { ascending: false }).limit(limit));
+}
+
+/**
+ * Those readings' metadata, by id — when each was taken, which is the edge of
+ * "between these two readings" when Changes asks the edit log who did it.
+ * A hundred at a time, because the ids travel in the URL.
+ */
+export async function snapshotMetaByIds(ids) {
+  const want = [...new Set((ids || []).filter(Boolean))];
+  const out = [];
+  for (let i = 0; i < want.length; i += 100) {
+    const chunk = want.slice(i, i + 100);
+    out.push(...await select('rc_lookahead_snapshot_meta', (q) => q.in('id', chunk)));
+  }
+  return out;
 }
 
 /** The newest snapshot with its grid, or null. The only full-grid read there is. */

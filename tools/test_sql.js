@@ -150,6 +150,19 @@ function main() {
 
     load('supabase/test/downgrade.sql');
     load('supabase/migrate.sql');
+    /* migrate.sql on its own brings back what Changes needs to say who made a
+       change — the columns and the kind — before rc_schema.sql has run. An
+       older project publishing in between would otherwise lose every reading. */
+    const whoColumns = psql(['-d', 'cxt', '-tAc', `
+      select (select count(*) from information_schema.columns
+               where table_schema='public' and column_name='la_row_id'
+                 and table_name in ('rc_lookahead_rows', 'rc_change_events'))
+           + (select count(*) from pg_constraint
+               where conname='rc_change_events_kind_check' and pg_get_constraintdef(oid) like '%details_changed%')`]).trim();
+    if (whoColumns !== '3') {
+      throw new Error(`migrate.sql alone did not bring back the row ids and the details kind (${whoColumns}/3)`);
+    }
+    console.log('✓ migrate.sql alone brings an older project the columns Changes names people by');
     load('supabase/rc_schema.sql');
     if (functionsPresent() !== String(accountFns.length)) {
       throw new Error('rc_schema.sql did not restore every function after a downgrade');
@@ -216,9 +229,15 @@ function main() {
       + (select count(*) from information_schema.columns
           where table_schema='public' and table_name='rc_plan_entries' and column_name='carry_chain_id')
       + (select count(*) from information_schema.columns
-          where table_schema='public' and table_name='rc_actuals' and column_name='lookahead_row_id')`]).trim();
-    if (upgraded !== '7') {
-      throw new Error(`migrate.sql left an old project incomplete (${upgraded}/7 pieces)`);
+          where table_schema='public' and table_name='rc_actuals' and column_name='lookahead_row_id')
+      + (select count(*) from information_schema.columns
+          where table_schema='public' and table_name='rc_lookahead_rows' and column_name='la_row_id')
+      + (select count(*) from information_schema.columns
+          where table_schema='public' and table_name='rc_change_events' and column_name='la_row_id')
+      + (select count(*) from pg_constraint
+          where conname='rc_change_events_kind_check' and pg_get_constraintdef(oid) like '%details_changed%')`]).trim();
+    if (upgraded !== '10') {
+      throw new Error(`migrate.sql left an old project incomplete (${upgraded}/10 pieces)`);
     }
     console.log('✓ migrate.sql upgrades a project built before any of this, and is safe twice\n');
 

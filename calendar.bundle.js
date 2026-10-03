@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-03T05:18:11.577Z
+ * Modules: 28   Built: 2026-10-03T15:34:37.010Z
  */
 (function () {
   'use strict';
@@ -2143,7 +2143,10 @@ __mods["core/la_edit.js"] = function (__x, __req) {
           if (c && (c.text || c.color)) cells.push(cell(r, L.firstDayCol + i, c.text || '', c.color || null));
         });
       }
-      rows.push({ row: r, label: '', cells });
+      /* The row's own id rides along, unseen. A workbook has no such thing, so
+         a reading of one matches rows by where they sit; a reading published from
+         here can match them by what they are, and so name who changed them. */
+      rows.push({ row: r, label: '', id: row.id, cells });
       r++;
     }
 
@@ -2396,6 +2399,166 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
+     Who changed what
+
+     The edit log read across the whole look-ahead rather than for one place:
+     every change as a line somebody can read ("Mon 12 Oct: Day → Cancelled"),
+     and, for each change found between two readings, the edits that made it.
+     Nothing here is stored — `rc_la_edits` keeps both sides of every change,
+     and a reading published from the editor carries each row's id, which is
+     the whole join.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Every row the log mentions, by id: the rows as they are now, and — for one
+   * since deleted — the last thing the log saw of it. A deleted activity is
+   * still somebody's change, and "Row" is no way to describe it.
+   */
+  function rowsKnown(rows, edits) {
+    const known = new Map((rows || []).map((r) => [r.id, r]));
+    const current = new Set(known.keys());
+    for (const e of [...(edits || [])].sort((a, b) => Number(a.id) - Number(b.id))) {
+      if (e.target !== 'row' || current.has(e.row_id)) continue;
+      const seen = e.after || e.before;
+      if (seen) known.set(e.row_id, { ...seen, id: e.row_id, gone: e.action === 'delete' });
+    }
+    return known;
+  }
+
+  /** What a row is called in a sentence about it. */
+  function rowTitle(row, known = new Map()) {
+    if (!row) return 'A row since deleted';
+    if (row.kind === 'resource') {
+      const parent = known.get(row.parent_id);
+      return parent ? `Names under ${rowTitle(parent, known)}` : 'Names row';
+    }
+    if (row.kind === 'absence') return row.description || ABSENCE_LABELS[row.absence_kind] || 'PTO';
+    if (row.kind === 'section') return `Section: ${row.description || 'untitled'}`;
+    return row.description || row.activity_id || 'Untitled activity';
+  }
+
+  /**
+   * The edit log as lines somebody can read, oldest first.
+   *
+   * One line per thing that changed: a row update that touched three fields is
+   * three lines, so "who changed the location" has an answer of its own. Moving a
+   * row (`sort`) or indenting it (`level`) is left out — it is where the row
+   * sits, not what it says, the rule `rowHistory()` already keeps.
+   *
+   * `{ id, at, by, batch, rowId, activityId, title, location, day, what, from, to }`
+   * — `activityId` is the activity a names row sits under, so filtering on an
+   * activity finds who was put on it too. `meaningOf(hex)` is the legend's.
+   */
+  function editLines(edits, { rows = [], meaningOf = () => '' } = {}) {
+    const known = rowsKnown(rows, edits);
+    const out = [];
+    for (const e of [...(edits || [])].sort((a, b) => Number(a.id) - Number(b.id))) {
+      const row = known.get(e.row_id) || null;
+      const activityId = row?.kind === 'resource' && row.parent_id ? row.parent_id : e.row_id;
+      const base = {
+        id: e.id, at: e.at, by: e.by || null, batch: e.batch || null, rowId: e.row_id, activityId,
+        title: rowTitle(row, known), location: known.get(activityId)?.location || '',
+        day: e.day ? String(e.day).slice(0, 10) : null,
+      };
+      if (e.target === 'cell') {
+        out.push({
+          ...base,
+          what: row?.kind === 'resource' ? 'Names' : 'Day',
+          from: e.action === 'insert' ? 'empty' : describeCellValue(cellValue(e.before), meaningOf),
+          to: e.action === 'delete' ? 'empty' : describeCellValue(cellValue(e.after), meaningOf),
+        });
+        continue;
+      }
+      if (e.action === 'insert') { out.push({ ...base, what: 'Added', from: '', to: base.title }); continue; }
+      if (e.action === 'delete') { out.push({ ...base, what: 'Deleted', from: base.title, to: '' }); continue; }
+      const before = e.before || {};
+      const after = e.after || {};
+      for (const f of HISTORY_FIELDS) {
+        const was = before[f.key] ?? '';
+        const now = after[f.key] ?? '';
+        if (String(was) === String(now)) continue;
+        if (f.key === 'archived') {
+          out.push({ ...base, what: now ? 'Taken off the look-ahead' : 'Put back', from: '', to: '' });
+        } else {
+          out.push({ ...base, what: f.label, from: String(was), to: String(now) });
+        }
+      }
+    }
+    return out;
+  }
+
+  function dayOfEvent(event) {
+    return String(event.before?.date || event.after?.date || event.date || '').slice(0, 10) || null;
+  }
+
+  function inWeek(day, weekStart) {
+    if (!day || !weekStart) return false;
+    const start = Date.parse(`${String(weekStart).slice(0, 10)}T00:00:00Z`);
+    const at = Date.parse(`${String(day).slice(0, 10)}T00:00:00Z`);
+    return at >= start && at < start + 7 * 86400000;
+  }
+
+  /**
+   * The edits that made one change, found between two readings.
+   *
+   * `event` is a stored change (`rc_change_events`): it names the editor's row
+   * (`la_row_id`), the week, and — for a day — the date. The edits are the ones
+   * written after the earlier reading was taken and no later than the later one
+   * (`fromAt`, `toAt`), on that row, narrowed to what the change was about: the
+   * day itself for a shift, the names row underneath for who is on it, the
+   * row's own fields for a move or a new description. A change between two
+   * workbook reads has no row id, and nothing is guessed for it.
+   */
+  function editsBehind(event, edits, { rows = [], fromAt = null, toAt = null } = {}) {
+    const rowId = event?.la_row_id;
+    if (!rowId) return [];
+    const from = fromAt ? Date.parse(fromAt) : -Infinity;
+    const to = toAt ? Date.parse(toAt) : Infinity;
+    const known = rowsKnown(rows, edits);
+    const children = new Set([...known.values()]
+      .filter((r) => r.kind === 'resource' && r.parent_id === rowId).map((r) => r.id));
+    const day = dayOfEvent(event);
+    const week = event.week_start;
+    const names = Boolean(event.before?.resources || event.after?.resources);
+
+    const wanted = (e) => {
+      const cell = e.target === 'cell';
+      const ownCell = cell && e.row_id === rowId;
+      switch (event.kind) {
+        case 'shift_changed':
+        case 'cancellation':
+          return ownCell && String(e.day).slice(0, 10) === day;
+        case 'resource_changed':
+          return names
+            ? cell && children.has(e.row_id) && inWeek(e.day, week)
+            : ownCell && inWeek(e.day, week);
+        case 'scope_added':
+        case 'scope_removed':
+          return (e.target === 'row' && e.row_id === rowId) || (ownCell && inWeek(e.day, week));
+        case 'location_shift':
+        case 'details_changed':
+          return e.target === 'row' && e.row_id === rowId && e.action === 'update';
+        default:
+          return false;
+      }
+    };
+
+    return (edits || [])
+      .filter((e) => {
+        const at = Date.parse(e.at);
+        return at > from && at <= to && wanted(e);
+      })
+      .sort((a, b) => Number(a.id) - Number(b.id));
+  }
+
+  /** Who made a set of edits, in the order they first did, without repeats. */
+  function editors(edits) {
+    const out = [];
+    for (const e of edits || []) if (!out.includes(e.by || null)) out.push(e.by || null);
+    return out;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
      Is everybody named where they can be?
 
      Only the people on the team — the names rows and the PTO / Office rows, read
@@ -2550,6 +2713,11 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   Object.defineProperty(__x, "cellHistory", { get: () => cellHistory, enumerable: true });
   Object.defineProperty(__x, "rowHistory", { get: () => rowHistory, enumerable: true });
   Object.defineProperty(__x, "describeCellValue", { get: () => describeCellValue, enumerable: true });
+  Object.defineProperty(__x, "rowsKnown", { get: () => rowsKnown, enumerable: true });
+  Object.defineProperty(__x, "rowTitle", { get: () => rowTitle, enumerable: true });
+  Object.defineProperty(__x, "editLines", { get: () => editLines, enumerable: true });
+  Object.defineProperty(__x, "editsBehind", { get: () => editsBehind, enumerable: true });
+  Object.defineProperty(__x, "editors", { get: () => editors, enumerable: true });
   Object.defineProperty(__x, "staffingIssues", { get: () => staffingIssues, enumerable: true });
 };
 
@@ -7320,17 +7488,30 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
            `resources` column — and PostgREST refuses the whole insert over it.
            The rest of the row is still worth having, so it goes without that one
            field and the gap is *said*, rather than costing the read. */
-        const missingColumn = /resources/.test(err.message)
-          && /(column|schema cache)/i.test(err.message);
-        if (missingColumn) {
+        let missing = missingColumns(err, ['resources', 'la_row_id']);
+        if (missing.length) {
           try {
-            const rows = (await lookaheadRows(snapshot.id, grid))
-              .map(({ resources, ...rest }) => rest);
-            if (rows.length) written = await rc.addSnapshotRows(rows);
-            rowTrouble = 'This database has no rc_lookahead_rows.resources column, so who the '
-              + 'Resource row names was not stored. Run supabase/migrate.sql and then '
-              + 'supabase/rc_schema.sql. The calendar still shows the names — it re-reads the '
-              + 'snapshot — but the Resources tab and the week plan read the stored column.';
+            const all = await lookaheadRows(snapshot.id, grid);
+            /* PostgREST names one missing column at a time, so a project behind on
+               both is asked twice rather than losing the rows on the second. */
+            for (;;) {
+              try {
+                if (all.length) written = await rc.addSnapshotRows(all.map((row) => withoutKeys(row, missing)));
+                break;
+              } catch (again) {
+                const more = missingColumns(again, ['resources', 'la_row_id']).filter((c) => !missing.includes(c));
+                if (!more.length) throw again;
+                missing = [...missing, ...more];
+              }
+            }
+            rowTrouble = missing.includes('resources')
+              ? 'This database has no rc_lookahead_rows.resources column, so who the '
+                + 'Resource row names was not stored. Run supabase/migrate.sql and then '
+                + 'supabase/rc_schema.sql. The calendar still shows the names — it re-reads the '
+                + 'snapshot — but the Resources tab and the week plan read the stored column.'
+              : 'This database has no rc_lookahead_rows.la_row_id column, so this reading was '
+                + 'compared by position and Changes cannot say who made it. Run '
+                + 'supabase/migrate.sql and then supabase/rc_schema.sql.';
           } catch (second) {
             rowTrouble = second.message;
           }
@@ -7542,6 +7723,7 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
     // database columns are named for what they are on disk.
     const shape = (r) => ({
       rowKey: r.row_key,
+      rowId: r.la_row_id || null,
       weekStart: r.week_start,
       location: r.raw_location || '',
       subsystem: r.subsystem || '',
@@ -7562,18 +7744,71 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
     if (!events.length) return [];
 
     const byKey = new Map(rows.map((r) => [r.row_key, r]));
-    await rc.addChangeEvents(events.map((e) => ({
+    const records = events.map((e) => ({
       from_snapshot: previous.id,
       to_snapshot: snapshot.id,
       kind: e.kind,
       week_start: e.weekStart || null,
       row_key: e.rowKey || null,
+      // The editor's id for the row, which is what Changes reads the edit log by
+      // to say who did it. Null for a change between two workbook reads.
+      la_row_id: e.rowId || null,
       location_id: byKey.get(e.rowKey)?.location_id || null,
       before: sideOf(e, 'before'),
       after: sideOf(e, 'after'),
-    })));
+    }));
 
-    return events;
+    /* A database that has not been brought up to date: no column for the id, or
+       a kind its check constraint does not know yet. Every change it *can* hold
+       is still written — losing the cancellations over a details edit would be
+       the wrong way round — and what it could not is reported. */
+    let dropId = false;
+    let dropNewer = false;
+    let first = null;
+    for (;;) {
+      const sending = records
+        .filter((r) => !dropNewer || !NEWER_KINDS.includes(r.kind))
+        .map((r) => (dropId ? withoutKeys(r, ['la_row_id']) : r));
+      try {
+        if (sending.length) await rc.addChangeEvents(sending);
+        break;
+      } catch (err) {
+        const idRefused = !dropId && missingColumns(err, ['la_row_id']).length > 0;
+        const kindRefused = !dropNewer && /check constraint|violates check/i.test(err.message);
+        if (!idRefused && !kindRefused) throw err;
+        dropId = dropId || idRefused;
+        dropNewer = dropNewer || kindRefused;
+        first = first || err;
+      }
+    }
+    if (first) {
+      rc.reportError('lookahead:changes', new Error(
+        `rc_change_events is behind the application (${first.message}); run supabase/migrate.sql `
+        + 'and then supabase/rc_schema.sql so Changes can say who made each change.'));
+    }
+    return events.filter((e) => !dropNewer || !NEWER_KINDS.includes(e.kind));
+  }
+
+  /** Kinds a schema older than version 10 refuses. */
+  const NEWER_KINDS = ['details_changed'];
+
+  /**
+   * Which of `names` a PostgREST error says the table has no column for.
+   *
+   * `create table if not exists` does nothing to a table that already exists, so
+   * a project that has not run `migrate.sql` lacks every column added since — and
+   * PostgREST refuses the whole insert over one of them.
+   */
+  function missingColumns(err, names) {
+    const message = String(err?.message || '');
+    if (!/(column|schema cache)/i.test(message)) return [];
+    return names.filter((name) => new RegExp(`\\b${name}\\b`).test(message));
+  }
+
+  function withoutKeys(row, keys) {
+    const out = { ...row };
+    for (const k of keys) delete out[k];
+    return out;
   }
 
   /**
@@ -7591,6 +7826,11 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
     // A whole row arrived or left: what it was is the useful part.
     if (event.kind === 'scope_added' || event.kind === 'scope_removed') {
       return { label: value.label || null, location: value.location || null, week: value.weekStart || null };
+    }
+    /* What the activity said about itself, before and after — the whole label
+       and where it was, so a moved activity reads "from W30 to Y10". */
+    if (event.kind === 'location_shift' || event.kind === 'details_changed') {
+      return { label: value.label || null, location: value.location || '' };
     }
     /* A resource request, as a map of date to what was asked for. Two shapes,
        because there are two places it can be written: a mark on the activity line
@@ -12116,6 +12356,150 @@ __mods["ui/rc_la_legend.js"] = function (__x, __req) {
   Object.defineProperty(__x, "renderLegend", { get: () => renderLegend, enumerable: true });
 };
 
+// ui/rc_table.js
+__mods["ui/rc_table.js"] = function (__x, __req) {
+  /**
+   * One behaviour for every table in the calendar.
+   *
+   * Fifteen tables were built in eight modules, and each behaved slightly
+   * differently: some numbers right-aligned under left-aligned headings, none
+   * could be sorted, and the header scrolled away on a long list so a column of
+   * figures was a column of figures with no name. Rather than a sixteenth way of
+   * building a table, this takes the ones that exist as they are drawn and gives
+   * each the same three things:
+   *
+   *   · the header stays in view while the rows scroll under it;
+   *   · a click on a heading sorts by that column — numbers as numbers, blanks
+   *     last, a second click reverses — and `aria-sort` says which;
+   *   · a table marked `data-csv="<name>"` carries an Export CSV button, and the
+   *     file holds exactly the rows on screen, in the order on screen.
+   *
+   * `ui/rc.js` runs it over whatever a tab draws, so a new table gets it without
+   * asking. Grids whose position *is* the meaning — the look-ahead, PTO, the
+   * week plan, the huddle — are left alone, and so is any table with a spanning
+   * cell, where a row is not a record and sorting would tear it apart.
+   *
+   * Imports: util, icons, exporters.
+   */
+
+  const { el } = __req("core/util.js");
+  const { icon } = __req("ui/icons.js");
+  const { saveFile } = __req("io/exporters.js");
+
+  /** Tables drawn as a grid, where reordering rows would change what they say. */
+  const POSITIONAL = ['la-grid', 'rc-pto-grid', 'rc-huddle', 'rc-resources'];
+
+  /** Taller than this and the frame scrolls on its own, so the header can stay. */
+  const TALL_ROWS = 14;
+
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+  /** Enhance every eligible table under `root`. Safe to call repeatedly. */
+  function enhanceTables(root) {
+    for (const table of root.querySelectorAll('table.rc-table:not([data-enhanced])')) {
+      enhanceTable(table);
+    }
+  }
+
+  function enhanceTable(table) {
+    table.dataset.enhanced = '1';
+    if (POSITIONAL.some((c) => table.classList.contains(c)) || table.dataset.plain != null) return;
+
+    const head = table.tHead?.rows[0];
+    const body = table.tBodies[0];
+    if (!head || !body) return;
+    const spans = body.querySelector('td[colspan], td[rowspan], th[colspan], th[rowspan]');
+
+    // A heading sits over its figures: where every cell in a column is a number,
+    // the heading takes the numbers' alignment rather than floating over the gap
+    // between two columns.
+    [...head.cells].forEach((th, index) => {
+      const cells = [...body.rows].map((r) => r.cells[index]).filter(Boolean);
+      if (cells.length && cells.every((c) => c.classList.contains('rc-num'))) th.classList.add('rc-num');
+    });
+
+    const frame = table.closest('.rc-scroll');
+    if (frame && body.rows.length > TALL_ROWS) frame.classList.add('rc-scroll-tall');
+
+    if (!spans && body.rows.length > 1) {
+      [...head.cells].forEach((th, index) => {
+        if (!th.textContent.trim()) return;
+        th.classList.add('rc-sortable');
+        th.tabIndex = 0;
+        th.setAttribute('aria-sort', 'none');
+        th.title = 'Sort by this column';
+        const sort = () => sortBy(table, index);
+        th.addEventListener('click', sort);
+        th.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            sort();
+          }
+        });
+      });
+    }
+
+    if (table.dataset.csv && body.rows.length) {
+      const button = el('button', {
+        class: 'cx-btn mini ghost rc-table-csv',
+        type: 'button',
+        html: icon('download', { size: 12 }) + '<span>Export CSV</span>',
+        title: 'Download these rows, in this order',
+        onClick: () => exportCsv(table),
+      });
+      (frame || table).before(el('div', { class: 'rc-table-tools' }, [button]));
+    }
+  }
+
+  /** What a cell sorts by: `data-sort` if the builder gave one, else its words. */
+  function keyOf(cell) {
+    if (!cell) return '';
+    if (cell.dataset.sort != null) return cell.dataset.sort;
+    const text = cell.textContent.trim();
+    return text === '—' ? '' : text;
+  }
+
+  function sortBy(table, index) {
+    const th = table.tHead.rows[0].cells[index];
+    const ascending = th.getAttribute('aria-sort') !== 'ascending';
+    for (const other of table.tHead.rows[0].cells) {
+      if (other.classList.contains('rc-sortable')) other.setAttribute('aria-sort', 'none');
+    }
+    th.setAttribute('aria-sort', ascending ? 'ascending' : 'descending');
+
+    const body = table.tBodies[0];
+    const rows = [...body.rows];
+    rows.sort((a, b) => {
+      const x = keyOf(a.cells[index]);
+      const y = keyOf(b.cells[index]);
+      // Blanks last whichever way round — an empty cell is not the smallest value.
+      if (!x || !y) return (!x) - (!y);
+      const cmp = collator.compare(x, y);
+      return ascending ? cmp : -cmp;
+    });
+    body.append(...rows);
+  }
+
+  function csvCell(value) {
+    const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
+  function exportCsv(table) {
+    const lines = [];
+    lines.push([...table.tHead.rows[0].cells].map((c) => csvCell(c.textContent)).join(','));
+    for (const row of table.tBodies[0].rows) {
+      lines.push([...row.cells].map((c) => csvCell(c.dataset.csv ?? c.textContent)).join(','));
+    }
+    const stamp = new Date().toISOString().slice(0, 10);
+    const name = String(table.dataset.csv).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    saveFile(`${name}-${stamp}.csv`, lines.join('\r\n') + '\r\n', 'text/csv', 'Table');
+  }
+
+  Object.defineProperty(__x, "enhanceTables", { get: () => enhanceTables, enumerable: true });
+  Object.defineProperty(__x, "enhanceTable", { get: () => enhanceTable, enumerable: true });
+};
+
 // ui/rc_la_changes.js
 __mods["ui/rc_la_changes.js"] = function (__x, __req) {
   /**
@@ -12136,7 +12520,8 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
 
 
   const { icon } = __req("ui/icons.js");
-  const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
+  const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat, segmented, openModal } = __req("ui/components.js");
+
 
 
   const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName } = __req("ui/rc_util.js");
@@ -12147,6 +12532,8 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
 
   const { la, table, WEEK_CHOICES } = __req("ui/rc_la_state.js");
   const { checkNowButton } = __req("ui/rc_ingest.js");
+  const { enhanceTable } = __req("ui/rc_table.js");
+  const { editLines, editsBehind, editors } = __req("core/la_edit.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      Changes
@@ -12184,7 +12571,29 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
   /** Whether the changes list is narrowed to that window. It is, by default. */
   let changesInWindow = true;
 
+  /** Which of the two the Changes section shows: the summary, or every edit. */
+  let changesView = 'summary';
+
   async function renderChanges(host) {
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'What the look-ahead did' }),
+      el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end' }, [
+        segmented({
+          value: changesView,
+          options: [
+            { value: 'summary', label: 'Summary', title: 'What changed between one reading and the next, and who changed it' },
+            { value: 'edits', label: 'Every edit', title: 'Every change made in the editor, one line each — who, when, from what to what' },
+          ],
+          onChange: (v) => { changesView = v; notifyChanged('changes'); },
+        }),
+        checkNowButton(),
+      ]),
+    ]));
+    if (changesView === 'edits') {
+      await renderEditLog(host);
+      return;
+    }
+
     const today = todayISO();
     const from = `${Number(today.slice(0, 4)) - 1}-01-01`;
     const [all, runs, parties, snapshot, legendRows] = await Promise.all([
@@ -12216,11 +12625,6 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
     for (const a of [...annotations].sort((x, y) => String(x.created_at).localeCompare(y.created_at))) {
       saidOf.set(a.change_event_id, a);
     }
-
-    host.appendChild(el('div', { class: 'rc-section-head' }, [
-      el('h3', { text: 'What the look-ahead did' }),
-      checkNowButton(),
-    ]));
 
     /* Coverage before content. Ingestion only happens when somebody has the
        application open, so the history has holes — and a hole that is not drawn
@@ -12266,13 +12670,23 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
     const counted = countable(events);
     host.appendChild(el('p', { class: 'rc-hint' }, [
       el('span', { text: `${counted.length} change(s) that count, ` }),
-      el('span', { text: `${events.length - counted.length} window movement(s) that do not.` }),
+      el('span', { text: `${events.length - counted.length} that do not — the window moving, an activity `
+        + 'moving site or its wording changing.' }),
     ]));
+
+    /* Who made each change, from the edit log. Read only for changes found
+       between two readings the editor published — they name the row — and a
+       failure here costs the column, never the list. */
+    const by = await whoMadeThem(events, legendRows).catch((err) => {
+      console.warn('[cx-timeline] who made the changes:', err.message);
+      return null;
+    });
 
     const rows = events.map((e) => el('tr', {}, [
       el('td', { text: e.week_start || '—' }),
       el('td', {}, [badge(kindLabel(e.kind), kindTone(e.kind))]),
       el('td', { text: describe({ ...e, weekStart: e.week_start, rowKey: e.row_key }) }),
+      byCell(e, by),
       el('td', { class: 'rc-hint', text: e.detected_at ? dayLabel(e.detected_at.slice(0, 10)) : '' }),
       el('td', {}, [(() => {
         const said = saidOf.get(e.id);
@@ -12299,7 +12713,14 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
       })()]),
     ]));
 
-    host.appendChild(table(['Week', 'Kind', 'What', 'Seen', 'Down to'], rows));
+    host.appendChild(table(['Week', 'Kind', 'What', 'By', 'Seen', 'Down to'], rows));
+    if (events.some((e) => !e.la_row_id && KPI_SHOWN.includes(e.kind))) {
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: 'A change with no name against it was found before readings carried the editor\'s row '
+          + 'ids, so the edit log cannot be joined to it. Every change from now on names who made it.',
+      }));
+    }
 
     const unanswered = events.filter((e) => e.kind === 'cancellation' && !saidOf.has(e.id)).length;
     if (unanswered) {
@@ -12384,8 +12805,254 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
   const KIND_LABELS = {
     scope_added: 'Scope added', scope_removed: 'Scope removed', cancellation: 'Cancelled',
     shift_changed: 'Shift changed', resource_changed: 'Resources', location_shift: 'Moved site',
-    window_advanced: 'Window advanced', window_retired: 'Window retired',
+    details_changed: 'Details', window_advanced: 'Window advanced', window_retired: 'Window retired',
   };
+
+  /** The kinds a person makes — the window moving is the calendar's, not anybody's. */
+  const KPI_SHOWN = ['scope_added', 'scope_removed', 'cancellation', 'shift_changed',
+    'resource_changed', 'location_shift', 'details_changed'];
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Who made each change
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** How a timestamp reads in the log: "Fri 2 Oct, 14:05". */
+  const whenLabel = (iso) => new Date(iso).toLocaleString(undefined, {
+    weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
+
+  /** The legend's meaning for a colour, newest row for it first. */
+  function meaningLookup(legendRows) {
+    const byHex = new Map();
+    for (const r of [...(legendRows || [])].sort((a, b) => String(a.valid_from || '').localeCompare(String(b.valid_from || '')))) {
+      byHex.set(String(r.argb).toUpperCase(), r.meaning || '');
+    }
+    return (hex) => byHex.get(String(hex || '').toUpperCase()) || '';
+  }
+
+  /** A person's name for an account id, from the roster (including people who have left). */
+  function nameLookup(people) {
+    const names = new Map((people || []).filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
+    return (id) => (id ? names.get(id) || 'An account no longer on the roster' : 'Unknown');
+  }
+
+  /**
+   * For every change that names an editor row, the edits that made it.
+   *
+   * The edges are the two readings' own times: an edit after the earlier one
+   * was taken and no later than the later one is between them. One read of the
+   * log covers the lot — from the earliest edge to the latest.
+   */
+  async function whoMadeThem(events, legendRows) {
+    const named = events.filter((e) => e.la_row_id && e.from_snapshot && e.to_snapshot);
+    if (!named.length) return null;
+    const [metas, laRows, people] = await Promise.all([
+      rc.snapshotMetaByIds(named.flatMap((e) => [e.from_snapshot, e.to_snapshot])),
+      rc.listLaRows().catch(() => []),
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+    ]);
+    const takenAt = new Map(metas.map((m) => [m.id, m.taken_at]));
+    const spans = named
+      .map((e) => ({ e, from: takenAt.get(e.from_snapshot), to: takenAt.get(e.to_snapshot) }))
+      .filter((x) => x.from && x.to);
+    if (!spans.length) return null;
+    const earliest = spans.map((x) => x.from).sort()[0];
+    const latest = spans.map((x) => x.to).sort().pop();
+    const edits = await rc.listLaEditsBetween(earliest, latest);
+
+    const behind = new Map();
+    for (const { e, from, to } of spans) {
+      behind.set(e.id, editsBehind(e, edits, { rows: laRows, fromAt: from, toAt: to }));
+    }
+    return { behind, rows: laRows, nameOf: nameLookup(people), meaningOf: meaningLookup(legendRows) };
+  }
+
+  /** The "By" cell: who made the change, and the edits themselves one press away. */
+  function byCell(event, by) {
+    const edits = by?.behind.get(event.id);
+    if (!edits || !edits.length) {
+      return el('td', {
+        class: 'rc-hint',
+        text: '—',
+        title: !event.la_row_id
+          ? 'Found before readings carried the editor\'s row ids — the edit log cannot be joined to it'
+          : 'No edit between these two readings matched this change',
+      });
+    }
+    const people = editors(edits).map(by.nameOf);
+    return el('td', { dataset: { sort: people.join(', '), csv: people.join(', ') } }, [
+      el('div', { text: people.join(', ') }),
+      el('button', {
+        class: 'cx-btn mini ghost',
+        text: edits.length === 1 ? 'The edit' : `The ${edits.length} edits`,
+        title: 'Exactly what was changed, by whom and when',
+        onClick: () => showEdits(event, edits, by),
+      }),
+    ]);
+  }
+
+  function showEdits(event, edits, by) {
+    const lines = editLines(edits, { rows: by.rows, meaningOf: by.meaningOf });
+    openModal({
+      title: 'What was changed',
+      subtitle: describe({ ...event, weekStart: event.week_start, rowKey: event.row_key }),
+      body: el('div', { class: 'lae-form' }, [editList(lines, by.nameOf)]),
+      actions: [{ label: 'Close' }],
+    });
+  }
+
+  /** Edit lines as a list, newest first — the shape the editor's own history uses. */
+  function editList(lines, nameOf) {
+    const list = el('ol', { class: 'lae-history', 'aria-label': 'Edits, newest first' });
+    for (const line of [...lines].reverse()) {
+      list.appendChild(el('li', { class: 'lae-history-item' }, [
+        el('span', { class: 'lae-history-when', text: whenLabel(line.at) }),
+        el('span', { class: 'lae-history-who', text: nameOf(line.by) }),
+        el('span', { class: 'lae-history-what', text: sentence(line) }),
+      ]));
+    }
+    return list;
+  }
+
+  /** One edit as one sentence: "Mon 12 Oct: Day shift → Cancelled". */
+  function sentence(line) {
+    const where = line.day ? `${dayLabel(line.day)} · ` : '';
+    if (line.what === 'Added' || line.what === 'Deleted') return `${line.what}: ${line.title}`;
+    if (!line.from && !line.to) return `${line.title}: ${line.what}`;
+    return `${line.title}: ${where}${line.what} ${line.from || 'empty'} → ${line.to || 'empty'}`;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Every edit
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** The edit log's span and filters — kept while the calendar is open. */
+  const editLog = { from: null, to: null, person: '', text: '' };
+
+  /**
+   * Every change made in the editor, one line each.
+   *
+   * The summary says what moved between two readings; this is what was done to
+   * get there — a cell painted and painted back again inside one save is two
+   * lines here and nothing there. Read straight from `rc_la_edits`, which keeps
+   * both sides of every change, so nothing is reconstructed. An administrator's,
+   * like the log itself.
+   */
+  async function renderEditLog(host) {
+    const today = todayISO();
+    if (!editLog.from) editLog.from = toISO(addDays(isoToMs(today), -13));
+    const from = editLog.from;
+    const to = editLog.to && editLog.to >= from ? editLog.to : today;
+
+    let edits;
+    let laRows;
+    let people;
+    let legendRows;
+    try {
+      [edits, laRows, people, legendRows] = await Promise.all([
+        rc.listLaEditsBetween(`${from}T00:00:00Z`, `${to}T23:59:59.999Z`),
+        rc.listLaRows().catch(() => []),
+        rc.listPeople({ includeInactive: true }).catch(() => []),
+        rc.listLegend().catch(() => []),
+      ]);
+    } catch (err) {
+      host.appendChild(el('p', { class: 'rc-error', text: `The edit log could not be read: ${err.message}` }));
+      return;
+    }
+
+    const nameOf = nameLookup(people);
+    const lines = editLines(edits, { rows: laRows, meaningOf: meaningLookup(legendRows) }).reverse();
+
+    const dateBox = (value, label, onPick) => {
+      const box = el('input', { type: 'date', class: 'cx-input mini', value, 'aria-label': label, style: 'width:150px' });
+      box.addEventListener('change', () => onPick(box.value));
+      return box;
+    };
+    const authors = [...new Set(lines.map((l) => l.by))];
+    if (editLog.person && !authors.includes(editLog.person)) editLog.person = '';
+    const person = selectInput({
+      value: editLog.person,
+      mini: true,
+      options: [
+        { value: '', label: 'Everybody' },
+        ...authors.map((id) => ({ value: id || '', label: nameOf(id) }))
+          .sort((a, b) => a.label.localeCompare(b.label)),
+      ],
+      onChange: (v) => { editLog.person = v; drawRows(); },
+    });
+    person.style.width = '200px';
+    person.setAttribute('aria-label', 'Edits made by');
+    const search = textInput({
+      value: editLog.text,
+      mini: true,
+      placeholder: 'Activity, location, day…',
+      'aria-label': 'Find edits mentioning',
+      style: 'width:260px',
+      onInput: (v) => { editLog.text = typeof v === 'string' ? v : search.value; drawRows(); },
+    });
+
+    host.appendChild(el('div', {
+      style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 10px',
+    }, [
+      el('span', { class: 'rc-hint', style: 'margin:0', text: 'From' }),
+      dateBox(from, 'Edits made from', (v) => { if (v) { editLog.from = v; notifyChanged('changes'); } }),
+      el('span', { class: 'rc-hint', style: 'margin:0', text: 'To' }),
+      dateBox(to, 'Edits made up to', (v) => { editLog.to = v; notifyChanged('changes'); }),
+      person,
+      search,
+    ]));
+
+    if (!lines.length) {
+      host.appendChild(emptyState({
+        iconName: 'edit',
+        title: 'Nothing was edited',
+        message: `No change was made in the look-ahead editor between ${dayLabel(from)} and ${dayLabel(to)}. `
+          + 'Widen the dates to look further back.',
+      }));
+      return;
+    }
+
+    const summary = el('p', { class: 'rc-hint' });
+    const holder = el('div');
+    host.append(summary, holder);
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'One line for each thing changed, newest first. A row moved up or down, or indented, is '
+        + 'left out — that is where it sits, not what it says. The colours read as the legend names them.',
+    }));
+
+    /* Only the rows are redrawn as the filters change — the search box stays put,
+       so typing in it never loses the caret. */
+    function drawRows() {
+      const words = String(editLog.text || '').toLowerCase().split(/[\s,]+/).filter(Boolean);
+      const shown = lines.filter((l) => {
+        if (editLog.person && (l.by || '') !== editLog.person) return false;
+        if (!words.length) return true;
+        const hay = [l.title, l.location, l.what, l.from, l.to, l.day, l.day ? dayLabel(l.day) : '']
+          .join(' ').toLowerCase();
+        return words.every((w) => hay.includes(w));
+      });
+      const people = new Set(shown.map((l) => l.by)).size;
+      summary.textContent = `${shown.length} edit(s) by ${people} ${people === 1 ? 'person' : 'people'}`
+        + ` between ${dayLabel(from)} and ${dayLabel(to)}${shown.length < lines.length ? ` — ${lines.length} in all` : ''}.`;
+      clear(holder);
+      const t = table(['When', 'Who', 'Activity', 'Location', 'Day', 'Changed', 'From', 'To'], shown.map((l) => el('tr', {}, [
+        el('td', { text: whenLabel(l.at), dataset: { sort: l.at, csv: l.at } }),
+        el('td', { text: nameOf(l.by) }),
+        el('td', { text: l.title }),
+        el('td', { text: l.location || '—' }),
+        el('td', { text: l.day ? dayLabel(l.day) : '—', dataset: { sort: l.day || '', csv: l.day || '' } }),
+        el('td', { text: l.what }),
+        el('td', { text: l.from || '—' }),
+        el('td', { text: l.to || '—' }),
+      ])));
+      const tableEl = t.querySelector('table');
+      tableEl.dataset.csv = 'lookahead-edits';
+      holder.appendChild(t);
+      enhanceTable(tableEl);
+    }
+    drawRows();
+  }
   const kindLabel = (k) => KIND_LABELS[k] || k;
   const kindTone = (k) => ({
     cancellation: 'bad', scope_removed: 'warn', scope_added: 'info',
@@ -18742,150 +19409,6 @@ __mods["ui/rc_tawr.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
-};
-
-// ui/rc_table.js
-__mods["ui/rc_table.js"] = function (__x, __req) {
-  /**
-   * One behaviour for every table in the calendar.
-   *
-   * Fifteen tables were built in eight modules, and each behaved slightly
-   * differently: some numbers right-aligned under left-aligned headings, none
-   * could be sorted, and the header scrolled away on a long list so a column of
-   * figures was a column of figures with no name. Rather than a sixteenth way of
-   * building a table, this takes the ones that exist as they are drawn and gives
-   * each the same three things:
-   *
-   *   · the header stays in view while the rows scroll under it;
-   *   · a click on a heading sorts by that column — numbers as numbers, blanks
-   *     last, a second click reverses — and `aria-sort` says which;
-   *   · a table marked `data-csv="<name>"` carries an Export CSV button, and the
-   *     file holds exactly the rows on screen, in the order on screen.
-   *
-   * `ui/rc.js` runs it over whatever a tab draws, so a new table gets it without
-   * asking. Grids whose position *is* the meaning — the look-ahead, PTO, the
-   * week plan, the huddle — are left alone, and so is any table with a spanning
-   * cell, where a row is not a record and sorting would tear it apart.
-   *
-   * Imports: util, icons, exporters.
-   */
-
-  const { el } = __req("core/util.js");
-  const { icon } = __req("ui/icons.js");
-  const { saveFile } = __req("io/exporters.js");
-
-  /** Tables drawn as a grid, where reordering rows would change what they say. */
-  const POSITIONAL = ['la-grid', 'rc-pto-grid', 'rc-huddle', 'rc-resources'];
-
-  /** Taller than this and the frame scrolls on its own, so the header can stay. */
-  const TALL_ROWS = 14;
-
-  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-
-  /** Enhance every eligible table under `root`. Safe to call repeatedly. */
-  function enhanceTables(root) {
-    for (const table of root.querySelectorAll('table.rc-table:not([data-enhanced])')) {
-      enhanceTable(table);
-    }
-  }
-
-  function enhanceTable(table) {
-    table.dataset.enhanced = '1';
-    if (POSITIONAL.some((c) => table.classList.contains(c)) || table.dataset.plain != null) return;
-
-    const head = table.tHead?.rows[0];
-    const body = table.tBodies[0];
-    if (!head || !body) return;
-    const spans = body.querySelector('td[colspan], td[rowspan], th[colspan], th[rowspan]');
-
-    // A heading sits over its figures: where every cell in a column is a number,
-    // the heading takes the numbers' alignment rather than floating over the gap
-    // between two columns.
-    [...head.cells].forEach((th, index) => {
-      const cells = [...body.rows].map((r) => r.cells[index]).filter(Boolean);
-      if (cells.length && cells.every((c) => c.classList.contains('rc-num'))) th.classList.add('rc-num');
-    });
-
-    const frame = table.closest('.rc-scroll');
-    if (frame && body.rows.length > TALL_ROWS) frame.classList.add('rc-scroll-tall');
-
-    if (!spans && body.rows.length > 1) {
-      [...head.cells].forEach((th, index) => {
-        if (!th.textContent.trim()) return;
-        th.classList.add('rc-sortable');
-        th.tabIndex = 0;
-        th.setAttribute('aria-sort', 'none');
-        th.title = 'Sort by this column';
-        const sort = () => sortBy(table, index);
-        th.addEventListener('click', sort);
-        th.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            sort();
-          }
-        });
-      });
-    }
-
-    if (table.dataset.csv && body.rows.length) {
-      const button = el('button', {
-        class: 'cx-btn mini ghost rc-table-csv',
-        type: 'button',
-        html: icon('download', { size: 12 }) + '<span>Export CSV</span>',
-        title: 'Download these rows, in this order',
-        onClick: () => exportCsv(table),
-      });
-      (frame || table).before(el('div', { class: 'rc-table-tools' }, [button]));
-    }
-  }
-
-  /** What a cell sorts by: `data-sort` if the builder gave one, else its words. */
-  function keyOf(cell) {
-    if (!cell) return '';
-    if (cell.dataset.sort != null) return cell.dataset.sort;
-    const text = cell.textContent.trim();
-    return text === '—' ? '' : text;
-  }
-
-  function sortBy(table, index) {
-    const th = table.tHead.rows[0].cells[index];
-    const ascending = th.getAttribute('aria-sort') !== 'ascending';
-    for (const other of table.tHead.rows[0].cells) {
-      if (other.classList.contains('rc-sortable')) other.setAttribute('aria-sort', 'none');
-    }
-    th.setAttribute('aria-sort', ascending ? 'ascending' : 'descending');
-
-    const body = table.tBodies[0];
-    const rows = [...body.rows];
-    rows.sort((a, b) => {
-      const x = keyOf(a.cells[index]);
-      const y = keyOf(b.cells[index]);
-      // Blanks last whichever way round — an empty cell is not the smallest value.
-      if (!x || !y) return (!x) - (!y);
-      const cmp = collator.compare(x, y);
-      return ascending ? cmp : -cmp;
-    });
-    body.append(...rows);
-  }
-
-  function csvCell(value) {
-    const text = String(value ?? '').replace(/\s+/g, ' ').trim();
-    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-  }
-
-  function exportCsv(table) {
-    const lines = [];
-    lines.push([...table.tHead.rows[0].cells].map((c) => csvCell(c.textContent)).join(','));
-    for (const row of table.tBodies[0].rows) {
-      lines.push([...row.cells].map((c) => csvCell(c.dataset.csv ?? c.textContent)).join(','));
-    }
-    const stamp = new Date().toISOString().slice(0, 10);
-    const name = String(table.dataset.csv).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    saveFile(`${name}-${stamp}.csv`, lines.join('\r\n') + '\r\n', 'text/csv', 'Table');
-  }
-
-  Object.defineProperty(__x, "enhanceTables", { get: () => enhanceTables, enumerable: true });
-  Object.defineProperty(__x, "enhanceTable", { get: () => enhanceTable, enumerable: true });
 };
 
 // ui/rc.js

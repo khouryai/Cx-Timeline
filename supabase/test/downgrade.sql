@@ -22,6 +22,14 @@ drop table if exists public.rc_support_codes;
 drop function if exists public.rc_compact_snapshots();
 drop table if exists public.rc_la_seen;
 drop table if exists public.rc_invitations cascade;
+-- Before Changes could say who: no row id on a reading or a change, and a
+-- kind list that has never heard of `details_changed`.
+alter table public.rc_lookahead_rows drop column if exists la_row_id;
+alter table public.rc_change_events drop column if exists la_row_id;
+alter table public.rc_change_events drop constraint if exists rc_change_events_kind_check;
+alter table public.rc_change_events add constraint rc_change_events_kind_check check (kind in (
+  'scope_added', 'scope_removed', 'cancellation', 'resource_changed', 'shift_changed',
+  'window_advanced', 'window_retired', 'location_shift'));
 
 -- And a role check that has never heard of a viewer, so read-only access is
 -- refused by the constraint rather than by any policy.

@@ -516,7 +516,7 @@ export function readGrid(grid, { anchorISO = null } = {}) {
     const absence = absenceKind(meta.find((value) => absenceKind(value)) || '');
     if (!heading && absence) {
       activities.push({
-        row: row.row, meta, marks, heading: false, highlighted: false,
+        row: row.row, id: row.id || null, meta, marks, heading: false, highlighted: false,
         named: true, resource: null, absence,
       });
       continue;
@@ -551,6 +551,7 @@ export function readGrid(grid, { anchorISO = null } = {}) {
       if (above && above.row === row.row - 1 && !above.heading && !above.absence) {
         above.resource = {
           row: row.row,
+          id: row.id || null,
           /* Where and when come from the activity above — that is what the
              workbook means by leaving them blank on this row. Anything typed
              here wins, so a resource working different hours can say so. */
@@ -582,7 +583,7 @@ export function readGrid(grid, { anchorISO = null } = {}) {
        unscheduled rows rather than dropped, so the switch still brings it back. */
     const named = meta.some(Boolean);
 
-    activities.push({ row: row.row, meta, marks, heading, highlighted, named, resource: null, absence: null });
+    activities.push({ row: row.row, id: row.id || null, meta, marks, heading, highlighted, named, resource: null, absence: null });
   }
 
   return { days, meta: metaCols, headings, activities, header: header.row };
@@ -771,6 +772,12 @@ export async function rowsFrom(view, {
         week_start: week,
         sheet_row: activity.row,
         row_key: rowKey({ weekStart: week, location: rawLocation || '', subsystem: '', ordinal }),
+        /* The editor's id for the activity, when the reading was published from
+           the editor; null for a workbook read. `row_key` is still written —
+           links made before ids existed point at it — but two readings that
+           both carry ids are compared on the id, so a row inserted mid-group
+           no longer shifts the ones under it into a removal and an addition. */
+        la_row_id: activity.id || null,
         location_id: locationId,
         raw_location: rawLocation,
         raw_label: label,
@@ -875,7 +882,19 @@ export function classify(before, after, { cancelledMeaning = 'cancelled' } = {})
   const beforeWindow = windowOf(before);
   const afterWindow = windowOf(after);
 
-  if (before.length && after.length) {
+  /* **Two readings that both carry the editor's ids are compared on them.**
+     A row is then the same row wherever it sits and whatever it says, so
+     inserting one mid-group no longer turns every row under it into a removal
+     and an addition, and an activity moved to another site is one event rather
+     than two. Only when *every* row on both sides has an id: the first reading
+     published after ids began is compared with one that had none, and mixing
+     the two keyings would book every row as moved. That one comparison goes by
+     position, as every comparison did before. */
+  const byId = before.length > 0 && after.length > 0
+    && before.every((r) => r.rowId) && after.every((r) => r.rowId);
+  const keyOf = byId ? (r) => `${r.weekStart}|id:${r.rowId}` : (r) => r.rowKey;
+
+  if (!byId && before.length && after.length) {
     const keys = new Set(after.map((r) => r.rowKey));
     const located = (rows) => rows.filter((r) => String(r.location || '').trim()).length;
     const sided = located(before) === 0 !== (located(after) === 0);
@@ -887,8 +906,9 @@ export function classify(before, after, { cancelledMeaning = 'cancelled' } = {})
   const shared = new Set(beforeWindow.weeks.filter((w) => afterWindow.weeks.includes(w)));
 
   const events = [];
-  const beforeByKey = new Map(before.map((r) => [r.rowKey, r]));
-  const afterByKey = new Map(after.map((r) => [r.rowKey, r]));
+  const beforeByKey = new Map(before.map((r) => [keyOf(r), r]));
+  const afterByKey = new Map(after.map((r) => [keyOf(r), r]));
+  const idOf = (r) => r.rowId || null;
 
   /* Weeks entering and leaving the window. Not scope, and named so. */
   for (const week of afterWindow.weeks) {
@@ -905,21 +925,38 @@ export function classify(before, after, { cancelledMeaning = 'cancelled' } = {})
   /* Rows added to, and removed from, a week that was already in view. */
   for (const row of after) {
     if (!shared.has(row.weekStart)) continue;
-    if (!beforeByKey.has(row.rowKey)) {
-      events.push({ kind: 'scope_added', weekStart: row.weekStart, rowKey: row.rowKey, before: null, after: row });
+    if (!beforeByKey.has(keyOf(row))) {
+      events.push({ kind: 'scope_added', weekStart: row.weekStart, rowKey: row.rowKey, rowId: idOf(row), before: null, after: row });
     }
   }
   for (const row of before) {
     if (!shared.has(row.weekStart)) continue;
-    if (!afterByKey.has(row.rowKey)) {
-      events.push({ kind: 'scope_removed', weekStart: row.weekStart, rowKey: row.rowKey, before: row, after: null });
+    if (!afterByKey.has(keyOf(row))) {
+      events.push({ kind: 'scope_removed', weekStart: row.weekStart, rowKey: row.rowKey, rowId: idOf(row), before: row, after: null });
     }
   }
 
+  /* What an activity says about itself, once per activity rather than once per
+     week it spans. Only visible when rows are matched on their ids: matched by
+     position, a row whose location changed was a different row, and a changed
+     description was never compared at all. */
+  const described = new Set();
+
   /* Rows present on both sides: what changed inside them. */
   for (const row of after) {
-    const prior = beforeByKey.get(row.rowKey);
+    const prior = beforeByKey.get(keyOf(row));
     if (!prior || !shared.has(row.weekStart)) continue;
+    const rowId = idOf(row);
+
+    if (byId && !described.has(rowId)) {
+      described.add(rowId);
+      const where = (r) => String(r.location || '').trim();
+      if (where(prior) !== where(row)) {
+        events.push({ kind: 'location_shift', weekStart: row.weekStart, rowKey: row.rowKey, rowId, before: prior, after: row });
+      } else if (String(prior.label || '') !== String(row.label || '')) {
+        events.push({ kind: 'details_changed', weekStart: row.weekStart, rowKey: row.rowKey, rowId, before: prior, after: row });
+      }
+    }
 
     const dates = [...new Set([...Object.keys(prior.cells || {}), ...Object.keys(row.cells || {})])].sort();
     for (const date of dates) {
@@ -937,6 +974,7 @@ export function classify(before, after, { cancelledMeaning = 'cancelled' } = {})
         kind,
         weekStart: row.weekStart,
         rowKey: row.rowKey,
+        rowId,
         date,
         before: was,
         after: now,
@@ -955,6 +993,7 @@ export function classify(before, after, { cancelledMeaning = 'cancelled' } = {})
         field: 'marks',
         weekStart: row.weekStart,
         rowKey: row.rowKey,
+        rowId,
         before: prior.marks || {},
         after: row.marks || {},
       });
@@ -974,6 +1013,7 @@ export function classify(before, after, { cancelledMeaning = 'cancelled' } = {})
         field: 'resources',
         weekStart: row.weekStart,
         rowKey: row.rowKey,
+        rowId,
         before: prior.resources || {},
         after: row.resources || {},
       });
@@ -1059,7 +1099,16 @@ export function describe(event) {
     }
     case 'window_advanced': return `Week ${event.weekStart} came into the window`;
     case 'window_retired': return `Week ${event.weekStart} left the window`;
-    case 'location_shift': return 'Relinked as one crew moving site';
+    case 'location_shift':
+      // Matched on the editor's id, the row itself says where it went. Linked
+      // by hand from a removal and an addition, it does not.
+      if (event.before?.location !== undefined || event.after?.location !== undefined) {
+        return `${event.after?.label || event.before?.label || 'Activity'}: moved from `
+          + `${event.before?.location || 'no location'} to ${event.after?.location || 'no location'}`;
+      }
+      return 'Relinked as one crew moving site';
+    case 'details_changed':
+      return `Details: ${event.before?.label || 'nothing'} → ${event.after?.label || 'nothing'}`;
     default: return event.kind;
   }
 }
