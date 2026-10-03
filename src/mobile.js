@@ -22,6 +22,10 @@ import { start } from './mobile/shell.js';
 applyTheme();
 followSystem();
 
+/* Opening the phone app undoes "Open the full site": the next visit to the site
+   on this phone comes back here, as it would have done (see `phone.js`). */
+try { localStorage.removeItem('cx-full-site'); } catch { /* no storage: nothing was kept */ }
+
 const go = () => {
   installPwa();
   start();

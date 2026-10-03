@@ -1726,6 +1726,30 @@ word on screen would be a migration of every row for nothing a reader sees.
 Draw a shift with `shiftLabel()`, never the raw value — the week plan and the
 huddle printed "possession" beside tasks until they did.
 
+### A phone opening the site is sent to the phone app
+
+The site is the full calendar and the timeline, laid out for a screen. Opened
+on a phone it was the desktop page shrunk, and "Add to Home Screen" from it
+saved a bookmark — iOS and Android alike open that in a browser tab every
+time, because the page has no manifest and does not declare itself an app.
+The phone app (`m/`) does, so the same gesture there installs something that
+opens on its own, full screen.
+
+`phone.js` runs on the site before the bundle is fetched (plain script, not
+in the bundle — it has to beat 1.4 MB, and the policy allows no inline
+script) and sends a **phone** to `m/` with `location.replace()`, so Back does
+not bounce it there again. A phone is a touch screen whose shorter side is
+under 600 CSS pixels; a tablet is somebody running the huddle or the editor
+and stays. It acts only in the calendar shape — the plan has no backend, the
+calendar has one — because nowhere else is `m/` published. "Open the full
+site" in the app goes to `../?full=1`, which is kept on that phone until the
+app is opened again. The desktop shell drops the tag (`tools/desktop.js`): a
+desktop is never a phone, and the shell ships no phone app.
+
+A home-screen icon saved from the site before this is still a bookmark to the
+site: it now lands in the phone app, but in the browser. Remove it and add the
+app again from `m/`.
+
 ### The phone's service worker keeps the app, never the data
 
 **The phone's service worker keeps the app, never the data.** `m/sw.js`

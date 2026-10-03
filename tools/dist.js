@@ -41,7 +41,7 @@ const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..'
 const OUT = path.join(ROOT, 'dist');
 
 /** Everything the browser actually loads, and nothing else. */
-const FILES = ['index.html', 'app.bundle.js', 'calendar.bundle.js', 'config.js', '_headers'];
+const FILES = ['index.html', 'app.bundle.js', 'calendar.bundle.js', 'config.js', 'phone.js', '_headers'];
 const DIRS = ['css', 'vendor'];
 
 /**

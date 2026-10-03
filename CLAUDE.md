@@ -279,6 +279,7 @@ alternative shipped once and went wrong.
 - The phone app (`m/`) is the calendar alone, and the linker keeps it that way; the answer to a refusal is to move the helper down a layer, never to widen what the phone may carry. [→](docs/ARCHITECTURE.md#the-phone-app-is-the-calendar-alone-and-the-linker-keeps-it-that-way)
 - It decides nothing of its own: every read is the calendar's (`assignmentIndex()`, `availability()`, `agendaFor()`), every write the same `rc_plan_entries` or `rc_leave` row through `core/rc.js`. [→](docs/ARCHITECTURE.md#the-phone-app-decides-nothing-of-its-own)
 - The third shift is called Blanket and stored as `possession`; draw a shift with `shiftLabel()`, never the raw value. [→](docs/ARCHITECTURE.md#the-third-shift-is-called-blanket-and-stored-as-possession)
+- A phone opening the site is sent to `m/` by `phone.js` before the bundle loads — phones only (shorter side under 600 px), calendar shape only, `?full=1` keeps the full site — so "Add to Home Screen" installs the app instead of bookmarking the desktop page. [→](docs/ARCHITECTURE.md#a-phone-opening-the-site-is-sent-to-the-phone-app)
 - Its service worker keeps the app, never the data, and is published in the calendar shape only. [→](docs/ARCHITECTURE.md#the-phones-service-worker-keeps-the-app-never-the-data)
 
 ### Reading the look-ahead workbook
@@ -427,14 +428,14 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 
 | Suite | Checks | What it covers |
 |---|---|---|
-| `test_dist.js` | 59 | every deployment shape, every bundle fingerprinted, that the plan has no backend in any of them, and the phone app in the calendar shape only |
+| `test_dist.js` | 61 | every deployment shape, every bundle fingerprinted, that the plan has no backend in any of them, and the phone app in the calendar shape only, with the site sending phones to it |
 | `test_lookahead.js` | 261 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
 | `test_la_edit.js` | 176 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back |
 | `smoke.js` | 301 | the application, local mode — **any console error fails the run** |
 | `smoke_calendar.js` | 588 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
-| `smoke_mobile.js` | 98 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, and that no timeline loads |
+| `smoke_mobile.js` | 105 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, a phone opening the site sent to it, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 70 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |

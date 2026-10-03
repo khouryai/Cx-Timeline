@@ -120,6 +120,11 @@ check('the phone app is published at m/', Boolean(phone) && exists('m/manifest.w
 check('its bundle under a name derived from its bytes', Boolean(phoneBundle) && exists(phoneBundle),
   phoneBundle || phone.match(/src="[^"]*mobile[^"]*"/)?.[0]);
 check('and the unhashed name is not there to be served uncached', !exists('mobile.bundle.js'));
+check('the site sends a phone there, from a script published beside it and loaded before the bundle',
+  exists('phone.js') && read('index.html').indexOf('src="phone.js"') > read('index.html').indexOf('src="config.js"')
+    && read('index.html').indexOf('src="phone.js"') < read('index.html').search(/src="app\.[0-9a-f]{10}\.js"/));
+check('and the script acts only where the phone app is published — the calendar shape',
+  /rcSupabaseUrl/.test(read('phone.js')) && /config\.supabaseUrl\) return/.test(read('phone.js')));
 check('every stylesheet it names is the hashed one that was written',
   (phone.match(/href="\.\.\/(css\/[a-z]+\.[0-9a-f]{10}\.css)"/g) || []).length === 5
     && (phone.match(/href="\.\.\/(css\/[^"]+)"/g) || [])

@@ -71,6 +71,13 @@
     <script src="config.js"></script>
 
     <!--
+      A phone is sent to the phone app (m/) before the bundle is fetched, so
+      "Add to Home Screen" installs the app rather than bookmarking this page.
+      Only where the phone app is published; see phone.js.
+    -->
+    <script src="phone.js"></script>
+
+    <!--
       The Supabase client, vendored rather than fetched from a CDN so the
       application still has no runtime network dependency and keeps working if
       a CDN is blocked or goes away. Loaded ahead of the bundle, which reads it

@@ -705,6 +705,47 @@ try {
   if (SHOT) await fresh.page.screenshot({ path: SHOT.replace(/(\.png)?$/, '-signin.png') });
   await fresh.context.close();
 
+  /* ── A phone opening the site ────────────────────────────────────────
+     The site is the full calendar; on a phone it is the desktop page shrunk,
+     and "Add to Home Screen" from it saves a bookmark that opens in the
+     browser. So a phone is sent to the app, which installs. The full site's
+     bundle is not run here: only where the page goes is under test. */
+  console.log('\nA phone opening the site');
+  const skipBundle = (page) => page.route('**/app.bundle.js', (r) => r.fulfill({ status: 200, contentType: 'text/javascript', body: '' }));
+  const visitor = await phone();
+  await skipBundle(visitor.page);
+  await visitor.page.goto(`${ORIGIN}/#week`, { waitUntil: 'domcontentloaded' });
+  await visitor.page.waitForURL(/\/m\/#week$/, { timeout: 10000 }).catch(() => {});
+  check('a phone opening the site lands in the phone app, which is what installs',
+    new URL(visitor.page.url()).pathname === '/m/', visitor.page.url());
+  await visitor.page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => null);
+  check('and the redirect replaced the page, so Back does not bounce it there again',
+    !/^http:\/\/127\.0\.0\.1:\d+\/(#week)?$/.test(visitor.page.url()), visitor.page.url());
+  await visitor.page.goto(`${ORIGIN}/?full=1`, { waitUntil: 'domcontentloaded' });
+  await visitor.page.waitForTimeout(300);
+  check('"Open the full site" stays on the full site', new URL(visitor.page.url()).pathname === '/');
+  await visitor.page.goto(`${ORIGIN}/`, { waitUntil: 'domcontentloaded' });
+  await visitor.page.waitForTimeout(300);
+  check('and that choice is kept for the next visit', new URL(visitor.page.url()).pathname === '/');
+  await visitor.page.goto(APP, { waitUntil: 'load' });
+  await visitor.page.goto(`${ORIGIN}/`, { waitUntil: 'domcontentloaded' });
+  await visitor.page.waitForURL(/\/m\/$/, { timeout: 10000 }).catch(() => {});
+  check('until the phone app is opened again', new URL(visitor.page.url()).pathname === '/m/', visitor.page.url());
+  check('the link in the app asks for the full site and says so',
+    (await visitor.page.evaluate(async () => (await (await fetch('/mobile.bundle.js')).text()).includes("href: '../?full=1'"))));
+  await visitor.context.close();
+
+  const tablet = pinClock(await browser.newContext({
+    viewport: { width: 820, height: 1180 }, screen: { width: 820, height: 1180 }, isMobile: true, hasTouch: true,
+  }));
+  const tabletPage = await tablet.newPage();
+  await skipBundle(tabletPage);
+  await tabletPage.goto(`${ORIGIN}/`, { waitUntil: 'domcontentloaded' });
+  await tabletPage.waitForTimeout(400);
+  check('a tablet stays on the full site — it is where the huddle and the editor are run',
+    new URL(tabletPage.url()).pathname === '/', tabletPage.url());
+  await tablet.close();
+
   console.log('\nNo console errors');
   check('none, on any page', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '));
 } catch (err) {

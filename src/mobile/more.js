@@ -84,7 +84,8 @@ export function render(root) {
     }),
     el('a', {
       class: 'cx-btn ghost m-wide',
-      href: '../',
+      // `?full=1` keeps a phone on the full site rather than sending it back here.
+      href: '../?full=1',
       html: `${icon('external', { size: 16 })}<span>Open the full site</span>`,
     }),
   ]));

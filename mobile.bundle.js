@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 19   Built: 2026-10-03T16:27:24.875Z
+ * Modules: 19   Built: 2026-10-03T18:19:55.931Z
  */
 (function () {
   'use strict';
@@ -9453,7 +9453,8 @@ __mods["mobile/more.js"] = function (__x, __req) {
       }),
       el('a', {
         class: 'cx-btn ghost m-wide',
-        href: '../',
+        // `?full=1` keeps a phone on the full site rather than sending it back here.
+        href: '../?full=1',
         html: `${icon('external', { size: 16 })}<span>Open the full site</span>`,
       }),
     ]));
@@ -9767,6 +9768,10 @@ __mods["mobile.js"] = function (__x, __req) {
 
   applyTheme();
   followSystem();
+
+  /* Opening the phone app undoes "Open the full site": the next visit to the site
+     on this phone comes back here, as it would have done (see `phone.js`). */
+  try { localStorage.removeItem('cx-full-site'); } catch { /* no storage: nothing was kept */ }
 
   const go = () => {
     installPwa();

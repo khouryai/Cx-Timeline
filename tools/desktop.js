@@ -280,6 +280,15 @@ function shellHtml(channel, withCalendar) {
     fail('the Supabase script tag is not where the calendar shape expects it');
   }
 
+  /* A desktop is never a phone, and the shell ships no phone app to send one
+     to — so `phone.js` is not in it, and neither is the tag asking for it. */
+  const noPhone = html.replace(
+    /\n\s*<!--\s*\n\s*A phone is sent to the phone app[\s\S]*?-->\s*\n\s*<script src="phone\.js"><\/script>/,
+    ''
+  );
+  if (noPhone === html) fail('could not remove the phone.js script tag');
+  html = noPhone;
+
   // The one substitution the whole design rests on: the loader decides which
   // copy of the application runs, so the bundle must not be loaded directly.
   const loaded = html.replace(
