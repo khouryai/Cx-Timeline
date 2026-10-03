@@ -865,7 +865,7 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await snap('changes-edits');
   const behind = (await page.locator('.cx-modal .lae-history-item').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
   check('and exactly what they changed, from what to what',
-    behind.length >= 1 && behind.every((t) => /Alex/.test(t) && /→|Added|Deleted|Taken off|Put back/.test(t)),
+    behind.length >= 1 && behind.every((t) => /Alex/.test(t) && /: \S/.test(t)),
     behind.join(' | ').slice(0, 240));
   await page.locator('.cx-modal button', { hasText: 'Close' }).click();
 
@@ -879,6 +879,11 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     allEdits > 5 && /Alex/.test(editText) && /ATS Site Test/.test(editText) && /Location/.test(editText) && /W40/.test(editText),
     `${allEdits} line(s)`);
   check('a day reads as the legend names its colour', /Day Shift/.test(editText));
+  const exactly = await page.locator('#rc-frame table[data-csv="lookahead-edits"] td.rc-edit-detail').allInnerTexts();
+  check('each line says exactly what differs — who was added, what was painted, which code',
+    exactly.some((t) => /^Added /.test(t)) && exactly.some((t) => /^Painted /.test(t))
+      && exactly.some((t) => /support (added|taken off)|struck out/.test(t)) && !exactly.some((t) => !t.trim()),
+    [...new Set(exactly)].slice(0, 6).join(' | '));
   check('names typed under an activity are about that activity', /Names under /.test(editText));
   check('and the log can be taken out as a spreadsheet',
     (await page.locator('#rc-frame .rc-table-tools button', { hasText: 'Export CSV' }).count()) >= 1);

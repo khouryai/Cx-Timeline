@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-03T15:34:37.010Z
+ * Modules: 28   Built: 2026-10-03T16:27:24.830Z
  */
 (function () {
   'use strict';
@@ -2438,6 +2438,96 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   }
 
   /**
+   * Who joined a day and who left it, between two ways a names cell was written.
+   * Names are compared as `resourceNames()` reads them, case aside, so "Jimmy,
+   * Viktor" becoming "Viktor, Jimmy" is nobody joining and nobody leaving.
+   */
+  function namesDiff(was, now) {
+    const before = resourceNames(was);
+    const after = resourceNames(now);
+    const has = (list, name) => list.some((n) => n.toLowerCase() === name.toLowerCase());
+    return {
+      added: after.filter((n) => !has(before, n)),
+      removed: before.filter((n) => !has(after, n)),
+    };
+  }
+
+  /**
+   * How the support codes on a day changed: codes asked for and taken off, and
+   * codes struck out ("X.~WIT" — cancelled while the work went ahead) or put
+   * back. Counted, because "X.X" is two EICs and one of them going is a change.
+   */
+  function codesDiff(was, now) {
+    const count = (text, cancelled) => {
+      const m = new Map();
+      for (const t of cellTokens(text)) if (t.cancelled === cancelled) m.set(t.code, (m.get(t.code) || 0) + 1);
+      return m;
+    };
+    const askedBefore = count(was, false);
+    const askedAfter = count(now, false);
+    const struckBefore = count(was, true);
+    const struckAfter = count(now, true);
+    const codes = [...new Set([...askedBefore.keys(), ...askedAfter.keys(), ...struckBefore.keys(), ...struckAfter.keys()])];
+    const out = { added: [], removed: [], struck: [], reinstated: [] };
+    const push = (list, code, n) => { if (n > 0) list.push(n > 1 ? `${n} × ${code}` : code); };
+    for (const code of codes) {
+      const asked = (askedAfter.get(code) || 0) - (askedBefore.get(code) || 0);
+      const struck = (struckAfter.get(code) || 0) - (struckBefore.get(code) || 0);
+      // Asked-for becoming struck out is one change, not a removal and a strike.
+      const nowStruck = Math.min(Math.max(-asked, 0), Math.max(struck, 0));
+      const putBack = Math.min(Math.max(asked, 0), Math.max(-struck, 0));
+      push(out.struck, code, nowStruck);
+      push(out.reinstated, code, putBack);
+      push(out.added, code, asked - putBack);
+      push(out.removed, code, -asked - nowStruck);
+      push(out.struck, code, struck - nowStruck);
+      push(out.reinstated, code, -struck - putBack);
+    }
+    return out;
+  }
+
+  /** "Added Jimmy, Viktor · Took off Adam" — or null when nothing differs. */
+  function namesSentence(was, now) {
+    const { added, removed } = namesDiff(was, now);
+    const parts = [];
+    if (added.length) parts.push(`Added ${added.join(', ')}`);
+    if (removed.length) parts.push(`Took off ${removed.join(', ')}`);
+    return parts.length ? parts.join(' · ') : null;
+  }
+
+  /**
+   * What one edit to an activity's day did, in words: the shift and the support
+   * codes, each only if it changed. `{ what, detail }` — `what` is the short
+   * name for the column, `detail` the sentence.
+   */
+  function dayChange(before, after, meaningOf) {
+    const colour = (v) => (v?.color ? (meaningOf(v.color) || `#${v.color}`) : '');
+    const text = (v) => String(v?.text ?? '');
+    const parts = [];
+    const shiftMoved = colour(before) !== colour(after);
+    if (shiftMoved) {
+      if (!colour(before)) parts.push(`Painted ${colour(after)}`);
+      else if (!colour(after)) parts.push(`Cleared ${colour(before)}`);
+      else parts.push(`Shift ${colour(before)} → ${colour(after)}`);
+    }
+    const codesMoved = text(before) !== text(after);
+    if (codesMoved) {
+      const d = codesDiff(text(before), text(after));
+      const said = [];
+      if (d.added.length) said.push(`support added ${d.added.join(', ')}`);
+      if (d.removed.length) said.push(`support taken off ${d.removed.join(', ')}`);
+      if (d.struck.length) said.push(`${d.struck.join(', ')} struck out`);
+      if (d.reinstated.length) said.push(`${d.reinstated.join(', ')} put back`);
+      // Text that is not codes, or the same codes written differently.
+      if (!said.length) said.push(`text "${text(before) || 'empty'}" → "${text(after) || 'empty'}"`);
+      parts.push(...said);
+    }
+    const what = shiftMoved && codesMoved ? 'Shift and support' : shiftMoved ? 'Shift' : codesMoved ? 'Support' : 'Day';
+    const detail = parts.join(' · ').replace(/^./, (c) => c.toUpperCase());
+    return { what, detail: detail || 'Rewritten unchanged' };
+  }
+
+  /**
    * The edit log as lines somebody can read, oldest first.
    *
    * One line per thing that changed: a row update that touched three fields is
@@ -2445,9 +2535,12 @@ __mods["core/la_edit.js"] = function (__x, __req) {
    * row (`sort`) or indenting it (`level`) is left out — it is where the row
    * sits, not what it says, the rule `rowHistory()` already keeps.
    *
-   * `{ id, at, by, batch, rowId, activityId, title, location, day, what, from, to }`
-   * — `activityId` is the activity a names row sits under, so filtering on an
-   * activity finds who was put on it too. `meaningOf(hex)` is the legend's.
+   * `{ id, at, by, batch, rowId, activityId, title, location, day, what, detail, from, to }`
+   * — `what` is the kind of change (Names, Shift, Support, a field's heading),
+   * `detail` says exactly what differs ("Added Oleksii · Took off Viktor",
+   * "Shift Day Shift → Cancellation · WIT struck out"), and `activityId` is the
+   * activity a names row sits under, so filtering on an activity finds who was
+   * put on it too. `meaningOf(hex)` is the legend's.
    */
   function editLines(edits, { rows = [], meaningOf = () => '' } = {}) {
     const known = rowsKnown(rows, edits);
@@ -2461,16 +2554,24 @@ __mods["core/la_edit.js"] = function (__x, __req) {
         day: e.day ? String(e.day).slice(0, 10) : null,
       };
       if (e.target === 'cell') {
+        const was = e.action === 'insert' ? null : cellValue(e.before);
+        const now = e.action === 'delete' ? null : cellValue(e.after);
+        /* A names row — under an activity, or the PTO / Office / Other rows at
+           the bottom — holds people, never a shift: its cells are names. */
+        const names = row?.kind === 'resource' || row?.kind === 'absence';
+        const change = names
+          ? { what: 'Names', detail: namesSentence(was?.text, now?.text) || `"${was?.text || 'empty'}" → "${now?.text || 'empty'}"` }
+          : dayChange(was, now, meaningOf);
         out.push({
           ...base,
-          what: row?.kind === 'resource' ? 'Names' : 'Day',
-          from: e.action === 'insert' ? 'empty' : describeCellValue(cellValue(e.before), meaningOf),
-          to: e.action === 'delete' ? 'empty' : describeCellValue(cellValue(e.after), meaningOf),
+          ...change,
+          from: names ? (was?.text || 'empty') : describeCellValue(was, meaningOf),
+          to: names ? (now?.text || 'empty') : describeCellValue(now, meaningOf),
         });
         continue;
       }
-      if (e.action === 'insert') { out.push({ ...base, what: 'Added', from: '', to: base.title }); continue; }
-      if (e.action === 'delete') { out.push({ ...base, what: 'Deleted', from: base.title, to: '' }); continue; }
+      if (e.action === 'insert') { out.push({ ...base, what: 'Added', detail: `Added ${base.title}`, from: '', to: base.title }); continue; }
+      if (e.action === 'delete') { out.push({ ...base, what: 'Deleted', detail: `Deleted ${base.title}`, from: base.title, to: '' }); continue; }
       const before = e.before || {};
       const after = e.after || {};
       for (const f of HISTORY_FIELDS) {
@@ -2478,9 +2579,13 @@ __mods["core/la_edit.js"] = function (__x, __req) {
         const now = after[f.key] ?? '';
         if (String(was) === String(now)) continue;
         if (f.key === 'archived') {
-          out.push({ ...base, what: now ? 'Taken off the look-ahead' : 'Put back', from: '', to: '' });
+          const what = now ? 'Taken off the look-ahead' : 'Put back';
+          out.push({ ...base, what, detail: what, from: '', to: '' });
         } else {
-          out.push({ ...base, what: f.label, from: String(was), to: String(now) });
+          out.push({
+            ...base, what: f.label, from: String(was), to: String(now),
+            detail: `${f.label} ${String(was) || 'empty'} → ${String(now) || 'empty'}`,
+          });
         }
       }
     }
@@ -2715,6 +2820,8 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   Object.defineProperty(__x, "describeCellValue", { get: () => describeCellValue, enumerable: true });
   Object.defineProperty(__x, "rowsKnown", { get: () => rowsKnown, enumerable: true });
   Object.defineProperty(__x, "rowTitle", { get: () => rowTitle, enumerable: true });
+  Object.defineProperty(__x, "namesDiff", { get: () => namesDiff, enumerable: true });
+  Object.defineProperty(__x, "codesDiff", { get: () => codesDiff, enumerable: true });
   Object.defineProperty(__x, "editLines", { get: () => editLines, enumerable: true });
   Object.defineProperty(__x, "editsBehind", { get: () => editsBehind, enumerable: true });
   Object.defineProperty(__x, "editors", { get: () => editors, enumerable: true });
@@ -12914,12 +13021,10 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
     return list;
   }
 
-  /** One edit as one sentence: "Mon 12 Oct: Day shift → Cancelled". */
+  /** One edit as one sentence: "IXL Regression Testing, Mon 12 Oct: Shift Day Shift → Cancellation". */
   function sentence(line) {
-    const where = line.day ? `${dayLabel(line.day)} · ` : '';
-    if (line.what === 'Added' || line.what === 'Deleted') return `${line.what}: ${line.title}`;
-    if (!line.from && !line.to) return `${line.title}: ${line.what}`;
-    return `${line.title}: ${where}${line.what} ${line.from || 'empty'} → ${line.to || 'empty'}`;
+    const where = line.day ? `, ${dayLabel(line.day)}` : '';
+    return `${line.title}${where}: ${line.detail}`;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -13017,8 +13122,10 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
     host.append(summary, holder);
     host.appendChild(el('p', {
       class: 'rc-hint',
-      text: 'One line for each thing changed, newest first. A row moved up or down, or indented, is '
-        + 'left out — that is where it sits, not what it says. The colours read as the legend names them.',
+      text: 'One line for each thing changed, newest first. "Exactly" says what differs — who was added '
+        + 'to a day or taken off it, the shift painted or cleared, a support code asked for, taken off or '
+        + 'struck out — and From and To are the whole cell before and after. A row moved up or down, or '
+        + 'indented, is left out: that is where it sits, not what it says.',
     }));
 
     /* Only the rows are redrawn as the filters change — the search box stays put,
@@ -13028,7 +13135,7 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
       const shown = lines.filter((l) => {
         if (editLog.person && (l.by || '') !== editLog.person) return false;
         if (!words.length) return true;
-        const hay = [l.title, l.location, l.what, l.from, l.to, l.day, l.day ? dayLabel(l.day) : '']
+        const hay = [l.title, l.location, l.what, l.detail, l.from, l.to, l.day, l.day ? dayLabel(l.day) : '']
           .join(' ').toLowerCase();
         return words.every((w) => hay.includes(w));
       });
@@ -13036,15 +13143,16 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
       summary.textContent = `${shown.length} edit(s) by ${people} ${people === 1 ? 'person' : 'people'}`
         + ` between ${dayLabel(from)} and ${dayLabel(to)}${shown.length < lines.length ? ` — ${lines.length} in all` : ''}.`;
       clear(holder);
-      const t = table(['When', 'Who', 'Activity', 'Location', 'Day', 'Changed', 'From', 'To'], shown.map((l) => el('tr', {}, [
+      const t = table(['When', 'Who', 'Activity', 'Location', 'Day', 'Changed', 'Exactly', 'From', 'To'], shown.map((l) => el('tr', {}, [
         el('td', { text: whenLabel(l.at), dataset: { sort: l.at, csv: l.at } }),
         el('td', { text: nameOf(l.by) }),
         el('td', { text: l.title }),
         el('td', { text: l.location || '—' }),
         el('td', { text: l.day ? dayLabel(l.day) : '—', dataset: { sort: l.day || '', csv: l.day || '' } }),
         el('td', { text: l.what }),
-        el('td', { text: l.from || '—' }),
-        el('td', { text: l.to || '—' }),
+        el('td', { class: 'rc-edit-detail', text: l.detail }),
+        el('td', { class: 'rc-hint', text: l.from || '—' }),
+        el('td', { class: 'rc-hint', text: l.to || '—' }),
       ])));
       const tableEl = t.querySelector('table');
       tableEl.dataset.csv = 'lookahead-edits';

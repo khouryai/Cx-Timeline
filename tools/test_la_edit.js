@@ -674,17 +674,56 @@ console.log('\nWho changed what');
   const meaningOf = (hex) => LEGEND.find((l) => l.argb === hex)?.meaning || '';
   const lines = ed.editLines(edits, { rows, meaningOf });
   const line = (id) => lines.filter((l) => l.id === id);
-  check('a painted day reads as the legend names it, both sides',
-    line(1).length === 1 && line(1)[0].what === 'Day' && line(1)[0].from === 'Day Shift · X.WIT'
-      && line(1)[0].to === 'Cancellation · X.WIT' && line(1)[0].title === 'IXL Regression Testing' && line(1)[0].day === '2026-09-23',
+  check('a repainted day is a shift change, read as the legend names it',
+    line(1).length === 1 && line(1)[0].what === 'Shift' && line(1)[0].detail === 'Shift Day Shift → Cancellation'
+      && line(1)[0].from === 'Day Shift · X.WIT' && line(1)[0].to === 'Cancellation · X.WIT'
+      && line(1)[0].title === 'IXL Regression Testing' && line(1)[0].day === '2026-09-23',
     JSON.stringify(line(1)[0]));
   check('a field changed is its own line, and moving the row is not a change',
     line(2).length === 1 && line(2)[0].what === 'Location' && line(2)[0].from === 'Y10' && line(2)[0].to === 'Y20',
     line(2).map((l) => l.what).join());
   check('a row only moved up, down or indented leaves no line', line(3).length === 0);
-  check('names typed are about the activity they sit under',
+  check('names typed are about the activity they sit under, and say who was added',
     line(4)[0]?.what === 'Names' && line(4)[0].activityId === 'a1' && line(4)[0].title === 'Names under IXL Regression Testing'
-      && line(4)[0].from === 'empty' && line(4)[0].to === 'Dana', JSON.stringify(line(4)[0]));
+      && line(4)[0].from === 'empty' && line(4)[0].to === 'Dana' && line(4)[0].detail === 'Added Dana', JSON.stringify(line(4)[0]));
+  check('a field changed says which, from what to what', line(2)[0]?.detail === 'Location Y10 → Y20', line(2)[0]?.detail);
+
+  /* The Office row, as it was read on the live site: a names row, never "Day". */
+  const office = ed.editLines([{
+    id: 20, at: at(20), by: 'u1', target: 'cell', row_id: 'p1', day: '2026-10-02', action: 'update',
+    before: { color: null, text: 'Jimmy, Viktor, Oleksii, Oleksandr, Yaroslav' }, after: { color: null, text: 'Jimmy, Oleksandr, Yaroslav' },
+  }, {
+    id: 21, at: at(21), by: 'u1', target: 'cell', row_id: 'p1', day: '2026-10-02', action: 'update',
+    before: { color: null, text: 'Jimmy' }, after: { color: null, text: 'Jimmy, Viktor, Oleksii' },
+  }, {
+    id: 22, at: at(22), by: 'u1', target: 'cell', row_id: 'p1', day: '2026-10-02', action: 'update',
+    before: { color: null, text: 'Jimmy, Viktor' }, after: { color: null, text: 'viktor,  Jimmy' },
+  }], { rows: sample().rows, meaningOf });
+  check('a PTO or Office row\'s day is names, and says who left it',
+    office[0].what === 'Names' && office[0].detail === 'Took off Viktor, Oleksii', JSON.stringify(office[0]));
+  check('and who joined it', office[1].detail === 'Added Viktor, Oleksii', office[1].detail);
+  check('the same people written another way is nobody joining or leaving',
+    !/Added|Took off/.test(office[2].detail), office[2].detail);
+
+  /* Support codes on an activity's day, each kind of change named. */
+  const day = (id, was, now) => ({ id, at: at(id), by: 'u1', target: 'cell', row_id: 'a1', day: '2026-09-22', action: was ? (now ? 'update' : 'delete') : 'insert', before: was, after: now });
+  const codes = ed.editLines([
+    day(30, { color: 'FFFF00', text: 'X' }, { color: 'FFFF00', text: 'X.WIT' }),
+    day(31, { color: 'FFFF00', text: 'X.X.WIT' }, { color: 'FFFF00', text: 'X.WIT' }),
+    day(32, { color: 'FFFF00', text: 'X.WIT' }, { color: 'FFFF00', text: 'X.~WIT' }),
+    day(33, { color: 'FFFF00', text: 'X.~WIT' }, { color: 'FFFF00', text: 'X.WIT' }),
+    day(34, null, { color: 'FFC000', text: 'X' }),
+    day(35, { color: 'FFC000', text: 'X' }, null),
+    day(36, { color: 'FFFF00', text: 'X' }, { color: 'FF0000', text: '' }),
+  ], { rows: sample().rows, meaningOf });
+  const said = codes.map((c) => `${c.what}: ${c.detail}`);
+  check('a code asked for', said[0] === 'Support: Support added WIT', said[0]);
+  check('one of two taken off', said[1] === 'Support: Support taken off X', said[1]);
+  check('struck out while the work went ahead', said[2] === 'Support: WIT struck out', said[2]);
+  check('and put back', said[3] === 'Support: WIT put back', said[3]);
+  check('a day painted with its support', said[4] === 'Shift and support: Painted Swing Shift · support added X', said[4]);
+  check('and cleared', said[5] === 'Shift and support: Cleared Swing Shift · support taken off X', said[5]);
+  check('a cancellation that took the codes with it says both', said[6] === 'Shift and support: Shift Day Shift → Cancellation · support taken off X', said[6]);
   check('a deleted activity is still called what it was called, with where it was',
     line(5)[0]?.title === 'Old trench work' && line(5)[0].location === 'B12' && line(6)[0]?.what === 'Deleted',
     `${line(5)[0]?.title} / ${line(6)[0]?.what}`);

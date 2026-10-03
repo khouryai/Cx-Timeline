@@ -2210,9 +2210,15 @@ it (`rc_la_edits`). Changes now joins the two, and the id is never shown.
   two workbook reads has no id and names nobody; nothing is guessed.
 - **Every edit** is the edit log itself across the whole look-ahead
   (`editLines()`): one line per thing changed — who, when, the activity, the
-  day, the field, from and to — with the colours read as the legend names
-  them, a names row described as the activity it sits under, and a deleted
-  row still called what it was called. A row moved or indented is left out,
+  day, the kind of change, exactly what differs, and the whole cell before and
+  after — with the colours read as the legend names them, a names row
+  described as the activity it sits under, and a deleted row still called what
+  it was called. **A cell on a names row is names**, whether it sits under an
+  activity or is the PTO / Office / Other row: its line says who was added
+  and who taken off (`namesDiff()`), never "Day". **A cell on an activity is
+  a shift and support codes**, and says which changed: painted, cleared or
+  repainted, and each code asked for, taken off, struck out or put back
+  (`codesDiff()`, counted, so one of two EICs going is a change). A row moved or indented is left out,
   as in a row's own history. It filters by person and by words without
   redrawing the search box, and exports as CSV like every calendar table.
 - **An older database keeps working.** A reading whose insert is refused over

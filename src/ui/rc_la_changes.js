@@ -410,12 +410,10 @@ function editList(lines, nameOf) {
   return list;
 }
 
-/** One edit as one sentence: "Mon 12 Oct: Day shift → Cancelled". */
+/** One edit as one sentence: "IXL Regression Testing, Mon 12 Oct: Shift Day Shift → Cancellation". */
 function sentence(line) {
-  const where = line.day ? `${dayLabel(line.day)} · ` : '';
-  if (line.what === 'Added' || line.what === 'Deleted') return `${line.what}: ${line.title}`;
-  if (!line.from && !line.to) return `${line.title}: ${line.what}`;
-  return `${line.title}: ${where}${line.what} ${line.from || 'empty'} → ${line.to || 'empty'}`;
+  const where = line.day ? `, ${dayLabel(line.day)}` : '';
+  return `${line.title}${where}: ${line.detail}`;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -513,8 +511,10 @@ async function renderEditLog(host) {
   host.append(summary, holder);
   host.appendChild(el('p', {
     class: 'rc-hint',
-    text: 'One line for each thing changed, newest first. A row moved up or down, or indented, is '
-      + 'left out — that is where it sits, not what it says. The colours read as the legend names them.',
+    text: 'One line for each thing changed, newest first. "Exactly" says what differs — who was added '
+      + 'to a day or taken off it, the shift painted or cleared, a support code asked for, taken off or '
+      + 'struck out — and From and To are the whole cell before and after. A row moved up or down, or '
+      + 'indented, is left out: that is where it sits, not what it says.',
   }));
 
   /* Only the rows are redrawn as the filters change — the search box stays put,
@@ -524,7 +524,7 @@ async function renderEditLog(host) {
     const shown = lines.filter((l) => {
       if (editLog.person && (l.by || '') !== editLog.person) return false;
       if (!words.length) return true;
-      const hay = [l.title, l.location, l.what, l.from, l.to, l.day, l.day ? dayLabel(l.day) : '']
+      const hay = [l.title, l.location, l.what, l.detail, l.from, l.to, l.day, l.day ? dayLabel(l.day) : '']
         .join(' ').toLowerCase();
       return words.every((w) => hay.includes(w));
     });
@@ -532,15 +532,16 @@ async function renderEditLog(host) {
     summary.textContent = `${shown.length} edit(s) by ${people} ${people === 1 ? 'person' : 'people'}`
       + ` between ${dayLabel(from)} and ${dayLabel(to)}${shown.length < lines.length ? ` — ${lines.length} in all` : ''}.`;
     clear(holder);
-    const t = table(['When', 'Who', 'Activity', 'Location', 'Day', 'Changed', 'From', 'To'], shown.map((l) => el('tr', {}, [
+    const t = table(['When', 'Who', 'Activity', 'Location', 'Day', 'Changed', 'Exactly', 'From', 'To'], shown.map((l) => el('tr', {}, [
       el('td', { text: whenLabel(l.at), dataset: { sort: l.at, csv: l.at } }),
       el('td', { text: nameOf(l.by) }),
       el('td', { text: l.title }),
       el('td', { text: l.location || '—' }),
       el('td', { text: l.day ? dayLabel(l.day) : '—', dataset: { sort: l.day || '', csv: l.day || '' } }),
       el('td', { text: l.what }),
-      el('td', { text: l.from || '—' }),
-      el('td', { text: l.to || '—' }),
+      el('td', { class: 'rc-edit-detail', text: l.detail }),
+      el('td', { class: 'rc-hint', text: l.from || '—' }),
+      el('td', { class: 'rc-hint', text: l.to || '—' }),
     ])));
     const tableEl = t.querySelector('table');
     tableEl.dataset.csv = 'lookahead-edits';
