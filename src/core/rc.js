@@ -468,6 +468,7 @@ export async function exportEverything() {
     'rc_la_rows', 'rc_la_cells', 'rc_la_edits', 'rc_support_codes', 'rc_la_seen',
     'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
     'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
+    'rc_tawrs', 'rc_tawr_descriptions', 'rc_tawr_settings', 'rc_tawr_profiles',
   ];
 
   const out = {
@@ -658,7 +659,7 @@ export function listSettings() {
  * "could not update the legend", on one screen, weeks after the deploy that
  * needed it; this turns it into one sentence at sign-in naming the two files.
  */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /**
  * Whether the database is the one this build was written against.
@@ -1302,4 +1303,116 @@ export async function sarUrl(path, seconds = 3600) {
   const { data, error } = await client.storage.from('sars').createSignedUrl(path, seconds);
   if (error) throw new Error(`link: ${error.message}`);
   return data.signedUrl;
+}
+
+/* ── Track access work requests ────────────────────────────────────────────
+   All of it an administrator's: the requests, the contacts, the wording, the
+   signatures and BART's blank form. The policies are the control — a member
+   reads nothing here and writes nothing — and these are the doors. */
+
+/** The live requests (drafts and approved) for one week, by its Monday. */
+export function listTawrs(weekStartISO) {
+  return select('rc_tawrs', (q) => q.eq('week_start', weekStartISO).neq('status', 'superseded').order('created_at'));
+}
+
+/** Every live request from a Monday on — what the week list counts. */
+export function listTawrsFrom(fromISO) {
+  return select('rc_tawrs', (q) => q.gte('week_start', fromISO).neq('status', 'superseded').order('week_start'));
+}
+
+export const addTawr = (row) => insert('rc_tawrs', [row]).then((r) => r[0]);
+export const updateTawr = (id, patch) => update('rc_tawrs', id, patch);
+
+/** Throw a draft away. An approved request cannot be: the policy matches nothing, and this says so. */
+export async function discardTawr(id) {
+  requireClient();
+  guardPreview();
+  forgetReads();
+  const { data, error } = await client.from('rc_tawrs').delete().eq('id', id).select();
+  if (error) throw new Error(`rc_tawrs: ${error.message}`);
+  if (!data || !data.length) throw new Error('That request was not discarded — only a draft can be.');
+  return data[0];
+}
+
+/** Supersede an approved request with a draft carrying its fields; answers the draft's id. */
+export const reviseTawr = (id) => rpc('rc_tawr_revise', { p_tawr: id });
+
+export function listTawrSettings() {
+  return select('rc_tawr_settings');
+}
+
+/** Write one TAWR setting — an upsert, for the reason `setSetting()` is one. */
+export async function setTawrSetting(key, value) {
+  requireClient();
+  guardPreview();
+  forgetReads();
+  const { data, error } = await client
+    .from('rc_tawr_settings')
+    .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+    .select();
+  if (error) throw new Error(`rc_tawr_settings: ${error.message}`);
+  if (!data || !data.length) throw new Error('rc_tawr_settings: that change was refused — only an administrator may set this.');
+  return data[0];
+}
+
+/** Every administrator's requestor details and signature. */
+export function listTawrProfiles() {
+  return select('rc_tawr_profiles');
+}
+
+/** Save the caller's own requestor details and signature. */
+export async function saveTawrProfile(patch) {
+  requireClient();
+  guardPreview();
+  forgetReads();
+  const who = me();
+  if (!who) throw new Error('Only somebody on the team has a TAWR profile.');
+  const { data, error } = await client
+    .from('rc_tawr_profiles')
+    .upsert({ ...patch, person_id: who.id, updated_at: new Date().toISOString() }, { onConflict: 'person_id' })
+    .select();
+  if (error) throw new Error(`rc_tawr_profiles: ${error.message}`);
+  if (!data || !data.length) throw new Error('rc_tawr_profiles: that change was refused — only an administrator has one.');
+  return data[0];
+}
+
+export function listTawrDescriptions() {
+  return select('rc_tawr_descriptions', (q) => q.order('activity'));
+}
+export const addTawrDescription = (row) => insert('rc_tawr_descriptions', [row]).then((r) => r[0]);
+export const updateTawrDescription = (id, patch) => update('rc_tawr_descriptions', id, { ...patch, updated_at: new Date().toISOString() });
+
+export async function deleteTawrDescription(id) {
+  requireClient();
+  guardPreview();
+  forgetReads();
+  const { data, error } = await client.from('rc_tawr_descriptions').delete().eq('id', id).select();
+  if (error) throw new Error(`rc_tawr_descriptions: ${error.message}`);
+  if (!data || !data.length) throw new Error('That wording was not removed — you may not have permission.');
+  return data[0];
+}
+
+const TAWR_TEMPLATE = 'template/tawr.pdf';
+
+/** Put BART's blank form in the private bucket, replacing the one there. */
+export async function uploadTawrTemplate(blob) {
+  requireClient();
+  guardPreview();
+  const { error } = await client.storage.from('tawr').upload(TAWR_TEMPLATE, blob, {
+    upsert: true,
+    contentType: 'application/pdf',
+  });
+  if (error) throw new Error(`upload: ${error.message}`);
+  return TAWR_TEMPLATE;
+}
+
+/** BART's blank form, as bytes; null when none has been uploaded. */
+export async function downloadTawrTemplate() {
+  requireClient();
+  const { data, error } = await client.storage.from('tawr').download(TAWR_TEMPLATE);
+  if (error) {
+    if (/not found|does not exist|404/i.test(String(error.message || error.statusCode || ''))) return null;
+    throw new Error(`download: ${error.message}`);
+  }
+  return new Uint8Array(await data.arrayBuffer());
 }

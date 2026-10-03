@@ -131,11 +131,13 @@ ui/workspace · ui/calendar_loader         the calendar, fetched on first use:
     ui/rc → ui/rc_myday · ui/rc_roster → ui/rc_inbox · ui/rc_settings · ui/rc_activity
           · ui/rc_huddle · ui/rc_week · ui/rc_pto · ui/rc_reports
           · ui/rc_lookahead → ui/rc_la_editor · ui/rc_la_* · ui/rc_ingest → ui/rc_la_state
-          · ui/rc_table                   → ui/rc_util   (calendar.bundle.js)
+          · ui/rc_table · ui/rc_tawr      → ui/rc_util   (calendar.bundle.js)
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
 io/rc_pdf → io/pdf · io/lookahead         the calendar drawn for print — no DOM
 core/la_edit → core/lookahead             the look-ahead editor's model — no DOM
 io/la_xlsx → core/la_edit · io/xlsx_write the 4WLA as an .xlsx — no DOM
+core/tawr → core/lookahead                a look-ahead week as TAWRs — no DOM
+io/tawr_pdf → io/inflate · io/pdf         BART's fillable PDF, filled — no DOM
 ui/rc_gate                                the calendar's front door (no backend,
                                           sign-in, not on the team), shared by
                                           ui/rc and the phone app
@@ -316,6 +318,16 @@ alternative shipped once and went wrong.
 - A day's or a row's history is `rc_la_edits` read for one place; nothing is reconstructed. [→](docs/ARCHITECTURE.md#a-days-history-is-the-edit-log-read-for-one-place)
 - Readings are compacted, never deleted: only an editor reading's grid goes (`rc_compact_snapshots()`); rows, change events and links stay. [→](docs/ARCHITECTURE.md#readings-are-compacted-never-deleted)
 
+### Track access work requests (TAWR)
+
+- A TAWR is one location, one shift, one week (Monday–Sunday), read off the newest reading by `extractWeek()` — never `rc_la_*`, never the workbook. [→](docs/ARCHITECTURE.md#a-request-is-one-location-one-shift-one-week)
+- Hours combine (earliest start, latest finish; the shift's own hours where the sheet has none), support adds across activities and the busiest day is asked for; a witness is never on the form and `tawr_line` says where each code goes. [→](docs/ARCHITECTURE.md#hours-combine-and-support-adds-and-the-busiest-day-is-asked-for)
+- An unknown location, a missing location and an unmapped colour are flags that stop approval, never guesses. [→](docs/ARCHITECTURE.md#what-the-sheet-cannot-say-is-a-default-what-it-cannot-be-trusted-with-is-a-flag)
+- A draft follows the look-ahead without losing an edit (`mergeRegenerated()`); an approved request is final in Postgres and changed only by `rc_tawr_revise()`. [→](docs/ARCHITECTURE.md#a-draft-follows-the-look-ahead-an-approved-request-is-final)
+- BART's form is filled by an incremental update with an appearance per field, never redrawn, so it stays fillable and signable. [→](docs/ARCHITECTURE.md#barts-form-is-filled-not-redrawn-and-stays-a-form)
+- The blank form lives in the private `tawr` bucket and is never committed or published; every TAWR table is an administrator's alone. [→](docs/ARCHITECTURE.md#the-blank-form-and-every-signature-are-an-administrators-alone)
+- A signature is strokes saved once per administrator, drawn as vector lines at download; the approval signatures stay blank. [→](docs/ARCHITECTURE.md#a-signature-is-strokes-drawn-once-per-administrator)
+
 ### Added with the module split and the calendar bundle
 
 - **The calendar is a second bundle, fetched the first time it is opened.** [→](docs/ARCHITECTURE.md#the-calendar-is-a-second-bundle-fetched-the-first-time-it-is-opened)
@@ -417,14 +429,15 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | `test_dist.js` | 59 | every deployment shape, every bundle fingerprinted, that the plan has no backend in any of them, and the phone app in the calendar shape only |
 | `test_lookahead.js` | 261 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
+| `test_tawr.js` | 106 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
 | `test_la_edit.js` | 144 | the look-ahead editor's model, undo, support codes, the published grid, cell history, staffing clashes, and the Excel export read back |
 | `smoke.js` | 301 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 536 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 576 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 98 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 70 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
-| `test_sql.js` | 378 | both permission models, snapshot compaction, Got it, the schema stamp, and that `migrate.sql` upgrades an old project |
+| `test_sql.js` | 409 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, the schema stamp, and that `migrate.sql` upgrades an old project |
 | `test_xlsx_compat.js` | 14 | the Excel export opened, re-saved and printed by LibreOffice Calc (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**

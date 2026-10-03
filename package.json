@@ -29,6 +29,7 @@
     "test:serial": "CX_TEST_JOBS=1 node tools/run_tests.js",
     "test:folder-rules": "node tools/test_folder_rules.js",
     "test:la-edit": "node tools/test_la_edit.js",
+    "test:tawr": "node tools/test_tawr.js",
     "test:xlsx": "node tools/test_xlsx_compat.js"
   },
   "cxTimeline": {

@@ -27,6 +27,7 @@ import * as lookahead from './rc_lookahead.js';
 import * as week from './rc_week.js';
 import * as pto from './rc_pto.js';
 import * as reports from './rc_reports.js';
+import * as tawr from './rc_tawr.js';
 import { enhanceTables } from './rc_table.js';
 import { inboxCount } from './rc_inbox.js';
 
@@ -45,6 +46,7 @@ const TABS = [
   { id: 'week', label: 'Week plan' },
   { id: 'pto', label: 'PTO' },
   { id: 'lookahead', label: 'Look-ahead' },
+  { id: 'tawr', label: 'TAWR' },
   { id: 'reports', label: 'Reports' },
   { id: 'org', label: 'Organisation' },
 ];
@@ -55,6 +57,7 @@ const RENDERERS = {
   week: week.render,
   pto: pto.render,
   lookahead: lookahead.render,
+  tawr: tawr.render,
   reports: reports.render,
   org: roster.render,
 };
@@ -189,7 +192,9 @@ function renderHead() {
        member has nothing to run and nothing to enter there but their own day,
        and what they need out of it — the status and the note recorded against
        their work — is now in the week plan, beside the rest of their week. */
-    const ADMIN_ONLY = new Set(['huddle', 'reports', 'org']);
+    /* Track access work requests are raised and approved by an administrator,
+       and every table and file behind them is an administrator's alone. */
+    const ADMIN_ONLY = new Set(['huddle', 'tawr', 'reports', 'org']);
     const visible = rc.isAdmin() ? TABS : TABS.filter((t) => !ADMIN_ONLY.has(t.id));
     if (!active) active = rc.isAdmin() ? 'lookahead' : visible[0].id;
     if (!visible.some((t) => t.id === active)) active = visible[0].id;

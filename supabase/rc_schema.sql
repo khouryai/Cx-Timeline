@@ -1702,6 +1702,8 @@ begin
        + (select count(*) from public.rc_change_events  where location_id = p_location)
        + (select count(*) from public.rc_sars           where location_id = p_location)
        + (select count(*) from public.rc_blockers       where location_id = p_location)
+       -- An approved request is a record of access asked for; a draft is not.
+       + (select count(*) from public.rc_tawrs          where location_id = p_location and status <> 'draft')
     into held;
 
   if held > 0 then
@@ -2738,6 +2740,259 @@ grant select, insert on public.rc_la_seen to authenticated;
 grant usage on sequence public.rc_la_seen_id_seq to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════
+-- Track access work requests (TAWRs)
+--
+-- BART's System Access / Track Allocation Work Request, one per location and
+-- shift per week, read off the look-ahead by `core/tawr.js` and written into
+-- BART's own fillable PDF by `io/tawr_pdf.js`. Everything here is an
+-- administrator's and nobody else's: the requests, the form they are written
+-- into, the wording mapped to activities, the contacts and the signatures.
+-- A member or a viewer reads none of it — not the tables, not the bucket.
+--
+-- A request is a draft until it is approved, and approved is final: the guard
+-- below refuses any change to an approved request except being superseded by
+-- its revision (`rc_tawr_revise`). A draft may be edited and discarded.
+-- ══════════════════════════════════════════════════════════════════════════
+
+-- Where a place is, in the words the form's Area column wants ("Train Control
+-- Room, A-Line MP 12.3"). Blank means the location's name.
+alter table public.rc_locations add column if not exists tawr_area text;
+
+-- Which line of the form a support code goes on. Everything is Technical
+-- Support (Systems) unless the register says otherwise; a witness is not on
+-- the form at all and ROC is the OCC line. Set once, when the column arrives,
+-- so an administrator's own choice survives this file being run again.
+do $$
+begin
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'rc_support_codes'
+                    and column_name = 'tawr_line') then
+    alter table public.rc_support_codes add column tawr_line text not null default 'systems';
+    update public.rc_support_codes set tawr_line = 'none' where upper(code) = 'WIT';
+    update public.rc_support_codes set tawr_line = 'occ'  where upper(code) = 'ROC';
+  end if;
+end;
+$$;
+alter table public.rc_support_codes drop constraint if exists rc_support_codes_tawr_line_check;
+alter table public.rc_support_codes
+  add constraint rc_support_codes_tawr_line_check check (tawr_line in ('systems', 'occ', 'none'));
+
+insert into public.rc_support_codes (code, name, party, sort, tawr_line)
+select 'ROC', 'ROC', 'BART', 40, 'occ'
+where not exists (select 1 from public.rc_support_codes where upper(code) = 'ROC');
+
+-- The contacts that are the same on every request, and the shift hours used
+-- where the sheet gives none. Its own table rather than `rc_settings`, which
+-- every signed-in account may read: these are phone numbers.
+create table if not exists public.rc_tawr_settings (
+  key        text primary key,
+  value      text,
+  updated_at timestamptz not null default now(),
+  updated_by uuid references auth.users(id) on delete set null
+);
+
+-- One per administrator: who they are on the form, and their signature, drawn
+-- once and kept as strokes (`{ width, height, strokes }`) rather than an image
+-- — a few hundred bytes, drawn as lines into the PDF.
+create table if not exists public.rc_tawr_profiles (
+  person_id      uuid primary key references public.rc_people(id) on delete cascade,
+  requestor_name text not null default '',
+  cell_phone     text not null default '',
+  signature      jsonb,
+  updated_at     timestamptz not null default now()
+);
+
+-- "IXL SIM Testing" → what the description of work should say about it.
+-- Matched on the activity's name folded for case and punctuation, the same
+-- fold every register here uses; never on a fragment of it.
+create table if not exists public.rc_tawr_descriptions (
+  id          uuid primary key default gen_random_uuid(),
+  activity    text not null check (length(trim(activity)) > 0),
+  description text not null default '',
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+create unique index if not exists rc_tawr_descriptions_activity_idx
+  on public.rc_tawr_descriptions (lower(regexp_replace(activity, '[^a-zA-Z0-9]', '', 'g')));
+
+create table if not exists public.rc_tawrs (
+  id            uuid primary key default gen_random_uuid(),
+  week_start    date not null check (extract(isodow from week_start) = 1),
+  -- Location and shift, as `core/tawr.js` keys a request: the same place on
+  -- the same shift in the same week is the same request.
+  group_key     text not null,
+  location_id   uuid references public.rc_locations(id) on delete set null,
+  location_name text not null default '',
+  shift         text not null,
+  status        text not null default 'draft' check (status in ('draft', 'approved', 'superseded')),
+  -- What the form says now, and what the look-ahead said when it was last
+  -- generated: the difference is what somebody changed by hand.
+  fields        jsonb not null default '{}'::jsonb,
+  generated     jsonb not null default '{}'::jsonb,
+  -- The activities and days behind it, its flags, and edits the look-ahead
+  -- has since moved underneath — for the review screen.
+  source        jsonb not null default '{}'::jsonb,
+  snapshot_id   uuid references public.rc_lookahead_snapshots(id) on delete set null,
+  first_day     date,
+  supersedes    uuid references public.rc_tawrs(id) on delete set null,
+  created_by    uuid references public.rc_people(id) on delete set null,
+  created_at    timestamptz not null default now(),
+  updated_by    uuid references public.rc_people(id) on delete set null,
+  updated_at    timestamptz not null default now(),
+  approved_by   uuid references public.rc_people(id) on delete set null,
+  approved_at   timestamptz
+);
+create index if not exists rc_tawrs_week_idx on public.rc_tawrs (week_start);
+-- One live request per place and shift in a week; revisions replace, never pile up.
+create unique index if not exists rc_tawrs_current_idx
+  on public.rc_tawrs (week_start, group_key) where status <> 'superseded';
+
+create or replace function public.rc_tawr_guard()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if tg_op = 'INSERT' then
+    new.created_by := coalesce(new.created_by, public.rc_me());
+    new.status := 'draft';
+    new.approved_by := null;
+    new.approved_at := null;
+    return new;
+  end if;
+  if old.status = 'superseded' then
+    raise exception 'that request has been revised; change the revision instead';
+  end if;
+  if old.status = 'approved' then
+    if new.status <> 'superseded'
+       or new.fields is distinct from old.fields
+       or new.generated is distinct from old.generated
+       or new.week_start is distinct from old.week_start
+       or new.group_key is distinct from old.group_key then
+      raise exception 'an approved request is final — revise it to change it';
+    end if;
+  end if;
+  if old.status = 'draft' and new.status = 'superseded' then
+    raise exception 'a draft is discarded, not superseded';
+  end if;
+  if new.status = 'approved' and old.status = 'draft' then
+    new.approved_by := public.rc_me();
+    new.approved_at := now();
+  end if;
+  new.created_by := old.created_by;
+  new.created_at := old.created_at;
+  new.updated_by := public.rc_me();
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+drop trigger if exists rc_tawr_guard on public.rc_tawrs;
+create trigger rc_tawr_guard before insert or update on public.rc_tawrs
+  for each row execute function public.rc_tawr_guard();
+
+-- Revise an approved request: it is superseded and a draft takes its place,
+-- carrying its fields, in one step so the week is never without either.
+create or replace function public.rc_tawr_revise(p_tawr uuid)
+returns uuid
+language plpgsql
+set search_path = ''
+as $$
+declare
+  v_old public.rc_tawrs;
+  v_new uuid;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator can revise a request';
+  end if;
+  select * into v_old from public.rc_tawrs where id = p_tawr;
+  if not found then raise exception 'no such request'; end if;
+  if v_old.status <> 'approved' then raise exception 'only an approved request is revised; a draft is edited'; end if;
+  update public.rc_tawrs set status = 'superseded' where id = p_tawr;
+  insert into public.rc_tawrs (week_start, group_key, location_id, location_name, shift,
+                               fields, generated, source, snapshot_id, first_day, supersedes)
+  values (v_old.week_start, v_old.group_key, v_old.location_id, v_old.location_name, v_old.shift,
+          v_old.fields, v_old.generated, v_old.source, v_old.snapshot_id, v_old.first_day, v_old.id)
+  returning id into v_new;
+  return v_new;
+end;
+$$;
+
+alter table public.rc_tawr_settings     enable row level security;
+alter table public.rc_tawr_profiles     enable row level security;
+alter table public.rc_tawr_descriptions enable row level security;
+alter table public.rc_tawrs             enable row level security;
+
+do $$
+declare t text;
+begin
+  foreach t in array array['rc_tawr_settings', 'rc_tawr_descriptions']
+  loop
+    execute format('drop policy if exists %1$s_admin on public.%1$s', t);
+    execute format('create policy %1$s_admin on public.%1$s for all to authenticated
+                      using (public.rc_is_admin()) with check (public.rc_is_admin())', t);
+  end loop;
+end;
+$$;
+
+-- Every administrator reads every profile — whoever approves a request exports
+-- it with the signature of the administrator who raised it — but each writes
+-- only their own.
+drop policy if exists rc_tawr_profiles_read on public.rc_tawr_profiles;
+create policy rc_tawr_profiles_read on public.rc_tawr_profiles for select to authenticated
+  using (public.rc_is_admin());
+drop policy if exists rc_tawr_profiles_write on public.rc_tawr_profiles;
+create policy rc_tawr_profiles_write on public.rc_tawr_profiles for all to authenticated
+  using (public.rc_is_admin() and person_id = public.rc_me())
+  with check (public.rc_is_admin() and person_id = public.rc_me());
+
+drop policy if exists rc_tawrs_read on public.rc_tawrs;
+create policy rc_tawrs_read on public.rc_tawrs for select to authenticated
+  using (public.rc_is_admin());
+drop policy if exists rc_tawrs_insert on public.rc_tawrs;
+create policy rc_tawrs_insert on public.rc_tawrs for insert to authenticated
+  with check (public.rc_is_admin());
+drop policy if exists rc_tawrs_update on public.rc_tawrs;
+create policy rc_tawrs_update on public.rc_tawrs for update to authenticated
+  using (public.rc_is_admin()) with check (public.rc_is_admin());
+-- Only a draft can be thrown away; an approved request is the record.
+drop policy if exists rc_tawrs_delete on public.rc_tawrs;
+create policy rc_tawrs_delete on public.rc_tawrs for delete to authenticated
+  using (public.rc_is_admin() and status = 'draft');
+
+revoke all on public.rc_tawr_settings, public.rc_tawr_profiles,
+              public.rc_tawr_descriptions, public.rc_tawrs from public, anon;
+grant select, insert, update, delete on public.rc_tawr_settings, public.rc_tawr_profiles,
+              public.rc_tawr_descriptions, public.rc_tawrs to authenticated;
+revoke all on function public.rc_tawr_revise(uuid) from public, anon;
+grant execute on function public.rc_tawr_revise(uuid) to authenticated;
+
+-- BART's blank form lives here, uploaded once by an administrator, and is
+-- never part of the published site. Private, and an administrator's alone to
+-- read, replace or remove.
+insert into storage.buckets (id, name, public)
+values ('tawr', 'tawr', false)
+on conflict (id) do update set public = false;
+
+drop policy if exists rc_tawr_files_read on storage.objects;
+create policy rc_tawr_files_read on storage.objects
+  for select to authenticated
+  using (bucket_id = 'tawr' and public.rc_is_admin());
+drop policy if exists rc_tawr_files_write on storage.objects;
+create policy rc_tawr_files_write on storage.objects
+  for insert to authenticated
+  with check (bucket_id = 'tawr' and public.rc_is_admin());
+drop policy if exists rc_tawr_files_replace on storage.objects;
+create policy rc_tawr_files_replace on storage.objects
+  for update to authenticated
+  using (bucket_id = 'tawr' and public.rc_is_admin())
+  with check (bucket_id = 'tawr' and public.rc_is_admin());
+drop policy if exists rc_tawr_files_remove on storage.objects;
+create policy rc_tawr_files_remove on storage.objects
+  for delete to authenticated
+  using (bucket_id = 'tawr' and public.rc_is_admin());
+
+-- ══════════════════════════════════════════════════════════════════════════
 -- The version stamp — last, on purpose.
 --
 -- The calendar reads this at sign-in and compares it with `SCHEMA_VERSION` in
@@ -2748,5 +3003,5 @@ grant usage on sequence public.rc_la_seen_id_seq to authenticated;
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '8')
+insert into public.rc_settings (key, value) values ('schema_version', '9')
 on conflict (key) do update set value = excluded.value, updated_at = now();

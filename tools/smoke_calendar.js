@@ -29,6 +29,7 @@ import { chromium } from 'playwright';
 import { launchOptions } from './lib/chrome.js';
 import { pinClock, pinNodeClock } from './lib/clock.js';
 import { lookaheadEditor } from './smoke_la_editor.js';
+import { tawrRequests } from './smoke_tawr.js';
 import { fakeSdk, SCHEMA_VERSION } from './lib/rc_stub.js';
 import path from 'node:path';
 import url from 'node:url';
@@ -2438,6 +2439,7 @@ async function main() {
      "administrators only", so removing the tabs takes away a door onto a wall. */
   check('the Reports tab is gone', !vTabs.includes('Reports'));
   check('and so is Organisation', !vTabs.includes('Organisation'), vTabs.join(', '));
+  check('and TAWR — requests are an administrator\'s', !vTabs.includes('TAWR'), vTabs.join(', '));
   check('and the state is named on screen',
     /Read only/.test(await viewer.locator('#rc-frame .rc-head').innerText()));
 
@@ -2507,6 +2509,7 @@ async function main() {
 
   check('and not the meeting either — that is where an outcome is entered',
     !mTabs.includes('Daily huddle'), mTabs.join(', '));
+  check('a member is not offered TAWR', !mTabs.includes('TAWR'), mTabs.join(', '));
 
   /* My day: where the calendar opens for somebody on the team — their today,
      their next working day and their week, read from the same index the week
@@ -2740,6 +2743,8 @@ async function main() {
   await member.close();
 
   await lookaheadEditor(page, { check, shot: process.env.CX_EDITOR_SHOT || null });
+
+  await tawrRequests(page, { check, shot: process.env.CX_TAWR_SHOT || null });
 
   /* ── A tablet in the room ─────────────────────────────────────────────
      The meeting is run standing, on a tablet, and a tablet in landscape is

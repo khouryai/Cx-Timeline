@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 19   Built: 2026-10-02T19:01:03.617Z
+ * Modules: 19   Built: 2026-10-03T03:19:28.605Z
  */
 (function () {
   'use strict';
@@ -1261,6 +1261,7 @@ __mods["core/rc.js"] = function (__x, __req) {
       'rc_la_rows', 'rc_la_cells', 'rc_la_edits', 'rc_support_codes', 'rc_la_seen',
       'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
       'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
+      'rc_tawrs', 'rc_tawr_descriptions', 'rc_tawr_settings', 'rc_tawr_profiles',
     ];
 
     const out = {
@@ -1451,7 +1452,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 8;
+  const SCHEMA_VERSION = 9;
 
   /**
    * Whether the database is the one this build was written against.
@@ -2097,6 +2098,118 @@ __mods["core/rc.js"] = function (__x, __req) {
     return data.signedUrl;
   }
 
+  /* ── Track access work requests ────────────────────────────────────────────
+     All of it an administrator's: the requests, the contacts, the wording, the
+     signatures and BART's blank form. The policies are the control — a member
+     reads nothing here and writes nothing — and these are the doors. */
+
+  /** The live requests (drafts and approved) for one week, by its Monday. */
+  function listTawrs(weekStartISO) {
+    return select('rc_tawrs', (q) => q.eq('week_start', weekStartISO).neq('status', 'superseded').order('created_at'));
+  }
+
+  /** Every live request from a Monday on — what the week list counts. */
+  function listTawrsFrom(fromISO) {
+    return select('rc_tawrs', (q) => q.gte('week_start', fromISO).neq('status', 'superseded').order('week_start'));
+  }
+
+  const addTawr = (row) => insert('rc_tawrs', [row]).then((r) => r[0]);
+  const updateTawr = (id, patch) => update('rc_tawrs', id, patch);
+
+  /** Throw a draft away. An approved request cannot be: the policy matches nothing, and this says so. */
+  async function discardTawr(id) {
+    requireClient();
+    guardPreview();
+    forgetReads();
+    const { data, error } = await client.from('rc_tawrs').delete().eq('id', id).select();
+    if (error) throw new Error(`rc_tawrs: ${error.message}`);
+    if (!data || !data.length) throw new Error('That request was not discarded — only a draft can be.');
+    return data[0];
+  }
+
+  /** Supersede an approved request with a draft carrying its fields; answers the draft's id. */
+  const reviseTawr = (id) => rpc('rc_tawr_revise', { p_tawr: id });
+
+  function listTawrSettings() {
+    return select('rc_tawr_settings');
+  }
+
+  /** Write one TAWR setting — an upsert, for the reason `setSetting()` is one. */
+  async function setTawrSetting(key, value) {
+    requireClient();
+    guardPreview();
+    forgetReads();
+    const { data, error } = await client
+      .from('rc_tawr_settings')
+      .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+      .select();
+    if (error) throw new Error(`rc_tawr_settings: ${error.message}`);
+    if (!data || !data.length) throw new Error('rc_tawr_settings: that change was refused — only an administrator may set this.');
+    return data[0];
+  }
+
+  /** Every administrator's requestor details and signature. */
+  function listTawrProfiles() {
+    return select('rc_tawr_profiles');
+  }
+
+  /** Save the caller's own requestor details and signature. */
+  async function saveTawrProfile(patch) {
+    requireClient();
+    guardPreview();
+    forgetReads();
+    const who = me();
+    if (!who) throw new Error('Only somebody on the team has a TAWR profile.');
+    const { data, error } = await client
+      .from('rc_tawr_profiles')
+      .upsert({ ...patch, person_id: who.id, updated_at: new Date().toISOString() }, { onConflict: 'person_id' })
+      .select();
+    if (error) throw new Error(`rc_tawr_profiles: ${error.message}`);
+    if (!data || !data.length) throw new Error('rc_tawr_profiles: that change was refused — only an administrator has one.');
+    return data[0];
+  }
+
+  function listTawrDescriptions() {
+    return select('rc_tawr_descriptions', (q) => q.order('activity'));
+  }
+  const addTawrDescription = (row) => insert('rc_tawr_descriptions', [row]).then((r) => r[0]);
+  const updateTawrDescription = (id, patch) => update('rc_tawr_descriptions', id, { ...patch, updated_at: new Date().toISOString() });
+
+  async function deleteTawrDescription(id) {
+    requireClient();
+    guardPreview();
+    forgetReads();
+    const { data, error } = await client.from('rc_tawr_descriptions').delete().eq('id', id).select();
+    if (error) throw new Error(`rc_tawr_descriptions: ${error.message}`);
+    if (!data || !data.length) throw new Error('That wording was not removed — you may not have permission.');
+    return data[0];
+  }
+
+  const TAWR_TEMPLATE = 'template/tawr.pdf';
+
+  /** Put BART's blank form in the private bucket, replacing the one there. */
+  async function uploadTawrTemplate(blob) {
+    requireClient();
+    guardPreview();
+    const { error } = await client.storage.from('tawr').upload(TAWR_TEMPLATE, blob, {
+      upsert: true,
+      contentType: 'application/pdf',
+    });
+    if (error) throw new Error(`upload: ${error.message}`);
+    return TAWR_TEMPLATE;
+  }
+
+  /** BART's blank form, as bytes; null when none has been uploaded. */
+  async function downloadTawrTemplate() {
+    requireClient();
+    const { data, error } = await client.storage.from('tawr').download(TAWR_TEMPLATE);
+    if (error) {
+      if (/not found|does not exist|404/i.test(String(error.message || error.statusCode || ''))) return null;
+      throw new Error(`download: ${error.message}`);
+    }
+    return new Uint8Array(await data.arrayBuffer());
+  }
+
   Object.defineProperty(__x, "isConfigured", { get: () => isConfigured, enumerable: true });
   Object.defineProperty(__x, "init", { get: () => init, enumerable: true });
   Object.defineProperty(__x, "raw", { get: () => raw, enumerable: true });
@@ -2220,6 +2333,22 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "uploadEvidence", { get: () => uploadEvidence, enumerable: true });
   Object.defineProperty(__x, "evidenceUrl", { get: () => evidenceUrl, enumerable: true });
   Object.defineProperty(__x, "sarUrl", { get: () => sarUrl, enumerable: true });
+  Object.defineProperty(__x, "listTawrs", { get: () => listTawrs, enumerable: true });
+  Object.defineProperty(__x, "listTawrsFrom", { get: () => listTawrsFrom, enumerable: true });
+  Object.defineProperty(__x, "addTawr", { get: () => addTawr, enumerable: true });
+  Object.defineProperty(__x, "updateTawr", { get: () => updateTawr, enumerable: true });
+  Object.defineProperty(__x, "discardTawr", { get: () => discardTawr, enumerable: true });
+  Object.defineProperty(__x, "reviseTawr", { get: () => reviseTawr, enumerable: true });
+  Object.defineProperty(__x, "listTawrSettings", { get: () => listTawrSettings, enumerable: true });
+  Object.defineProperty(__x, "setTawrSetting", { get: () => setTawrSetting, enumerable: true });
+  Object.defineProperty(__x, "listTawrProfiles", { get: () => listTawrProfiles, enumerable: true });
+  Object.defineProperty(__x, "saveTawrProfile", { get: () => saveTawrProfile, enumerable: true });
+  Object.defineProperty(__x, "listTawrDescriptions", { get: () => listTawrDescriptions, enumerable: true });
+  Object.defineProperty(__x, "addTawrDescription", { get: () => addTawrDescription, enumerable: true });
+  Object.defineProperty(__x, "updateTawrDescription", { get: () => updateTawrDescription, enumerable: true });
+  Object.defineProperty(__x, "deleteTawrDescription", { get: () => deleteTawrDescription, enumerable: true });
+  Object.defineProperty(__x, "uploadTawrTemplate", { get: () => uploadTawrTemplate, enumerable: true });
+  Object.defineProperty(__x, "downloadTawrTemplate", { get: () => downloadTawrTemplate, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════

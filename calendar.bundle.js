@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 25   Built: 2026-10-02T19:01:03.595Z
+ * Modules: 28   Built: 2026-10-03T03:19:28.588Z
  */
 (function () {
   'use strict';
@@ -3594,6 +3594,9 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
       el('td', {}, [
         el('div', { class: 'rc-hint', text: (byLocation.get(l.id) || []).join(', ') || 'no other spellings' }),
       ]),
+      el('td', {}, [
+        el('div', { class: 'rc-hint', text: l.tawr_area || 'its name' }),
+      ]),
       el('td', {}, admin ? [
         el('button', {
           class: 'cx-btn mini ghost',
@@ -3632,6 +3635,27 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
         }),
         el('button', {
           class: 'cx-btn mini ghost',
+          text: 'TAWR area',
+          title: 'What a track access work request\'s Area column says for this place. Blank uses its name.',
+          dataset: { action: 'tawr-area' },
+          onClick: async () => {
+            const area = await promptDialog({
+              title: `Area for ${l.name} on a TAWR`,
+              label: 'Tracks, mileposts, gates or stations, as the form should say it',
+              value: l.tawr_area || '',
+              confirmLabel: 'Save',
+            });
+            if (area == null || area.trim() === (l.tawr_area || '')) return;
+            try {
+              await rc.updateLocation(l.id, { tawr_area: area.trim() || null });
+              notifyChanged('locations');
+            } catch (err) {
+              toast({ tone: 'bad', message: err?.message || String(err) });
+            }
+          },
+        }),
+        el('button', {
+          class: 'cx-btn mini ghost',
           text: 'Add spelling',
           title: 'Another way this place is written in the look-ahead or on a SAR.',
           onClick: async () => {
@@ -3648,7 +3672,7 @@ __mods["ui/rc_roster.js"] = function (__x, __req) {
       ] : []),
     ]));
 
-    host.appendChild(table(['Location', 'Code', 'Also written as', ''], rows));
+    host.appendChild(table(['Location', 'Code', 'Also written as', 'TAWR area', ''], rows));
     host.appendChild(el('p', {
       class: 'rc-hint',
       text: 'Every match against the look-ahead and the SARs keys on location, never on '
@@ -11010,12 +11034,718 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   Object.defineProperty(__x, "openExcelExport", { get: () => openExcelExport, enumerable: true });
 };
 
+// core/tawr.js
+__mods["core/tawr.js"] = function (__x, __req) {
+  /**
+   * Track access work requests (TAWRs), derived from the look-ahead.
+   *
+   * BART wants a System Access / Track Allocation Work Request for every place
+   * the team works, seventeen days before the work. Everything the form needs is
+   * already on the 4WLA — where, which days, which shift, what hours, what BART
+   * support — so a request is *read off the reading the calendar draws*, never
+   * typed again. This module is that reading: one look-ahead week in, one request
+   * per place and shift out, each with the values its form fields take.
+   *
+   * **One request is one location, one shift, one week (Monday to Sunday).** Two
+   * activities at the same place on the same shift are one request listing both;
+   * the same place on a day shift and a night shift is two. A form has seven date
+   * rows, which is why the week is the unit: each day the place is worked is one
+   * row, and an activity running five days is one request with five rows.
+   *
+   * **Hours combine, support adds.** A day's hours are the earliest start and the
+   * latest finish of the activities working there that day, read off the Work
+   * Hours column — or the shift's own hours where the sheet says nothing. Support
+   * is counted per day, adding the activities together (an EIC on IXL and an EIC
+   * on DCS the same day is two), and the busiest day is what is asked for: "EIC"
+   * for one, "2 x EIC" for two. A witness is never on the form; ROC goes on the
+   * OCC line and every other code on Technical Support (Systems), as the support
+   * code register says (`tawr_line`).
+   *
+   * **Nothing is guessed.** A location the register does not know, a colour the
+   * legend does not know and an activity with no location are carried onto the
+   * request as flags that stop it being approved until somebody fixes the
+   * register or the sheet — the same answer the rest of the calendar gives.
+   *
+   * Pure: no DOM, no network, so `tools/test_tawr.js` runs it in Node.
+   *
+   * Imports: lookahead.
+   */
+
+  const { cellTokens, isCancelMeaning, locationColumnOf } = __req("core/lookahead.js");
+
+  /** How many days before the work the request has to be in. */
+  const TAWR_LEAD_DAYS = 17;
+
+  /**
+   * Every field on BART's form, by the name it carries in the PDF:
+   * `[name, kind, label]`, kind being text, check, choice or sig. The template an
+   * administrator uploads is checked against this list, so a revised form that
+   * renamed a box is reported rather than filled half way.
+   */
+  const TAWR_FIELDS = [
+    ['advisory_no_work_clearance', 'check', 'Advisory (No Work Clearance)'],
+    ['clearance_verification_no', 'check', 'Clearance Verification: No'],
+    ['clearance_verification_yes', 'check', 'Clearance Verification: Yes'],
+    ['coordinate_hirail_passage', 'check', 'Coordinate Hi-Rail Passage'],
+    ['no_passage_hirail_vehicles', 'check', 'No Passage of Hi-Rail Vehicles'],
+    ['police_advisory_threat_of_theft', 'check', 'Police Advisory (Threat of Theft)'],
+    ['schedule_number', 'text', 'Schedule Number'],
+    ['track_inspection_first_train_no', 'check', 'Track Inspection (with 1st Train): No'],
+    ['track_inspection_first_train_yes', 'check', 'Track Inspection (with 1st Train): Yes'],
+    ['work_in_track_zone_no', 'check', 'Work/Activity in Track Zone: No'],
+    ['work_in_track_zone_yes', 'check', 'Work/Activity in Track Zone: Yes'],
+    ['person_in_charge_cell_phone', 'text', 'Person in Charge Cell Phone'],
+    ['person_in_charge_name', 'text', 'Person in Charge'],
+    ['project_rep_cell_phone', 'text', 'Project Representative Cell Phone'],
+    ['project_rep_name', 'text', 'Project Representative'],
+    ['project_rep_signature', 'sig', 'Project Representative Signature'],
+    ['requestor_cell_phone', 'text', 'Requestor Cell Phone'],
+    ['requestor_name', 'text', 'Requestor'],
+    ['requestor_signature', 'sig', 'Requestor Signature'],
+    ['category_of_work', 'choice', 'Category of Work (A, B, C, F, P, BL, Y)'],
+    ['work_description', 'text', 'Work Description'],
+    ['row1_area', 'text', 'Row 1 Area (Tracks, Mileposts, Gates, Stations)'],
+    ['row1_date', 'text', 'Row 1 Date'],
+    ['row1_day', 'choice', 'Row 1 Day'],
+    ['row1_power_na', 'check', 'Row 1 Power Status: N/A'],
+    ['row1_power_off', 'check', 'Row 1 Power Status: OFF'],
+    ['row1_power_on', 'check', 'Row 1 Power Status: ON'],
+    ['row1_safe_clear_rail_sections', 'text', 'Row 1 Safe Clear Rail Section(s)'],
+    ['row1_time_end', 'text', 'Row 1 End Time'],
+    ['row1_time_start', 'text', 'Row 1 Start Time'],
+    ['row2_area', 'text', 'Row 2 Area (Tracks, Mileposts, Gates, Stations)'],
+    ['row2_date', 'text', 'Row 2 Date'],
+    ['row2_day', 'choice', 'Row 2 Day'],
+    ['row2_power_na', 'check', 'Row 2 Power Status: N/A'],
+    ['row2_power_off', 'check', 'Row 2 Power Status: OFF'],
+    ['row2_power_on', 'check', 'Row 2 Power Status: ON'],
+    ['row2_safe_clear_rail_sections', 'text', 'Row 2 Safe Clear Rail Section(s)'],
+    ['row2_time_end', 'text', 'Row 2 End Time'],
+    ['row2_time_start', 'text', 'Row 2 Start Time'],
+    ['row3_area', 'text', 'Row 3 Area (Tracks, Mileposts, Gates, Stations)'],
+    ['row3_date', 'text', 'Row 3 Date'],
+    ['row3_day', 'choice', 'Row 3 Day'],
+    ['row3_power_na', 'check', 'Row 3 Power Status: N/A'],
+    ['row3_power_off', 'check', 'Row 3 Power Status: OFF'],
+    ['row3_power_on', 'check', 'Row 3 Power Status: ON'],
+    ['row3_safe_clear_rail_sections', 'text', 'Row 3 Safe Clear Rail Section(s)'],
+    ['row3_time_end', 'text', 'Row 3 End Time'],
+    ['row3_time_start', 'text', 'Row 3 Start Time'],
+    ['row4_area', 'text', 'Row 4 Area (Tracks, Mileposts, Gates, Stations)'],
+    ['row4_date', 'text', 'Row 4 Date'],
+    ['row4_day', 'choice', 'Row 4 Day'],
+    ['row4_power_na', 'check', 'Row 4 Power Status: N/A'],
+    ['row4_power_off', 'check', 'Row 4 Power Status: OFF'],
+    ['row4_power_on', 'check', 'Row 4 Power Status: ON'],
+    ['row4_safe_clear_rail_sections', 'text', 'Row 4 Safe Clear Rail Section(s)'],
+    ['row4_time_end', 'text', 'Row 4 End Time'],
+    ['row4_time_start', 'text', 'Row 4 Start Time'],
+    ['row5_area', 'text', 'Row 5 Area (Tracks, Mileposts, Gates, Stations)'],
+    ['row5_date', 'text', 'Row 5 Date'],
+    ['row5_day', 'choice', 'Row 5 Day'],
+    ['row5_power_na', 'check', 'Row 5 Power Status: N/A'],
+    ['row5_power_off', 'check', 'Row 5 Power Status: OFF'],
+    ['row5_power_on', 'check', 'Row 5 Power Status: ON'],
+    ['row5_safe_clear_rail_sections', 'text', 'Row 5 Safe Clear Rail Section(s)'],
+    ['row5_time_end', 'text', 'Row 5 End Time'],
+    ['row5_time_start', 'text', 'Row 5 Start Time'],
+    ['row6_area', 'text', 'Row 6 Area (Tracks, Mileposts, Gates, Stations)'],
+    ['row6_date', 'text', 'Row 6 Date'],
+    ['row6_day', 'choice', 'Row 6 Day'],
+    ['row6_power_na', 'check', 'Row 6 Power Status: N/A'],
+    ['row6_power_off', 'check', 'Row 6 Power Status: OFF'],
+    ['row6_power_on', 'check', 'Row 6 Power Status: ON'],
+    ['row6_safe_clear_rail_sections', 'text', 'Row 6 Safe Clear Rail Section(s)'],
+    ['row6_time_end', 'text', 'Row 6 End Time'],
+    ['row6_time_start', 'text', 'Row 6 Start Time'],
+    ['row7_area', 'text', 'Row 7 Area (Tracks, Mileposts, Gates, Stations)'],
+    ['row7_date', 'text', 'Row 7 Date'],
+    ['row7_day', 'choice', 'Row 7 Day'],
+    ['row7_power_na', 'check', 'Row 7 Power Status: N/A'],
+    ['row7_power_off', 'check', 'Row 7 Power Status: OFF'],
+    ['row7_power_on', 'check', 'Row 7 Power Status: ON'],
+    ['row7_safe_clear_rail_sections', 'text', 'Row 7 Safe Clear Rail Section(s)'],
+    ['row7_time_end', 'text', 'Row 7 End Time'],
+    ['row7_time_start', 'text', 'Row 7 Start Time'],
+    ['maint_operating_bulletin_details', 'text', 'Operating Bulletin # (details)'],
+    ['maint_operating_bulletin_req', 'check', 'Operating Bulletin # (checkbox)'],
+    ['maint_physical_barrier_details', 'text', 'Physical Barrier Req. (Please Attach) (details)'],
+    ['maint_physical_barrier_req', 'check', 'Physical Barrier Req. (Please Attach) (checkbox)'],
+    ['maint_power_tech_support_details', 'text', 'Technical Support (Power & Mechanical) (details)'],
+    ['maint_power_tech_support_req', 'check', 'Technical Support (Power & Mechanical) (checkbox)'],
+    ['maint_rail_bond_cbond_details', 'text', 'Rail Bond/C-Bond (details)'],
+    ['maint_rail_bond_cbond_req', 'check', 'Rail Bond/C-Bond (checkbox)'],
+    ['maint_route_prohibit_details', 'text', 'Route Prohibit (details)'],
+    ['maint_route_prohibit_req', 'check', 'Route Prohibit (checkbox)'],
+    ['maint_safe_clearance_details', 'text', 'Safe Clearance (details)'],
+    ['maint_safe_clearance_req', 'check', 'Safe Clearance (checkbox)'],
+    ['maint_safety_dept_details', 'text', 'Safety Dept. (details)'],
+    ['maint_safety_dept_req', 'check', 'Safety Dept. (checkbox)'],
+    ['maint_safety_monitor_details', 'text', 'Safety Monitor (details)'],
+    ['maint_safety_monitor_req', 'check', 'Safety Monitor (checkbox)'],
+    ['maint_speed_restriction_details', 'text', 'Speed Restriction (details)'],
+    ['maint_speed_restriction_req', 'check', 'Speed Restriction (checkbox)'],
+    ['maint_systems_tech_support_details', 'text', 'Technical Support (Systems) (details)'],
+    ['maint_systems_tech_support_req', 'check', 'Technical Support (Systems) (checkbox)'],
+    ['maint_vehicle_equipment_details', 'text', 'Vehicle Equipment (details)'],
+    ['maint_vehicle_equipment_req', 'check', 'Vehicle Equipment (checkbox)'],
+    ['maint_vehicle_tech_support_details', 'text', 'Technical Support (Vehicle) (details)'],
+    ['maint_vehicle_tech_support_req', 'check', 'Technical Support (Vehicle) (checkbox)'],
+    ['trans_adverse_impact_blanket_details', 'text', 'Adverse Impact to Blanket (details)'],
+    ['trans_adverse_impact_blanket_req', 'check', 'Adverse Impact to Blanket (checkbox)'],
+    ['trans_occ_support_details', 'text', 'OCC Support (details)'],
+    ['trans_occ_support_req', 'check', 'OCC Support (checkbox)'],
+    ['trans_passenger_bulletin_req', 'check', 'Passenger Bulletin (checkbox)'],
+    ['trans_public_notice', 'text', 'Public Notice'],
+    ['trans_single_tracking_details', 'text', 'Single Tracking (details)'],
+    ['trans_single_tracking_req', 'check', 'Single Tracking (checkbox)'],
+    ['trans_sswp_iop_required_req', 'check', 'SSWP/IOP Required (Please Attach) (checkbox)'],
+    ['trans_train_operators_details', 'text', 'Train Operator(s) (details)'],
+    ['trans_train_operators_req', 'check', 'Train Operator(s) (checkbox)'],
+    ['trans_train_required_details', 'text', 'Train Required (details)'],
+    ['trans_train_required_req', 'check', 'Train Required (checkbox)'],
+    ['trans_yard_line_support_details', 'text', 'Yard/Line Support (details)'],
+    ['trans_yard_line_support_req', 'check', 'Yard/Line Support (checkbox)'],
+    ['appr_ops_planning_date', 'text', 'Operations Planning Date'],
+    ['appr_ops_planning_signature', 'text', 'Operations Planning Signature'],
+    ['appr_power_mech_date', 'text', 'Power & Mechanical Support Date'],
+    ['appr_power_mech_signature', 'text', 'Power & Mechanical Support Signature'],
+    ['appr_safety_dept_date', 'text', 'Safety Department Date'],
+    ['appr_safety_dept_signature', 'text', 'Safety Department Signature'],
+    ['appr_safety_monitor_supv_date', 'text', 'Safety Monitor Supervisor Date'],
+    ['appr_safety_monitor_supv_signature', 'text', 'Safety Monitor Supervisor Signature'],
+    ['appr_systems_maint_date', 'text', 'Systems Maintenance Support Date'],
+    ['appr_systems_maint_signature', 'text', 'Systems Maintenance Support Signature'],
+    ['appr_ta_committee_chair_date', 'text', 'TA Committee Chairperson Date'],
+    ['appr_ta_committee_chair_signature', 'text', 'TA Committee Chairperson Signature'],
+    ['appr_transportation_occ_date', 'text', 'Transportation OCC Date'],
+    ['appr_transportation_occ_signature', 'text', 'Transportation OCC Signature'],
+    ['appr_way_facilities_date', 'text', 'Way & Facilities Support Date'],
+    ['appr_way_facilities_signature', 'text', 'Way & Facilities Support Signature'],
+    ['appr_yard_admin_line_mgr_date', 'text', 'Yard Administrator / Line Mgr. Date'],
+    ['appr_yard_admin_line_mgr_signature', 'text', 'Yard Administrator / Line Mgr. Signature'],
+  ];
+
+  const FIELD_KIND = new Map(TAWR_FIELDS.map(([name, kind]) => [name, kind]));
+  const FIELD_LABEL = new Map(TAWR_FIELDS.map(([name, , label]) => [name, label]));
+
+  /** The rows the form has for dates. */
+  const FORM_ROWS = 7;
+
+  /** The shifts a request is split by, in the order they are listed. */
+  const TAWR_SHIFTS = [
+    { id: 'day', label: 'Day' },
+    { id: 'swing', label: 'Swing' },
+    { id: 'night', label: 'Night' },
+    { id: 'possession', label: 'Blanket' },
+    { id: 'unmapped', label: 'Unmapped colour' },
+  ];
+
+  function tawrShiftLabel(id) {
+    return TAWR_SHIFTS.find((s) => s.id === id)?.label || id || '';
+  }
+
+  /**
+   * The hours a shift works when the sheet does not say. By the shift, not the
+   * colour: a colour is re-mapped in Legend, and the hours must not move with it.
+   */
+  const DEFAULT_SHIFT_HOURS = {
+    day: '0700-1500',
+    swing: '1500-2300',
+    night: '2200-0600',
+    possession: '0000-0800',
+  };
+
+  /**
+   * Which shift a legend meaning names. Null for a colour the legend does not
+   * know — that is a fact to report, not a day shift to assume.
+   */
+  function shiftOfMeaning(meaning) {
+    if (meaning == null || meaning === '') return null;
+    const said = String(meaning).toLowerCase();
+    if (/night/.test(said)) return 'night';
+    if (/blanket|possession/.test(said)) return 'possession';
+    if (/swing/.test(said)) return 'swing';
+    return 'day';
+  }
+
+  /* ── Hours ─────────────────────────────────────────────────────────────── */
+
+  /**
+   * "0700-1500", "07:00 – 15:30", "7:00-15:00", "2200-0600" → minutes from
+   * midnight, `{ start, end }`; null for anything else. An end before the start
+   * is the next morning, which is what a night shift writes.
+   */
+  function parseHours(text) {
+    const m = String(text ?? '').trim().match(/^(\d{1,2}):?(\d{2})\s*(?:-|–|—|to)\s*(\d{1,2}):?(\d{2})$/i);
+    if (!m) return null;
+    const [h1, m1, h2, m2] = m.slice(1).map(Number);
+    if (h1 > 24 || h2 > 24 || m1 > 59 || m2 > 59) return null;
+    return { start: (h1 % 24) * 60 + m1, end: (h2 % 24) * 60 + m2 };
+  }
+
+  /** Minutes from midnight as the form writes a time: 420 → "0700". */
+  function hhmm(minutes) {
+    const m = ((Math.round(minutes) % 1440) + 1440) % 1440;
+    return `${String(Math.floor(m / 60)).padStart(2, '0')}${String(m % 60).padStart(2, '0')}`;
+  }
+
+  /**
+   * The earliest start and latest finish of several ranges on one day.
+   *
+   * Each range is laid on a line that runs past midnight, so 2200–0600 ends at
+   * 30:00 and outlasts 2300–0500. On a night shift a start in the small hours is
+   * that same night continuing, not the morning before it.
+   */
+  function combineHours(ranges, shift) {
+    let start = Infinity;
+    let end = -Infinity;
+    for (const r of ranges || []) {
+      if (!r) continue;
+      let s = r.start;
+      let e = r.end <= r.start ? r.end + 1440 : r.end;
+      if (shift === 'night' && s < 720) { s += 1440; e += 1440; }
+      if (s < start) start = s;
+      if (e > end) end = e;
+    }
+    if (!Number.isFinite(start)) return null;
+    return { start: start % 1440, end: end % 1440 };
+  }
+
+  /* ── Dates ─────────────────────────────────────────────────────────────── */
+
+  const DAY_MS = 86400000;
+  const msOf = (iso) => Date.parse(`${String(iso).slice(0, 10)}T00:00:00Z`);
+  const isoOf = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+  function addDaysISO(iso, n) {
+    return isoOf(msOf(iso) + n * DAY_MS);
+  }
+
+  function mondayOf(iso) {
+    const ms = msOf(iso);
+    return isoOf(ms - ((new Date(ms).getUTCDay() + 6) % 7) * DAY_MS);
+  }
+
+  /** The Mondays of every week the reading covers, in order. */
+  function weeksIn(view) {
+    const out = new Set();
+    for (const d of view?.days || []) if (d.date) out.add(mondayOf(d.date));
+    return [...out].sort();
+  }
+
+  /** The form's own spelling of a weekday, as its Day dropdown offers them. */
+  const FORM_DAYS = ['SUN', 'MON', 'TUES', 'WED', 'THURS', 'FRI', 'SAT'];
+
+  function formDay(iso) {
+    return FORM_DAYS[new Date(msOf(iso)).getUTCDay()];
+  }
+
+  /** "2026-10-19" → "10/19/26". */
+  function formDate(iso) {
+    const [y, m, d] = String(iso).slice(0, 10).split('-');
+    return `${m}/${d}/${y.slice(2)}`;
+  }
+
+  /** The last day the request can go in: seventeen calendar days before its first day. */
+  function tawrDeadline(firstISO) {
+    return addDaysISO(firstISO, -TAWR_LEAD_DAYS);
+  }
+
+  /**
+   * How the deadline stands today: `{ deadline, daysLeft, tone, label }`. Tone
+   * is `bad` once it has passed, `warn` inside three days, `ok` otherwise.
+   */
+  function deadlineState(firstISO, todayISO) {
+    const deadline = tawrDeadline(firstISO);
+    const daysLeft = Math.round((msOf(deadline) - msOf(todayISO)) / DAY_MS);
+    const tone = daysLeft < 0 ? 'bad' : daysLeft <= 3 ? 'warn' : 'ok';
+    const label = daysLeft < 0
+      ? `Overdue by ${-daysLeft} day${daysLeft === -1 ? '' : 's'}`
+      : daysLeft === 0 ? 'Due today' : `Due in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`;
+    return { deadline, daysLeft, tone, label };
+  }
+
+  /* ── Reading a week ────────────────────────────────────────────────────── */
+
+  /** Case and punctuation only — the fold every register in the calendar uses. */
+  function fold(text) {
+    return String(text ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  /** Which of the activity columns says what: found off the sheet's own headings. */
+  function columnsOf(view) {
+    const headings = view?.headings || [];
+    const find = (re) => headings.findIndex((h) => re.test(String(h || '')));
+    const location = locationColumnOf(view);
+    let description = find(/description/i);
+    if (description < 0) description = headings.findIndex((_, i) => i !== location && i !== find(/activity\s*id/i));
+    return {
+      activityId: find(/activity\s*id/i),
+      description,
+      location,
+      sswp: find(/sswp/i),
+      hours: find(/work\s*hours?/i) >= 0 ? find(/work\s*hours?/i) : find(/hours?/i),
+    };
+  }
+
+  /** The lines of the form a support code can go on, as the register offers them. */
+  const TAWR_LINES = [
+    { value: 'systems', label: 'Technical Support (Systems)' },
+    { value: 'occ', label: 'OCC Support' },
+    { value: 'none', label: 'Not on the form' },
+  ];
+
+  /** Which form line a support code goes on: `systems`, `occ` or `none`. */
+  function lineOfCode(code, register) {
+    const entry = register?.get(String(code).toUpperCase());
+    if (entry?.tawr_line) return entry.tawr_line;
+    if (String(code).toUpperCase() === 'WIT') return 'none';
+    if (String(code).toUpperCase() === 'ROC') return 'occ';
+    return 'systems';
+  }
+
+  function codeRegister(codes) {
+    const map = new Map();
+    for (const c of codes || []) if (c?.code) map.set(String(c.code).toUpperCase(), c);
+    return map;
+  }
+
+  /**
+   * Every request a week of the look-ahead calls for.
+   *
+   *   view           the parsed reading — `parsedView()` of the newest snapshot
+   *   weekStart      the Monday, as an ISO date
+   *   resolveLocation(raw) → `{ id, name, tawr_area }` or null, off the register
+   *   codes          the support code register
+   *   descriptions   `[{ activity, description }]` — the expanded wording
+   *   shiftHours     `{ day, swing, night, possession }` — "0700-1500"
+   *
+   * Answers `{ groups, columns }`. Each group is one request: its key (location
+   * and shift), the location, the activities with their days, one entry per day
+   * worked with its combined hours, the support asked for, the SSWP numbers, the
+   * work description, and its flags.
+   */
+  function extractWeek(view, weekStart, {
+    resolveLocation = () => null, codes = [], descriptions = [], shiftHours = DEFAULT_SHIFT_HOURS,
+  } = {}) {
+    const columns = columnsOf(view);
+    const register = codeRegister(codes);
+    const expanded = new Map((descriptions || []).map((d) => [fold(d.activity), String(d.description || '').trim()]));
+    const weekEnd = addDaysISO(weekStart, 6);
+    const dayByCol = new Map();
+    for (const d of view?.days || []) {
+      if (d.date && d.date >= weekStart && d.date <= weekEnd) dayByCol.set(d.col, d.date);
+    }
+    const cell = (activity, i) => (i >= 0 ? String(activity.meta?.[i] || '').trim() : '');
+
+    const groups = new Map();
+    for (const activity of view?.activities || []) {
+      if (activity.heading || activity.absence || !activity.named) continue;
+      const title = cell(activity, columns.description) || cell(activity, columns.activityId);
+      const rawLocation = cell(activity, columns.location);
+      const hoursText = cell(activity, columns.hours);
+      const sswp = cell(activity, columns.sswp);
+
+      /* Day by day: the paint says the shift, the text on the activity line says
+         the support. The workbook sometimes paints the Resource row instead of
+         the activity, so either one's paint counts; its text never does — those
+         are names, not codes. */
+      const paintAt = new Map();
+      for (const mark of [...(activity.resource?.marks || []), ...activity.marks]) {
+        if (!dayByCol.has(mark.col) || !mark.hex || mark.role !== 'shift') continue;
+        paintAt.set(mark.col, mark); // the activity line's own paint wins, being last
+      }
+      const textAt = new Map(activity.marks.filter((m) => m.value).map((m) => [m.col, m.value]));
+
+      for (const [col, mark] of paintAt) {
+        if (isCancelMeaning(mark.meaning)) continue; // a cancelled day asks for nothing
+        const date = dayByCol.get(col);
+        const shift = shiftOfMeaning(mark.meaning) || 'unmapped';
+        const location = rawLocation ? resolveLocation(rawLocation) : null;
+        const locKey = location?.id ? `loc:${location.id}` : `raw:${fold(rawLocation)}`;
+        const key = `${locKey}|${shift}`;
+        if (!groups.has(key)) {
+          groups.set(key, {
+            key, weekStart, shift, location: location || null, rawLocation,
+            activities: new Map(), days: new Map(), unmappedColours: new Set(),
+          });
+        }
+        const group = groups.get(key);
+        if (shift === 'unmapped') group.unmappedColours.add(mark.hex);
+        if (!group.activities.has(activity.row)) {
+          group.activities.set(activity.row, {
+            row: activity.row, title, activityId: cell(activity, columns.activityId),
+            sswp, hoursText, days: [],
+          });
+        }
+        group.activities.get(activity.row).days.push(date);
+        if (!group.days.has(date)) group.days.set(date, []);
+        const counts = new Map();
+        for (const t of cellTokens(textAt.get(col) || '')) {
+          if (!t.cancelled) counts.set(t.code, (counts.get(t.code) || 0) + 1);
+        }
+        group.days.get(date).push({ row: activity.row, hoursText, counts });
+      }
+    }
+
+    const out = [...groups.values()].map((g) => finish(g, { register, expanded, shiftHours }));
+    const SHIFT_ORDER = TAWR_SHIFTS.map((s) => s.id);
+    out.sort((a, b) => a.locationName.localeCompare(b.locationName)
+      || SHIFT_ORDER.indexOf(a.shift) - SHIFT_ORDER.indexOf(b.shift));
+    return { groups: out, columns };
+  }
+
+  function finish(g, { register, expanded, shiftHours }) {
+    const flags = [];
+    const activities = [...g.activities.values()].sort((a, b) => a.row - b.row);
+    for (const a of activities) a.days = [...new Set(a.days)].sort();
+
+    if (!g.rawLocation) {
+      flags.push({ kind: 'no_location', blocking: true,
+        message: 'An activity here has no location on the look-ahead. Add one to the sheet.' });
+    } else if (!g.location) {
+      flags.push({ kind: 'location_unmatched', blocking: true,
+        message: `"${g.rawLocation}" is not in the location list. Add it (or an alias) in Organisation → Locations, or correct it on the look-ahead.` });
+    }
+    if (g.shift === 'unmapped') {
+      flags.push({ kind: 'colour_unmapped', blocking: true,
+        message: `Painted in a colour the legend does not know (${[...g.unmappedColours].map((h) => `#${h}`).join(', ')}). Say what it is in Legend.` });
+    }
+
+    /* Hours, a day at a time. */
+    const unreadable = new Set();
+    const fallback = parseHours(shiftHours?.[g.shift] || DEFAULT_SHIFT_HOURS[g.shift] || '');
+    const days = [...g.days.keys()].sort().map((date) => {
+      const entries = g.days.get(date);
+      let fromShift = false;
+      const ranges = entries.map((e) => {
+        const read = parseHours(e.hoursText);
+        if (read) return read;
+        if (e.hoursText) unreadable.add(e.hoursText);
+        fromShift = true;
+        return fallback;
+      });
+      const hours = combineHours(ranges, g.shift);
+      return {
+        date,
+        start: hours ? hhmm(hours.start) : '',
+        end: hours ? hhmm(hours.end) : '',
+        fromShift,
+        rows: entries.map((e) => e.row),
+      };
+    });
+    for (const text of unreadable) {
+      flags.push({ kind: 'hours_unreadable', blocking: false,
+        message: `Could not read the work hours "${text}"; the shift's hours were used instead.` });
+    }
+    if (days.some((d) => !d.start)) {
+      flags.push({ kind: 'hours_missing', blocking: false,
+        message: 'No hours for some days — the shift has no default hours. Fill them in.' });
+    }
+
+    /* Support: per day, the activities added together; the busiest day is asked for. */
+    const peak = new Map();
+    for (const entries of g.days.values()) {
+      const day = new Map();
+      for (const e of entries) for (const [code, n] of e.counts) day.set(code, (day.get(code) || 0) + n);
+      for (const [code, n] of day) peak.set(code, Math.max(peak.get(code) || 0, n));
+    }
+    const support = [];
+    const unknownCodes = [];
+    for (const [code, count] of peak) {
+      const line = lineOfCode(code, register);
+      if (!register.has(code)) unknownCodes.push(code);
+      if (line === 'none') continue;
+      const entry = register.get(code);
+      support.push({ code, count, line, label: String(entry?.name || '').trim() || code });
+    }
+    support.sort((a, b) => (register.get(a.code)?.sort ?? 999) - (register.get(b.code)?.sort ?? 999) || a.code.localeCompare(b.code));
+    if (unknownCodes.length) {
+      flags.push({ kind: 'code_unknown', blocking: false,
+        message: `Support code${unknownCodes.length === 1 ? '' : 's'} not in the register: ${unknownCodes.join(', ')} — listed under Technical Support. Add ${unknownCodes.length === 1 ? 'it' : 'them'} in Legend → Support codes.` });
+    }
+
+    const sswp = [...new Set(activities.map((a) => a.sswp).filter(Boolean))];
+
+    /* The description of work: each activity once, with the wording mapped to it. */
+    const seen = new Set();
+    const lines = [];
+    const unexpanded = [];
+    for (const a of activities) {
+      const k = fold(a.title);
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      const more = expanded.get(k);
+      if (more) lines.push(`${a.title} — ${more}`);
+      else { lines.push(a.title); unexpanded.push(a.title); }
+    }
+
+    const locationName = g.location?.name || g.rawLocation || '(no location)';
+    return {
+      key: g.key,
+      weekStart: g.weekStart,
+      shift: g.shift,
+      locationId: g.location?.id || null,
+      locationName,
+      rawLocation: g.rawLocation,
+      area: String(g.location?.tawr_area || '').trim() || locationName,
+      activities,
+      days,
+      firstDay: days[0]?.date || g.weekStart,
+      support,
+      sswp,
+      description: lines.join('\n'),
+      unexpanded,
+      flags,
+    };
+  }
+
+  /* ── The form ──────────────────────────────────────────────────────────── */
+
+  const supportText = (items) => items.map((s) => (s.count > 1 ? `${s.count} x ${s.label}` : s.label)).join(', ');
+
+  /**
+   * The value of every field the request fills, `{ field: string | boolean }`.
+   *
+   * `settings` carries the contacts that are the same on every request (person
+   * in charge, project representative); `profile` is the administrator raising
+   * it — their name and cell phone go in as the requestor, and their signature is
+   * drawn at export, not stored as a field. What the look-ahead cannot say is set
+   * to the answer agreed for it: the three Yes/No questions No, Category of Work
+   * F, power N/A. Everything left out stays blank for a person to fill.
+   */
+  function formValues(group, { settings = {}, profile = {} } = {}) {
+    const v = {
+      work_in_track_zone_no: true,
+      clearance_verification_no: true,
+      track_inspection_first_train_no: true,
+      category_of_work: String(settings.category_default || 'F'),
+      work_description: group.description,
+      requestor_name: String(profile.requestor_name || ''),
+      requestor_cell_phone: String(profile.cell_phone || ''),
+      person_in_charge_name: String(settings.person_in_charge_name || ''),
+      person_in_charge_cell_phone: String(settings.person_in_charge_cell_phone || ''),
+      project_rep_name: String(settings.project_rep_name || ''),
+      project_rep_cell_phone: String(settings.project_rep_cell_phone || ''),
+    };
+    group.days.slice(0, FORM_ROWS).forEach((d, i) => {
+      const n = i + 1;
+      v[`row${n}_date`] = formDate(d.date);
+      v[`row${n}_day`] = formDay(d.date);
+      v[`row${n}_time_start`] = d.start;
+      v[`row${n}_time_end`] = d.end;
+      v[`row${n}_area`] = group.area;
+      v[`row${n}_power_na`] = true;
+    });
+    const systems = group.support.filter((s) => s.line === 'systems');
+    const occ = group.support.filter((s) => s.line === 'occ');
+    if (systems.length) {
+      v.maint_systems_tech_support_req = true;
+      v.maint_systems_tech_support_details = supportText(systems);
+    }
+    if (occ.length) {
+      v.trans_occ_support_req = true;
+      v.trans_occ_support_details = supportText(occ);
+    }
+    if (group.sswp.length) {
+      v.trans_sswp_iop_required_req = true;
+      // The SSWP box has no line of its own; the one beside it is the bottom line.
+      v.trans_adverse_impact_blanket_details = `SSWP# ${group.sswp.map((s) => s.replace(/^sswp\s*#?\s*/i, '')).join(', ')}`;
+    }
+    return v;
+  }
+
+  /** The fields the look-ahead decides — what "changed since approval" compares. */
+  function fromLookahead(name) {
+    return /^row\d_/.test(name)
+      || ['work_description', 'maint_systems_tech_support_req', 'maint_systems_tech_support_details',
+        'trans_occ_support_req', 'trans_occ_support_details', 'trans_sswp_iop_required_req',
+        'trans_adverse_impact_blanket_details'].includes(name);
+  }
+
+  const same = (a, b) => (a ?? '') === (b ?? '') || (a === false && b == null) || (a == null && b === false);
+
+  /** The fields somebody changed by hand: where the value is not what was generated. */
+  function editedKeys(fields, generated) {
+    const keys = new Set([...Object.keys(fields || {}), ...Object.keys(generated || {})]);
+    return [...keys].filter((k) => !same(fields?.[k], generated?.[k])).sort();
+  }
+
+  /**
+   * A draft brought up to date with a fresh reading: every field nobody edited
+   * takes the new value, every edit is kept, and an edit whose generated value
+   * moved underneath it is named in `conflicts` so the review can say so.
+   */
+  function mergeRegenerated({ fields = {}, generated = {} }, fresh) {
+    const edited = new Set(editedKeys(fields, generated));
+    const next = {};
+    const conflicts = [];
+    for (const k of new Set([...Object.keys(fresh), ...Object.keys(fields)])) {
+      if (edited.has(k)) {
+        next[k] = fields[k];
+        if (!same(generated[k], fresh[k])) conflicts.push(k);
+      } else if (fresh[k] !== undefined && fresh[k] !== '' && fresh[k] !== false) next[k] = fresh[k];
+    }
+    return { fields: next, generated: fresh, conflicts: conflicts.sort() };
+  }
+
+  /** What the look-ahead now says differently from what was approved. */
+  function changedSince(generated, fresh) {
+    const keys = new Set([...Object.keys(generated || {}), ...Object.keys(fresh || {})]);
+    return [...keys].filter((k) => fromLookahead(k) && !same(generated?.[k], fresh?.[k])).sort();
+  }
+
+  /** Whether a request may be approved: no blocking flag. */
+  function blockers(group) {
+    return (group?.flags || []).filter((f) => f.blocking);
+  }
+
+  /** "TAWR 2026-10-19 Train Control Room Day.pdf" — safe on every file system. */
+  function tawrFileName({ weekStart, locationName, shift }) {
+    const name = `TAWR ${weekStart} ${locationName} ${tawrShiftLabel(shift)}`;
+    return `${name.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim()}.pdf`;
+  }
+
+  Object.defineProperty(__x, "TAWR_LEAD_DAYS", { get: () => TAWR_LEAD_DAYS, enumerable: true });
+  Object.defineProperty(__x, "TAWR_FIELDS", { get: () => TAWR_FIELDS, enumerable: true });
+  Object.defineProperty(__x, "FIELD_KIND", { get: () => FIELD_KIND, enumerable: true });
+  Object.defineProperty(__x, "FIELD_LABEL", { get: () => FIELD_LABEL, enumerable: true });
+  Object.defineProperty(__x, "FORM_ROWS", { get: () => FORM_ROWS, enumerable: true });
+  Object.defineProperty(__x, "TAWR_SHIFTS", { get: () => TAWR_SHIFTS, enumerable: true });
+  Object.defineProperty(__x, "tawrShiftLabel", { get: () => tawrShiftLabel, enumerable: true });
+  Object.defineProperty(__x, "DEFAULT_SHIFT_HOURS", { get: () => DEFAULT_SHIFT_HOURS, enumerable: true });
+  Object.defineProperty(__x, "shiftOfMeaning", { get: () => shiftOfMeaning, enumerable: true });
+  Object.defineProperty(__x, "parseHours", { get: () => parseHours, enumerable: true });
+  Object.defineProperty(__x, "hhmm", { get: () => hhmm, enumerable: true });
+  Object.defineProperty(__x, "combineHours", { get: () => combineHours, enumerable: true });
+  Object.defineProperty(__x, "addDaysISO", { get: () => addDaysISO, enumerable: true });
+  Object.defineProperty(__x, "mondayOf", { get: () => mondayOf, enumerable: true });
+  Object.defineProperty(__x, "weeksIn", { get: () => weeksIn, enumerable: true });
+  Object.defineProperty(__x, "formDay", { get: () => formDay, enumerable: true });
+  Object.defineProperty(__x, "formDate", { get: () => formDate, enumerable: true });
+  Object.defineProperty(__x, "tawrDeadline", { get: () => tawrDeadline, enumerable: true });
+  Object.defineProperty(__x, "deadlineState", { get: () => deadlineState, enumerable: true });
+  Object.defineProperty(__x, "fold", { get: () => fold, enumerable: true });
+  Object.defineProperty(__x, "columnsOf", { get: () => columnsOf, enumerable: true });
+  Object.defineProperty(__x, "TAWR_LINES", { get: () => TAWR_LINES, enumerable: true });
+  Object.defineProperty(__x, "lineOfCode", { get: () => lineOfCode, enumerable: true });
+  Object.defineProperty(__x, "extractWeek", { get: () => extractWeek, enumerable: true });
+  Object.defineProperty(__x, "formValues", { get: () => formValues, enumerable: true });
+  Object.defineProperty(__x, "fromLookahead", { get: () => fromLookahead, enumerable: true });
+  Object.defineProperty(__x, "editedKeys", { get: () => editedKeys, enumerable: true });
+  Object.defineProperty(__x, "mergeRegenerated", { get: () => mergeRegenerated, enumerable: true });
+  Object.defineProperty(__x, "changedSince", { get: () => changedSince, enumerable: true });
+  Object.defineProperty(__x, "blockers", { get: () => blockers, enumerable: true });
+  Object.defineProperty(__x, "tawrFileName", { get: () => tawrFileName, enumerable: true });
+};
+
 // ui/rc_la_legend.js
 __mods["ui/rc_la_legend.js"] = function (__x, __req) {
   /**
    * Look-ahead → Legend: the register of what each colour means and does.
    *
-   * Imports: util, rc, io/lookahead, core/lookahead, icons, components, rc_util,
+   * Imports: util, rc, io/lookahead, core/lookahead, core/tawr, icons, components, rc_util,
    *          rc_la_state, rc_ingest.
    */
 
@@ -11038,6 +11768,7 @@ __mods["ui/rc_la_legend.js"] = function (__x, __req) {
 
 
   const { toISO, addDays } = __req("core/dates.js");
+  const { lineOfCode, TAWR_LINES } = __req("core/tawr.js");
 
   const { la, table, WEEK_CHOICES } = __req("ui/rc_la_state.js");
   const { checkNowButton } = __req("ui/rc_ingest.js");
@@ -11325,11 +12056,12 @@ __mods["ui/rc_la_legend.js"] = function (__x, __req) {
       wrap.appendChild(el('p', { class: 'rc-hint', text: 'No codes yet.' }));
     } else {
       wrap.appendChild(table(
-        ['Code', 'Asks for', 'Party', ''],
+        ['Code', 'Asks for', 'Party', 'On a TAWR', ''],
         codes.map((c) => el('tr', { class: c.active === false ? 'rc-inactive' : '' }, [
           el('td', {}, [el('span', { class: 'lae-code', text: String(c.code).toUpperCase() })]),
           el('td', { text: c.name || '—' }),
           el('td', { text: c.party || '—' }),
+          el('td', { text: TAWR_LINES.find((l) => l.value === lineOfCode(c.code, new Map([[String(c.code).toUpperCase(), c]])))?.label || '—' }),
           el('td', { style: 'text-align:right;white-space:nowrap' }, [
             el('button', { class: 'cx-btn mini ghost', text: 'Edit', onClick: () => editCode(c, codes) }),
             el('button', {
@@ -11356,6 +12088,9 @@ __mods["ui/rc_la_legend.js"] = function (__x, __req) {
     const code = textInput({ value: existing?.code || '', placeholder: 'X', maxlength: '8' });
     const name = textInput({ value: existing?.name || '', placeholder: 'EIC' });
     const party = selectInput({ value: existing?.party || 'BART', options: PARTIES });
+    const line = selectInput({ value: existing ? lineOfCode(existing.code, new Map([[String(existing.code).toUpperCase(), existing]])) : 'systems', options: TAWR_LINES });
+    // Offered only once the database has the column — an older one refuses the field.
+    const hasLine = codes.some((c) => 'tawr_line' in c);
     formModal({
       title: existing ? `Support code ${String(existing.code).toUpperCase()}` : 'Add a support code',
       confirmLabel: existing ? 'Save' : 'Add',
@@ -11363,13 +12098,14 @@ __mods["ui/rc_la_legend.js"] = function (__x, __req) {
         el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Code, as typed on the sheet' }), code]),
         el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'What it asks for' }), name]),
         el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Who provides it' }), party]),
+        hasLine ? el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Where it goes on a TAWR' }), line]) : null,
       ]),
       onConfirm: async () => {
         const value = code.value.trim().toUpperCase();
         if (!/^[A-Z0-9]{1,8}$/.test(value)) throw new Error('A code is one to eight letters or digits, with no dots — the dots separate codes.');
         const clash = codes.find((c) => String(c.code).toUpperCase() === value && c.id !== existing?.id);
         if (clash) throw new Error(`${value} is already a code${clash.active === false ? ' (retired — restore it instead)' : ''}.`);
-        const row = { code: value, name: name.value.trim(), party: party.value };
+        const row = { code: value, name: name.value.trim(), party: party.value, ...(hasLine ? { tawr_line: line.value } : {}) };
         if (existing) await rc.updateSupportCode(existing.id, row);
         else await rc.addSupportCode({ ...row, active: true, sort: Math.max(0, ...codes.map((c) => c.sort || 0)) + 10 });
         notifyChanged('support-codes');
@@ -15722,6 +16458,2160 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
   Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
 };
 
+// io/tawr_pdf.js
+__mods["io/tawr_pdf.js"] = function (__x, __req) {
+  /**
+   * Filling BART's TAWR form — a fillable PDF, read and written here.
+   *
+   * Why by hand, like `io/pdf.js`: the job is narrow. Find the form's fields by
+   * name, give each a value and an appearance, draw one signature, and leave the
+   * rest of the file exactly as it was. That is a PDF reader good enough to walk
+   * the cross-reference and the field tree, and an *incremental update*: the
+   * changed objects appended after the original bytes, with a new
+   * cross-reference pointing at them. The original is never rewritten, so the
+   * form stays a form — fillable in Acrobat afterwards, its two signature boxes
+   * still signable — and nothing a library would have to bring with it is in the
+   * calendar's bundle.
+   *
+   * **Every value gets its own appearance.** A field's value and what it looks
+   * like are separate in a PDF, and a viewer that does not rebuild appearances
+   * (most of them, and every printer) shows only the second. So each filled text
+   * box is drawn here, at the size that fits it: a single line shrinks until it
+   * fits across and down its box, the work description wraps and shrinks until
+   * every line fits. What still does not fit at the smallest legible size is
+   * reported, so the review can say so instead of the form quietly losing words.
+   *
+   * Reads both shapes a form arrives in: a classic cross-reference table (how
+   * the template was saved) and cross-reference and object streams (how Acrobat
+   * re-saves one). An encrypted file is refused with a reason.
+   *
+   * No DOM, so `tools/test_tawr.js` fills a form and reads it back in Node.
+   *
+   * Imports: inflate, pdf.
+   */
+
+  const { inflateRaw } = __req("io/inflate.js");
+  const { textWidth } = __req("io/pdf.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Reading objects
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /*
+   * Values, as this module holds them:
+   *   number, true/false, null      as themselves
+   *   name   /Helv                  { n: 'Helv' }
+   *   string (text) or <hex>        { s: '…' } — one char per byte
+   *   array                         [ … ]
+   *   dict                          { d: { Key: value } }
+   *   reference 12 0 R              { r: 12, g: 0 }
+   *   stream                        { d: {…}, stream: Uint8Array } (raw bytes)
+   */
+
+  const WS = new Set([0, 9, 10, 12, 13, 32]);
+  const DELIM = new Set([40, 41, 60, 62, 91, 93, 123, 125, 47, 37]);
+
+  function latin1(bytes, from = 0, to = bytes.length) {
+    let out = '';
+    for (let i = from; i < to; i += 8192) {
+      out += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(to, i + 8192)));
+    }
+    return out;
+  }
+
+  function bytesOf(str) {
+    const out = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) out[i] = str.charCodeAt(i) & 0xff;
+    return out;
+  }
+
+  class Lexer {
+    constructor(bytes, pos = 0) {
+      this.b = bytes;
+      this.pos = pos;
+    }
+
+    skip() {
+      const b = this.b;
+      for (;;) {
+        while (this.pos < b.length && WS.has(b[this.pos])) this.pos++;
+        if (b[this.pos] === 37) { // % comment, to end of line
+          while (this.pos < b.length && b[this.pos] !== 10 && b[this.pos] !== 13) this.pos++;
+          continue;
+        }
+        return;
+      }
+    }
+
+    /** The next bare word or number, without consuming it. */
+    peekWord() {
+      const save = this.pos;
+      this.skip();
+      const w = this.word();
+      this.pos = save;
+      return w;
+    }
+
+    word() {
+      const b = this.b;
+      const start = this.pos;
+      while (this.pos < b.length && !WS.has(b[this.pos]) && !DELIM.has(b[this.pos])) this.pos++;
+      return latin1(b, start, this.pos);
+    }
+
+    value() {
+      this.skip();
+      const b = this.b;
+      const c = b[this.pos];
+      if (c === 47) { // /Name
+        this.pos++;
+        const raw = this.word();
+        return { n: raw.replace(/#([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))) };
+      }
+      if (c === 40) return { s: this.literal() };
+      if (c === 60 && b[this.pos + 1] === 60) {
+        this.pos += 2;
+        const d = {};
+        for (;;) {
+          this.skip();
+          if (b[this.pos] === 62 && b[this.pos + 1] === 62) { this.pos += 2; break; }
+          if (this.pos >= b.length) throw new Error('This PDF is damaged: a dictionary never ends.');
+          const key = this.value();
+          if (!key || key.n === undefined) throw new Error('This PDF is damaged: a dictionary key is not a name.');
+          d[key.n] = this.value();
+        }
+        return { d };
+      }
+      if (c === 60) { // <hex>
+        this.pos++;
+        let hex = '';
+        while (this.pos < b.length && b[this.pos] !== 62) {
+          const ch = String.fromCharCode(b[this.pos++]);
+          if (/[0-9a-fA-F]/.test(ch)) hex += ch;
+        }
+        this.pos++;
+        if (hex.length % 2) hex += '0';
+        let s = '';
+        for (let i = 0; i < hex.length; i += 2) s += String.fromCharCode(parseInt(hex.slice(i, i + 2), 16));
+        return { s };
+      }
+      if (c === 91) {
+        this.pos++;
+        const arr = [];
+        for (;;) {
+          this.skip();
+          if (b[this.pos] === 93) { this.pos++; break; }
+          if (this.pos >= b.length) throw new Error('This PDF is damaged: an array never ends.');
+          arr.push(this.value());
+        }
+        return arr;
+      }
+      const w = this.word();
+      if (w === 'true') return true;
+      if (w === 'false') return false;
+      if (w === 'null') return null;
+      if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(w)) {
+        const n = Number(w);
+        // "12 0 R" is a reference: two integers and the letter R.
+        if (/^\d+$/.test(w)) {
+          const save = this.pos;
+          this.skip();
+          const g = this.word();
+          if (/^\d+$/.test(g)) {
+            this.skip();
+            if (this.b[this.pos] === 82 && (this.pos + 1 >= this.b.length || WS.has(this.b[this.pos + 1]) || DELIM.has(this.b[this.pos + 1]))) {
+              this.pos++;
+              return { r: n, g: Number(g) };
+            }
+          }
+          this.pos = save;
+        }
+        return n;
+      }
+      if (!w) throw new Error(`This PDF is damaged: unexpected byte ${c} at ${this.pos}.`);
+      return { op: w };
+    }
+
+    literal() {
+      const b = this.b;
+      this.pos++;
+      let depth = 1;
+      let out = '';
+      while (this.pos < b.length) {
+        const c = b[this.pos++];
+        if (c === 92) { // backslash
+          const e = b[this.pos++];
+          const map = { 110: '\n', 114: '\r', 116: '\t', 98: '\b', 102: '\f', 40: '(', 41: ')', 92: '\\' };
+          if (map[e] !== undefined) out += map[e];
+          else if (e >= 48 && e <= 55) {
+            let oct = String.fromCharCode(e);
+            for (let k = 0; k < 2 && b[this.pos] >= 48 && b[this.pos] <= 55; k++) oct += String.fromCharCode(b[this.pos++]);
+            out += String.fromCharCode(parseInt(oct, 8) & 0xff);
+          } else if (e === 13) { if (b[this.pos] === 10) this.pos++; } // line continuation
+          else if (e === 10) { /* line continuation */ } else out += String.fromCharCode(e);
+          continue;
+        }
+        if (c === 40) depth++;
+        if (c === 41 && --depth === 0) break;
+        out += String.fromCharCode(c);
+      }
+      return out;
+    }
+  }
+
+  /* ── Streams ───────────────────────────────────────────────────────────── */
+
+  function zlibInflate(data) {
+    // A zlib stream is a two-byte header, raw DEFLATE, and a checksum the
+    // inflater stops before reaching.
+    return inflateRaw(data.subarray(2));
+  }
+
+  function unpredict(data, parms) {
+    const predictor = parms?.Predictor || 1;
+    if (predictor < 10) return data;
+    const colors = parms.Colors || 1;
+    const bpc = parms.BitsPerComponent || 8;
+    const columns = parms.Columns || 1;
+    const bpp = Math.max(1, Math.ceil((colors * bpc) / 8));
+    const rowLen = Math.ceil((colors * bpc * columns) / 8);
+    const rows = Math.floor(data.length / (rowLen + 1));
+    const out = new Uint8Array(rows * rowLen);
+    let prev = new Uint8Array(rowLen);
+    for (let r = 0; r < rows; r++) {
+      const type = data[r * (rowLen + 1)];
+      const row = data.subarray(r * (rowLen + 1) + 1, (r + 1) * (rowLen + 1));
+      const cur = new Uint8Array(rowLen);
+      for (let i = 0; i < rowLen; i++) {
+        const left = i >= bpp ? cur[i - bpp] : 0;
+        const up = prev[i];
+        const ul = i >= bpp ? prev[i - bpp] : 0;
+        let v = row[i];
+        if (type === 1) v += left;
+        else if (type === 2) v += up;
+        else if (type === 3) v += (left + up) >> 1;
+        else if (type === 4) {
+          const p = left + up - ul;
+          const pa = Math.abs(p - left); const pb = Math.abs(p - up); const pc = Math.abs(p - ul);
+          v += pa <= pb && pa <= pc ? left : pb <= pc ? up : ul;
+        }
+        cur[i] = v & 0xff;
+      }
+      out.set(cur, r * rowLen);
+      prev = cur;
+    }
+    return out;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The document
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  class Doc {
+    constructor(bytes) {
+      this.bytes = bytes;
+      this.entries = new Map(); // num → { type: 1, offset, gen } | { type: 2, stm, idx }
+      this.cache = new Map();
+      this.objStreams = new Map();
+      const head = latin1(bytes, 0, Math.min(bytes.length, 1024));
+      if (!/%PDF-\d/.test(head)) throw new Error('That file is not a PDF.');
+      const tail = latin1(bytes, Math.max(0, bytes.length - 2048));
+      const at = tail.lastIndexOf('startxref');
+      if (at < 0) throw new Error('This PDF is damaged: it has no cross-reference.');
+      this.startxref = Number(tail.slice(at + 9).trim().split(/\s+/)[0]);
+      this.trailer = null;
+      this.xrefIsStream = false;
+      const seen = new Set();
+      let offset = this.startxref;
+      let first = true;
+      while (Number.isFinite(offset) && !seen.has(offset)) {
+        seen.add(offset);
+        const t = this.readXref(offset, first);
+        if (first) this.trailer = t;
+        first = false;
+        if (t.d.XRefStm != null) this.readXref(t.d.XRefStm, false);
+        offset = t.d.Prev;
+      }
+      if (!this.trailer) throw new Error('This PDF is damaged: it has no trailer.');
+      if (this.trailer.d.Encrypt) {
+        throw new Error('This PDF is password-protected or encrypted. Save a copy without security in Acrobat and upload that.');
+      }
+    }
+
+    setEntry(num, entry) {
+      if (!this.entries.has(num)) this.entries.set(num, entry);
+    }
+
+    readXref(offset, first) {
+      const lx = new Lexer(this.bytes, offset);
+      lx.skip();
+      if (lx.peekWord() === 'xref') {
+        lx.word();
+        for (;;) {
+          lx.skip();
+          const w = lx.peekWord();
+          if (w === 'trailer') { lx.word(); break; }
+          const start = Number(lx.word());
+          lx.skip();
+          const count = Number(lx.word());
+          if (!Number.isFinite(start) || !Number.isFinite(count)) throw new Error('This PDF is damaged: its cross-reference table cannot be read.');
+          for (let i = 0; i < count; i++) {
+            lx.skip();
+            const off = Number(lx.word()); lx.skip();
+            const gen = Number(lx.word()); lx.skip();
+            const kind = lx.word();
+            if (kind === 'n' && off > 0) this.setEntry(start + i, { type: 1, offset: off, gen });
+            else this.setEntry(start + i, { type: 0 });
+          }
+        }
+        return lx.value();
+      }
+      // A cross-reference stream: "N G obj << /Type /XRef … >> stream".
+      const obj = this.parseIndirectAt(offset);
+      if (obj?.d?.Type?.n !== 'XRef') throw new Error('This PDF is damaged: its cross-reference cannot be found.');
+      if (first) this.xrefIsStream = true;
+      const data = this.decode(obj);
+      const W = obj.d.W;
+      const index = obj.d.Index || [0, obj.d.Size];
+      const width = W[0] + W[1] + W[2];
+      let p = 0;
+      const field = (n) => { let v = 0; for (let k = 0; k < n; k++) v = v * 256 + data[p++]; return v; };
+      for (let s = 0; s < index.length; s += 2) {
+        for (let i = 0; i < index[s + 1]; i++) {
+          if (p + width > data.length) break;
+          const type = W[0] ? field(W[0]) : 1;
+          const a = field(W[1]);
+          const b = field(W[2]);
+          const num = index[s] + i;
+          if (type === 1) this.setEntry(num, { type: 1, offset: a, gen: b });
+          else if (type === 2) this.setEntry(num, { type: 2, stm: a, idx: b });
+          else this.setEntry(num, { type: 0 });
+        }
+      }
+      return obj;
+    }
+
+    parseIndirectAt(offset) {
+      const lx = new Lexer(this.bytes, offset);
+      lx.skip(); lx.word(); lx.skip(); lx.word(); lx.skip();
+      const kw = lx.word();
+      if (kw !== 'obj') throw new Error(`This PDF is damaged: no object at offset ${offset}.`);
+      const value = lx.value();
+      lx.skip();
+      if (value && value.d && lx.peekWord() === 'stream') {
+        lx.word();
+        if (this.bytes[lx.pos] === 13) lx.pos++;
+        if (this.bytes[lx.pos] === 10) lx.pos++;
+        let length = value.d.Length;
+        if (length && length.r !== undefined) length = this.get(length);
+        if (!Number.isFinite(length)) {
+          // A length nobody wrote: find the end marker instead.
+          const rest = latin1(this.bytes, lx.pos, Math.min(this.bytes.length, lx.pos + 10_000_000));
+          length = rest.indexOf('endstream');
+          while (length > 0 && /[\r\n]/.test(rest[length - 1])) length--;
+        }
+        return { d: value.d, stream: this.bytes.subarray(lx.pos, lx.pos + length) };
+      }
+      return value;
+    }
+
+    /** The object a reference points at, or the value itself if it is not one. */
+    get(ref) {
+      if (!ref || ref.r === undefined) return ref;
+      if (this.cache.has(ref.r)) return this.cache.get(ref.r);
+      const entry = this.entries.get(ref.r);
+      let value = null;
+      if (entry?.type === 1) value = this.parseIndirectAt(entry.offset);
+      else if (entry?.type === 2) value = this.fromObjStream(entry.stm, entry.idx, ref.r);
+      this.cache.set(ref.r, value);
+      return value;
+    }
+
+    fromObjStream(stmNum, idx, num) {
+      let held = this.objStreams.get(stmNum);
+      if (!held) {
+        const stm = this.get({ r: stmNum, g: 0 });
+        const data = this.decode(stm);
+        const lx = new Lexer(data, 0);
+        const offsets = new Map();
+        for (let i = 0; i < stm.d.N; i++) {
+          const n = lx.value();
+          const off = lx.value();
+          offsets.set(n, off);
+        }
+        held = { data, first: stm.d.First, offsets };
+        this.objStreams.set(stmNum, held);
+      }
+      const off = held.offsets.get(num);
+      if (off === undefined) return null;
+      return new Lexer(held.data, held.first + off).value();
+    }
+
+    decode(stream) {
+      let data = stream.stream;
+      const filters = [].concat(stream.d.Filter || []).map((f) => f.n);
+      const parms = [].concat(stream.d.DecodeParms || []);
+      filters.forEach((f, i) => {
+        if (f !== 'FlateDecode') throw new Error(`This PDF uses a compression this form filler does not read (${f}).`);
+        data = unpredict(zlibInflate(data), this.get(parms[i])?.d);
+      });
+      return data;
+    }
+
+    size() {
+      return Math.max(Number(this.trailer.d.Size) || 0, ...[...this.entries.keys()].map((n) => n + 1));
+    }
+  }
+
+  /* ── Text strings ──────────────────────────────────────────────────────── */
+
+  /** A PDF text string, as text: UTF-16 where it says so, else one byte per character. */
+  function textOf(value) {
+    if (value == null) return null;
+    if (value.n !== undefined) return value.n;
+    if (value.s === undefined) return null;
+    const s = value.s;
+    if (s.charCodeAt(0) === 0xfe && s.charCodeAt(1) === 0xff) {
+      let out = '';
+      for (let i = 2; i + 1 < s.length; i += 2) out += String.fromCharCode((s.charCodeAt(i) << 8) | s.charCodeAt(i + 1));
+      return out;
+    }
+    return s;
+  }
+
+  /** Text as a PDF string: plain where it is plain, UTF-16 with a byte-order mark where not. */
+  function pdfText(text) {
+    const t = String(text ?? '');
+    if (/^[\x20-\x7e\n\r\t]*$/.test(t)) return { s: t };
+    let s = '\xfe\xff';
+    for (const ch of t) {
+      const code = ch.codePointAt(0);
+      if (code > 0xffff) {
+        const v = code - 0x10000;
+        const hi = 0xd800 + (v >> 10); const lo = 0xdc00 + (v & 0x3ff);
+        s += String.fromCharCode(hi >> 8, hi & 0xff, lo >> 8, lo & 0xff);
+      } else s += String.fromCharCode(code >> 8, code & 0xff);
+    }
+    return { s };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The form
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const KIND = { Tx: 'text', Btn: 'check', Ch: 'choice', Sig: 'sig' };
+
+  function walkFields(doc) {
+    const catalog = doc.get(doc.trailer.d.Root);
+    const acro = doc.get(catalog?.d?.AcroForm);
+    const out = [];
+    if (!acro?.d?.Fields) return { acro: null, fields: out, catalog };
+
+    // Which page each widget sits on, for widgets that do not say.
+    const pageOf = new Map();
+    const pages = [];
+    const visit = (ref, depth = 0) => {
+      const node = doc.get(ref);
+      if (!node?.d || depth > 50) return;
+      if (node.d.Type?.n === 'Pages' || node.d.Kids) {
+        for (const kid of doc.get(node.d.Kids) || []) visit(kid, depth + 1);
+        return;
+      }
+      pages.push(ref);
+      for (const a of doc.get(node.d.Annots) || []) if (a?.r !== undefined) pageOf.set(a.r, ref);
+    };
+    visit(catalog.d.Pages);
+
+    const walk = (ref, parentName, inherited, depth = 0) => {
+      const node = doc.get(ref);
+      if (!node?.d || depth > 50) return;
+      const d = node.d;
+      const partial = textOf(d.T);
+      const name = partial == null ? parentName : (parentName ? `${parentName}.${partial}` : partial);
+      const inh = {
+        FT: d.FT || inherited.FT, Ff: d.Ff ?? inherited.Ff, DA: d.DA || inherited.DA,
+        Q: d.Q ?? inherited.Q, Opt: d.Opt || inherited.Opt, V: d.V !== undefined ? d.V : inherited.V,
+        MaxLen: d.MaxLen ?? inherited.MaxLen,
+      };
+      const kids = (doc.get(d.Kids) || []).filter((k) => k?.r !== undefined);
+      const kidFields = kids.filter((k) => doc.get(k)?.d?.T !== undefined);
+      if (kidFields.length) {
+        for (const k of kids) walk(k, name, inh, depth + 1);
+        return;
+      }
+      // A terminal field: itself a widget, or the parent of widgets with no names.
+      const widgets = kids.length ? kids : [ref];
+      const ff = Number(doc.get(inh.Ff) || 0);
+      let kind = KIND[inh.FT?.n] || 'other';
+      if (kind === 'check' && ff & (1 << 16)) kind = 'button';
+      if (kind === 'check' && ff & (1 << 15)) kind = 'radio';
+      const first = doc.get(widgets[0]);
+      const onStates = new Set();
+      for (const w of widgets) {
+        const n = doc.get(doc.get(doc.get(w)?.d?.AP)?.d?.N);
+        for (const key of Object.keys(n?.d || {})) if (key !== 'Off') onStates.add(key);
+      }
+      const options = (doc.get(inh.Opt) || []).map((o) => {
+        const v = doc.get(o);
+        return Array.isArray(v) ? textOf(doc.get(v[1])) : textOf(v);
+      }).filter((o) => o != null);
+      out.push({
+        name,
+        kind,
+        ref,
+        value: textOf(doc.get(inh.V)),
+        onState: [...onStates][0] || null,
+        options,
+        multiline: kind === 'text' && Boolean(ff & (1 << 12)),
+        da: textOf(doc.get(inh.DA)) || textOf(doc.get(acro.d.DA)) || '/Helv 9 Tf 0 g',
+        q: Number(doc.get(inh.Q) || 0),
+        widgets: widgets.map((w) => ({
+          ref: w,
+          rect: (doc.get(doc.get(w)?.d?.Rect) || [0, 0, 0, 0]).map((x) => Number(doc.get(x))),
+          page: doc.get(w)?.d?.P || pageOf.get(w.r) || null,
+        })),
+        readOnly: Boolean(ff & 1),
+        rect: (doc.get(first?.d?.Rect) || [0, 0, 0, 0]).map((x) => Number(doc.get(x))),
+      });
+    };
+    for (const f of doc.get(acro.d.Fields) || []) walk(f, '', {});
+    return { acro, fields: out, catalog, pages };
+  }
+
+  /**
+   * The fields of a fillable PDF: `{ fields: [{ name, kind, value, onState,
+   * options, multiline, rect }] }`. Throws, with a sentence somebody can act on,
+   * for a file that is not a PDF, is damaged, or is encrypted.
+   */
+  function readForm(bytes) {
+    const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const doc = new Doc(data);
+    const { fields } = walkFields(doc);
+    return {
+      fields: fields.map(({ name, kind, value, onState, options, multiline, rect, da }) => ({
+        name, kind, value, onState, options, multiline, rect, da,
+      })),
+    };
+  }
+
+  /** The names asked for that the form does not have. */
+  function missingFields(form, names) {
+    const have = new Set((form?.fields || []).map((f) => f.name));
+    return names.filter((n) => !have.has(n));
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Writing
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  function num(n) {
+    if (Number.isInteger(n)) return String(n);
+    return (Math.round(n * 10000) / 10000).toFixed(4).replace(/\.?0+$/, '');
+  }
+
+  function nameOut(n) {
+    return `/${String(n).replace(/[^\x21-\x7e]|[#()<>[\]{}/%]/g, (c) => `#${c.charCodeAt(0).toString(16).padStart(2, '0')}`)}`;
+  }
+
+  function stringOut(s) {
+    if (/^[\x20-\x7e]*$/.test(s)) return `(${s.replace(/[\\()]/g, (c) => `\\${c}`)})`;
+    let hex = '';
+    for (let i = 0; i < s.length; i++) hex += s.charCodeAt(i).toString(16).padStart(2, '0');
+    return `<${hex}>`;
+  }
+
+  function serialize(v) {
+    if (v === null || v === undefined) return 'null';
+    if (v === true) return 'true';
+    if (v === false) return 'false';
+    if (typeof v === 'number') return num(v);
+    if (Array.isArray(v)) return `[${v.map(serialize).join(' ')}]`;
+    if (v.r !== undefined) return `${v.r} ${v.g || 0} R`;
+    if (v.n !== undefined) return nameOut(v.n);
+    if (v.s !== undefined) return stringOut(v.s);
+    if (v.d) return `<<${Object.entries(v.d).map(([k, x]) => `${nameOut(k)} ${serialize(x)}`).join(' ')}>>`;
+    if (v.op) return v.op;
+    return 'null';
+  }
+
+  /* ── Fonts and text ────────────────────────────────────────────────────── */
+
+  /* WinAnsi, for the characters past ASCII that a description is likely to hold. */
+  const WINANSI = {
+    0x20ac: 0x80, 0x201a: 0x82, 0x0192: 0x83, 0x201e: 0x84, 0x2026: 0x85, 0x2020: 0x86, 0x2021: 0x87,
+    0x02c6: 0x88, 0x2030: 0x89, 0x0160: 0x8a, 0x2039: 0x8b, 0x0152: 0x8c, 0x017d: 0x8e, 0x2018: 0x91,
+    0x2019: 0x92, 0x201c: 0x93, 0x201d: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97, 0x02dc: 0x98,
+    0x2122: 0x99, 0x0161: 0x9a, 0x203a: 0x9b, 0x0153: 0x9c, 0x017e: 0x9e, 0x0178: 0x9f,
+  };
+
+  function winAnsi(text) {
+    let out = '';
+    for (const ch of String(text)) {
+      const c = ch.codePointAt(0);
+      if (c >= 0x20 && c <= 0x7e) out += ch;
+      else if (c >= 0xa0 && c <= 0xff) out += String.fromCharCode(c);
+      else if (WINANSI[c]) out += String.fromCharCode(WINANSI[c]);
+      else if (c === 9) out += ' ';
+      else out += '?';
+    }
+    return out;
+  }
+
+  const widthOf = (text, size) => textWidth(text, size, 'F1');
+
+  /** "/Helv 9 Tf 0 g" → { font, size, color } */
+  function parseDA(da) {
+    const font = (da.match(/\/([^\s/]+)\s+[\d.]+\s+Tf/) || [])[1] || 'Helv';
+    const size = Number((da.match(/\/[^\s/]+\s+([\d.]+)\s+Tf/) || [])[1] || 0);
+    const rgb = da.match(/([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+rg/);
+    const gray = da.match(/([\d.]+)\s+g\b/);
+    const color = rgb ? `${rgb[1]} ${rgb[2]} ${rgb[3]} rg` : gray ? `${gray[1]} g` : '0 g';
+    return { font, size, color };
+  }
+
+  /** Lines of text that fit `width` at `size`, keeping the line breaks that were typed. */
+  function wrap(text, size, width) {
+    const lines = [];
+    for (const para of String(text).split(/\r\n|\r|\n/)) {
+      const words = para.split(/(\s+)/).filter((w) => w !== '');
+      let line = '';
+      for (const w of words) {
+        const next = line + w;
+        if (!line || widthOf(next.trimEnd(), size) <= width) { line = next; continue; }
+        lines.push(line.trimEnd());
+        line = w.trimStart();
+        // A single word wider than the box is broken where it has to be.
+        while (widthOf(line, size) > width && line.length > 1) {
+          let cut = line.length - 1;
+          while (cut > 1 && widthOf(line.slice(0, cut), size) > width) cut--;
+          lines.push(line.slice(0, cut));
+          line = line.slice(cut);
+        }
+      }
+      lines.push(line.trimEnd());
+    }
+    return lines;
+  }
+
+  const MIN_SIZE = 4;
+
+  /**
+   * The appearance of a filled text box, and whether it fits.
+   *
+   * Single line: the form's own size, shrunk until the text fits across the box
+   * and its glyphs fit inside it top to bottom. Multi-line: wrapped, and shrunk a
+   * quarter point at a time until every line is inside the box.
+   */
+  function layoutText(text, field, w, h) {
+    const { size: daSize } = parseDA(field.da);
+    const start = daSize || 12;
+    const pad = 2;
+    if (field.multiline) {
+      for (let size = start; size >= MIN_SIZE; size -= 0.25) {
+        const lines = wrap(text, size, w - pad * 2);
+        if (lines.length * size * 1.15 <= h - pad) return { size, lines, fits: true };
+      }
+      return { size: MIN_SIZE, lines: wrap(text, MIN_SIZE, w - pad * 2), fits: false };
+    }
+    const flat = String(text).replace(/\s*[\r\n]+\s*/g, ' ');
+    const byHeight = Math.max(MIN_SIZE, (h - 0.5) / 0.93);
+    let size = Math.min(start, byHeight);
+    const avail = w - pad * 2;
+    const full = widthOf(flat, size);
+    if (full > avail) size = Math.max(MIN_SIZE, Math.floor((size * avail / full) * 4) / 4);
+    return { size, lines: [flat], fits: widthOf(flat, size) <= avail + 0.01 };
+  }
+
+  function textAppearance(text, field, w, h, fontName) {
+    const { color } = parseDA(field.da);
+    const layout = layoutText(text, field, w, h);
+    const { size, lines } = layout;
+    const pad = 2;
+    // A single line is clipped to the box itself: its boxes are barely taller
+    // than the text, and an inset clip cuts the tops and tails off the letters.
+    const clip = field.multiline
+      ? `1 1 ${num(Math.max(0, w - 2))} ${num(Math.max(0, h - 2))} re W n`
+      : `0 0 ${num(w)} ${num(h)} re W n`;
+    const ops = ['/Tx BMC', 'q', clip, 'BT', `/${fontName} ${num(size)} Tf`, color];
+    const lead = size * 1.15;
+    let y = field.multiline ? h - pad - size * 0.8 : 0.21 * size + (h - 0.93 * size) / 2;
+    lines.forEach((line, i) => {
+      const encoded = winAnsi(line);
+      const lw = widthOf(encoded, size);
+      const x = field.q === 1 ? (w - lw) / 2 : field.q === 2 ? w - pad - lw : pad;
+      ops.push(`1 0 0 1 ${num(x)} ${num(y - (field.multiline ? i * lead : 0))} Tm`);
+      ops.push(`${stringOut(encoded)} Tj`);
+    });
+    ops.push('ET', 'Q', 'EMC');
+    return { content: ops.join('\n'), size: layout.size, fits: layout.fits, daSize: parseDA(field.da).size };
+  }
+
+  /* ── The signature ─────────────────────────────────────────────────────── */
+
+  /**
+   * Strokes drawn on a pad, `{ width, height, strokes: [[[x, y], …], …] }` with y
+   * running down, fitted into a box on the page and drawn as lines — a vector
+   * signature, a few hundred bytes, as sharp printed as on screen.
+   */
+  function signatureContent(sig, [x1, y1, x2, y2]) {
+    const bw = Math.abs(x2 - x1);
+    const bh = Math.abs(y2 - y1);
+    const left = Math.min(x1, x2);
+    const bottom = Math.min(y1, y2);
+    const pts = sig.strokes.flat();
+    if (!pts.length) return null;
+    const minX = Math.min(...pts.map((p) => p[0])); const maxX = Math.max(...pts.map((p) => p[0]));
+    const minY = Math.min(...pts.map((p) => p[1])); const maxY = Math.max(...pts.map((p) => p[1]));
+    const sw = Math.max(1, maxX - minX);
+    const sh = Math.max(1, maxY - minY);
+    const pad = 1;
+    const scale = Math.min((bw - pad * 2) / sw, (bh - pad * 2) / sh);
+    const ox = left + (bw - sw * scale) / 2;
+    const oy = bottom + (bh - sh * scale) / 2;
+    const at = ([px, py]) => `${num(ox + (px - minX) * scale)} ${num(oy + (maxY - py) * scale)}`;
+    const ops = ['q', '0 0 0 RG', '1 J', '1 j', `${num(Math.max(0.5, Math.min(1.2, bh / 14)))} w`];
+    for (const stroke of sig.strokes) {
+      if (!stroke.length) continue;
+      ops.push(`${at(stroke[0])} m`);
+      if (stroke.length === 1) ops.push(`${at(stroke[0])} l`);
+      for (const p of stroke.slice(1)) ops.push(`${at(p)} l`);
+      ops.push('S');
+    }
+    ops.push('Q');
+    return ops.join('\n');
+  }
+
+  /* ── Filling ───────────────────────────────────────────────────────────── */
+
+  /**
+   * Fill a form and answer `{ bytes, report }`.
+   *
+   *   values     `{ field: string | boolean }` — a string for a text box or a
+   *              dropdown, true or false for a checkbox. A field not named is
+   *              left exactly as it was.
+   *   signature  `{ field, width, height, strokes }` — drawn in that field's box.
+   *
+   * `report.fields[name]` says, for every text box filled, the size it was drawn
+   * at and whether it fitted; `report.unknown` names values for fields the form
+   * does not have.
+   */
+  function fillForm(bytes, values, { signature = null } = {}) {
+    const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const doc = new Doc(data);
+    const { acro, fields } = walkFields(doc);
+    if (!acro) throw new Error('This PDF has no fillable fields.');
+    const byName = new Map(fields.map((f) => [f.name, f]));
+
+    let next = doc.size();
+    const changed = new Map(); // num → { gen, value }
+    const added = [];          // { num, value }
+    const objectOf = (ref) => {
+      if (changed.has(ref.r)) return changed.get(ref.r).value;
+      const v = doc.get(ref);
+      const copy = { d: { ...(v?.d || {}) } };
+      if (v?.stream) copy.stream = v.stream;
+      changed.set(ref.r, { gen: ref.g || 0, value: copy });
+      return copy;
+    };
+    const addObject = (value) => {
+      const n = next++;
+      added.push({ num: n, value });
+      return { r: n, g: 0 };
+    };
+
+    // One Helvetica of our own for every appearance: WinAnsi, so a dash or a
+    // curly quote is drawn as itself whatever the form's own font resource says.
+    const font = addObject({ d: { Type: { n: 'Font' }, Subtype: { n: 'Type1' }, BaseFont: { n: 'Helvetica' }, Encoding: { n: 'WinAnsiEncoding' } } });
+
+    const report = { fields: {}, unknown: [], appearances: 0, signature: false };
+
+    for (const [name, value] of Object.entries(values || {})) {
+      const field = byName.get(name);
+      if (!field) { report.unknown.push(name); continue; }
+      const fieldObj = objectOf(field.ref);
+
+      if (field.kind === 'check' || field.kind === 'radio') {
+        const on = field.onState || 'Yes';
+        const state = value === true || value === on || value === 'Yes' ? on : 'Off';
+        fieldObj.d.V = { n: state };
+        for (const w of field.widgets) {
+          const wo = objectOf(w.ref);
+          const states = Object.keys(doc.get(doc.get(doc.get(w.ref)?.d?.AP)?.d?.N)?.d || {});
+          wo.d.AS = { n: states.includes(state) ? state : 'Off' };
+        }
+        continue;
+      }
+      if (field.kind !== 'text' && field.kind !== 'choice') continue;
+
+      const text = String(value ?? '');
+      fieldObj.d.V = pdfText(text);
+      const { font: fontName } = parseDA(field.da);
+      for (const w of field.widgets) {
+        const wo = objectOf(w.ref);
+        const [x1, y1, x2, y2] = w.rect;
+        const bw = Math.abs(x2 - x1);
+        const bh = Math.abs(y2 - y1);
+        const ap = textAppearance(text, field, bw, bh, fontName);
+        const stream = addObject({
+          d: {
+            Type: { n: 'XObject' }, Subtype: { n: 'Form' }, BBox: [0, 0, bw, bh],
+            Resources: { d: { Font: { d: { [fontName]: font } } } },
+          },
+          stream: bytesOf(ap.content),
+        });
+        wo.d.AP = { d: { N: stream } };
+        // Drawn smaller than the form asks: say so in the field too, as "fit to
+        // box", so a later edit in Acrobat keeps fitting rather than overflowing.
+        if (text && ap.daSize && ap.size < ap.daSize) {
+          wo.d.DA = { s: field.da.replace(/(\/[^\s/]+\s+)[\d.]+(\s+Tf)/, '$10$2') };
+        }
+        report.appearances++;
+        if (text) report.fields[name] = { size: ap.size, fits: ap.fits };
+      }
+    }
+
+    if (signature?.strokes?.length) {
+      const field = byName.get(signature.field);
+      const widget = field?.widgets?.[0];
+      const pageRef = widget?.page;
+      if (widget && pageRef) {
+        const content = signatureContent(signature, widget.rect);
+        if (content) {
+          const page = objectOf(pageRef);
+          const c = page.d.Contents;
+          let existing = [];
+          if (Array.isArray(c)) existing = c;
+          else if (c != null) {
+            const resolved = doc.get(c);
+            existing = Array.isArray(resolved) ? resolved : [c];
+          }
+          // Wrapped, so whatever state the page's own drawing leaves behind cannot
+          // move or recolour the signature.
+          const open = addObject({ d: {}, stream: bytesOf('q') });
+          const close = addObject({ d: {}, stream: bytesOf('Q') });
+          const sig = addObject({ d: {}, stream: bytesOf(content) });
+          page.d.Contents = [open, ...existing, close, sig];
+          report.signature = true;
+        }
+      }
+    }
+
+    return { bytes: writeIncrement(doc, data, changed, added, next), report };
+  }
+
+  function writeIncrement(doc, data, changed, added, size) {
+    const parts = [];
+    let offset = data.length;
+    const offsets = new Map();
+    const push = (str) => {
+      const b = typeof str === 'string' ? bytesOf(str) : str;
+      parts.push(b);
+      offset += b.length;
+    };
+    push('\n');
+    const objects = [
+      ...[...changed.entries()].map(([n, { gen, value }]) => ({ num: n, gen, value })),
+      ...added.map((a) => ({ num: a.num, gen: 0, value: a.value })),
+    ].sort((a, b) => a.num - b.num);
+    for (const o of objects) {
+      offsets.set(o.num, { offset, gen: o.gen });
+      if (o.value.stream) {
+        const d = { ...o.value.d, Length: o.value.stream.length };
+        push(`${o.num} ${o.gen} obj\n${serialize({ d })}\nstream\n`);
+        push(o.value.stream);
+        push('\nendstream\nendobj\n');
+      } else {
+        push(`${o.num} ${o.gen} obj\n${serialize(o.value)}\nendobj\n`);
+      }
+    }
+
+    const t = doc.trailer.d;
+    const trailer = { Size: size, Root: t.Root, Prev: doc.startxref };
+    if (t.Info) trailer.Info = t.Info;
+    if (t.ID) trailer.ID = t.ID;
+
+    // Runs of consecutive object numbers, as both kinds of cross-reference want them.
+    const nums = [...offsets.keys()].sort((a, b) => a - b);
+    const runs = [];
+    for (const n of nums) {
+      const last = runs[runs.length - 1];
+      if (last && last.start + last.list.length === n) last.list.push(n);
+      else runs.push({ start: n, list: [n] });
+    }
+
+    const xrefAt = offset;
+    if (doc.xrefIsStream) {
+      // The original's cross-reference is a stream; so is this one, uncompressed.
+      const rows = [];
+      const index = [];
+      for (const run of runs) {
+        index.push(run.start, run.list.length);
+        for (const n of run.list) rows.push([1, offsets.get(n).offset, offsets.get(n).gen]);
+      }
+      index.push(size, 1);
+      rows.push([1, xrefAt, 0]);
+      const bin = new Uint8Array(rows.length * 7);
+      rows.forEach(([type, off, gen], i) => {
+        const p = i * 7;
+        bin[p] = type;
+        bin[p + 1] = (off >>> 24) & 0xff; bin[p + 2] = (off >>> 16) & 0xff;
+        bin[p + 3] = (off >>> 8) & 0xff; bin[p + 4] = off & 0xff;
+        bin[p + 5] = (gen >>> 8) & 0xff; bin[p + 6] = gen & 0xff;
+      });
+      const d = { ...trailer, Size: size + 1, Type: { n: 'XRef' }, W: [1, 4, 2], Index: index, Length: bin.length };
+      push(`${size} 0 obj\n${serialize({ d })}\nstream\n`);
+      push(bin);
+      push('\nendstream\nendobj\n');
+    } else {
+      let table = 'xref\n';
+      for (const run of runs) {
+        table += `${run.start} ${run.list.length}\n`;
+        for (const n of run.list) {
+          const { offset: off, gen } = offsets.get(n);
+          table += `${String(off).padStart(10, '0')} ${String(gen).padStart(5, '0')} n \n`;
+        }
+      }
+      push(`${table}trailer\n${serialize({ d: trailer })}\n`);
+    }
+    push(`startxref\n${xrefAt}\n%%EOF\n`);
+
+    const out = new Uint8Array(offset);
+    out.set(data, 0);
+    let p = data.length;
+    for (const part of parts) { out.set(part, p); p += part.length; }
+    return out;
+  }
+
+  Object.defineProperty(__x, "readForm", { get: () => readForm, enumerable: true });
+  Object.defineProperty(__x, "missingFields", { get: () => missingFields, enumerable: true });
+  Object.defineProperty(__x, "fillForm", { get: () => fillForm, enumerable: true });
+};
+
+// ui/rc_tawr.js
+__mods["ui/rc_tawr.js"] = function (__x, __req) {
+  /**
+   * TAWR — track access work requests, raised from the look-ahead.
+   *
+   * Pick a week; every place the look-ahead works that week becomes a request,
+   * one per location and shift, read off the reading every other screen draws
+   * (`core/tawr.js` decides what goes in each). An administrator reviews each
+   * draft, changes what needs changing, and approves it; an approved request is
+   * downloaded as BART's own form, filled and signed (`io/tawr_pdf.js`), and is
+   * final — changing it afterwards is a revision.
+   *
+   * **The look-ahead stays the source.** Creating the requests again after the
+   * sheet changes brings every draft up to date without losing what anybody
+   * typed: a field nobody touched takes the new value, an edit is kept, and an
+   * edit the sheet has since moved underneath is named. An approved request is
+   * never touched; it is marked as no longer matching the sheet.
+   *
+   * Administrators only, in the policies and therefore here: the tab is not
+   * offered to anybody else (`ui/rc.js`), and this module says so if reached.
+   *
+   * Two sections: **Requests** (the week) and **Setup** (BART's blank form, your
+   * name and signature, the contacts on every request, the shift hours, and the
+   * expanded wording for activities).
+   *
+   * Imports: util, rc, tawr, tawr_pdf, xlsx_write, exporters, icons, components,
+   * rc_util.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const T = __req("core/tawr.js");
+  const { readForm, missingFields, fillForm } = __req("io/tawr_pdf.js");
+  const { zipStore } = __req("io/xlsx_write.js");
+  const { saveFile } = __req("io/exporters.js");
+  const { icon } = __req("ui/icons.js");
+  const { textInput, selectInput, toast, badge, emptyState, confirmDialog, openModal } = __req("ui/components.js");
+  const { parsedView, locationRegister, foldName, todayISO, notifyChanged, goToTab, orgNav, formModal } = __req("ui/rc_util.js");
+
+
+
+  /* Dates as a request talks about them: "Mon 12 Oct", and the year where it matters. */
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const utc = (iso) => new Date(`${String(iso).slice(0, 10)}T00:00:00Z`);
+  function dayLabel(iso) {
+    const d = utc(iso);
+    return `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+  }
+  function dateLabel(iso) {
+    const d = utc(iso);
+    return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  }
+
+  const state = { section: 'requests', week: null };
+
+  /* ── BART's blank form, once per session ───────────────────────────────── */
+
+  let template = null; // { user, bytes }
+
+  async function getTemplate() {
+    const user = rc.currentUser()?.id || null;
+    if (template && template.user === user) return template.bytes;
+    const bytes = await rc.downloadTawrTemplate();
+    template = bytes ? { user, bytes } : null;
+    return bytes;
+  }
+
+  /* ── Everything a request is made from ─────────────────────────────────── */
+
+  const settingValue = (rows, key) => rows.find((r) => r.key === key)?.value ?? '';
+
+  async function loadContext() {
+    const [snapshot, legend, locations, aliases, codes, descriptions, settingsRows, profiles] = await Promise.all([
+      rc.latestSnapshot().catch(() => null),
+      rc.listLegend().catch(() => []),
+      rc.listLocations({ includeInactive: true }).catch(() => []),
+      rc.listLocationAliases().catch(() => []),
+      rc.listSupportCodes({ includeRetired: true }).catch(() => []),
+      rc.listTawrDescriptions().catch(() => []),
+      rc.listTawrSettings().catch(() => []),
+      rc.listTawrProfiles().catch(() => []),
+    ]);
+    const view = snapshot?.grid ? parsedView(snapshot, legend) : null;
+    const byId = new Map(locations.map((l) => [l.id, l]));
+    const register = locationRegister(locations, aliases);
+    const settings = Object.fromEntries(settingsRows.map((r) => [r.key, r.value]));
+    const shiftHours = {};
+    for (const s of ['day', 'swing', 'night', 'possession']) {
+      shiftHours[s] = settings[`hours_${s}`] || T.DEFAULT_SHIFT_HOURS[s];
+    }
+    return {
+      snapshot,
+      view,
+      settings,
+      settingsRows,
+      shiftHours,
+      codes,
+      descriptions,
+      profiles: new Map(profiles.map((p) => [p.person_id, p])),
+      resolveLocation: (raw) => byId.get(register.get(foldName(raw))) || null,
+    };
+  }
+
+  function extract(ctx, week) {
+    if (!ctx.view) return [];
+    return T.extractWeek(ctx.view, week, {
+      resolveLocation: ctx.resolveLocation,
+      codes: ctx.codes,
+      descriptions: ctx.descriptions,
+      shiftHours: ctx.shiftHours,
+    }).groups;
+  }
+
+  /** The form values for a group, as the administrator who raised it would have them. */
+  function freshValues(ctx, group, raisedBy) {
+    return T.formValues(group, { settings: ctx.settings, profile: ctx.profiles.get(raisedBy) || {} });
+  }
+
+  function sourceOf(group) {
+    return {
+      activities: group.activities.map((a) => ({ title: a.title, activityId: a.activityId, days: a.days })),
+      days: group.days,
+      support: group.support,
+      sswp: group.sswp,
+      flags: group.flags,
+      unexpanded: group.unexpanded,
+      area: group.area,
+    };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The tab
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function render(root) {
+    if (!rc.isAdmin()) {
+      root.appendChild(emptyState({
+        iconName: 'lock',
+        title: 'Administrators only',
+        message: 'Track access work requests are raised and approved by an administrator.',
+      }));
+      return;
+    }
+    const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
+    for (const [id, label] of [['requests', 'Requests'], ['setup', 'Setup']]) {
+      nav.appendChild(el('button', {
+        class: 'rc-tab',
+        type: 'button',
+        text: label,
+        dataset: { tawrSection: id },
+        'aria-pressed': String(state.section === id),
+        onClick: () => { state.section = id; clear(root); render(root); },
+      }));
+    }
+    root.appendChild(nav);
+    const host = el('div', { class: 'rc-tawr' });
+    root.appendChild(host);
+    if (state.section === 'setup') await renderSetup(host);
+    else await renderRequests(host);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Requests
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function renderRequests(host) {
+    const today = todayISO();
+    const [ctx, recent] = await Promise.all([
+      loadContext(),
+      rc.listTawrsFrom(T.addDaysISO(T.mondayOf(today), -28)).catch(() => []),
+    ]);
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Track access work requests' })]));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: `One request per location and shift for the week, read off the look-ahead. Each is due ${T.TAWR_LEAD_DAYS} days before its first day of work.`,
+    }));
+
+    const me = rc.me();
+    const mine = ctx.profiles.get(me?.id);
+    const templateInfo = parseJson(ctx.settings.template_info);
+    if (!templateInfo) {
+      host.appendChild(notice('warning', 'BART\'s blank form has not been uploaded yet.',
+        'Requests can be created and approved, but not downloaded until it is. Upload it in Setup.', 'Open Setup'));
+    } else if (!mine?.signature?.strokes?.length || !mine?.requestor_name) {
+      host.appendChild(notice('info', 'Your name, cell phone or signature is not saved yet.',
+        'Requests you raise go out with them as the requestor. Save them in Setup.', 'Open Setup'));
+    }
+
+    if (!ctx.view) {
+      host.appendChild(emptyState({
+        iconName: 'calendar',
+        title: 'No look-ahead to read',
+        message: 'Requests are read off the look-ahead. Publish it from the editor, or read the workbook, first.',
+        action: { label: 'Go to the look-ahead', onClick: () => goToTab('lookahead') },
+      }));
+      return;
+    }
+
+    const weeks = [...new Set([...T.weeksIn(ctx.view), ...recent.map((r) => r.week_start)])].sort();
+    if (!weeks.includes(state.week)) {
+      state.week = weeks.find((w) => T.tawrDeadline(w) >= today) || weeks[weeks.length - 1];
+    }
+    const week = state.week;
+    const counts = new Map();
+    for (const r of recent) counts.set(r.week_start, (counts.get(r.week_start) || 0) + 1);
+
+    const picker = el('div', { class: 'rc-tabs rc-tawr-weeks', role: 'group', 'aria-label': 'Week' });
+    for (const w of weeks) {
+      const n = counts.get(w) || 0;
+      picker.appendChild(el('button', {
+        class: 'rc-tab',
+        type: 'button',
+        dataset: { week: w },
+        'aria-pressed': String(w === week),
+        title: `${dayLabel(w)} to ${dayLabel(T.addDaysISO(w, 6))}`,
+        onClick: () => { state.week = w; notifyChanged('tawr-week'); },
+      }, [
+        `Week of ${dateLabel(w).replace(/ \d{4}$/, '')}`,
+        n ? el('span', { class: 'rc-tab-count rc-tab-count-info', text: String(n), 'aria-label': `${n} saved` }) : null,
+      ]));
+    }
+    host.appendChild(picker);
+
+    const groups = extract(ctx, week);
+    const saved = await rc.listTawrs(week);
+    const items = groups.map((g) => ({ group: g, record: saved.find((r) => r.group_key === g.key) || null }));
+    for (const r of saved) if (!groups.some((g) => g.key === r.group_key)) items.push({ group: null, record: r });
+
+    const due = T.deadlineState(week, today);
+    const approved = items.filter((i) => i.record?.status === 'approved');
+    const toolbar = el('div', { class: 'rc-tawr-toolbar' }, [
+      el('div', { class: 'rc-tawr-week-line' }, [
+        el('strong', { text: `${dayLabel(week)} – ${dayLabel(T.addDaysISO(week, 6))} ${utc(week).getUTCFullYear()}` }),
+        el('span', { class: 'rc-hint', style: 'margin:0', text: ` · first-day requests due ${dayLabel(due.deadline)}` }),
+      ]),
+      el('div', { class: 'rc-tawr-actions' }, [
+        groups.length ? el('button', {
+          class: 'cx-btn mini primary',
+          type: 'button',
+          dataset: { action: 'tawr-create' },
+          html: `${icon('refresh', { size: 12 })}<span>${saved.length ? 'Update drafts from the look-ahead' : 'Create TAWRs for this week'}</span>`,
+          title: 'One draft per location and shift. Drafts already made keep every change typed into them; approved requests are left alone.',
+          onClick: (e) => createDrafts(e.currentTarget, ctx, items),
+        }) : null,
+        approved.length ? el('button', {
+          class: 'cx-btn mini',
+          type: 'button',
+          dataset: { action: 'tawr-download-all' },
+          html: `${icon('download', { size: 12 })}<span>Download approved (${approved.length})</span>`,
+          onClick: () => downloadAll(ctx, week, approved.map((i) => i.record)),
+        }) : null,
+      ]),
+    ]);
+    host.appendChild(toolbar);
+
+    if (!items.length) {
+      host.appendChild(emptyState({
+        iconName: 'calendar',
+        title: 'Nothing painted this week',
+        message: 'The look-ahead has no shifts painted between this Monday and Sunday, so there is nothing to request.',
+      }));
+      return;
+    }
+
+    const list = el('div', { class: 'rc-tawr-list' });
+    for (const item of items) list.appendChild(card(ctx, item, today));
+    host.appendChild(list);
+  }
+
+  function notice(tone, title, detail, action) {
+    return el('div', { class: `rc-tawr-notice rc-tawr-notice-${tone}`, role: 'status' }, [
+      el('span', { html: icon(tone === 'warning' ? 'warning' : 'info', { size: 16 }), 'aria-hidden': 'true' }),
+      el('div', {}, [el('strong', { text: title }), el('span', { text: ` ${detail}` })]),
+      action ? el('button', {
+        class: 'cx-btn mini ghost', type: 'button', text: action,
+        onClick: () => { state.section = 'setup'; notifyChanged('tawr-section'); },
+      }) : null,
+    ]);
+  }
+
+  const STATUS = {
+    none: ['Not created', 'neutral'],
+    draft: ['Draft', 'warn'],
+    approved: ['Approved', 'good'],
+  };
+
+  function card(ctx, { group, record }, today) {
+    const status = record?.status || 'none';
+    const name = group?.locationName || record?.location_name || '(no location)';
+    const shift = group?.shift || record?.shift;
+    const firstDay = group?.firstDay || record?.first_day || record?.week_start;
+    const due = T.deadlineState(firstDay, today);
+    const fresh = group ? freshValues(ctx, group, record?.created_by || rc.me()?.id) : null;
+    const flags = group ? group.flags : [{ kind: 'gone', blocking: true, message: 'No longer on the look-ahead for this week. Discard the draft, or check the sheet.' }];
+    const blocking = flags.filter((f) => f.blocking);
+    const edited = record ? T.editedKeys(record.fields, record.generated) : [];
+    const conflicts = record?.source?.conflicts || [];
+    const changed = record?.status === 'approved' && fresh ? T.changedSince(record.generated, fresh) : [];
+
+    const days = group?.days || record?.source?.days || [];
+    const activities = group?.activities || record?.source?.activities || [];
+    const support = group?.support || record?.source?.support || [];
+    const sswp = group?.sswp || record?.source?.sswp || [];
+
+    const node = el('article', {
+      class: `rc-tawr-card rc-tawr-${status}`,
+      dataset: { tawrKey: group?.key || record?.group_key || '', tawrStatus: status },
+      'aria-label': `${name}, ${T.tawrShiftLabel(shift)} shift — ${STATUS[status][0]}`,
+    });
+    node.appendChild(el('header', { class: 'rc-tawr-card-head' }, [
+      el('h4', { text: name }),
+      badge(T.tawrShiftLabel(shift), 'info', { dot: false }),
+      badge(STATUS[status][0], STATUS[status][1]),
+      status === 'approved' ? null : badge(due.label, due.tone === 'ok' ? 'neutral' : due.tone),
+    ]));
+
+    node.appendChild(el('dl', { class: 'rc-tawr-facts' }, [
+      el('dt', { text: 'Days' }),
+      el('dd', { text: days.map((d) => `${dayLabel(d.date)} ${d.start || '?'}–${d.end || '?'}${d.fromShift ? ' (shift hours)' : ''}`).join(' · ') || '—' }),
+      el('dt', { text: 'Work' }),
+      el('dd', { text: activities.map((a) => a.title).join(' · ') || '—' }),
+      el('dt', { text: 'BART support' }),
+      el('dd', {
+        text: [
+          support.filter((s) => s.line === 'systems').map((s) => (s.count > 1 ? `${s.count} x ${s.label}` : s.label)).join(', '),
+          support.filter((s) => s.line === 'occ').map((s) => `OCC: ${s.label}`).join(', '),
+        ].filter(Boolean).join(' · ') || 'None',
+      }),
+      sswp.length ? el('dt', { text: 'SSWP' }) : null,
+      sswp.length ? el('dd', { text: sswp.join(', ') }) : null,
+    ]));
+
+    const notes = el('ul', { class: 'rc-tawr-flags' });
+    for (const f of flags) {
+      notes.appendChild(el('li', { class: f.blocking ? 'rc-tawr-flag-block' : 'rc-tawr-flag-note' }, [
+        el('span', { html: icon(f.blocking ? 'warning' : 'info', { size: 12 }), 'aria-hidden': 'true' }),
+        el('span', { text: f.message }),
+      ]));
+    }
+    if (changed.length) {
+      notes.appendChild(el('li', { class: 'rc-tawr-flag-block' }, [
+        el('span', { html: icon('warning', { size: 12 }), 'aria-hidden': 'true' }),
+        el('span', { text: `The look-ahead has changed since this was approved (${changed.map(label).join(', ')}). Revise it if the request should follow.` }),
+      ]));
+    }
+    if (record?.status === 'draft' && conflicts.length) {
+      notes.appendChild(el('li', { class: 'rc-tawr-flag-note' }, [
+        el('span', { html: icon('info', { size: 12 }), 'aria-hidden': 'true' }),
+        el('span', { text: `Kept your change where the look-ahead now says something else: ${conflicts.map(label).join(', ')}.` }),
+      ]));
+    }
+    if (group?.unexpanded?.length) {
+      notes.appendChild(el('li', { class: 'rc-tawr-flag-note' }, [
+        el('span', { html: icon('info', { size: 12 }), 'aria-hidden': 'true' }),
+        el('span', { text: `No expanded wording for: ${group.unexpanded.join(', ')}. Add it in Setup.` }),
+      ]));
+    }
+    if (notes.childNodes.length) node.appendChild(notes);
+
+    const meta = [];
+    if (record) {
+      const who = ctx.profiles.get(record.created_by)?.requestor_name;
+      meta.push(`Raised ${who ? `by ${who} ` : ''}${dateLabel(record.created_at)}`);
+      if (edited.length) meta.push(`${edited.length} field${edited.length === 1 ? '' : 's'} changed by hand`);
+      if (record.status === 'approved' && record.approved_at) {
+        const by = ctx.profiles.get(record.approved_by)?.requestor_name;
+        meta.push(`approved${by ? ` by ${by}` : ''} ${dateLabel(record.approved_at)}`);
+      }
+    } else meta.push('Not created yet — "Create TAWRs" makes the draft.');
+    node.appendChild(el('p', { class: 'rc-hint rc-tawr-meta', text: meta.join(' · ') }));
+
+    const actions = el('div', { class: 'rc-tawr-card-actions' });
+    if (record?.status === 'draft') {
+      actions.append(
+        button('Review', 'edit', () => openReview(ctx, record, group), 'tawr-review'),
+        button('Approve', 'check', () => approve(record, blocking), 'tawr-approve', {
+          primary: true,
+          disabled: blocking.length > 0,
+          title: blocking.length ? `Cannot be approved yet: ${blocking.map((f) => f.message).join(' ')}` : 'Approve as final. It can be revised later, not edited.',
+        }),
+        button('Preview PDF', 'document', () => downloadOne(ctx, record, { draft: true }), 'tawr-preview'),
+        button('Discard', 'trash', () => discard(record), 'tawr-discard', { danger: true }),
+      );
+    } else if (record?.status === 'approved') {
+      actions.append(
+        button('Download PDF', 'download', () => downloadOne(ctx, record), 'tawr-download', { primary: true }),
+        button('View', 'eye', () => openReview(ctx, record, group, { readOnly: true }), 'tawr-view'),
+        button('Revise', 'edit', () => revise(record), 'tawr-revise'),
+      );
+    }
+    if (actions.childNodes.length) node.appendChild(actions);
+    return node;
+  }
+
+  function button(text, iconName, onClick, action, { primary = false, danger = false, disabled = false, title = '' } = {}) {
+    return el('button', {
+      class: `cx-btn mini${primary ? ' primary' : ' ghost'}${danger ? ' danger' : ''}`,
+      type: 'button',
+      disabled,
+      title: title || null,
+      dataset: { action },
+      html: `${icon(iconName, { size: 12 })}<span>${text}</span>`,
+      onClick,
+    });
+  }
+
+  const label = (name) => T.FIELD_LABEL.get(name) || name;
+
+  function parseJson(text) {
+    if (!text) return null;
+    try { return JSON.parse(text); } catch { return null; }
+  }
+
+  /* ── Creating, approving, revising ─────────────────────────────────────── */
+
+  async function createDrafts(btn, ctx, items) {
+    btn.disabled = true;
+    let made = 0;
+    let updated = 0;
+    let kept = 0;
+    try {
+      for (const { group, record } of items) {
+        if (!group) continue;
+        const source = sourceOf(group);
+        const common = {
+          location_id: group.locationId,
+          location_name: group.locationName,
+          snapshot_id: ctx.snapshot?.id || null,
+          first_day: group.firstDay,
+        };
+        if (!record) {
+          const values = freshValues(ctx, group, rc.me()?.id);
+          await rc.addTawr({
+            week_start: group.weekStart, group_key: group.key, shift: group.shift,
+            fields: values, generated: values, source: { ...source, conflicts: [] }, ...common,
+          });
+          made++;
+        } else if (record.status === 'draft') {
+          const values = freshValues(ctx, group, record.created_by);
+          const merged = T.mergeRegenerated(record, values);
+          await rc.updateTawr(record.id, {
+            fields: merged.fields, generated: merged.generated, source: { ...source, conflicts: merged.conflicts }, ...common,
+          });
+          updated++;
+        } else kept++;
+      }
+      const said = [
+        made ? `${made} created` : '',
+        updated ? `${updated} brought up to date` : '',
+        kept ? `${kept} approved left as they are` : '',
+      ].filter(Boolean).join(', ');
+      toast({ tone: 'good', message: `TAWRs: ${said || 'nothing to do'}.` });
+    } catch (err) {
+      rc.reportError('tawr:create', err);
+      toast({ tone: 'bad', message: err?.message || String(err) });
+    } finally {
+      btn.disabled = false;
+      notifyChanged('tawr');
+    }
+  }
+
+  async function approve(record, blocking) {
+    if (blocking.length) return;
+    const ok = await confirmDialog({
+      title: `Approve the ${record.location_name} request?`,
+      message: 'Approved is final: it is downloaded as it stands and cannot be edited. If it has to change, revise it — the approved version is kept.',
+      confirmLabel: 'Approve',
+    });
+    if (!ok) return;
+    try {
+      await rc.updateTawr(record.id, { status: 'approved' });
+      toast({ tone: 'good', message: `${record.location_name} approved.` });
+    } catch (err) {
+      toast({ tone: 'bad', message: err?.message || String(err) });
+    }
+    notifyChanged('tawr');
+  }
+
+  async function revise(record) {
+    const ok = await confirmDialog({
+      title: `Revise the ${record.location_name} request?`,
+      message: 'A new draft takes its place, carrying everything it said. The approved version is kept on record as superseded.',
+      confirmLabel: 'Revise',
+    });
+    if (!ok) return;
+    try {
+      await rc.reviseTawr(record.id);
+      toast({ tone: 'good', message: 'A draft revision is ready to review.' });
+    } catch (err) {
+      toast({ tone: 'bad', message: err?.message || String(err) });
+    }
+    notifyChanged('tawr');
+  }
+
+  async function discard(record) {
+    const ok = await confirmDialog({
+      title: `Discard the ${record.location_name} draft?`,
+      message: 'Changes typed into it go with it. "Create TAWRs" makes a fresh one from the look-ahead.',
+      confirmLabel: 'Discard',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await rc.discardTawr(record.id);
+      toast({ message: 'Draft discarded.' });
+    } catch (err) {
+      toast({ tone: 'bad', message: err?.message || String(err) });
+    }
+    notifyChanged('tawr');
+  }
+
+  /* ── The PDF ───────────────────────────────────────────────────────────── */
+
+  function filled(ctx, bytes, record) {
+    const profile = ctx.profiles.get(record.created_by);
+    const signature = profile?.signature?.strokes?.length
+      ? { field: 'requestor_signature', ...profile.signature }
+      : null;
+    return { ...fillForm(bytes, record.fields || {}, { signature }), signed: Boolean(signature), profile };
+  }
+
+  async function templateOrSay() {
+    let bytes = null;
+    try {
+      bytes = await getTemplate();
+    } catch (err) {
+      toast({ tone: 'bad', message: `Could not fetch BART's form: ${err?.message || err}` });
+      return null;
+    }
+    if (!bytes) {
+      toast({ tone: 'warn', message: 'Upload BART\'s blank form in TAWR → Setup first.' });
+      return null;
+    }
+    return bytes;
+  }
+
+  async function downloadOne(ctx, record, { draft = false } = {}) {
+    const bytes = await templateOrSay();
+    if (!bytes) return;
+    try {
+      const out = filled(ctx, bytes, record);
+      const name = T.tawrFileName({ weekStart: record.week_start, locationName: record.location_name, shift: record.shift });
+      saveFile(draft ? `DRAFT ${name}` : name, out.bytes, 'application/pdf', draft ? 'TAWR preview' : 'TAWR');
+      warnAbout(out);
+    } catch (err) {
+      rc.reportError('tawr:pdf', err);
+      toast({ tone: 'bad', message: err?.message || String(err) });
+    }
+  }
+
+  async function downloadAll(ctx, week, records) {
+    const bytes = await templateOrSay();
+    if (!bytes) return;
+    try {
+      const files = records.map((record) => {
+        const out = filled(ctx, bytes, record);
+        warnAbout(out, record.location_name);
+        return { name: T.tawrFileName({ weekStart: record.week_start, locationName: record.location_name, shift: record.shift }), data: out.bytes };
+      });
+      saveFile(`TAWRs ${week}.zip`, zipStore(files), 'application/zip', `${files.length} TAWR${files.length === 1 ? '' : 's'}`);
+    } catch (err) {
+      rc.reportError('tawr:pdf', err);
+      toast({ tone: 'bad', message: err?.message || String(err) });
+    }
+  }
+
+  function warnAbout(out, where = '') {
+    const overflow = Object.entries(out.report.fields).filter(([, r]) => !r.fits).map(([k]) => label(k));
+    if (overflow.length) {
+      toast({ tone: 'warn', message: `${where ? `${where}: ` : ''}too long to fit even at the smallest size — ${overflow.join(', ')}. Shorten it in Review.` });
+    }
+    if (!out.signed) {
+      toast({ tone: 'warn', message: `${where ? `${where}: ` : ''}no signature — ${out.profile?.requestor_name || 'the administrator who raised it'} has not saved one in Setup.` });
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Review: every field on the form, as it will be printed
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const DAY_OPTIONS = ['', 'MON', 'TUES', 'WED', 'THURS', 'FRI', 'SAT', 'SUN'];
+  const CATEGORY_OPTIONS = ['', 'A', 'B', 'C', 'F', 'P', 'BL', 'Y'];
+
+  const MAINT_LINES = [
+    ['maint_route_prohibit', 'Route Prohibit'],
+    ['maint_speed_restriction', 'Speed Restriction'],
+    ['maint_systems_tech_support', 'Technical Support (Systems)'],
+    ['maint_safe_clearance', 'Safe Clearance'],
+    ['maint_rail_bond_cbond', 'Rail Bond / C-Bond'],
+    ['maint_power_tech_support', 'Technical Support (Power & Mechanical)'],
+    ['maint_vehicle_equipment', 'Vehicle Equipment'],
+    ['maint_vehicle_tech_support', 'Technical Support (Vehicle)'],
+    ['maint_safety_dept', 'Safety Dept.'],
+    ['maint_operating_bulletin', 'Operating Bulletin #'],
+    ['maint_physical_barrier', 'Physical Barrier Req. (attach)'],
+    ['maint_safety_monitor', 'Safety Monitor'],
+  ];
+  const TRANS_LINES = [
+    ['trans_yard_line_support', 'Yard / Line Support'],
+    ['trans_train_required', 'Train Required'],
+    ['trans_train_operators', 'Train Operator(s)'],
+    ['trans_single_tracking', 'Single Tracking'],
+    ['trans_occ_support', 'OCC Support'],
+  ];
+
+  function openReview(ctx, record, group, { readOnly = false } = {}) {
+    const editor = formEditor(record, { readOnly });
+    const fitBox = el('div', { class: 'rc-tawr-fit', 'aria-live': 'polite' });
+    const body = el('div', { class: 'rc-tawr-review' }, [
+      group?.flags?.some((f) => f.blocking)
+        ? el('div', { class: 'rc-error' }, group.flags.filter((f) => f.blocking).map((f) => el('div', { text: f.message })))
+        : null,
+      fitBox,
+      editor.node,
+    ]);
+
+    // Whether what is typed fits, against BART's real form — drawn the way the
+    // download will draw it, so the answer is the download's answer.
+    let timer = null;
+    const checkFit = () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        let bytes = null;
+        try { bytes = await getTemplate(); } catch { /* said on download */ }
+        if (!bytes) { fitBox.textContent = ''; return; }
+        try {
+          const { report } = fillForm(bytes, editor.read());
+          const over = Object.entries(report.fields).filter(([, r]) => !r.fits).map(([k]) => label(k));
+          const shrunk = report.fields.work_description;
+          fitBox.className = `rc-tawr-fit${over.length ? ' rc-warn' : ''}`;
+          fitBox.textContent = over.length
+            ? `Too long to fit the form even at the smallest size: ${over.join(', ')}.`
+            : shrunk ? `Fits the form. The work description prints at ${Math.round(shrunk.size * 4) / 4} pt.` : 'Fits the form.';
+        } catch (err) {
+          fitBox.textContent = '';
+        }
+      }, 250);
+    };
+    editor.node.addEventListener('input', checkFit);
+    editor.node.addEventListener('change', checkFit);
+    checkFit();
+
+    const save = async (handle, { andApprove = false } = {}) => {
+      try {
+        await rc.updateTawr(record.id, { fields: editor.read() });
+        if (andApprove) {
+          const blocking = (group?.flags || [{ blocking: true }]).filter((f) => f.blocking);
+          if (blocking.length) throw new Error('Saved, but it cannot be approved until what is flagged is fixed.');
+          await rc.updateTawr(record.id, { status: 'approved' });
+        }
+        toast({ tone: 'good', message: andApprove ? `${record.location_name} approved.` : 'Draft saved.' });
+        handle.close();
+      } catch (err) {
+        toast({ tone: 'bad', message: err?.message || String(err) });
+      }
+      notifyChanged('tawr');
+    };
+
+    openModal({
+      title: `${record.location_name} — ${T.tawrShiftLabel(record.shift)} shift`,
+      subtitle: readOnly
+        ? 'Approved. Revise it to change anything.'
+        : 'Every field as it will be printed. Fields changed by hand are marked; the rest follow the look-ahead.',
+      size: 'xl',
+      body,
+      actions: readOnly
+        ? [{ label: 'Close' }, { label: 'Download PDF', kind: 'primary', onClick: () => { downloadOne(ctx, record); } }]
+        : [
+          { label: 'Cancel' },
+          { label: 'Save draft', keepOpen: true, onClick: (h) => { save(h); } },
+          { label: 'Save and approve', kind: 'primary', keepOpen: true, onClick: (h) => { save(h, { andApprove: true }); } },
+        ],
+    });
+  }
+
+  /**
+   * The form as controls. `read()` answers the fields object to store: strings
+   * for text and dropdowns, true for a ticked box, and nothing at all for what
+   * is blank, so a field nobody filled stays blank on the PDF.
+   */
+  function formEditor(record, { readOnly = false } = {}) {
+    const fields = record.fields || {};
+    const generated = record.generated || {};
+    const getters = new Map();
+
+    const mark = (wrap, names) => {
+      const changed = names.some((n) => !sameValue(fields[n], generated[n]));
+      if (changed) {
+        wrap.classList.add('rc-tawr-edited');
+        wrap.title = `Changed by hand. The look-ahead says: ${names.map((n) => display(generated[n])).join(' / ') || 'nothing'}`;
+      }
+      return wrap;
+    };
+
+    const text = (name, { multiline = false, placeholder = '', width = null } = {}) => {
+      const input = multiline
+        ? el('textarea', { class: 'cx-input rc-tawr-textarea', rows: '4', placeholder })
+        : textInput({ value: fields[name] ?? '', placeholder });
+      if (multiline) input.value = fields[name] ?? '';
+      input.dataset.field = name;
+      input.setAttribute('aria-label', label(name));
+      if (width) input.style.width = width;
+      if (readOnly) input.readOnly = true;
+      getters.set(name, () => input.value.trim());
+      return mark(el('span', { class: 'rc-tawr-ctl' }, [input]), [name]);
+    };
+    const check = (name, caption = '') => {
+      const input = el('input', { type: 'checkbox', 'aria-label': label(name) });
+      input.checked = fields[name] === true;
+      input.dataset.field = name;
+      if (readOnly) input.disabled = true;
+      getters.set(name, () => input.checked);
+      return mark(el('label', { class: 'rc-tawr-ctl rc-tawr-check' }, [input, caption ? el('span', { text: caption }) : null]), [name]);
+    };
+    const choice = (name, options) => {
+      const select = selectInput({ value: fields[name] ?? '', options: options.map((o) => ({ value: o, label: o || '—' })) });
+      select.dataset.field = name;
+      select.setAttribute('aria-label', label(name));
+      if (readOnly) select.disabled = true;
+      getters.set(name, () => select.value);
+      return mark(el('span', { class: 'rc-tawr-ctl' }, [select]), [name]);
+    };
+    // A Yes/No question is two boxes on the form; here it is one answer.
+    const yesNo = (base, caption) => {
+      const yes = `${base}_yes`;
+      const no = `${base}_no`;
+      const value = fields[yes] ? 'Yes' : fields[no] ? 'No' : '';
+      const select = selectInput({ value, options: [{ value: '', label: '—' }, 'Yes', 'No'] });
+      select.setAttribute('aria-label', caption);
+      select.dataset.field = base;
+      if (readOnly) select.disabled = true;
+      getters.set(yes, () => select.value === 'Yes');
+      getters.set(no, () => select.value === 'No');
+      return el('div', { class: 'rc-tawr-q' }, [el('span', { text: caption }), mark(el('span', { class: 'rc-tawr-ctl' }, [select]), [yes, no])]);
+    };
+    const power = (n) => {
+      const names = ['on', 'off', 'na'].map((p) => `row${n}_power_${p}`);
+      const value = fields[names[0]] ? 'ON' : fields[names[1]] ? 'OFF' : fields[names[2]] ? 'N/A' : '';
+      const select = selectInput({ value, options: [{ value: '', label: '—' }, 'ON', 'OFF', 'N/A'] });
+      select.setAttribute('aria-label', `Row ${n} power status`);
+      select.dataset.field = `row${n}_power`;
+      if (readOnly) select.disabled = true;
+      getters.set(names[0], () => select.value === 'ON');
+      getters.set(names[1], () => select.value === 'OFF');
+      getters.set(names[2], () => select.value === 'N/A');
+      return mark(el('span', { class: 'rc-tawr-ctl' }, [select]), names);
+    };
+
+    const section = (title, children) => el('fieldset', { class: 'rc-tawr-section' }, [el('legend', { text: title }), ...children]);
+    const pair = (caption, control) => el('label', { class: 'rc-tawr-pair' }, [el('span', { text: caption }), control]);
+
+    const rows = [];
+    for (let n = 1; n <= T.FORM_ROWS; n++) {
+      rows.push(el('tr', {}, [
+        el('td', {}, [text(`row${n}_date`, { placeholder: 'MM/DD/YY', width: '84px' })]),
+        el('td', {}, [choice(`row${n}_day`, DAY_OPTIONS)]),
+        el('td', {}, [text(`row${n}_time_start`, { placeholder: '0700', width: '60px' })]),
+        el('td', {}, [text(`row${n}_time_end`, { placeholder: '1500', width: '60px' })]),
+        el('td', {}, [text(`row${n}_area`)]),
+        el('td', {}, [power(n)]),
+        el('td', {}, [text(`row${n}_safe_clear_rail_sections`, { width: '110px' })]),
+      ]));
+    }
+
+    const supportLine = ([base, caption]) => el('div', { class: 'rc-tawr-line' }, [
+      check(`${base}_req`, caption),
+      T.FIELD_KIND.has(`${base}_details`) ? text(`${base}_details`) : el('span'),
+    ]);
+
+    const node = el('div', { class: 'rc-tawr-form' }, [
+      section('Work and clearances', [
+        el('div', { class: 'rc-tawr-qs' }, [
+          yesNo('work_in_track_zone', 'Work/Activity in Track Zone'),
+          yesNo('clearance_verification', 'Clearance Verification'),
+          yesNo('track_inspection_first_train', 'Track Inspection (with 1st Train)'),
+        ]),
+        el('div', { class: 'rc-tawr-checks' }, [
+          check('police_advisory_threat_of_theft', 'Police Advisory (Threat of Theft)'),
+          check('advisory_no_work_clearance', 'Advisory (No Work Clearance)'),
+          check('no_passage_hirail_vehicles', 'No Passage of Hi-Rail Vehicles'),
+          check('coordinate_hirail_passage', 'Coordinate Hi-Rail Passage'),
+        ]),
+        el('div', { class: 'rc-tawr-grid2' }, [
+          pair('Category of Work', choice('category_of_work', CATEGORY_OPTIONS)),
+          pair('Schedule Number', text('schedule_number')),
+        ]),
+        pair('Work Description', text('work_description', { multiline: true })),
+      ]),
+      section('Contacts', [
+        el('div', { class: 'rc-tawr-grid2' }, [
+          pair('Requestor', text('requestor_name')),
+          pair('Cell phone', text('requestor_cell_phone')),
+          pair('Person in charge', text('person_in_charge_name')),
+          pair('Cell phone', text('person_in_charge_cell_phone')),
+          pair('Project representative', text('project_rep_name')),
+          pair('Cell phone', text('project_rep_cell_phone')),
+        ]),
+      ]),
+      section('Dates, times and area', [
+        el('div', { class: 'rc-scroll' }, [
+          el('table', { class: 'rc-table rc-tawr-rows' }, [
+            el('thead', {}, [el('tr', {}, ['Date', 'Day', 'Start', 'End', 'Area (tracks, mileposts, gates, stations)', 'Power', 'Safe clear'].map((h) => el('th', { text: h })))]),
+            el('tbody', {}, rows),
+          ]),
+        ]),
+      ]),
+      section('Maintenance support', MAINT_LINES.map(supportLine)),
+      section('Transportation support', [
+        ...TRANS_LINES.map(supportLine),
+        el('div', { class: 'rc-tawr-line' }, [check('trans_passenger_bulletin_req', 'Passenger Bulletin'), pair('Public notice', text('trans_public_notice', { width: '80px' }))]),
+        el('div', { class: 'rc-tawr-line' }, [check('trans_sswp_iop_required_req', 'SSWP/IOP Required (attach)'), el('span')]),
+        el('div', { class: 'rc-tawr-line' }, [check('trans_adverse_impact_blanket_req', 'Adverse Impact to Blanket'), text('trans_adverse_impact_blanket_details', { placeholder: 'SSWP numbers print on this line' })]),
+      ]),
+      el('p', { class: 'rc-hint', text: 'The approval clearance signatures are left blank for BART. Your signature is drawn on the requestor line at download.' }),
+    ]);
+
+    return {
+      node,
+      read() {
+        const out = {};
+        for (const [name, get] of getters) {
+          const v = get();
+          if (v === true || (typeof v === 'string' && v)) out[name] = v;
+        }
+        return out;
+      },
+    };
+  }
+
+  function sameValue(a, b) {
+    const blank = (v) => v == null || v === '' || v === false;
+    return (blank(a) && blank(b)) || a === b;
+  }
+
+  function display(v) {
+    if (v === true) return 'ticked';
+    if (v == null || v === '' || v === false) return 'blank';
+    return String(v);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Setup
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function renderSetup(host) {
+    const ctx = await loadContext();
+    const me = rc.me();
+    const mine = ctx.profiles.get(me?.id) || {};
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Setup' })]));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'What every request is filled from besides the look-ahead. All of it is visible to administrators only — the database refuses anybody else.',
+    }));
+
+    const list = el('div', { class: 'rc-settings' });
+    host.appendChild(list);
+
+    /* ── BART's form ────────────────────────────────────────────────────── */
+    list.appendChild(group('BART\'s form'));
+    const info = parseJson(ctx.settings.template_info);
+    const fileInput = el('input', { type: 'file', accept: 'application/pdf,.pdf', hidden: true, dataset: { action: 'tawr-template-file' } });
+    fileInput.addEventListener('change', () => uploadTemplate(fileInput.files?.[0]));
+    list.appendChild(row({
+      label: 'The blank fillable form',
+      hint: info
+        ? `${info.name || 'tawr.pdf'} · ${info.fields} fields · uploaded ${dateLabel(info.uploaded_at)}${info.uploaded_by ? ` by ${info.uploaded_by}` : ''}. Kept in private storage, never published with the site.`
+        : 'Not uploaded yet. Kept in private storage that only an administrator can open, and never published with the site.',
+      control: el('div', { class: 'rc-settings-inline' }, [
+        info ? badge('Uploaded', 'good') : badge('Missing', 'warn'),
+        el('button', {
+          class: 'cx-btn mini', type: 'button', dataset: { action: 'tawr-template' },
+          html: `${icon('upload', { size: 12 })}<span>${info ? 'Replace…' : 'Upload…'}</span>`,
+          onClick: () => fileInput.click(),
+        }),
+        fileInput,
+      ]),
+    }));
+
+    /* ── You ────────────────────────────────────────────────────────────── */
+    list.appendChild(group('You, as the requestor'));
+    list.appendChild(profileRow('Your name on the form', 'requestor_name', mine.requestor_name ?? me?.name ?? '', 'Printed as the Requestor on every request you raise.'));
+    list.appendChild(profileRow('Your cell phone', 'cell_phone', mine.cell_phone ?? '', 'Printed beside it.'));
+    list.appendChild(row({
+      label: 'Your signature',
+      hint: 'Drawn once, here, and signed onto the requestor line of every request you raise when it is downloaded. Drawn as lines, so it prints sharp.',
+      control: signaturePad(mine.signature),
+    }));
+
+    /* ── Every request ──────────────────────────────────────────────────── */
+    list.appendChild(group('The same on every request'));
+    list.appendChild(settingRow('Person in charge', 'person_in_charge_name', ctx.settings));
+    list.appendChild(settingRow('Person in charge — cell phone', 'person_in_charge_cell_phone', ctx.settings));
+    list.appendChild(settingRow('Project representative', 'project_rep_name', ctx.settings));
+    list.appendChild(settingRow('Project representative — cell phone', 'project_rep_cell_phone', ctx.settings));
+    list.appendChild(settingRow('Category of Work, unless changed', 'category_default', ctx.settings, {
+      options: CATEGORY_OPTIONS.filter(Boolean), fallback: 'F',
+    }));
+
+    list.appendChild(group('Shift hours, where the look-ahead gives none'));
+    for (const [id, caption] of [['day', 'Day shift'], ['swing', 'Swing shift'], ['night', 'Night shift'], ['possession', 'Blanket']]) {
+      list.appendChild(settingRow(caption, `hours_${id}`, ctx.settings, {
+        fallback: T.DEFAULT_SHIFT_HOURS[id],
+        placeholder: T.DEFAULT_SHIFT_HOURS[id],
+        check: (v) => (!v || T.parseHours(v) ? null : 'Write the hours as 0700-1500.'),
+        hint: 'By the shift, not the colour — re-mapping a colour in Legend does not move these.',
+      }));
+    }
+
+    list.appendChild(group('Where each place is'));
+    list.appendChild(row({
+      label: 'Area wording',
+      hint: 'What the form\'s Area column says for each location ("Train Control Room, A-Line MP 12.3") is set on the location itself. Blank uses its name.',
+      control: el('button', {
+        class: 'cx-btn mini ghost', type: 'button', text: 'Open Locations',
+        onClick: () => { orgNav.section = 'locations'; goToTab('org'); },
+      }),
+    }));
+    list.appendChild(row({
+      label: 'Which line each support code goes on',
+      hint: 'Set on the support code: Technical Support (Systems), OCC Support, or not on the form. A witness is not on the form; ROC is OCC.',
+      control: el('button', {
+        class: 'cx-btn mini ghost', type: 'button', text: 'Open support codes',
+        onClick: () => goToTab('lookahead'),
+      }),
+    }));
+
+    /* ── Expanded wording ───────────────────────────────────────────────── */
+    host.appendChild(descriptionsSection(ctx));
+  }
+
+  function group(title) {
+    return el('div', { class: 'rc-settings-group', text: title });
+  }
+
+  function row({ label: caption, hint, control }) {
+    return el('div', { class: 'rc-settings-row' }, [
+      el('div', { class: 'rc-settings-label' }, [
+        el('div', { class: 'rc-settings-name', text: caption }),
+        hint ? el('div', { class: 'rc-hint', text: hint }) : null,
+      ]),
+      el('div', { class: 'rc-settings-control' }, [control]),
+    ]);
+  }
+
+  function inlineSave({ input, current, commit }) {
+    const button = el('button', { class: 'cx-btn mini', type: 'button', text: 'Save', disabled: true });
+    const sync = () => { button.disabled = input.value.trim() === String(current ?? '').trim(); };
+    input.addEventListener('input', sync);
+    input.addEventListener('change', sync);
+    const go = async () => {
+      if (button.disabled) return;
+      if (await commit(input.value.trim())) { current = input.value.trim(); sync(); }
+    };
+    button.addEventListener('click', go);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+    return el('div', { class: 'rc-settings-inline' }, [input, button]);
+  }
+
+  function settingRow(caption, key, settings, { options = null, fallback = '', placeholder = '', check = null, hint = '' } = {}) {
+    const current = settings[key] ?? fallback;
+    const input = options
+      ? selectInput({ value: current, options })
+      : textInput({ value: current, placeholder });
+    input.setAttribute('aria-label', caption);
+    input.dataset.tawrSetting = key;
+    return row({
+      label: caption,
+      hint,
+      control: inlineSave({
+        input,
+        current,
+        commit: async (v) => {
+          const problem = check?.(v);
+          if (problem) { toast({ tone: 'warn', message: problem }); return false; }
+          try {
+            await rc.setTawrSetting(key, v);
+            toast({ tone: 'good', message: `${caption} saved.` });
+            return true;
+          } catch (err) {
+            toast({ tone: 'bad', message: err?.message || String(err) });
+            return false;
+          }
+        },
+      }),
+    });
+  }
+
+  function profileRow(caption, key, current, hint) {
+    const input = textInput({ value: current });
+    input.setAttribute('aria-label', caption);
+    input.dataset.tawrProfile = key;
+    return row({
+      label: caption,
+      hint,
+      control: inlineSave({
+        input,
+        current: null, // never saved until somebody saves it, even when prefilled
+        commit: async (v) => {
+          try {
+            await rc.saveTawrProfile({ [key]: v });
+            toast({ tone: 'good', message: `${caption} saved.` });
+            return true;
+          } catch (err) {
+            toast({ tone: 'bad', message: err?.message || String(err) });
+            return false;
+          }
+        },
+      }),
+    });
+  }
+
+  async function uploadTemplate(file) {
+    if (!file) return;
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const form = readForm(bytes);
+      const missing = missingFields(form, T.TAWR_FIELDS.map((f) => f[0]));
+      if (!form.fields.length) throw new Error('That PDF has no fillable fields. Upload the fillable version of the form.');
+      if (missing.length) {
+        throw new Error(`That form is missing ${missing.length} field${missing.length === 1 ? '' : 's'} the requests fill: `
+          + `${missing.slice(0, 8).join(', ')}${missing.length > 8 ? '…' : ''}. Was it revised? Nothing was uploaded.`);
+      }
+      await rc.uploadTawrTemplate(new Blob([bytes], { type: 'application/pdf' }));
+      await rc.setTawrSetting('template_info', JSON.stringify({
+        name: file.name, size: bytes.length, fields: form.fields.length,
+        uploaded_at: new Date().toISOString(), uploaded_by: rc.me()?.name || null,
+      }));
+      template = { user: rc.currentUser()?.id || null, bytes };
+      toast({ tone: 'good', message: `BART's form uploaded — all ${T.TAWR_FIELDS.length} fields found.` });
+      notifyChanged('tawr-template');
+    } catch (err) {
+      toast({ tone: 'bad', message: err?.message || String(err) });
+    }
+  }
+
+  /* ── The signature pad ─────────────────────────────────────────────────── */
+
+  const PAD_W = 360;
+  const PAD_H = 120;
+
+  function signaturePad(saved) {
+    const canvas = el('canvas', {
+      class: 'rc-tawr-pad', width: String(PAD_W), height: String(PAD_H),
+      'aria-label': 'Signature pad — draw your signature with the mouse, a pen or a finger',
+      role: 'img', dataset: { action: 'tawr-signature-pad' },
+    });
+    let strokes = (saved?.strokes || []).map((s) => s.map((p) => [...p]));
+    let live = null;
+    const ctx2d = canvas.getContext('2d');
+    const scaleOf = () => {
+      const sw = saved?.width || PAD_W;
+      const sh = saved?.height || PAD_H;
+      return Math.min(PAD_W / sw, PAD_H / sh);
+    };
+    // A signature saved at another size is redrawn to fit, then kept at this one.
+    if (saved?.width && saved.width !== PAD_W) {
+      const s = scaleOf();
+      strokes = strokes.map((st) => st.map(([x, y]) => [x * s, y * s]));
+    }
+
+    const draw = () => {
+      ctx2d.clearRect(0, 0, PAD_W, PAD_H);
+      const css = getComputedStyle(canvas);
+      ctx2d.strokeStyle = css.color || 'black';
+      ctx2d.lineWidth = 2;
+      ctx2d.lineCap = 'round';
+      ctx2d.lineJoin = 'round';
+      for (const st of strokes) {
+        if (!st.length) continue;
+        ctx2d.beginPath();
+        ctx2d.moveTo(st[0][0], st[0][1]);
+        for (const [x, y] of st.slice(1)) ctx2d.lineTo(x, y);
+        if (st.length === 1) ctx2d.lineTo(st[0][0] + 0.1, st[0][1]);
+        ctx2d.stroke();
+      }
+    };
+    const at = (e) => {
+      const r = canvas.getBoundingClientRect();
+      return [
+        Math.round(((e.clientX - r.left) / r.width) * PAD_W * 10) / 10,
+        Math.round(((e.clientY - r.top) / r.height) * PAD_H * 10) / 10,
+      ];
+    };
+    canvas.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      canvas.setPointerCapture?.(e.pointerId);
+      live = [at(e)];
+      strokes.push(live);
+      draw();
+      sync();
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (!live) return;
+      const p = at(e);
+      const last = live[live.length - 1];
+      if (Math.hypot(p[0] - last[0], p[1] - last[1]) < 1.5) return;
+      live.push(p);
+      draw();
+    });
+    const end = () => { live = null; sync(); };
+    canvas.addEventListener('pointerup', end);
+    canvas.addEventListener('pointercancel', end);
+
+    const saveBtn = el('button', { class: 'cx-btn mini primary', type: 'button', text: 'Save signature', dataset: { action: 'tawr-signature-save' } });
+    const clearBtn = el('button', { class: 'cx-btn mini ghost', type: 'button', text: 'Clear', dataset: { action: 'tawr-signature-clear' } });
+    let dirty = false;
+    const sync = () => {
+      dirty = true;
+      saveBtn.disabled = !strokes.length;
+    };
+    saveBtn.disabled = true;
+    clearBtn.addEventListener('click', () => { strokes = []; draw(); dirty = true; saveBtn.disabled = false; });
+    saveBtn.addEventListener('click', async () => {
+      if (!dirty) return;
+      try {
+        const signature = strokes.length ? { width: PAD_W, height: PAD_H, strokes: strokes.filter((s) => s.length) } : null;
+        await rc.saveTawrProfile({ signature });
+        dirty = false;
+        saveBtn.disabled = true;
+        toast({ tone: 'good', message: signature ? 'Signature saved.' : 'Signature removed.' });
+      } catch (err) {
+        toast({ tone: 'bad', message: err?.message || String(err) });
+      }
+    });
+    requestAnimationFrame(draw);
+    return el('div', { class: 'rc-tawr-signature' }, [
+      canvas,
+      el('div', { class: 'rc-settings-inline' }, [clearBtn, saveBtn]),
+    ]);
+  }
+
+  /* ── Expanded wording ──────────────────────────────────────────────────── */
+
+  function descriptionsSection(ctx) {
+    const wrap = el('div', { class: 'rc-tawr-descriptions' });
+    wrap.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'Expanded wording for activities' }),
+      el('button', {
+        class: 'cx-btn mini primary', type: 'button', dataset: { action: 'tawr-description-add' },
+        html: `${icon('plus', { size: 12 })}<span>Add wording</span>`,
+        onClick: () => editDescription(null, ctx.descriptions),
+      }),
+    ]));
+    wrap.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'What the Work Description says about an activity, after its name. Matched on the activity\'s name as the look-ahead writes it (case and punctuation ignored, nothing else).',
+    }));
+
+    if (ctx.descriptions.length) {
+      wrap.appendChild(el('div', { class: 'rc-scroll' }, [
+        el('table', { class: 'rc-table' }, [
+          el('thead', {}, [el('tr', {}, ['Activity', 'Wording', ''].map((h) => el('th', { text: h })))]),
+          el('tbody', {}, ctx.descriptions.map((d) => el('tr', {}, [
+            el('td', { text: d.activity }),
+            el('td', { text: d.description || '—' }),
+            el('td', { style: 'text-align:right;white-space:nowrap' }, [
+              el('button', { class: 'cx-btn mini ghost', type: 'button', text: 'Edit', onClick: () => editDescription(d, ctx.descriptions) }),
+              el('button', {
+                class: 'cx-btn mini ghost danger', type: 'button', text: 'Remove',
+                onClick: async () => {
+                  if (!(await confirmDialog({ title: `Remove the wording for ${d.activity}?`, message: 'Requests already approved keep what they say.', confirmLabel: 'Remove', danger: true }))) return;
+                  try { await rc.deleteTawrDescription(d.id); notifyChanged('tawr-descriptions'); } catch (err) { toast({ tone: 'bad', message: err.message }); }
+                },
+              }),
+            ]),
+          ]))),
+        ]),
+      ]));
+    } else {
+      wrap.appendChild(el('p', { class: 'rc-hint', text: 'None yet.' }));
+    }
+
+    // The activities the look-ahead is working that nothing describes yet.
+    const known = new Set(ctx.descriptions.map((d) => foldName(d.activity)));
+    const titles = new Map();
+    if (ctx.view) {
+      const cols = T.columnsOf(ctx.view);
+      for (const a of ctx.view.activities) {
+        if (a.heading || a.absence || !a.named || !a.highlighted) continue;
+        const title = String(a.meta?.[cols.description] || '').trim();
+        const key = foldName(title);
+        if (title && !known.has(key) && !titles.has(key)) titles.set(key, title);
+      }
+    }
+    if (titles.size) {
+      wrap.appendChild(el('p', { class: 'rc-hint', text: 'On the look-ahead with no wording yet:' }));
+      const sorted = [...titles.values()].sort((a, b) => a.localeCompare(b));
+      wrap.appendChild(el('div', { class: 'rc-tawr-chips' }, sorted.map((t) => el('button', {
+        class: 'cx-btn mini ghost', type: 'button', dataset: { action: 'tawr-describe' },
+        onClick: () => editDescription({ activity: t, description: '' }, ctx.descriptions, { isNew: true }),
+      }, [el('span', { html: icon('plus', { size: 11 }), 'aria-hidden': 'true' }), t]))));
+    }
+    return wrap;
+  }
+
+  function editDescription(existing, all, { isNew = false } = {}) {
+    const creating = !existing?.id || isNew;
+    const activity = textInput({ value: existing?.activity || '', placeholder: 'IXL SIM Testing' });
+    const wording = el('textarea', { class: 'cx-input rc-tawr-textarea', rows: '4', placeholder: 'IXL team will perform functional testing using CBTC equipment only within the train control room.' });
+    wording.value = existing?.description || '';
+    formModal({
+      title: creating ? 'Add wording for an activity' : `Wording for ${existing.activity}`,
+      confirmLabel: creating ? 'Add' : 'Save',
+      body: el('div', { class: 'lae-form' }, [
+        el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Activity, as the look-ahead names it' }), activity]),
+        el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'What the Work Description adds' }), wording]),
+      ]),
+      onConfirm: async () => {
+        const name = activity.value.trim();
+        if (!name) throw new Error('Name the activity.');
+        const clash = all.find((d) => foldName(d.activity) === foldName(name) && d.id !== existing?.id);
+        if (clash) throw new Error(`"${clash.activity}" already has wording — edit that one.`);
+        if (creating) await rc.addTawrDescription({ activity: name, description: wording.value.trim() });
+        else await rc.updateTawrDescription(existing.id, { activity: name, description: wording.value.trim() });
+        notifyChanged('tawr-descriptions');
+      },
+    });
+  }
+
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+};
+
 // ui/rc_table.js
 __mods["ui/rc_table.js"] = function (__x, __req) {
   /**
@@ -15897,6 +18787,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
   const week = __req("ui/rc_week.js");
   const pto = __req("ui/rc_pto.js");
   const reports = __req("ui/rc_reports.js");
+  const tawr = __req("ui/rc_tawr.js");
   const { enhanceTables } = __req("ui/rc_table.js");
   const { inboxCount } = __req("ui/rc_inbox.js");
 
@@ -15915,6 +18806,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
     { id: 'week', label: 'Week plan' },
     { id: 'pto', label: 'PTO' },
     { id: 'lookahead', label: 'Look-ahead' },
+    { id: 'tawr', label: 'TAWR' },
     { id: 'reports', label: 'Reports' },
     { id: 'org', label: 'Organisation' },
   ];
@@ -15925,6 +18817,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
     week: week.render,
     pto: pto.render,
     lookahead: lookahead.render,
+    tawr: tawr.render,
     reports: reports.render,
     org: roster.render,
   };
@@ -16059,7 +18952,9 @@ __mods["ui/rc.js"] = function (__x, __req) {
          member has nothing to run and nothing to enter there but their own day,
          and what they need out of it — the status and the note recorded against
          their work — is now in the week plan, beside the rest of their week. */
-      const ADMIN_ONLY = new Set(['huddle', 'reports', 'org']);
+      /* Track access work requests are raised and approved by an administrator,
+         and every table and file behind them is an administrator's alone. */
+      const ADMIN_ONLY = new Set(['huddle', 'tawr', 'reports', 'org']);
       const visible = rc.isAdmin() ? TABS : TABS.filter((t) => !ADMIN_ONLY.has(t.id));
       if (!active) active = rc.isAdmin() ? 'lookahead' : visible[0].id;
       if (!visible.some((t) => t.id === active)) active = visible[0].id;

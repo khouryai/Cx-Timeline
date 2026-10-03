@@ -300,6 +300,9 @@ async function renderLocations(host) {
     el('td', {}, [
       el('div', { class: 'rc-hint', text: (byLocation.get(l.id) || []).join(', ') || 'no other spellings' }),
     ]),
+    el('td', {}, [
+      el('div', { class: 'rc-hint', text: l.tawr_area || 'its name' }),
+    ]),
     el('td', {}, admin ? [
       el('button', {
         class: 'cx-btn mini ghost',
@@ -338,6 +341,27 @@ async function renderLocations(host) {
       }),
       el('button', {
         class: 'cx-btn mini ghost',
+        text: 'TAWR area',
+        title: 'What a track access work request\'s Area column says for this place. Blank uses its name.',
+        dataset: { action: 'tawr-area' },
+        onClick: async () => {
+          const area = await promptDialog({
+            title: `Area for ${l.name} on a TAWR`,
+            label: 'Tracks, mileposts, gates or stations, as the form should say it',
+            value: l.tawr_area || '',
+            confirmLabel: 'Save',
+          });
+          if (area == null || area.trim() === (l.tawr_area || '')) return;
+          try {
+            await rc.updateLocation(l.id, { tawr_area: area.trim() || null });
+            notifyChanged('locations');
+          } catch (err) {
+            toast({ tone: 'bad', message: err?.message || String(err) });
+          }
+        },
+      }),
+      el('button', {
+        class: 'cx-btn mini ghost',
         text: 'Add spelling',
         title: 'Another way this place is written in the look-ahead or on a SAR.',
         onClick: async () => {
@@ -354,7 +378,7 @@ async function renderLocations(host) {
     ] : []),
   ]));
 
-  host.appendChild(table(['Location', 'Code', 'Also written as', ''], rows));
+  host.appendChild(table(['Location', 'Code', 'Also written as', 'TAWR area', ''], rows));
   host.appendChild(el('p', {
     class: 'rc-hint',
     text: 'Every match against the look-ahead and the SARs keys on location, never on '

@@ -220,6 +220,24 @@ grant select, insert, update, delete on public.rc_invitations to authenticated;
 -- it, and `rc_record_actual` (in rc_schema.sql) takes it.
 alter table public.rc_actuals add column if not exists task text;
 
+-- ── Track access work requests ────────────────────────────────────────────
+-- The location's Area wording for the form, and which line of the form each
+-- support code goes on. The four TAWR tables are new and `rc_schema.sql`
+-- creates them.
+alter table public.rc_locations add column if not exists tawr_area text;
+do $$
+begin
+  if to_regclass('public.rc_support_codes') is not null
+     and not exists (select 1 from information_schema.columns
+                      where table_schema = 'public' and table_name = 'rc_support_codes'
+                        and column_name = 'tawr_line') then
+    alter table public.rc_support_codes add column tawr_line text not null default 'systems';
+    update public.rc_support_codes set tawr_line = 'none' where upper(code) = 'WIT';
+    update public.rc_support_codes set tawr_line = 'occ'  where upper(code) = 'ROC';
+  end if;
+end;
+$$;
+
 /*
  * Nothing is dropped here any more.
  *
@@ -378,6 +396,16 @@ select 'a task can be withdrawn and moved',
                       and column_name = 'withdrawn'
                  )
             then 'ok' else 'RUN this file — a member cannot delete their own task' end
+union all
+select 'rc_locations.tawr_area',
+       case when exists (
+         select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'rc_locations' and column_name = 'tawr_area'
+       ) then 'ok' else 'MISSING' end
+union all
+select 'rc_tawrs',
+       case when to_regclass('public.rc_tawrs') is not null then 'ok'
+            else 'RUN rc_schema.sql — track access work requests cannot be saved' end
 union all
 select 'managers stood down',
        coalesce((select count(*)::text || ' not scheduled' from public.rc_people where not scheduled), '0');

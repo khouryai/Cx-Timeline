@@ -1,7 +1,7 @@
 /**
  * Look-ahead → Legend: the register of what each colour means and does.
  *
- * Imports: util, rc, io/lookahead, core/lookahead, icons, components, rc_util,
+ * Imports: util, rc, io/lookahead, core/lookahead, core/tawr, icons, components, rc_util,
  *          rc_la_state, rc_ingest.
  */
 
@@ -24,6 +24,7 @@ import {
   isoToMs, nameRegister, foldName,
 } from './rc_util.js';
 import { toISO, addDays } from '../core/dates.js';
+import { lineOfCode, TAWR_LINES } from '../core/tawr.js';
 
 import { la, table, WEEK_CHOICES } from './rc_la_state.js';
 import { checkNowButton } from './rc_ingest.js';
@@ -311,11 +312,12 @@ async function supportCodes(host) {
     wrap.appendChild(el('p', { class: 'rc-hint', text: 'No codes yet.' }));
   } else {
     wrap.appendChild(table(
-      ['Code', 'Asks for', 'Party', ''],
+      ['Code', 'Asks for', 'Party', 'On a TAWR', ''],
       codes.map((c) => el('tr', { class: c.active === false ? 'rc-inactive' : '' }, [
         el('td', {}, [el('span', { class: 'lae-code', text: String(c.code).toUpperCase() })]),
         el('td', { text: c.name || '—' }),
         el('td', { text: c.party || '—' }),
+        el('td', { text: TAWR_LINES.find((l) => l.value === lineOfCode(c.code, new Map([[String(c.code).toUpperCase(), c]])))?.label || '—' }),
         el('td', { style: 'text-align:right;white-space:nowrap' }, [
           el('button', { class: 'cx-btn mini ghost', text: 'Edit', onClick: () => editCode(c, codes) }),
           el('button', {
@@ -342,6 +344,9 @@ function editCode(existing, codes) {
   const code = textInput({ value: existing?.code || '', placeholder: 'X', maxlength: '8' });
   const name = textInput({ value: existing?.name || '', placeholder: 'EIC' });
   const party = selectInput({ value: existing?.party || 'BART', options: PARTIES });
+  const line = selectInput({ value: existing ? lineOfCode(existing.code, new Map([[String(existing.code).toUpperCase(), existing]])) : 'systems', options: TAWR_LINES });
+  // Offered only once the database has the column — an older one refuses the field.
+  const hasLine = codes.some((c) => 'tawr_line' in c);
   formModal({
     title: existing ? `Support code ${String(existing.code).toUpperCase()}` : 'Add a support code',
     confirmLabel: existing ? 'Save' : 'Add',
@@ -349,13 +354,14 @@ function editCode(existing, codes) {
       el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Code, as typed on the sheet' }), code]),
       el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'What it asks for' }), name]),
       el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Who provides it' }), party]),
+      hasLine ? el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Where it goes on a TAWR' }), line]) : null,
     ]),
     onConfirm: async () => {
       const value = code.value.trim().toUpperCase();
       if (!/^[A-Z0-9]{1,8}$/.test(value)) throw new Error('A code is one to eight letters or digits, with no dots — the dots separate codes.');
       const clash = codes.find((c) => String(c.code).toUpperCase() === value && c.id !== existing?.id);
       if (clash) throw new Error(`${value} is already a code${clash.active === false ? ' (retired — restore it instead)' : ''}.`);
-      const row = { code: value, name: name.value.trim(), party: party.value };
+      const row = { code: value, name: name.value.trim(), party: party.value, ...(hasLine ? { tawr_line: line.value } : {}) };
       if (existing) await rc.updateSupportCode(existing.id, row);
       else await rc.addSupportCode({ ...row, active: true, sort: Math.max(0, ...codes.map((c) => c.sort || 0)) + 10 });
       notifyChanged('support-codes');

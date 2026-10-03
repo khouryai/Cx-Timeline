@@ -1572,14 +1572,14 @@ select refuses(:'alice', 'update public.rc_la_edits set after = null', 'or rewri
 
 -- Support codes are the register, and managed like the colours.
 select act_as(:'alice');
-select assert((select string_agg(code, ',' order by sort) from public.rc_support_codes) = 'X,WIT,TCE',
-  'the support codes the sheet uses are seeded');
+select assert((select string_agg(code, ',' order by sort) from public.rc_support_codes) = 'X,WIT,TCE,ROC',
+  'the support codes the sheet uses are seeded, ROC among them');
 insert into public.rc_support_codes (code, name, party, sort) values ('SEC', 'Security escort', 'BART', 40);
 select assert(exists (select 1 from public.rc_support_codes where code = 'SEC'), 'an administrator adds one');
 select refuses(:'alice', 'insert into public.rc_support_codes (code, name) values (''x'', ''Duplicate'')',
   'a code that already exists, in any case');
 select act_as(:'carol');
-select assert((select count(*) from public.rc_support_codes) = 4, 'a member reads them');
+select assert((select count(*) from public.rc_support_codes) = 5, 'a member reads them');
 select refuses(:'carol', 'insert into public.rc_support_codes (code, name) values (''ZZ'', ''Mine'')',
   'a member adding a code');
 select refuses(:'carol', 'update public.rc_support_codes set name = ''Changed''', 'a member renaming one');
@@ -1647,6 +1647,115 @@ select assert((select count(*) from public.rc_la_seen) = 1, 'a viewer records th
 select act_as(:'alice');
 select assert((select count(*) from public.rc_la_seen) = 2, 'an administrator reads the whole team''s');
 select refuses(:'alice', 'delete from public.rc_la_seen', 'and cannot remove one either');
+
+-- ══════════════════════════════════════════════════════════════════════════
+do $$ begin raise notice 'Track access work requests'; end $$;
+-- ══════════════════════════════════════════════════════════════════════════
+
+-- Which line of the form each code goes on: a witness nowhere, ROC on OCC,
+-- everything else on Technical Support (Systems).
+select act_as(:'alice');
+select assert((select tawr_line from public.rc_support_codes where code = 'WIT') = 'none'
+          and (select tawr_line from public.rc_support_codes where code = 'ROC') = 'occ'
+          and (select tawr_line from public.rc_support_codes where code = 'X') = 'systems',
+  'support codes say which line of the form they go on');
+select refuses(:'alice', 'update public.rc_support_codes set tawr_line = ''somewhere'' where code = ''X''',
+  'a line the form does not have');
+update public.rc_locations set tawr_area = 'Traction Power Substation 12, A-Line' where id = :'loc12';
+select assert((select tawr_area from public.rc_locations where id = :'loc12') like 'Traction%',
+  'a location carries the wording the form''s Area column wants');
+
+-- A request: an administrator's, and nobody else's to read.
+insert into public.rc_tawrs (week_start, group_key, location_id, location_name, shift, fields, generated)
+values ('2026-10-19', 'loc:' || :'loc12' || '|day', :'loc12', 'TPSS 12', 'day',
+        '{"row1_date": "10/19/26", "category_of_work": "F"}', '{"row1_date": "10/19/26", "category_of_work": "F"}')
+returning id as tawr1 \gset
+select assert((select status from public.rc_tawrs where id = :'tawr1') = 'draft'
+          and (select created_by from public.rc_tawrs where id = :'tawr1') = :'p_alice',
+  'a request starts as a draft, raised by whoever made it');
+select refuses(:'alice', $q$insert into public.rc_tawrs (week_start, group_key, shift) values ('2026-10-20', 'x|day', 'day')$q$,
+  'a week that does not start on a Monday');
+select refuses(:'alice', format($q$insert into public.rc_tawrs (week_start, group_key, shift) values ('2026-10-19', %L, 'day')$q$,
+  'loc:' || :'loc12' || '|day'), 'a second live request for the same place and shift');
+
+select act_as(:'carol');
+select assert((select count(*) from public.rc_tawrs) = 0, 'a member reads no requests');
+select refuses(:'carol', $q$insert into public.rc_tawrs (week_start, group_key, shift) values ('2026-10-26', 'x|day', 'day')$q$,
+  'a member raising one');
+select refuses(:'carol', 'update public.rc_tawrs set fields = ''{}''', 'a member editing one');
+select act_as(:'dave');
+select assert((select count(*) from public.rc_tawrs) = 0, 'nor does a viewer');
+
+-- Editing a draft, approving it, and approved being final.
+select act_as(:'bob');
+update public.rc_tawrs set fields = fields || '{"category_of_work": "C"}' where id = :'tawr1';
+select assert((select fields ->> 'category_of_work' from public.rc_tawrs where id = :'tawr1') = 'C'
+          and (select updated_by from public.rc_tawrs where id = :'tawr1') = (select id from public.rc_people where name = 'Deputy'),
+  'another administrator edits the draft, and is recorded as having done so');
+update public.rc_tawrs set status = 'approved' where id = :'tawr1';
+select assert((select approved_by from public.rc_tawrs where id = :'tawr1') = (select id from public.rc_people where name = 'Deputy')
+          and (select approved_at from public.rc_tawrs where id = :'tawr1') is not null,
+  'approving records who approved it and when');
+select refuses(:'bob', format('update public.rc_tawrs set fields = ''{}'' where id = %L', :'tawr1'),
+  'changing an approved request');
+select refuses(:'bob', format('update public.rc_tawrs set status = ''draft'' where id = %L', :'tawr1'),
+  'putting an approved request back to draft');
+select refuses(:'alice', format('delete from public.rc_tawrs where id = %L', :'tawr1'),
+  'deleting an approved request');
+select refuses(:'alice', format('select public.rc_delete_location(%L)', :'loc12'),
+  'deleting a location an approved request names');
+
+select act_as(:'alice');
+select public.rc_tawr_revise(:'tawr1') as tawr2 \gset
+select assert((select status from public.rc_tawrs where id = :'tawr1') = 'superseded'
+          and (select status from public.rc_tawrs where id = :'tawr2') = 'draft'
+          and (select supersedes from public.rc_tawrs where id = :'tawr2') = :'tawr1'
+          and (select fields ->> 'category_of_work' from public.rc_tawrs where id = :'tawr2') = 'C',
+  'revising supersedes it with a draft that carries its fields');
+select refuses(:'alice', format('update public.rc_tawrs set fields = ''{}'' where id = %L', :'tawr1'),
+  'changing a superseded request');
+select act_as(:'carol');
+select refuses(:'carol', format('select public.rc_tawr_revise(%L)', :'tawr2'), 'a member revising one');
+select act_as(:'alice');
+delete from public.rc_tawrs where id = :'tawr2';
+select assert(not exists (select 1 from public.rc_tawrs where id = :'tawr2'), 'a draft can be discarded');
+
+-- The contacts, the wording, the signatures — an administrator's alone.
+insert into public.rc_tawr_settings (key, value) values ('person_in_charge_cell_phone', '555-0101');
+insert into public.rc_tawr_descriptions (activity, description)
+values ('IXL SIM Testing', 'IXL team will perform functional testing using CBTC equipment only.');
+select refuses(:'alice', $q$insert into public.rc_tawr_descriptions (activity) values ('ixl sim-testing')$q$,
+  'the same activity twice, however it is spelled');
+insert into public.rc_tawr_profiles (person_id, requestor_name, cell_phone, signature)
+values (:'p_alice', 'Alex Morgan', '555-0100', '{"width": 300, "height": 100, "strokes": [[[1, 2], [3, 4]]]}');
+select refuses(:'alice', format($q$insert into public.rc_tawr_profiles (person_id, requestor_name)
+  values ((select id from public.rc_people where name = 'Deputy'), 'Forged')$q$),
+  'an administrator writing somebody else''s signature');
+select act_as(:'bob');
+select assert((select requestor_name from public.rc_tawr_profiles where person_id = :'p_alice') = 'Alex Morgan',
+  'but every administrator reads them, to export a request another raised');
+select act_as(:'carol');
+select assert((select count(*) from public.rc_tawr_settings) = 0
+          and (select count(*) from public.rc_tawr_descriptions) = 0
+          and (select count(*) from public.rc_tawr_profiles) = 0,
+  'a member reads none of the contacts, the wording or the signatures');
+select refuses(:'carol', $q$insert into public.rc_tawr_settings (key, value) values ('x', 'y')$q$, 'a member changing a contact');
+select refuses(:'carol', format($q$insert into public.rc_tawr_profiles (person_id) values (%L)$q$, :'p_carol'),
+  'a member saving a signature of their own');
+
+-- BART's blank form, in a bucket only an administrator can open.
+select act_as(:'alice');
+insert into storage.objects (bucket_id, name) values ('tawr', 'template/tawr.pdf');
+select assert((select count(*) from storage.objects where bucket_id = 'tawr') = 1, 'an administrator uploads the form');
+reset role;
+select assert(not (select public from storage.buckets where id = 'tawr'), 'and the bucket is private');
+set role authenticated;
+select act_as(:'carol');
+select assert((select count(*) from storage.objects where bucket_id = 'tawr') = 0, 'a member cannot see it');
+select refuses(:'carol', $q$insert into storage.objects (bucket_id, name) values ('tawr', 'template/forged.pdf')$q$,
+  'or replace it');
+select act_as(:'dave');
+select assert((select count(*) from storage.objects where bucket_id = 'tawr') = 0, 'nor can a viewer');
 
 reset role;
 do $$ begin raise notice ''; raise notice 'All resource calendar checks passed.'; end $$;

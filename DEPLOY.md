@@ -420,6 +420,13 @@ compares it with the version it was built for when somebody signs in. An
 administrator whose database is behind sees a banner naming these two files;
 everybody else is told that some changes may be refused until it is done.
 
+**Track access work requests need one more step, taken in the application rather
+than here.** An administrator uploads BART's blank fillable TAWR form once, in
+the calendar's TAWR → Setup. It goes into the private `tawr` bucket that
+`rc_schema.sql` creates — readable by administrators only — and is checked for
+every field the requests fill before it is accepted. It is never part of a
+deploy: do not commit it to this repository.
+
 Then Settings → API, and copy **Project URL** and the **anon / public** key.
 The anon key is designed to be public: it identifies the project and grants
 nothing. Every rule is a row-level security policy tied to the signed-in

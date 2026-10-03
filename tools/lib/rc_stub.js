@@ -375,9 +375,9 @@ export function fakeSdk() {
          calendar in one click is what the checks below are about. */
     ],
     rc_support_codes: [
-      { id: 'sc1', code: 'X', name: 'EIC', party: 'BART', active: true, sort: 10 },
-      { id: 'sc2', code: 'WIT', name: 'BART witness', party: 'BART', active: true, sort: 20 },
-      { id: 'sc3', code: 'TCE', name: 'TCE', party: 'BART', active: true, sort: 30 },
+      { id: 'sc1', code: 'X', name: 'EIC', party: 'BART', active: true, sort: 10, tawr_line: 'systems' },
+      { id: 'sc2', code: 'WIT', name: 'BART witness', party: 'BART', active: true, sort: 20, tawr_line: 'none' },
+      { id: 'sc3', code: 'TCE', name: 'TCE', party: 'BART', active: true, sort: 30, tawr_line: 'systems' },
     ],
     rc_la_rows: [],
     rc_la_cells: [],
@@ -644,7 +644,14 @@ export function fakeSdk() {
     rc_sars_without_rows: [],
     rc_invitations: [],
     rc_la_seen: [],
+    /* Track access work requests: the requests, and what they are filled from. */
+    rc_tawrs: [],
+    rc_tawr_settings: [],
+    rc_tawr_profiles: [],
+    rc_tawr_descriptions: [],
   };
+  // Files in the private buckets, by "bucket/path" — what was uploaded is what downloads.
+  S.files = S.files || {};
 
   /* A filter chain thin enough to be obviously right, and no thinner. */
   function query(table) {
@@ -733,6 +740,11 @@ export function fakeSdk() {
               ...(table === 'rc_client_errors' ? { created_at: new Date().toISOString() } : {}),
               ...(table === 'rc_la_seen' ? { seen_at: new Date().toISOString() } : {}),
               ...(table === 'rc_lookahead_snapshots' ? { taken_at: new Date().toISOString() } : {}),
+              /* rc_tawr_guard(): a request starts as a draft, raised by whoever made it. */
+              ...(table === 'rc_tawrs' ? {
+                status: 'draft', created_by: S.rows.rc_people[0].id, created_at: new Date().toISOString(),
+                fields: {}, generated: {}, source: {}, supersedes: null, approved_by: null, approved_at: null,
+              } : {}),
             };
             const made = [].concat(rows).map((r, i) => (
               { id: `${table}-${list.length + i + 1}`, ...defaults, ...r }));
@@ -785,8 +797,35 @@ export function fakeSdk() {
                 select: () => {
                   const list = S.rows[table] || [];
                   const hit = list.filter((r) => r[col] === v);
+                  /* rc_tawr_guard(): approved is final, superseded is history. */
+                  if (table === 'rc_tawrs') {
+                    for (const r of hit) {
+                      if (r.status === 'superseded' || (r.status === 'approved' && patch.status !== 'superseded')) {
+                        return Promise.resolve({ data: null, error: { message: 'an approved request is final — revise it to change it' } });
+                      }
+                    }
+                    if (patch.status === 'approved') {
+                      Object.assign(patch, { approved_by: S.rows.rc_people[0].id, approved_at: new Date().toISOString() });
+                    }
+                  }
                   hit.forEach((r) => Object.assign(r, patch));
                   return Promise.resolve({ data: hit, error: null });
+                },
+              }),
+            };
+          };
+          /* A DELETE the policies refuse matches nothing and says so with no
+             rows — which is what the client checks for. Only a draft request
+             may go. */
+          api.delete = () => {
+            S.calls.push({ kind: 'delete', table });
+            return {
+              eq: (col, v) => ({
+                select: () => {
+                  const list = S.rows[table] || [];
+                  const gone = list.filter((r) => r[col] === v && (table !== 'rc_tawrs' || r.status === 'draft'));
+                  S.rows[table] = list.filter((r) => !gone.includes(r));
+                  return Promise.resolve({ data: gone, error: null });
                 },
               }),
             };
@@ -1044,6 +1083,19 @@ export function fakeSdk() {
             person.role = args.p_role;
             return Promise.resolve({ data: null, error: null });
           }
+          if (name === 'rc_tawr_revise') {
+            const old = S.rows.rc_tawrs.find((r) => r.id === args.p_tawr);
+            if (!old || old.status !== 'approved') {
+              return Promise.resolve({ data: null, error: { message: 'only an approved request is revised; a draft is edited' } });
+            }
+            old.status = 'superseded';
+            const made = {
+              ...JSON.parse(JSON.stringify(old)), id: `rc_tawrs-${S.rows.rc_tawrs.length + 1}`, status: 'draft',
+              supersedes: old.id, approved_by: null, approved_at: null, created_at: new Date().toISOString(),
+            };
+            S.rows.rc_tawrs.push(made);
+            return Promise.resolve({ data: made.id, error: null });
+          }
           if (name === 'rc_resolve_location') {
             const fold = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
             const key = fold(args.p_raw);
@@ -1060,7 +1112,15 @@ export function fakeSdk() {
               // Bucket and path, because two buckets are written to now and
               // "one upload happened" stopped being a useful thing to know.
               (S.uploads = S.uploads || []).push(`${bucket}/${path_}`);
+              S.files[`${bucket}/${path_}`] = blob;
               return Promise.resolve({ error: null });
+            },
+            download: (path_) => {
+              S.calls.push({ kind: 'download', table: bucket, payload: { path: path_ } });
+              const blob = S.files[`${bucket}/${path_}`];
+              return Promise.resolve(blob
+                ? { data: blob, error: null }
+                : { data: null, error: { message: 'Object not found', statusCode: '404' } });
             },
             createSignedUrl: (path_) =>
               Promise.resolve({ data: { signedUrl: `https://rc-stub.supabase.co/${bucket}/${path_}` }, error: null }),

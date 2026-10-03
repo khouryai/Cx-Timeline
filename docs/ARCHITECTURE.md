@@ -2309,6 +2309,110 @@ is waiting, and the administrator's inbox lists who has changes they have not
 seen and who has never opened My day. Reminders stay inside the application:
 nothing is emailed from it, by design.
 
+## Track access work requests
+
+BART wants a System Access / Track Allocation Work Request (a TAWR) for every
+place the team works, seventeen days before the work. The calendar's **TAWR**
+tab raises them from the look-ahead, an administrator reviews and approves them,
+and each approved one downloads as BART's own fillable PDF, filled and signed.
+`core/tawr.js` is the reading, `io/tawr_pdf.js` the form, `ui/rc_tawr.js` the
+screen; `tools/test_tawr.js` covers the first two in Node and
+`tools/smoke_tawr.js` (inside `smoke_calendar.js`) the whole flow in a browser.
+
+### A request is one location, one shift, one week
+
+`extractWeek()` walks the week's painted days on the newest reading — the same
+`parsedView()` every calendar screen draws, never `rc_la_*` and never the
+workbook — and keys each day by **where** (the location the register resolves,
+or the raw spelling where it cannot) and **which shift** (the legend's meaning:
+Day, Swing, Night, Blanket). Two activities at one place on one shift are one
+request listing both; the same place on a day and a night shift is two. The
+week runs Monday to Sunday because the form has seven date rows: each day the
+place is worked is one row. A cancelled day asks for nothing and is left out.
+The paint on an activity's Resource row counts as its day, as everywhere else;
+the names typed there are never codes.
+
+### Hours combine and support adds, and the busiest day is asked for
+
+A day's hours are the earliest start and the latest finish of the activities
+working there that day, off the Work Hours column; a night is laid on a line
+past midnight so 2200–0600 outlasts 2300–0500. Where the sheet gives no hours
+the **shift's** own hours are used (Day 0700–1500, Night 2200–0600, Blanket
+0000–0800, set in Setup) — by the shift, not the colour, so re-mapping a colour
+in Legend does not move them. Unreadable hours fall back the same way and say
+so.
+
+Support is counted per day by **adding the activities together** — an EIC on
+IXL and an EIC on DCS the same day is two — and the busiest day is what the form
+asks for: "EIC" for one, "2 x EIC" for two ("X.X" in one cell is two as well).
+A struck-out code ("~X") is not asked for. Which line a code goes on is the
+register's `tawr_line`: a witness is not on the form, ROC is OCC Support, and
+everything else is Technical Support (Systems). A code nobody registered is
+listed there and flagged, never dropped. Each activity's SSWP number ticks
+SSWP/IOP Required and is written on the line beside it.
+
+### What the sheet cannot say is a default; what it cannot be trusted with is a flag
+
+The three Yes/No questions start at No, Category of Work at F (Setup can change
+the default), power at N/A, and everything else the look-ahead cannot know is
+left blank for a person. The Work Description is each activity's name followed
+by the wording mapped to it in `rc_tawr_descriptions` — matched on the folded
+name and nothing looser. The Area column is the location's `tawr_area`, or its
+name. A location the register does not know, an activity with no location and a
+colour the legend does not know are **flags that stop approval**, exactly as the
+rest of the calendar refuses to guess them; they are fixed in the location list,
+the legend or the sheet, and the next "Create TAWRs" picks the fix up.
+
+### A draft follows the look-ahead; an approved request is final
+
+A request is stored with what the form says (`fields`) and what the look-ahead
+said when it was last generated (`generated`); the difference is what somebody
+changed by hand, and the review marks those fields in words as well as by
+outline. Creating the requests again brings every draft up to date through
+`mergeRegenerated()`: an untouched field takes the new value, an edit is kept,
+and an edit the sheet has since moved underneath is named. An approved request
+is never touched — `changedSince()` compares it with a fresh reading at paint
+time and says what moved, which is derived, not stored. `rc_tawr_guard()`
+refuses any change to an approved request; `rc_tawr_revise()` supersedes it with
+a draft carrying its fields, in one step. Only a draft can be discarded.
+
+### BART's form is filled, not redrawn, and stays a form
+
+`io/tawr_pdf.js` reads the form's cross-reference (a classic table, or the
+streams Acrobat re-saves with), walks the field tree, and writes an
+**incremental update**: the changed field objects, their new appearances and a
+new cross-reference, appended after the original bytes. Nothing of the original
+is rewritten, so the result is still fillable in Acrobat and its signature boxes
+still signable. Every filled box gets its own appearance, because most viewers
+and every printer show only that: a single line shrinks until it fits across and
+inside its box, the work description wraps and shrinks a quarter point at a
+time, and a field drawn smaller than the form asked is set to auto size so a
+later edit in Acrobat keeps fitting. What does not fit at four points is
+reported, and the review says so before anybody downloads. An encrypted file is
+refused with a reason.
+
+### The blank form and every signature are an administrator's alone
+
+The template is uploaded once in Setup into the private `tawr` bucket, which
+only an administrator can read, replace or remove; it is never committed and
+never published with the site. On upload every field in `TAWR_FIELDS` must be
+present, so a revised form that renamed a box is refused by name rather than
+filled half way. It is fetched once per session and kept in memory. The
+contacts that are the same on every request live in `rc_tawr_settings`, not
+`rc_settings`, because every signed-in account can read the latter and these
+are phone numbers. The tests use a synthetic form with the same field names
+(`tools/fixtures/tawr_fixture.js`) for the same reason.
+
+### A signature is strokes, drawn once per administrator
+
+Each administrator saves their requestor name, cell phone and signature once
+(`rc_tawr_profiles`; every administrator reads them, each writes only their
+own). The signature is kept as the strokes drawn on the pad — a few hundred
+bytes — and drawn as vector lines on the requestor line at download, wrapped in
+its own graphics state so nothing on the page can move it. A request carries the
+signature of the administrator who raised it, whoever downloads it. The approval
+clearance signatures are BART's and stay blank.
+
 ## What each suite covers
 
 `smoke.js` boots the real application in Chromium and checks rendering,
@@ -2351,6 +2455,16 @@ drawn, a save going through the shell, the guard refusing one, and the whole
 update path — downloaded in the background, applied on the next launch, and
 rolled back when the downloaded copy either throws or silently never boots. The
 Rust side is `npm run test:rust`, which needs no webview and no display.
+
+`test_tawr.js` reads look-ahead weeks written the way the editor writes them
+into requests and checks every agreed rule — grouping, hours, support, flags,
+the form's defaults, regenerating and approving — then fills a synthetic copy of
+BART's form in both cross-reference shapes and reads it back through the same
+parser, checking the original bytes are untouched, the description shrinks to
+fit and the signature is drawn. `smoke_tawr.js` walks the screen: drafts,
+template upload (and a revised form refused), the profile and signature, the
+wording, edits surviving regeneration, approve, the downloaded PDF read back,
+revise and discard.
 
 `smoke_hosted.js` boots it with a configured backend and a stubbed client, so
 the gate, invitations, sharing and read-only mode are covered without a
