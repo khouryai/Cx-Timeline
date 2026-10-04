@@ -569,6 +569,22 @@ change what is on screen at once, which is the rule the legend design rests
 on. It carries `unknown` along with the view so nothing has to re-apply the
 legend to find out which colours it could not place.
 
+### The huddle goes over today, or the day before — the team's choice
+
+The huddle was built for a meeting at the start of the day: it went over the
+previous working day's work and planned the next working day, and today —
+planned the day before — was on neither side. A team that meets late in the
+shift goes over how *today* is going and plans tomorrow, so
+`rc_settings.huddle_reviews` says which (Organisation → Settings → "What the
+huddle goes over"): `today` (the default) reviews the meeting day itself and
+plans the next working day; `previous` reviews the previous working day, as
+before. Either way a day nobody on the roster works is skipped — a late
+meeting opened on a Saturday looks back to Friday. The headings, the
+presenter's question ("Today you are on … — how is it going?") and the digest
+name the days as the room would, counted from the real today: Today,
+Yesterday, Tomorrow, or the weekday. Outcomes are recorded against the day
+under review either way, through the same path.
+
 ### The meeting can be run rather than filled in, and both are one path
 
 **The meeting can be run rather than filled in, and both are one path.**

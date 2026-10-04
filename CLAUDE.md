@@ -219,6 +219,7 @@ alternative shipped once and went wrong.
 - A grid is the one heavy row, and it moves once. [→](docs/ARCHITECTURE.md#a-grid-is-the-one-heavy-row-and-it-moves-once)
 - Reads are remembered for thirty seconds and forgotten on every write. [→](docs/ARCHITECTURE.md#reads-are-remembered-for-thirty-seconds-and-forgotten-on-every-write)
 - The sheet is parsed once, against the legend it was parsed with. [→](docs/ARCHITECTURE.md#the-sheet-is-parsed-once-against-the-legend-it-was-parsed-with)
+- The huddle goes over today's work and plans the next working day, or goes over the previous working day — `rc_settings.huddle_reviews`, set in Organisation → Settings. [→](docs/ARCHITECTURE.md#the-huddle-goes-over-today-or-the-day-before--the-teams-choice)
 - The meeting can be run rather than filled in, and both are one path. [→](docs/ARCHITECTURE.md#the-meeting-can-be-run-rather-than-filled-in-and-both-are-one-path)
 - Pressing a status is the record; the line that follows is the detail. [→](docs/ARCHITECTURE.md#pressing-a-status-is-the-record-the-line-that-follows-is-the-detail)
 - An outcome is corrected, never edited — and "recorded" is not "final". [→](docs/ARCHITECTURE.md#an-outcome-is-corrected-never-edited--and-recorded-is-not-final)
@@ -434,7 +435,7 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
 | `test_la_edit.js` | 176 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back |
 | `smoke.js` | 301 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 588 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 593 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 105 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, a phone opening the site sent to it, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 70 | the desktop shell and its updates |

@@ -1894,9 +1894,10 @@ async function main() {
       getComputedStyle(document.querySelector('#rc-frame .rc-huddle tbody tr')).display === 'block'));
   check('and each answer keeps the heading the table row lost',
     await page.evaluate(() => {
+      // "How it is going" when the day under review is today, "What happened" otherwise.
       const td = [...document.querySelectorAll('#rc-frame .rc-huddle td')]
-        .find((n) => n.dataset.label === 'What happened');
-      return Boolean(td) && getComputedStyle(td, '::before').content.includes('What happened');
+        .find((n) => /^(What happened|How it is going)$/.test(n.dataset.label || ''));
+      return Boolean(td) && getComputedStyle(td, '::before').content.includes(td.dataset.label);
     }));
   // A 20px button is a miss when the tablet is in your other hand, and the
   // huddle is one button per person.
@@ -2257,6 +2258,48 @@ async function main() {
   check('and Tidy now runs it on demand, and says what it did',
     (await page.evaluate(() => window.__rc.compactCalls || 0)) === tidyBefore + 1
       && /Nothing to tidy/.test(await page.evaluate(() => [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | '))));
+
+  /* The huddle held late in the shift: today's work, and the next working
+     day's plan — chosen here, read by the meeting, named the way the room
+     would say it. */
+  const reviewsPick = page.locator('#rc-frame select[data-setting="huddle_reviews"]');
+  check('what the huddle goes over is a setting, on screen', (await reviewsPick.count()) === 1
+    && await reviewsPick.inputValue() === 'previous');
+  await reviewsPick.selectOption('today');
+  await page.waitForTimeout(400);
+  check('and choosing today\'s work is saved',
+    await page.evaluate(() => window.__rc.rows.rc_settings.find((r) => r.key === 'huddle_reviews')?.value === 'today'));
+  await page.locator('#rc-frame .rc-head .rc-tab', { hasText: 'Daily huddle' }).click();
+  await page.waitForSelector('#rc-frame .rc-huddle');
+  // Back to today's meeting, wherever the arrows were left.
+  const backToToday = page.locator('#rc-frame .rc-section-head button', { hasText: /^Today$/ });
+  if (await backToToday.count()) {
+    await backToToday.click();
+    await page.waitForSelector('#rc-frame .rc-huddle');
+  }
+  const huddleHeads = await page.locator('#rc-frame .rc-huddle thead th').allInnerTexts();
+  const todayLabel = await page.evaluate(() => new Date().toISOString().slice(0, 10));
+  check('the huddle goes over today, and plans tomorrow',
+    /^Today — /i.test(huddleHeads[1] || '') && /How it is going/i.test(huddleHeads[2] || '') && /^Tomorrow — /i.test(huddleHeads[3] || ''),
+    huddleHeads.join(' | '));
+  check('and today is the meeting day itself, not the day before',
+    await page.evaluate((iso) => {
+      const th = document.querySelectorAll('#rc-frame .rc-huddle thead th')[1]?.textContent || '';
+      const d = new Date(`${iso}T00:00:00Z`);
+      return th.includes(String(d.getUTCDate()));
+    }, todayLabel), huddleHeads[1]);
+  await page.locator('#rc-frame button', { hasText: 'Run the meeting' }).click();
+  await page.waitForSelector('#rc-frame .rc-present');
+  const askedToday = await page.locator('#rc-frame .rc-present-ask').innerText();
+  check('the meeting asks how today is going, not how yesterday went',
+    /today/i.test(askedToday) && /going|working on/.test(askedToday) && !/Yesterday/.test(askedToday), askedToday);
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('#rc-frame .rc-huddle', { timeout: 5000 }).catch(() => {});
+  await page.locator('#rc-frame .rc-head .rc-tab', { hasText: 'Organisation' }).click();
+  await page.locator('#rc-frame .rc-body .rc-tab', { hasText: 'Settings' }).click();
+  await page.waitForSelector('#rc-frame select[data-setting="huddle_reviews"]');
+  await page.locator('#rc-frame select[data-setting="huddle_reviews"]').selectOption('previous');
+  await page.waitForTimeout(400);
 
   /* Seeing it as somebody else. The first member the picker offers gets a day
      tied to a look-ahead row, so their My day has a task that opens the whole

@@ -389,6 +389,10 @@ export function fakeSdk() {
       // Relative, like every other date here, so the log has a start whatever
       // day the suite runs on.
       { key: 'cancellation_log_from', value: iso(-40) },
+      /* The huddle as a start-of-day meeting: yesterday's work, today's plan
+         read as done. The suite's huddle fixtures are yesterday's, so this is
+         pinned; going over today's work is switched on and checked by itself. */
+      { key: 'huddle_reviews', value: 'previous' },
     ],
     /* Rows of earlier reads, as the cancellation view sees them. Kept apart
        from `rc_lookahead_rows` so no other screen's reads or counts move: the

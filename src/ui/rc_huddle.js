@@ -12,8 +12,9 @@
  * The week plan used to live in this file, behind the meeting, and it is now
  * `ui/rc_week.js` — one tab rather than the two that drew the same table twice.
  *
- * One screen, everyone side by side, all subsystems in one meeting: yesterday's
- * plan, yesterday's outcome, tomorrow's plan. It is used live, at a fixed time,
+ * One screen, everyone side by side, all subsystems in one meeting: the day
+ * under review — today, or the previous working day (`huddle_reviews`) — its
+ * plan and its outcome, and the next working day's plan. It is used live, at a fixed time,
  * in front of the whole team — which sets every constraint here.
  *
  * **It must not rebuild while somebody is typing into it.** Panes elsewhere in
@@ -134,8 +135,38 @@ export async function flushQueue() {
    The huddle
    ═══════════════════════════════════════════════════════════════════════ */
 
-/** Which day is being reviewed. Defaults to today; the arrows move it. */
+/** Which day the meeting is held on. Defaults to today; the arrows move it. */
 let onDate = null;
+
+/**
+ * Which day the meeting looks back on — `rc_settings.huddle_reviews`.
+ *
+ * `today`: the meeting is held late in the shift, so it goes over how today's
+ * work is going and plans the next working day. `previous`: it is held at the
+ * start of the day, so it goes over the previous working day — today was
+ * planned yesterday — and plans the next. Read on every render; changed in
+ * Organisation → Settings.
+ */
+export const HUDDLE_REVIEWS = {
+  today: 'Today\u2019s work, and the next working day\u2019s plan',
+  previous: 'The previous working day\u2019s work, and the next working day\u2019s plan',
+};
+export const DEFAULT_HUDDLE_REVIEWS = 'today';
+let reviews = DEFAULT_HUDDLE_REVIEWS;
+
+/**
+ * A day named the way the room would say it: "Today", "Yesterday",
+ * "Tomorrow" — counted from the real today, so a meeting looked at on another
+ * day never calls a Thursday "Today" — and the weekday otherwise ("Friday"),
+ * which is what somebody says when the roster skipped a weekend.
+ */
+function relDay(iso) {
+  const gap = Math.round((isoToMs(iso) - isoToMs(todayISO())) / 86400000);
+  if (gap === 0) return 'Today';
+  if (gap === -1) return 'Yesterday';
+  if (gap === 1) return 'Tomorrow';
+  return new Date(isoToMs(iso)).toLocaleDateString(undefined, { weekday: 'long', timeZone: 'UTC' });
+}
 /**
  * Whether the meeting is being *run* rather than filled in.
  *
@@ -173,12 +204,16 @@ function anybodyWorks(iso, people) {
 /**
  * The day whose outcomes are being captured.
  *
- * The previous *working* day, not literally yesterday. On a Monday the meeting
- * reviews Friday — asking a team what they achieved on Sunday would produce a
- * screen of blanks and, worse, would tempt somebody into recording "carried
- * over" for a day nobody was there.
+ * The meeting day itself where the huddle reviews today's work and anybody
+ * works today. Otherwise the previous *working* day, not literally yesterday:
+ * on a Monday a start-of-day meeting reviews Friday — asking a team what they
+ * achieved on Sunday would produce a screen of blanks and, worse, would tempt
+ * somebody into recording "carried over" for a day nobody was there. A
+ * late-shift meeting opened on a Saturday nobody works looks back to Friday
+ * for the same reason.
  */
 function reviewDate(iso, people) {
+  if (reviews === 'today' && anybodyWorks(iso, people)) return iso;
   let ms = addDays(isoToMs(iso), -1);
   for (let i = 0; i < 7 && !anybodyWorks(toISO(ms), people); i++) ms = addDays(ms, -1);
   return toISO(ms);
@@ -199,7 +234,12 @@ export async function render(root) {
   // The roster decides which days count, so it is read before the window that
   // depends on it. One extra round trip, and it is what keeps a Monday meeting
   // pointed at Friday.
-  const people = await rc.listPeople({ scheduledOnly: true });
+  const [people, settings] = await Promise.all([
+    rc.listPeople({ scheduledOnly: true }),
+    rc.listSettings().catch(() => []),
+  ]);
+  const chosen = settings.find((r) => r.key === 'huddle_reviews')?.value;
+  reviews = HUDDLE_REVIEWS[chosen] ? chosen : DEFAULT_HUDDLE_REVIEWS;
   const review = reviewDate(date, people);
   const plan = planDate(date, people);
 
@@ -280,6 +320,8 @@ export async function render(root) {
   const ctx = {
     people, review, plan, planFor, plannedOn, absentOn, actualByPerson, cats, locs,
     categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
+    // How the room names the two days: "Today" and "Tomorrow", or "Yesterday".
+    reviewWord: relDay(review), planWord: relDay(plan),
     // What is typed in each person's "what they did" fields, read when a status
     // is pressed — see `workFields()`.
     drafts: new Map(),
@@ -312,9 +354,9 @@ export async function render(root) {
       el('thead', {}, [
         el('tr', {}, [
           el('th', { text: 'Person' }),
-          el('th', { text: `Was planned — ${dayLabel(review)}` }),
-          el('th', { text: 'What happened' }),
-          el('th', { text: `Tomorrow — ${dayLabel(plan)}` }),
+          el('th', { text: `${ctx.reviewWord} — ${dayLabel(review)}` }),
+          el('th', { text: ctx.reviewWord === 'Today' ? 'How it is going' : 'What happened' }),
+          el('th', { text: `${ctx.planWord} — ${dayLabel(plan)}` }),
         ]),
       ]),
       body,
@@ -465,12 +507,19 @@ function updateBlocker(blocker, ctx) {
  * 12" — so appending the location unconditionally reads back as "at TPSS 12 at
  * TPSS 12". Say it only when the sentence does not already.
  */
-function askFor(planned, locs) {
-  if (!planned) return 'Nothing was planned for you — what did you end up doing?';
+function askFor(planned, locs, reviewWord = 'Yesterday') {
+  const today = reviewWord === 'Today';
+  if (!planned) {
+    return today ? 'Nothing was planned for you today — what are you working on?'
+      : 'Nothing was planned for you — what did you end up doing?';
+  }
   const task = planned.task || 'this';
   const where = locs.get(planned.location_id)?.name || '';
   const said = where && task.toLowerCase().includes(where.toLowerCase());
-  return `Yesterday you were on ${task}${where && !said ? ` at ${where}` : ''} — how did it go?`;
+  const at = where && !said ? ` at ${where}` : '';
+  if (today) return `Today you are on ${task}${at} — how is it going?`;
+  const when = reviewWord === 'Yesterday' ? 'Yesterday' : `On ${reviewWord}`;
+  return `${when} you were on ${task}${at} — how did it go?`;
 }
 
 function presenter(ctx) {
@@ -546,7 +595,7 @@ function presenter(ctx) {
   wrap.appendChild(el('div', { class: 'rc-hint', text: [person.title, person.subsystem].filter(Boolean).join(' · ') }));
 
   /* The question, in the words somebody would use. */
-  wrap.appendChild(el('p', { class: 'rc-present-ask', text: askFor(wasPlanned, locs) }));
+  wrap.appendChild(el('p', { class: 'rc-present-ask', text: askFor(wasPlanned, locs, ctx.reviewWord) }));
 
   /* What the room needs, which is not what the person needs. */
   const context = el('div', { class: 'rc-present-context' });
@@ -616,7 +665,7 @@ function presenter(ctx) {
   wrap.appendChild(answer);
 
   wrap.appendChild(el('div', { class: 'rc-present-next' }, [
-    el('span', { class: 'rc-eyebrow', text: `Tomorrow — ${dayLabel(plan)}` }),
+    el('span', { class: 'rc-eyebrow', text: `${ctx.planWord} — ${dayLabel(plan)}` }),
     tomorrow
       ? el('div', { text: tomorrow.task || '—' })
       : el('div', { class: 'rc-hint', text: 'nothing set yet' }),
@@ -665,7 +714,7 @@ function digestText(ctx) {
 
   lines.push(`Huddle — ${dayLabel(plan, 'medium')}`);
   lines.push('');
-  lines.push(`What happened — ${dayLabel(review, 'medium')}`);
+  lines.push(`${ctx.reviewWord === 'Today' ? 'How today went' : 'What happened'} — ${dayLabel(review, 'medium')}`);
 
   const silent = [];
   for (const person of people) {
@@ -916,7 +965,7 @@ function personRow(ctx) {
      the field team cannot open. */
   const chain = wasPlanned ? chainByeId?.get(carryChainFor(wasPlanned)) : null;
   const plannedDay = ctx.plannedOn ? ctx.plannedOn(person.id, review) : [wasPlanned].filter(Boolean);
-  row.appendChild(el('td', { 'data-label': 'Was planned' },
+  row.appendChild(el('td', { 'data-label': ctx.reviewWord },
     plannedDay.length
       ? plannedDay.map((task, i) => el('div', { class: i ? 'rc-day-next' : '' }, [
         el('div', { text: task.task || '—' }),
@@ -937,7 +986,7 @@ function personRow(ctx) {
      asked for — somebody on leave did not carry anything over, and letting
      that fall into a performance status is exactly what the five-way split
      exists to prevent. */
-  const outcome = { 'data-label': 'What happened' };
+  const outcome = { 'data-label': ctx.reviewWord === 'Today' ? 'How it is going' : 'What happened' };
   if (away.state === 'leave') {
     row.appendChild(el('td', outcome, [badge('On leave', 'muted')]));
   } else if (away.state === 'non-working') {
@@ -975,7 +1024,7 @@ function personRow(ctx) {
   }
 
   /* Tomorrow. */
-  row.appendChild(el('td', { 'data-label': 'Tomorrow' }, [
+  row.appendChild(el('td', { 'data-label': ctx.planWord }, [
     tomorrow
       ? el('div', {}, [
         el('div', { text: tomorrow.task || '—' }),
@@ -996,7 +1045,7 @@ function personRow(ctx) {
           wasPlanned ? el('button', {
             class: 'cx-btn mini ghost',
             text: 'Same again',
-            title: `Repeat "${wasPlanned.task || 'yesterday\u2019s task'}" tomorrow.`,
+            title: `Repeat "${wasPlanned.task || 'this task'}" on ${dayLabel(plan)}.`,
             onClick: async () => {
               await rollForward(wasPlanned, person, plan, null);
               notifyChanged('plan');

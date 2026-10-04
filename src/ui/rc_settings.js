@@ -11,14 +11,15 @@
  * editor's own menu does, and adopting the editor goes to the editor, which
  * has to import something before there is anything to write in.
  *
- * Imports: util, rc, components, rc_util, rc_la_state.
+ * Imports: util, rc, components, rc_util, rc_la_state, rc_huddle.
  */
 
 import { el } from '../core/util.js';
 import * as rc from '../core/rc.js';
-import { textInput, toast, confirmDialog, badge } from './components.js';
+import { textInput, selectInput, toast, confirmDialog, badge } from './components.js';
 import { notifyChanged, goToTab, dayLabel } from './rc_util.js';
 import { la } from './rc_la_state.js';
+import { HUDDLE_REVIEWS, DEFAULT_HUDDLE_REVIEWS } from './rc_huddle.js';
 
 /** How long an editor-published reading is kept whole, unless somebody says otherwise. */
 export const DEFAULT_KEEP_DAYS = 60;
@@ -105,6 +106,26 @@ export async function renderSettings(host) {
     type: 'date',
     required: true,
     said: (v) => `The cancellation log starts on ${dayLabel(v)}.`,
+  }));
+
+  /* ── The daily huddle ───────────────────────────────────────────────── */
+  list.appendChild(group('The daily huddle'));
+  const reviews = HUDDLE_REVIEWS[value(settings, 'huddle_reviews')] ? value(settings, 'huddle_reviews') : DEFAULT_HUDDLE_REVIEWS;
+  const reviewsPick = selectInput({
+    value: reviews,
+    options: Object.entries(HUDDLE_REVIEWS).map(([v, label]) => ({ value: v, label })),
+    onChange: (v) => save('huddle_reviews', v, v === 'today'
+      ? 'The huddle now goes over today\u2019s work and plans the next working day.'
+      : 'The huddle now goes over the previous working day and plans the next working day.'),
+  });
+  reviewsPick.setAttribute('aria-label', 'What the huddle goes over');
+  reviewsPick.dataset.setting = 'huddle_reviews';
+  list.appendChild(row({
+    label: 'What the huddle goes over',
+    hint: 'A meeting late in the shift goes over how today is going and plans the next working day. '
+      + 'One at the start of the day goes over the previous working day instead. Either way, a day nobody '
+      + 'on the roster works is skipped.',
+    control: reviewsPick,
   }));
 
   /* ── Keeping the record tidy ────────────────────────────────────────── */
