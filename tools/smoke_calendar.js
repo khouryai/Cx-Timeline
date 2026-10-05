@@ -955,8 +955,20 @@ async function main() {
   check('the date axis is found from the weekday row', (await dayHeadCount()) > 7);
   check('the weekend is marked apart',
     (await page.locator('#rc-frame .la-grid thead .la-weekend').count()) >= 4);
-  check('the year is resolved and said out loud',
-    new RegExp(axis.today).test(await page.locator('#rc-frame').innerText()));
+  // The explanatory text under the grid is gone; a today column is only drawn
+  // when the year resolved, so that is the evidence now.
+  check('the year is resolved, so today has a column',
+    Boolean(axis.today) && (await page.locator('#rc-frame .la-grid thead .la-today').count()) >= 1);
+  /* The grid's frame runs to the bottom of the pane — as long as the screen
+     allows — with none of the old paragraphs of explanation under it. */
+  await page.waitForTimeout(100);
+  const fit = await page.evaluate(() => {
+    const wrap = document.querySelector('#rc-frame .la-grid').parentElement;
+    return { max: parseFloat(wrap.style.maxHeight), top: wrap.getBoundingClientRect().top,
+      after: wrap.parentElement.parentElement.querySelectorAll(':scope > p.rc-hint').length };
+  });
+  check('the look-ahead grid reaches the bottom, with no text under it',
+    fit.top + fit.max > page.viewportSize().height - 80 && fit.after === 0, JSON.stringify(fit));
 
   // Today is a line down the grid, not a tint: a fill would be one more colour
   // competing with the workbook's own.

@@ -350,76 +350,6 @@ async function renderCalendar(host) {
   host.appendChild(body);
   draw();
 
-  const inWindow = windowed(view, today);
-  const scheduled = inWindow.activities.filter((a) => a.highlighted && a.named).length;
-  const headings = view.activities.filter((a) => a.heading).length;
-  const named = view.activities.filter((a) => a.resource).length;
-  const away = view.activities.filter((a) => a.absence).length;
-  host.appendChild(el('p', {
-    class: 'rc-hint',
-    text: `${scheduled} of ${view.activities.length} activities have something scheduled in the `
-      + `weeks on screen. The workbook holds `
-      + `${view.days.length} days, from the snapshot taken `
-      + `${snapshot.taken_at ? snapshot.taken_at.slice(0, 16).replace('T', ' ') : 'earlier'}`
-      + `${headings ? `, under ${headings} section heading(s)` : ''}. `
-      + 'The rest are either carried for reference with no shift against them, or were worked in '
-      + 'weeks that have already gone; both are hidden unless you ask for them. Only the rows and '
-      + 'columns that were visible in the workbook are here at all — a hidden row is not work '
-      + 'anybody was being asked to look at.',
-  }));
-  host.appendChild(el('p', {
-    class: 'rc-hint',
-    text: dated
-      ? `The sheet carries months and day numbers but no year, so the axis is dated from the `
-        + `snapshot's own timestamp and then checked against the workbook's weekday letters — `
-        + `only one candidate year makes M, Tu and W land where the file says they do. It reads `
-        + `as ${view.days[0].date} to ${view.days[view.days.length - 1].date}. `
-        + `Today is ${today}.`
-      : 'No year could be resolved from this sheet — the weekday letters did not agree with any '
-        + 'candidate, so no today line is drawn and the week filters stand down. A today line on '
-        + 'the wrong column would be worse than none.',
-  }));
-  host.appendChild(el('p', {
-    class: 'rc-hint',
-    text: 'A row counts as scheduled when one of the days on screen carries paint the legend does '
-      + 'not call shading — so narrowing to four weeks drops the rows whose work was in the '
-      + 'weeks before it. A colour nobody has mapped counts too: until somebody says what it is, '
-      + 'it might be work, and hiding it would bury exactly the rows that need looking at. '
-      + 'Weekends are counted like any other day: possession work lands on them. A section '
-      + 'heading is only drawn when something under it is: a title over nothing is not an answer, '
-      + 'and headings used to be exempt from the switch entirely — which is how a whole workbook '
-      + 'came back on screen the moment one stray colour went unmapped.',
-  }));
-  host.appendChild(el('p', {
-    class: 'rc-hint',
-    text: named
-      ? `${named} activity(ies) carry a Resource row — the line the workbook writes underneath `
-        + 'with the names typed against each day. It is drawn as part of the activity above it, '
-        + 'taking that line\'s location and work hours, because that is what leaving them blank '
-        + 'means. "Show resource names" hides the names and never the activities.'
-      : 'No Resource rows on this sheet yet. Add a row under an activity whose description reads '
-        + '"Resource", leave its location and work hours blank so they carry down from the '
-        + 'activity, and type the names into the day cells.',
-  }));
-  host.appendChild(el('p', {
-    class: 'rc-hint',
-    text: away
-      ? `${away} row(s) say who is away rather than what is happening — "PTO" and "Other Group / `
-        + 'Project", with the names typed into the day cells. They stand on their own rather than '
-        + 'under an activity, because what they say is about the person; they are never counted as '
-        + 'scope, and they hide with "Show resource names" like every other row of names. Those '
-        + 'days reach the week plan, Resources and PTO against the people they name.'
-      : 'Nothing on this sheet says who is away. Add a row at the bottom whose description reads '
-        + '"PTO", or "Other Group / Project", and type the names into the day cells — those days '
-        + 'then show against those people in the week plan, Resources and PTO instead of reading '
-        + 'as a day nobody planned.',
-  }));
-  host.appendChild(el('p', {
-    class: 'rc-hint',
-    text: 'The key above the grid lists only the colours actually on screen. A legend of thirty '
-      + 'entries for a window carrying four of them is a key to somebody else\'s calendar; the '
-      + 'full register is in Legend.',
-  }));
 }
 
 /**
@@ -565,6 +495,38 @@ function paintOn(view) {
   return hexes;
 }
 
+/**
+ * Stretch the grid's frame down to the bottom of whatever scrolls it, so the
+ * table is as long as the screen allows. Measured, because only the browser
+ * knows how much sits above it; re-measured when that container resizes.
+ */
+function fitToBottom(wrap) {
+  const scroller = () => {
+    for (let node = wrap.parentElement; node; node = node.parentElement) {
+      const { overflowY } = getComputedStyle(node);
+      if ((overflowY === 'auto' || overflowY === 'scroll') && node.clientHeight) return node;
+    }
+    return document.scrollingElement || document.documentElement;
+  };
+  let observer = null;
+  const fit = () => {
+    if (!wrap.isConnected) { observer?.disconnect(); return; }
+    const box = scroller();
+    const boxTop = box === document.scrollingElement ? 0 : box.getBoundingClientRect().top;
+    const boxHeight = box === document.scrollingElement ? window.innerHeight : box.clientHeight;
+    const top = wrap.getBoundingClientRect().top - boxTop + box.scrollTop;
+    const pad = parseFloat(getComputedStyle(box).paddingBottom) || 0;
+    wrap.style.maxHeight = `${Math.max(240, Math.floor(boxHeight - top - pad - 4))}px`;
+  };
+  requestAnimationFrame(() => {
+    fit();
+    if (typeof ResizeObserver === 'function' && wrap.isConnected) {
+      observer = new ResizeObserver(fit);
+      observer.observe(scroller());
+    }
+  });
+}
+
 /** The grid itself. Split out so the filter can redraw it without the header. */
 function grid_(view, today, isMe = null, snapshotId = null) {
   const rows = view.activities;
@@ -704,6 +666,7 @@ function grid_(view, today, isMe = null, snapshotId = null) {
 
   const table_ = el('table', { class: 'rc-table la-grid' }, [head, tbody]);
   const wrap = el('div', { class: 'rc-scroll', style: 'max-height:60vh' }, [table_]);
+  fitToBottom(wrap);
 
   /* The frozen columns have to be told where they start, and only the browser
      knows how wide the content made them. Measured once the table is in the
