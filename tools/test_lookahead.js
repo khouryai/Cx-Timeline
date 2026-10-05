@@ -1536,6 +1536,37 @@ console.log('\nWhat changed for me');
   check('nothing changed is an empty list', cls.changesForMe(before, before, isMe, { from: '2026-09-21' }).length === 0);
 }
 
+{
+  /* ── The reason a hover gives for a cancelled day ──────────────────────
+     The grid shows the note logged for a red day or a struck-out code. It is
+     the activity's own words, a location the row carries, a date the note
+     covers, and the same kind — a code's note is never the day's. */
+  const note = (over) => ({
+    id: over.id, raw_label: 'IXL · Night mode SAT', raw_location: 'Y10', start_date: '2026-10-03',
+    end_date: '2026-10-04', party: 'BART', reason: 'Witness unavailable', codes: null,
+    created_at: '2026-10-01T10:00:00Z', supersedes_id: null, dismissed: false, ...over,
+  });
+  const notes = [
+    note({ id: 'day', reason: 'Possession not granted' }),
+    note({ id: 'wit', codes: 'WIT', reason: 'Witness unavailable' }),
+    note({ id: 'old', codes: 'TCE', reason: 'First guess', created_at: '2026-10-01T09:00:00Z' }),
+    note({ id: 'new', codes: 'TCE', reason: 'Engineer reassigned', supersedes_id: 'old', created_at: '2026-10-02T09:00:00Z' }),
+  ];
+  const meta = ['', 'IXL · Night mode SAT', 'Y10', '82'];
+  const at = (day, codes) => cls.cancellationReasonText(
+    cls.cancellationNoteFor(notes, { label: 'ixl ·  night mode sat', meta, day, codes }));
+  check('a cancelled day says the reason logged for it', at('2026-10-04') === 'BART — Possession not granted', at('2026-10-04'));
+  check('a struck-out code says its own reason, not the day\'s', at('2026-10-04', 'WIT') === 'BART — Witness unavailable', at('2026-10-04', 'WIT'));
+  check('a corrected note gives the correction', at('2026-10-03', 'TCE') === 'BART — Engineer reassigned', at('2026-10-03', 'TCE'));
+  check('a day the note does not cover gives nothing', at('2026-10-05') === '');
+  check('another location gives nothing',
+    cls.cancellationNoteFor(notes, { label: 'IXL · Night mode SAT', meta: ['C156'], day: '2026-10-04' }) === null);
+  check('a note that took the day out of the log gives no reason',
+    cls.cancellationNoteFor([note({ id: 'x', dismissed: true })], { label: 'IXL · Night mode SAT', meta, day: '2026-10-04' }) === null);
+  check('a note with no reason still says who',
+    cls.cancellationReasonText(note({ reason: null, party: 'Hitachi' })) === 'Hitachi');
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

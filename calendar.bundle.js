@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-05T18:25:36.735Z
+ * Modules: 28   Built: 2026-10-05T21:21:39.778Z
  */
 (function () {
   'use strict';
@@ -298,16 +298,21 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * A day's codes as nodes, with every struck-out code ("~WIT") in a span of its
    * own so it can be drawn struck through in red — the calendar's grid and the
    * editor's both draw a cell this way. Text with no tilde is returned as it is:
-   * names, notes, anything that is not codes.
+   * names, notes, anything that is not codes. `reasonFor(code)`, when given,
+   * adds the reason logged for that code's cancellation to its hover.
    */
-  function codeNodes(value, klass = 'rc-code-cancelled') {
+  function codeNodes(value, klass = 'rc-code-cancelled', reasonFor = null) {
     const text = String(value ?? '');
     if (!text.includes('~') || !/^[\s~A-Za-z0-9.]+$/.test(text)) return [text];
     const parts = [];
     cellTokens(text).forEach((t, i) => {
       if (i) parts.push('.');
       parts.push(t.cancelled
-        ? el('span', { class: klass, text: t.code, title: `${t.code} — cancelled` })
+        ? el('span', {
+          class: klass,
+          text: t.code,
+          title: [`${t.code} — cancelled`, reasonFor?.(t.code)].filter(Boolean).join(': '),
+        })
         : t.code);
     });
     return parts;
@@ -8786,7 +8791,10 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
   const ed = __req("core/la_edit.js");
-  const { readGrid, isCancelMeaning, countCodes, describeCodeCounts, cellTokens } = __req("core/lookahead.js");
+  const { readGrid, isCancelMeaning, countCodes, describeCodeCounts, cellTokens, cancellationNoteFor, cancellationReasonText } = __req("core/lookahead.js");
+
+
+
   const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
   const { lookaheadWorkbook, lookaheadFileName } = __req("io/la_xlsx.js");
   const { saveFile } = __req("io/exporters.js");
@@ -8867,14 +8875,17 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       return;
     }
 
-    const [settings, legend, codes, people, aliases, leaveKinds] = await Promise.all([
+    const [settings, legend, codes, people, aliases, leaveKinds, notes] = await Promise.all([
       rc.listSettings().catch(() => []),
       rc.listLegend().catch(() => []),
       rc.listSupportCodes({ includeRetired: true }).catch(() => []),
       rc.listPeople().catch(() => []),
       rc.listPersonAliases().catch(() => []),
       rc.listLeaveKinds().catch(() => []),
+      // The reasons logged for cancellations, shown when a cancelled day is hovered.
+      rc.listCancellationNotes().catch(() => []),
     ]);
+    E.notes = notes;
     /* The same exact register the week plan reads names with — full name, alias,
        or a first name only one person has. A name it cannot place is somebody
        else's person, and the staffing check leaves it alone. */
@@ -9206,6 +9217,19 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       result.push(r);
     }
     return result.length ? result : [];
+  }
+
+  /** The reason logged for a cancelled day on a row, or one struck-out code. */
+  function reasonFor(row, day, codes = '') {
+    const key = ed.cancellationKey(row);
+    return cancellationReasonText(cancellationNoteFor(E.notes, {
+      label: key.raw_label, meta: [key.raw_location], day, codes,
+    }));
+  }
+
+  /** A note just written, kept so the hover says it before the next load. */
+  function rememberNote(note) {
+    if (note) E.notes = [...(E.notes || []), note];
   }
 
   function draw() {
@@ -9564,12 +9588,14 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
         }
         const struck = ed.cancelledTokens(cell.text);
         if (struck.length && looksLikeCodes(cell.text)) {
-          title = [title, `Cancelled: ${struck.map(codeName).join(' + ')}`].filter(Boolean).join(' · ');
+          title = [title, `Cancelled: ${struck.map(codeName).join(' + ')}`, reasonFor(row, d, struck.join('.'))]
+            .filter(Boolean).join(' · ');
         }
       }
       if (cell?.color) {
         const meaning = E.legendAll.find((e) => e.argb === cell.color)?.meaning;
-        if (meaning) title = [meaning, title].filter(Boolean).join(' · ');
+        const why = cls.includes('lae-cancel') ? reasonFor(row, d) : '';
+        if (meaning) title = [meaning, why, title].filter(Boolean).join(' · ');
       }
       // Names are wider than a day; the whole list is one hover away.
       if (!title && cell?.text) title = cell.text;
@@ -9580,7 +9606,9 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       }
       const td = el('td', {
         class: cls.join(' '), dataset: { c: String(c) }, title,
-      }, row.kind === 'activity' ? codeNodes(cell?.text || '', 'lae-code-cancelled') : [cell?.text || '']);
+      }, row.kind === 'activity'
+        ? codeNodes(cell?.text || '', 'lae-code-cancelled', (code) => reasonFor(row, d, code))
+        : [cell?.text || '']);
       if (cell?.color) td.style.backgroundColor = `#${cell.color}`;
       if (!editable(row, c)) td.classList.add('lae-fixed');
       tr.appendChild(td);
@@ -10165,15 +10193,16 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
           commit(ops);
         }
         for (const run of runs) {
-          await rc.addCancellationNote({
+          rememberNote(await rc.addCancellationNote({
             ...ed.cancellationKey(run.row),
             start_date: run.start,
             end_date: run.end,
             codes: run.code,
             party: party.value,
             reason: reason.value.trim() || null,
-          });
+          }));
         }
+        draw();
         toast({ tone: 'good', message: `Cancelled and logged — ${[...new Set(runs.map((r) => r.code))].join(', ')}, ${party.value}.` });
       } catch (err) {
         toast({ tone: 'bad', message: err.message, timeout: 10000 });
@@ -10305,14 +10334,15 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
           label: 'Record', kind: 'primary', autofocus: true, onClick: async () => {
             try {
               for (const r of runs) {
-                await rc.addCancellationNote({
+                rememberNote(await rc.addCancellationNote({
                   ...ed.cancellationKey(r.row),
                   start_date: r.start,
                   end_date: r.end,
                   party: party.value,
                   reason: reason.value.trim() || null,
-                });
+                }));
               }
+              draw();
               toast({ tone: 'good', message: `Recorded in the cancellation log — ${party.value}.` });
             } catch (err) {
               toast({ tone: 'bad', message: err.message, timeout: 10000 });
@@ -14224,7 +14254,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
   const { calendarPdf, calendarFit, PAGE_CHOICES } = __req("io/rc_pdf.js");
   const { saveFile } = __req("io/exporters.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes, isCancelMeaning, rowsNaming, resourceNames } = __req("core/lookahead.js");
+  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes, isCancelMeaning, rowsNaming, resourceNames, cancellationNoteFor, cancellationReasonText } = __req("core/lookahead.js");
 
 
 
@@ -14388,10 +14418,13 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * straight away instead of at the next ingest.
    */
   async function renderCalendar(host) {
-    const [snapshot, legendRows, isMe] = await Promise.all([
+    const [snapshot, legendRows, isMe, notes] = await Promise.all([
       rc.latestSnapshot(),
       rc.listLegend(),
       meMatcher(),
+      // The reasons logged for cancellations, shown on hover. A database that
+      // cannot give them still draws the grid.
+      rc.listCancellationNotes().catch(() => []),
     ]);
     // The choice belongs to whoever made it: a different person looking — an
     // administrator previewing a member — starts from their own default.
@@ -14516,7 +14549,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         }));
         return;
       }
-      body.appendChild(grid_(shown, today, isMe, snapshot.id));
+      body.appendChild(grid_(shown, today, isMe, snapshot.id, notes));
     };
     // Redraw the rows only, never the input: rebuilding the field under the
     // caret is the trap this project has already been bitten by three times.
@@ -14728,7 +14761,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   }
 
   /** The grid itself. Split out so the filter can redraw it without the header. */
-  function grid_(view, today, isMe = null, snapshotId = null) {
+  function grid_(view, today, isMe = null, snapshotId = null, notes = []) {
     const rows = view.activities;
 
     /* The month band. Each label spans its own run of days, which is what the
@@ -14797,7 +14830,13 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
      * per day. Used for the activity and for its Resource row alike, because the
      * two are the same shape and drawing them twice is how they drift apart.
      */
-    const line = (meta, marks, { klass = '', what = '', resource = false, open = null }) => el('tr', {
+    const line = (meta, marks, { klass = '', what = '', resource = false, open = null }) => {
+      const label = meta.filter(Boolean).join(' · ');
+      // Why it was cancelled, as logged — for the day, or for one struck-out code.
+      const reason = (date, codes = '') => (date && !resource
+        ? cancellationReasonText(cancellationNoteFor(notes, { label, meta, day: date, codes }))
+        : '');
+      return el('tr', {
       class: klass,
     }, [
       ...meta.map((value, i) => el('td', {
@@ -14833,11 +14872,14 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
           style: mark?.hex ? `background-color:#${mark.hex}` : '',
           title: [what, d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
             mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value,
+            classes.includes('la-cancel') ? reason(d.date) || null : null,
             yours ? 'you are on this day' : null]
             .filter(Boolean).join(' · '),
-        }, resource ? [mark?.value || ''] : codeNodes(mark?.value || '', 'la-code-cancelled'));
+        }, resource ? [mark?.value || '']
+          : codeNodes(mark?.value || '', 'la-code-cancelled', (code) => reason(d.date, code)));
       }),
     ]);
+    };
 
     const tbody = el('tbody');
     for (const a of rows) {

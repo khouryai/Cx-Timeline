@@ -29,7 +29,10 @@ import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
 import * as ed from '../core/la_edit.js';
-import { readGrid, isCancelMeaning, countCodes, describeCodeCounts, cellTokens } from '../core/lookahead.js';
+import {
+  readGrid, isCancelMeaning, countCodes, describeCodeCounts, cellTokens,
+  cancellationNoteFor, cancellationReasonText,
+} from '../core/lookahead.js';
 import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
 import { lookaheadWorkbook, lookaheadFileName } from '../io/la_xlsx.js';
 import { saveFile } from '../io/exporters.js';
@@ -110,14 +113,17 @@ export async function renderEditor(host) {
     return;
   }
 
-  const [settings, legend, codes, people, aliases, leaveKinds] = await Promise.all([
+  const [settings, legend, codes, people, aliases, leaveKinds, notes] = await Promise.all([
     rc.listSettings().catch(() => []),
     rc.listLegend().catch(() => []),
     rc.listSupportCodes({ includeRetired: true }).catch(() => []),
     rc.listPeople().catch(() => []),
     rc.listPersonAliases().catch(() => []),
     rc.listLeaveKinds().catch(() => []),
+    // The reasons logged for cancellations, shown when a cancelled day is hovered.
+    rc.listCancellationNotes().catch(() => []),
   ]);
+  E.notes = notes;
   /* The same exact register the week plan reads names with — full name, alias,
      or a first name only one person has. A name it cannot place is somebody
      else's person, and the staffing check leaves it alone. */
@@ -449,6 +455,19 @@ function visibleRows() {
     result.push(r);
   }
   return result.length ? result : [];
+}
+
+/** The reason logged for a cancelled day on a row, or one struck-out code. */
+function reasonFor(row, day, codes = '') {
+  const key = ed.cancellationKey(row);
+  return cancellationReasonText(cancellationNoteFor(E.notes, {
+    label: key.raw_label, meta: [key.raw_location], day, codes,
+  }));
+}
+
+/** A note just written, kept so the hover says it before the next load. */
+function rememberNote(note) {
+  if (note) E.notes = [...(E.notes || []), note];
 }
 
 function draw() {
@@ -807,12 +826,14 @@ function bodyRow(row, r, days, today) {
       }
       const struck = ed.cancelledTokens(cell.text);
       if (struck.length && looksLikeCodes(cell.text)) {
-        title = [title, `Cancelled: ${struck.map(codeName).join(' + ')}`].filter(Boolean).join(' · ');
+        title = [title, `Cancelled: ${struck.map(codeName).join(' + ')}`, reasonFor(row, d, struck.join('.'))]
+          .filter(Boolean).join(' · ');
       }
     }
     if (cell?.color) {
       const meaning = E.legendAll.find((e) => e.argb === cell.color)?.meaning;
-      if (meaning) title = [meaning, title].filter(Boolean).join(' · ');
+      const why = cls.includes('lae-cancel') ? reasonFor(row, d) : '';
+      if (meaning) title = [meaning, why, title].filter(Boolean).join(' · ');
     }
     // Names are wider than a day; the whole list is one hover away.
     if (!title && cell?.text) title = cell.text;
@@ -823,7 +844,9 @@ function bodyRow(row, r, days, today) {
     }
     const td = el('td', {
       class: cls.join(' '), dataset: { c: String(c) }, title,
-    }, row.kind === 'activity' ? codeNodes(cell?.text || '', 'lae-code-cancelled') : [cell?.text || '']);
+    }, row.kind === 'activity'
+      ? codeNodes(cell?.text || '', 'lae-code-cancelled', (code) => reasonFor(row, d, code))
+      : [cell?.text || '']);
     if (cell?.color) td.style.backgroundColor = `#${cell.color}`;
     if (!editable(row, c)) td.classList.add('lae-fixed');
     tr.appendChild(td);
@@ -1408,15 +1431,16 @@ function askAboutRemovedResources(removed, { chosen = null } = {}) {
         commit(ops);
       }
       for (const run of runs) {
-        await rc.addCancellationNote({
+        rememberNote(await rc.addCancellationNote({
           ...ed.cancellationKey(run.row),
           start_date: run.start,
           end_date: run.end,
           codes: run.code,
           party: party.value,
           reason: reason.value.trim() || null,
-        });
+        }));
       }
+      draw();
       toast({ tone: 'good', message: `Cancelled and logged — ${[...new Set(runs.map((r) => r.code))].join(', ')}, ${party.value}.` });
     } catch (err) {
       toast({ tone: 'bad', message: err.message, timeout: 10000 });
@@ -1548,14 +1572,15 @@ function askWhyCancelled(runs) {
         label: 'Record', kind: 'primary', autofocus: true, onClick: async () => {
           try {
             for (const r of runs) {
-              await rc.addCancellationNote({
+              rememberNote(await rc.addCancellationNote({
                 ...ed.cancellationKey(r.row),
                 start_date: r.start,
                 end_date: r.end,
                 party: party.value,
                 reason: reason.value.trim() || null,
-              });
+              }));
             }
+            draw();
             toast({ tone: 'good', message: `Recorded in the cancellation log — ${party.value}.` });
           } catch (err) {
             toast({ tone: 'bad', message: err.message, timeout: 10000 });

@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 19   Built: 2026-10-05T18:25:36.757Z
+ * Modules: 19   Built: 2026-10-05T21:21:39.801Z
  */
 (function () {
   'use strict';
@@ -5887,6 +5887,47 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     });
   }
 
+  /**
+   * The note logged for one cancelled day of one activity on the grid — what a
+   * hover over a red day, or a struck-out code, says the reason was.
+   *
+   * Matched the way `attachCancellationNotes()` matches an event: the activity's
+   * own words, a location the row carries, a date the note covers, and the same
+   * kind — a note about struck-out codes ("WIT") is never the day's, and a note
+   * about the day never a code's. The newest note still standing wins; one that
+   * took the day out of the log says it was never a cancellation, so it gives
+   * no reason. `meta` is the row's frozen cells, whichever of them is the
+   * location.
+   */
+  function cancellationNoteFor(notes, { label, meta = [], day, codes = '' }) {
+    if (!notes?.length || !day) return null;
+    const superseded = new Set(notes.map((n) => n.supersedes_id).filter(Boolean));
+    const key = suggestionKey(label);
+    const places = new Set(meta.map(suggestionKey).filter(Boolean));
+    const codesOf = (v) => new Set(String(v || '').split('.').map((c) => c.trim().toUpperCase()).filter(Boolean));
+    const mine = codesOf(codes);
+    const hit = notes
+      .filter((n) => !superseded.has(n.id))
+      .filter((n) => suggestionKey(n.raw_label) === key)
+      .filter((n) => !suggestionKey(n.raw_location) || places.has(suggestionKey(n.raw_location)))
+      .filter((n) => String(n.start_date).slice(0, 10) <= day && String(n.end_date).slice(0, 10) >= day)
+      .filter((n) => {
+        const theirs = codesOf(n.codes);
+        if (!mine.size || !theirs.size) return !mine.size && !theirs.size;
+        return [...theirs].some((c) => mine.has(c));
+      })
+      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+      .pop();
+    return hit && !hit.dismissed ? hit : null;
+  }
+
+  /** A note as a hover reads it: "BART — possession not granted". */
+  function cancellationReasonText(note) {
+    if (!note) return '';
+    const reason = String(note.reason || '').trim();
+    return [note.party, reason].filter(Boolean).join(' — ');
+  }
+
   /* ══════════════════════════════════════════════════════════════════════════
      Progress from the calendar
 
@@ -6261,6 +6302,8 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "bartCodes", { get: () => bartCodes, enumerable: true });
   Object.defineProperty(__x, "describeCodeCounts", { get: () => describeCodeCounts, enumerable: true });
   Object.defineProperty(__x, "attachCancellationNotes", { get: () => attachCancellationNotes, enumerable: true });
+  Object.defineProperty(__x, "cancellationNoteFor", { get: () => cancellationNoteFor, enumerable: true });
+  Object.defineProperty(__x, "cancellationReasonText", { get: () => cancellationReasonText, enumerable: true });
   Object.defineProperty(__x, "WORKED_STATUSES", { get: () => WORKED_STATUSES, enumerable: true });
   Object.defineProperty(__x, "outcomeProgress", { get: () => outcomeProgress, enumerable: true });
   Object.defineProperty(__x, "rowsNaming", { get: () => rowsNaming, enumerable: true });
@@ -7310,16 +7353,21 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * A day's codes as nodes, with every struck-out code ("~WIT") in a span of its
    * own so it can be drawn struck through in red — the calendar's grid and the
    * editor's both draw a cell this way. Text with no tilde is returned as it is:
-   * names, notes, anything that is not codes.
+   * names, notes, anything that is not codes. `reasonFor(code)`, when given,
+   * adds the reason logged for that code's cancellation to its hover.
    */
-  function codeNodes(value, klass = 'rc-code-cancelled') {
+  function codeNodes(value, klass = 'rc-code-cancelled', reasonFor = null) {
     const text = String(value ?? '');
     if (!text.includes('~') || !/^[\s~A-Za-z0-9.]+$/.test(text)) return [text];
     const parts = [];
     cellTokens(text).forEach((t, i) => {
       if (i) parts.push('.');
       parts.push(t.cancelled
-        ? el('span', { class: klass, text: t.code, title: `${t.code} — cancelled` })
+        ? el('span', {
+          class: klass,
+          text: t.code,
+          title: [`${t.code} — cancelled`, reasonFor?.(t.code)].filter(Boolean).join(': '),
+        })
         : t.code);
     });
     return parts;

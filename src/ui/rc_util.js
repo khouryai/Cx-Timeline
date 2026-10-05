@@ -124,16 +124,21 @@ export function groupBy(rows, key) {
  * A day's codes as nodes, with every struck-out code ("~WIT") in a span of its
  * own so it can be drawn struck through in red — the calendar's grid and the
  * editor's both draw a cell this way. Text with no tilde is returned as it is:
- * names, notes, anything that is not codes.
+ * names, notes, anything that is not codes. `reasonFor(code)`, when given,
+ * adds the reason logged for that code's cancellation to its hover.
  */
-export function codeNodes(value, klass = 'rc-code-cancelled') {
+export function codeNodes(value, klass = 'rc-code-cancelled', reasonFor = null) {
   const text = String(value ?? '');
   if (!text.includes('~') || !/^[\s~A-Za-z0-9.]+$/.test(text)) return [text];
   const parts = [];
   cellTokens(text).forEach((t, i) => {
     if (i) parts.push('.');
     parts.push(t.cancelled
-      ? el('span', { class: klass, text: t.code, title: `${t.code} — cancelled` })
+      ? el('span', {
+        class: klass,
+        text: t.code,
+        title: [`${t.code} — cancelled`, reasonFor?.(t.code)].filter(Boolean).join(': '),
+      })
       : t.code);
   });
   return parts;

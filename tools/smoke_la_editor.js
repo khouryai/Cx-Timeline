@@ -672,6 +672,9 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await snap('struck');
   check('drawn through in red on the grid',
     (await witCell().locator('.lae-code-cancelled').innerText()).trim() === 'WIT');
+  check('hovering the struck-out witness says the reason logged for it',
+    /BART — Witness not required for testing/.test(await witCell().locator('.lae-code-cancelled').getAttribute('title') || ''),
+    await witCell().locator('.lae-code-cancelled').getAttribute('title'));
   check('and logged as a BART resource, with who and why',
     (await notesAt()) === notesBeforeRemove + 1 && witNote?.codes === 'WIT' && witNote?.party === 'BART'
       && witNote?.reason === 'Witness not required for testing' && witNote?.start_date === witDay
@@ -741,6 +744,9 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     }));
   check('the calendar draws the cancelled witness struck through in red',
     (await page.locator('#rc-frame .la-grid .la-code-cancelled', { hasText: 'WIT' }).count()) >= 1);
+  check('and hovering it there says the reason logged',
+    await page.evaluate(() => [...document.querySelectorAll('#rc-frame .la-grid .la-code-cancelled')]
+      .some((n) => /Witness not required for testing/.test(n.title))));
   check('and it no longer offers to read the workbook',
     (await page.locator('#rc-frame button', { hasText: 'Check now' }).count()) === 0
       && (await page.locator('#rc-frame .la-edit-switch[aria-pressed="false"]').count()) === 1);

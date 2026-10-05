@@ -27,7 +27,7 @@ import { saveFile } from '../io/exporters.js';
 import {
   keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
   reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes, isCancelMeaning,
-  rowsNaming, resourceNames,
+  rowsNaming, resourceNames, cancellationNoteFor, cancellationReasonText,
 } from '../core/lookahead.js';
 import { icon } from './icons.js';
 import {
@@ -188,10 +188,13 @@ function watchForNewReading(host, seenId) {
  * straight away instead of at the next ingest.
  */
 async function renderCalendar(host) {
-  const [snapshot, legendRows, isMe] = await Promise.all([
+  const [snapshot, legendRows, isMe, notes] = await Promise.all([
     rc.latestSnapshot(),
     rc.listLegend(),
     meMatcher(),
+    // The reasons logged for cancellations, shown on hover. A database that
+    // cannot give them still draws the grid.
+    rc.listCancellationNotes().catch(() => []),
   ]);
   // The choice belongs to whoever made it: a different person looking — an
   // administrator previewing a member — starts from their own default.
@@ -316,7 +319,7 @@ async function renderCalendar(host) {
       }));
       return;
     }
-    body.appendChild(grid_(shown, today, isMe, snapshot.id));
+    body.appendChild(grid_(shown, today, isMe, snapshot.id, notes));
   };
   // Redraw the rows only, never the input: rebuilding the field under the
   // caret is the trap this project has already been bitten by three times.
@@ -528,7 +531,7 @@ function fitToBottom(wrap) {
 }
 
 /** The grid itself. Split out so the filter can redraw it without the header. */
-function grid_(view, today, isMe = null, snapshotId = null) {
+function grid_(view, today, isMe = null, snapshotId = null, notes = []) {
   const rows = view.activities;
 
   /* The month band. Each label spans its own run of days, which is what the
@@ -597,7 +600,13 @@ function grid_(view, today, isMe = null, snapshotId = null) {
    * per day. Used for the activity and for its Resource row alike, because the
    * two are the same shape and drawing them twice is how they drift apart.
    */
-  const line = (meta, marks, { klass = '', what = '', resource = false, open = null }) => el('tr', {
+  const line = (meta, marks, { klass = '', what = '', resource = false, open = null }) => {
+    const label = meta.filter(Boolean).join(' · ');
+    // Why it was cancelled, as logged — for the day, or for one struck-out code.
+    const reason = (date, codes = '') => (date && !resource
+      ? cancellationReasonText(cancellationNoteFor(notes, { label, meta, day: date, codes }))
+      : '');
+    return el('tr', {
     class: klass,
   }, [
     ...meta.map((value, i) => el('td', {
@@ -633,11 +642,14 @@ function grid_(view, today, isMe = null, snapshotId = null) {
         style: mark?.hex ? `background-color:#${mark.hex}` : '',
         title: [what, d.date || `${d.month} ${d.day} ${d.weekday}`.trim(),
           mark?.meaning || (mark?.hex ? `unmapped colour #${mark.hex}` : null), mark?.value,
+          classes.includes('la-cancel') ? reason(d.date) || null : null,
           yours ? 'you are on this day' : null]
           .filter(Boolean).join(' · '),
-      }, resource ? [mark?.value || ''] : codeNodes(mark?.value || '', 'la-code-cancelled'));
+      }, resource ? [mark?.value || '']
+        : codeNodes(mark?.value || '', 'la-code-cancelled', (code) => reason(d.date, code)));
     }),
   ]);
+  };
 
   const tbody = el('tbody');
   for (const a of rows) {

@@ -1656,6 +1656,47 @@ export function attachCancellationNotes(events, notes) {
   });
 }
 
+/**
+ * The note logged for one cancelled day of one activity on the grid — what a
+ * hover over a red day, or a struck-out code, says the reason was.
+ *
+ * Matched the way `attachCancellationNotes()` matches an event: the activity's
+ * own words, a location the row carries, a date the note covers, and the same
+ * kind — a note about struck-out codes ("WIT") is never the day's, and a note
+ * about the day never a code's. The newest note still standing wins; one that
+ * took the day out of the log says it was never a cancellation, so it gives
+ * no reason. `meta` is the row's frozen cells, whichever of them is the
+ * location.
+ */
+export function cancellationNoteFor(notes, { label, meta = [], day, codes = '' }) {
+  if (!notes?.length || !day) return null;
+  const superseded = new Set(notes.map((n) => n.supersedes_id).filter(Boolean));
+  const key = suggestionKey(label);
+  const places = new Set(meta.map(suggestionKey).filter(Boolean));
+  const codesOf = (v) => new Set(String(v || '').split('.').map((c) => c.trim().toUpperCase()).filter(Boolean));
+  const mine = codesOf(codes);
+  const hit = notes
+    .filter((n) => !superseded.has(n.id))
+    .filter((n) => suggestionKey(n.raw_label) === key)
+    .filter((n) => !suggestionKey(n.raw_location) || places.has(suggestionKey(n.raw_location)))
+    .filter((n) => String(n.start_date).slice(0, 10) <= day && String(n.end_date).slice(0, 10) >= day)
+    .filter((n) => {
+      const theirs = codesOf(n.codes);
+      if (!mine.size || !theirs.size) return !mine.size && !theirs.size;
+      return [...theirs].some((c) => mine.has(c));
+    })
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+    .pop();
+  return hit && !hit.dismissed ? hit : null;
+}
+
+/** A note as a hover reads it: "BART — possession not granted". */
+export function cancellationReasonText(note) {
+  if (!note) return '';
+  const reason = String(note.reason || '').trim();
+  return [note.party, reason].filter(Boolean).join(' — ');
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    Progress from the calendar
 
