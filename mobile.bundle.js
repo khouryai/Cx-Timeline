@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 19   Built: 2026-10-05T21:21:39.801Z
+ * Modules: 19   Built: 2026-10-06T21:38:53.564Z
  */
 (function () {
   'use strict';
@@ -1155,6 +1155,23 @@ __mods["core/rc.js"] = function (__x, __req) {
   }
 
   /**
+   * Send a write, and forget what was read again once it has landed.
+   *
+   * Forgetting only before it was not enough: a read made while the write was on
+   * its way was answered from the server as it stood before, and remembered —
+   * for thirty seconds the newest reading of the look-ahead was the one the
+   * editor had just replaced, so its next publish compared against the wrong
+   * one, decided nothing had changed, and the calendar drew an earlier state.
+   */
+  async function landed(request) {
+    try {
+      return await request;
+    } finally {
+      forgetReads();
+    }
+  }
+
+  /**
    * The filters a query built, as text, so two identical questions share an
    * answer and two different ones never do. The builder is wrapped rather than
    * inspected: the client's own object does not describe itself, and the stub the
@@ -1729,7 +1746,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     requireClient();
     guardPreview();
     forgetReads();
-    const { data, error } = await client.from(table).insert(rows).select();
+    const { data, error } = await landed(client.from(table).insert(rows).select());
     if (error) throw new Error(`${table}: ${error.message}`);
     return data || [];
   }
@@ -1745,11 +1762,12 @@ __mods["core/rc.js"] = function (__x, __req) {
        the read memory on every tab switch — the calendar re-read the roster, the
        plan and the sheet each time, which is the wait the memory exists to
        remove. */
-    if (!READ_ONLY_RPC.has(name)) {
+    const read = READ_ONLY_RPC.has(name);
+    if (!read) {
       guardPreview();
       forgetReads();
     }
-    const { data, error } = await client.rpc(name, args);
+    const { data, error } = await (read ? client.rpc(name, args) : landed(client.rpc(name, args)));
     if (error) throw new Error(`${name}: ${error.message}`);
     return data;
   }
@@ -1766,7 +1784,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     requireClient();
     guardPreview();
     forgetReads();
-    const { data, error } = await client.from(table).update(patch).eq('id', id).select();
+    const { data, error } = await landed(client.from(table).update(patch).eq('id', id).select());
     if (error) throw new Error(`${table}: ${error.message}`);
     if (!data || !data.length) {
       throw new Error(`${table}: that change was refused — you may not have permission.`);
@@ -1802,10 +1820,10 @@ __mods["core/rc.js"] = function (__x, __req) {
     requireClient();
     guardPreview();
     forgetReads();
-    const { data, error } = await client
+    const { data, error } = await landed(client
       .from('rc_legend')
       .upsert(rows, { onConflict: 'valid_from,argb' })
-      .select();
+      .select());
     if (error) throw new Error(`rc_legend: ${error.message}`);
     return data || [];
   }
@@ -1844,10 +1862,10 @@ __mods["core/rc.js"] = function (__x, __req) {
     requireClient();
     guardPreview();
     forgetReads();
-    const { data, error } = await client
+    const { data, error } = await landed(client
       .from('rc_settings')
       .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
-      .select();
+      .select());
     if (error) throw new Error(`rc_settings: ${error.message}`);
     if (!data || !data.length) {
       throw new Error('rc_settings: that change was refused — only an administrator may set this.');
@@ -2145,7 +2163,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     requireClient();
     guardPreview();
     forgetReads();
-    const { data, error } = await client.from('rc_tawrs').delete().eq('id', id).select();
+    const { data, error } = await landed(client.from('rc_tawrs').delete().eq('id', id).select());
     if (error) throw new Error(`rc_tawrs: ${error.message}`);
     if (!data || !data.length) throw new Error('That request was not discarded — only a draft can be.');
     return data[0];
@@ -2163,10 +2181,10 @@ __mods["core/rc.js"] = function (__x, __req) {
     requireClient();
     guardPreview();
     forgetReads();
-    const { data, error } = await client
+    const { data, error } = await landed(client
       .from('rc_tawr_settings')
       .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
-      .select();
+      .select());
     if (error) throw new Error(`rc_tawr_settings: ${error.message}`);
     if (!data || !data.length) throw new Error('rc_tawr_settings: that change was refused — only an administrator may set this.');
     return data[0];
@@ -2184,10 +2202,10 @@ __mods["core/rc.js"] = function (__x, __req) {
     forgetReads();
     const who = me();
     if (!who) throw new Error('Only somebody on the team has a TAWR profile.');
-    const { data, error } = await client
+    const { data, error } = await landed(client
       .from('rc_tawr_profiles')
       .upsert({ ...patch, person_id: who.id, updated_at: new Date().toISOString() }, { onConflict: 'person_id' })
-      .select();
+      .select());
     if (error) throw new Error(`rc_tawr_profiles: ${error.message}`);
     if (!data || !data.length) throw new Error('rc_tawr_profiles: that change was refused — only an administrator has one.');
     return data[0];
@@ -2203,7 +2221,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     requireClient();
     guardPreview();
     forgetReads();
-    const { data, error } = await client.from('rc_tawr_descriptions').delete().eq('id', id).select();
+    const { data, error } = await landed(client.from('rc_tawr_descriptions').delete().eq('id', id).select());
     if (error) throw new Error(`rc_tawr_descriptions: ${error.message}`);
     if (!data || !data.length) throw new Error('That wording was not removed — you may not have permission.');
     return data[0];

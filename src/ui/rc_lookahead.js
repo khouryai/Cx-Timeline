@@ -129,7 +129,12 @@ function editSwitch() {
       try {
         if (on) await flushEditor();
       } catch (err) {
+        /* Stay in the editor: switching to the calendar now would draw an
+           older reading than the one on screen, as if the edits were lost. */
         rc.reportError('lookahead:publish', err);
+        toast({ tone: 'bad', message: `Not published yet — ${err.message}`, timeout: 10000 });
+        btn.disabled = false;
+        return;
       }
       la.editing = !on;
       notifyChanged('lookahead');

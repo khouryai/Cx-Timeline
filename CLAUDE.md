@@ -435,7 +435,7 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
 | `test_la_edit.js` | 176 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back |
 | `smoke.js` | 301 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 596 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 600 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 105 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, a phone opening the site sent to it, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 70 | the desktop shell and its updates |
@@ -501,6 +501,12 @@ Each of these has caused a real bug:
   A painted look-ahead cell set `style="background:#hex"`, which resets
   `background-image` — so the hatch marking an unmapped colour was never drawn,
   for as long as it existed. Paint with `background-color`.
+- **A write forgets what was read when it lands, not only when it is sent.**
+  `core/rc.js` cleared its thirty-second read memory as a write left, so a read
+  made while the write was on its way got the server as it stood before and
+  was kept as current — the inbox re-read the newest look-ahead reading while
+  the editor's next one was being written, and Done editing then drew the
+  older reading. Every write goes through `landed()`; a new write path must too.
 - **A Playwright test types before a dialog's field has focus.** Opening a
   modal focuses its field on a timer; wait for `document.activeElement` to be
   the input before `keyboard.type()`, or the first characters go nowhere.

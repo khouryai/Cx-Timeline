@@ -693,9 +693,39 @@ export function fakeSdk() {
     return api;
   }
 
+  /* A network with some distance in it, when a test asks for one
+     (`S.writeLatency`, in ms): a write lands on the server that long after it
+     is sent, and answers then, while a read is answered at once — so a read
+     made while a write is on its way sees the server as it was, as it would.
+     Off by default: everything else in the suite runs with no distance at all. */
+  const READ_RPC = new Set(['rc_la_revision', 'rc_list_invitations', 'rc_resolve_location']);
+  const later = (run) => (S.writeLatency
+    ? new Promise((resolve) => setTimeout(resolve, S.writeLatency)).then(run)
+    : run());
+  const distant = (client) => {
+    const rpc = client.rpc.bind(client);
+    const from = client.from.bind(client);
+    client.rpc = (name, args) => (READ_RPC.has(name) || !S.writeLatency ? rpc(name, args) : later(() => rpc(name, args)));
+    client.from = (table) => {
+      const api = from(table);
+      const insert = api.insert;
+      api.insert = (rows) => {
+        if (!S.writeLatency) return insert(rows);
+        // Sent without asking for the rows back (the error reporter) still lands.
+        const sent = later(() => insert(rows));
+        return {
+          select: () => sent.then((made) => made.select()),
+          then: (resolve, reject) => sent.then(() => ({ data: null, error: null })).then(resolve, reject),
+        };
+      };
+      return api;
+    };
+    return client;
+  };
+
   window.supabase = {
     createClient() {
-      return {
+      return distant({
         auth: {
           getSession: () => Promise.resolve({
             data: { session: S.signedIn ? { user: USER } : null },
@@ -1142,7 +1172,7 @@ export function fakeSdk() {
               Promise.resolve({ data: { signedUrl: `https://rc-stub.supabase.co/${bucket}/${path_}` }, error: null }),
           }),
         },
-      };
+      });
     },
   };
 }

@@ -710,6 +710,100 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     (await serverCell('IXL Regression Testing', bulkDay))?.text === bulkBefore && (await page.locator('.cx-modal').count()) === 0);
   await grid().focus();
 
+  /* ── A read made while a write is on its way ──────────────────────────
+     Reads are remembered for thirty seconds and forgotten on every write — but
+     forgotten when the write was *sent*, so a read made while it was on its way
+     got the server as it stood before, and was remembered as current. That is
+     how the calendar drew an older reading than the editor had just published:
+     the inbox re-read the newest reading while the next one was being written. */
+  const cacheRule = await page.evaluate(async () => {
+    const rc = window.__CX_MODULES.req('core/rc.js');
+    window.__rc.writeLatency = 300;
+    const count = async () => (await rc.listCancellationNotes()).filter((n) => n.raw_label === 'Cache check').length;
+    const before = await count();
+    const writing = rc.addCancellationNote({
+      raw_label: 'Cache check', raw_location: '', start_date: '2026-01-01', end_date: '2026-01-01', party: 'Other', reason: null,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const during = await count();
+    await writing;
+    const after = await count();
+    window.__rc.writeLatency = 0;
+    const list = window.__rc.rows.rc_cancellation_notes;
+    list.splice(list.findIndex((n) => n.raw_label === 'Cache check'), 1);
+    rc.forgetReads();
+    return { before, during, after };
+  });
+  check('a read made while a write is on its way is not remembered once it lands',
+    cacheRule.during === cacheRule.before && cacheRule.after === cacheRule.before + 1, JSON.stringify(cacheRule));
+
+  /* ── Many quick edits to one day, then Done editing at once ──────────
+     A day's resources added, cancelled, put back and taken off in quick
+     succession, over a network with some distance in it, then Edit switched
+     off without waiting. The editor drew the last state, and the calendar used
+     to draw an earlier one: an edit made while a save was finishing sat in the
+     queue unsent, and a read made while a write was on its way was remembered
+     as the newest, so the publish compared against the wrong reading and
+     decided nothing had changed. */
+  const busyDay = day(3);
+  const busy = () => cell('IXL Regression Testing', busyDay);
+  const typeInto = async (text) => {
+    await busy().dblclick();
+    await page.waitForSelector('#rc-frame .lae-editor');
+    await page.locator('#rc-frame .lae-editor').fill(text);
+    await page.keyboard.press('Tab');
+  };
+  const answer = async (button) => {
+    const modal = page.locator('.cx-modal', { hasText: 'BART resource' });
+    await modal.waitFor({ timeout: 4000 });
+    if (button === 'Cancel and log') await modal.locator('textarea').fill('Quick changes');
+    await modal.locator('button', { hasText: button }).click();
+    await page.waitForSelector('.cx-modal', { state: 'detached', timeout: 4000 }).catch(() => {});
+  };
+  await page.evaluate(() => { window.__rc.writeLatency = 400; });
+  await typeInto('X.TCE.WIT');
+  await typeInto('X.TCE');
+  await answer('Cancel and log');
+  await typeInto('X.TCE.WIT');
+  await typeInto('X.WIT');
+  await answer('Just remove');
+  await typeInto('X');
+  await answer('Cancel and log');
+  // The names under it changed too, and the last one still being typed when
+  // Done editing is pressed — pressing it is what ends the typing.
+  const busyNames = () => rowLoc('IXL Regression Testing').locator('xpath=following-sibling::tr[1]').locator(`td[data-c="${col(busyDay)}"]`);
+  await busyNames().dblclick();
+  await page.locator('#rc-frame .lae-editor').fill('Dan, Priya');
+  await page.keyboard.press('Tab');
+  await busyNames().dblclick();
+  await page.locator('#rc-frame .lae-editor').fill('Priya');
+  const editorSays = await busy().getAttribute('title');
+  await page.locator('#rc-frame .la-edit-switch').click();
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 15000 });
+  await page.waitForTimeout(300);
+  const drawnBusy = await page.evaluate((iso) => {
+    const row = [...document.querySelectorAll('#rc-frame .la-grid tbody tr')]
+      .find((tr) => /IXL Regression Testing/.test(tr.textContent));
+    const td = [...(row?.querySelectorAll('td.la-day') || [])].find((c) => (c.title || '').includes(iso));
+    return td ? td.title : null;
+  }, busyDay);
+  const serverBusy = (await serverCell('IXL Regression Testing', busyDay))?.text;
+  await page.evaluate(() => { window.__rc.writeLatency = 0; });
+  check('after many quick edits to one day, the server holds what the editor last showed',
+    serverBusy === 'X.~WIT', `${serverBusy} — editor: ${editorSays}`);
+  check('and Done editing draws it: the calendar shows the day as the editor last did',
+    / · X\.~WIT( · |$)/.test(drawnBusy || ''), drawnBusy);
+  const drawnNames = await page.evaluate((iso) => {
+    const rows = [...document.querySelectorAll('#rc-frame .la-grid tbody tr')];
+    const at = rows.findIndex((tr) => /IXL Regression Testing/.test(tr.textContent));
+    const td = [...(rows[at + 1]?.querySelectorAll('td.la-day') || [])].find((c) => (c.title || '').includes(iso));
+    return td ? td.textContent.trim() : null;
+  }, busyDay);
+  check('with the names still being typed when Done editing was pressed', drawnNames === 'Priya', drawnNames);
+  await page.locator('#rc-frame .la-edit-switch').click();
+  await page.waitForSelector('#rc-frame .lae-grid', { timeout: 10000 });
+  await grid().focus();
+
   /* ── Publishing: the rest of the calendar reads what was written ──── */
   /* Names written, published, then taken off and Edit switched off at once:
      the calendar used to open while the first publish was still writing, and

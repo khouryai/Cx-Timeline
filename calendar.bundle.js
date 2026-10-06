@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-05T21:21:39.778Z
+ * Modules: 28   Built: 2026-10-06T21:38:53.540Z
  */
 (function () {
   'use strict';
@@ -7613,6 +7613,10 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
     const days = publishDays(todayISO());
     const grid = applyLegend(gridFromModel(model, days, { title }), legend);
     const hash = `editor:${hash64(JSON.stringify(grid.rows.map((r) => r.cells.map((c) => [c.col, c.value, c.hex]))))}`;
+    /* Compared against the newest reading as the server has it now, never a
+       remembered one: matching an older reading's hash is how a day put back the
+       way it was a minute ago went unpublished. */
+    rc.forgetReads();
     const previous = await rc.latestSnapshot();
     if (previous && previous.file_hash === hash) return { changed: false, events: [] };
     const run = {
@@ -8846,6 +8850,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     dirtySincePublish: false,
     publishTimer: null,
     publishing: null, // the publish under way, so a flush can wait for it
+    publishError: null, // why the last publish failed, so Done editing can say so
     pollTimer: null,
     clip: null,
     editing: null,
@@ -8940,12 +8945,22 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
    * reads the look-ahead as it stands rather than as it stood a few seconds ago.
    */
   async function flushEditor() {
-    await drain();
+    // A day still being typed into is part of what was meant.
+    if (E.editing) commitEdit();
+    /* Until nothing is queued and nothing is on its way: a save that was
+       finishing when an edit arrived used to end with that edit still queued,
+       and this returned with it unsent. */
+    while (E.queue.length || E.saving) {
+      await drain();
+      if (E.status === 'conflict') break;
+      if (E.status === 'retry') throw new Error('The look-ahead could not be saved — check the connection and try again.');
+    }
     /* Always through `publish()`, which waits for one already under way. Only
        starting a publish when one was pending let the calendar open while the
        previous publish was still writing — and it drew the reading from before
        the edit, so a row taken off stayed on. */
     await publish();
+    if (E.publishError) throw E.publishError;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -11330,49 +11345,56 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   async function drain() {
     if (E.saving) return E.saving;
     E.saving = (async () => {
-      while (E.queue.length) {
-        const batch = E.queue.slice(0, SAVE_BATCH);
-        const shadow = new Map(E.server);
-        const stamped = batch.map((op) => {
-          const key = op.op === 'cell' ? `cell:${op.row_id}|${op.day}` : `row:${op.id}`;
-          const expect = shadow.get(key) || 0;
-          if (op.op === 'delete_row') shadow.delete(key);
-          else if (op.op === 'cell' && !op.color && !op.text) shadow.delete(key);
-          else shadow.set(key, expect + 1);
-          return { ...op, expect };
-        });
-        E.status = 'saving';
-        refreshStatus();
-        try {
-          const results = await rc.applyLookaheadOps(stamped);
-          E.queue.splice(0, batch.length);
-          for (const r of results || []) {
-            if (r.kind === 'cell') {
-              const key = `cell:${r.row_id}|${String(r.day).slice(0, 10)}`;
-              if (r.version) E.server.set(key, r.version);
-              else E.server.delete(key);
-            } else if (r.deleted) E.server.delete(`row:${r.id}`);
-            else E.server.set(`row:${r.id}`, r.version);
-          }
-          ed.acknowledge(E.model, (results || []).map((r) => ({ ...r, day: r.day ? String(r.day).slice(0, 10) : r.day })));
-          E.retryIn = 0;
-        } catch (err) {
-          if (/conflict/i.test(err.message)) {
-            await onConflict(err);
-            break;
-          }
-          E.status = 'retry';
-          E.retryIn = Math.min(30, (E.retryIn || 2) * 2);
+      /* Round again if an edit arrived while the last round was finishing —
+         asking the revision is a wait too, and an edit made during it would
+         otherwise sit in the queue until the next one came along. */
+      for (;;) {
+        while (E.queue.length) {
+          const batch = E.queue.slice(0, SAVE_BATCH);
+          const shadow = new Map(E.server);
+          const stamped = batch.map((op) => {
+            const key = op.op === 'cell' ? `cell:${op.row_id}|${op.day}` : `row:${op.id}`;
+            const expect = shadow.get(key) || 0;
+            if (op.op === 'delete_row') shadow.delete(key);
+            else if (op.op === 'cell' && !op.color && !op.text) shadow.delete(key);
+            else shadow.set(key, expect + 1);
+            return { ...op, expect };
+          });
+          E.status = 'saving';
           refreshStatus();
-          rc.reportError('lookahead:save', err);
-          const wait = E.retryIn;
-          setTimeout(() => { E.saving = null; drain(); }, wait * 1000);
-          return;
+          try {
+            const results = await rc.applyLookaheadOps(stamped);
+            E.queue.splice(0, batch.length);
+            for (const r of results || []) {
+              if (r.kind === 'cell') {
+                const key = `cell:${r.row_id}|${String(r.day).slice(0, 10)}`;
+                if (r.version) E.server.set(key, r.version);
+                else E.server.delete(key);
+              } else if (r.deleted) E.server.delete(`row:${r.id}`);
+              else E.server.set(`row:${r.id}`, r.version);
+            }
+            ed.acknowledge(E.model, (results || []).map((r) => ({ ...r, day: r.day ? String(r.day).slice(0, 10) : r.day })));
+            E.retryIn = 0;
+          } catch (err) {
+            if (/conflict/i.test(err.message)) {
+              await onConflict(err);
+              break;
+            }
+            E.status = 'retry';
+            E.retryIn = Math.min(30, (E.retryIn || 2) * 2);
+            refreshStatus();
+            rc.reportError('lookahead:save', err);
+            const wait = E.retryIn;
+            setTimeout(() => { E.saving = null; drain(); }, wait * 1000);
+            return;
+          }
         }
+        if (E.status === 'conflict') break;
+        E.revision = await rc.lookaheadRevision().catch(() => E.revision);
+        if (!E.queue.length) break;
       }
       if (!E.queue.length && E.status !== 'conflict') E.status = 'saved';
       refreshStatus();
-      E.revision = await rc.lookaheadRevision().catch(() => E.revision);
       schedulePublish();
     })().finally(() => { E.saving = null; });
     return E.saving;
@@ -11422,12 +11444,16 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   }
 
   async function publishNow() {
+    E.publishError = null;
+    // Published only once it is saved: the reading must be what the server holds.
+    if (E.queue.length || E.saving) await drain();
     if (!E.model || E.queue.length || !E.dirtySincePublish) return;
     E.dirtySincePublish = false;
     try {
       await publishFromEditor({ model: E.model, title: E.title, silent: true });
     } catch (err) {
       E.dirtySincePublish = true;
+      E.publishError = err;
       rc.reportError('lookahead:publish', err);
       return;
     }
@@ -11460,6 +11486,8 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       if (!E.root?.isConnected || document.hidden || E.editing || E.queue.length || E.saving) return;
       try {
         const rev = await rc.lookaheadRevision();
+        // Asked again after the wait: an edit made meanwhile is not the other editor's.
+        if (E.editing || E.queue.length || E.saving) return;
         if (rev > E.revision) {
           await reload();
           toast({ message: 'The look-ahead was updated with changes made by the other editor.', timeout: 4000 });
@@ -14359,7 +14387,12 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         try {
           if (on) await flushEditor();
         } catch (err) {
+          /* Stay in the editor: switching to the calendar now would draw an
+             older reading than the one on screen, as if the edits were lost. */
           rc.reportError('lookahead:publish', err);
+          toast({ tone: 'bad', message: `Not published yet — ${err.message}`, timeout: 10000 });
+          btn.disabled = false;
+          return;
         }
         la.editing = !on;
         notifyChanged('lookahead');

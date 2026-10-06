@@ -230,6 +230,10 @@ export async function publishFromEditor({ model, title = '', silent = true } = {
   const days = publishDays(todayISO());
   const grid = applyLegend(gridFromModel(model, days, { title }), legend);
   const hash = `editor:${hash64(JSON.stringify(grid.rows.map((r) => r.cells.map((c) => [c.col, c.value, c.hex]))))}`;
+  /* Compared against the newest reading as the server has it now, never a
+     remembered one: matching an older reading's hash is how a day put back the
+     way it was a minute ago went unpublished. */
+  rc.forgetReads();
   const previous = await rc.latestSnapshot();
   if (previous && previous.file_hash === hash) return { changed: false, events: [] };
   const run = {
