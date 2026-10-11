@@ -104,6 +104,9 @@ else with a clear error:
 
 ```
 core/util · core/events · core/dates      leaves — import nothing
+core/sdk                                  a leaf: fetches vendor/supabase.js the
+                                          first time core/cloud or core/rc makes
+                                          a client
 core/folder_rules                         a leaf: the shared folder's names,
                                           digest and pen rules, pure (Node-tested)
 core/access                               a leaf: may this account edit the plan,
@@ -135,6 +138,8 @@ ui/workspace · ui/calendar_loader         the calendar, fetched on first use:
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
 io/rc_pdf → io/pdf · io/lookahead         the calendar drawn for print — no DOM
 core/la_edit → core/lookahead             the look-ahead editor's model — no DOM
+core/la_register → core/lookahead         readings stored as rows, and compared —
+                                          the calendar's alone (calendar.bundle.js)
 io/la_xlsx → core/la_edit · io/xlsx_write the 4WLA as an .xlsx — no DOM
 core/tawr → core/lookahead                a look-ahead week as TAWRs — no DOM
 io/tawr_pdf → io/inflate · io/pdf         BART's fillable PDF, filled — no DOM
@@ -350,6 +355,23 @@ alternative shipped once and went wrong.
 - **What changed for me is two readings' stored rows compared** (`changesForMe()`), and **Got it is append-only** (`rc_la_seen`). [→](docs/ARCHITECTURE.md#what-changed-for-me-is-two-readings-compared-and-got-it-is-append-only)
 - **Changes say who made them**: a published reading carries each editor row's id (`la_row_id`, never shown), two readings that both carry ids are compared on them, and `editsBehind()` names who from `rc_la_edits`; **Every edit** is the log itself, one line per thing changed (`editLines()`). [→](docs/ARCHITECTURE.md#changes-say-who-made-them-by-the-rows-id)
 
+### Added with the performance pass
+
+- The published bundles are minified (esbuild, `tools/dist.js`) and the committed ones are not; CI drives the browser suites against `dist/` too (`CX_SITE=dist`). [→](docs/ARCHITECTURE.md#the-published-bundles-are-minified-the-committed-ones-are-not)
+- The Supabase client is fetched when a client is made (`core/sdk.js`), never by a tag on the page. [→](docs/ARCHITECTURE.md#the-supabase-client-is-fetched-when-a-client-is-made)
+- The calendar's stylesheet (`css/rc.css`) comes with its bundle; `css/calendar.css` keeps what the main page draws, and `rc.css` wins every tie. [→](docs/ARCHITECTURE.md#the-calendars-stylesheet-comes-with-its-bundle)
+- A policy asks who is asking once per query: `(select auth.uid())`, never a bare call — the SQL suites name the offender. [→](docs/ARCHITECTURE.md#a-policy-asks-who-is-asking-once-per-query)
+- The look-ahead rings a bell (`rc_la_beacon`, `onLookaheadChange()`); the polls only check on it, and a newer revision forgets remembered reads. [→](docs/ARCHITECTURE.md#the-look-ahead-rings-a-bell-the-polls-only-check-on-it)
+- Every foreign key that names a calendar row has an index; stamps pointing at `auth.users` are exempt. [→](docs/ARCHITECTURE.md#every-foreign-key-that-names-a-calendar-row-has-an-index)
+- Paged reads ask for the count, then fetch the rest together, and follow a page still full afterwards. [→](docs/ARCHITECTURE.md#paged-reads-ask-for-the-count-then-the-rest-together)
+- An edit made of cell ops redraws the days it touched (`redrawAfter()`, `dayCell()`), not the editor's grid. [→](docs/ARCHITECTURE.md#an-edit-redraws-the-days-it-touched)
+- The timeline draws the rows in view and 800 px either side (`CULL_MARGIN`); layout, links and counts still see everything. [→](docs/ARCHITECTURE.md#the-timeline-draws-the-rows-in-view)
+- Reading a sheet is `core/lookahead.js`; comparing two readings is `core/la_register.js`, the calendar's alone. [→](docs/ARCHITECTURE.md#reading-a-sheet-and-comparing-two-readings-are-two-modules)
+- `npm run lint` and `npm run typecheck` catch mistakes, not preferences; destructured options are documented with `?` on the optional ones. [→](docs/ARCHITECTURE.md#lint-and-types-catch-mistakes-not-preferences)
+- The site's service worker (`sw.js`) keeps the timeline for when there is no network, never the plan and nothing only the calendar needs. [→](docs/ARCHITECTURE.md#the-site-keeps-the-timeline-for-when-there-is-no-network-never-the-plan)
+- The System theme is Dark or Light, as the computer is; Dark stays the default. [→](docs/ARCHITECTURE.md#the-system-theme-is-dark-or-light-as-the-computer-is)
+- Motion follows the system's preference, in script (`scrollBehavior()`) as in CSS. [→](docs/ARCHITECTURE.md#motion-follows-the-systems-preference-in-script-as-in-css)
+
 ## Extending it
 
 - **A new object type**: add an entry to `TYPES` in `core/model.js` (label,
@@ -418,6 +440,8 @@ alternative shipped once and went wrong.
 
 ```bash
 npm run build          # must succeed — it lints the module graph and parses all three bundles
+npm run lint           # ESLint over src/ — no undefined names, no unused imports
+npm run typecheck      # the JSDoc read as types (tsc --checkJs, no emit)
 npm test               # every suite, in parallel lanes (tools/run_tests.js); must exit 0
 npm run test:serial    # the same, one at a time
 npm run test:rust      #  33 checks — the plan, lock and intake rules, in Rust
@@ -425,22 +449,23 @@ npm run test:xlsx      # the Excel export through LibreOffice Calc (skips withou
 
 node tools/run_tests.js smoke smoke_calendar   # just these suites
 node tools/smoke.js --shot out.png             # …and eyeball the result
+CX_SITE=dist node tools/run_tests.js smoke smoke_calendar   # against a published copy
 ```
 
 | Suite | Checks | What it covers |
 |---|---|---|
-| `test_dist.js` | 61 | every deployment shape, every bundle fingerprinted, that the plan has no backend in any of them, and the phone app in the calendar shape only, with the site sending phones to it |
+| `test_dist.js` | 73 | every deployment shape, every bundle fingerprinted, that the plan has no backend in any of them, and the phone app in the calendar shape only, with the site sending phones to it, the site's service worker, and that the calendar's register and stylesheet stay out of the pages that do not open it |
 | `test_lookahead.js` | 268 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
-| `test_la_edit.js` | 176 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back |
-| `smoke.js` | 301 | the application, local mode — **any console error fails the run** |
-| `smoke_calendar.js` | 600 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
+| `test_la_edit.js` | 180 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, and every page of a long read fetched together |
+| `smoke.js` | 313 | the application, local mode — a tall plan drawn by the rows in view, offline, less motion and the System theme — **any console error fails the run** |
+| `smoke_calendar.js` | 605 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 105 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, a phone opening the site sent to it, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 70 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
-| `test_sql.js` | 413 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, changes naming the editor's row, the schema stamp, and that `migrate.sql` upgrades an old project |
+| `test_sql.js` | 420 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, changes naming the editor's row, the schema stamp, and that `migrate.sql` upgrades an old project, policies that ask who you are once per query, every foreign key indexed, and the bell |
 | `test_xlsx_compat.js` | 14 | the Excel export opened, re-saved and printed by LibreOffice Calc (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**

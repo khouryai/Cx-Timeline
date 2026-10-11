@@ -161,6 +161,10 @@ async function boot() {
   // cannot leave anybody unable to open the application. Absent in a browser.
   window.CX_SHELL?.confirmHealthy?.();
 
+  // The timeline kept for when there is no network (sw.js). After the gate
+  // above, like everything that is not needed to open the plan.
+  installOfflineShell();
+
   // The resource calendar is registered here and built on first use — after
   // the line above, deliberately. It needs a network and an account, and the
   // trial gate must not be waiting on either: a calendar that could not reach
@@ -195,6 +199,22 @@ async function boot() {
   // it, and last, so booting is never held up by a question.
   const pen = await startupPen;
   if (pen) await cmd.announceStartupPen(pen);
+}
+
+/**
+ * Register the site's service worker, which keeps the timeline (never the plan)
+ * so it opens with no network — the plan in file mode is already on this
+ * machine. Not in the desktop app, whose page is on disk already and whose
+ * updates are its own (tools/shell/loader.js), and not from a file:// page,
+ * which cannot have one.
+ */
+function installOfflineShell() {
+  if (window.CX_SHELL || desktop.isAvailable()) return;
+  if (!('serviceWorker' in navigator) || !/^https?:$/.test(location.protocol)) return;
+  navigator.serviceWorker.register('sw.js', { scope: './' }).catch((err) => {
+    // Not fatal: the timeline runs without it, it only cannot open offline.
+    console.warn('[cx-timeline] the service worker did not register:', err.message);
+  });
 }
 
 /** Fade out the boot splash. Safe to call more than once. */

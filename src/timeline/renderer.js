@@ -15,7 +15,7 @@
  * Imports: util, dates, model, store, query, viewport, layout, connectors, icons.
  */
 
-import { el, clear, rafBatch, withAlpha, readableInk, clamp } from '../core/util.js';
+import { el, clear, rafBatch, withAlpha, readableInk, clamp, scrollBehavior } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
 import { ticks, fmtDate, toISO } from '../core/dates.js';
 import { TYPES, statusOf, objectColor, effectiveToday } from '../core/model.js';
@@ -1515,7 +1515,7 @@ export function revealObject(id, { center = true } = {}) {
   const rect = lastLayout?.byId.get(id);
   if (rect) {
     const target = rect.y - dom.scroll.clientHeight / 2 + rect.h / 2;
-    dom.scroll.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+    dom.scroll.scrollTo({ top: Math.max(0, target), behavior: scrollBehavior() });
   }
 
   const node = objectNodes.get(id);

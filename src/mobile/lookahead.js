@@ -20,7 +20,7 @@
  * Imports: util, dates, rc, core/lookahead, icons, components, rc_util.
  */
 
-import { el, clear } from '../core/util.js';
+import { el, clear, scrollBehavior } from '../core/util.js';
 import { toISO, addDays, DAYS_SHORT } from '../core/dates.js';
 import * as rc from '../core/rc.js';
 import { agendaFor } from '../core/lookahead.js';
@@ -153,7 +153,7 @@ export async function render(root) {
     selected = iso;
     draw();
     strip.querySelector('[aria-selected="true"]')
-      ?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+      ?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: scrollBehavior() });
   }
 
   function draw() {

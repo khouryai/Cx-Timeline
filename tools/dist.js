@@ -78,7 +78,7 @@ const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..'
 const OUT = path.join(ROOT, 'dist');
 
 /** Everything the browser actually loads, and nothing else. */
-const FILES = ['index.html', 'app.bundle.js', 'calendar.bundle.js', 'config.js', 'phone.js', '_headers'];
+const FILES = ['index.html', 'app.bundle.js', 'calendar.bundle.js', 'config.js', 'phone.js', 'sw.js', '_headers'];
 const DIRS = ['css', 'vendor'];
 
 /**
@@ -304,32 +304,15 @@ function fingerprint(dir) {
   rewrite('index.html', '');
   rewrite('m/index.html', '../');
 
+  /* The site's service worker keeps the timeline by name, the same way: the
+     hashed names in, and a version that changes exactly when they do. */
+  stampWorker(dir, 'sw.js', renamed, './', /'\.\/(app\.bundle\.js|css\/[a-z]+\.css)'/, 'index.html');
+
   /* The phone app's service worker precaches the app by name, so it has to be
      told the names — and given a version that changes exactly when they do, so
      a deploy that changed nothing leaves every phone's cache alone and one that
      changed anything replaces it. */
-  const worker = path.join(dir, 'm/sw.js');
-  if (fs.existsSync(worker)) {
-    let source = fs.readFileSync(worker, 'utf8');
-    for (const [from, to] of renamed) {
-      source = source.split(`'../${from}'`).join(`'../${to}'`);
-    }
-    const precache = /const PRECACHE = \[[\s\S]*?\];/.exec(source)?.[0] || '';
-    if (!precache || /'\.\.\/(mobile\.bundle\.js|css\/[a-z]+\.css)'/.test(precache)) {
-      console.error('✗ m/sw.js still precaches an unhashed asset — check PRECACHE.');
-      process.exit(1);
-    }
-    const version = crypto.createHash('sha256')
-      .update(precache)
-      .update(fs.readFileSync(path.join(dir, 'm/index.html')))
-      .digest('hex').slice(0, 10);
-    const versioned = source.replace("const VERSION = 'dev';", `const VERSION = '${version}';`);
-    if (versioned === source) {
-      console.error('✗ could not stamp a version into m/sw.js — check the file.');
-      process.exit(1);
-    }
-    fs.writeFileSync(worker, versioned);
-  }
+  stampWorker(dir, 'm/sw.js', renamed, '../', /'\.\.\/(mobile\.bundle\.js|css\/[a-z]+\.css)'/, 'm/index.html');
 
   /* The rule that made the bundles uncacheable no longer applies to them, and a
      rule naming a file that is not there any more is worse than no rule: it
@@ -354,6 +337,36 @@ function fingerprint(dir) {
   }
 
   return [...renamed.values()];
+}
+
+/**
+ * Write the hashed names into a service worker's PRECACHE, and stamp it with a
+ * version derived from that list and its page — so a deploy that changed
+ * nothing leaves every visitor's cache alone and one that changed anything
+ * replaces it. A name left unhashed, or a missing stamp, fails the build.
+ */
+function stampWorker(dir, rel, renamed, prefix, unhashed, page) {
+  const worker = path.join(dir, rel);
+  if (!fs.existsSync(worker)) return;
+  let source = fs.readFileSync(worker, 'utf8');
+  for (const [from, to] of renamed) {
+    source = source.split(`'${prefix}${from}'`).join(`'${prefix}${to}'`);
+  }
+  const precache = /const PRECACHE = \[[\s\S]*?\];/.exec(source)?.[0] || '';
+  if (!precache || unhashed.test(precache)) {
+    console.error(`✗ ${rel} still precaches an unhashed asset — check PRECACHE.`);
+    process.exit(1);
+  }
+  const version = crypto.createHash('sha256')
+    .update(precache)
+    .update(fs.readFileSync(path.join(dir, page)))
+    .digest('hex').slice(0, 10);
+  const versioned = source.replace("const VERSION = 'dev';", `const VERSION = '${version}';`);
+  if (versioned === source) {
+    console.error(`✗ could not stamp a version into ${rel} — check the file.`);
+    process.exit(1);
+  }
+  fs.writeFileSync(worker, versioned);
 }
 
 /**

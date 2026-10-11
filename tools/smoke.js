@@ -2088,6 +2088,59 @@ async function main() {
   check('scrolling down draws the rows it reaches, and lets go of the ones it left',
     tall.farAtBottom && !tall.firstLaneAtBottom, JSON.stringify(tall));
 
+  /* With no network the timeline still opens: the site's service worker keeps
+     the page and what it loads (sw.js), and the plan is this browser's own. */
+  console.log('\nOffline');
+  const workerReady = await page.evaluate(() => Promise.race([
+    navigator.serviceWorker.ready.then(() => true),
+    new Promise((r) => setTimeout(() => r(false), 8000)),
+  ]));
+  check('the site registers its service worker', workerReady);
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('.tl-root', { timeout: 15000 });
+  await context.setOffline(true);
+  let offlineBoot = false;
+  try {
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForSelector('.tl-obj', { timeout: 15000 });
+    offlineBoot = (await page.locator('.tl-obj').count()) > 0;
+  } catch { /* reported below */ }
+  await context.setOffline(false);
+  check('and with the network off, the timeline opens with its plan', offlineBoot);
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('.tl-root', { timeout: 15000 });
+
+  /* Less motion, when the system asks for it: CSS cuts every transition, and
+     the scrolls the application makes from script stop gliding too. */
+  console.log('\nReduced motion');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const still = await page.evaluate(() => ({
+    transition: getComputedStyle(document.querySelector('#toolbar .cx-btn')).transitionDuration,
+    scroll: window.__CX_MODULES.req('core/util.js').scrollBehavior(),
+  }));
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const moving = await page.evaluate(() => window.__CX_MODULES.req('core/util.js').scrollBehavior());
+  check('asked for less motion, the controls stop animating',
+    still.transition.split(',').every((d) => parseFloat(d) < 0.01), still.transition);
+  check('and a scroll the application makes jumps rather than glides — and glides again otherwise',
+    still.scroll === 'auto' && moving === 'smooth', `${still.scroll} / ${moving}`);
+
+  /* The System theme draws Dark or Light as the computer is set, and follows
+     it when it changes — without being chosen again. */
+  console.log('\nThe System theme');
+  const themeNow = await page.evaluate(() => window.__CX_MODULES.req('ui/theme.js').getTheme());
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.evaluate(() => window.__CX_MODULES.req('ui/theme.js').applyTheme('system', { persist: false, syncDoc: false }));
+  const onLight = await page.evaluate(() => document.documentElement.dataset.theme);
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.waitForTimeout(100);
+  const onDark = await page.evaluate(() => document.documentElement.dataset.theme);
+  const stillSystem = await page.evaluate(() => window.__CX_MODULES.req('ui/theme.js').getTheme());
+  check('System draws Light on a computer set to light', onLight === 'light', onLight);
+  check('and Dark the moment the computer changes, still on System', onDark === 'dark' && stillSystem === 'system', `${onDark} / ${stillSystem}`);
+  await page.evaluate((t) => window.__CX_MODULES.req('ui/theme.js').applyTheme(t, { persist: false, syncDoc: false }), themeNow);
+  await page.emulateMedia({ colorScheme: null });
+
   console.log('\nConsole');
   const meaningful = consoleErrors.filter((e) => !/favicon|fonts\.googleapis|net::ERR/i.test(e));
   check('no console errors', meaningful.length === 0, meaningful.slice(0, 4).join(' | '));

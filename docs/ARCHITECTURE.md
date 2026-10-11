@@ -2514,6 +2514,173 @@ its own graphics state so nothing on the page can move it. A request carries the
 signature of the administrator who raised it, whoever downloads it. The approval
 clearance signatures are BART's and stay blank.
 
+## Added with the performance pass
+
+### The published bundles are minified; the committed ones are not
+
+`tools/dist.js` minifies every bundle and stylesheet it publishes (esbuild,
+`minifyFile()`), after every literal it rewrites (`CALENDAR_BUNDLE`,
+`CALENDAR_CSS`) and before anything is named after its bytes, so the hash is of
+what is served. The repository's bundles stay the linker's readable output, and
+CI still compares them byte for byte with the source. Names are not kept: a
+reported failure records its area and message, never a stack, and `keepNames`
+cost the main bundle a twentieth of its size. esbuild is the one build-time
+dependency; `dist.js` refuses to run without it rather than publish bundles
+twice the size, so the deploy job runs `npm ci`. CI drives `smoke.js` and
+`smoke_calendar.js` once more against `dist/` (`CX_SITE=dist`), because the
+repository's copies are not what anybody downloads.
+
+### The Supabase client is fetched when a client is made
+
+`vendor/supabase.js` used to be a blocking tag ahead of the bundle, so every page
+— the plan included, which has no backend in any shape this is deployed in —
+parsed 200 kB of library before the timeline could start. `core/sdk.js` now
+injects it the first time `core/cloud.js` or `core/rc.js` makes a client, from
+their `init()`, which was already async and already after the desktop trial
+gate. `init()` shares one start between callers, so two of them during the
+download make one client, not two. The phone app still loads it by tag — its
+first screen is the calendar — and `loadSupabase()` then finds the global and
+fetches nothing. No page names the file in a tag any more, so `dist.js` and
+`desktop.js` only decide whether the file is shipped.
+
+### The calendar's stylesheet comes with its bundle
+
+Most of `css/calendar.css` styled only what the calendar bundle builds, and every
+page linked it. It is split: `css/rc.css` holds the rules that match only
+calendar-built elements (`.rc-*`, `.lae-*`, `#rc-frame` descendants) and is
+fetched by `ui/calendar_loader.js` with the bundle, which waits for both, so the
+calendar never draws unstyled. `css/calendar.css` keeps what the main page can
+draw (the workspace switch, the frame, the `.la-*` grid the timeline's pane also
+uses) and any rule whose move would let it win a tie it used to lose — `rc.css`
+loads later, so it wins every tie. `.rc-table td/th` stay for that reason: the
+look-ahead's tables are `.rc-table.la-grid`, and `.la-grid td` must win. The
+phone app and the desktop shell carry the calendar from the start and link
+`rc.css` directly. Adding a rule to `rc.css` that ties with one in
+`calendar.css` changes which one wins.
+
+### A policy asks who is asking once per query
+
+Every policy wraps `auth.uid()` and the identity helpers (`rc_is_admin()`,
+`rc_me()`, `rc_my_role()`, `is_admin()`) in a sub-select. Bare, Postgres calls
+them for every row the table holds — and they are `SECURITY DEFINER`, so they
+cannot be inlined: a read of `rc_la_cells` ran one `rc_people` query per cell.
+Wrapped, each is an InitPlan, evaluated once per statement. Both permission
+suites fail on a bare call, naming the policy. A helper that takes the row
+(`rc_can_act_for(person_id)`) is per row by nature and is left alone.
+
+### The look-ahead rings a bell; the polls only check on it
+
+`rc_la_beacon` is one row a trigger touches whenever an edit is logged or a
+reading is taken, published to Supabase Realtime. `onLookaheadChange()` in
+`core/rc.js` keeps one channel for the page; the editor and the calendar's view
+ask what changed the moment it rings, exactly as their polls did. It says only
+*that* something changed: Realtime applies the same policies, so it could not
+have been `rc_la_edits` (an administrator's), and it must not be
+`rc_lookahead_snapshots`, whose rows carry the whole grid. While the bell is
+connected the polls slow to a two-minute check rather than stopping — a table
+missing from the publication subscribes and never rings — and when the socket
+comes back after a drop every listener is called once. A ring is not a reason
+to forget reads (every listener asks with a read that is never remembered),
+but a newer revision is: the editor forgets what it remembered before it
+reloads, or a reload inside the thirty seconds drew the sheet as it was.
+
+### Every foreign key that names a calendar row has an index
+
+Retiring a person, a location, a category or a party asks Postgres for rows
+that still point at it, and so does every join along a key and every "what
+superseded this" in `rc_plan_current`. Without an index under the key each of
+those is a scan of the referencing table. `rc_schema.sql` indexes every foreign
+key that names a calendar row; the who-did-it stamps that point at
+`auth.users` are left alone — an account is never deleted under its rows and
+nothing is looked up by them, so an index there is write cost alone.
+`rc_permissions.sql` fails when a key arrives without one.
+
+### Paged reads ask for the count, then the rest together
+
+`selectAll()` asks for an exact count with its first page and fetches the other
+pages at once; a sheet of four pages was four round trips end to end. A page
+that comes back full after them — rows written between the count and the read —
+is followed one at a time, as before, so a stale count loses nothing. Every
+caller orders by a unique key, which is what makes the pages line up.
+
+### An edit redraws the days it touched
+
+The look-ahead editor's `redrawAfter()` takes an edit made of cell ops alone —
+typing, painting, a paste, a fill, an undo of any of those — and draws again
+only those days, every day whose staffing clash came or went, and the totals.
+A cell edit cannot change which rows are shown (the filter reads a row's own
+fields), so the grid's structure is what it was. Anything else — a row op, a
+clash count that changes the toolbar — is `draw()`. The grid keeps its node, and
+with it the keyboard: the trap about a redraw dropping focus no longer arises on
+the path every keystroke takes. `dayCell()` and `totalsRow()` are the one way a
+day or the totals are drawn, so the two paths cannot disagree.
+
+### The timeline draws the rows in view
+
+The layout already left out what is outside the visible dates. Objects, notes,
+actuals and baseline ghosts are now drawn only for the rows in view and 800 px
+either side (`CULL_MARGIN`); scrolling past half the margin draws the next band.
+The packing, the links and the baseline's counts still see the whole layout, so
+nothing about *where* anything goes depends on what is drawn. The selection and
+an object being revealed are drawn wherever they are, for the keyboard, a drag
+and the flash. The lane gutter is rebuilt only when what it shows changes. On
+sixty lanes of 2,400 objects a render went from 44 ms to 16.
+
+### Reading a sheet and comparing two readings are two modules
+
+`core/lookahead.js` reads: the grid as a calendar, its marks and names, who is
+away, and what it offers the timeline. Every bundle carries it.
+`core/la_register.js` stores a reading as rows and compares two —
+`rowsFrom()`, `classify()`, what changed for me — which only the calendar does,
+so it is in `calendar.bundle.js` and `test_dist.js` fails if it reaches the main
+or the phone bundle. The register is what `core/lookahead.js` began as, and it
+took that module's header with it. The other large modules were measured and
+left whole: the editor and the folder store are needed entire wherever they
+are used, and splitting `core/rc.js` would have meant exporting the client and
+`landed()` to its own long tail.
+
+### Lint and types catch mistakes, not preferences
+
+`npm run lint` (eslint.config.js) is the recommended rules — a name nothing
+defines, an import nothing reads, dead code — with arguments exempt, because a
+handler's signature is its caller's. An unused import is not cosmetic here: it is
+an edge in the graph the layering is checked against and can pull a module into
+a bundle. `npm run typecheck` reads the JSDoc as types (`checkJs`, no emit,
+`types/globals.d.ts` for what the page provides). A helper that destructures its
+options documents them with `?` on the optional ones; without that, every
+option without a default reads as required. Both run in CI. The first run found
+`store.setMeta()` dropping its options, which made renaming the project one
+undo step per keystroke.
+
+### The site keeps the timeline for when there is no network, never the plan
+
+`sw.js` keeps the page, the main bundle, the stylesheets it links, `config.js`
+and `phone.js`, so the timeline opens offline — in file mode the plan is already
+on the machine. It keeps neither the plan nor anything only the calendar needs:
+the calendar cannot work without its server, says so offline, and precaching
+its bundle or the Supabase client would download for everybody what only its
+users fetch. It leaves `m/` (the phone app's own worker) and `desktop/` (the
+update channel) to the network. Hashed files are answered from the cache, the
+page and anything unhashed from the network first. `dist.js` stamps the hashed
+names and a version derived from them, as it does for `m/sw.js`. It is not
+registered in the desktop app, whose page is on disk and whose updates are its
+own, nor from a `file://` page.
+
+### The System theme is Dark or Light, as the computer is
+
+`ui/theme.js` has a sixth choice that is not a sixth palette: System draws Dark
+or Light, whichever `prefers-color-scheme` says, and repaints when the computer
+changes. `getTheme()` answers `system`; the palette drawn is `palette(current)`,
+and `isLightTheme()` asks the palette. Dark stays the default. The phone app has
+followed the phone since it existed.
+
+### Motion follows the system's preference, in script as in CSS
+
+`base.css` has always cut every animation and transition under
+`prefers-reduced-motion`. A scroll started from script is out of its reach, so
+each asks `scrollBehavior()` in `core/util.js` and jumps rather than glides when
+less motion is wanted.
+
 ## What each suite covers
 
 `smoke.js` boots the real application in Chromium and checks rendering,
@@ -2524,7 +2691,12 @@ bar was actually worked over and the arrow measuring how far its edges moved,
 baseline comparison — down to measuring, at five zooms, that no ghost, and no reason
 written on one, is drawn over a bar or over another ghost — all eighteen dock panes,
 all five themes, every exporter (including PDF header validation) and reload
-persistence. **Any console error fails the run.**
+persistence — then a tall plan drawing only the rows in view, the page opening
+again with the network off, less motion and the System theme. It reads every
+request the page makes, so a page with no backend fetching the Supabase client,
+or the calendar's code before the calendar is opened, fails it. `CX_SITE=dist`
+drives it against a published copy instead of the repository. **Any console
+error fails the run.**
 
 `smoke_mobile.js` serves the repository over HTTP — a service worker needs a
 real origin — at a phone's size with touch, against the same stub backend as

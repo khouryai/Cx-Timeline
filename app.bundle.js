@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 60   Built: 2026-10-11T21:09:00.649Z
+ * Modules: 60   Built: 2026-10-11T21:25:23.975Z
  */
 (function () {
   'use strict';
@@ -391,6 +391,17 @@ __mods["core/util.js"] = function (__x, __req) {
     return tag === 'input' || tag === 'textarea' || tag === 'select' || n.isContentEditable === true;
   }
 
+  /**
+   * How a scroll the application makes should move: smoothly, unless the person
+   * has asked their system for less motion. CSS honours that on its own (base.css
+   * cuts every transition and animation); a scroll started from script does not,
+   * so each one asks here.
+   */
+  function scrollBehavior() {
+    const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    return reduce ? 'auto' : 'smooth';
+  }
+
   /** Sort comparator factory for a numeric or string field. */
   function by(key, dir = 1) {
     return (a, b) => {
@@ -437,6 +448,7 @@ __mods["core/util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "IS_MAC", { get: () => IS_MAC, enumerable: true });
   Object.defineProperty(__x, "hasMod", { get: () => hasMod, enumerable: true });
   Object.defineProperty(__x, "isTyping", { get: () => isTyping, enumerable: true });
+  Object.defineProperty(__x, "scrollBehavior", { get: () => scrollBehavior, enumerable: true });
   Object.defineProperty(__x, "by", { get: () => by, enumerable: true });
 };
 
@@ -13290,7 +13302,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
    * Imports: util, dates, model, store, query, viewport, layout, connectors, icons.
    */
 
-  const { el, clear, rafBatch, withAlpha, readableInk, clamp } = __req("core/util.js");
+  const { el, clear, rafBatch, withAlpha, readableInk, clamp, scrollBehavior } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { ticks, fmtDate, toISO } = __req("core/dates.js");
   const { TYPES, statusOf, objectColor, effectiveToday } = __req("core/model.js");
@@ -14790,7 +14802,7 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     const rect = lastLayout?.byId.get(id);
     if (rect) {
       const target = rect.y - dom.scroll.clientHeight / 2 + rect.h / 2;
-      dom.scroll.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+      dom.scroll.scrollTo({ top: Math.max(0, target), behavior: scrollBehavior() });
     }
 
     const node = objectNodes.get(id);
@@ -15933,9 +15945,33 @@ __mods["ui/theme.js"] = function (__x, __req) {
     { id: 'engineering', label: 'Engineering', icon: 'cpu', description: 'High-contrast instrument panel, monospace UI.' },
     { id: 'blueprint', label: 'Blueprint', icon: 'grid', description: 'Drafting-table blue with cyan rules.' },
     { id: 'presentation', label: 'Presentation', icon: 'maximize', description: 'Bright and low-chrome for customer meetings.' },
+    // Not a sixth palette: Dark or Light, whichever the computer is set to, and
+    // changing when it does — at dusk, say, on a machine that switches itself.
+    { id: 'system', label: 'System', icon: 'monitor', description: 'Dark or Light, as the computer is set, and changing with it.' },
   ];
 
   let current = 'dark';
+
+  const darkScheme = typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null;
+
+  /** The palette a theme draws with: System is whichever of Dark and Light the computer asks for. */
+  function palette(id) {
+    if (id !== 'system') return id;
+    return darkScheme && !darkScheme.matches ? 'light' : 'dark';
+  }
+
+  /** Draw `current` — on a choice, and again when the computer's scheme moves under System. */
+  function paint() {
+    document.documentElement.setAttribute('data-theme', palette(current));
+    // Give the browser a frame to recompute custom properties before we read
+    // them back for contrast decisions.
+    requestAnimationFrame(() => invalidateAll());
+    emit(EV.THEME_CHANGED, { theme: current });
+  }
+
+  darkScheme?.addEventListener?.('change', () => {
+    if (current === 'system') paint();
+  });
 
   function initTheme() {
     const saved = getPref('theme');
@@ -15954,15 +15990,10 @@ __mods["ui/theme.js"] = function (__x, __req) {
   function applyTheme(id, { persist = true, syncDoc = true } = {}) {
     const theme = THEMES.find((t) => t.id === id) ? id : 'dark';
     current = theme;
-    document.documentElement.setAttribute('data-theme', theme);
 
     if (persist) setPref('theme', theme);
     if (syncDoc && getDoc()?.settings?.theme !== theme) setSetting('theme', theme, 'Change theme');
-
-    // Give the browser a frame to recompute custom properties before we read
-    // them back for contrast decisions.
-    requestAnimationFrame(() => invalidateAll());
-    emit(EV.THEME_CHANGED, { theme });
+    paint();
   }
 
   /** Step to the next theme in the list — bound to a toolbar button. */
@@ -15973,7 +16004,8 @@ __mods["ui/theme.js"] = function (__x, __req) {
 
   /** True for themes whose surfaces are light — used by exporters. */
   function isLightTheme(id = current) {
-    return id === 'light' || id === 'presentation';
+    const drawn = palette(id);
+    return drawn === 'light' || drawn === 'presentation';
   }
 
   Object.defineProperty(__x, "THEMES", { get: () => THEMES, enumerable: true });
@@ -34152,6 +34184,10 @@ __mods["main.js"] = function (__x, __req) {
     // cannot leave anybody unable to open the application. Absent in a browser.
     window.CX_SHELL?.confirmHealthy?.();
 
+    // The timeline kept for when there is no network (sw.js). After the gate
+    // above, like everything that is not needed to open the plan.
+    installOfflineShell();
+
     // The resource calendar is registered here and built on first use — after
     // the line above, deliberately. It needs a network and an account, and the
     // trial gate must not be waiting on either: a calendar that could not reach
@@ -34186,6 +34222,22 @@ __mods["main.js"] = function (__x, __req) {
     // it, and last, so booting is never held up by a question.
     const pen = await startupPen;
     if (pen) await cmd.announceStartupPen(pen);
+  }
+
+  /**
+   * Register the site's service worker, which keeps the timeline (never the plan)
+   * so it opens with no network — the plan in file mode is already on this
+   * machine. Not in the desktop app, whose page is on disk already and whose
+   * updates are its own (tools/shell/loader.js), and not from a file:// page,
+   * which cannot have one.
+   */
+  function installOfflineShell() {
+    if (window.CX_SHELL || desktop.isAvailable()) return;
+    if (!('serviceWorker' in navigator) || !/^https?:$/.test(location.protocol)) return;
+    navigator.serviceWorker.register('sw.js', { scope: './' }).catch((err) => {
+      // Not fatal: the timeline runs without it, it only cannot open offline.
+      console.warn('[cx-timeline] the service worker did not register:', err.message);
+    });
   }
 
   /** Fade out the boot splash. Safe to call more than once. */

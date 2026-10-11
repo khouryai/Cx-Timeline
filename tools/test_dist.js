@@ -225,6 +225,22 @@ check('the published bundle is minified — well under the committed one',
   published > 100000 && published < committed * 0.6, `${Math.round(published / 1024)} kB of ${Math.round(committed / 1024)} kB`);
 check('and still says what it is, in its banner', /\/\*![\s*]*CX Timeline/.test(read(hashedBundle || '').slice(0, 400)));
 
+/* The site's service worker keeps the timeline for when there is no network:
+   by the names this deploy wrote, stamped, and nothing the calendar alone
+   needs — nor the plan, which no worker ever holds. */
+const siteWorker = read('sw.js');
+const sitePrecache = (/const PRECACHE = \[([\s\S]*?)\];/.exec(siteWorker)?.[1] || '')
+  .split(',').map((x) => x.trim().replace(/^'\.\/|'$/g, '')).filter(Boolean);
+check('the site publishes a service worker, stamped with a version', /const VERSION = '[0-9a-f]{10}';/.test(siteWorker));
+check('it keeps the page, the main bundle and every stylesheet the page links, by their hashed names',
+  sitePrecache.includes(hashedBundle) && sitePrecache.filter((p) => p.startsWith('css/')).length === 7
+    && sitePrecache.every((p) => exists(p)), sitePrecache.join(' '));
+check('and nothing only the calendar needs — not its bundle, its stylesheet or the Supabase client',
+  !sitePrecache.some((p) => /^calendar\.|css\/rc\.|vendor\//.test(p)));
+check('nor anything under m/ or desktop/, which it leaves to their own answers',
+  /ELSEWHERE = \['m\/', 'desktop\/'\]/.test(siteWorker));
+check('and a browser checks it for updates on every open', /\/sw\.js\n\s*Cache-Control: no-cache/.test(read('_headers')));
+
 const policy = read('_headers');
 check('they are cached forever, because the name changes when the bytes do',
   /\/app\.\*\.js\n\s*Cache-Control: public, max-age=31536000, immutable/.test(policy));

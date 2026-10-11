@@ -33,6 +33,11 @@
 /index.html
   Cache-Control: no-cache
 
+# The site's service worker: a browser checks it for updates against exactly
+# this, so a deploy is seen on the next open.
+/sw.js
+  Cache-Control: no-cache
+
 # The phone app (published in the calendar shape only). The page, the manifest
 # and the service worker are never cached by HTTP: the worker must see a new
 # deploy on the next open, and a browser checks a worker script for updates

@@ -20,9 +20,33 @@ export const THEMES = [
   { id: 'engineering', label: 'Engineering', icon: 'cpu', description: 'High-contrast instrument panel, monospace UI.' },
   { id: 'blueprint', label: 'Blueprint', icon: 'grid', description: 'Drafting-table blue with cyan rules.' },
   { id: 'presentation', label: 'Presentation', icon: 'maximize', description: 'Bright and low-chrome for customer meetings.' },
+  // Not a sixth palette: Dark or Light, whichever the computer is set to, and
+  // changing when it does — at dusk, say, on a machine that switches itself.
+  { id: 'system', label: 'System', icon: 'monitor', description: 'Dark or Light, as the computer is set, and changing with it.' },
 ];
 
 let current = 'dark';
+
+const darkScheme = typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null;
+
+/** The palette a theme draws with: System is whichever of Dark and Light the computer asks for. */
+function palette(id) {
+  if (id !== 'system') return id;
+  return darkScheme && !darkScheme.matches ? 'light' : 'dark';
+}
+
+/** Draw `current` — on a choice, and again when the computer's scheme moves under System. */
+function paint() {
+  document.documentElement.setAttribute('data-theme', palette(current));
+  // Give the browser a frame to recompute custom properties before we read
+  // them back for contrast decisions.
+  requestAnimationFrame(() => invalidateAll());
+  emit(EV.THEME_CHANGED, { theme: current });
+}
+
+darkScheme?.addEventListener?.('change', () => {
+  if (current === 'system') paint();
+});
 
 export function initTheme() {
   const saved = getPref('theme');
@@ -41,15 +65,10 @@ export function getTheme() {
 export function applyTheme(id, { persist = true, syncDoc = true } = {}) {
   const theme = THEMES.find((t) => t.id === id) ? id : 'dark';
   current = theme;
-  document.documentElement.setAttribute('data-theme', theme);
 
   if (persist) setPref('theme', theme);
   if (syncDoc && getDoc()?.settings?.theme !== theme) setSetting('theme', theme, 'Change theme');
-
-  // Give the browser a frame to recompute custom properties before we read
-  // them back for contrast decisions.
-  requestAnimationFrame(() => invalidateAll());
-  emit(EV.THEME_CHANGED, { theme });
+  paint();
 }
 
 /** Step to the next theme in the list — bound to a toolbar button. */
@@ -60,5 +79,6 @@ export function cycleTheme() {
 
 /** True for themes whose surfaces are light — used by exporters. */
 export function isLightTheme(id = current) {
-  return id === 'light' || id === 'presentation';
+  const drawn = palette(id);
+  return drawn === 'light' || drawn === 'presentation';
 }

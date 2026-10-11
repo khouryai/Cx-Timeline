@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 20   Built: 2026-10-11T21:09:00.752Z
+ * Modules: 20   Built: 2026-10-11T21:25:24.084Z
  */
 (function () {
   'use strict';
@@ -579,6 +579,17 @@ __mods["core/util.js"] = function (__x, __req) {
     return tag === 'input' || tag === 'textarea' || tag === 'select' || n.isContentEditable === true;
   }
 
+  /**
+   * How a scroll the application makes should move: smoothly, unless the person
+   * has asked their system for less motion. CSS honours that on its own (base.css
+   * cuts every transition and animation); a scroll started from script does not,
+   * so each one asks here.
+   */
+  function scrollBehavior() {
+    const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    return reduce ? 'auto' : 'smooth';
+  }
+
   /** Sort comparator factory for a numeric or string field. */
   function by(key, dir = 1) {
     return (a, b) => {
@@ -625,6 +636,7 @@ __mods["core/util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "IS_MAC", { get: () => IS_MAC, enumerable: true });
   Object.defineProperty(__x, "hasMod", { get: () => hasMod, enumerable: true });
   Object.defineProperty(__x, "isTyping", { get: () => isTyping, enumerable: true });
+  Object.defineProperty(__x, "scrollBehavior", { get: () => scrollBehavior, enumerable: true });
   Object.defineProperty(__x, "by", { get: () => by, enumerable: true });
 };
 
@@ -8514,7 +8526,7 @@ __mods["mobile/lookahead.js"] = function (__x, __req) {
    * Imports: util, dates, rc, core/lookahead, icons, components, rc_util.
    */
 
-  const { el, clear } = __req("core/util.js");
+  const { el, clear, scrollBehavior } = __req("core/util.js");
   const { toISO, addDays, DAYS_SHORT } = __req("core/dates.js");
   const rc = __req("core/rc.js");
   const { agendaFor } = __req("core/lookahead.js");
@@ -8647,7 +8659,7 @@ __mods["mobile/lookahead.js"] = function (__x, __req) {
       selected = iso;
       draw();
       strip.querySelector('[aria-selected="true"]')
-        ?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+        ?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: scrollBehavior() });
     }
 
     function draw() {

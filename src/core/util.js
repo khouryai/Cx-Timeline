@@ -364,6 +364,17 @@ export function isTyping(target) {
   return tag === 'input' || tag === 'textarea' || tag === 'select' || n.isContentEditable === true;
 }
 
+/**
+ * How a scroll the application makes should move: smoothly, unless the person
+ * has asked their system for less motion. CSS honours that on its own (base.css
+ * cuts every transition and animation); a scroll started from script does not,
+ * so each one asks here.
+ */
+export function scrollBehavior() {
+  const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  return reduce ? 'auto' : 'smooth';
+}
+
 /** Sort comparator factory for a numeric or string field. */
 export function by(key, dir = 1) {
   return (a, b) => {
