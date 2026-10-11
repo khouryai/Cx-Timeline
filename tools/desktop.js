@@ -41,7 +41,7 @@ const SHELL_OUT = path.join(ROOT, 'dist-desktop');
 const PLACEHOLDER = '__CHANNEL__';
 
 /** Loaded in this order by `index.html`, so concatenated in this order too. */
-const STYLES = ['tokens.css', 'base.css', 'components.css', 'layout.css', 'timeline.css', 'notes.css', 'calendar.css'];
+const STYLES = ['tokens.css', 'base.css', 'components.css', 'layout.css', 'timeline.css', 'notes.css', 'calendar.css', 'rc.css'];
 
 /** `config.js` for the desktop build. The *plan* has no backend and never had. */
 const BLANK_CONFIG = `/**
@@ -263,22 +263,18 @@ function shellHtml(channel, withCalendar) {
   if (marked === html) fail('could not mark the stylesheet links');
   html = marked;
 
-  /* The vendored client goes with the calendar, and only with it.
-     The plan never needs one in this build — it has no backend in any desktop
-     shape — so without the calendar the script is not shipped and its tag must
-     go with it, or the window opens on a 404 for a file that is not there. */
-  if (!withCalendar) {
-    const noVendor = html.replace(
-      /\n\s*<!--\s*\n\s*The Supabase client[\s\S]*?-->\s*\n\s*<script src="vendor\/supabase\.js"><\/script>/,
-      '\n    <!-- No backend in this desktop build: the Supabase client is not shipped. -->'
-    );
-    if (noVendor === html) fail('could not remove the Supabase script tag');
-    html = noVendor;
-  } else if (!html.includes('<script src="vendor/supabase.js"></script>')) {
-    // Belt and braces: the calendar cannot start without the global this tag
-    // defines, and a moved tag would produce a build that looks complete.
-    fail('the Supabase script tag is not where the calendar shape expects it');
-  }
+  /* The site fetches css/rc.css with the calendar bundle; the shell's own
+     bundle carries the calendar from the start, so the loader never fetches
+     either, and the sheet is linked here instead — after calendar.css, the
+     order the site ends up with. */
+  const calendarLink = '<link rel="stylesheet" href="css/calendar.css" data-shell="shipped" />';
+  if (!html.includes(calendarLink)) fail('could not find the calendar stylesheet link');
+  html = html.replace(calendarLink, `${calendarLink}\n    <link rel="stylesheet" href="css/rc.css" data-shell="shipped" />`);
+
+  /* The vendored client goes with the calendar, and only with it — as a file,
+     never a tag: core/sdk.js fetches it when the calendar first makes a client,
+     so a shell without one has nothing on its page to 404 for. */
+  if (html.includes('vendor/supabase.js')) fail('index.html loads the Supabase client by a tag; core/sdk.js fetches it');
 
   /* A desktop is never a phone, and the shell ships no phone app to send one
      to — so `phone.js` is not in it, and neither is the tag asking for it. */

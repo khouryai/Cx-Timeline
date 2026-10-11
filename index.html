@@ -78,12 +78,10 @@
     <script src="phone.js"></script>
 
     <!--
-      The Supabase client, vendored rather than fetched from a CDN so the
-      application still has no runtime network dependency and keeps working if
-      a CDN is blocked or goes away. Loaded ahead of the bundle, which reads it
-      as a global; the module linker never sees it.
+      The Supabase client is vendored rather than fetched from a CDN, and is
+      not loaded here: src/core/sdk.js fetches it the first time a client is
+      made, so a page that never signs in never downloads it.
     -->
-    <script src="vendor/supabase.js"></script>
 
     <!--
       The application is authored as ES modules in src/ and linked into this

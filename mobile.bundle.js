@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 19   Built: 2026-10-06T21:38:53.564Z
+ * Modules: 20   Built: 2026-10-11T19:58:29.585Z
  */
 (function () {
   'use strict';
@@ -788,6 +788,62 @@ __mods["core/events.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// core/sdk.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/sdk.js"] = function (__x, __req) {
+  /**
+   * The vendored Supabase client, fetched the first time a client is made.
+   *
+   * It used to be a plain script tag ahead of the bundle, so every page paid for
+   * 200 kB of a library before the timeline could start — including the plan,
+   * which has no backend in any shape this is deployed in. Now `core/cloud.js`
+   * and `core/rc.js` ask for it in their `init()`, which is already async and
+   * already off the boot path, and a page that never makes a client never
+   * downloads it.
+   *
+   * Where a page loads it itself — the phone app's `m/index.html` does, because
+   * its first screen is the calendar — the global is already there and nothing
+   * is fetched. The file stays where it was (`vendor/`, cached forever), so the
+   * desktop shell and the published site resolve the same relative name.
+   *
+   * Imports: nothing.
+   */
+
+  const SDK_SRC = 'vendor/supabase.js';
+
+  let loading = null;
+
+  const present = () => typeof window !== 'undefined'
+    && window.supabase && typeof window.supabase.createClient === 'function';
+
+  /**
+   * Resolves to the `supabase` global, or to null when it cannot be had — no
+   * DOM, no file, no network. Never rejects: both callers degrade to "not
+   * signed in", which is what a missing client has always meant.
+   */
+  function loadSupabase() {
+    if (present()) return Promise.resolve(window.supabase);
+    if (typeof document === 'undefined') return Promise.resolve(null);
+    if (loading) return loading;
+    loading = new Promise((resolve) => {
+      const script = document.createElement('script');
+      script.src = SDK_SRC;
+      script.async = true;
+      script.onload = () => resolve(present() ? window.supabase : null);
+      script.onerror = () => resolve(null);
+      document.head.appendChild(script);
+    }).then((sdk) => {
+      // A failure is not remembered: the next sign-in tries the network again.
+      if (!sdk) loading = null;
+      return sdk;
+    });
+    return loading;
+  }
+
+  Object.defineProperty(__x, "loadSupabase", { get: () => loadSupabase, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // core/rc.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["core/rc.js"] = function (__x, __req) {
@@ -824,10 +880,11 @@ __mods["core/rc.js"] = function (__x, __req) {
    * whole; this is rows, written one at a time, because the reports have to
    * answer arbitrary date ranges and two people have to edit at once.
    *
-   * Imports: util, events.
+   * Imports: util, events, sdk.
    */
 
   const { emit, EV } = __req("core/events.js");
+  const { loadSupabase } = __req("core/sdk.js");
 
   /* ── Configuration ─────────────────────────────────────────────────────── */
 
@@ -863,12 +920,23 @@ __mods["core/rc.js"] = function (__x, __req) {
    * all, so a backend that is unreachable degrades to "not signed in" and the
    * Resource Calendar simply says so when you switch to it.
    */
-  async function init() {
+  function init() {
+    if (ready) return Promise.resolve(user);
+    // One client, however many callers ask while the SDK is still on its way.
+    if (!starting) starting = start().finally(() => { starting = null; });
+    return starting;
+  }
+
+  let starting = null;
+
+  async function start() {
     if (ready) return user;
     if (!isConfigured()) return null;
 
-    const sdk = typeof window !== 'undefined' ? window.supabase : null;
-    if (!sdk || typeof sdk.createClient !== 'function') {
+    // Fetched here, not by a script tag: a page that never makes a client
+    // never downloads one (see core/sdk.js).
+    const sdk = await loadSupabase();
+    if (!sdk) {
       console.warn('[cx-timeline] the Supabase client did not load; the resource calendar is unavailable');
       return null;
     }

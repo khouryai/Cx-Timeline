@@ -22,6 +22,11 @@ import url from 'node:url';
 pinNodeClock();
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
+/* The site the browser opens: the repository by default, or a published copy
+   (`CX_SITE=dist`), so the minified, renamed files are driven exactly as the
+   source is. Its config.js is the repository's either way — this suite is the
+   local mode, whatever shape the copy was published in. */
+const SITE = path.resolve(ROOT, process.env.CX_SITE || '.');
 const PORT = 8231;
 
 const MIME = {
@@ -36,7 +41,8 @@ function serve() {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       const requested = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-      const file = path.join(ROOT, requested === '/' ? 'index.html' : requested.replace(/^\/+/, ''));
+      const rel = requested === '/' ? 'index.html' : requested.replace(/^\/+/, '');
+      const file = path.join(rel === 'config.js' ? ROOT : SITE, rel);
       fs.readFile(file, (err, data) => {
         if (err) {
           res.writeHead(404).end('nf');
@@ -71,10 +77,21 @@ async function main() {
   });
   page.on('pageerror', (err) => consoleErrors.push(`pageerror: ${err.message}`));
 
+  const requested = [];
+  page.on('request', (req) => requested.push(new URL(req.url()).pathname));
+
   console.log('\nBoot');
   await page.goto(`http://localhost:${PORT}/index.html`, { waitUntil: 'load' });
   await page.waitForSelector('.tl-root', { timeout: 15000 });
   await page.waitForTimeout(1400);
+
+  /* The timeline is most of what anybody opens, and it needs neither the
+     Supabase client (no backend here, and none for the plan in any shape) nor
+     the calendar's own styling — both are fetched when something asks. */
+  check('the Supabase client is not downloaded by a page with no backend',
+    !requested.some((p) => p.endsWith('/vendor/supabase.js')), requested.filter((p) => p.includes('vendor')).join(', '));
+  check('nor the calendar\u2019s stylesheet, nor its bundle, before the calendar is opened',
+    !requested.some((p) => /\/css\/rc\.|\/calendar\.(bundle|[0-9a-f]{10})\.js$/.test(p)));
 
   check('splash cleared', (await page.locator('#boot').count()) === 0);
   check('sidebar rendered', (await page.locator('#sidenav .nav-link').count()) > 8);

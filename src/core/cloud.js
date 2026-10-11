@@ -27,10 +27,11 @@
  * optimistic revision check, so two people editing one plan get told about the
  * collision instead of quietly overwriting each other.
  *
- * Imports: util, events.
+ * Imports: util, events, sdk.
  */
 
 import { emit, EV } from './events.js';
+import { loadSupabase } from './sdk.js';
 
 /* ── Configuration ─────────────────────────────────────────────────────── */
 
@@ -65,12 +66,23 @@ let ready = false;
  * Resolves to the signed-in user, or null. Never throws: a backend that is
  * down must degrade to "not signed in", not to a blank page.
  */
-export async function init() {
+export function init() {
+  if (ready) return Promise.resolve(user);
+  // One client, however many callers ask while the SDK is still on its way.
+  if (!starting) starting = start().finally(() => { starting = null; });
+  return starting;
+}
+
+let starting = null;
+
+async function start() {
   if (ready) return user;
   if (!isConfigured()) return null;
 
-  const sdk = typeof window !== 'undefined' ? window.supabase : null;
-  if (!sdk || typeof sdk.createClient !== 'function') {
+  // Fetched here, not by a script tag: a page that never makes a client
+  // never downloads one (see core/sdk.js).
+  const sdk = await loadSupabase();
+  if (!sdk) {
     console.warn('[cx-timeline] the Supabase client did not load; running local-only');
     return null;
   }

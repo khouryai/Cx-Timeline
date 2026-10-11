@@ -127,6 +127,11 @@ The build writes these into `config.js`, so the keys live in Cloudflare rather
 than in the repository. The build **fails** if they are missing, rather than
 publishing a site nobody can sign in to.
 
+`build:dist` minifies what it publishes, with esbuild — the one build-time
+dependency, pinned in `package.json`. Cloudflare's builder installs it from the
+lockfile before running the build command; anywhere else, run `npm ci` first.
+The build **fails** without it, rather than publishing bundles twice the size.
+
 > **If the build says `[ERROR] Asset too large`**, wrangler is uploading the
 > repository root instead of `dist/` — it generates its own config when it
 > cannot find one, and that config points at `.`, which sweeps in

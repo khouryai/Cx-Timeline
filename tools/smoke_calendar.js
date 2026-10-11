@@ -37,6 +37,10 @@ import url from 'node:url';
 pinNodeClock();
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
+/* The site the browser opens: the repository, or a published copy
+   (`CX_SITE=dist`) — the minified bundles and the calendar's stylesheet fetched
+   by its hashed name. config.js is stubbed below either way. */
+const SITE = path.resolve(ROOT, process.env.CX_SITE || '.');
 
 let passed = 0;
 const failures = [];
@@ -214,7 +218,7 @@ async function main() {
   await page.addInitScript(fakeFolder);
   await page.addInitScript(`window.__rcSchemaVersion = ${SCHEMA_VERSION};`);
   await page.addInitScript(fakeSdk);
-  const url_ = 'file://' + path.join(ROOT, 'index.html');
+  const url_ = 'file://' + path.join(SITE, 'index.html');
 
   /* ── The timeline still owns the application ──────────────────────────── */
   console.log('\nThe timeline is unaffected');
@@ -228,6 +232,8 @@ async function main() {
     await page.evaluate(() => document.body.dataset.workspace !== 'calendar'));
   check('the calendar stage is empty until asked for',
     await page.evaluate(() => document.getElementById('rc-frame').children.length === 0));
+  check('and its stylesheet is not on the page yet',
+    await page.evaluate(() => ![...document.styleSheets].some((sh) => /\/css\/rc\./.test(sh.href || ''))));
 
   /* ── The switch ───────────────────────────────────────────────────────── */
   console.log('\nSwitching to the calendar');
@@ -241,6 +247,9 @@ async function main() {
   check('the timeline canvas is hidden, not destroyed',
     await page.evaluate(() => document.querySelectorAll('#canvas-frame .tl-obj').length > 8));
   check('it asks for an account', (await page.locator('#rc-frame .rc-signin').count()) === 1);
+  check('its stylesheet came with it, and is applied — the head is a flex row',
+    await page.evaluate(() => [...document.styleSheets].some((sh) => /\/css\/rc\./.test(sh.href || ''))
+      && getComputedStyle(document.querySelector('#rc-frame .rc-head')).display === 'flex'));
   check('the dock is out of the way', !(await page.locator('#dock').isVisible()));
 
   /* Switching back must cost nothing — the canvas was never unmounted. */

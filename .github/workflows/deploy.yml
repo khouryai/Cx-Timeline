@@ -63,9 +63,11 @@ jobs:
         env:
           RC_SUPABASE_URL: ${{ secrets.RC_SUPABASE_URL }}
           RC_SUPABASE_ANON_KEY: ${{ secrets.RC_SUPABASE_ANON_KEY }}
-        # No `npm ci`: the build needs nothing from node_modules, and the only
-        # dependency is the browser the test suites drive.
-        run: npm run build:dist
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        # `npm ci` for the minifier tools/dist.js runs over the published copy —
+        # it refuses to publish without it rather than doubling every download.
+        # No browser: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD keeps the install small.
+        run: npm ci && npm run build:dist
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 59   Built: 2026-10-06T21:38:53.447Z
+ * Modules: 60   Built: 2026-10-11T19:58:29.482Z
  */
 (function () {
   'use strict';
@@ -2938,6 +2938,62 @@ __mods["core/model.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// core/sdk.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/sdk.js"] = function (__x, __req) {
+  /**
+   * The vendored Supabase client, fetched the first time a client is made.
+   *
+   * It used to be a plain script tag ahead of the bundle, so every page paid for
+   * 200 kB of a library before the timeline could start — including the plan,
+   * which has no backend in any shape this is deployed in. Now `core/cloud.js`
+   * and `core/rc.js` ask for it in their `init()`, which is already async and
+   * already off the boot path, and a page that never makes a client never
+   * downloads it.
+   *
+   * Where a page loads it itself — the phone app's `m/index.html` does, because
+   * its first screen is the calendar — the global is already there and nothing
+   * is fetched. The file stays where it was (`vendor/`, cached forever), so the
+   * desktop shell and the published site resolve the same relative name.
+   *
+   * Imports: nothing.
+   */
+
+  const SDK_SRC = 'vendor/supabase.js';
+
+  let loading = null;
+
+  const present = () => typeof window !== 'undefined'
+    && window.supabase && typeof window.supabase.createClient === 'function';
+
+  /**
+   * Resolves to the `supabase` global, or to null when it cannot be had — no
+   * DOM, no file, no network. Never rejects: both callers degrade to "not
+   * signed in", which is what a missing client has always meant.
+   */
+  function loadSupabase() {
+    if (present()) return Promise.resolve(window.supabase);
+    if (typeof document === 'undefined') return Promise.resolve(null);
+    if (loading) return loading;
+    loading = new Promise((resolve) => {
+      const script = document.createElement('script');
+      script.src = SDK_SRC;
+      script.async = true;
+      script.onload = () => resolve(present() ? window.supabase : null);
+      script.onerror = () => resolve(null);
+      document.head.appendChild(script);
+    }).then((sdk) => {
+      // A failure is not remembered: the next sign-in tries the network again.
+      if (!sdk) loading = null;
+      return sdk;
+    });
+    return loading;
+  }
+
+  Object.defineProperty(__x, "loadSupabase", { get: () => loadSupabase, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // core/cloud.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["core/cloud.js"] = function (__x, __req) {
@@ -2970,10 +3026,11 @@ __mods["core/cloud.js"] = function (__x, __req) {
    * optimistic revision check, so two people editing one plan get told about the
    * collision instead of quietly overwriting each other.
    *
-   * Imports: util, events.
+   * Imports: util, events, sdk.
    */
 
   const { emit, EV } = __req("core/events.js");
+  const { loadSupabase } = __req("core/sdk.js");
 
   /* ── Configuration ─────────────────────────────────────────────────────── */
 
@@ -3008,12 +3065,23 @@ __mods["core/cloud.js"] = function (__x, __req) {
    * Resolves to the signed-in user, or null. Never throws: a backend that is
    * down must degrade to "not signed in", not to a blank page.
    */
-  async function init() {
+  function init() {
+    if (ready) return Promise.resolve(user);
+    // One client, however many callers ask while the SDK is still on its way.
+    if (!starting) starting = start().finally(() => { starting = null; });
+    return starting;
+  }
+
+  let starting = null;
+
+  async function start() {
     if (ready) return user;
     if (!isConfigured()) return null;
 
-    const sdk = typeof window !== 'undefined' ? window.supabase : null;
-    if (!sdk || typeof sdk.createClient !== 'function') {
+    // Fetched here, not by a script tag: a page that never makes a client
+    // never downloads one (see core/sdk.js).
+    const sdk = await loadSupabase();
+    if (!sdk) {
       console.warn('[cx-timeline] the Supabase client did not load; running local-only');
       return null;
     }
@@ -16540,10 +16608,11 @@ __mods["core/rc.js"] = function (__x, __req) {
    * whole; this is rows, written one at a time, because the reports have to
    * answer arbitrary date ranges and two people have to edit at once.
    *
-   * Imports: util, events.
+   * Imports: util, events, sdk.
    */
 
   const { emit, EV } = __req("core/events.js");
+  const { loadSupabase } = __req("core/sdk.js");
 
   /* ── Configuration ─────────────────────────────────────────────────────── */
 
@@ -16579,12 +16648,23 @@ __mods["core/rc.js"] = function (__x, __req) {
    * all, so a backend that is unreachable degrades to "not signed in" and the
    * Resource Calendar simply says so when you switch to it.
    */
-  async function init() {
+  function init() {
+    if (ready) return Promise.resolve(user);
+    // One client, however many callers ask while the SDK is still on its way.
+    if (!starting) starting = start().finally(() => { starting = null; });
+    return starting;
+  }
+
+  let starting = null;
+
+  async function start() {
     if (ready) return user;
     if (!isConfigured()) return null;
 
-    const sdk = typeof window !== 'undefined' ? window.supabase : null;
-    if (!sdk || typeof sdk.createClient !== 'function') {
+    // Fetched here, not by a script tag: a page that never makes a client
+    // never downloads one (see core/sdk.js).
+    const sdk = await loadSupabase();
+    if (!sdk) {
       console.warn('[cx-timeline] the Supabase client did not load; the resource calendar is unavailable');
       return null;
     }
@@ -34578,20 +34658,27 @@ __mods["ui/calendar_loader.js"] = function (__x, __req) {
    * `tools/build.js` puts everything only the calendar needs into
    * `calendar.bundle.js`, registering into the main bundle's module table, so the
    * timeline's own page does not carry a second application nobody on it is
-   * using. `tools/dist.js` renames the file after its contents and rewrites the
-   * name below in the published main bundle, which is why it is one literal.
+   * using. Its stylesheet, `css/rc.css`, comes with it for the same reason —
+   * it is most of the calendar's styling — and the calendar is not built until
+   * both have arrived, so it never draws unstyled. `tools/dist.js` renames both
+   * files after their contents and rewrites the names below in the published
+   * main bundle, which is why each is one literal.
    *
    * Where the calendar is already registered — the desktop payload carries both
    * bundles as one script, because an installed shell's loader predates the
-   * split and knows about one — nothing is fetched at all.
+   * split and knows about one, and carries every stylesheet with them — nothing
+   * is fetched at all.
    *
    * Imports: nothing.
    */
 
   const CALENDAR_BUNDLE = 'calendar.bundle.js';
+  const CALENDAR_CSS = 'css/rc.css';
   const ENTRY = 'ui/rc.js';
 
   let loading = null;
+  /** rc.css: null until this loader asks for it, then 'failed' or 'loaded'. */
+  let sheet = null;
 
   /** Resolves to the calendar's `ui/rc.js` module, loading it once. */
   function loadCalendar() {
@@ -34602,19 +34689,42 @@ __mods["ui/calendar_loader.js"] = function (__x, __req) {
         reject(new Error('the module table is missing — the page is not running the built bundle'));
         return;
       }
-      if (registry.mods[ENTRY]) {
+      /* Registered before anything was asked for is the desktop payload, which
+         carries the stylesheets too. Registered after a fetch whose stylesheet
+         failed is a retry, which must fetch the sheet again but never run the
+         bundle twice. */
+      const needScript = !registry.mods[ENTRY];
+      const needSheet = needScript || sheet === 'failed';
+      if (!needScript && !needSheet) {
         resolve(registry.req(ENTRY));
         return;
       }
-      const script = document.createElement('script');
-      script.src = CALENDAR_BUNDLE;
-      script.async = true;
-      script.onload = () => {
+      const script = !needScript ? Promise.resolve() : new Promise((done, fail) => {
+        const tag = document.createElement('script');
+        tag.src = CALENDAR_BUNDLE;
+        tag.async = true;
+        tag.onload = done;
+        tag.onerror = () => fail(new Error('The calendar could not be downloaded. Check the connection and open it again.'));
+        document.head.appendChild(tag);
+      });
+      const styles = new Promise((done, fail) => {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = CALENDAR_CSS;
+        link.onload = () => { sheet = 'loaded'; done(); };
+        link.onerror = () => {
+          // A retry must not leave a second copy of a sheet that never arrived.
+          sheet = 'failed';
+          link.remove();
+          fail(new Error('The calendar could not be downloaded. Check the connection and open it again.'));
+        };
+        // Last in <head>, so it follows calendar.css exactly as it always did.
+        document.head.appendChild(link);
+      });
+      Promise.all([script, styles]).then(() => {
         if (registry.mods[ENTRY]) resolve(registry.req(ENTRY));
         else reject(new Error(`${CALENDAR_BUNDLE} loaded but did not register the calendar`));
-      };
-      script.onerror = () => reject(new Error('The calendar could not be downloaded. Check the connection and open it again.'));
-      document.head.appendChild(script);
+      }, reject);
     });
     // A failure is not remembered: the next attempt tries the network again.
     loading.catch(() => { loading = null; });

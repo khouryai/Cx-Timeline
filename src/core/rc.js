@@ -31,10 +31,11 @@
  * whole; this is rows, written one at a time, because the reports have to
  * answer arbitrary date ranges and two people have to edit at once.
  *
- * Imports: util, events.
+ * Imports: util, events, sdk.
  */
 
 import { emit, EV } from './events.js';
+import { loadSupabase } from './sdk.js';
 
 /* ── Configuration ─────────────────────────────────────────────────────── */
 
@@ -70,12 +71,23 @@ let ready = false;
  * all, so a backend that is unreachable degrades to "not signed in" and the
  * Resource Calendar simply says so when you switch to it.
  */
-export async function init() {
+export function init() {
+  if (ready) return Promise.resolve(user);
+  // One client, however many callers ask while the SDK is still on its way.
+  if (!starting) starting = start().finally(() => { starting = null; });
+  return starting;
+}
+
+let starting = null;
+
+async function start() {
   if (ready) return user;
   if (!isConfigured()) return null;
 
-  const sdk = typeof window !== 'undefined' ? window.supabase : null;
-  if (!sdk || typeof sdk.createClient !== 'function') {
+  // Fetched here, not by a script tag: a page that never makes a client
+  // never downloads one (see core/sdk.js).
+  const sdk = await loadSupabase();
+  if (!sdk) {
     console.warn('[cx-timeline] the Supabase client did not load; the resource calendar is unavailable');
     return null;
   }

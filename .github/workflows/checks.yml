@@ -96,6 +96,16 @@ jobs:
         env:
           CX_TEST_NOW: '2026-09-21T08:00:00Z'
         run: node tools/run_tests.js smoke_calendar smoke_mobile
+      # …and the timeline and the calendar once more against what a deploy
+      # actually publishes: the minified bundles under their hashed names, and
+      # the calendar's stylesheet fetched by the name dist.js wrote into the
+      # main bundle. The repository's copies are not what anybody downloads.
+      - name: The published site, minified
+        env:
+          RC_SUPABASE_URL: https://rc-stub.supabase.co
+          RC_SUPABASE_ANON_KEY: rc-stub-key
+          CX_SITE: dist
+        run: node tools/dist.js --calendar && node tools/run_tests.js smoke smoke_calendar
 
       # A picture of the failure is worth more than the log when a layout
       # check goes red.

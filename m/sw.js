@@ -40,6 +40,7 @@ const PRECACHE = [
   '../css/base.css',
   '../css/components.css',
   '../css/calendar.css',
+  '../css/rc.css',
   '../css/mobile.css',
 ];
 

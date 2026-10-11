@@ -37,6 +37,43 @@ import path from 'node:path';
 import url from 'node:url';
 import { writeChannel } from './desktop.js';
 
+/**
+ * The minifier, for the published copy only.
+ *
+ * The repository's bundles stay as the linker wrote them — readable, with every
+ * module's comments, and compared byte for byte against the source in CI. What
+ * a browser downloads has no use for any of that: about half of the bundles is
+ * comment and indentation, so the published copy is minified here, after every
+ * literal this script rewrites and before anything is named after its bytes.
+ * Identifiers keep their names (`keepNames`), so a reported failure's stack
+ * still says which function it was in.
+ *
+ * A dependency, so `npm ci` must have run. Refusing is deliberate: a deploy
+ * that quietly fell back to the unminified files would double every download
+ * with nothing to say why.
+ */
+let esbuild;
+try {
+  esbuild = await import('esbuild');
+} catch {
+  console.error('✗ esbuild is not installed — run `npm ci` before `npm run build:dist`.');
+  process.exit(1);
+}
+
+function minifyFile(file) {
+  const loader = file.endsWith('.css') ? 'css' : 'js';
+  const source = fs.readFileSync(file, 'utf8');
+  const { code } = esbuild.transformSync(source, {
+    loader,
+    minify: true,
+    keepNames: loader === 'js',
+    // The bundles' `/*!` banner says what the file is and that it is generated.
+    legalComments: 'inline',
+  });
+  fs.writeFileSync(file, code);
+  return { before: source.length, after: code.length };
+}
+
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'dist');
 
@@ -190,35 +227,61 @@ function fingerprint(dir) {
     return to;
   };
 
-  /* The calendar first, because the main bundle names it: its hashed name is
-     written into the main bundle, and only then is the main bundle hashed —
-     otherwise a calendar-only change would not change the main bundle's name,
-     and a visitor holding the old one would ask for a file that is gone. */
-  const calendar = rename('calendar.bundle.js', (h) => `calendar.${h}.js`);
-  if (calendar) {
-    const appFile = path.join(dir, 'app.bundle.js');
-    const code = fs.readFileSync(appFile, 'utf8');
-    const named = code.replace("const CALENDAR_BUNDLE = 'calendar.bundle.js';", `const CALENDAR_BUNDLE = '${calendar}';`);
-    if (named === code) {
-      console.error('✗ the main bundle does not name calendar.bundle.js where ui/calendar_loader.js puts it.');
-      process.exit(1);
-    }
-    fs.writeFileSync(appFile, named);
-  }
-  const bundle = rename('app.bundle.js', (h) => `app.${h}.js`);
-  if (!bundle) {
-    console.error('✗ no app.bundle.js to publish — run `npm run build` first.');
-    process.exit(1);
-  }
-  // The phone app's bundle, where this shape publishes one.
-  rename('mobile.bundle.js', (h) => `mobile.${h}.js`);
+  /* Everything a browser loads from here is minified before it is named, so
+     the name is the hash of what is actually served. */
+  const saved = { before: 0, after: 0 };
+  const minify = (rel) => {
+    const file = path.join(dir, rel);
+    if (!fs.existsSync(file)) return;
+    const { before, after } = minifyFile(file);
+    saved.before += before;
+    saved.after += after;
+  };
 
+  /* The stylesheets first: the main bundle names the calendar's own sheet
+     (css/rc.css, fetched with the calendar), so its hashed name has to be
+     known before the main bundle is written and hashed. */
   const cssDir = path.join(dir, 'css');
   if (fs.existsSync(cssDir)) {
     for (const name of fs.readdirSync(cssDir).filter((f) => f.endsWith('.css'))) {
+      minify(`css/${name}`);
       rename(`css/${name}`, (h) => `css/${name.replace(/\.css$/, '')}.${h}.css`);
     }
   }
+
+  /* The literals ui/calendar_loader.js fetches, rewritten in the main bundle
+     before it is minified — the minifier would change their quoting. */
+  const appFile = path.join(dir, 'app.bundle.js');
+  if (!fs.existsSync(appFile)) {
+    console.error('✗ no app.bundle.js to publish — run `npm run build` first.');
+    process.exit(1);
+  }
+  const nameIn = (literal, published) => {
+    const code = fs.readFileSync(appFile, 'utf8');
+    const named = code.replace(literal, literal.replace(/'[^']+'/, `'${published}'`));
+    if (named === code) {
+      console.error(`✗ the main bundle does not say ${literal} where ui/calendar_loader.js puts it.`);
+      process.exit(1);
+    }
+    fs.writeFileSync(appFile, named);
+  };
+  const calendarCss = renamed.get('css/rc.css');
+  if (calendarCss) nameIn("const CALENDAR_CSS = 'css/rc.css';", calendarCss);
+
+  /* The calendar before the main bundle, because the main bundle names it: its
+     hashed name is written into the main bundle, and only then is the main
+     bundle hashed — otherwise a calendar-only change would not change the main
+     bundle's name, and a visitor holding the old one would ask for a file that
+     is gone. */
+  minify('calendar.bundle.js');
+  const calendar = rename('calendar.bundle.js', (h) => `calendar.${h}.js`);
+  if (calendar) nameIn("const CALENDAR_BUNDLE = 'calendar.bundle.js';", calendar);
+  minify('app.bundle.js');
+  rename('app.bundle.js', (h) => `app.${h}.js`);
+  // The phone app's bundle, where this shape publishes one.
+  minify('mobile.bundle.js');
+  rename('mobile.bundle.js', (h) => `mobile.${h}.js`);
+  console.log(`✓ minified      — ${(saved.before / 1024).toFixed(0)} kB → ${(saved.after / 1024).toFixed(0)} kB before compression`);
 
   /* Every page names its assets relative to itself, so the phone app's page —
      one folder down — says `../css/…` where the site's says `css/…`. The same
@@ -364,21 +427,12 @@ function main() {
       WITH_CALENDAR ? calendarConfig(rc) : BLANK_CONFIG
     );
 
-    // The vendored client is loaded by a plain script tag. Dropping the file
-    // without dropping the tag would log a 404 on every page load — and in the
-    // calendar shape the file is shipped, so the tag has to stay.
-    const html = path.join(OUT, 'index.html');
-    if (!WITH_CALENDAR) {
-      const source = fs.readFileSync(html, 'utf8');
-      const stripped = source.replace(
-        /\n\s*<!--\s*\n\s*The Supabase client[\s\S]*?-->\s*\n\s*<script src="vendor\/supabase\.js"><\/script>/,
-        '\n    <!-- No backend in this build: the Supabase client is not shipped. -->'
-      );
-      if (stripped === source) {
-        console.error('✗ could not remove the Supabase script tag from index.html — check the markup.');
-        process.exit(1);
-      }
-      fs.writeFileSync(html, stripped);
+    // No script tag names the vendored client — core/sdk.js fetches it when a
+    // client is first made — so leaving the file out of this shape is all it
+    // takes, and nothing on the page can 404 for it.
+    if (/vendor\/supabase\.js/.test(fs.readFileSync(path.join(OUT, 'index.html'), 'utf8'))) {
+      console.error('✗ index.html loads the Supabase client by a tag — core/sdk.js fetches it on demand.');
+      process.exit(1);
     }
 
     // The policy is narrowed either way. With no backend there is nowhere
@@ -406,10 +460,10 @@ function main() {
 
     if (WITH_CALENDAR) {
       console.log('✓ config.js     — the plan has no backend; the calendar has its own');
-      console.log('✓ index.html    — Supabase client shipped for the calendar only');
+      console.log('✓ vendor/       — Supabase client shipped for the calendar only, fetched on first use');
     } else {
       console.log('✓ config.js     — no backend; the plan lives in a folder the user picks');
-      console.log('✓ index.html    — Supabase client not shipped');
+      console.log('✓ vendor/       — Supabase client not shipped');
     }
     if (process.env.SUPABASE_URL) {
       console.log('  note          — SUPABASE_URL is set in this environment and was ignored;');

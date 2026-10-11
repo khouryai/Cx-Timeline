@@ -50,6 +50,9 @@ function build(args, env = {}) {
   }
 }
 
+/** The modules a bundle registers — by their keys in the module table, which
+    survive minification where the linker's `// path.js` markers do not. */
+const registered = (code) => [...code.matchAll(/\["([a-z_/]+\.js)"\]\s*=\s*function/g)].map((m) => m[1]);
 const read = (f) => (fs.existsSync(path.join(DIST, f)) ? fs.readFileSync(path.join(DIST, f), 'utf8') : '');
 const exists = (f) => fs.existsSync(path.join(DIST, f));
 
@@ -101,7 +104,9 @@ check('the calendar has its own', config.includes(`rcSupabaseUrl: "${RC}"`));
 check('and its own key', config.includes('rcSupabaseAnonKey: "rc-key"'));
 
 check('the vendored client is shipped', exists('vendor/supabase.js'));
-check('and its script tag kept, so nothing 404s', read('index.html').includes('vendor/supabase.js'));
+check('and fetched when the calendar makes a client, not by a tag on every page',
+  !read('index.html').includes('vendor/supabase.js')
+    && fs.readdirSync(DIST).some((f) => /^app\.[0-9a-f]{10}\.js$/.test(f) && /["']vendor\/supabase\.js["']/.test(read(f))));
 
 // A wildcard would permit every project on the platform — including the plan's,
 // if one ever existed. The host is named.
@@ -126,7 +131,7 @@ check('the site sends a phone there, from a script published beside it and loade
 check('and the script acts only where the phone app is published — the calendar shape',
   /rcSupabaseUrl/.test(read('phone.js')) && /config\.supabaseUrl\) return/.test(read('phone.js')));
 check('every stylesheet it names is the hashed one that was written',
-  (phone.match(/href="\.\.\/(css\/[a-z]+\.[0-9a-f]{10}\.css)"/g) || []).length === 5
+  (phone.match(/href="\.\.\/(css\/[a-z]+\.[0-9a-f]{10}\.css)"/g) || []).length === 6
     && (phone.match(/href="\.\.\/(css\/[^"]+)"/g) || [])
       .map((m) => m.replace(/^href="\.\.\/|"$/g, '')).every((rel) => exists(rel)));
 check('it loads the same config and the same calendar client as the site',
@@ -134,7 +139,7 @@ check('it loads the same config and the same calendar client as the site',
 
 /* The thing the phone app is for, checked on what is actually published: the
    bundle carries the calendar and not one module of the timeline or the plan. */
-const phoneModules = [...read(phoneBundle || 'missing').matchAll(/^\/\/ ([a-z_/]+\.js)$/gm)].map((m) => m[1]);
+const phoneModules = registered(read(phoneBundle || 'missing'));
 check('the phone bundle carries the calendar client', phoneModules.includes('core/rc.js'));
 check('and nothing of the timeline or the plan\u2019s storage',
   phoneModules.length > 0 && !phoneModules.some((m) =>
@@ -194,9 +199,26 @@ check('and index.html points at what was actually written',
 const calendarFile = fs.readdirSync(path.join(ROOT, 'dist')).find((f) => /^calendar\.[0-9a-f]{10}\.js$/.test(f));
 check('the calendar is its own bundle, named after its bytes', Boolean(calendarFile), calendarFile || 'none');
 check('and the main bundle asks for exactly that file',
-  Boolean(calendarFile) && read(hashedBundle || '').includes(`const CALENDAR_BUNDLE = '${calendarFile}';`));
+  Boolean(calendarFile) && read(hashedBundle || '').includes(`"${calendarFile}"`));
 check('so the page nobody opens the calendar on does not carry it',
-  !read(hashedBundle || '').includes('__mods["ui/rc.js"]'));
+  registered(read(hashedBundle || '')).length > 0 && !registered(read(hashedBundle || '')).includes('ui/rc.js'));
+
+/* The calendar's own stylesheet travels with it: hashed like every other, named
+   in the main bundle where the loader fetches it, and not linked by the page —
+   a page nobody opens the calendar on does not download most of its styling. */
+const rcCss = fs.readdirSync(path.join(DIST, 'css')).find((f) => /^rc\.[0-9a-f]{10}\.css$/.test(f));
+check('the calendar\u2019s stylesheet is published under a name derived from its bytes', Boolean(rcCss), rcCss || 'none');
+check('and the main bundle fetches exactly that file', Boolean(rcCss) && read(hashedBundle || '').includes(`"css/${rcCss}"`));
+check('but the page does not link it', !/href="css\/rc\./.test(markup));
+
+/* What is published is minified; what is committed is not. The repository's
+   bundle is the linker's output, comments and all, and CI compares it against
+   the source — the published copy is the same program with none of that. */
+const committed = fs.readFileSync(path.join(ROOT, 'app.bundle.js'), 'utf8').length;
+const published = read(hashedBundle || '').length;
+check('the published bundle is minified — well under the committed one',
+  published > 100000 && published < committed * 0.6, `${Math.round(published / 1024)} kB of ${Math.round(committed / 1024)} kB`);
+check('and still says what it is, in its banner', /\/\*![\s*]*CX Timeline/.test(read(hashedBundle || '').slice(0, 400)));
 
 const policy = read('_headers');
 check('they are cached forever, because the name changes when the bytes do',
@@ -217,7 +239,9 @@ check('rebuilding the same source publishes the same name',
 const bundlePath = path.join(ROOT, 'app.bundle.js');
 const original = fs.readFileSync(bundlePath);
 try {
-  fs.writeFileSync(bundlePath, Buffer.concat([original, Buffer.from('\n// changed\n')]));
+  // Code, not a comment: the published copy is minified, so a comment changes
+  // nothing that is served — and rightly keeps the name.
+  fs.writeFileSync(bundlePath, Buffer.concat([original, Buffer.from('\nwindow.__cxChanged = 1;\n')]));
   build(['--calendar'], { RC_SUPABASE_URL: RC, RC_SUPABASE_ANON_KEY: 'rc-anon-key' });
   check('and a changed bundle publishes a different one',
     (/src="(app\.[0-9a-f]{10}\.js)"/.exec(read('index.html')) || [])[1] !== first);
@@ -277,7 +301,7 @@ check('and only the calendar gets one',
   shellFile('config.js').includes('https://rc-test.supabase.co'));
 check('the client is shipped for it, from the installer rather than a CDN',
   fs.existsSync(path.join(ROOT, 'dist-desktop', 'vendor', 'supabase.js'))
-    && shellFile('index.html').includes('vendor/supabase.js'));
+    && !shellFile('index.html').includes('vendor/supabase.js'));
 
 // The plan's own variables must not be able to reach this build by being left
 // set in a shell — the same trap the folder shape is guarded against.
