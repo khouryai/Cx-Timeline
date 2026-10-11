@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-11T19:58:29.565Z
+ * Modules: 28   Built: 2026-10-11T20:31:14.604Z
  */
 (function () {
   'use strict';
@@ -8818,6 +8818,8 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   const META = ed.FIELDS.length; // six activity columns, then the days
   const SAVE_BATCH = 400;
   const POLL_MS = 20000;
+  /** While the bell is connected (`rc.lookaheadLive()`), a poll is only a check on it. */
+  const POLL_LIVE_MS = 120000;
   const PUBLISH_QUIET_MS = 2500;
 
   /**
@@ -11479,16 +11481,26 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     rc.compactSnapshots().catch((err) => rc.reportError('lookahead:compact', err));
   }
 
-  /** Look for the other editor's changes, quietly, while nobody is mid-edit. */
+  /**
+   * Look for the other editor's changes, quietly, while nobody is mid-edit — the
+   * moment the bell rings (`rc.onLookaheadChange()`), and on a poll that slows
+   * to a check while the bell is connected. A ring that lands mid-edit is not
+   * lost: the next poll, the window's focus or the next ring asks again.
+   */
   function startPolling() {
     if (E.pollTimer) return;
+    let asked = 0;
     const tick = async () => {
       if (!E.root?.isConnected || document.hidden || E.editing || E.queue.length || E.saving) return;
+      asked = Date.now();
       try {
         const rev = await rc.lookaheadRevision();
         // Asked again after the wait: an edit made meanwhile is not the other editor's.
         if (E.editing || E.queue.length || E.saving) return;
         if (rev > E.revision) {
+          // Somebody else wrote: whatever this page remembers reading is from
+          // before it, and a reload served from memory would draw the old sheet.
+          rc.forgetReads();
           await reload();
           toast({ message: 'The look-ahead was updated with changes made by the other editor.', timeout: 4000 });
         }
@@ -11496,7 +11508,11 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
         /* the next tick will ask again */
       }
     };
-    E.pollTimer = setInterval(tick, POLL_MS);
+    E.pollTimer = setInterval(() => {
+      if (rc.lookaheadLive() && Date.now() - asked < POLL_LIVE_MS) return;
+      tick();
+    }, POLL_MS);
+    rc.onLookaheadChange(tick);
     window.addEventListener('focus', tick);
     window.addEventListener('beforeunload', (e) => {
       if (E.queue.length) {
@@ -14310,6 +14326,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
   /** How often an open calendar asks whether a newer reading has been published. */
   const WATCH_MS = 10000;
+  /** While the bell is connected (`rc.lookaheadLive()`), a poll is only a check on it. */
+  const WATCH_LIVE_MS = 120000;
 
   async function render(root) {
     /* The calendar is the team's; the register around it is not.
@@ -14413,27 +14431,43 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
   /**
    * Redraw the calendar when somebody publishes a newer reading — the other
-   * administrator editing, or this one in another window. Asked every few
-   * seconds while it is on screen, and never while somebody is typing into its
-   * filter or has a dialog open, because redrawing takes the field away.
+   * administrator editing, or this one in another window. Told the moment it
+   * happens by the bell (`rc.onLookaheadChange()`), and asked every few seconds
+   * as well while the bell is not connected; never while somebody is typing into
+   * its filter or has a dialog open, because redrawing takes the field away. A
+   * ring that lands then is not lost: the next poll asks again.
    */
   function watchForNewReading(host, seenId) {
-    const timer = setInterval(async () => {
-      if (!host.isConnected) { clearInterval(timer); return; }
+    let asked = 0;
+    let done = false;
+    const stop = () => {
+      done = true;
+      clearInterval(timer);
+      unring();
+    };
+    const look = async () => {
+      if (done) return;
+      if (!host.isConnected) { stop(); return; }
       if (document.hidden || document.querySelector('.cx-modal-overlay')) return;
       const active = document.activeElement;
       if (active && host.contains(active)
         && active.matches('input:not([type=checkbox]):not([type=radio]), textarea, select')) return;
+      asked = Date.now();
       try {
         const id = await rc.newestSnapshotId();
-        if (id == null || id === seenId || !host.isConnected) return;
-        clearInterval(timer);
+        if (done || id == null || id === seenId || !host.isConnected) return;
+        stop();
         rc.forgetReads();
         notifyChanged('lookahead');
       } catch {
         /* the next tick asks again */
       }
+    };
+    const timer = setInterval(() => {
+      if (rc.lookaheadLive() && Date.now() - asked < WATCH_LIVE_MS) return;
+      look();
     }, WATCH_MS);
+    const unring = rc.onLookaheadChange(look);
   }
 
   /* ══════════════════════════════════════════════════════════════════════════

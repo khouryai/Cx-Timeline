@@ -477,5 +477,19 @@ select refuses(:'alice',
   'the only administrator demoting themselves'
 );
 
+-- Every identity helper is asked once per statement, not once per row: a bare
+-- call in a policy is a function run for every row the table holds.
+reset role;
+select assert(offenders is null, 'no policy calls auth.uid() or is_admin() once per row' || coalesce(' — ' || offenders, ''))
+from (
+  select string_agg(distinct p.tablename || '.' || p.policyname, ', ') as offenders
+  from pg_policies p,
+    lateral (values (p.qual), (p.with_check)) as e(expr)
+  where expr is not null
+    -- Every policy in the database, the calendar's included when it is loaded.
+    and regexp_replace(expr, 'SELECT (auth\.uid|(public\.)?(rc_is_admin|rc_me|rc_my_role|is_admin))\(\)', '', 'g')
+        ~ '(auth\.uid|rc_is_admin|rc_me|rc_my_role|is_admin)\(\)'
+) found;
+
 reset role;
 do $$ begin raise notice E'\nAll permission checks passed.'; end $$;

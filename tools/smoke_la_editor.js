@@ -599,6 +599,17 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     (await cell('IXL Regression Testing', day(4)).innerText()).trim() === 'X.TCE'
       && (await serverCell('IXL Regression Testing', day(4)))?.text === 'X.TCE');
 
+  // A change made elsewhere arrives the moment it is made: the bell rings
+  // (Realtime, on rc_la_beacon) — no focus, and long before the next poll.
+  await page.evaluate(({ id, iso }) => {
+    window.__rc.rows.rc_la_cells.push({ row_id: id, day: iso, color: 'FFFF00', text: 'X.WIT', version: 1 });
+    window.__rc.laRevision += 1;
+    window.__rc.ring();
+  }, { id: ixlId, iso: day(16) });
+  await page.waitForTimeout(800);
+  check('the other editor\'s change arrives as it is made — the bell, not the poll',
+    (await cell('IXL Regression Testing', day(16)).innerText()).trim() === 'X.WIT');
+
   // A change made elsewhere while this page is idle arrives on its own.
   await page.evaluate(({ id, iso }) => {
     window.__rc.rows.rc_la_cells.push({ row_id: id, day: iso, color: 'FF0000', text: 'X', version: 1 });
@@ -940,6 +951,8 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     row.cells.find((c) => /^ATS Site Test/.test(c.value)).value = to;
     const later = new Date(Math.max(Date.now(), ...snaps.map((x) => Date.parse(x.taken_at) || 0)) + 1000).toISOString();
     snaps.push({ ...last, id: `${last.id}-${snaps.length}`, taken_at: later, file_hash: `editor:elsewhere-${snaps.length}`, grid });
+    // A reading inserted anywhere rings the bell — the trigger does it in Postgres.
+    window.__rc.ring();
   }, label);
   const calendarSays = (re) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector('#rc-frame .la-grid')?.innerText || ''), re.source, { timeout: 15000 }).then(() => true, () => false);
   await publishElsewhere('ATS Site Test, from elsewhere');

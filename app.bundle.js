@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 60   Built: 2026-10-11T19:58:29.482Z
+ * Modules: 60   Built: 2026-10-11T20:31:14.493Z
  */
 (function () {
   'use strict';
@@ -16876,6 +16876,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     // Whoever signs in next must not read this account's rows out of memory.
     // The database would refuse them; the cache must not answer first.
     forgetReads();
+    closeBell();
     await client.auth.signOut();
     user = null;
     person = null;
@@ -17105,19 +17106,41 @@ __mods["core/rc.js"] = function (__x, __req) {
    * PostgREST answers a thousand rows at most, and a five-week look-ahead can
    * hold more cells than that: a read that stopped at the limit would draw a
    * sheet with its bottom rows blank and no sign anything was missing.
+   *
+   * The first page asks how many rows there are, and the rest are asked for
+   * together rather than one after another — a sheet of four pages was four
+   * round trips end to end. A page that comes back full after them (rows written
+   * between the count and the read) is followed one at a time, as before, so
+   * nothing is lost to a count that went stale. Every caller orders by a unique
+   * key, which is what makes the pages line up.
    */
   async function selectAll(table, build, pageSize = 1000) {
     requireClient();
     const key = `${table}|all|${describe(build)}`;
     return remember(key, async () => {
-      const out = [];
-      for (let from = 0; ; from += pageSize) {
-        let query = client.from(table).select('*');
+      const page = async (from, counted = false) => {
+        let query = client.from(table).select('*', counted ? { count: 'exact' } : undefined);
         if (build) query = build(query);
-        const { data, error } = await query.range(from, from + pageSize - 1);
-        if (error) throw new Error(`${table}: ${error.message}`);
-        out.push(...(data || []));
-        if (!data || data.length < pageSize) break;
+        const answer = await query.range(from, from + pageSize - 1);
+        if (answer.error) throw new Error(`${table}: ${answer.error.message}`);
+        return answer;
+      };
+      const first = await page(0, true);
+      const out = [...(first.data || [])];
+      let last = first.data || [];
+      let from = pageSize;
+      if (last.length === pageSize && Number.isFinite(first.count) && first.count > pageSize) {
+        const starts = [];
+        for (let at = pageSize; at < first.count; at += pageSize) starts.push(at);
+        const pages = await Promise.all(starts.map((at) => page(at)));
+        for (const p of pages) out.push(...(p.data || []));
+        last = pages[pages.length - 1].data || [];
+        from = starts[starts.length - 1] + pageSize;
+      }
+      while (last.length === pageSize) {
+        last = (await page(from)).data || [];
+        out.push(...last);
+        from += pageSize;
       }
       return out;
     });
@@ -17149,6 +17172,85 @@ __mods["core/rc.js"] = function (__x, __req) {
     const { data, error } = await client.rpc('rc_la_revision', {});
     if (error) throw new Error(`rc_la_revision: ${error.message}`);
     return Number(data) || 0;
+  }
+
+  /* ── The bell: told when the look-ahead changes, rather than asking ───────── */
+
+  /**
+   * `rc_la_beacon` is one row a trigger touches whenever an edit is logged or a
+   * reading is taken (see rc_schema.sql). Realtime tells every open page the
+   * moment it moves, so the editor and the calendar's view hear about somebody
+   * else's change at once instead of on their next poll. It says only *that*
+   * something changed: a listener asks what, exactly as its poll does.
+   *
+   * One channel for the page, opened by the first listener and closed by the
+   * last. A client without Realtime (an SDK stub, an old vendored copy) never
+   * opens one, and `lookaheadLive()` stays false, which is the polls' cue to
+   * carry on as they always have. When the socket comes back after a drop,
+   * every listener is called once — whatever rang meanwhile was missed.
+   */
+  const bellListeners = new Set();
+  let bell = null;
+  let bellLive = false;
+  let bellDropped = false;
+
+  function ring() {
+    for (const fn of [...bellListeners]) {
+      try { fn(); } catch (err) { console.warn('[cx-timeline] a look-ahead listener failed:', err); }
+    }
+  }
+
+  function openBell() {
+    if (bell || !client || typeof client.channel !== 'function') return;
+    bell = client.channel('rc-la-beacon')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rc_la_beacon' }, () => {
+        // A change of this page's own lands here too. Nothing is forgotten on
+        // it — a write already empties the read memory when it lands, and every
+        // listener asks with a read that is never remembered — so it costs one
+        // small question and reads nothing new.
+        ring();
+      })
+      .subscribe((status) => {
+        const live = status === 'SUBSCRIBED';
+        // Back after a drop: whatever rang while it was down was missed.
+        if (live && bellDropped) ring();
+        if (!live && bellLive) bellDropped = true;
+        if (live) bellDropped = false;
+        bellLive = live;
+      });
+  }
+
+  function closeBell() {
+    if (!bell) return;
+    try { client?.removeChannel?.(bell); } catch { /* already gone */ }
+    bell = null;
+    bellLive = false;
+    bellDropped = false;
+  }
+
+  /**
+   * Call `fn` whenever anybody changes the look-ahead — an edit, a published
+   * reading, a workbook read. Answers with the function that stops it.
+   */
+  function onLookaheadChange(fn) {
+    bellListeners.add(fn);
+    openBell();
+    return () => {
+      bellListeners.delete(fn);
+      if (!bellListeners.size) closeBell();
+    };
+  }
+
+  /**
+   * True while the bell is connected, so a poll can slow down: anything it
+   * would find, the bell has normally said already. False whenever it is not —
+   * no Realtime, a socket that dropped, a project that never ran the SQL that
+   * added the table. Live is not proof, though: a table missing from the
+   * publication subscribes and never rings. So the polls slow down rather
+   * than stop (`POLL_LIVE_MS`).
+   */
+  function lookaheadLive() {
+    return bellLive;
   }
 
   /**
@@ -17274,7 +17376,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 10;
+  const SCHEMA_VERSION = 11;
 
   /**
    * Whether the database is the one this build was written against.
@@ -18081,6 +18183,8 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listLaCells", { get: () => listLaCells, enumerable: true });
   Object.defineProperty(__x, "applyLookaheadOps", { get: () => applyLookaheadOps, enumerable: true });
   Object.defineProperty(__x, "lookaheadRevision", { get: () => lookaheadRevision, enumerable: true });
+  Object.defineProperty(__x, "onLookaheadChange", { get: () => onLookaheadChange, enumerable: true });
+  Object.defineProperty(__x, "lookaheadLive", { get: () => lookaheadLive, enumerable: true });
   Object.defineProperty(__x, "listLaEdits", { get: () => listLaEdits, enumerable: true });
   Object.defineProperty(__x, "listLaEditsBetween", { get: () => listLaEditsBetween, enumerable: true });
   Object.defineProperty(__x, "listLaEditsForRow", { get: () => listLaEditsForRow, enumerable: true });

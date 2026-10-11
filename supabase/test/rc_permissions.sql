@@ -1535,9 +1535,24 @@ select assert(jsonb_array_length(:'la_first'::jsonb) = 5
   and (:'la_first'::jsonb)->3->>'version' = '1', 'and every op answers with the version it made');
 select assert((select count(*) from public.rc_la_edits) = 5, 'every change is on the record, in the same breath');
 
+-- The bell every open page listens for (rc_la_beacon): set back, then rung by
+-- the next edit, once for the batch, and readable by anybody signed in.
+reset role;
+update public.rc_la_beacon set changed_at = '2000-01-01';
+set role authenticated;
+select act_as(:'alice');
+
 -- Two people, one cell: the second is refused rather than silently winning.
 select public.rc_la_apply(jsonb_build_array(jsonb_build_object('op', 'cell',
   'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-21', 'color', 'FF0000', 'text', 'X.WIT', 'expect', 1)));
+
+select assert((select changed_at from public.rc_la_beacon) > now() - interval '1 minute',
+  'an edit rings the bell an open page listens for');
+select act_as(:'dave');
+select assert((select count(*) from public.rc_la_beacon) = 1, 'a viewer can hear it');
+select refuses(:'dave', 'update public.rc_la_beacon set changed_at = now()', 'but nobody rings it by hand');
+select refuses(:'alice', 'update public.rc_la_beacon set changed_at = now()', 'not even an administrator');
+select act_as(:'alice');
 select refuses(:'alice', format('select public.rc_la_apply(%L::jsonb)', jsonb_build_array(jsonb_build_object('op', 'cell',
   'row_id', '51000000-0000-0000-0000-000000000002', 'day', '2026-09-21', 'color', 'FFC000', 'text', 'X', 'expect', 1))),
   'writing over a day somebody else changed since you last looked');
@@ -1773,6 +1788,49 @@ select refuses(:'carol', $q$insert into storage.objects (bucket_id, name) values
   'or replace it');
 select act_as(:'dave');
 select assert((select count(*) from storage.objects where bucket_id = 'tawr') = 0, 'nor can a viewer');
+
+-- Every helper that answers "who is asking" is asked once per statement, not
+-- once per row. A bare call in a policy is a SECURITY DEFINER function run for
+-- every row the table holds — invisible on a test table, minutes on
+-- rc_la_cells. Wrapped in a sub-select, Postgres makes it an InitPlan.
+reset role;
+select assert(offenders is null, 'no policy calls auth.uid() or an identity helper once per row' || coalesce(' — ' || offenders, ''))
+from (
+  select string_agg(distinct p.tablename || '.' || p.policyname, ', ') as offenders
+  from pg_policies p,
+    lateral (values (p.qual), (p.with_check)) as e(expr)
+  where expr is not null
+    and regexp_replace(expr, 'SELECT (auth\.uid|(public\.)?(rc_is_admin|rc_me|rc_my_role|is_admin))\(\)', '', 'g')
+        ~ '(auth\.uid|rc_is_admin|rc_me|rc_my_role|is_admin)\(\)'
+) found;
+
+-- Every foreign key has an index that leads with its columns (Supabase's
+-- "unindexed foreign keys" lint, run here so a new table cannot ship without
+-- one). Without it, deleting or retiring a referenced row scans the whole
+-- referencing table — and a join along the key does the same.
+reset role;
+select assert(offenders is null, 'every foreign key is indexed' || coalesce(' — missing: ' || offenders, ''))
+from (
+  select string_agg(c.conrelid::regclass || ' (' || cols || ')', ', ' order by 1) as offenders
+  from pg_constraint c
+  cross join lateral (
+    select string_agg(a.attname, ', ' order by k.n) as cols
+    from unnest(c.conkey) with ordinality as k(attnum, n)
+    join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum
+  ) named
+  where c.contype = 'f'
+    and c.connamespace = 'public'::regnamespace
+    -- Who-did-it stamps (created_by, author, approved_by…) point at
+    -- auth.users: an account is never deleted while its rows exist, and
+    -- nothing is looked up by them, so an index would be write cost alone.
+    and c.confrelid <> 'auth.users'::regclass
+    and not exists (
+      select 1 from pg_index i
+      where i.indrelid = c.conrelid
+        and (string_to_array(i.indkey::text, ' ')::int2[])[1:cardinality(c.conkey)] @> c.conkey
+        and (string_to_array(i.indkey::text, ' ')::int2[])[1:cardinality(c.conkey)] <@ c.conkey
+    )
+) found;
 
 reset role;
 do $$ begin raise notice ''; raise notice 'All resource calendar checks passed.'; end $$;

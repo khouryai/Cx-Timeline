@@ -229,12 +229,12 @@ drop policy if exists profiles_select on public.profiles;
 create policy profiles_select on public.profiles
   for select to authenticated
   using (
-    id = auth.uid()
+    id = (select auth.uid())
     or exists (
       select 1
       from public.project_members mine
       join public.project_members theirs on theirs.project_id = mine.project_id
-      where mine.user_id = auth.uid()
+      where mine.user_id = (select auth.uid())
         and theirs.user_id = public.profiles.id
     )
   );
@@ -242,8 +242,8 @@ create policy profiles_select on public.profiles
 drop policy if exists profiles_update on public.profiles;
 create policy profiles_update on public.profiles
   for update to authenticated
-  using (id = auth.uid())
-  with check (id = auth.uid());
+  using (id = (select auth.uid()))
+  with check (id = (select auth.uid()));
 
 -- ── projects ──────────────────────────────────────────────────────────────
 drop policy if exists projects_select on public.projects;
@@ -255,7 +255,7 @@ create policy projects_select on public.projects
 drop policy if exists projects_insert on public.projects;
 create policy projects_insert on public.projects
   for insert to authenticated
-  with check (owner_id = auth.uid());
+  with check (owner_id = (select auth.uid()));
 
 -- This is the read-only rule. A viewer passes `projects_select` and fails
 -- here, so the row is visible and unwritable.
@@ -715,21 +715,21 @@ alter table public.invitations enable row level security;
 drop policy if exists invitations_admin on public.invitations;
 create policy invitations_admin on public.invitations
   for all to authenticated
-  using (public.is_admin())
-  with check (public.is_admin());
+  using ((select public.is_admin()))
+  with check ((select public.is_admin()));
 
 -- A user may edit their own profile but must not be able to make themselves
 -- an administrator, which the previous `profiles_update` policy allowed.
 drop policy if exists profiles_update on public.profiles;
 create policy profiles_update on public.profiles
   for update to authenticated
-  using (id = auth.uid() or public.is_admin())
+  using (id = (select auth.uid()) or (select public.is_admin()))
   with check (
-    public.is_admin()
+    (select public.is_admin())
     or (
-      id = auth.uid()
+      id = (select auth.uid())
       -- unchanged, whatever it currently is
-      and is_admin = (select p.is_admin from public.profiles p where p.id = auth.uid())
+      and is_admin = (select p.is_admin from public.profiles p where p.id = (select auth.uid()))
     )
   );
 
@@ -738,13 +738,13 @@ drop policy if exists profiles_select on public.profiles;
 create policy profiles_select on public.profiles
   for select to authenticated
   using (
-    id = auth.uid()
-    or public.is_admin()
+    id = (select auth.uid())
+    or (select public.is_admin())
     or exists (
       select 1
       from public.project_members mine
       join public.project_members theirs on theirs.project_id = mine.project_id
-      where mine.user_id = auth.uid()
+      where mine.user_id = (select auth.uid())
         and theirs.user_id = public.profiles.id
     )
   );

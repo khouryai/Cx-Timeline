@@ -21,6 +21,9 @@ alter table public.rc_locations drop column if exists tawr_area;
 drop table if exists public.rc_support_codes;
 drop function if exists public.rc_compact_snapshots();
 drop table if exists public.rc_la_seen;
+-- Before the bell: pages polled, and nothing rang when the look-ahead changed.
+drop table if exists public.rc_la_beacon;
+drop function if exists public.rc_la_ring() cascade;
 drop table if exists public.rc_invitations cascade;
 -- Before Changes could say who: no row id on a reading or a change, and a
 -- kind list that has never heard of `details_changed`.

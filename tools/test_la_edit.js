@@ -805,6 +805,78 @@ console.log('\nIs everybody named where they can be');
   check('clashes are keyed by cell for drawing', (byCell.get(ed.cellKey('r1', d(0))) || []).length === 1);
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   Reading every page — core/rc.js against a client that answers as PostgREST
+   ═══════════════════════════════════════════════════════════════════════ */
+console.log('\nReading a look-ahead longer than one page');
+{
+  // 2,500 cells: two full pages and a part, which a read that stopped at the
+  // server's limit would cut short with no sign anything was missing.
+  const cells = [];
+  for (let i = 0; i < 2500; i++) {
+    cells.push({ row_id: `r${String(i % 50).padStart(3, '0')}`, day: `2026-10-${String(1 + Math.floor(i / 50) % 28).padStart(2, '0')}`, n: i });
+  }
+  cells.sort((a, b) => (a.day + a.row_id).localeCompare(b.day + b.row_id) || a.n - b.n);
+  let inFlight = 0;
+  let mostAtOnce = 0;
+  let requests = 0;
+  let grewBy = 0;
+  const query = (table) => {
+    let rows = table === 'rc_la_cells' ? cells.slice() : [];
+    let counted = false;
+    const q = {
+      select(_cols, opts) { counted = Boolean(opts?.count); return q; },
+      eq() { return q; }, gte() { return q; }, lte() { return q; }, order() { return q; },
+      range(from, to) { q.from = from; q.to = to; return q; },
+      maybeSingle() { return Promise.resolve({ data: null, error: null }); },
+      then(resolve, reject) {
+        requests++;
+        inFlight++;
+        mostAtOnce = Math.max(mostAtOnce, inFlight);
+        const total = rows.length;
+        const page = q.from == null ? rows : rows.slice(q.from, q.to + 1);
+        // Rows written after the count was taken land on the end.
+        if (counted && grewBy) for (let k = 0; k < grewBy; k++) cells.push({ row_id: 'zz', day: '2026-10-31', n: 9000 + k });
+        return new Promise((done) => setTimeout(done, 5)).then(() => {
+          inFlight--;
+          return { data: page, error: null, count: counted ? total : null };
+        }).then(resolve, reject);
+      },
+    };
+    return q;
+  };
+  globalThis.window = {
+    CX_CONFIG: { rcSupabaseUrl: 'https://rc-test.example', rcSupabaseAnonKey: 'k' },
+    supabase: {
+      createClient: () => ({
+        auth: {
+          getSession: () => Promise.resolve({ data: { session: { user: { id: 'u1' } } } }),
+          onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
+        },
+        from: query,
+        rpc: () => Promise.resolve({ data: null, error: null }),
+      }),
+    },
+  };
+  const rc = await import(path.join(ROOT, 'src/core/rc.js'));
+  await rc.init();
+  const read = await rc.listLaCells('2026-10-01', '2026-10-31');
+  check('every cell is read, across every page', read.length === 2500, `${read.length} of 2500`);
+  check('in the order the server gave them', read.every((c, i) => c === cells[i]));
+  check('and the pages after the first are asked for together, not one after another',
+    mostAtOnce >= 2 && requests === 3, `${requests} requests, ${mostAtOnce} at once`);
+
+  // A count that went stale — rows written between it and the last page — is
+  // followed to the end rather than trusted.
+  rc.forgetReads();
+  cells.length = 0;
+  for (let i = 0; i < 2000; i++) cells.push({ row_id: 'r', day: '2026-10-01', n: i });
+  grewBy = 5;
+  const grown = await rc.listLaCells('2026-10-01', '2026-10-31');
+  check('rows written while it was being read are not lost to a stale count', grown.length === 2005, `${grown.length} of 2005`);
+  delete globalThis.window;
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

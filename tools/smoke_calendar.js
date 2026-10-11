@@ -943,6 +943,31 @@ async function main() {
   await page.locator('#rc-frame .rc-tab', { hasText: 'Look-ahead' }).click();
   await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
 
+  /* A reading published somewhere else redraws this one as it lands: the bell
+     rings (Realtime, on rc_la_beacon) and the view asks for the newest reading
+     at once, rather than on its next ten-second poll. The copy is taken away
+     again so every check below reads the register it always did. */
+  {
+    const snapshotReads = () => page.evaluate(() =>
+      window.__rc.calls.filter((c) => c.kind === 'select' && c.table === 'rc_lookahead_snapshots').length);
+    const before = await snapshotReads();
+    await page.evaluate(() => {
+      const list = window.__rc.rows.rc_lookahead_snapshots;
+      const newest = [...list].sort((a, b) => String(b.taken_at).localeCompare(String(a.taken_at)))[0];
+      list.push({ ...newest, id: 'snapshot-rung', taken_at: new Date(Date.now() + 1000).toISOString() });
+      window.__rc.ring();
+    });
+    await page.waitForTimeout(900);
+    check('a reading published elsewhere redraws the calendar as it lands — the bell, not the poll',
+      (await snapshotReads()) > before && (await page.locator('#rc-frame .la-grid').count()) === 1);
+    await page.evaluate(() => {
+      const list = window.__rc.rows.rc_lookahead_snapshots;
+      list.splice(list.findIndex((x) => x.id === 'snapshot-rung'), 1);
+    });
+    await page.locator('#rc-frame .rc-tab', { hasText: 'Look-ahead' }).click();
+    await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
+  }
+
   /* ── The calendar ─────────────────────────────────────────────────────
      The workbook drawn as it looks: activities down, days across, in the
      colours it was painted. It draws the snapshot rather than the file,
@@ -2107,7 +2132,16 @@ async function main() {
   /* Six visits, three tabs, twice round. Uncached, each visit reads the roster
      and the sheet again; remembered, the second lap reads nothing and the
      first lap shares one grid between the three. */
-  await page.evaluate(() => { window.__rc.calls.length = 0; });
+  /* Measured from an empty memory. A read the sections above made shortly
+     before the first lap is a hit in that lap and expires in the second — at
+     thirty seconds, which a slow or loaded machine reaches mid-lap — and the
+     second lap then reads it again for a reason that has nothing to do with
+     what is under test. Forgotten here, every read starts its thirty seconds
+     in the first lap. */
+  await page.evaluate(() => {
+    window.__CX_MODULES.req('core/rc.js').forgetReads();
+    window.__rc.calls.length = 0;
+  });
   const lap = async () => {
     await page.locator('#rc-frame .rc-tab', { hasText: 'Week plan' }).click();
     await page.waitForSelector('#rc-frame .rc-resources');

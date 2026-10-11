@@ -40,6 +40,12 @@ export function fakeSdk() {
   S.signedIn = S.signedIn === undefined ? false : S.signedIn;
   S.role = S.role || 'admin';
   S.offline = S.offline || false;
+  /* Realtime's bell (rc_la_beacon). `S.ring()` is what the trigger does in
+     Postgres: every page subscribed to the beacon hears it, on the next turn.
+     The stub rings on its own look-ahead edits and readings, as the trigger
+     would. */
+  S.bells = new Set();
+  S.ring = () => setTimeout(() => { for (const fn of S.bells) fn({ eventType: 'UPDATE' }); }, 0);
   /* The stub's `auth.users`. It exists because "has this address got an account
      yet" is now a question with three answers rather than two — linked, invited
      and on its way, or nothing at all — and a stub that could not tell the
@@ -667,7 +673,11 @@ export function fakeSdk() {
     // Recorded when the read is awaited, not when the builder is made: a write
     // builds one of these too and never reads through it.
     const api = {
-      select(columns) { if (columns) read.columns = columns; return api; },
+      select(columns, options) {
+        if (columns) read.columns = columns;
+        if (options?.count) read.count = options.count;
+        return api;
+      },
       eq(col, v) { rows = rows.filter((r) => r[col] === v); return api; },
       neq(col, v) { rows = rows.filter((r) => r[col] !== v); return api; },
       gte(col, v) { rows = rows.filter((r) => r[col] >= v); return api; },
@@ -686,9 +696,14 @@ export function fakeSdk() {
       },
       limit(n) { read.limit = n; return api; },
       // Paging, as PostgREST does it: the editor reads every page of the cells.
-      range(from, to) { rows = rows.slice(from, to + 1); return api; },
+      // `count: 'exact'` answers how many rows match, before the range cuts them.
+      range(from, to) { read.total = rows.length; read.range = [from, to]; rows = rows.slice(from, to + 1); return api; },
       maybeSingle() { S.calls.push(read); return Promise.resolve({ data: rows[0] || null, error: null }); },
-      then(resolve) { S.calls.push(read); return Promise.resolve({ data: rows, error: null }).then(resolve); },
+      then(resolve) {
+        S.calls.push(read);
+        const count = read.count ? (read.total ?? rows.length) : null;
+        return Promise.resolve({ data: rows, error: null, count }).then(resolve);
+      },
     };
     return api;
   }
@@ -758,6 +773,23 @@ export function fakeSdk() {
           signOut: () => { S.signedIn = false; return Promise.resolve({ error: null }); },
           onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
         },
+        channel() {
+          let handler = null;
+          const ch = {
+            on(type, filter, fn) {
+              if (type === 'postgres_changes' && filter.table === 'rc_la_beacon') handler = fn;
+              return ch;
+            },
+            subscribe(status) {
+              if (handler) S.bells.add(handler);
+              setTimeout(() => status?.('SUBSCRIBED'), 0);
+              ch.unsubscribe = () => S.bells.delete(handler);
+              return ch;
+            },
+          };
+          return ch;
+        },
+        removeChannel(ch) { ch?.unsubscribe?.(); return Promise.resolve('ok'); },
         from(table) {
           const api = query(table);
           api.insert = (rows) => {
@@ -797,6 +829,8 @@ export function fakeSdk() {
             // The stub ignores order(): a "Got it" is read newest first, so it goes in first.
             if (table === 'rc_la_seen') list.unshift(...made);
             else list.push(...made);
+            // rc_lookahead_snapshots_ring: a reading taken rings the bell.
+            if (table === 'rc_lookahead_snapshots') S.ring();
             // rc_plan_current is a *view* over the entries, and the stub makes
             // it an alias rather than a copy — so pushing again here would
             // double every plan row.
@@ -965,6 +999,7 @@ export function fakeSdk() {
                 }
               }
               S.laRevision = (S.laRevision || 0) + 1;
+              S.ring();
             }
             return Promise.resolve({ data: results, error: null });
           }

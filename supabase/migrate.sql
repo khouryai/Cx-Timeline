@@ -114,7 +114,7 @@ create policy rc_person_alias_read on public.rc_person_alias
 drop policy if exists rc_person_alias_write on public.rc_person_alias;
 create policy rc_person_alias_write on public.rc_person_alias
   for all to authenticated
-  using (public.rc_is_admin()) with check (public.rc_is_admin());
+  using ((select public.rc_is_admin())) with check ((select public.rc_is_admin()));
 grant select, insert, update, delete on public.rc_person_alias to authenticated;
 
 -- ── Somewhere for a day that is not commissioning work ────────────────────
@@ -187,7 +187,7 @@ create policy rc_settings_read on public.rc_settings
 drop policy if exists rc_settings_write on public.rc_settings;
 create policy rc_settings_write on public.rc_settings
   for all to authenticated
-  using (public.rc_is_admin()) with check (public.rc_is_admin());
+  using ((select public.rc_is_admin())) with check ((select public.rc_is_admin()));
 grant select, insert, update, delete on public.rc_settings to authenticated;
 
 -- ── Invitations ───────────────────────────────────────────────────────────

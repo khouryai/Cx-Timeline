@@ -785,7 +785,7 @@ begin
     execute format('drop policy if exists %1$s_write on public.%1$s', t);
     execute format(
       'create policy %1$s_write on public.%1$s for all to authenticated
-         using (public.rc_is_admin()) with check (public.rc_is_admin())', t);
+         using ((select public.rc_is_admin())) with check ((select public.rc_is_admin()))', t);
   end loop;
 end;
 $$;
@@ -819,7 +819,7 @@ drop policy if exists rc_leave_insert on public.rc_leave;
 create policy rc_leave_insert on public.rc_leave
   for insert to authenticated
   with check (
-    public.rc_is_admin()
+    (select public.rc_is_admin())
     or (public.rc_can_act_for(person_id) and status = 'requested')
   );
 
@@ -832,18 +832,18 @@ create policy rc_leave_update on public.rc_leave
      status a member can write is `cancelled`, so a request cannot approve
      itself. */
   using (
-    public.rc_is_admin()
+    (select public.rc_is_admin())
     or (public.rc_can_act_for(person_id) and status = 'requested')
   )
   with check (
-    public.rc_is_admin()
+    (select public.rc_is_admin())
     or (public.rc_can_act_for(person_id) and status = 'cancelled')
   );
 
 drop policy if exists rc_leave_delete on public.rc_leave;
 create policy rc_leave_delete on public.rc_leave
   for delete to authenticated
-  using (public.rc_is_admin());
+  using ((select public.rc_is_admin()));
 
 -- ── The look-ahead register ───────────────────────────────────────────────
 -- Two halves, and the line between them is what somebody can *do* with the
@@ -875,7 +875,7 @@ begin
     execute format('drop policy if exists %1$s_write on public.%1$s', t);
     execute format(
       'create policy %1$s_write on public.%1$s for all to authenticated
-         using (public.rc_is_admin()) with check (public.rc_is_admin())', t);
+         using ((select public.rc_is_admin())) with check ((select public.rc_is_admin()))', t);
   end loop;
 
   foreach t in array array['rc_ingest_runs', 'rc_change_events', 'rc_sars', 'rc_sar_links']
@@ -883,14 +883,14 @@ begin
     execute format('drop policy if exists %1$s_admin on public.%1$s', t);
     execute format(
       'create policy %1$s_admin on public.%1$s for all to authenticated
-         using (public.rc_is_admin()) with check (public.rc_is_admin())', t);
+         using ((select public.rc_is_admin())) with check ((select public.rc_is_admin()))', t);
   end loop;
 end;
 $$;
 
 drop policy if exists rc_change_annotations_read on public.rc_change_annotations;
 create policy rc_change_annotations_read on public.rc_change_annotations
-  for select to authenticated using (public.rc_is_admin());
+  for select to authenticated using ((select public.rc_is_admin()));
 
 -- Insert only, and only as yourself. Correcting an annotation means inserting
 -- one that supersedes it, so the record of who decided what, and when, cannot
@@ -898,17 +898,17 @@ create policy rc_change_annotations_read on public.rc_change_annotations
 drop policy if exists rc_change_annotations_insert on public.rc_change_annotations;
 create policy rc_change_annotations_insert on public.rc_change_annotations
   for insert to authenticated
-  with check (public.rc_is_admin() and author = auth.uid());
+  with check ((select public.rc_is_admin()) and author = (select auth.uid()));
 
 -- The cancellation log's judgements: the same rule, for the same reason.
 drop policy if exists rc_cancellation_notes_read on public.rc_cancellation_notes;
 create policy rc_cancellation_notes_read on public.rc_cancellation_notes
-  for select to authenticated using (public.rc_is_admin());
+  for select to authenticated using ((select public.rc_is_admin()));
 
 drop policy if exists rc_cancellation_notes_insert on public.rc_cancellation_notes;
 create policy rc_cancellation_notes_insert on public.rc_cancellation_notes
   for insert to authenticated
-  with check (public.rc_is_admin() and author = auth.uid());
+  with check ((select public.rc_is_admin()) and author = (select auth.uid()));
 
 -- ── Plan and actuals ──────────────────────────────────────────────────────
 
@@ -928,7 +928,7 @@ create policy rc_plan_read on public.rc_plan_entries
 drop policy if exists rc_plan_insert on public.rc_plan_entries;
 create policy rc_plan_insert on public.rc_plan_entries
   for insert to authenticated
-  with check (public.rc_can_act_for(person_id) and created_by = auth.uid());
+  with check (public.rc_can_act_for(person_id) and created_by = (select auth.uid()));
 
 -- A member sees the whole team's actuals — the huddle happens in front of
 -- everyone, so there is nothing to hide — but may only write their own.
@@ -939,7 +939,7 @@ create policy rc_actuals_read on public.rc_actuals
 drop policy if exists rc_actuals_insert on public.rc_actuals;
 create policy rc_actuals_insert on public.rc_actuals
   for insert to authenticated
-  with check (public.rc_can_act_for(person_id) and created_by = auth.uid());
+  with check (public.rc_can_act_for(person_id) and created_by = (select auth.uid()));
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Accounts
@@ -1334,7 +1334,7 @@ alter table public.rc_invitations enable row level security;
 drop policy if exists rc_invitations_admin on public.rc_invitations;
 create policy rc_invitations_admin on public.rc_invitations
   for all to authenticated
-  using (public.rc_is_admin()) with check (public.rc_is_admin());
+  using ((select public.rc_is_admin())) with check ((select public.rc_is_admin()));
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Blockers
@@ -1418,7 +1418,7 @@ create policy rc_blockers_read on public.rc_blockers
 drop policy if exists rc_blockers_insert on public.rc_blockers;
 create policy rc_blockers_insert on public.rc_blockers
   for insert to authenticated
-  with check (public.rc_can_act_for(person_id) and created_by = auth.uid());
+  with check (public.rc_can_act_for(person_id) and created_by = (select auth.uid()));
 
 drop policy if exists rc_blocker_updates_read on public.rc_blocker_updates;
 create policy rc_blocker_updates_read on public.rc_blocker_updates
@@ -1430,11 +1430,11 @@ drop policy if exists rc_blocker_updates_insert on public.rc_blocker_updates;
 create policy rc_blocker_updates_insert on public.rc_blocker_updates
   for insert to authenticated
   with check (
-    created_by = auth.uid()
+    created_by = (select auth.uid())
     and exists (
       select 1 from public.rc_blockers b
        where b.id = blocker_id
-         and (public.rc_is_admin() or public.rc_can_act_for(b.person_id))
+         and ((select public.rc_is_admin()) or public.rc_can_act_for(b.person_id))
     )
   );
 
@@ -2242,18 +2242,18 @@ on conflict (id) do nothing;
 drop policy if exists rc_sars_files_read on storage.objects;
 create policy rc_sars_files_read on storage.objects
   for select to authenticated
-  using (bucket_id = 'sars' and public.rc_is_admin());
+  using (bucket_id = 'sars' and (select public.rc_is_admin()));
 
 drop policy if exists rc_sars_files_write on storage.objects;
 create policy rc_sars_files_write on storage.objects
   for insert to authenticated
-  with check (bucket_id = 'sars' and public.rc_is_admin());
+  with check (bucket_id = 'sars' and (select public.rc_is_admin()));
 
 drop policy if exists rc_sars_files_move on storage.objects;
 create policy rc_sars_files_move on storage.objects
   for update to authenticated
-  using (bucket_id = 'sars' and public.rc_is_admin())
-  with check (bucket_id = 'sars' and public.rc_is_admin());
+  using (bucket_id = 'sars' and (select public.rc_is_admin()))
+  with check (bucket_id = 'sars' and (select public.rc_is_admin()));
 
 drop policy if exists rc_evidence_read on storage.objects;
 create policy rc_evidence_read on storage.objects
@@ -2263,7 +2263,7 @@ create policy rc_evidence_read on storage.objects
 drop policy if exists rc_evidence_write on storage.objects;
 create policy rc_evidence_write on storage.objects
   for insert to authenticated
-  with check (bucket_id = 'evidence' and coalesce(public.rc_my_role(), '') <> 'viewer');
+  with check (bucket_id = 'evidence' and coalesce((select public.rc_my_role()), '') <> 'viewer');
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Seed vocabularies
@@ -2403,13 +2403,13 @@ drop policy if exists rc_la_cells_read on public.rc_la_cells;
 create policy rc_la_cells_read on public.rc_la_cells for select to authenticated using (true);
 -- Who changed what is the evidence base, and an administrator's.
 drop policy if exists rc_la_edits_read on public.rc_la_edits;
-create policy rc_la_edits_read on public.rc_la_edits for select to authenticated using (public.rc_is_admin());
+create policy rc_la_edits_read on public.rc_la_edits for select to authenticated using ((select public.rc_is_admin()));
 
 drop policy if exists rc_support_codes_read on public.rc_support_codes;
 create policy rc_support_codes_read on public.rc_support_codes for select to authenticated using (true);
 drop policy if exists rc_support_codes_write on public.rc_support_codes;
 create policy rc_support_codes_write on public.rc_support_codes for all to authenticated
-  using (public.rc_is_admin()) with check (public.rc_is_admin());
+  using ((select public.rc_is_admin())) with check ((select public.rc_is_admin()));
 
 -- Reading only. Every write to the look-ahead is `rc_la_apply()`; the log has
 -- no write grant at all, so nothing but that function can add to it and
@@ -2592,6 +2592,66 @@ grant execute on function public.rc_la_apply(jsonb) to authenticated;
 revoke all on function public.rc_la_revision() from public, anon;
 grant execute on function public.rc_la_revision() to authenticated;
 
+-- ── The bell: one row that changes whenever the look-ahead does ─────────────
+--
+-- An open editor used to ask rc_la_revision() every twenty seconds, and the
+-- calendar's view asked for the newest reading every ten, so somebody else's
+-- change took that long to arrive and every open window asked whether anything
+-- had happened, all day, whether or not anything had. Supabase Realtime can
+-- tell a page instead, but not about rc_la_edits (an administrator's alone, and
+-- Realtime applies the same policies) nor rc_lookahead_snapshots (whose rows
+-- carry the whole grid, which would be pushed to every window on every
+-- publish). So it is told about this: a single row anybody signed in may read,
+-- touched by a trigger whenever an edit is logged or a reading is taken. It
+-- says *that* something changed, never what; the page asks what, exactly as
+-- its poll always did. The poll stays, slower, for a page whose socket is down.
+--
+-- `changed_at is distinct from now()` makes the second touch in a transaction
+-- a no-op — rc_la_apply logs one row per op — so a batch rings once.
+create table if not exists public.rc_la_beacon (
+  id         boolean primary key default true check (id),
+  changed_at timestamptz not null default now()
+);
+insert into public.rc_la_beacon (id) values (true) on conflict (id) do nothing;
+
+alter table public.rc_la_beacon enable row level security;
+drop policy if exists rc_la_beacon_read on public.rc_la_beacon;
+create policy rc_la_beacon_read on public.rc_la_beacon for select to authenticated using (true);
+revoke all on public.rc_la_beacon from public, anon;
+grant select on public.rc_la_beacon to authenticated;
+
+create or replace function public.rc_la_ring()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update public.rc_la_beacon set changed_at = now()
+  where id and changed_at is distinct from now();
+  return null;
+end;
+$$;
+revoke all on function public.rc_la_ring() from public, anon, authenticated;
+
+drop trigger if exists rc_la_edits_ring on public.rc_la_edits;
+create trigger rc_la_edits_ring after insert on public.rc_la_edits
+  for each statement execute function public.rc_la_ring();
+drop trigger if exists rc_lookahead_snapshots_ring on public.rc_lookahead_snapshots;
+create trigger rc_lookahead_snapshots_ring after insert on public.rc_lookahead_snapshots
+  for each statement execute function public.rc_la_ring();
+
+-- Realtime publishes only the tables in its publication. Supabase creates the
+-- publication; a plain Postgres (the test harness) has none, and is left alone.
+do $$
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime')
+     and not exists (select 1 from pg_publication_tables
+                     where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'rc_la_beacon') then
+    alter publication supabase_realtime add table public.rc_la_beacon;
+  end if;
+end $$;
+
 -- ══════════════════════════════════════════════════════════════════════════
 -- Problems the application ran into
 --
@@ -2626,12 +2686,12 @@ alter table public.rc_client_errors enable row level security;
 
 drop policy if exists rc_client_errors_read on public.rc_client_errors;
 create policy rc_client_errors_read on public.rc_client_errors
-  for select to authenticated using (public.rc_is_admin());
+  for select to authenticated using ((select public.rc_is_admin()));
 
 -- Your own row, as yourself: a report cannot be written in somebody else's name.
 drop policy if exists rc_client_errors_insert on public.rc_client_errors;
 create policy rc_client_errors_insert on public.rc_client_errors
-  for insert to authenticated with check (created_by = auth.uid());
+  for insert to authenticated with check (created_by = (select auth.uid()));
 
 revoke all on public.rc_client_errors from public, anon, authenticated;
 grant select, insert on public.rc_client_errors to authenticated;
@@ -2757,11 +2817,11 @@ alter table public.rc_la_seen enable row level security;
 
 drop policy if exists rc_la_seen_read on public.rc_la_seen;
 create policy rc_la_seen_read on public.rc_la_seen for select to authenticated
-  using (public.rc_is_admin() or person_id = public.rc_me());
+  using ((select public.rc_is_admin()) or person_id = (select public.rc_me()));
 
 drop policy if exists rc_la_seen_insert on public.rc_la_seen;
 create policy rc_la_seen_insert on public.rc_la_seen for insert to authenticated
-  with check (person_id = public.rc_me());
+  with check (person_id = (select public.rc_me()));
 
 revoke all on public.rc_la_seen from public, anon, authenticated;
 grant select, insert on public.rc_la_seen to authenticated;
@@ -2958,7 +3018,7 @@ begin
   loop
     execute format('drop policy if exists %1$s_admin on public.%1$s', t);
     execute format('create policy %1$s_admin on public.%1$s for all to authenticated
-                      using (public.rc_is_admin()) with check (public.rc_is_admin())', t);
+                      using ((select public.rc_is_admin())) with check ((select public.rc_is_admin()))', t);
   end loop;
 end;
 $$;
@@ -2968,25 +3028,25 @@ $$;
 -- only their own.
 drop policy if exists rc_tawr_profiles_read on public.rc_tawr_profiles;
 create policy rc_tawr_profiles_read on public.rc_tawr_profiles for select to authenticated
-  using (public.rc_is_admin());
+  using ((select public.rc_is_admin()));
 drop policy if exists rc_tawr_profiles_write on public.rc_tawr_profiles;
 create policy rc_tawr_profiles_write on public.rc_tawr_profiles for all to authenticated
-  using (public.rc_is_admin() and person_id = public.rc_me())
-  with check (public.rc_is_admin() and person_id = public.rc_me());
+  using ((select public.rc_is_admin()) and person_id = (select public.rc_me()))
+  with check ((select public.rc_is_admin()) and person_id = (select public.rc_me()));
 
 drop policy if exists rc_tawrs_read on public.rc_tawrs;
 create policy rc_tawrs_read on public.rc_tawrs for select to authenticated
-  using (public.rc_is_admin());
+  using ((select public.rc_is_admin()));
 drop policy if exists rc_tawrs_insert on public.rc_tawrs;
 create policy rc_tawrs_insert on public.rc_tawrs for insert to authenticated
-  with check (public.rc_is_admin());
+  with check ((select public.rc_is_admin()));
 drop policy if exists rc_tawrs_update on public.rc_tawrs;
 create policy rc_tawrs_update on public.rc_tawrs for update to authenticated
-  using (public.rc_is_admin()) with check (public.rc_is_admin());
+  using ((select public.rc_is_admin())) with check ((select public.rc_is_admin()));
 -- Only a draft can be thrown away; an approved request is the record.
 drop policy if exists rc_tawrs_delete on public.rc_tawrs;
 create policy rc_tawrs_delete on public.rc_tawrs for delete to authenticated
-  using (public.rc_is_admin() and status = 'draft');
+  using ((select public.rc_is_admin()) and status = 'draft');
 
 revoke all on public.rc_tawr_settings, public.rc_tawr_profiles,
               public.rc_tawr_descriptions, public.rc_tawrs from public, anon;
@@ -3005,20 +3065,73 @@ on conflict (id) do update set public = false;
 drop policy if exists rc_tawr_files_read on storage.objects;
 create policy rc_tawr_files_read on storage.objects
   for select to authenticated
-  using (bucket_id = 'tawr' and public.rc_is_admin());
+  using (bucket_id = 'tawr' and (select public.rc_is_admin()));
 drop policy if exists rc_tawr_files_write on storage.objects;
 create policy rc_tawr_files_write on storage.objects
   for insert to authenticated
-  with check (bucket_id = 'tawr' and public.rc_is_admin());
+  with check (bucket_id = 'tawr' and (select public.rc_is_admin()));
 drop policy if exists rc_tawr_files_replace on storage.objects;
 create policy rc_tawr_files_replace on storage.objects
   for update to authenticated
-  using (bucket_id = 'tawr' and public.rc_is_admin())
-  with check (bucket_id = 'tawr' and public.rc_is_admin());
+  using (bucket_id = 'tawr' and (select public.rc_is_admin()))
+  with check (bucket_id = 'tawr' and (select public.rc_is_admin()));
 drop policy if exists rc_tawr_files_remove on storage.objects;
 create policy rc_tawr_files_remove on storage.objects
   for delete to authenticated
-  using (bucket_id = 'tawr' and public.rc_is_admin());
+  using (bucket_id = 'tawr' and (select public.rc_is_admin()));
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- An index under every foreign key that names a calendar row
+--
+-- Retiring is the first answer and deleting the second, and Postgres decides
+-- which applies by looking for rows that still point at the one going. With
+-- no index under the key, that look is a scan of every referencing table —
+-- a person or a location touches the plan, the outcomes, the blockers, the
+-- readings' rows and the requests — and so is every join along the key and
+-- every "what superseded this" (rc_plan_current asks it of each entry). The
+-- who-did-it stamps that point at auth.users are left alone: an account is
+-- never deleted under its rows, and nothing is looked up by them.
+-- `rc_permissions.sql` fails when a foreign key is added without one.
+-- ══════════════════════════════════════════════════════════════════════════
+
+create index if not exists rc_location_alias_location_id_fk_idx on public.rc_location_alias (location_id);
+create index if not exists rc_person_alias_person_id_fk_idx on public.rc_person_alias (person_id);
+create index if not exists rc_leave_kind_id_fk_idx on public.rc_leave (kind_id);
+create index if not exists rc_lookahead_rows_location_id_fk_idx on public.rc_lookahead_rows (location_id);
+create index if not exists rc_change_events_from_snapshot_fk_idx on public.rc_change_events (from_snapshot);
+create index if not exists rc_change_events_to_snapshot_fk_idx on public.rc_change_events (to_snapshot);
+create index if not exists rc_change_events_location_id_fk_idx on public.rc_change_events (location_id);
+create index if not exists rc_change_annotations_party_id_fk_idx on public.rc_change_annotations (party_id);
+create index if not exists rc_change_annotations_linked_event_id_fk_idx on public.rc_change_annotations (linked_event_id);
+create index if not exists rc_change_annotations_supersedes_id_fk_idx on public.rc_change_annotations (supersedes_id);
+create index if not exists rc_cancellation_notes_supersedes_id_fk_idx on public.rc_cancellation_notes (supersedes_id);
+create index if not exists rc_sars_location_id_fk_idx on public.rc_sars (location_id);
+create index if not exists rc_sars_superseded_by_fk_idx on public.rc_sars (superseded_by);
+create index if not exists rc_sar_links_lookahead_row_id_fk_idx on public.rc_sar_links (lookahead_row_id);
+create index if not exists rc_plan_entries_location_id_fk_idx on public.rc_plan_entries (location_id);
+create index if not exists rc_plan_entries_category_id_fk_idx on public.rc_plan_entries (category_id);
+create index if not exists rc_plan_entries_lookahead_row_id_fk_idx on public.rc_plan_entries (lookahead_row_id);
+create index if not exists rc_plan_entries_supersedes_id_fk_idx on public.rc_plan_entries (supersedes_id);
+create index if not exists rc_plan_entries_reassigned_from_fk_idx on public.rc_plan_entries (reassigned_from);
+create index if not exists rc_actuals_plan_entry_id_fk_idx on public.rc_actuals (plan_entry_id);
+create index if not exists rc_actuals_category_id_fk_idx on public.rc_actuals (category_id);
+create index if not exists rc_actuals_location_id_fk_idx on public.rc_actuals (location_id);
+create index if not exists rc_actuals_blocked_party_id_fk_idx on public.rc_actuals (blocked_party_id);
+create index if not exists rc_actuals_lookahead_row_id_fk_idx on public.rc_actuals (lookahead_row_id);
+create index if not exists rc_blocker_updates_owner_id_fk_idx on public.rc_blocker_updates (owner_id);
+create index if not exists rc_tawrs_location_id_fk_idx on public.rc_tawrs (location_id);
+create index if not exists rc_tawrs_snapshot_id_fk_idx on public.rc_tawrs (snapshot_id);
+create index if not exists rc_tawrs_supersedes_fk_idx on public.rc_tawrs (supersedes);
+create index if not exists rc_tawrs_created_by_fk_idx on public.rc_tawrs (created_by);
+create index if not exists rc_tawrs_updated_by_fk_idx on public.rc_tawrs (updated_by);
+create index if not exists rc_tawrs_approved_by_fk_idx on public.rc_tawrs (approved_by);
+create index if not exists rc_invitations_person_id_fk_idx on public.rc_invitations (person_id);
+create index if not exists rc_blockers_raised_actual_id_fk_idx on public.rc_blockers (raised_actual_id);
+create index if not exists rc_blockers_location_id_fk_idx on public.rc_blockers (location_id);
+create index if not exists rc_blockers_lookahead_row_id_fk_idx on public.rc_blockers (lookahead_row_id);
+create index if not exists rc_blockers_party_id_fk_idx on public.rc_blockers (party_id);
+create index if not exists rc_la_rows_parent_id_fk_idx on public.rc_la_rows (parent_id);
+create index if not exists rc_la_seen_snapshot_id_fk_idx on public.rc_la_seen (snapshot_id);
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- The version stamp — last, on purpose.
@@ -3031,5 +3144,5 @@ create policy rc_tawr_files_remove on storage.objects
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '10')
+insert into public.rc_settings (key, value) values ('schema_version', '11')
 on conflict (key) do update set value = excluded.value, updated_at = now();

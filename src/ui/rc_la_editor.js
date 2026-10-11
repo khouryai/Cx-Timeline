@@ -52,6 +52,8 @@ import { la } from './rc_la_state.js';
 const META = ed.FIELDS.length; // six activity columns, then the days
 const SAVE_BATCH = 400;
 const POLL_MS = 20000;
+/** While the bell is connected (`rc.lookaheadLive()`), a poll is only a check on it. */
+const POLL_LIVE_MS = 120000;
 const PUBLISH_QUIET_MS = 2500;
 
 /**
@@ -2713,16 +2715,26 @@ function tidyOnceADay() {
   rc.compactSnapshots().catch((err) => rc.reportError('lookahead:compact', err));
 }
 
-/** Look for the other editor's changes, quietly, while nobody is mid-edit. */
+/**
+ * Look for the other editor's changes, quietly, while nobody is mid-edit — the
+ * moment the bell rings (`rc.onLookaheadChange()`), and on a poll that slows
+ * to a check while the bell is connected. A ring that lands mid-edit is not
+ * lost: the next poll, the window's focus or the next ring asks again.
+ */
 function startPolling() {
   if (E.pollTimer) return;
+  let asked = 0;
   const tick = async () => {
     if (!E.root?.isConnected || document.hidden || E.editing || E.queue.length || E.saving) return;
+    asked = Date.now();
     try {
       const rev = await rc.lookaheadRevision();
       // Asked again after the wait: an edit made meanwhile is not the other editor's.
       if (E.editing || E.queue.length || E.saving) return;
       if (rev > E.revision) {
+        // Somebody else wrote: whatever this page remembers reading is from
+        // before it, and a reload served from memory would draw the old sheet.
+        rc.forgetReads();
         await reload();
         toast({ message: 'The look-ahead was updated with changes made by the other editor.', timeout: 4000 });
       }
@@ -2730,7 +2742,11 @@ function startPolling() {
       /* the next tick will ask again */
     }
   };
-  E.pollTimer = setInterval(tick, POLL_MS);
+  E.pollTimer = setInterval(() => {
+    if (rc.lookaheadLive() && Date.now() - asked < POLL_LIVE_MS) return;
+    tick();
+  }, POLL_MS);
+  rc.onLookaheadChange(tick);
   window.addEventListener('focus', tick);
   window.addEventListener('beforeunload', (e) => {
     if (E.queue.length) {
