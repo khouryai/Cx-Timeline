@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 60   Built: 2026-10-11T20:47:32.987Z
+ * Modules: 60   Built: 2026-10-11T20:59:57.456Z
  */
 (function () {
   'use strict';
@@ -4372,13 +4372,14 @@ __mods["core/filestore.js"] = function (__x, __req) {
   /* The pure rules — names, digests, whose turn the pen is — tested in Node. */
   const {
     basename, lockNameFor, isLockFile, claimNameFor, isClaimFor, isLockLitter,
-    fingerprint, hash64, parseClaim, penHolder, isStale,
+    fingerprint, parseClaim, penHolder, isStale,
   } = rules;
 
   /** How often a session restates its claim, in ms. */
   const HEARTBEAT_MS = 30000;
-  /**
-   * A claim older than this is treated as abandoned — a crash, or a closed lid.
+  /*
+   * `STALE_MS` (core/folder_rules.js, read through `isStale()`): a claim older
+   * than this is treated as abandoned — a crash, or a closed lid.
    *
    * Four minutes, not the seventy-five seconds this started at, and the reason is
    * the folder rather than the people: OneDrive routinely takes a minute or more
@@ -4388,7 +4389,6 @@ __mods["core/filestore.js"] = function (__x, __req) {
    * wrong. Eight heartbeats of margin costs a crashed session four minutes of
    * somebody else's patience, and `takeOver()` is there for anyone with less.
    */
-  const STALE_MS = rules.STALE_MS;
   /**
    * A claim file this old is deleted rather than merely ignored.
    *
@@ -7077,6 +7077,9 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    * activities for reference with no shift against them, and writing those would
    * make the register mostly noise — and, worse, make every one of them look
    * like scope the first time it *did* get a shift.
+   *
+   * @param {object} view
+   * @param {{ snapshotId?: string | null, locate?: (raw: string) => Promise<string | null>, locationColumn?: number | null }} [options]
    */
   async function rowsFrom(view, {
     snapshotId = null, locate = async () => null, locationColumn = null,
@@ -7880,6 +7883,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
       groups.get(key).push({ ...d, day });
     }
 
+    /** @type {any[]} */
     const out = [];
     for (const [key, list] of groups) {
       list.sort((a, b) => a.day.localeCompare(b.day));
@@ -7943,6 +7947,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
       groups.get(group).list.push({ ...d, day });
     }
 
+    /** @type {any[]} */
     const out = [];
     for (const { key, codes, list } of groups.values()) {
       list.sort((a, b) => a.day.localeCompare(b.day));
@@ -8306,6 +8311,10 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    * when the axis is undated): `[{ date, col, meaning, hex, shift, cancelled,
    * text, names, mine }]`. `shift` is true when the paint is work; `mine` when
    * `isMe` answers yes for a name on that day.
+   *
+   * @param {object} view
+   * @param {object} activity
+   * @param {{ fromISO?: string | null, isMe?: (name: string) => boolean }} [options]
    */
   function activityDays(view, activity, { fromISO = null, isMe = () => false } = {}) {
     const marks = new Map((activity?.marks || []).map((m) => [m.col, m]));
@@ -8407,6 +8416,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     const usedAdded = new Set();
     const stillRemoved = [];
     for (const r of removed.sort((a, b) => a.date.localeCompare(b.date))) {
+      /** @type {number | null} */
       let best = null;
       let bestGap = Infinity;
       added.forEach((a, i) => {
@@ -8524,9 +8534,7 @@ __mods["core/store.js"] = function (__x, __req) {
      saved without ever having been written anywhere. */
   const { isViewer: folderViewer } = __req("core/filestore.js");
   const { planLocked, readView, writeView } = __req("core/access.js");
-  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, isDerivedBaseline, syncDurationBasis, emptyLookahead, lookaheadRegister, lookaheadActivity, makeLookaheadEntry, laLinkedIds, laPlacedIds, laRollUp } = __req("core/model.js");
-
-
+  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, syncDurationBasis, emptyLookahead, lookaheadRegister, lookaheadActivity, makeLookaheadEntry, laLinkedIds, laPlacedIds, laRollUp } = __req("core/model.js");
 
 
 
@@ -9369,10 +9377,13 @@ __mods["core/store.js"] = function (__x, __req) {
     }, 'view');
   }
 
-  function setMeta(patch, label = 'Edit project details') {
+  function setMeta(patch, label = 'Edit project details', opts = {}) {
+    // `opts` reaches `edit()`: the inspector's name field passes a mergeKey so a
+    // name typed letter by letter is one step of undo, and it used to be dropped
+    // here — every keystroke was its own.
     return edit(label, (d) => {
       Object.assign(d, patch);
-    });
+    }, opts);
   }
 
   /* ── Baselines ─────────────────────────────────────────────────────────── */
@@ -12315,7 +12326,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
 
   const { clamp } = __req("core/util.js");
   const { MS_DAY, daysBetween } = __req("core/dates.js");
-  const { TYPES, objectRange, baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange } = __req("core/model.js");
+  const { TYPES, baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange } = __req("core/model.js");
 
 
   const { getDoc, orderedLanes, getLane, activeBaseline } = __req("core/store.js");
@@ -13634,8 +13645,8 @@ __mods["timeline/connectors.js"] = function (__x, __req) {
 
       if (item.label) {
         const text = document.createElementNS(SVG_NS, 'text');
-        text.setAttribute('x', item.mid.x);
-        text.setAttribute('y', item.mid.y - 4);
+        text.setAttribute('x', String(item.mid.x));
+        text.setAttribute('y', String(item.mid.y - 4));
         text.setAttribute('text-anchor', 'middle');
         text.setAttribute('class', 'tl-link-label' + (item.violated ? ' violated' : ''));
         text.textContent = item.label;
@@ -13944,14 +13955,16 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
 
   const { el, clear, rafBatch, withAlpha, readableInk, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
-  const { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } = __req("core/dates.js");
-  const { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } = __req("core/model.js");
-  const { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
+  const { ticks, fmtDate, toISO } = __req("core/dates.js");
+  const { TYPES, statusOf, objectColor, effectiveToday } = __req("core/model.js");
+  const { getDoc, getSelection, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
+
+
   const { filterPredicate, dateWindowPredicate } = __req("core/query.js");
-  const { linkViolations, criticalPath, predecessorsOf } = __req("core/analysis.js");
+  const { linkViolations, predecessorsOf } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
-  const { computeLayout, stageHeight, ROW_HEIGHT } = __req("timeline/layout.js");
-  const { fontString, textWidth, wrapText, resetTextCache } = __req("timeline/text.js");
+  const { computeLayout, stageHeight } = __req("timeline/layout.js");
+  const { fontString, textWidth, resetTextCache } = __req("timeline/text.js");
   const { routeAll, renderConnectors } = __req("timeline/connectors.js");
   const { icon } = __req("ui/icons.js");
 
@@ -15511,7 +15524,9 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
 
   const { clamp, closestData, el, hasMod, isTyping } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
-  const { MS_DAY, snap: snapMs, fmtDate, toISO, addMonths, addWeeks, addWorkingDays } = __req("core/dates.js");
+  const { MS_DAY, snap: snapMs, fmtDate, addMonths, addWeeks, addWorkingDays } = __req("core/dates.js");
+
+
   const { TYPES, LINK_TYPES, linkTypeBetween } = __req("core/model.js");
   const store = __req("core/store.js");
   const viewport = __req("timeline/viewport.js");
@@ -17448,6 +17463,8 @@ __mods["core/rc.js"] = function (__x, __req) {
    * desktop copy that has not fetched its update yet. A read that fails answers
    * `unknown` rather than guessing: the calendar has its own ways of saying the
    * database is unreachable, and a second one here would only compete.
+   *
+   * @returns {Promise<{ state: string, expected: number, found?: number | null }>}
    */
   async function schemaStatus() {
     let rows;
@@ -18374,7 +18391,7 @@ __mods["ui/components.js"] = function (__x, __req) {
    * Imports: util, events, icons.
    */
 
-  const { el, clear, escapeHtml, uid, IS_MAC, clamp, fold } = __req("core/util.js");
+  const { el, clear, uid, IS_MAC, clamp, fold } = __req("core/util.js");
   const { on, EV } = __req("core/events.js");
   const { icon, searchIcons, hasIcon } = __req("ui/icons.js");
 
@@ -18394,6 +18411,7 @@ __mods["ui/components.js"] = function (__x, __req) {
    * @param {Array}  [opts.actions]          [{label, kind, onClick, autofocus}]
    * @param {string} [opts.size]             '' | 'wide' | 'xl'
    * @param {Function} [opts.onClose]
+   * @param {boolean} [opts.dismissible]  false: a click outside or Escape does not close it.
    * @returns {{close:Function, root:HTMLElement, body:HTMLElement}}
    */
   function openModal(opts) {
@@ -18508,8 +18526,9 @@ __mods["ui/components.js"] = function (__x, __req) {
     return modalStack.length > 0;
   }
 
-  /* ── Confirm / prompt ──────────────────────────────────────────────────── */
-
+  /* ── Confirm / prompt ────────────────────────────────────────────────────
+   * @param {{ title: string, message?: any, confirmLabel?: string, cancelLabel?: string, danger?: boolean }} options
+   */
   function confirmDialog({ title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false }) {
     return new Promise((resolve) => {
       let settled = false;
@@ -18527,6 +18546,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     });
   }
 
+  /** @param {{ title: string, label?: string, value?: string, placeholder?: string, multiline?: boolean, confirmLabel?: string }} options */
   function promptDialog({ title, label, value = '', placeholder = '', multiline = false, confirmLabel = 'Save' }) {
     return new Promise((resolve) => {
       const input = multiline
@@ -18847,6 +18867,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     ]);
   }
 
+  /** @param {{ value?: any, placeholder?: string, type?: string, onInput?: Function, onChange?: Function, mini?: boolean, [attr: string]: any }} options */
   function textInput({ value = '', placeholder = '', type = 'text', onInput, onChange, mini = false, ...rest }) {
     const input = el('input', {
       class: 'cx-input' + (mini ? ' mini' : ''),
@@ -18860,6 +18881,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     return input;
   }
 
+  /** @param {{ value?: number, min?: number, max?: number, step?: number, onChange?: Function, mini?: boolean }} options */
   function numberInput({ value = 0, min, max, step = 1, onChange, mini = false }) {
     const input = el('input', { class: 'cx-input' + (mini ? ' mini' : ''), type: 'number', min, max, step });
     input.value = value;
@@ -18867,6 +18889,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     return input;
   }
 
+  /** @param {{ value?: any, options: any[], onChange?: Function, mini?: boolean, placeholder?: string, disabled?: boolean }} options */
   function selectInput({ value, options, onChange, mini = false, placeholder, disabled = false }) {
     const select = el('select', { class: 'cx-select' + (mini ? ' mini' : '') });
     // A field with one possible answer is shown, not hidden: "Resource: you" says
@@ -18882,12 +18905,14 @@ __mods["ui/components.js"] = function (__x, __req) {
     return select;
   }
 
+  /** @param {{ value?: string, onChange?: Function }} options */
   function colorInput({ value = '#5b93f5', onChange }) {
     const input = el('input', { class: 'cx-color', type: 'color', value: value || '#5b93f5' });
     if (onChange) input.addEventListener('input', () => onChange(input.value));
     return input;
   }
 
+  /** @param {{ label: any, checked?: boolean, onChange?: Function }} options */
   function checkbox({ label, checked = false, onChange }) {
     const input = el('input', { type: 'checkbox' });
     input.checked = !!checked;
@@ -18895,6 +18920,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     return el('label', { class: 'cx-check' }, [input, el('span', { text: label })]);
   }
 
+  /** @param {{ label: any, checked?: boolean, onChange?: Function }} options */
   function toggle({ label, checked = false, onChange }) {
     const input = el('input', { type: 'checkbox' });
     input.checked = !!checked;
@@ -18902,6 +18928,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     return el('label', { class: 'cx-switch' }, [input, el('span', { text: label })]);
   }
 
+  /** @param {{ value?: number, min?: number, max?: number, step?: number, onInput?: Function, onChange?: Function }} options */
   function rangeInput({ value = 0, min = 0, max = 100, step = 1, onInput, onChange }) {
     const input = el('input', { class: 'cx-range', type: 'range', min, max, step });
     input.value = value;
@@ -18910,7 +18937,11 @@ __mods["ui/components.js"] = function (__x, __req) {
     return input;
   }
 
-  /** Segmented button row. `options` = [{value, label, icon, title}] */
+  /**
+   * Segmented button row. `options` = [{value, label, icon, title}]
+   *
+   * @param {{ value?: any, options: any[], onChange?: Function, stretch?: boolean }} options
+   */
   function segmented({ value, options, onChange, stretch = false }) {
     const wrap = el('div', { class: 'cx-seg' + (stretch ? ' stretch' : ''), role: 'group' });
     for (const opt of options) {
@@ -18951,7 +18982,11 @@ __mods["ui/components.js"] = function (__x, __req) {
     return wrap;
   }
 
-  /** Empty-state block. */
+  /**
+   * Empty-state block.
+   *
+   * @param {{ iconName?: string, title: string, message?: any, action?: { label: string, onClick: Function } | null }} options
+   */
   function emptyState({ iconName = 'inbox', title, message, action }) {
     return el('div', { class: 'cx-empty' }, [
       hasIcon(iconName) ? el('div', { class: 'ce-icon', html: icon(iconName, { size: 26 }) }) : null,
@@ -19084,6 +19119,7 @@ __mods["ui/components.js"] = function (__x, __req) {
   /**
    * Searchable icon grid. Calls `onPick(name)` and returns the panel element,
    * ready to drop into a popover or modal.
+   * @param {{ value?: string, onPick?: Function }} options
    */
   function iconPicker({ value, onPick }) {
     const search = el('input', { class: 'cx-input mini', type: 'search', placeholder: 'Search icons…' });
@@ -19129,6 +19165,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     '#ffffff', '#e5e7eb', '#9ca3af', '#6b7280', '#4b5563', '#374151', '#1f2937', '#111827', '#0b0f1a', '#000000',
   ];
 
+  /** @param {{ value?: string, onPick?: Function, colors?: string[] }} options */
   function swatchGrid({ value, onPick, colors = PALETTE }) {
     const grid = el('div', { class: 'cx-swatches' });
     for (const color of colors) {
@@ -19145,7 +19182,11 @@ __mods["ui/components.js"] = function (__x, __req) {
     return grid;
   }
 
-  /** Colour control: swatch input plus the shared palette in a popover. */
+  /**
+   * Colour control: swatch input plus the shared palette in a popover.
+   *
+   * @param {{ value?: string, onChange?: Function, allowInherit?: boolean }} options
+   */
   function colorControl({ value, onChange, allowInherit = false }) {
     const swatch = el('input', { class: 'cx-color', type: 'color', value: value || '#5b93f5' });
     swatch.addEventListener('input', () => onChange(swatch.value));
@@ -19233,6 +19274,2133 @@ __mods["ui/components.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/auth.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/auth.js"] = function (__x, __req) {
+  /**
+   * Sign-in, the account menu, and sharing.
+   *
+   * Only reachable on a hosted deployment — with `config.js` blank none of this
+   * is ever shown and the application boots straight into the canvas, exactly as
+   * it does today.
+   *
+   * The gate is a full-screen overlay rather than a separate page, so a single
+   * static file still serves the whole application and there is no route to get
+   * wrong. It renders before the workspace is built, so nothing behind it can
+   * flash into view.
+   *
+   * Imports: util, events, dates, cloud, icons, components.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const { on, EV } = __req("core/events.js");
+  const cloud = __req("core/cloud.js");
+  const filestore = __req("core/filestore.js");
+  const access = __req("core/access.js");
+  const { icon } = __req("ui/icons.js");
+  const { fmtDate } = __req("core/dates.js");
+  const { openModal, field, textInput, selectInput, section, skeleton, toast, badge, confirmDialog, emptyState } = __req("ui/components.js");
+
+
+
+
+
+
+
+
+
+
+
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The gate
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Show the sign-in screen and resolve once there is a session.
+   *
+   * Resolves to the user, or to null when the visitor chooses to work locally —
+   * which stays available unless the deployment sets `requireAuth`.
+   */
+  function requireSignIn() {
+    return new Promise((resolve) => {
+      const allowLocal = !cloud.authRequired();
+
+      // Sign-up is not offered. An invited person arrives on a link carrying
+      // their address, which is the only thing that reveals the form — and even
+      // then the database refuses any address without a pending invitation, so
+      // finding this URL achieves nothing on its own.
+      const invited = invitedEmail();
+      let mode = invited ? 'signup' : 'signin'; // signin | signup | reset
+
+      const overlay = el('div', { class: 'cx-gate', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Sign in' });
+      const card = el('div', { class: 'cx-gate-card' });
+      overlay.appendChild(card);
+
+      const emailInput = textInput({ type: 'email', value: invited || '', placeholder: 'you@company.com' });
+      emailInput.setAttribute('autocomplete', 'username');
+      emailInput.setAttribute('name', 'email');
+
+      const passwordInput = textInput({ type: 'password', value: '', placeholder: '••••••••' });
+      passwordInput.setAttribute('autocomplete', 'current-password');
+      passwordInput.setAttribute('name', 'password');
+
+      const nameInput = textInput({ value: '', placeholder: 'Your name' });
+      nameInput.setAttribute('autocomplete', 'name');
+
+      const message = el('div', { class: 'cx-gate-msg', role: 'alert' });
+      const submit = el('button', { class: 'cx-btn primary', type: 'submit', text: 'Sign in' });
+
+      const say = (text, tone = 'bad') => {
+        message.className = `cx-gate-msg ${tone}`;
+        message.textContent = text || '';
+      };
+
+      let busy = false;
+      const setBusy = (state) => {
+        busy = state;
+        submit.disabled = state;
+        submit.classList.toggle('loading', state);
+      };
+
+      const form = el('form', { class: 'cx-gate-form', onSubmit: (e) => { e.preventDefault(); go(); } });
+
+      async function go() {
+        if (busy) return;
+        const email = emailInput.value.trim();
+        const password = passwordInput.value;
+
+        if (!email) return say('Enter your email address.');
+        if (mode !== 'reset' && !password) return say('Enter your password.');
+
+        setBusy(true);
+        say('');
+        try {
+          if (mode === 'signin') {
+            const user = await cloud.signIn(email, password);
+            finish(user);
+          } else if (mode === 'signup') {
+            const { user, confirmationRequired } = await cloud.signUp(email, password, nameInput.value.trim());
+            if (confirmationRequired) {
+              say(`Account created. Check ${email} for a confirmation link, then sign in.`, 'good');
+              setMode('signin');
+            } else {
+              finish(user);
+            }
+          } else {
+            await cloud.sendPasswordReset(email);
+            say(`If there is an account for ${email}, a reset link is on its way.`, 'good');
+            setMode('signin');
+          }
+        } catch (err) {
+          say(err.message);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      function finish(user) {
+        overlay.classList.add('done');
+        setTimeout(() => overlay.remove(), 260);
+        resolve(user);
+      }
+
+      function setMode(next) {
+        mode = next;
+        render();
+        setTimeout(() => (mode === 'signup' ? nameInput : emailInput).focus(), 30);
+      }
+
+      function render() {
+        clear(card);
+
+        const titles = {
+          signin: ['Sign in', 'Your projects, wherever you open them.'],
+          signup: [
+            'Set up your account',
+            invited ? `You have been invited as ${invited}. Choose a password.` : 'Accounts are created by invitation.',
+          ],
+          reset: ['Reset your password', 'We will email you a link.'],
+        };
+        const [title, subtitle] = titles[mode];
+
+        card.append(
+          el('div', { class: 'cx-gate-brand' }, [
+            el('div', { class: 'brand-mark' }),
+            el('div', {}, [
+              el('div', { class: 'cx-gate-name', text: 'CX Timeline' }),
+              el('div', { class: 'cx-gate-sub', text: 'Commissioning Planner' }),
+            ]),
+          ]),
+          el('h1', { class: 'cx-gate-title', text: title }),
+          el('div', { class: 'cx-gate-lede', text: subtitle })
+        );
+
+        clear(form);
+        form.append(
+          ...[
+            mode === 'signup' ? field('Name', nameInput) : null,
+            field('Email', emailInput),
+            mode !== 'reset' ? field('Password', passwordInput) : null,
+            message,
+            submit,
+          ].filter(Boolean)
+        );
+        submit.textContent = { signin: 'Sign in', signup: 'Create account', reset: 'Send reset link' }[mode];
+        passwordInput.setAttribute('autocomplete', mode === 'signup' ? 'new-password' : 'current-password');
+        card.appendChild(form);
+
+        const links = el('div', { class: 'cx-gate-links' });
+        if (mode === 'signin') {
+          // No "create an account": there is no self-service sign-up.
+          links.append(
+            el('span', { class: 'cx-hint', text: 'Access is by invitation.' }),
+            gateLink('Forgot password?', () => setMode('reset'))
+          );
+        } else {
+          links.appendChild(gateLink('Back to sign in', () => setMode('signin')));
+        }
+        card.appendChild(links);
+
+        if (allowLocal) {
+          card.appendChild(
+            el('div', { class: 'cx-gate-local' }, [
+              el('button', {
+                class: 'cx-btn ghost mini',
+                text: 'Continue without an account',
+                onClick: () => {
+                  overlay.classList.add('done');
+                  setTimeout(() => overlay.remove(), 260);
+                  resolve(null);
+                },
+              }),
+              el('div', { class: 'cx-hint', text: 'Work is saved in this browser only, and is not shared.' }),
+            ])
+          );
+        }
+      }
+
+      render();
+      document.body.appendChild(overlay);
+      // An invited person already has their address filled in; put them in the
+      // field they actually have to complete.
+      setTimeout(() => (invited ? nameInput : emailInput).focus(), 80);
+    });
+  }
+
+  /**
+   * The address on an invitation link, if this is one.
+   *
+   * The link is a convenience, not a credential — it reveals the form and
+   * prefills the address, nothing more. Whether an account may be created is
+   * decided by the database, which refuses any address without a pending
+   * invitation however the request arrives.
+   */
+  function invitedEmail() {
+    const match = /[#&?]invite=([^&]+)/.exec(window.location.hash || '');
+    if (!match) return '';
+    try {
+      return decodeURIComponent(match[1]).trim().toLowerCase();
+    } catch {
+      return '';
+    }
+  }
+
+  function gateLink(text, onClick) {
+    return el('button', { class: 'cx-gate-link', type: 'button', text, onClick });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Read-only presentation
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Reflect the current role in the interface.
+   *
+   * A viewer is not shown a broken application: the editing affordances go away,
+   * a banner explains why, and a refused write says so once rather than on every
+   * keystroke. The database is what actually stops the write — this is here so
+   * the user understands the state they are in.
+   */
+  function installAccessMode() {
+    const apply = () => {
+      /* Three things can make a session read-only, and the interface says the
+         same thing for all of them — only the reason differs, and only the reason
+         decides whether there is anything the reader can do about it.
+
+         A viewer role on a hosted project: ask the owner. A colleague holding the
+         pen on a plan in a shared folder: wait, ask, or take it. And an account
+         the calendar says may not edit the plan at all, which outranks the other
+         two — there is no pen to ask for and nobody to ask, so the banner says
+         why and offers nothing. */
+      const locked = access.planLocked();
+      const viewingFolder = !locked && filestore.isViewer();
+      const readOnly = locked || cloud.isReadOnly() || viewingFolder;
+      document.body.classList.toggle('read-only', readOnly);
+      renderBanner(readOnly, viewingFolder ? filestore.state() : null);
+    };
+
+    on(EV.ACCESS_CHANGED, apply);
+    on(EV.AUTH_CHANGED, apply);
+    on(EV.FILE_STATE, apply);
+
+    // One notice per burst — a viewer holding an arrow key would otherwise
+    // stack up a notification per repeat.
+    let lastRefusal = 0;
+    on(EV.EDIT_REFUSED, () => {
+      const now = Date.now();
+      if (now - lastRefusal < 4000) return;
+      lastRefusal = now;
+      toast({
+        tone: 'warn',
+        title: 'Read-only',
+        message: access.planLocked()
+          ? access.lockReason()
+          : 'You have view access to this project. Ask the owner for edit access to make changes.',
+      });
+    });
+
+    apply();
+  }
+
+  /**
+   * How long ago, in words somebody can act on.
+   *
+   * Deliberately coarse: the difference between eleven and twelve minutes
+   * changes nobody's mind, and a ticking number in a banner reads as something
+   * that needs watching.
+   */
+  function since(ms) {
+    if (!Number.isFinite(ms)) return '';
+    const mins = Math.floor(ms / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
+    const hours = Math.round(mins / 60);
+    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  }
+
+  function renderBanner(readOnly, folder = null) {
+    const existing = document.getElementById('cx-readonly-bar');
+    if (!readOnly) {
+      existing?.remove();
+      return;
+    }
+    // The message can change while the bar is up — a colleague closing the plan
+    // hands the pen over — so rebuild rather than bail out on an existing bar.
+    existing?.remove();
+
+    const holder = folder?.holder || '';
+    /* What they are doing with it, not merely that they have it. "Dana has this
+       plan open" is a fact; "Dana has this plan open, last saved 40 minutes ago"
+       is a decision — wait, ask, or take it. */
+    const idle = folder && Number.isFinite(folder.holderIdleMs)
+      ? ` Last saved ${since(folder.holderIdleMs)}.`
+      : '';
+    const message = access.planLocked()
+      ? `Read-only — ${access.lockReason()}`
+      : holder
+        ? `Read-only — ${holder} has this plan open.${idle}`
+        : 'Read-only — you have view access to this project.';
+
+    const kids = [
+      el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),
+      el('span', { text: message }),
+    ];
+
+    /* The third option. Waiting had no end and taking over is destructive by
+       design, so people took over by habit; asking costs the holder one toast
+       and costs the asker nothing. Only in a folder, and only while somebody
+       else really has it — a hosted viewer has nobody to ask. */
+    if (holder && holder !== 'another window of yours') {
+      kids.push(folder.asked
+        ? el('span', { class: 'ro-asked', text: `Asked ${holder} — you will get it when they hand over.` })
+        : el('button', {
+          class: 'cx-btn mini',
+          text: 'Ask for the pen',
+          title: `Let ${holder} know you are waiting. They decide; nothing is taken.`,
+          onClick: async (event) => {
+            event.currentTarget.disabled = true;
+            await filestore.requestPen();
+          },
+        }));
+    }
+
+    const bar = el('div', { id: 'cx-readonly-bar', class: 'cx-readonly-bar', role: 'status' }, kids);
+    document.getElementById('main')?.prepend(bar);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The account menu
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** The signed-in-as block that sits at the foot of the sidebar. */
+  function accountBlock() {
+    const root = el('div', { class: 'cx-account' });
+
+    const render = () => {
+      clear(root);
+      if (!cloud.isSignedIn()) {
+        root.appendChild(
+          el('button', {
+            class: 'cx-btn mini',
+            html: icon('user', { size: 12 }) + '<span>Sign in</span>',
+            onClick: async () => {
+              await requireSignIn();
+              window.location.reload();
+            },
+          })
+        );
+        return;
+      }
+
+      const label = cloud.accountLabel();
+      root.append(
+        el('div', { class: 'acc-avatar', text: initials(label) }),
+        el('div', { class: 'acc-main' }, [
+          el('div', { class: 'acc-name', text: label, title: cloud.currentUser()?.email || '' }),
+          el('div', { class: 'acc-role', text: roleLabel(cloud.getRole()) }),
+        ]),
+        el('button', {
+          class: 'cx-btn icon mini ghost',
+          title: 'Sign out',
+          'aria-label': 'Sign out',
+          html: icon('logout', { size: 13 }),
+          onClick: async () => {
+            const ok = await confirmDialog({
+              title: 'Sign out?',
+              message: 'Anything saved stays on the server. Unsaved changes in this tab are written first.',
+              confirmLabel: 'Sign out',
+            });
+            if (!ok) return;
+            await cloud.signOut();
+            window.location.reload();
+          },
+        })
+      );
+    };
+
+    on(EV.AUTH_CHANGED, render);
+    on(EV.ACCESS_CHANGED, render);
+    render();
+    return root;
+  }
+
+  function initials(label) {
+    const parts = String(label).replace(/@.*$/, '').split(/[\s._-]+/).filter(Boolean);
+    return ((parts[0]?.[0] || '') + (parts[1]?.[0] || '')).toUpperCase() || '?';
+  }
+
+  function roleLabel(role) {
+    return { owner: 'Owner', editor: 'Editor', viewer: 'View only' }[role] || 'No project open';
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Team administration
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Who may have an account, and who administers the deployment.
+   *
+   * Sign-up is closed, so this pane is the only door in. Inviting writes a row
+   * the database checks when the account is created — which is why an
+   * invitation cannot be forged by anyone who finds the link, and why revoking
+   * one actually stops the sign-up rather than merely hiding a button.
+   */
+  function paneTeam(root) {
+    if (!cloud.isConfigured() || !cloud.isSignedIn()) {
+      root.appendChild(
+        emptyState({ iconName: 'users', title: 'Not available', message: 'Sign in to manage who has access.' })
+      );
+      return;
+    }
+    if (!cloud.isAdmin()) {
+      root.appendChild(
+        emptyState({
+          iconName: 'shield',
+          title: 'Administrators only',
+          message: 'Accounts are created by invitation. Ask an administrator to invite someone.',
+        })
+      );
+      return;
+    }
+
+    root.appendChild(el('div', { class: 'cx-hint', style: { marginBottom: '12px' },
+      text: 'Nobody can create an account unless their address is invited here — the database refuses the sign-up, not just the form.' }));
+
+    /* ── Invite ────────────────────────────────────────────────────────────── */
+    const emailInput = textInput({ type: 'email', value: '', placeholder: 'colleague@company.com' });
+    const noteInput = textInput({ value: '', placeholder: 'Role or team (optional)' });
+
+    const invite = async () => {
+      const email = emailInput.value.trim();
+      if (!email) return;
+      try {
+        const result = await cloud.inviteUser(email, 'editor', noteInput.value.trim());
+        emailInput.value = '';
+        noteInput.value = '';
+        showInviteLink(result.email);
+        refresh();
+      } catch (err) {
+        toast({ tone: 'bad', title: 'Could not invite', message: err.message });
+      }
+    };
+    emailInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        invite();
+      }
+    });
+
+    root.appendChild(
+      section('Invite someone', [
+        field('Email', emailInput),
+        field('Note', noteInput, 'Only you see this — a reminder of who they are.'),
+        el('button', {
+          class: 'cx-btn mini primary',
+          html: icon('plus', { size: 12 }) + '<span>Create invitation</span>',
+          onClick: invite,
+        }),
+        el('div', { class: 'cx-hint', style: { marginTop: '8px' },
+          text: 'No email is sent. You get a link to pass on however you like.' }),
+      ])
+    );
+
+    const pending = el('div', { class: 'cx-list' });
+    const accounts = el('div', { class: 'cx-list' });
+    root.append(
+      section('Pending invitations', [pending]),
+      section('Accounts', [accounts])
+    );
+
+    async function refresh() {
+      clear(pending);
+      clear(accounts);
+      pending.appendChild(skeleton(2));
+
+      try {
+        const [invites, people] = await Promise.all([cloud.listInvitations(), cloud.listAccounts()]);
+        clear(pending);
+
+        if (!invites.length) {
+          pending.appendChild(el('div', { class: 'cx-hint', text: 'None outstanding.' }));
+        } else {
+          for (const invitation of invites) pending.appendChild(invitationRow(invitation));
+        }
+        for (const person of people) accounts.appendChild(accountRow(person));
+      } catch (err) {
+        clear(pending);
+        pending.appendChild(el('div', { class: 'cx-gate-msg bad', text: err.message }));
+      }
+    }
+
+    function invitationRow(invitation) {
+      return el('div', { class: 'cx-listrow', dataset: { invite: invitation.email }, style: { cursor: 'default' } }, [
+        el('span', { class: 'cx-dot', style: { background: invitation.expired ? 'var(--bad)' : 'var(--pending)' } }),
+        el('div', { class: 'lr-main' }, [
+          el('div', { class: 'lr-title', text: invitation.email }),
+          el('div', { class: 'lr-meta', text: [
+            invitation.note,
+            invitation.expired ? 'expired' : `expires ${fmtDate(invitation.expires, 'medium')}`,
+          ].filter(Boolean).join(' · ') }),
+        ]),
+        el('div', { class: 'lr-actions', style: { opacity: '1' } }, [
+          el('button', {
+            class: 'cx-btn icon mini ghost',
+            title: 'Copy the invitation link',
+            'aria-label': `Copy the invitation link for ${invitation.email}`,
+            html: icon('copy', { size: 11 }),
+            onClick: () => showInviteLink(invitation.email),
+          }),
+          el('button', {
+            class: 'cx-btn icon mini ghost',
+            title: 'Revoke',
+            'aria-label': `Revoke the invitation for ${invitation.email}`,
+            html: icon('trash', { size: 11 }),
+            onClick: async () => {
+              const ok = await confirmDialog({
+                title: `Revoke ${invitation.email}?`,
+                message: 'They will not be able to create an account with that address.',
+                confirmLabel: 'Revoke',
+                danger: true,
+              });
+              if (!ok) return;
+              try {
+                await cloud.revokeInvitation(invitation.email);
+                refresh();
+              } catch (err) {
+                toast({ tone: 'bad', title: 'Could not revoke', message: err.message });
+              }
+            },
+          }),
+        ]),
+      ]);
+    }
+
+    function accountRow(person) {
+      return el('div', { class: 'cx-listrow', dataset: { account: person.id }, style: { cursor: 'default' } }, [
+        el('div', { class: 'acc-avatar small', text: initials(person.name || person.email) }),
+        el('div', { class: 'lr-main' }, [
+          el('div', { class: 'lr-title', text: (person.name || person.email) + (person.isYou ? '  (you)' : '') }),
+          el('div', { class: 'lr-meta', text: [
+            person.email,
+            `${person.projects} project${person.projects === 1 ? '' : 's'}`,
+          ].join(' · ') }),
+        ]),
+        person.admin ? badge('Admin', 'good') : null,
+        el('div', { class: 'lr-actions', style: { opacity: '1' } }, [
+          el('button', {
+            class: 'cx-btn mini ghost',
+            text: person.admin ? 'Remove admin' : 'Make admin',
+            onClick: async () => {
+              try {
+                await cloud.setAdmin(person.id, !person.admin);
+                refresh();
+              } catch (err) {
+                toast({ tone: 'bad', title: 'Could not change', message: err.message });
+              }
+            },
+          }),
+        ]),
+      ].filter(Boolean));
+    }
+
+    refresh();
+  }
+
+  /**
+   * Show the link an invited person opens.
+   *
+   * A dialog rather than a silent clipboard write, because the link is the
+   * whole deliverable of inviting someone — losing it silently would mean
+   * revoking and re-inviting to get it back.
+   */
+  function showInviteLink(email) {
+    const link = cloud.inviteLink(email);
+    const box = textInput({ value: link });
+    box.readOnly = true;
+    box.style.fontFamily = 'var(--f-mono)';
+    box.style.fontSize = 'var(--fs-tiny)';
+
+    openModal({
+      title: 'Invitation created',
+      subtitle: `${email} can now set up an account — and nobody else can.`,
+      body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+        field('Send them this link', box, 'It expires in 30 days. Revoke it any time from the Team pane.'),
+        el('button', {
+          class: 'cx-btn mini',
+          html: icon('copy', { size: 12 }) + '<span>Copy link</span>',
+          onClick: async (e) => {
+            try {
+              await navigator.clipboard.writeText(link);
+            } catch {
+              // Clipboard access can be refused; selecting the text still works.
+              box.select();
+            }
+            e.currentTarget.innerHTML = icon('check', { size: 12 }) + '<span>Copied</span>';
+          },
+        }),
+      ]),
+      actions: [{ label: 'Done', kind: 'primary' }],
+    });
+
+    setTimeout(() => box.select(), 60);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Sharing
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const ROLE_OPTIONS = [
+    { value: 'viewer', label: 'Viewer — can open and export, cannot change anything' },
+    { value: 'editor', label: 'Editor — can change the plan' },
+    { value: 'owner', label: 'Owner — full control, including sharing' },
+  ];
+
+  /**
+   * Who can see this project, and what they may do.
+   * Owners can change it; everyone else sees the list read-only, which is
+   * useful on its own — knowing who else is in a plan matters.
+   */
+  function openShareDialog(projectId = cloud.getProjectId(), projectName = '') {
+    if (!projectId) {
+      toast({ tone: 'warn', title: 'No project open', message: 'Open a project before sharing it.' });
+      return;
+    }
+
+    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } });
+    const list = el('div', { class: 'cx-list' });
+    const owner = cloud.isOwner();
+
+    const emailInput = textInput({ type: 'email', value: '', placeholder: 'colleague@company.com' });
+    let inviteRole = 'viewer';
+
+    async function refresh() {
+      clear(list);
+      let members = [];
+      try {
+        members = await cloud.listMembers(projectId);
+      } catch (err) {
+        list.appendChild(el('div', { class: 'cx-gate-msg bad', text: err.message }));
+        return;
+      }
+      if (!members.length) {
+        list.appendChild(emptyState({ iconName: 'user', title: 'Nobody else yet' }));
+        return;
+      }
+      for (const member of members) list.appendChild(memberRow(member));
+    }
+
+    function memberRow(member) {
+      const isLastOwner = member.role === 'owner';
+      return el('div', { class: 'cx-listrow', dataset: { member: member.userId }, style: { cursor: 'default' } }, [
+        el('div', { class: 'acc-avatar small', text: initials(member.name || member.email || '?') }),
+        el('div', { class: 'lr-main' }, [
+          el('div', { class: 'lr-title', text: (member.name || member.email) + (member.isYou ? '  (you)' : '') }),
+          el('div', { class: 'lr-meta', text: member.email || '' }),
+        ]),
+        owner && !member.isYou
+          ? selectInput({
+              value: member.role,
+              mini: true,
+              options: ROLE_OPTIONS.map((o) => ({ value: o.value, label: o.value })),
+              onChange: async (v) => {
+                try {
+                  await cloud.setMemberRole(projectId, member.email, v);
+                  toast({ tone: 'good', title: 'Access updated', message: `${member.email} is now ${v === 'viewer' ? 'a viewer' : `an ${v}`}.` });
+                  refresh();
+                } catch (err) {
+                  toast({ tone: 'bad', title: 'Could not change access', message: err.message });
+                  refresh();
+                }
+              },
+            })
+          : badge(roleLabel(member.role), member.role === 'viewer' ? 'muted' : 'info'),
+        owner && !(member.isYou && isLastOwner)
+          ? el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Remove access',
+              'aria-label': `Remove ${member.email}`,
+              html: icon('x', { size: 11 }),
+              onClick: async () => {
+                const ok = await confirmDialog({
+                  title: `Remove ${member.email}?`,
+                  message: 'They lose access to this project immediately.',
+                  confirmLabel: 'Remove',
+                  danger: true,
+                });
+                if (!ok) return;
+                try {
+                  await cloud.unshareProject(projectId, member.userId);
+                  refresh();
+                } catch (err) {
+                  toast({ tone: 'bad', title: 'Could not remove', message: err.message });
+                }
+              },
+            })
+          : null,
+      ].filter(Boolean));
+    }
+
+    async function invite() {
+      const email = emailInput.value.trim();
+      if (!email) return;
+      try {
+        await cloud.shareProject(projectId, email, inviteRole);
+        emailInput.value = '';
+        toast({
+          tone: 'good',
+          title: 'Shared',
+          message: `${email} now has ${inviteRole === 'viewer' ? 'view-only' : inviteRole} access.`,
+        });
+        refresh();
+      } catch (err) {
+        toast({ tone: 'bad', title: 'Could not share', message: err.message });
+      }
+    }
+
+    if (owner) {
+      const roleSelect = selectInput({
+        value: inviteRole,
+        options: ROLE_OPTIONS,
+        onChange: (v) => { inviteRole = v; },
+      });
+      emailInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          invite();
+        }
+      });
+
+      body.append(
+        el('div', {}, [
+          field('Invite by email', emailInput, 'They need a CX Timeline account already — sharing does not send an invitation email.'),
+          field('Access level', roleSelect),
+          el('button', {
+            class: 'cx-btn primary mini',
+            html: icon('plus', { size: 12 }) + '<span>Grant access</span>',
+            onClick: invite,
+          }),
+        ])
+      );
+    } else {
+      body.appendChild(
+        el('div', { class: 'cx-hint', text: 'Only the project owner can change who has access.' })
+      );
+    }
+
+    body.append(el('div', { class: 'cx-section-label', text: 'People with access' }), list);
+    refresh();
+
+    return openModal({
+      title: projectName ? `Share "${projectName}"` : 'Share project',
+      subtitle: 'Access is enforced by the database, not the interface.',
+      body,
+      actions: [{ label: 'Done', kind: 'primary' }],
+    });
+  }
+
+  Object.defineProperty(__x, "requireSignIn", { get: () => requireSignIn, enumerable: true });
+  Object.defineProperty(__x, "installAccessMode", { get: () => installAccessMode, enumerable: true });
+  Object.defineProperty(__x, "accountBlock", { get: () => accountBlock, enumerable: true });
+  Object.defineProperty(__x, "paneTeam", { get: () => paneTeam, enumerable: true });
+  Object.defineProperty(__x, "openShareDialog", { get: () => openShareDialog, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// io/inflate.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["io/inflate.js"] = function (__x, __req) {
+  /**
+   * Minimal DEFLATE decompressor and ZIP reader.
+   *
+   * Exists so `.xlsx` files can be imported without a dependency: an xlsx is a
+   * ZIP of XML parts, and the parts are almost always DEFLATE-compressed. The
+   * browser's own DecompressionStream handles this when available (Chrome,
+   * Edge, Firefox, Safari 16.4+); the hand-written inflater below is the
+   * fallback so the feature works on any engine, offline, from `file://`.
+   *
+   * Implements RFC 1951 for stored, fixed-Huffman and dynamic-Huffman blocks —
+   * which is everything a spreadsheet writer emits.
+   *
+   * Imports: nothing (leaf).
+   */
+
+  /* ── Huffman decoding ──────────────────────────────────────────────────── */
+
+  /** Build a canonical Huffman decode table from a list of code lengths. */
+  function buildTree(lengths) {
+    const maxBits = Math.max(...lengths, 0);
+    const blCount = new Array(maxBits + 1).fill(0);
+    for (const len of lengths) if (len) blCount[len]++;
+
+    const nextCode = new Array(maxBits + 1).fill(0);
+    let code = 0;
+    for (let bits = 1; bits <= maxBits; bits++) {
+      code = (code + blCount[bits - 1]) << 1;
+      nextCode[bits] = code;
+    }
+
+    // Map "length:code" to a symbol. A flat object lookup is fast enough here
+    // and keeps the implementation short and auditable.
+    const table = new Map();
+    for (let symbol = 0; symbol < lengths.length; symbol++) {
+      const len = lengths[symbol];
+      if (!len) continue;
+      table.set(len * 65536 + nextCode[len], symbol);
+      nextCode[len]++;
+    }
+    return { table, maxBits };
+  }
+
+  class BitReader {
+    constructor(bytes) {
+      this.bytes = bytes;
+      this.pos = 0;
+      this.bitBuffer = 0;
+      this.bitCount = 0;
+    }
+
+    bits(n) {
+      while (this.bitCount < n) {
+        if (this.pos >= this.bytes.length) throw new Error('Unexpected end of compressed data');
+        this.bitBuffer |= this.bytes[this.pos++] << this.bitCount;
+        this.bitCount += 8;
+      }
+      const value = this.bitBuffer & ((1 << n) - 1);
+      this.bitBuffer >>>= n;
+      this.bitCount -= n;
+      return value;
+    }
+
+    /** Huffman codes are stored most-significant-bit first. */
+    decode(tree) {
+      let code = 0;
+      for (let len = 1; len <= tree.maxBits; len++) {
+        code = (code << 1) | this.bits(1);
+        const symbol = tree.table.get(len * 65536 + code);
+        if (symbol !== undefined) return symbol;
+      }
+      throw new Error('Invalid Huffman code');
+    }
+
+    alignToByte() {
+      this.bitBuffer = 0;
+      this.bitCount = 0;
+    }
+  }
+
+  const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+  const LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+  const DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+  const DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+  const CODE_LENGTH_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+
+  let fixedLiteral = null;
+  let fixedDistance = null;
+
+  function fixedTrees() {
+    if (!fixedLiteral) {
+      const lengths = new Array(288);
+      for (let i = 0; i < 144; i++) lengths[i] = 8;
+      for (let i = 144; i < 256; i++) lengths[i] = 9;
+      for (let i = 256; i < 280; i++) lengths[i] = 7;
+      for (let i = 280; i < 288; i++) lengths[i] = 8;
+      fixedLiteral = buildTree(lengths);
+      fixedDistance = buildTree(new Array(30).fill(5));
+    }
+    return [fixedLiteral, fixedDistance];
+  }
+
+  /**
+   * Inflate a raw DEFLATE stream (no zlib header).
+   * @param {Uint8Array} data
+   * @returns {Uint8Array}
+   */
+  function inflateRaw(data) {
+    const reader = new BitReader(data);
+    let output = new Uint8Array(Math.max(1024, data.length * 4));
+    let length = 0;
+
+    const push = (byte) => {
+      if (length >= output.length) {
+        const bigger = new Uint8Array(output.length * 2);
+        bigger.set(output);
+        output = bigger;
+      }
+      output[length++] = byte;
+    };
+
+    let final = false;
+    while (!final) {
+      final = reader.bits(1) === 1;
+      const type = reader.bits(2);
+
+      if (type === 0) {
+        reader.alignToByte();
+        const len = data[reader.pos] | (data[reader.pos + 1] << 8);
+        reader.pos += 4; // skip LEN and NLEN
+        for (let i = 0; i < len; i++) push(data[reader.pos++]);
+        continue;
+      }
+
+      let literalTree;
+      let distanceTree;
+
+      if (type === 1) {
+        [literalTree, distanceTree] = fixedTrees();
+      } else if (type === 2) {
+        const hlit = reader.bits(5) + 257;
+        const hdist = reader.bits(5) + 1;
+        const hclen = reader.bits(4) + 4;
+
+        const codeLengths = new Array(19).fill(0);
+        for (let i = 0; i < hclen; i++) codeLengths[CODE_LENGTH_ORDER[i]] = reader.bits(3);
+        const codeTree = buildTree(codeLengths);
+
+        const lengths = [];
+        while (lengths.length < hlit + hdist) {
+          const symbol = reader.decode(codeTree);
+          if (symbol < 16) {
+            lengths.push(symbol);
+          } else if (symbol === 16) {
+            const previous = lengths[lengths.length - 1];
+            const repeat = reader.bits(2) + 3;
+            for (let i = 0; i < repeat; i++) lengths.push(previous);
+          } else if (symbol === 17) {
+            const repeat = reader.bits(3) + 3;
+            for (let i = 0; i < repeat; i++) lengths.push(0);
+          } else {
+            const repeat = reader.bits(7) + 11;
+            for (let i = 0; i < repeat; i++) lengths.push(0);
+          }
+        }
+
+        literalTree = buildTree(lengths.slice(0, hlit));
+        distanceTree = buildTree(lengths.slice(hlit));
+      } else {
+        throw new Error('Invalid DEFLATE block type');
+      }
+
+      for (;;) {
+        const symbol = reader.decode(literalTree);
+        if (symbol === 256) break;
+        if (symbol < 256) {
+          push(symbol);
+          continue;
+        }
+        const lengthIndex = symbol - 257;
+        const copyLength = LENGTH_BASE[lengthIndex] + reader.bits(LENGTH_EXTRA[lengthIndex]);
+        const distSymbol = reader.decode(distanceTree);
+        const distance = DIST_BASE[distSymbol] + reader.bits(DIST_EXTRA[distSymbol]);
+        const from = length - distance;
+        if (from < 0) throw new Error('Invalid back-reference in compressed data');
+        for (let i = 0; i < copyLength; i++) push(output[from + i]);
+      }
+    }
+
+    return output.subarray(0, length);
+  }
+
+  /**
+   * Decompress using the platform where it exists, falling back to the
+   * implementation above. Always returns a promise for one call shape.
+   */
+  async function inflate(data) {
+    if (typeof DecompressionStream === 'function') {
+      try {
+        const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+        const buffer = await new Response(stream).arrayBuffer();
+        return new Uint8Array(buffer);
+      } catch {
+        /* fall through to the JavaScript inflater */
+      }
+    }
+    return inflateRaw(data);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     ZIP reading
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Read a ZIP archive from an ArrayBuffer.
+   * Returns a Map of path → Uint8Array. Only the stored (0) and deflate (8)
+   * methods are supported, which covers every spreadsheet writer in practice.
+   */
+  async function readZip(arrayBuffer) {
+    const bytes = new Uint8Array(arrayBuffer);
+    const view = new DataView(arrayBuffer);
+
+    // Locate the End Of Central Directory record by scanning backwards.
+    let eocd = -1;
+    for (let i = bytes.length - 22; i >= 0 && i > bytes.length - 66_000; i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) throw new Error('Not a valid ZIP archive (no end-of-directory record).');
+
+    const entryCount = view.getUint16(eocd + 10, true);
+    let offset = view.getUint32(eocd + 16, true);
+
+    const files = new Map();
+    const decoder = new TextDecoder('utf-8');
+
+    for (let i = 0; i < entryCount; i++) {
+      if (view.getUint32(offset, true) !== 0x02014b50) break;
+
+      const method = view.getUint16(offset + 10, true);
+      const compressedSize = view.getUint32(offset + 20, true);
+      const nameLength = view.getUint16(offset + 28, true);
+      const extraLength = view.getUint16(offset + 30, true);
+      const commentLength = view.getUint16(offset + 32, true);
+      const localOffset = view.getUint32(offset + 42, true);
+      const name = decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
+
+      // Re-read the local header: its extra field length can differ.
+      const localNameLength = view.getUint16(localOffset + 26, true);
+      const localExtraLength = view.getUint16(localOffset + 28, true);
+      const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+      const raw = bytes.subarray(dataStart, dataStart + compressedSize);
+
+      if (!name.endsWith('/')) {
+        if (method === 0) files.set(name, raw);
+        else if (method === 8) files.set(name, await inflate(raw));
+        // Any other method (bzip2, LZMA) is left out rather than corrupting data.
+      }
+
+      offset += 46 + nameLength + extraLength + commentLength;
+    }
+
+    return files;
+  }
+
+  /** Decode a ZIP entry as UTF-8 text. */
+  function zipText(files, path) {
+    const entry = files.get(path);
+    return entry ? new TextDecoder('utf-8').decode(entry) : null;
+  }
+
+  Object.defineProperty(__x, "inflateRaw", { get: () => inflateRaw, enumerable: true });
+  Object.defineProperty(__x, "inflate", { get: () => inflate, enumerable: true });
+  Object.defineProperty(__x, "readZip", { get: () => readZip, enumerable: true });
+  Object.defineProperty(__x, "zipText", { get: () => zipText, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// io/importers.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["io/importers.js"] = function (__x, __req) {
+  /**
+   * Import.
+   *
+   * Four routes in: the application's own JSON, generic CSV/TSV, Microsoft
+   * Project's CSV export, and `.xlsx` workbooks. Everything converges on one
+   * intermediate shape — a list of row objects with normalised column names —
+   * so the mapping logic is written once.
+   *
+   * Nothing is applied to the live document until the caller confirms; every
+   * function returns a *result* describing what would be imported, along with
+   * any warnings, so the UI can preview it first.
+   *
+   * Imports: util, dates, model, store, inflate.
+   */
+
+  const { readFileAsText, readFileAsArrayBuffer, fold } = __req("core/util.js");
+  const { toISO, MS_DAY, addDays, todayMs, getDateOrder } = __req("core/dates.js");
+  const { makeProject, makeObject, makeLane, makeLink, normalise, validate, TYPES, listOptions } = __req("core/model.js");
+
+
+
+
+
+
+
+
+
+  const { getDoc } = __req("core/store.js");
+  const { readZip, zipText } = __req("io/inflate.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Entry point
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Inspect a file and import it with the right reader.
+   * @returns {Promise<{kind:string, doc?:object, objects?:Array, lanes?:Array,
+   *                    links?:Array, warnings:string[], errors:string[], summary:string}>}
+   */
+  async function importFile(file) {
+    const name = (file.name || '').toLowerCase();
+
+    try {
+      if (name.endsWith('.json')) return await importJsonFile(file);
+      if (name.endsWith('.xlsx') || name.endsWith('.xlsm')) return await importXlsxFile(file);
+      if (name.endsWith('.csv') || name.endsWith('.tsv') || name.endsWith('.txt')) return await importCsvFile(file);
+
+      // Unknown extension: sniff the content rather than refusing outright.
+      const text = await readFileAsText(file);
+      if (text.trim().startsWith('{')) return parseJson(text);
+      return parseTabular(splitDelimited(text), file.name);
+    } catch (err) {
+      return { kind: 'error', warnings: [], errors: [err.message], summary: 'Import failed' };
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     JSON — a full project
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function importJsonFile(file) {
+    return parseJson(await readFileAsText(file));
+  }
+
+  function parseJson(text) {
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      return { kind: 'error', warnings: [], errors: [`The file is not valid JSON: ${err.message}`], summary: 'Import failed' };
+    }
+
+    const check = validate(parsed);
+    if (!check.ok) {
+      return { kind: 'error', warnings: check.warnings, errors: check.errors, summary: 'Import failed' };
+    }
+
+    const doc = normalise(parsed);
+    return {
+      kind: 'project',
+      doc,
+      warnings: check.warnings,
+      errors: [],
+      summary: `${doc.objects.length} objects across ${doc.lanes.length} lanes, ${doc.links.length} dependencies`,
+    };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     CSV / TSV
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function importCsvFile(file) {
+    const text = await readFileAsText(file);
+    return parseTabular(splitDelimited(text), file.name);
+  }
+
+  /**
+   * Split delimited text into a matrix, honouring RFC 4180 quoting and
+   * auto-detecting the separator (comma, semicolon or tab — European Excel
+   * exports use semicolons).
+   */
+  function splitDelimited(text) {
+    const clean = text.replace(/^\uFEFF/, ''); // a byte-order mark, as Excel writes one
+    const sample = clean.slice(0, 4000);
+    const counts = {
+      ',': (sample.match(/,/g) || []).length,
+      ';': (sample.match(/;/g) || []).length,
+      '\t': (sample.match(/\t/g) || []).length,
+    };
+    const delimiter = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+
+    const rows = [];
+    let row = [];
+    let cell = '';
+    let quoted = false;
+
+    for (let i = 0; i < clean.length; i++) {
+      const ch = clean[i];
+
+      if (quoted) {
+        if (ch === '"') {
+          if (clean[i + 1] === '"') {
+            cell += '"';
+            i++;
+          } else {
+            quoted = false;
+          }
+        } else {
+          cell += ch;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        quoted = true;
+      } else if (ch === delimiter) {
+        row.push(cell);
+        cell = '';
+      } else if (ch === '\n') {
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = '';
+      } else if (ch !== '\r') {
+        cell += ch;
+      }
+    }
+
+    if (cell.length || row.length) {
+      row.push(cell);
+      rows.push(row);
+    }
+
+    return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
+  }
+
+  /* ── Column mapping ────────────────────────────────────────────────────── */
+
+  /**
+   * Header aliases. The first match wins, so more specific names come first.
+   * Covers our own CSV export, Microsoft Project's CSV, and the column names
+   * people actually type into a spreadsheet.
+   */
+  const COLUMN_ALIASES = {
+    title: ['title', 'name', 'task name', 'task', 'activity', 'activity name', 'description', 'summary', 'subject'],
+    type: ['type', 'object type', 'category', 'kind'],
+    lane: ['lane', 'swimlane', 'group', 'workstream', 'discipline', 'resource names', 'resource', 'team', 'phase'],
+    start: ['start', 'start date', 'planned start', 'begin', 'from', 'baseline start', 'early start'],
+    end: ['finish', 'finish date', 'end', 'end date', 'planned finish', 'to', 'due', 'due date', 'baseline finish', 'early finish'],
+    duration: ['duration', 'duration days', 'duration_days', 'days'],
+    status: ['status', 'state', 'progress status'],
+    progress: ['percent complete', 'percent_complete', '% complete', 'complete', 'progress', 'pct complete'],
+    owner: ['owner', 'assigned to', 'assignee', 'responsible', 'engineer', 'lead'],
+    subsystem: ['subsystem', 'system', 'sub-system', 'discipline code'],
+    area: ['area', 'zone', 'section', 'location', 'site'],
+    tags: ['tags', 'labels', 'keywords'],
+    notes: ['notes', 'note', 'comments', 'remarks', 'detail'],
+    version: ['version', 'sw version', 'software version'],
+    releaseNumber: ['release number', 'release_number', 'release no', 'release'],
+    buildNumber: ['build number', 'build_number', 'build'],
+    testPackage: ['test package', 'test_package', 'package', 'tp'],
+    testKind: ['test type', 'test_type', 'test kind'],
+    severity: ['severity', 'priority', 'risk level'],
+    reference: ['reference', 'ref', 'ticket', 'issue id', 'defect'],
+    predecessors: ['predecessors', 'predecessor', 'depends on', 'dependency', 'dependencies'],
+    id: ['id', 'unique id', 'uid', 'task id', 'wbs'],
+    milestone: ['milestone'],
+    outline: ['outline level', 'outline_level', 'level'],
+  };
+
+  /** Map a header row onto our field names. */
+  function mapHeaders(header) {
+    const normalised = header.map((h) => fold(String(h).trim()));
+    const mapping = {};
+    for (const [field, aliases] of Object.entries(COLUMN_ALIASES)) {
+      for (const alias of aliases) {
+        const index = normalised.indexOf(alias);
+        if (index >= 0) {
+          mapping[field] = index;
+          break;
+        }
+      }
+    }
+    return mapping;
+  }
+
+  /**
+   * Turn a matrix into importable objects and lanes.
+   * @param {string[][]} rows
+   * @param {string} sourceName
+   */
+  function parseTabular(rows, sourceName = 'import') {
+    const warnings = [];
+    const errors = [];
+
+    if (rows.length < 2) {
+      return { kind: 'error', warnings, errors: ['The file has no data rows.'], summary: 'Import failed' };
+    }
+
+    const header = rows[0];
+    const mapping = mapHeaders(header);
+
+    if (mapping.title == null) {
+      return {
+        kind: 'error',
+        warnings,
+        errors: [`No recognisable title column. Expected one of: ${COLUMN_ALIASES.title.join(', ')}. Found: ${header.join(', ')}`],
+        summary: 'Import failed',
+      };
+    }
+    if (mapping.start == null) {
+      warnings.push('No start-date column found — imported items will start today and be spaced sequentially.');
+    }
+
+    const laneNames = new Map(); // lane label -> lane record
+    const objects = [];
+    const sourceIds = new Map(); // source id -> new object id
+    const pendingLinks = [];
+    let cursor = todayMs();
+
+    for (let r = 1; r < rows.length; r++) {
+      const row = rows[r];
+      const get = (field) => (mapping[field] != null ? String(row[mapping[field]] ?? '').trim() : '');
+
+      const title = get('title');
+      if (!title) continue;
+
+      /* Lane */
+      const laneLabel = get('lane') || 'Imported';
+      if (!laneNames.has(laneLabel)) {
+        laneNames.set(laneLabel, makeLane({ name: laneLabel, color: laneColour(laneNames.size) }));
+      }
+      const lane = laneNames.get(laneLabel);
+
+      /* Dates */
+      let start = parseDate(get('start'));
+      if (!Number.isFinite(start)) {
+        start = cursor;
+        cursor = addDays(cursor, 1);
+      }
+
+      let end = parseDate(get('end'));
+      const durationText = get('duration');
+      if (!Number.isFinite(end) && durationText) {
+        const days = parseDuration(durationText);
+        if (Number.isFinite(days)) end = addDays(start, Math.max(1, Math.round(days)));
+      }
+
+      /* Type */
+      const isMilestone =
+        truthy(get('milestone')) ||
+        (Number.isFinite(end) && end === start && !durationText) ||
+        /milestone|gate|acceptance/i.test(title);
+      const type = resolveType(get('type'), { isMilestone, title });
+
+      if (!Number.isFinite(end)) end = TYPES[type]?.duration ? addDays(start, TYPES[type].defaultDays || 5) : start;
+      if (TYPES[type]?.duration && end <= start) end = addDays(start, 1);
+
+      /* Everything else */
+      const obj = makeObject({
+        type,
+        lane: lane.id,
+        title,
+        start,
+        end,
+        status: resolveStatus(get('status'), get('progress')),
+        progress: parseProgress(get('progress')),
+        owner: get('owner'),
+        subsystem: resolveSubsystem(get('subsystem')),
+        area: get('area'),
+        tags: get('tags').split(/[;,|]/).map((t) => t.trim()).filter(Boolean),
+        notes: get('notes') ? `<p>${escapeText(get('notes'))}</p>` : '',
+        data: pruneEmpty({
+          version: get('version'),
+          releaseNumber: get('releaseNumber'),
+          buildNumber: get('buildNumber'),
+          testPackage: get('testPackage'),
+          testKind: resolveTestKind(get('testKind')),
+          severity: resolveSeverity(get('severity')),
+          reference: get('reference'),
+        }),
+      });
+
+      objects.push(obj);
+
+      const sourceId = get('id');
+      if (sourceId) sourceIds.set(sourceId, obj.id);
+
+      const predecessors = get('predecessors');
+      if (predecessors) pendingLinks.push({ to: obj.id, spec: predecessors });
+    }
+
+    if (!objects.length) {
+      return { kind: 'error', warnings, errors: ['No rows contained a usable title.'], summary: 'Import failed' };
+    }
+
+    /* Resolve predecessor references — Microsoft Project writes "12FS+3 days". */
+    const links = [];
+    let unresolved = 0;
+    for (const pending of pendingLinks) {
+      for (const part of pending.spec.split(/[;,]/)) {
+        const match = /^\s*([\w.-]+)\s*(FS|SS|FF|SF)?\s*([+-]\s*\d+)?/i.exec(part.trim());
+        if (!match) continue;
+        const fromId = sourceIds.get(match[1]);
+        if (!fromId) {
+          unresolved++;
+          continue;
+        }
+        links.push(
+          makeLink({
+            from: fromId,
+            to: pending.to,
+            type: (match[2] || 'FS').toUpperCase(),
+            lag: match[3] ? parseInt(match[3].replace(/\s+/g, ''), 10) : 0,
+          })
+        );
+      }
+    }
+    if (unresolved) warnings.push(`${unresolved} predecessor reference(s) pointed at rows that were not imported.`);
+
+    const lanes = Array.from(laneNames.values());
+    return {
+      kind: 'rows',
+      objects,
+      lanes,
+      links,
+      warnings,
+      errors,
+      summary: `${objects.length} objects, ${lanes.length} lanes, ${links.length} dependencies from ${sourceName}`,
+    };
+  }
+
+  /* ── Value coercion ────────────────────────────────────────────────────── */
+
+  /** Parse a date cell across the formats spreadsheets actually produce. */
+  function parseDate(value) {
+    const text = String(value || '').trim();
+    if (!text) return NaN;
+
+    // Excel serial number (days since 1899-12-30).
+    if (/^\d{5}(\.\d+)?$/.test(text)) {
+      const serial = parseFloat(text);
+      if (serial > 20000 && serial < 80000) return Date.UTC(1899, 11, 30) + Math.round(serial) * MS_DAY;
+    }
+
+    const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(text);
+    if (iso) return Date.UTC(+iso[1], +iso[2] - 1, +iso[3]);
+
+    // 3/5/2026 is genuinely ambiguous. Where one field is over 12 the order is
+    // decided for us; otherwise fall back to the project's display order, so a
+    // plan shown as M/D/Y also imports spreadsheets written as M/D/Y.
+    const slash = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})/.exec(text);
+    if (slash) {
+      const [, first, second, y] = slash;
+      const a = +first;
+      const b = +second;
+
+      let day;
+      let month;
+      if (a > 12 && b <= 12) {
+        day = a;
+        month = b;
+      } else if (b > 12 && a <= 12) {
+        month = a;
+        day = b;
+      } else if (getDateOrder() === 'dmy') {
+        day = a;
+        month = b;
+      } else {
+        month = a;
+        day = b;
+      }
+
+      let year = +y;
+      if (year < 100) year += year < 70 ? 2000 : 1900;
+      return Date.UTC(year, month - 1, day);
+    }
+
+    const parsed = Date.parse(text);
+    if (!Number.isNaN(parsed)) {
+      const d = new Date(parsed);
+      return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+    }
+    return NaN;
+  }
+
+  /** "12 days", "3 wks", "5d", "8h" → days. */
+  function parseDuration(value) {
+    const text = String(value).trim().toLowerCase();
+    const match = /^([\d.]+)\s*([a-z]*)/.exec(text);
+    if (!match) return NaN;
+    const n = parseFloat(match[1]);
+    if (!Number.isFinite(n)) return NaN;
+    const unit = match[2];
+    if (unit.startsWith('w')) return n * 7;
+    if (unit.startsWith('mo')) return n * 30.44;
+    if (unit.startsWith('h')) return n / 8;
+    if (unit.startsWith('m') && unit !== 'mo') return n * 30.44;
+    return n;
+  }
+
+  function parseProgress(value) {
+    const text = String(value || '').replace('%', '').trim();
+    const n = parseFloat(text);
+    if (!Number.isFinite(n)) return 0;
+    // Spreadsheets store percentages as 0–1 as often as 0–100.
+    return n <= 1 && text.includes('.') ? Math.round(n * 100) : Math.round(n);
+  }
+
+  function resolveType(value, { isMilestone, title }) {
+    const text = fold(value);
+    if (text) {
+      for (const [id, def] of Object.entries(TYPES)) {
+        if (fold(def.label) === text || id === text) return id;
+      }
+      if (/release|build|drop/.test(text)) return 'release';
+      if (/campaign|commission/.test(text)) return 'campaign';
+      if (/risk/.test(text)) return 'risk';
+      if (/issue|defect|bug/.test(text)) return 'issue';
+      if (/milestone|gate/.test(text)) return 'milestone';
+      if (/test/.test(text)) return 'testwindow';
+      if (/freeze/.test(text)) return 'freeze';
+      if (/outage/.test(text)) return 'outage';
+    }
+    if (isMilestone) return 'milestone';
+    if (/\brelease\b|\bv\d+\.\d+/i.test(title)) return 'release';
+    if (/\btest(ing)?\b/i.test(title)) return 'testwindow';
+    if (/\bcampaign\b/i.test(title)) return 'campaign';
+    return 'activity';
+  }
+
+  function resolveStatus(value, progressText) {
+    const text = fold(value);
+    if (text) {
+      for (const option of listOptions('status')) {
+        if (fold(option.label) === text || option.id === text) return option.id;
+      }
+      if (/complete|done|finish|closed/.test(text)) return 'complete';
+      if (/progress|active|started|ongoing|wip/.test(text)) return 'inprogress';
+      if (/late|delay|slip|overdue/.test(text)) return 'delayed';
+      if (/block|stopped/.test(text)) return 'blocked';
+      if (/cancel/.test(text)) return 'cancelled';
+      if (/hold|pause/.test(text)) return 'onhold';
+      if (/test/.test(text)) return 'testing';
+      if (/release/.test(text)) return 'released';
+    }
+    const progress = parseProgress(progressText);
+    if (progress >= 100) return 'complete';
+    if (progress > 0) return 'inprogress';
+    return 'planned';
+  }
+
+  function resolveSubsystem(value) {
+    const text = fold(value);
+    if (!text) return '';
+    const found = listOptions('subsystem').find((s) => s.id === text || fold(s.label) === text);
+    if (found) return found.id;
+    if (/interlock/.test(text)) return 'ixl';
+    if (/comm|radio|network/.test(text)) return 'comms';
+    if (/train|vehicle|rolling/.test(text)) return 'vehicle';
+    if (/scada|supervis/.test(text)) return 'scada';
+    if (/wayside|track/.test(text)) return 'wayside';
+    return '';
+  }
+
+  function resolveTestKind(value) {
+    const text = fold(value);
+    if (!text) return '';
+    const found = listOptions('testKind').find((t) => t.id === text || fold(t.label) === text);
+    return found ? found.id : '';
+  }
+
+  function resolveSeverity(value) {
+    const text = fold(value);
+    if (!text) return '';
+    if (/crit|1|highest|blocker/.test(text)) return 'critical';
+    if (/high|2|major/.test(text)) return 'high';
+    if (/med|3|moderate|normal/.test(text)) return 'medium';
+    if (/low|4|minor/.test(text)) return 'low';
+    return '';
+  }
+
+  function truthy(value) {
+    return /^(yes|y|true|1|x)$/i.test(String(value || '').trim());
+  }
+
+  function pruneEmpty(obj) {
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) if (v) out[k] = v;
+    return out;
+  }
+
+  function escapeText(text) {
+    return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  const LANE_COLOURS = ['#5b93f5', '#a855f7', '#16a571', '#e0900b', '#f2555b', '#0ea5e9', '#0d9488', '#f97316', '#818cf8', '#94a3b8'];
+  function laneColour(index) {
+    return LANE_COLOURS[index % LANE_COLOURS.length];
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     XLSX
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  async function importXlsxFile(file) {
+    const buffer = await readFileAsArrayBuffer(file);
+    const rows = await readXlsx(buffer);
+    if (!rows.length) {
+      return { kind: 'error', warnings: [], errors: ['No readable sheet was found in the workbook.'], summary: 'Import failed' };
+    }
+    const result = parseTabular(rows, file.name);
+    result.warnings.unshift('Imported from the first worksheet. Formatting, formulas and charts are not read.');
+    return result;
+  }
+
+  /**
+   * Read the first worksheet of an xlsx workbook into a matrix.
+   * Handles shared strings, inline strings, numbers and dates.
+   */
+  /**
+   * Rows and cells: either a self-closing tag, or an open tag through its close.
+   *
+   * The obvious `/<row[\s\S]*?(?:\/>|<\/row>)/` is wrong, and wrong in a way that
+   * hides. A cell carrying a style but no value is written `<c r="D2" s="1"/>`,
+   * and a lazy match stops at that first `/>` — truncating the row and silently
+   * dropping every cell after it. A sheet whose cells all hold values never hits
+   * it, because those close with `</c>`, which is why this survived: the
+   * spreadsheets people import are full of values. A sheet where cells are
+   * formatted but empty hits it on nearly every row, and the four-week look-ahead
+   * is exactly that shape.
+   */
+  const ROW_RE = /<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g;
+  const CELL_RE = /<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g;
+
+  async function readXlsx(arrayBuffer) {
+    const files = await readZip(arrayBuffer);
+
+    /* Shared string table */
+    const sharedStrings = [];
+    const sharedXml = zipText(files, 'xl/sharedStrings.xml');
+    if (sharedXml) {
+      for (const si of sharedXml.match(/<si>[\s\S]*?<\/si>/g) || []) {
+        // A cell's text can be split across several runs; concatenate them all.
+        const parts = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
+        sharedStrings.push(parts.map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join(''));
+      }
+    }
+
+    /* Which sheet is first? Fall back to sheet1.xml if the map is missing. */
+    let sheetPath = 'xl/worksheets/sheet1.xml';
+    const workbookXml = zipText(files, 'xl/workbook.xml');
+    const relsXml = zipText(files, 'xl/_rels/workbook.xml.rels');
+    if (workbookXml && relsXml) {
+      const firstSheet = /<sheet[^>]*r:id="([^"]+)"/.exec(workbookXml);
+      if (firstSheet) {
+        const rel = new RegExp(`<Relationship[^>]*Id="${firstSheet[1]}"[^>]*Target="([^"]+)"`).exec(relsXml);
+        if (rel) {
+          const target = rel[1].replace(/^\/?xl\//, '').replace(/^\//, '');
+          if (files.has(`xl/${target}`)) sheetPath = `xl/${target}`;
+        }
+      }
+    }
+
+    const sheetXml = zipText(files, sheetPath);
+    if (!sheetXml) return [];
+
+    /* Date-formatted cells need the style table to be recognised as dates. */
+    const dateStyles = readDateStyles(zipText(files, 'xl/styles.xml'));
+
+    const rows = [];
+    for (const rowXml of sheetXml.match(ROW_RE) || []) {
+      const cells = [];
+      for (const cellXml of rowXml.match(CELL_RE) || []) {
+        const ref = /r="([A-Z]+)\d+"/.exec(cellXml);
+        const column = ref ? columnIndex(ref[1]) : cells.length;
+        const type = /t="([^"]+)"/.exec(cellXml)?.[1];
+        const styleIndex = /s="(\d+)"/.exec(cellXml)?.[1];
+
+        let value = '';
+        if (type === 'inlineStr') {
+          value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || []).map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join('');
+        } else {
+          const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
+          if (raw != null) {
+            if (type === 's') value = sharedStrings[parseInt(raw, 10)] ?? '';
+            else if (type === 'str' || type === 'e') value = decodeXml(raw);
+            else if (styleIndex != null && dateStyles.has(parseInt(styleIndex, 10))) {
+              value = toISO(Date.UTC(1899, 11, 30) + Math.round(parseFloat(raw)) * MS_DAY);
+            } else {
+              value = decodeXml(raw);
+            }
+          }
+        }
+
+        while (cells.length < column) cells.push('');
+        cells[column] = value;
+      }
+      if (cells.length) rows.push(cells);
+    }
+
+    return rows;
+  }
+
+  /** Style indices whose number format is a date/time format. */
+  function readDateStyles(stylesXml) {
+    const dateStyles = new Set();
+    if (!stylesXml) return dateStyles;
+
+    // Built-in numeric formats 14–22 and 45–47 are dates/times.
+    const builtInDates = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47]);
+    const customDates = new Set();
+    for (const fmt of stylesXml.match(/<numFmt[^>]*\/>/g) || []) {
+      const id = /numFmtId="(\d+)"/.exec(fmt)?.[1];
+      const code = /formatCode="([^"]*)"/.exec(fmt)?.[1] || '';
+      if (id && /[dmyh]/i.test(code) && !/[#0]/.test(code.replace(/\[[^\]]*\]/g, ''))) customDates.add(parseInt(id, 10));
+    }
+
+    const cellXfs = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] || '';
+    const xfs = cellXfs.match(/<xf[\s\S]*?(?:\/>|<\/xf>)/g) || [];
+    xfs.forEach((xf, index) => {
+      const id = parseInt(/numFmtId="(\d+)"/.exec(xf)?.[1] ?? '0', 10);
+      if (builtInDates.has(id) || customDates.has(id)) dateStyles.add(index);
+    });
+
+    return dateStyles;
+  }
+
+  /** 'A' → 0, 'B' → 1, 'AA' → 26 … */
+  function columnIndex(letters) {
+    let n = 0;
+    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n - 1;
+  }
+
+  function decodeXml(text) {
+    return String(text)
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(+code))
+      .replace(/&amp;/g, '&');
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Applying an import
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Turn a row-based import result into a document.
+   * `mode` is 'replace' (a new project from the rows) or 'merge' (append the
+   * rows to the open project, creating any lanes it needs).
+   */
+  function buildDocFromRows(result, { mode = 'replace', name = 'Imported plan' } = {}) {
+    if (mode === 'merge') {
+      const doc = JSON.parse(JSON.stringify(getDoc()));
+      const laneByName = new Map(doc.lanes.map((l) => [fold(l.name), l]));
+      const laneMap = new Map();
+
+      for (const lane of result.lanes) {
+        const existing = laneByName.get(fold(lane.name));
+        if (existing) {
+          laneMap.set(lane.id, existing.id);
+        } else {
+          doc.lanes.push(lane);
+          doc.laneOrder.push(lane.id);
+          laneMap.set(lane.id, lane.id);
+        }
+      }
+
+      for (const obj of result.objects) {
+        obj.lane = laneMap.get(obj.lane) || doc.laneOrder[0];
+        doc.objects.push(obj);
+      }
+      doc.links.push(...result.links);
+      return normalise(doc);
+    }
+
+    const doc = makeProject(name);
+    doc.lanes = result.lanes;
+    doc.laneOrder = result.lanes.map((l) => l.id);
+    doc.objects = result.objects;
+    doc.links = result.links;
+    return normalise(doc);
+  }
+
+  Object.defineProperty(__x, "importFile", { get: () => importFile, enumerable: true });
+  Object.defineProperty(__x, "parseJson", { get: () => parseJson, enumerable: true });
+  Object.defineProperty(__x, "splitDelimited", { get: () => splitDelimited, enumerable: true });
+  Object.defineProperty(__x, "parseTabular", { get: () => parseTabular, enumerable: true });
+  Object.defineProperty(__x, "parseDate", { get: () => parseDate, enumerable: true });
+  Object.defineProperty(__x, "readXlsx", { get: () => readXlsx, enumerable: true });
+  Object.defineProperty(__x, "buildDocFromRows", { get: () => buildDocFromRows, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// io/p6.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["io/p6.js"] = function (__x, __req) {
+  /**
+   * Reading a Primavera P6 export.
+   *
+   * P6 exports whatever columns the scheduler's layout happens to show, in
+   * whatever order, with whatever headings that version uses. So the reader
+   * asks for four things and takes the rest if it finds them:
+   *
+   *   required   Activity ID, Activity Name, Start, Finish
+   *   optional   WBS, % Complete, Activity Status, Total Float
+   *
+   * Requiring four columns means the scheduler can send a minimal export and it
+   * works; recognising more means a richer layout costs nothing extra.
+   *
+   * Two things here have bitten every P6 importer ever written:
+   *
+   *   Finish times. P6 writes a finish as `30-Oct-26 17:00` — the last working
+   *   moment of the 30th. Truncating the time is right; rounding up puts every
+   *   activity a day long, and the error is invisible until someone checks a
+   *   date against the schedule in a meeting.
+   *
+   *   Milestones. A start milestone has a finish and a finish milestone has a
+   *   start, both equal to the other. They are not zero-length bugs.
+   *
+   * Imports: util, dates, model, importers.
+   */
+
+  const { MS_DAY } = __req("core/dates.js");
+  const { makeP6Activity } = __req("core/model.js");
+  const { parseDate, splitDelimited, readXlsx } = __req("io/importers.js");
+
+  /* ── Column recognition ────────────────────────────────────────────────── */
+
+  /**
+   * Header patterns, most specific first.
+   *
+   * P6 and its various export layouts disagree on names — "Activity ID" is also
+   * "Task ID" and "Act ID"; "Finish" is also "End" and "Finish Date". These are
+   * matched against a folded heading, so spacing and case do not matter.
+   */
+  const COLUMNS = {
+    id: [/^activity ?id$/, /^act(ivity)? ?(id|code)$/, /^task ?id$/, /^id$/],
+    name: [/^activity ?name$/, /^act(ivity)? ?(name|description)$/, /^task ?name$/, /^description$/, /^name$/],
+    start: [/^(bl|baseline) ?(project )?start/, /^start( date)?$/, /^early start$/, /^actual start$/],
+    end: [/^(bl|baseline) ?(project )?finish/, /^finish( date)?$/, /^end( date)?$/, /^early finish$/, /^actual finish$/],
+    wbs: [/^wbs( ?(path|code|name))?$/, /^work breakdown/, /^phase$/],
+    percent: [/^(activity )?% ?(complete|comp)$/, /^percent ?complete$/, /^progress$/],
+    status: [/^(activity )?status$/, /^state$/],
+    float: [/^(total )?float$/, /^slack$/],
+  };
+
+  /** Lower-cased, collapsed, punctuation-light form of a heading. */
+  function fold(text) {
+    return String(text || '')
+      .toLowerCase()
+      .replace(/[_\-.]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * Work out which column is which.
+   *
+   * Returns the index of each field, or -1. The caller decides whether what was
+   * found is enough — this does not throw, because a preview that says "I could
+   * not find a Finish column" is far more use than an exception.
+   */
+  function mapColumns(headerRow) {
+    const headings = (headerRow || []).map(fold);
+    const found = {};
+
+    for (const [field, patterns] of Object.entries(COLUMNS)) {
+      found[field] = -1;
+      for (const pattern of patterns) {
+        const index = headings.findIndex((h, i) => pattern.test(h) && !Object.values(found).includes(i));
+        if (index >= 0) {
+          found[field] = index;
+          break;
+        }
+      }
+    }
+    return found;
+  }
+
+  /**
+   * Find the header row.
+   *
+   * P6's own Excel export puts the project name, a filter description and a
+   * blank line above the headings, so the first row is rarely the one wanted.
+   * The header is the first row within the top twenty that yields both an ID
+   * and a name column.
+   */
+  function findHeaderRow(rows) {
+    const limit = Math.min(rows.length, 20);
+    for (let i = 0; i < limit; i++) {
+      const mapped = mapColumns(rows[i]);
+      if (mapped.id >= 0 && mapped.name >= 0) return i;
+    }
+    return -1;
+  }
+
+  /* ── Dates ─────────────────────────────────────────────────────────────── */
+
+  /**
+   * A P6 date cell to a UTC-midnight day.
+   *
+   * The time is dropped rather than rounded: `30-Oct-26 17:00` is the 30th, and
+   * treating it as the 31st would lengthen every activity in the schedule by a
+   * day. `parseDate` handles the formats; this strips the P6 decorations first
+   * — a trailing `A` marks an actual date and `*` marks a constraint.
+   */
+  function parseP6Date(value) {
+    if (value == null) return null;
+    const text = String(value).trim().replace(/\s*[A*]$/i, '');
+    if (!text || /^(tbd|n\/?a|-+)$/i.test(text)) return null;
+
+    // Drop a time component; the day is what a plan is drawn against.
+    const dayOnly = text.replace(/[ T]\d{1,2}:\d{2}(:\d{2})?(\s*[AP]M)?$/i, '').trim();
+    const parsed = parseDate(dayOnly);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  /* ── Reading ───────────────────────────────────────────────────────────── */
+
+  /**
+   * Read a P6 export into activities.
+   *
+   * @returns {{activities: Array, mapping: object, headerRow: number,
+   *            skipped: number, duplicates: string[], warnings: string[]}}
+   */
+  function parseP6Rows(rows) {
+    const warnings = [];
+    const headerRow = findHeaderRow(rows);
+
+    if (headerRow < 0) {
+      return {
+        activities: [],
+        mapping: {},
+        headerRow: -1,
+        skipped: 0,
+        duplicates: [],
+        warnings: ['No Activity ID and Activity Name columns were found in the first 20 rows.'],
+      };
+    }
+
+    const mapping = mapColumns(rows[headerRow]);
+    const missing = ['id', 'name', 'start', 'end'].filter((f) => mapping[f] < 0);
+    if (missing.length) {
+      warnings.push(
+        `Missing column${missing.length === 1 ? '' : 's'}: ${missing
+          .map((f) => ({ id: 'Activity ID', name: 'Activity Name', start: 'Start', end: 'Finish' }[f]))
+          .join(', ')}.`
+      );
+    }
+
+    const cell = (row, field) => (mapping[field] >= 0 ? row[mapping[field]] : undefined);
+    const seen = new Map();
+    const duplicates = [];
+    const activities = [];
+    let skipped = 0;
+    let order = 0;
+    let undated = 0;
+
+    for (let i = headerRow + 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || !row.length) continue;
+
+      const id = String(cell(row, 'id') ?? '').trim();
+      if (!id) {
+        skipped++;
+        continue;
+      }
+      // P6 layouts repeat the header when grouped by WBS.
+      if (fold(id) === 'activity id') continue;
+
+      const start = parseP6Date(cell(row, 'start'));
+      const end = parseP6Date(cell(row, 'end'));
+      if (start == null && end == null) {
+        undated++;
+        skipped++;
+        continue;
+      }
+
+      // A milestone has one date; using it for both keeps every downstream
+      // calculation (duration, slip, variance) working without a special case.
+      const from = start ?? end;
+      const to = end ?? start;
+
+      if (seen.has(id)) {
+        duplicates.push(id);
+        continue;
+      }
+
+      const percentRaw = cell(row, 'percent');
+      const percent = percentRaw == null || percentRaw === ''
+        ? null
+        : Math.max(0, Math.min(100, Math.round(parseFloat(String(percentRaw).replace('%', '')) || 0)));
+
+      const activity = makeP6Activity({
+        id,
+        name: String(cell(row, 'name') ?? '').trim() || id,
+        wbs: String(cell(row, 'wbs') ?? '').trim(),
+        percent,
+        status: String(cell(row, 'status') ?? '').trim(),
+        order: order++,
+      });
+      activity.dates = { start: Math.min(from, to), end: Math.max(from, to) };
+
+      seen.set(id, activity);
+      activities.push(activity);
+    }
+
+    if (undated) warnings.push(`${undated} row${undated === 1 ? '' : 's'} had no readable dates and were skipped.`);
+    if (duplicates.length) {
+      warnings.push(
+        `${duplicates.length} duplicate activity ID${duplicates.length === 1 ? '' : 's'} ignored ` +
+          `(${duplicates.slice(0, 3).join(', ')}${duplicates.length > 3 ? '…' : ''}). ` +
+          'A multi-project export can repeat IDs.'
+      );
+    }
+
+    return { activities, mapping, headerRow, skipped, duplicates, warnings };
+  }
+
+  /** Read a `.xlsx`, `.csv` or `.txt` P6 export. */
+  async function readP6File(file) {
+    const name = (file.name || '').toLowerCase();
+
+    if (name.endsWith('.xlsx') || name.endsWith('.xlsm')) {
+      const buffer = await file.arrayBuffer();
+      return parseP6Rows(await readXlsx(buffer));
+    }
+
+    const text = await file.text();
+    return parseP6Rows(splitDelimited(text));
+  }
+
+  /* ── Reconciliation ────────────────────────────────────────────────────── */
+
+  /**
+   * Work out what an import would do, without doing it.
+   *
+   * The result is shown before anything is written, because an import that
+   * silently moved forty dates would be indistinguishable from one that
+   * silently moved four hundred.
+   *
+   * @param {object} register   The current `doc.p6`.
+   * @param {Array}  incoming   Activities from `parseP6Rows`.
+   * @param {string} kind       'baseline' | 'progress'
+   * @param {Set}    placedIds  Activity ids that appear on the timeline.
+   */
+  function reconcile(register, incoming, kind, placedIds = new Set()) {
+    const existing = register.activities || {};
+    const added = [];
+    const moved = [];
+    const unchanged = [];
+    const renamed = [];
+
+    for (const activity of incoming) {
+      const before = existing[activity.id];
+      const dates = activity.dates;
+
+      if (!before) {
+        added.push({ id: activity.id, name: activity.name, dates });
+        continue;
+      }
+
+      // What "moved" means depends on what we already knew. The first progress
+      // import has no previous progress, so the honest comparison is against the
+      // baseline — otherwise every activity reports "unchanged" on the very
+      // import that first shows the slip.
+      const previous = kind === 'baseline'
+        ? before.baseline
+        : before.progress || before.baseline;
+      const against = kind === 'baseline'
+        ? 'the previous baseline'
+        : before.progress ? 'the last progress import' : 'the baseline';
+
+      const startShift = previous ? Math.round((dates.start - previous.start) / MS_DAY) : null;
+      const finishShift = previous ? Math.round((dates.end - previous.end) / MS_DAY) : null;
+
+      if (before.name && activity.name && before.name !== activity.name) {
+        renamed.push({ id: activity.id, from: before.name, to: activity.name });
+      }
+
+      if (!previous || startShift !== 0 || finishShift !== 0) {
+        moved.push({
+          id: activity.id,
+          name: activity.name,
+          from: previous || null,
+          to: dates,
+          against,
+          startShift,
+          finishShift,
+          placed: placedIds.has(activity.id),
+        });
+      } else {
+        unchanged.push(activity.id);
+      }
+    }
+
+    // Activities the register knows about that this file does not mention.
+    // They are marked, never deleted: something on the timeline may point at
+    // one, and losing it silently would leave a bar with no explanation.
+    const incomingIds = new Set(incoming.map((a) => a.id));
+    const absent = Object.values(existing)
+      .filter((a) => !incomingIds.has(a.id))
+      .map((a) => ({ id: a.id, name: a.name, placed: placedIds.has(a.id) }));
+
+    return {
+      kind,
+      added,
+      moved,
+      renamed,
+      unchanged,
+      absent,
+      total: incoming.length,
+      placedAffected: moved.filter((m) => m.placed).length,
+    };
+  }
+
+  Object.defineProperty(__x, "mapColumns", { get: () => mapColumns, enumerable: true });
+  Object.defineProperty(__x, "findHeaderRow", { get: () => findHeaderRow, enumerable: true });
+  Object.defineProperty(__x, "parseP6Date", { get: () => parseP6Date, enumerable: true });
+  Object.defineProperty(__x, "parseP6Rows", { get: () => parseP6Rows, enumerable: true });
+  Object.defineProperty(__x, "readP6File", { get: () => readP6File, enumerable: true });
+  Object.defineProperty(__x, "reconcile", { get: () => reconcile, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/commands.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/commands.js"] = function (__x, __req) {
@@ -19247,9 +21415,9 @@ __mods["ui/commands.js"] = function (__x, __req) {
    *          renderer, interactions, icons, components.
    */
 
-  const { el, download, clamp } = __req("core/util.js");
+  const { el, clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
-  const { MS_DAY, toISO, fmtDate, addDays } = __req("core/dates.js");
+  const { MS_DAY, toISO, fmtDate } = __req("core/dates.js");
   const { TYPES, makeBaseline, makeObject, projectExtent, effectiveToday, makeProject } = __req("core/model.js");
   const store = __req("core/store.js");
   const { saveNow, makeBackup, openFolderPlan, createFolderPlan, leaveFolder } = __req("core/storage.js");
@@ -20289,2695 +22457,6 @@ __mods["ui/commands.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
-// ui/lists.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["ui/lists.js"] = function (__x, __req) {
-  /**
-   * Editable dropdown vocabularies.
-   *
-   * Two things live here: `managedSelect()`, a dropdown that can edit its own
-   * options, and the manager dialog behind it. Every list the user can change —
-   * status, subsystem, test type, severity, approval, fonts, and the owner and
-   * area suggestion lists — is reached through these, so adding a status from
-   * the inspector and adding one from the Lists pane run the same code.
-   *
-   * Imports: util, events, model, query, store, renderer, icons, components.
-   */
-
-  const { el, clear } = __req("core/util.js");
-  const { emit, EV } = __req("core/events.js");
-  const { LIST_DEFS, LIST_IDS, TONES, listOptions, listOption } = __req("core/model.js");
-  const store = __req("core/store.js");
-  const renderer = __req("timeline/renderer.js");
-  const { icon } = __req("ui/icons.js");
-  const { facet } = __req("core/query.js");
-  const { openModal, domId, field, textInput, selectInput, colorControl, confirmDialog, toast, emptyState } = __req("ui/components.js");
-
-
-
-
-
-
-
-
-
-
-
-  /**
-   * Sentinel values for the two action rows at the foot of every managed
-   * dropdown. A leading NUL cannot occur in a real option id, so a
-   * user-defined option can never collide with them.
-   */
-  const ADD = '\u0000add';
-  const MANAGE = '\u0000manage';
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The dropdown
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * A `<select>` bound to an editable list, with "Add option…" and "Manage
-   * list…" at the bottom.
-   *
-   * A value that is not in the list (imported data, or an option someone else
-   * deleted) is still shown and still selected, marked so it is obvious why it
-   * looks different — silently dropping it would silently change the object.
-   *
-   * @param {object}   opts
-   * @param {string}   opts.listId
-   * @param {string}   opts.value
-   * @param {Function} opts.onChange
-   * @param {string}   [opts.placeholder]  Shown as the empty choice.
-   * @param {boolean}  [opts.mini]
-   * @param {boolean}  [opts.allowEmpty]   Offer a blank choice (default: true
-   *                                       unless the list def says required).
-   */
-  function managedSelect({ listId, value, onChange, placeholder, mini = false, allowEmpty = null }) {
-    const def = LIST_DEFS[listId] || { label: listId };
-    const select = el('select', { class: 'cx-select' + (mini ? ' mini' : ''), dataset: { list: listId } });
-
-    const rebuild = (current) => {
-      clear(select);
-      const empty = allowEmpty == null ? !def.required : allowEmpty;
-      if (empty) select.appendChild(el('option', { value: '', text: placeholder || '—' }));
-
-      const options = listOptions(listId);
-      for (const option of options) {
-        if (option.id === '' && empty) continue; // already covered by the blank row
-        select.appendChild(el('option', { value: option.id, text: option.label }));
-      }
-
-      // Keep an unknown value visible rather than snapping the field to blank.
-      if (current && !options.some((o) => o.id === current)) {
-        select.appendChild(el('option', { value: current, text: `${current} — not in list` }));
-      }
-
-      select.appendChild(el('option', { value: '\u0000sep', text: '──────────', disabled: true }));
-      select.appendChild(el('option', { value: ADD, text: `＋  Add ${def.label.toLowerCase()}…` }));
-      select.appendChild(el('option', { value: MANAGE, text: `⚙  Manage ${def.label.toLowerCase()}…` }));
-
-      select.value = current ?? '';
-    };
-
-    let last = value ?? '';
-    rebuild(last);
-
-    select.addEventListener('change', () => {
-      const picked = select.value;
-
-      if (picked === ADD || picked === MANAGE) {
-        // Never let a command leak out as a value.
-        select.value = last;
-        const done = (chosenId) => {
-          rebuild(chosenId ?? last);
-          if (chosenId != null && chosenId !== last) {
-            last = chosenId;
-            select.value = chosenId;
-            onChange(chosenId);
-          }
-        };
-        if (picked === ADD) promptNewOption(listId, done);
-        else openListManager(listId, () => done(null));
-        return;
-      }
-
-      if (picked === '\u0000sep') {
-        select.value = last;
-        return;
-      }
-
-      last = picked;
-      onChange(picked);
-    });
-
-    return select;
-  }
-
-  /**
-   * A text input backed by a suggestion list (owner, area).
-   *
-   * These stay free text — a plan should never block you from typing a name
-   * that is not yet on a list — but the list is offered through a `datalist`,
-   * and the manager is one click away.
-   */
-  function suggestInput({ listId, value, onInput, onChange, placeholder, mini = false }) {
-    // The inspector and the object dialog can both be showing an Owner field at
-    // once, so the datalist needs an id of its own — a duplicate would silently
-    // hand one of them the wrong suggestions.
-    const listElementId = domId(`sg-${listId}`);
-    const input = textInput({ value, placeholder, mini, onInput, onChange });
-    input.setAttribute('list', listElementId);
-
-    const datalist = el('datalist', { id: listElementId });
-    for (const suggestion of suggestions(listId)) {
-      datalist.appendChild(el('option', { value: suggestion }));
-    }
-
-    const manage = el('button', {
-      class: 'cx-btn icon mini ghost',
-      title: `Manage ${LIST_DEFS[listId]?.label.toLowerCase() || listId} suggestions`,
-      'aria-label': `Manage ${LIST_DEFS[listId]?.label || listId} suggestions`,
-      html: icon('list', { size: 12 }),
-      onClick: () => openListManager(listId),
-    });
-
-    return el('div', { class: 'cx-inline' }, [
-      el('div', { style: { flex: '1', minWidth: '0' } }, [input, datalist]),
-      manage,
-    ]);
-  }
-
-  /**
-   * Suggestions for a free-text field: the curated list plus whatever the plan
-   * already uses. Typing a new owner should make that owner offerable on the
-   * next object without anyone having to curate a list first.
-   */
-  function suggestions(listId) {
-    const out = [];
-    const seen = new Set();
-    for (const option of listOptions(listId)) {
-      if (option.id && !seen.has(option.id)) { seen.add(option.id); out.push(option.id); }
-    }
-    const def = LIST_DEFS[listId];
-    if (def?.field) {
-      for (const entry of facet(store.getDoc(), def.field)) {
-        if (entry.value && !seen.has(entry.value)) { seen.add(entry.value); out.push(entry.value); }
-      }
-    }
-    return out;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Add an option
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Ask for a new option and add it.
-   * `onDone(id|null)` reports the id that was created, so the dropdown that
-   * launched this can select it straight away.
-   */
-  function promptNewOption(listId, onDone = () => {}) {
-    const def = LIST_DEFS[listId] || { label: listId };
-    const labelInput = textInput({ value: '', placeholder: `New ${def.label.toLowerCase()}` });
-
-    let color = '#5b93f5';
-    let tone = 'neutral';
-
-    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
-      field('Name', labelInput),
-      def.color ? field('Colour', colorControl({ value: color, onChange: (v) => { color = v; } })) : null,
-      def.tone
-        ? field('Tone', selectInput({
-            value: tone,
-            options: TONES.map((t) => ({ value: t, label: t[0].toUpperCase() + t.slice(1) })),
-            onChange: (v) => { tone = v; },
-          }), 'Controls the badge colour where this value is shown as a chip.')
-        : null,
-      el('div', { class: 'cx-hint', text: def.hint || '' }),
-    ].filter(Boolean));
-
-    let settled = false;
-    const modal = openModal({
-      title: `Add ${def.label.toLowerCase()}`,
-      body,
-      actions: [
-        { label: 'Cancel' },
-        {
-          label: 'Add',
-          kind: 'primary',
-          onClick: () => {
-            settled = true;
-            onDone(commit());
-          },
-        },
-      ],
-      onClose: () => {
-        if (!settled) onDone(null);
-      },
-    });
-
-    function commit() {
-      const label = labelInput.value.trim();
-      if (!label) return null;
-      // The id is what every object stores, so derive a stable one from the
-      // name rather than letting it drift with later renames.
-      const id = listId === 'font' ? label : slugify(label, listId);
-      const created = store.addListOption(listId, {
-        id,
-        label,
-        color: def.color ? color : undefined,
-        tone: def.tone ? tone : undefined,
-      });
-      if (!created) {
-        toast({ tone: 'warn', title: 'Already on the list', message: `"${label}" is already a ${def.label.toLowerCase()} option.` });
-        return null;
-      }
-      renderer.requestRender();
-      return created;
-    }
-
-    labelInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        settled = true;
-        const id = commit();
-        modal.close();
-        onDone(id);
-      }
-    });
-
-    setTimeout(() => labelInput.focus(), 40);
-  }
-
-  /** A url-safe id, unique within the list. */
-  function slugify(label, listId) {
-    const base =
-      String(label)
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '') || 'option';
-
-    const taken = new Set(listOptions(listId).map((o) => o.id));
-    if (!taken.has(base)) return base;
-    let n = 2;
-    while (taken.has(`${base}-${n}`)) n++;
-    return `${base}-${n}`;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The editor
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Which list the editor last showed.
-   *
-   * Every mutation writes to the store, and the dock rebuilds its pane on
-   * `doc:changed` — so without this, deleting an option would drop the reader
-   * back on the first tab mid-task.
-   */
-  let lastList = LIST_IDS[0];
-
-  /**
-   * The list editor, as a detached node.
-   *
-   * The modal and the Lists dock pane are the same widget — building it once
-   * means "add a status" behaves identically wherever it is reached, and there
-   * is only one place to change when a list grows a new property.
-   *
-   * @param {object}   [opts]
-   * @param {string}   [opts.listId]  Start on this list (default: the first).
-   * @param {boolean}  [opts.tabs]    Offer the list picker (default: true).
-   * @returns {{node: HTMLElement, refresh: Function, active: Function}}
-   */
-  function listEditor({ listId = null, tabs: showTabs = true } = {}) {
-    let active = listId && LIST_DEFS[listId] ? listId : lastList;
-
-    const tabs = el('div', { class: 'cx-seg', style: { flexWrap: 'wrap', marginBottom: '13px' } });
-    const body = el('div');
-    const node = el('div', {}, showTabs ? [tabs, body] : [body]);
-
-    if (showTabs) {
-      for (const id of LIST_IDS) {
-        tabs.appendChild(
-          el('button', { dataset: { list: id }, text: LIST_DEFS[id].label, onClick: () => selectTab(id) })
-        );
-      }
-    }
-
-    function selectTab(id) {
-      active = id;
-      lastList = id;
-      for (const button of tabs.children) button.classList.toggle('active', button.dataset.list === id);
-      renderList();
-    }
-
-    function renderList() {
-      clear(body);
-      const def = LIST_DEFS[active];
-      const options = listOptions(active);
-
-      body.appendChild(el('div', { class: 'cx-hint', style: { marginBottom: '10px' }, text: def.hint || '' }));
-
-      if (!options.length) {
-        body.appendChild(
-          emptyState({
-            iconName: 'list',
-            title: 'No options yet',
-            message: `Add the ${def.label.toLowerCase()} values this project uses.`,
-          })
-        );
-      } else {
-        const rows = el('div', { class: 'cx-list' });
-        options.forEach((option, index) => rows.appendChild(optionRow(active, def, option, index, options.length)));
-        body.appendChild(rows);
-      }
-
-      body.appendChild(
-        el('div', { style: { display: 'flex', gap: '6px', marginTop: '12px', flexWrap: 'wrap' } }, [
-          el('button', {
-            class: 'cx-btn mini primary',
-            html: icon('plus', { size: 12 }) + '<span>Add option</span>',
-            onClick: () => promptNewOption(active, () => renderList()),
-          }),
-          el('button', {
-            class: 'cx-btn mini',
-            html: icon('refresh', { size: 12 }) + '<span>Restore defaults</span>',
-            title: 'Re-add the shipped options, keeping any custom one still in use',
-            onClick: async () => {
-              const ok = await confirmDialog({
-                title: `Restore ${def.label.toLowerCase()} defaults`,
-                message: 'The shipped options come back. Custom options still used by an object are kept; unused ones are removed.',
-                confirmLabel: 'Restore',
-              });
-              if (ok) {
-                store.resetList(active);
-                changed();
-                renderList();
-              }
-            },
-          }),
-        ])
-      );
-    }
-
-    function optionRow(listId_, def, option, index, total) {
-      const usage = store.listOptionUsage(listId_, option.id);
-
-      const label = textInput({
-        value: option.label,
-        mini: true,
-        onChange: (v) => {
-          store.updateListOption(listId_, option.id, { label: v.trim() || option.id });
-          changed();
-        },
-      });
-      label.setAttribute('aria-label', `Name for ${option.label}`);
-
-      return el('div', { class: 'list-opt', dataset: { option: option.id } }, [
-        def.color
-          ? el('input', {
-              class: 'cx-color lo-swatch',
-              type: 'color',
-              value: toHex(option.color),
-              title: 'Option colour',
-              'aria-label': `Colour for ${option.label}`,
-              // `change`, not `input`: the dock pane rebuilds on doc:changed and
-              // a colour input is not covered by the typing guard, so a live
-              // stream of edits would pull the picker out from under the drag.
-              onChange: (e) => {
-                store.updateListOption(listId_, option.id, { color: e.target.value });
-                changed();
-              },
-            })
-          : el('span', { class: 'cx-dot lo-swatch', style: { background: 'var(--text-subtle)' } }),
-
-        el('div', { class: 'lo-name' }, [label]),
-
-        el('div', { class: 'lo-actions' }, [
-          iconButton('chevron-up', 'Move up', index === 0, () => {
-            store.moveListOption(listId_, option.id, -1);
-            changed();
-            renderList();
-          }),
-          iconButton('chevron-down', 'Move down', index === total - 1, () => {
-            store.moveListOption(listId_, option.id, 1);
-            changed();
-            renderList();
-          }),
-          iconButton('trash', 'Remove option', false, () => confirmRemoval(listId_, def, option, usage)),
-        ]),
-
-        el('div', { class: 'lo-foot' }, [
-          el('div', { class: 'lo-meta', text: `${option.id || '(blank)'} · ${usage ? `used by ${usage}` : 'unused'}` }),
-          def.tone
-            ? el('div', { class: 'lo-tone' }, [
-                selectInput({
-                  value: option.tone || 'neutral',
-                  mini: true,
-                  options: TONES.map((t) => ({ value: t, label: t })),
-                  onChange: (v) => {
-                    store.updateListOption(listId_, option.id, { tone: v });
-                    changed();
-                  },
-                }),
-              ])
-            : null,
-        ].filter(Boolean)),
-      ].filter(Boolean));
-    }
-
-    function confirmRemoval(listId_, def, option, usage) {
-      if (!usage) {
-        store.removeListOption(listId_, option.id);
-        changed();
-        renderList();
-        return;
-      }
-
-      // Something still points at it, so ask what those objects should become
-      // rather than leaving them referencing an option that no longer exists.
-      const replacements = listOptions(listId_).filter((o) => o.id !== option.id);
-      let reassignTo = '';
-
-      let settled = false;
-      openModal({
-        title: `Remove "${option.label}"`,
-        body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
-          el('div', { style: { fontSize: 'var(--fs-small)', color: 'var(--text-muted)' }, text: `${usage} object${usage === 1 ? '' : 's'} currently use this ${def.label.toLowerCase()}.` }),
-          field('Move them to', selectInput({
-            value: '',
-            placeholder: '— leave blank —',
-            options: replacements.map((o) => ({ value: o.id, label: o.label })),
-            onChange: (v) => { reassignTo = v; },
-          }), 'Leaving it blank clears the field on those objects.'),
-        ]),
-        actions: [
-          { label: 'Cancel' },
-          {
-            label: 'Remove',
-            kind: 'danger',
-            onClick: () => {
-              settled = true;
-              const target = reassignTo ? listOption(listId_, reassignTo)?.label : '';
-              store.removeListOption(listId_, option.id, { reassignTo });
-              changed();
-              renderList();
-              toast({
-                tone: 'good',
-                title: `"${option.label}" removed`,
-                message: target
-                  ? `${usage} object${usage === 1 ? '' : 's'} moved to "${target}".`
-                  : `${usage} object${usage === 1 ? '' : 's'} had the field cleared.`,
-              });
-            },
-          },
-        ],
-        onClose: () => {
-          if (!settled) renderList();
-        },
-      });
-    }
-
-    /** One announcement for every mutation: repaint, then tell the UI. */
-    function changed() {
-      renderer.requestRender();
-      emit(EV.LISTS_CHANGED, { listId: active });
-    }
-
-    selectTab(active);
-    return { node, refresh: renderList, active: () => active };
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The manager dialog
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /** Open the manager for one list, or the whole set when `listId` is omitted. */
-  function openListManager(listId = null, onClose = () => {}) {
-    const editor = listEditor({ listId });
-
-    return openModal({
-      title: 'Manage lists',
-      subtitle: 'Options are saved with the project, and every change is undoable.',
-      size: 'wide',
-      body: editor.node,
-      actions: [{ label: 'Done', kind: 'primary' }],
-      onClose: () => {
-        emit(EV.LISTS_CHANGED, { listId: editor.active() });
-        onClose();
-      },
-    });
-  }
-
-  function iconButton(name, title, disabled, onClick) {
-    return el('button', {
-      class: 'cx-btn icon mini ghost',
-      title,
-      'aria-label': title,
-      disabled,
-      html: icon(name, { size: 11 }),
-      onClick,
-    });
-  }
-
-  /** Colour inputs need a concrete hex; theme tokens resolve to one. */
-  function toHex(color) {
-    if (!color) return '#5b93f5';
-    const value = String(color).trim();
-    if (value.startsWith('#')) return value.length === 4
-      ? '#' + value.slice(1).split('').map((c) => c + c).join('')
-      : value.slice(0, 7);
-
-    if (value.startsWith('var(')) {
-      try {
-        const resolved = getComputedStyle(document.documentElement).getPropertyValue(value.slice(4, -1).trim()).trim();
-        if (resolved.startsWith('#')) return resolved.length === 4
-          ? '#' + resolved.slice(1).split('').map((c) => c + c).join('')
-          : resolved.slice(0, 7);
-      } catch {
-        /* fall through to the default */
-      }
-    }
-    return '#5b93f5';
-  }
-
-  Object.defineProperty(__x, "managedSelect", { get: () => managedSelect, enumerable: true });
-  Object.defineProperty(__x, "suggestInput", { get: () => suggestInput, enumerable: true });
-  Object.defineProperty(__x, "promptNewOption", { get: () => promptNewOption, enumerable: true });
-  Object.defineProperty(__x, "listEditor", { get: () => listEditor, enumerable: true });
-  Object.defineProperty(__x, "openListManager", { get: () => openListManager, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
-// ui/auth.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["ui/auth.js"] = function (__x, __req) {
-  /**
-   * Sign-in, the account menu, and sharing.
-   *
-   * Only reachable on a hosted deployment — with `config.js` blank none of this
-   * is ever shown and the application boots straight into the canvas, exactly as
-   * it does today.
-   *
-   * The gate is a full-screen overlay rather than a separate page, so a single
-   * static file still serves the whole application and there is no route to get
-   * wrong. It renders before the workspace is built, so nothing behind it can
-   * flash into view.
-   *
-   * Imports: util, events, dates, cloud, icons, components.
-   */
-
-  const { el, clear } = __req("core/util.js");
-  const { on, emit, EV } = __req("core/events.js");
-  const cloud = __req("core/cloud.js");
-  const filestore = __req("core/filestore.js");
-  const access = __req("core/access.js");
-  const { icon } = __req("ui/icons.js");
-  const { fmtDate } = __req("core/dates.js");
-  const { openModal, field, textInput, selectInput, section, skeleton, toast, badge, confirmDialog, emptyState } = __req("ui/components.js");
-
-
-
-
-
-
-
-
-
-
-
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The gate
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Show the sign-in screen and resolve once there is a session.
-   *
-   * Resolves to the user, or to null when the visitor chooses to work locally —
-   * which stays available unless the deployment sets `requireAuth`.
-   */
-  function requireSignIn() {
-    return new Promise((resolve) => {
-      const allowLocal = !cloud.authRequired();
-
-      // Sign-up is not offered. An invited person arrives on a link carrying
-      // their address, which is the only thing that reveals the form — and even
-      // then the database refuses any address without a pending invitation, so
-      // finding this URL achieves nothing on its own.
-      const invited = invitedEmail();
-      let mode = invited ? 'signup' : 'signin'; // signin | signup | reset
-
-      const overlay = el('div', { class: 'cx-gate', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Sign in' });
-      const card = el('div', { class: 'cx-gate-card' });
-      overlay.appendChild(card);
-
-      const emailInput = textInput({ type: 'email', value: invited || '', placeholder: 'you@company.com' });
-      emailInput.setAttribute('autocomplete', 'username');
-      emailInput.setAttribute('name', 'email');
-
-      const passwordInput = textInput({ type: 'password', value: '', placeholder: '••••••••' });
-      passwordInput.setAttribute('autocomplete', 'current-password');
-      passwordInput.setAttribute('name', 'password');
-
-      const nameInput = textInput({ value: '', placeholder: 'Your name' });
-      nameInput.setAttribute('autocomplete', 'name');
-
-      const message = el('div', { class: 'cx-gate-msg', role: 'alert' });
-      const submit = el('button', { class: 'cx-btn primary', type: 'submit', text: 'Sign in' });
-
-      const say = (text, tone = 'bad') => {
-        message.className = `cx-gate-msg ${tone}`;
-        message.textContent = text || '';
-      };
-
-      let busy = false;
-      const setBusy = (state) => {
-        busy = state;
-        submit.disabled = state;
-        submit.classList.toggle('loading', state);
-      };
-
-      const form = el('form', { class: 'cx-gate-form', onSubmit: (e) => { e.preventDefault(); go(); } });
-
-      async function go() {
-        if (busy) return;
-        const email = emailInput.value.trim();
-        const password = passwordInput.value;
-
-        if (!email) return say('Enter your email address.');
-        if (mode !== 'reset' && !password) return say('Enter your password.');
-
-        setBusy(true);
-        say('');
-        try {
-          if (mode === 'signin') {
-            const user = await cloud.signIn(email, password);
-            finish(user);
-          } else if (mode === 'signup') {
-            const { user, confirmationRequired } = await cloud.signUp(email, password, nameInput.value.trim());
-            if (confirmationRequired) {
-              say(`Account created. Check ${email} for a confirmation link, then sign in.`, 'good');
-              setMode('signin');
-            } else {
-              finish(user);
-            }
-          } else {
-            await cloud.sendPasswordReset(email);
-            say(`If there is an account for ${email}, a reset link is on its way.`, 'good');
-            setMode('signin');
-          }
-        } catch (err) {
-          say(err.message);
-        } finally {
-          setBusy(false);
-        }
-      }
-
-      function finish(user) {
-        overlay.classList.add('done');
-        setTimeout(() => overlay.remove(), 260);
-        resolve(user);
-      }
-
-      function setMode(next) {
-        mode = next;
-        render();
-        setTimeout(() => (mode === 'signup' ? nameInput : emailInput).focus(), 30);
-      }
-
-      function render() {
-        clear(card);
-
-        const titles = {
-          signin: ['Sign in', 'Your projects, wherever you open them.'],
-          signup: [
-            'Set up your account',
-            invited ? `You have been invited as ${invited}. Choose a password.` : 'Accounts are created by invitation.',
-          ],
-          reset: ['Reset your password', 'We will email you a link.'],
-        };
-        const [title, subtitle] = titles[mode];
-
-        card.append(
-          el('div', { class: 'cx-gate-brand' }, [
-            el('div', { class: 'brand-mark' }),
-            el('div', {}, [
-              el('div', { class: 'cx-gate-name', text: 'CX Timeline' }),
-              el('div', { class: 'cx-gate-sub', text: 'Commissioning Planner' }),
-            ]),
-          ]),
-          el('h1', { class: 'cx-gate-title', text: title }),
-          el('div', { class: 'cx-gate-lede', text: subtitle })
-        );
-
-        clear(form);
-        form.append(
-          ...[
-            mode === 'signup' ? field('Name', nameInput) : null,
-            field('Email', emailInput),
-            mode !== 'reset' ? field('Password', passwordInput) : null,
-            message,
-            submit,
-          ].filter(Boolean)
-        );
-        submit.textContent = { signin: 'Sign in', signup: 'Create account', reset: 'Send reset link' }[mode];
-        passwordInput.setAttribute('autocomplete', mode === 'signup' ? 'new-password' : 'current-password');
-        card.appendChild(form);
-
-        const links = el('div', { class: 'cx-gate-links' });
-        if (mode === 'signin') {
-          // No "create an account": there is no self-service sign-up.
-          links.append(
-            el('span', { class: 'cx-hint', text: 'Access is by invitation.' }),
-            gateLink('Forgot password?', () => setMode('reset'))
-          );
-        } else {
-          links.appendChild(gateLink('Back to sign in', () => setMode('signin')));
-        }
-        card.appendChild(links);
-
-        if (allowLocal) {
-          card.appendChild(
-            el('div', { class: 'cx-gate-local' }, [
-              el('button', {
-                class: 'cx-btn ghost mini',
-                text: 'Continue without an account',
-                onClick: () => {
-                  overlay.classList.add('done');
-                  setTimeout(() => overlay.remove(), 260);
-                  resolve(null);
-                },
-              }),
-              el('div', { class: 'cx-hint', text: 'Work is saved in this browser only, and is not shared.' }),
-            ])
-          );
-        }
-      }
-
-      render();
-      document.body.appendChild(overlay);
-      // An invited person already has their address filled in; put them in the
-      // field they actually have to complete.
-      setTimeout(() => (invited ? nameInput : emailInput).focus(), 80);
-    });
-  }
-
-  /**
-   * The address on an invitation link, if this is one.
-   *
-   * The link is a convenience, not a credential — it reveals the form and
-   * prefills the address, nothing more. Whether an account may be created is
-   * decided by the database, which refuses any address without a pending
-   * invitation however the request arrives.
-   */
-  function invitedEmail() {
-    const match = /[#&?]invite=([^&]+)/.exec(window.location.hash || '');
-    if (!match) return '';
-    try {
-      return decodeURIComponent(match[1]).trim().toLowerCase();
-    } catch {
-      return '';
-    }
-  }
-
-  function gateLink(text, onClick) {
-    return el('button', { class: 'cx-gate-link', type: 'button', text, onClick });
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Read-only presentation
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Reflect the current role in the interface.
-   *
-   * A viewer is not shown a broken application: the editing affordances go away,
-   * a banner explains why, and a refused write says so once rather than on every
-   * keystroke. The database is what actually stops the write — this is here so
-   * the user understands the state they are in.
-   */
-  function installAccessMode() {
-    const apply = () => {
-      /* Three things can make a session read-only, and the interface says the
-         same thing for all of them — only the reason differs, and only the reason
-         decides whether there is anything the reader can do about it.
-
-         A viewer role on a hosted project: ask the owner. A colleague holding the
-         pen on a plan in a shared folder: wait, ask, or take it. And an account
-         the calendar says may not edit the plan at all, which outranks the other
-         two — there is no pen to ask for and nobody to ask, so the banner says
-         why and offers nothing. */
-      const locked = access.planLocked();
-      const viewingFolder = !locked && filestore.isViewer();
-      const readOnly = locked || cloud.isReadOnly() || viewingFolder;
-      document.body.classList.toggle('read-only', readOnly);
-      renderBanner(readOnly, viewingFolder ? filestore.state() : null);
-    };
-
-    on(EV.ACCESS_CHANGED, apply);
-    on(EV.AUTH_CHANGED, apply);
-    on(EV.FILE_STATE, apply);
-
-    // One notice per burst — a viewer holding an arrow key would otherwise
-    // stack up a notification per repeat.
-    let lastRefusal = 0;
-    on(EV.EDIT_REFUSED, () => {
-      const now = Date.now();
-      if (now - lastRefusal < 4000) return;
-      lastRefusal = now;
-      toast({
-        tone: 'warn',
-        title: 'Read-only',
-        message: access.planLocked()
-          ? access.lockReason()
-          : 'You have view access to this project. Ask the owner for edit access to make changes.',
-      });
-    });
-
-    apply();
-  }
-
-  /**
-   * How long ago, in words somebody can act on.
-   *
-   * Deliberately coarse: the difference between eleven and twelve minutes
-   * changes nobody's mind, and a ticking number in a banner reads as something
-   * that needs watching.
-   */
-  function since(ms) {
-    if (!Number.isFinite(ms)) return '';
-    const mins = Math.floor(ms / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
-    const hours = Math.round(mins / 60);
-    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
-  }
-
-  function renderBanner(readOnly, folder = null) {
-    const existing = document.getElementById('cx-readonly-bar');
-    if (!readOnly) {
-      existing?.remove();
-      return;
-    }
-    // The message can change while the bar is up — a colleague closing the plan
-    // hands the pen over — so rebuild rather than bail out on an existing bar.
-    existing?.remove();
-
-    const holder = folder?.holder || '';
-    /* What they are doing with it, not merely that they have it. "Dana has this
-       plan open" is a fact; "Dana has this plan open, last saved 40 minutes ago"
-       is a decision — wait, ask, or take it. */
-    const idle = folder && Number.isFinite(folder.holderIdleMs)
-      ? ` Last saved ${since(folder.holderIdleMs)}.`
-      : '';
-    const message = access.planLocked()
-      ? `Read-only — ${access.lockReason()}`
-      : holder
-        ? `Read-only — ${holder} has this plan open.${idle}`
-        : 'Read-only — you have view access to this project.';
-
-    const kids = [
-      el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),
-      el('span', { text: message }),
-    ];
-
-    /* The third option. Waiting had no end and taking over is destructive by
-       design, so people took over by habit; asking costs the holder one toast
-       and costs the asker nothing. Only in a folder, and only while somebody
-       else really has it — a hosted viewer has nobody to ask. */
-    if (holder && holder !== 'another window of yours') {
-      kids.push(folder.asked
-        ? el('span', { class: 'ro-asked', text: `Asked ${holder} — you will get it when they hand over.` })
-        : el('button', {
-          class: 'cx-btn mini',
-          text: 'Ask for the pen',
-          title: `Let ${holder} know you are waiting. They decide; nothing is taken.`,
-          onClick: async (event) => {
-            event.currentTarget.disabled = true;
-            await filestore.requestPen();
-          },
-        }));
-    }
-
-    const bar = el('div', { id: 'cx-readonly-bar', class: 'cx-readonly-bar', role: 'status' }, kids);
-    document.getElementById('main')?.prepend(bar);
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The account menu
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /** The signed-in-as block that sits at the foot of the sidebar. */
-  function accountBlock() {
-    const root = el('div', { class: 'cx-account' });
-
-    const render = () => {
-      clear(root);
-      if (!cloud.isSignedIn()) {
-        root.appendChild(
-          el('button', {
-            class: 'cx-btn mini',
-            html: icon('user', { size: 12 }) + '<span>Sign in</span>',
-            onClick: async () => {
-              await requireSignIn();
-              window.location.reload();
-            },
-          })
-        );
-        return;
-      }
-
-      const label = cloud.accountLabel();
-      root.append(
-        el('div', { class: 'acc-avatar', text: initials(label) }),
-        el('div', { class: 'acc-main' }, [
-          el('div', { class: 'acc-name', text: label, title: cloud.currentUser()?.email || '' }),
-          el('div', { class: 'acc-role', text: roleLabel(cloud.getRole()) }),
-        ]),
-        el('button', {
-          class: 'cx-btn icon mini ghost',
-          title: 'Sign out',
-          'aria-label': 'Sign out',
-          html: icon('logout', { size: 13 }),
-          onClick: async () => {
-            const ok = await confirmDialog({
-              title: 'Sign out?',
-              message: 'Anything saved stays on the server. Unsaved changes in this tab are written first.',
-              confirmLabel: 'Sign out',
-            });
-            if (!ok) return;
-            await cloud.signOut();
-            window.location.reload();
-          },
-        })
-      );
-    };
-
-    on(EV.AUTH_CHANGED, render);
-    on(EV.ACCESS_CHANGED, render);
-    render();
-    return root;
-  }
-
-  function initials(label) {
-    const parts = String(label).replace(/@.*$/, '').split(/[\s._-]+/).filter(Boolean);
-    return ((parts[0]?.[0] || '') + (parts[1]?.[0] || '')).toUpperCase() || '?';
-  }
-
-  function roleLabel(role) {
-    return { owner: 'Owner', editor: 'Editor', viewer: 'View only' }[role] || 'No project open';
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Team administration
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Who may have an account, and who administers the deployment.
-   *
-   * Sign-up is closed, so this pane is the only door in. Inviting writes a row
-   * the database checks when the account is created — which is why an
-   * invitation cannot be forged by anyone who finds the link, and why revoking
-   * one actually stops the sign-up rather than merely hiding a button.
-   */
-  function paneTeam(root) {
-    if (!cloud.isConfigured() || !cloud.isSignedIn()) {
-      root.appendChild(
-        emptyState({ iconName: 'users', title: 'Not available', message: 'Sign in to manage who has access.' })
-      );
-      return;
-    }
-    if (!cloud.isAdmin()) {
-      root.appendChild(
-        emptyState({
-          iconName: 'shield',
-          title: 'Administrators only',
-          message: 'Accounts are created by invitation. Ask an administrator to invite someone.',
-        })
-      );
-      return;
-    }
-
-    root.appendChild(el('div', { class: 'cx-hint', style: { marginBottom: '12px' },
-      text: 'Nobody can create an account unless their address is invited here — the database refuses the sign-up, not just the form.' }));
-
-    /* ── Invite ────────────────────────────────────────────────────────────── */
-    const emailInput = textInput({ type: 'email', value: '', placeholder: 'colleague@company.com' });
-    const noteInput = textInput({ value: '', placeholder: 'Role or team (optional)' });
-
-    const invite = async () => {
-      const email = emailInput.value.trim();
-      if (!email) return;
-      try {
-        const result = await cloud.inviteUser(email, 'editor', noteInput.value.trim());
-        emailInput.value = '';
-        noteInput.value = '';
-        showInviteLink(result.email);
-        refresh();
-      } catch (err) {
-        toast({ tone: 'bad', title: 'Could not invite', message: err.message });
-      }
-    };
-    emailInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        invite();
-      }
-    });
-
-    root.appendChild(
-      section('Invite someone', [
-        field('Email', emailInput),
-        field('Note', noteInput, 'Only you see this — a reminder of who they are.'),
-        el('button', {
-          class: 'cx-btn mini primary',
-          html: icon('plus', { size: 12 }) + '<span>Create invitation</span>',
-          onClick: invite,
-        }),
-        el('div', { class: 'cx-hint', style: { marginTop: '8px' },
-          text: 'No email is sent. You get a link to pass on however you like.' }),
-      ])
-    );
-
-    const pending = el('div', { class: 'cx-list' });
-    const accounts = el('div', { class: 'cx-list' });
-    root.append(
-      section('Pending invitations', [pending]),
-      section('Accounts', [accounts])
-    );
-
-    async function refresh() {
-      clear(pending);
-      clear(accounts);
-      pending.appendChild(skeleton(2));
-
-      try {
-        const [invites, people] = await Promise.all([cloud.listInvitations(), cloud.listAccounts()]);
-        clear(pending);
-
-        if (!invites.length) {
-          pending.appendChild(el('div', { class: 'cx-hint', text: 'None outstanding.' }));
-        } else {
-          for (const invitation of invites) pending.appendChild(invitationRow(invitation));
-        }
-        for (const person of people) accounts.appendChild(accountRow(person));
-      } catch (err) {
-        clear(pending);
-        pending.appendChild(el('div', { class: 'cx-gate-msg bad', text: err.message }));
-      }
-    }
-
-    function invitationRow(invitation) {
-      return el('div', { class: 'cx-listrow', dataset: { invite: invitation.email }, style: { cursor: 'default' } }, [
-        el('span', { class: 'cx-dot', style: { background: invitation.expired ? 'var(--bad)' : 'var(--pending)' } }),
-        el('div', { class: 'lr-main' }, [
-          el('div', { class: 'lr-title', text: invitation.email }),
-          el('div', { class: 'lr-meta', text: [
-            invitation.note,
-            invitation.expired ? 'expired' : `expires ${fmtDate(invitation.expires, 'medium')}`,
-          ].filter(Boolean).join(' · ') }),
-        ]),
-        el('div', { class: 'lr-actions', style: { opacity: '1' } }, [
-          el('button', {
-            class: 'cx-btn icon mini ghost',
-            title: 'Copy the invitation link',
-            'aria-label': `Copy the invitation link for ${invitation.email}`,
-            html: icon('copy', { size: 11 }),
-            onClick: () => showInviteLink(invitation.email),
-          }),
-          el('button', {
-            class: 'cx-btn icon mini ghost',
-            title: 'Revoke',
-            'aria-label': `Revoke the invitation for ${invitation.email}`,
-            html: icon('trash', { size: 11 }),
-            onClick: async () => {
-              const ok = await confirmDialog({
-                title: `Revoke ${invitation.email}?`,
-                message: 'They will not be able to create an account with that address.',
-                confirmLabel: 'Revoke',
-                danger: true,
-              });
-              if (!ok) return;
-              try {
-                await cloud.revokeInvitation(invitation.email);
-                refresh();
-              } catch (err) {
-                toast({ tone: 'bad', title: 'Could not revoke', message: err.message });
-              }
-            },
-          }),
-        ]),
-      ]);
-    }
-
-    function accountRow(person) {
-      return el('div', { class: 'cx-listrow', dataset: { account: person.id }, style: { cursor: 'default' } }, [
-        el('div', { class: 'acc-avatar small', text: initials(person.name || person.email) }),
-        el('div', { class: 'lr-main' }, [
-          el('div', { class: 'lr-title', text: (person.name || person.email) + (person.isYou ? '  (you)' : '') }),
-          el('div', { class: 'lr-meta', text: [
-            person.email,
-            `${person.projects} project${person.projects === 1 ? '' : 's'}`,
-          ].join(' · ') }),
-        ]),
-        person.admin ? badge('Admin', 'good') : null,
-        el('div', { class: 'lr-actions', style: { opacity: '1' } }, [
-          el('button', {
-            class: 'cx-btn mini ghost',
-            text: person.admin ? 'Remove admin' : 'Make admin',
-            onClick: async () => {
-              try {
-                await cloud.setAdmin(person.id, !person.admin);
-                refresh();
-              } catch (err) {
-                toast({ tone: 'bad', title: 'Could not change', message: err.message });
-              }
-            },
-          }),
-        ]),
-      ].filter(Boolean));
-    }
-
-    refresh();
-  }
-
-  /**
-   * Show the link an invited person opens.
-   *
-   * A dialog rather than a silent clipboard write, because the link is the
-   * whole deliverable of inviting someone — losing it silently would mean
-   * revoking and re-inviting to get it back.
-   */
-  function showInviteLink(email) {
-    const link = cloud.inviteLink(email);
-    const box = textInput({ value: link });
-    box.readOnly = true;
-    box.style.fontFamily = 'var(--f-mono)';
-    box.style.fontSize = 'var(--fs-tiny)';
-
-    openModal({
-      title: 'Invitation created',
-      subtitle: `${email} can now set up an account — and nobody else can.`,
-      body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
-        field('Send them this link', box, 'It expires in 30 days. Revoke it any time from the Team pane.'),
-        el('button', {
-          class: 'cx-btn mini',
-          html: icon('copy', { size: 12 }) + '<span>Copy link</span>',
-          onClick: async (e) => {
-            try {
-              await navigator.clipboard.writeText(link);
-            } catch {
-              // Clipboard access can be refused; selecting the text still works.
-              box.select();
-            }
-            e.currentTarget.innerHTML = icon('check', { size: 12 }) + '<span>Copied</span>';
-          },
-        }),
-      ]),
-      actions: [{ label: 'Done', kind: 'primary' }],
-    });
-
-    setTimeout(() => box.select(), 60);
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Sharing
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const ROLE_OPTIONS = [
-    { value: 'viewer', label: 'Viewer — can open and export, cannot change anything' },
-    { value: 'editor', label: 'Editor — can change the plan' },
-    { value: 'owner', label: 'Owner — full control, including sharing' },
-  ];
-
-  /**
-   * Who can see this project, and what they may do.
-   * Owners can change it; everyone else sees the list read-only, which is
-   * useful on its own — knowing who else is in a plan matters.
-   */
-  function openShareDialog(projectId = cloud.getProjectId(), projectName = '') {
-    if (!projectId) {
-      toast({ tone: 'warn', title: 'No project open', message: 'Open a project before sharing it.' });
-      return;
-    }
-
-    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } });
-    const list = el('div', { class: 'cx-list' });
-    const owner = cloud.isOwner();
-
-    const emailInput = textInput({ type: 'email', value: '', placeholder: 'colleague@company.com' });
-    let inviteRole = 'viewer';
-
-    async function refresh() {
-      clear(list);
-      let members = [];
-      try {
-        members = await cloud.listMembers(projectId);
-      } catch (err) {
-        list.appendChild(el('div', { class: 'cx-gate-msg bad', text: err.message }));
-        return;
-      }
-      if (!members.length) {
-        list.appendChild(emptyState({ iconName: 'user', title: 'Nobody else yet' }));
-        return;
-      }
-      for (const member of members) list.appendChild(memberRow(member));
-    }
-
-    function memberRow(member) {
-      const isLastOwner = member.role === 'owner';
-      return el('div', { class: 'cx-listrow', dataset: { member: member.userId }, style: { cursor: 'default' } }, [
-        el('div', { class: 'acc-avatar small', text: initials(member.name || member.email || '?') }),
-        el('div', { class: 'lr-main' }, [
-          el('div', { class: 'lr-title', text: (member.name || member.email) + (member.isYou ? '  (you)' : '') }),
-          el('div', { class: 'lr-meta', text: member.email || '' }),
-        ]),
-        owner && !member.isYou
-          ? selectInput({
-              value: member.role,
-              mini: true,
-              options: ROLE_OPTIONS.map((o) => ({ value: o.value, label: o.value })),
-              onChange: async (v) => {
-                try {
-                  await cloud.setMemberRole(projectId, member.email, v);
-                  toast({ tone: 'good', title: 'Access updated', message: `${member.email} is now ${v === 'viewer' ? 'a viewer' : `an ${v}`}.` });
-                  refresh();
-                } catch (err) {
-                  toast({ tone: 'bad', title: 'Could not change access', message: err.message });
-                  refresh();
-                }
-              },
-            })
-          : badge(roleLabel(member.role), member.role === 'viewer' ? 'muted' : 'info'),
-        owner && !(member.isYou && isLastOwner)
-          ? el('button', {
-              class: 'cx-btn icon mini ghost',
-              title: 'Remove access',
-              'aria-label': `Remove ${member.email}`,
-              html: icon('x', { size: 11 }),
-              onClick: async () => {
-                const ok = await confirmDialog({
-                  title: `Remove ${member.email}?`,
-                  message: 'They lose access to this project immediately.',
-                  confirmLabel: 'Remove',
-                  danger: true,
-                });
-                if (!ok) return;
-                try {
-                  await cloud.unshareProject(projectId, member.userId);
-                  refresh();
-                } catch (err) {
-                  toast({ tone: 'bad', title: 'Could not remove', message: err.message });
-                }
-              },
-            })
-          : null,
-      ].filter(Boolean));
-    }
-
-    async function invite() {
-      const email = emailInput.value.trim();
-      if (!email) return;
-      try {
-        await cloud.shareProject(projectId, email, inviteRole);
-        emailInput.value = '';
-        toast({
-          tone: 'good',
-          title: 'Shared',
-          message: `${email} now has ${inviteRole === 'viewer' ? 'view-only' : inviteRole} access.`,
-        });
-        refresh();
-      } catch (err) {
-        toast({ tone: 'bad', title: 'Could not share', message: err.message });
-      }
-    }
-
-    if (owner) {
-      const roleSelect = selectInput({
-        value: inviteRole,
-        options: ROLE_OPTIONS,
-        onChange: (v) => { inviteRole = v; },
-      });
-      emailInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          invite();
-        }
-      });
-
-      body.append(
-        el('div', {}, [
-          field('Invite by email', emailInput, 'They need a CX Timeline account already — sharing does not send an invitation email.'),
-          field('Access level', roleSelect),
-          el('button', {
-            class: 'cx-btn primary mini',
-            html: icon('plus', { size: 12 }) + '<span>Grant access</span>',
-            onClick: invite,
-          }),
-        ])
-      );
-    } else {
-      body.appendChild(
-        el('div', { class: 'cx-hint', text: 'Only the project owner can change who has access.' })
-      );
-    }
-
-    body.append(el('div', { class: 'cx-section-label', text: 'People with access' }), list);
-    refresh();
-
-    return openModal({
-      title: projectName ? `Share "${projectName}"` : 'Share project',
-      subtitle: 'Access is enforced by the database, not the interface.',
-      body,
-      actions: [{ label: 'Done', kind: 'primary' }],
-    });
-  }
-
-  Object.defineProperty(__x, "requireSignIn", { get: () => requireSignIn, enumerable: true });
-  Object.defineProperty(__x, "installAccessMode", { get: () => installAccessMode, enumerable: true });
-  Object.defineProperty(__x, "accountBlock", { get: () => accountBlock, enumerable: true });
-  Object.defineProperty(__x, "paneTeam", { get: () => paneTeam, enumerable: true });
-  Object.defineProperty(__x, "openShareDialog", { get: () => openShareDialog, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
-// io/inflate.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["io/inflate.js"] = function (__x, __req) {
-  /**
-   * Minimal DEFLATE decompressor and ZIP reader.
-   *
-   * Exists so `.xlsx` files can be imported without a dependency: an xlsx is a
-   * ZIP of XML parts, and the parts are almost always DEFLATE-compressed. The
-   * browser's own DecompressionStream handles this when available (Chrome,
-   * Edge, Firefox, Safari 16.4+); the hand-written inflater below is the
-   * fallback so the feature works on any engine, offline, from `file://`.
-   *
-   * Implements RFC 1951 for stored, fixed-Huffman and dynamic-Huffman blocks —
-   * which is everything a spreadsheet writer emits.
-   *
-   * Imports: nothing (leaf).
-   */
-
-  /* ── Huffman decoding ──────────────────────────────────────────────────── */
-
-  /** Build a canonical Huffman decode table from a list of code lengths. */
-  function buildTree(lengths) {
-    const maxBits = Math.max(...lengths, 0);
-    const blCount = new Array(maxBits + 1).fill(0);
-    for (const len of lengths) if (len) blCount[len]++;
-
-    const nextCode = new Array(maxBits + 1).fill(0);
-    let code = 0;
-    for (let bits = 1; bits <= maxBits; bits++) {
-      code = (code + blCount[bits - 1]) << 1;
-      nextCode[bits] = code;
-    }
-
-    // Map "length:code" to a symbol. A flat object lookup is fast enough here
-    // and keeps the implementation short and auditable.
-    const table = new Map();
-    for (let symbol = 0; symbol < lengths.length; symbol++) {
-      const len = lengths[symbol];
-      if (!len) continue;
-      table.set(len * 65536 + nextCode[len], symbol);
-      nextCode[len]++;
-    }
-    return { table, maxBits };
-  }
-
-  class BitReader {
-    constructor(bytes) {
-      this.bytes = bytes;
-      this.pos = 0;
-      this.bitBuffer = 0;
-      this.bitCount = 0;
-    }
-
-    bits(n) {
-      while (this.bitCount < n) {
-        if (this.pos >= this.bytes.length) throw new Error('Unexpected end of compressed data');
-        this.bitBuffer |= this.bytes[this.pos++] << this.bitCount;
-        this.bitCount += 8;
-      }
-      const value = this.bitBuffer & ((1 << n) - 1);
-      this.bitBuffer >>>= n;
-      this.bitCount -= n;
-      return value;
-    }
-
-    /** Huffman codes are stored most-significant-bit first. */
-    decode(tree) {
-      let code = 0;
-      for (let len = 1; len <= tree.maxBits; len++) {
-        code = (code << 1) | this.bits(1);
-        const symbol = tree.table.get(len * 65536 + code);
-        if (symbol !== undefined) return symbol;
-      }
-      throw new Error('Invalid Huffman code');
-    }
-
-    alignToByte() {
-      this.bitBuffer = 0;
-      this.bitCount = 0;
-    }
-  }
-
-  const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
-  const LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
-  const DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
-  const DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
-  const CODE_LENGTH_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
-
-  let fixedLiteral = null;
-  let fixedDistance = null;
-
-  function fixedTrees() {
-    if (!fixedLiteral) {
-      const lengths = new Array(288);
-      for (let i = 0; i < 144; i++) lengths[i] = 8;
-      for (let i = 144; i < 256; i++) lengths[i] = 9;
-      for (let i = 256; i < 280; i++) lengths[i] = 7;
-      for (let i = 280; i < 288; i++) lengths[i] = 8;
-      fixedLiteral = buildTree(lengths);
-      fixedDistance = buildTree(new Array(30).fill(5));
-    }
-    return [fixedLiteral, fixedDistance];
-  }
-
-  /**
-   * Inflate a raw DEFLATE stream (no zlib header).
-   * @param {Uint8Array} data
-   * @returns {Uint8Array}
-   */
-  function inflateRaw(data) {
-    const reader = new BitReader(data);
-    const out = [];
-    let output = new Uint8Array(Math.max(1024, data.length * 4));
-    let length = 0;
-
-    const push = (byte) => {
-      if (length >= output.length) {
-        const bigger = new Uint8Array(output.length * 2);
-        bigger.set(output);
-        output = bigger;
-      }
-      output[length++] = byte;
-    };
-
-    let final = false;
-    while (!final) {
-      final = reader.bits(1) === 1;
-      const type = reader.bits(2);
-
-      if (type === 0) {
-        reader.alignToByte();
-        const len = data[reader.pos] | (data[reader.pos + 1] << 8);
-        reader.pos += 4; // skip LEN and NLEN
-        for (let i = 0; i < len; i++) push(data[reader.pos++]);
-        continue;
-      }
-
-      let literalTree;
-      let distanceTree;
-
-      if (type === 1) {
-        [literalTree, distanceTree] = fixedTrees();
-      } else if (type === 2) {
-        const hlit = reader.bits(5) + 257;
-        const hdist = reader.bits(5) + 1;
-        const hclen = reader.bits(4) + 4;
-
-        const codeLengths = new Array(19).fill(0);
-        for (let i = 0; i < hclen; i++) codeLengths[CODE_LENGTH_ORDER[i]] = reader.bits(3);
-        const codeTree = buildTree(codeLengths);
-
-        const lengths = [];
-        while (lengths.length < hlit + hdist) {
-          const symbol = reader.decode(codeTree);
-          if (symbol < 16) {
-            lengths.push(symbol);
-          } else if (symbol === 16) {
-            const previous = lengths[lengths.length - 1];
-            const repeat = reader.bits(2) + 3;
-            for (let i = 0; i < repeat; i++) lengths.push(previous);
-          } else if (symbol === 17) {
-            const repeat = reader.bits(3) + 3;
-            for (let i = 0; i < repeat; i++) lengths.push(0);
-          } else {
-            const repeat = reader.bits(7) + 11;
-            for (let i = 0; i < repeat; i++) lengths.push(0);
-          }
-        }
-
-        literalTree = buildTree(lengths.slice(0, hlit));
-        distanceTree = buildTree(lengths.slice(hlit));
-      } else {
-        throw new Error('Invalid DEFLATE block type');
-      }
-
-      for (;;) {
-        const symbol = reader.decode(literalTree);
-        if (symbol === 256) break;
-        if (symbol < 256) {
-          push(symbol);
-          continue;
-        }
-        const lengthIndex = symbol - 257;
-        const copyLength = LENGTH_BASE[lengthIndex] + reader.bits(LENGTH_EXTRA[lengthIndex]);
-        const distSymbol = reader.decode(distanceTree);
-        const distance = DIST_BASE[distSymbol] + reader.bits(DIST_EXTRA[distSymbol]);
-        const from = length - distance;
-        if (from < 0) throw new Error('Invalid back-reference in compressed data');
-        for (let i = 0; i < copyLength; i++) push(output[from + i]);
-      }
-    }
-
-    return output.subarray(0, length);
-  }
-
-  /**
-   * Decompress using the platform where it exists, falling back to the
-   * implementation above. Always returns a promise for one call shape.
-   */
-  async function inflate(data) {
-    if (typeof DecompressionStream === 'function') {
-      try {
-        const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-        const buffer = await new Response(stream).arrayBuffer();
-        return new Uint8Array(buffer);
-      } catch {
-        /* fall through to the JavaScript inflater */
-      }
-    }
-    return inflateRaw(data);
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     ZIP reading
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Read a ZIP archive from an ArrayBuffer.
-   * Returns a Map of path → Uint8Array. Only the stored (0) and deflate (8)
-   * methods are supported, which covers every spreadsheet writer in practice.
-   */
-  async function readZip(arrayBuffer) {
-    const bytes = new Uint8Array(arrayBuffer);
-    const view = new DataView(arrayBuffer);
-
-    // Locate the End Of Central Directory record by scanning backwards.
-    let eocd = -1;
-    for (let i = bytes.length - 22; i >= 0 && i > bytes.length - 66_000; i--) {
-      if (view.getUint32(i, true) === 0x06054b50) {
-        eocd = i;
-        break;
-      }
-    }
-    if (eocd < 0) throw new Error('Not a valid ZIP archive (no end-of-directory record).');
-
-    const entryCount = view.getUint16(eocd + 10, true);
-    let offset = view.getUint32(eocd + 16, true);
-
-    const files = new Map();
-    const decoder = new TextDecoder('utf-8');
-
-    for (let i = 0; i < entryCount; i++) {
-      if (view.getUint32(offset, true) !== 0x02014b50) break;
-
-      const method = view.getUint16(offset + 10, true);
-      const compressedSize = view.getUint32(offset + 20, true);
-      const nameLength = view.getUint16(offset + 28, true);
-      const extraLength = view.getUint16(offset + 30, true);
-      const commentLength = view.getUint16(offset + 32, true);
-      const localOffset = view.getUint32(offset + 42, true);
-      const name = decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
-
-      // Re-read the local header: its extra field length can differ.
-      const localNameLength = view.getUint16(localOffset + 26, true);
-      const localExtraLength = view.getUint16(localOffset + 28, true);
-      const dataStart = localOffset + 30 + localNameLength + localExtraLength;
-      const raw = bytes.subarray(dataStart, dataStart + compressedSize);
-
-      if (!name.endsWith('/')) {
-        if (method === 0) files.set(name, raw);
-        else if (method === 8) files.set(name, await inflate(raw));
-        // Any other method (bzip2, LZMA) is left out rather than corrupting data.
-      }
-
-      offset += 46 + nameLength + extraLength + commentLength;
-    }
-
-    return files;
-  }
-
-  /** Decode a ZIP entry as UTF-8 text. */
-  function zipText(files, path) {
-    const entry = files.get(path);
-    return entry ? new TextDecoder('utf-8').decode(entry) : null;
-  }
-
-  Object.defineProperty(__x, "inflateRaw", { get: () => inflateRaw, enumerable: true });
-  Object.defineProperty(__x, "inflate", { get: () => inflate, enumerable: true });
-  Object.defineProperty(__x, "readZip", { get: () => readZip, enumerable: true });
-  Object.defineProperty(__x, "zipText", { get: () => zipText, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
-// io/importers.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["io/importers.js"] = function (__x, __req) {
-  /**
-   * Import.
-   *
-   * Four routes in: the application's own JSON, generic CSV/TSV, Microsoft
-   * Project's CSV export, and `.xlsx` workbooks. Everything converges on one
-   * intermediate shape — a list of row objects with normalised column names —
-   * so the mapping logic is written once.
-   *
-   * Nothing is applied to the live document until the caller confirms; every
-   * function returns a *result* describing what would be imported, along with
-   * any warnings, so the UI can preview it first.
-   *
-   * Imports: util, dates, model, store, inflate.
-   */
-
-  const { readFileAsText, readFileAsArrayBuffer, fold } = __req("core/util.js");
-  const { toMs, toISO, MS_DAY, addDays, todayMs, getDateOrder } = __req("core/dates.js");
-  const { makeProject, makeObject, makeLane, makeLink, normalise, validate, TYPES, listOptions } = __req("core/model.js");
-
-
-
-
-
-
-
-
-
-  const { getDoc } = __req("core/store.js");
-  const { readZip, zipText } = __req("io/inflate.js");
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Entry point
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Inspect a file and import it with the right reader.
-   * @returns {Promise<{kind:string, doc?:object, objects?:Array, lanes?:Array,
-   *                    links?:Array, warnings:string[], errors:string[], summary:string}>}
-   */
-  async function importFile(file) {
-    const name = (file.name || '').toLowerCase();
-
-    try {
-      if (name.endsWith('.json')) return await importJsonFile(file);
-      if (name.endsWith('.xlsx') || name.endsWith('.xlsm')) return await importXlsxFile(file);
-      if (name.endsWith('.csv') || name.endsWith('.tsv') || name.endsWith('.txt')) return await importCsvFile(file);
-
-      // Unknown extension: sniff the content rather than refusing outright.
-      const text = await readFileAsText(file);
-      if (text.trim().startsWith('{')) return parseJson(text);
-      return parseTabular(splitDelimited(text), file.name);
-    } catch (err) {
-      return { kind: 'error', warnings: [], errors: [err.message], summary: 'Import failed' };
-    }
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     JSON — a full project
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  async function importJsonFile(file) {
-    return parseJson(await readFileAsText(file));
-  }
-
-  function parseJson(text) {
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch (err) {
-      return { kind: 'error', warnings: [], errors: [`The file is not valid JSON: ${err.message}`], summary: 'Import failed' };
-    }
-
-    const check = validate(parsed);
-    if (!check.ok) {
-      return { kind: 'error', warnings: check.warnings, errors: check.errors, summary: 'Import failed' };
-    }
-
-    const doc = normalise(parsed);
-    return {
-      kind: 'project',
-      doc,
-      warnings: check.warnings,
-      errors: [],
-      summary: `${doc.objects.length} objects across ${doc.lanes.length} lanes, ${doc.links.length} dependencies`,
-    };
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     CSV / TSV
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  async function importCsvFile(file) {
-    const text = await readFileAsText(file);
-    return parseTabular(splitDelimited(text), file.name);
-  }
-
-  /**
-   * Split delimited text into a matrix, honouring RFC 4180 quoting and
-   * auto-detecting the separator (comma, semicolon or tab — European Excel
-   * exports use semicolons).
-   */
-  function splitDelimited(text) {
-    const clean = text.replace(/^﻿/, '');
-    const sample = clean.slice(0, 4000);
-    const counts = {
-      ',': (sample.match(/,/g) || []).length,
-      ';': (sample.match(/;/g) || []).length,
-      '\t': (sample.match(/\t/g) || []).length,
-    };
-    const delimiter = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
-
-    const rows = [];
-    let row = [];
-    let cell = '';
-    let quoted = false;
-
-    for (let i = 0; i < clean.length; i++) {
-      const ch = clean[i];
-
-      if (quoted) {
-        if (ch === '"') {
-          if (clean[i + 1] === '"') {
-            cell += '"';
-            i++;
-          } else {
-            quoted = false;
-          }
-        } else {
-          cell += ch;
-        }
-        continue;
-      }
-
-      if (ch === '"') {
-        quoted = true;
-      } else if (ch === delimiter) {
-        row.push(cell);
-        cell = '';
-      } else if (ch === '\n') {
-        row.push(cell);
-        rows.push(row);
-        row = [];
-        cell = '';
-      } else if (ch !== '\r') {
-        cell += ch;
-      }
-    }
-
-    if (cell.length || row.length) {
-      row.push(cell);
-      rows.push(row);
-    }
-
-    return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
-  }
-
-  /* ── Column mapping ────────────────────────────────────────────────────── */
-
-  /**
-   * Header aliases. The first match wins, so more specific names come first.
-   * Covers our own CSV export, Microsoft Project's CSV, and the column names
-   * people actually type into a spreadsheet.
-   */
-  const COLUMN_ALIASES = {
-    title: ['title', 'name', 'task name', 'task', 'activity', 'activity name', 'description', 'summary', 'subject'],
-    type: ['type', 'object type', 'category', 'kind'],
-    lane: ['lane', 'swimlane', 'group', 'workstream', 'discipline', 'resource names', 'resource', 'team', 'phase'],
-    start: ['start', 'start date', 'planned start', 'begin', 'from', 'baseline start', 'early start'],
-    end: ['finish', 'finish date', 'end', 'end date', 'planned finish', 'to', 'due', 'due date', 'baseline finish', 'early finish'],
-    duration: ['duration', 'duration days', 'duration_days', 'days'],
-    status: ['status', 'state', 'progress status'],
-    progress: ['percent complete', 'percent_complete', '% complete', 'complete', 'progress', 'pct complete'],
-    owner: ['owner', 'assigned to', 'assignee', 'responsible', 'engineer', 'lead'],
-    subsystem: ['subsystem', 'system', 'sub-system', 'discipline code'],
-    area: ['area', 'zone', 'section', 'location', 'site'],
-    tags: ['tags', 'labels', 'keywords'],
-    notes: ['notes', 'note', 'comments', 'remarks', 'detail'],
-    version: ['version', 'sw version', 'software version'],
-    releaseNumber: ['release number', 'release_number', 'release no', 'release'],
-    buildNumber: ['build number', 'build_number', 'build'],
-    testPackage: ['test package', 'test_package', 'package', 'tp'],
-    testKind: ['test type', 'test_type', 'test kind'],
-    severity: ['severity', 'priority', 'risk level'],
-    reference: ['reference', 'ref', 'ticket', 'issue id', 'defect'],
-    predecessors: ['predecessors', 'predecessor', 'depends on', 'dependency', 'dependencies'],
-    id: ['id', 'unique id', 'uid', 'task id', 'wbs'],
-    milestone: ['milestone'],
-    outline: ['outline level', 'outline_level', 'level'],
-  };
-
-  /** Map a header row onto our field names. */
-  function mapHeaders(header) {
-    const normalised = header.map((h) => fold(String(h).trim()));
-    const mapping = {};
-    for (const [field, aliases] of Object.entries(COLUMN_ALIASES)) {
-      for (const alias of aliases) {
-        const index = normalised.indexOf(alias);
-        if (index >= 0) {
-          mapping[field] = index;
-          break;
-        }
-      }
-    }
-    return mapping;
-  }
-
-  /**
-   * Turn a matrix into importable objects and lanes.
-   * @param {string[][]} rows
-   * @param {string} sourceName
-   */
-  function parseTabular(rows, sourceName = 'import') {
-    const warnings = [];
-    const errors = [];
-
-    if (rows.length < 2) {
-      return { kind: 'error', warnings, errors: ['The file has no data rows.'], summary: 'Import failed' };
-    }
-
-    const header = rows[0];
-    const mapping = mapHeaders(header);
-
-    if (mapping.title == null) {
-      return {
-        kind: 'error',
-        warnings,
-        errors: [`No recognisable title column. Expected one of: ${COLUMN_ALIASES.title.join(', ')}. Found: ${header.join(', ')}`],
-        summary: 'Import failed',
-      };
-    }
-    if (mapping.start == null) {
-      warnings.push('No start-date column found — imported items will start today and be spaced sequentially.');
-    }
-
-    const laneNames = new Map(); // lane label -> lane record
-    const objects = [];
-    const sourceIds = new Map(); // source id -> new object id
-    const pendingLinks = [];
-    let cursor = todayMs();
-
-    for (let r = 1; r < rows.length; r++) {
-      const row = rows[r];
-      const get = (field) => (mapping[field] != null ? String(row[mapping[field]] ?? '').trim() : '');
-
-      const title = get('title');
-      if (!title) continue;
-
-      /* Lane */
-      const laneLabel = get('lane') || 'Imported';
-      if (!laneNames.has(laneLabel)) {
-        laneNames.set(laneLabel, makeLane({ name: laneLabel, color: laneColour(laneNames.size) }));
-      }
-      const lane = laneNames.get(laneLabel);
-
-      /* Dates */
-      let start = parseDate(get('start'));
-      if (!Number.isFinite(start)) {
-        start = cursor;
-        cursor = addDays(cursor, 1);
-      }
-
-      let end = parseDate(get('end'));
-      const durationText = get('duration');
-      if (!Number.isFinite(end) && durationText) {
-        const days = parseDuration(durationText);
-        if (Number.isFinite(days)) end = addDays(start, Math.max(1, Math.round(days)));
-      }
-
-      /* Type */
-      const isMilestone =
-        truthy(get('milestone')) ||
-        (Number.isFinite(end) && end === start && !durationText) ||
-        /milestone|gate|acceptance/i.test(title);
-      const type = resolveType(get('type'), { isMilestone, title });
-
-      if (!Number.isFinite(end)) end = TYPES[type]?.duration ? addDays(start, TYPES[type].defaultDays || 5) : start;
-      if (TYPES[type]?.duration && end <= start) end = addDays(start, 1);
-
-      /* Everything else */
-      const obj = makeObject({
-        type,
-        lane: lane.id,
-        title,
-        start,
-        end,
-        status: resolveStatus(get('status'), get('progress')),
-        progress: parseProgress(get('progress')),
-        owner: get('owner'),
-        subsystem: resolveSubsystem(get('subsystem')),
-        area: get('area'),
-        tags: get('tags').split(/[;,|]/).map((t) => t.trim()).filter(Boolean),
-        notes: get('notes') ? `<p>${escapeText(get('notes'))}</p>` : '',
-        data: pruneEmpty({
-          version: get('version'),
-          releaseNumber: get('releaseNumber'),
-          buildNumber: get('buildNumber'),
-          testPackage: get('testPackage'),
-          testKind: resolveTestKind(get('testKind')),
-          severity: resolveSeverity(get('severity')),
-          reference: get('reference'),
-        }),
-      });
-
-      objects.push(obj);
-
-      const sourceId = get('id');
-      if (sourceId) sourceIds.set(sourceId, obj.id);
-
-      const predecessors = get('predecessors');
-      if (predecessors) pendingLinks.push({ to: obj.id, spec: predecessors });
-    }
-
-    if (!objects.length) {
-      return { kind: 'error', warnings, errors: ['No rows contained a usable title.'], summary: 'Import failed' };
-    }
-
-    /* Resolve predecessor references — Microsoft Project writes "12FS+3 days". */
-    const links = [];
-    let unresolved = 0;
-    for (const pending of pendingLinks) {
-      for (const part of pending.spec.split(/[;,]/)) {
-        const match = /^\s*([\w.-]+)\s*(FS|SS|FF|SF)?\s*([+-]\s*\d+)?/i.exec(part.trim());
-        if (!match) continue;
-        const fromId = sourceIds.get(match[1]);
-        if (!fromId) {
-          unresolved++;
-          continue;
-        }
-        links.push(
-          makeLink({
-            from: fromId,
-            to: pending.to,
-            type: (match[2] || 'FS').toUpperCase(),
-            lag: match[3] ? parseInt(match[3].replace(/\s+/g, ''), 10) : 0,
-          })
-        );
-      }
-    }
-    if (unresolved) warnings.push(`${unresolved} predecessor reference(s) pointed at rows that were not imported.`);
-
-    const lanes = Array.from(laneNames.values());
-    return {
-      kind: 'rows',
-      objects,
-      lanes,
-      links,
-      warnings,
-      errors,
-      summary: `${objects.length} objects, ${lanes.length} lanes, ${links.length} dependencies from ${sourceName}`,
-    };
-  }
-
-  /* ── Value coercion ────────────────────────────────────────────────────── */
-
-  /** Parse a date cell across the formats spreadsheets actually produce. */
-  function parseDate(value) {
-    const text = String(value || '').trim();
-    if (!text) return NaN;
-
-    // Excel serial number (days since 1899-12-30).
-    if (/^\d{5}(\.\d+)?$/.test(text)) {
-      const serial = parseFloat(text);
-      if (serial > 20000 && serial < 80000) return Date.UTC(1899, 11, 30) + Math.round(serial) * MS_DAY;
-    }
-
-    const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(text);
-    if (iso) return Date.UTC(+iso[1], +iso[2] - 1, +iso[3]);
-
-    // 3/5/2026 is genuinely ambiguous. Where one field is over 12 the order is
-    // decided for us; otherwise fall back to the project's display order, so a
-    // plan shown as M/D/Y also imports spreadsheets written as M/D/Y.
-    const slash = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})/.exec(text);
-    if (slash) {
-      const [, first, second, y] = slash;
-      const a = +first;
-      const b = +second;
-
-      let day;
-      let month;
-      if (a > 12 && b <= 12) {
-        day = a;
-        month = b;
-      } else if (b > 12 && a <= 12) {
-        month = a;
-        day = b;
-      } else if (getDateOrder() === 'dmy') {
-        day = a;
-        month = b;
-      } else {
-        month = a;
-        day = b;
-      }
-
-      let year = +y;
-      if (year < 100) year += year < 70 ? 2000 : 1900;
-      return Date.UTC(year, month - 1, day);
-    }
-
-    const parsed = Date.parse(text);
-    if (!Number.isNaN(parsed)) {
-      const d = new Date(parsed);
-      return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
-    }
-    return NaN;
-  }
-
-  /** "12 days", "3 wks", "5d", "8h" → days. */
-  function parseDuration(value) {
-    const text = String(value).trim().toLowerCase();
-    const match = /^([\d.]+)\s*([a-z]*)/.exec(text);
-    if (!match) return NaN;
-    const n = parseFloat(match[1]);
-    if (!Number.isFinite(n)) return NaN;
-    const unit = match[2];
-    if (unit.startsWith('w')) return n * 7;
-    if (unit.startsWith('mo')) return n * 30.44;
-    if (unit.startsWith('h')) return n / 8;
-    if (unit.startsWith('m') && unit !== 'mo') return n * 30.44;
-    return n;
-  }
-
-  function parseProgress(value) {
-    const text = String(value || '').replace('%', '').trim();
-    const n = parseFloat(text);
-    if (!Number.isFinite(n)) return 0;
-    // Spreadsheets store percentages as 0–1 as often as 0–100.
-    return n <= 1 && text.includes('.') ? Math.round(n * 100) : Math.round(n);
-  }
-
-  function resolveType(value, { isMilestone, title }) {
-    const text = fold(value);
-    if (text) {
-      for (const [id, def] of Object.entries(TYPES)) {
-        if (fold(def.label) === text || id === text) return id;
-      }
-      if (/release|build|drop/.test(text)) return 'release';
-      if (/campaign|commission/.test(text)) return 'campaign';
-      if (/risk/.test(text)) return 'risk';
-      if (/issue|defect|bug/.test(text)) return 'issue';
-      if (/milestone|gate/.test(text)) return 'milestone';
-      if (/test/.test(text)) return 'testwindow';
-      if (/freeze/.test(text)) return 'freeze';
-      if (/outage/.test(text)) return 'outage';
-    }
-    if (isMilestone) return 'milestone';
-    if (/\brelease\b|\bv\d+\.\d+/i.test(title)) return 'release';
-    if (/\btest(ing)?\b/i.test(title)) return 'testwindow';
-    if (/\bcampaign\b/i.test(title)) return 'campaign';
-    return 'activity';
-  }
-
-  function resolveStatus(value, progressText) {
-    const text = fold(value);
-    if (text) {
-      for (const option of listOptions('status')) {
-        if (fold(option.label) === text || option.id === text) return option.id;
-      }
-      if (/complete|done|finish|closed/.test(text)) return 'complete';
-      if (/progress|active|started|ongoing|wip/.test(text)) return 'inprogress';
-      if (/late|delay|slip|overdue/.test(text)) return 'delayed';
-      if (/block|stopped/.test(text)) return 'blocked';
-      if (/cancel/.test(text)) return 'cancelled';
-      if (/hold|pause/.test(text)) return 'onhold';
-      if (/test/.test(text)) return 'testing';
-      if (/release/.test(text)) return 'released';
-    }
-    const progress = parseProgress(progressText);
-    if (progress >= 100) return 'complete';
-    if (progress > 0) return 'inprogress';
-    return 'planned';
-  }
-
-  function resolveSubsystem(value) {
-    const text = fold(value);
-    if (!text) return '';
-    const found = listOptions('subsystem').find((s) => s.id === text || fold(s.label) === text);
-    if (found) return found.id;
-    if (/interlock/.test(text)) return 'ixl';
-    if (/comm|radio|network/.test(text)) return 'comms';
-    if (/train|vehicle|rolling/.test(text)) return 'vehicle';
-    if (/scada|supervis/.test(text)) return 'scada';
-    if (/wayside|track/.test(text)) return 'wayside';
-    return '';
-  }
-
-  function resolveTestKind(value) {
-    const text = fold(value);
-    if (!text) return '';
-    const found = listOptions('testKind').find((t) => t.id === text || fold(t.label) === text);
-    return found ? found.id : '';
-  }
-
-  function resolveSeverity(value) {
-    const text = fold(value);
-    if (!text) return '';
-    if (/crit|1|highest|blocker/.test(text)) return 'critical';
-    if (/high|2|major/.test(text)) return 'high';
-    if (/med|3|moderate|normal/.test(text)) return 'medium';
-    if (/low|4|minor/.test(text)) return 'low';
-    return '';
-  }
-
-  function truthy(value) {
-    return /^(yes|y|true|1|x)$/i.test(String(value || '').trim());
-  }
-
-  function pruneEmpty(obj) {
-    const out = {};
-    for (const [k, v] of Object.entries(obj)) if (v) out[k] = v;
-    return out;
-  }
-
-  function escapeText(text) {
-    return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  const LANE_COLOURS = ['#5b93f5', '#a855f7', '#16a571', '#e0900b', '#f2555b', '#0ea5e9', '#0d9488', '#f97316', '#818cf8', '#94a3b8'];
-  function laneColour(index) {
-    return LANE_COLOURS[index % LANE_COLOURS.length];
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     XLSX
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  async function importXlsxFile(file) {
-    const buffer = await readFileAsArrayBuffer(file);
-    const rows = await readXlsx(buffer);
-    if (!rows.length) {
-      return { kind: 'error', warnings: [], errors: ['No readable sheet was found in the workbook.'], summary: 'Import failed' };
-    }
-    const result = parseTabular(rows, file.name);
-    result.warnings.unshift('Imported from the first worksheet. Formatting, formulas and charts are not read.');
-    return result;
-  }
-
-  /**
-   * Read the first worksheet of an xlsx workbook into a matrix.
-   * Handles shared strings, inline strings, numbers and dates.
-   */
-  /**
-   * Rows and cells: either a self-closing tag, or an open tag through its close.
-   *
-   * The obvious `/<row[\s\S]*?(?:\/>|<\/row>)/` is wrong, and wrong in a way that
-   * hides. A cell carrying a style but no value is written `<c r="D2" s="1"/>`,
-   * and a lazy match stops at that first `/>` — truncating the row and silently
-   * dropping every cell after it. A sheet whose cells all hold values never hits
-   * it, because those close with `</c>`, which is why this survived: the
-   * spreadsheets people import are full of values. A sheet where cells are
-   * formatted but empty hits it on nearly every row, and the four-week look-ahead
-   * is exactly that shape.
-   */
-  const ROW_RE = /<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g;
-  const CELL_RE = /<c\b[^>]*\/>|<c\b[^>]*>[\s\S]*?<\/c>/g;
-
-  async function readXlsx(arrayBuffer) {
-    const files = await readZip(arrayBuffer);
-
-    /* Shared string table */
-    const sharedStrings = [];
-    const sharedXml = zipText(files, 'xl/sharedStrings.xml');
-    if (sharedXml) {
-      for (const si of sharedXml.match(/<si>[\s\S]*?<\/si>/g) || []) {
-        // A cell's text can be split across several runs; concatenate them all.
-        const parts = si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
-        sharedStrings.push(parts.map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join(''));
-      }
-    }
-
-    /* Which sheet is first? Fall back to sheet1.xml if the map is missing. */
-    let sheetPath = 'xl/worksheets/sheet1.xml';
-    const workbookXml = zipText(files, 'xl/workbook.xml');
-    const relsXml = zipText(files, 'xl/_rels/workbook.xml.rels');
-    if (workbookXml && relsXml) {
-      const firstSheet = /<sheet[^>]*r:id="([^"]+)"/.exec(workbookXml);
-      if (firstSheet) {
-        const rel = new RegExp(`<Relationship[^>]*Id="${firstSheet[1]}"[^>]*Target="([^"]+)"`).exec(relsXml);
-        if (rel) {
-          const target = rel[1].replace(/^\/?xl\//, '').replace(/^\//, '');
-          if (files.has(`xl/${target}`)) sheetPath = `xl/${target}`;
-        }
-      }
-    }
-
-    const sheetXml = zipText(files, sheetPath);
-    if (!sheetXml) return [];
-
-    /* Date-formatted cells need the style table to be recognised as dates. */
-    const dateStyles = readDateStyles(zipText(files, 'xl/styles.xml'));
-
-    const rows = [];
-    for (const rowXml of sheetXml.match(ROW_RE) || []) {
-      const cells = [];
-      for (const cellXml of rowXml.match(CELL_RE) || []) {
-        const ref = /r="([A-Z]+)\d+"/.exec(cellXml);
-        const column = ref ? columnIndex(ref[1]) : cells.length;
-        const type = /t="([^"]+)"/.exec(cellXml)?.[1];
-        const styleIndex = /s="(\d+)"/.exec(cellXml)?.[1];
-
-        let value = '';
-        if (type === 'inlineStr') {
-          value = (cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || []).map((p) => decodeXml(p.replace(/<[^>]+>/g, ''))).join('');
-        } else {
-          const raw = /<v>([\s\S]*?)<\/v>/.exec(cellXml)?.[1];
-          if (raw != null) {
-            if (type === 's') value = sharedStrings[parseInt(raw, 10)] ?? '';
-            else if (type === 'str' || type === 'e') value = decodeXml(raw);
-            else if (styleIndex != null && dateStyles.has(parseInt(styleIndex, 10))) {
-              value = toISO(Date.UTC(1899, 11, 30) + Math.round(parseFloat(raw)) * MS_DAY);
-            } else {
-              value = decodeXml(raw);
-            }
-          }
-        }
-
-        while (cells.length < column) cells.push('');
-        cells[column] = value;
-      }
-      if (cells.length) rows.push(cells);
-    }
-
-    return rows;
-  }
-
-  /** Style indices whose number format is a date/time format. */
-  function readDateStyles(stylesXml) {
-    const dateStyles = new Set();
-    if (!stylesXml) return dateStyles;
-
-    // Built-in numeric formats 14–22 and 45–47 are dates/times.
-    const builtInDates = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47]);
-    const customDates = new Set();
-    for (const fmt of stylesXml.match(/<numFmt[^>]*\/>/g) || []) {
-      const id = /numFmtId="(\d+)"/.exec(fmt)?.[1];
-      const code = /formatCode="([^"]*)"/.exec(fmt)?.[1] || '';
-      if (id && /[dmyh]/i.test(code) && !/[#0]/.test(code.replace(/\[[^\]]*\]/g, ''))) customDates.add(parseInt(id, 10));
-    }
-
-    const cellXfs = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] || '';
-    const xfs = cellXfs.match(/<xf[\s\S]*?(?:\/>|<\/xf>)/g) || [];
-    xfs.forEach((xf, index) => {
-      const id = parseInt(/numFmtId="(\d+)"/.exec(xf)?.[1] ?? '0', 10);
-      if (builtInDates.has(id) || customDates.has(id)) dateStyles.add(index);
-    });
-
-    return dateStyles;
-  }
-
-  /** 'A' → 0, 'B' → 1, 'AA' → 26 … */
-  function columnIndex(letters) {
-    let n = 0;
-    for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
-    return n - 1;
-  }
-
-  function decodeXml(text) {
-    return String(text)
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&apos;/g, "'")
-      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(+code))
-      .replace(/&amp;/g, '&');
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Applying an import
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Turn a row-based import result into a document.
-   * `mode` is 'replace' (a new project from the rows) or 'merge' (append the
-   * rows to the open project, creating any lanes it needs).
-   */
-  function buildDocFromRows(result, { mode = 'replace', name = 'Imported plan' } = {}) {
-    if (mode === 'merge') {
-      const doc = JSON.parse(JSON.stringify(getDoc()));
-      const laneByName = new Map(doc.lanes.map((l) => [fold(l.name), l]));
-      const laneMap = new Map();
-
-      for (const lane of result.lanes) {
-        const existing = laneByName.get(fold(lane.name));
-        if (existing) {
-          laneMap.set(lane.id, existing.id);
-        } else {
-          doc.lanes.push(lane);
-          doc.laneOrder.push(lane.id);
-          laneMap.set(lane.id, lane.id);
-        }
-      }
-
-      for (const obj of result.objects) {
-        obj.lane = laneMap.get(obj.lane) || doc.laneOrder[0];
-        doc.objects.push(obj);
-      }
-      doc.links.push(...result.links);
-      return normalise(doc);
-    }
-
-    const doc = makeProject(name);
-    doc.lanes = result.lanes;
-    doc.laneOrder = result.lanes.map((l) => l.id);
-    doc.objects = result.objects;
-    doc.links = result.links;
-    return normalise(doc);
-  }
-
-  Object.defineProperty(__x, "importFile", { get: () => importFile, enumerable: true });
-  Object.defineProperty(__x, "parseJson", { get: () => parseJson, enumerable: true });
-  Object.defineProperty(__x, "splitDelimited", { get: () => splitDelimited, enumerable: true });
-  Object.defineProperty(__x, "parseTabular", { get: () => parseTabular, enumerable: true });
-  Object.defineProperty(__x, "parseDate", { get: () => parseDate, enumerable: true });
-  Object.defineProperty(__x, "readXlsx", { get: () => readXlsx, enumerable: true });
-  Object.defineProperty(__x, "buildDocFromRows", { get: () => buildDocFromRows, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
-// io/p6.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["io/p6.js"] = function (__x, __req) {
-  /**
-   * Reading a Primavera P6 export.
-   *
-   * P6 exports whatever columns the scheduler's layout happens to show, in
-   * whatever order, with whatever headings that version uses. So the reader
-   * asks for four things and takes the rest if it finds them:
-   *
-   *   required   Activity ID, Activity Name, Start, Finish
-   *   optional   WBS, % Complete, Activity Status, Total Float
-   *
-   * Requiring four columns means the scheduler can send a minimal export and it
-   * works; recognising more means a richer layout costs nothing extra.
-   *
-   * Two things here have bitten every P6 importer ever written:
-   *
-   *   Finish times. P6 writes a finish as `30-Oct-26 17:00` — the last working
-   *   moment of the 30th. Truncating the time is right; rounding up puts every
-   *   activity a day long, and the error is invisible until someone checks a
-   *   date against the schedule in a meeting.
-   *
-   *   Milestones. A start milestone has a finish and a finish milestone has a
-   *   start, both equal to the other. They are not zero-length bugs.
-   *
-   * Imports: util, dates, model, importers.
-   */
-
-  const { MS_DAY } = __req("core/dates.js");
-  const { makeP6Activity } = __req("core/model.js");
-  const { parseDate, splitDelimited, readXlsx } = __req("io/importers.js");
-
-  /* ── Column recognition ────────────────────────────────────────────────── */
-
-  /**
-   * Header patterns, most specific first.
-   *
-   * P6 and its various export layouts disagree on names — "Activity ID" is also
-   * "Task ID" and "Act ID"; "Finish" is also "End" and "Finish Date". These are
-   * matched against a folded heading, so spacing and case do not matter.
-   */
-  const COLUMNS = {
-    id: [/^activity ?id$/, /^act(ivity)? ?(id|code)$/, /^task ?id$/, /^id$/],
-    name: [/^activity ?name$/, /^act(ivity)? ?(name|description)$/, /^task ?name$/, /^description$/, /^name$/],
-    start: [/^(bl|baseline) ?(project )?start/, /^start( date)?$/, /^early start$/, /^actual start$/],
-    end: [/^(bl|baseline) ?(project )?finish/, /^finish( date)?$/, /^end( date)?$/, /^early finish$/, /^actual finish$/],
-    wbs: [/^wbs( ?(path|code|name))?$/, /^work breakdown/, /^phase$/],
-    percent: [/^(activity )?% ?(complete|comp)$/, /^percent ?complete$/, /^progress$/],
-    status: [/^(activity )?status$/, /^state$/],
-    float: [/^(total )?float$/, /^slack$/],
-  };
-
-  /** Lower-cased, collapsed, punctuation-light form of a heading. */
-  function fold(text) {
-    return String(text || '')
-      .toLowerCase()
-      .replace(/[_\-.]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  /**
-   * Work out which column is which.
-   *
-   * Returns the index of each field, or -1. The caller decides whether what was
-   * found is enough — this does not throw, because a preview that says "I could
-   * not find a Finish column" is far more use than an exception.
-   */
-  function mapColumns(headerRow) {
-    const headings = (headerRow || []).map(fold);
-    const found = {};
-
-    for (const [field, patterns] of Object.entries(COLUMNS)) {
-      found[field] = -1;
-      for (const pattern of patterns) {
-        const index = headings.findIndex((h, i) => pattern.test(h) && !Object.values(found).includes(i));
-        if (index >= 0) {
-          found[field] = index;
-          break;
-        }
-      }
-    }
-    return found;
-  }
-
-  /**
-   * Find the header row.
-   *
-   * P6's own Excel export puts the project name, a filter description and a
-   * blank line above the headings, so the first row is rarely the one wanted.
-   * The header is the first row within the top twenty that yields both an ID
-   * and a name column.
-   */
-  function findHeaderRow(rows) {
-    const limit = Math.min(rows.length, 20);
-    for (let i = 0; i < limit; i++) {
-      const mapped = mapColumns(rows[i]);
-      if (mapped.id >= 0 && mapped.name >= 0) return i;
-    }
-    return -1;
-  }
-
-  /* ── Dates ─────────────────────────────────────────────────────────────── */
-
-  /**
-   * A P6 date cell to a UTC-midnight day.
-   *
-   * The time is dropped rather than rounded: `30-Oct-26 17:00` is the 30th, and
-   * treating it as the 31st would lengthen every activity in the schedule by a
-   * day. `parseDate` handles the formats; this strips the P6 decorations first
-   * — a trailing `A` marks an actual date and `*` marks a constraint.
-   */
-  function parseP6Date(value) {
-    if (value == null) return null;
-    const text = String(value).trim().replace(/\s*[A*]$/i, '');
-    if (!text || /^(tbd|n\/?a|-+)$/i.test(text)) return null;
-
-    // Drop a time component; the day is what a plan is drawn against.
-    const dayOnly = text.replace(/[ T]\d{1,2}:\d{2}(:\d{2})?(\s*[AP]M)?$/i, '').trim();
-    const parsed = parseDate(dayOnly);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  /* ── Reading ───────────────────────────────────────────────────────────── */
-
-  /**
-   * Read a P6 export into activities.
-   *
-   * @returns {{activities: Array, mapping: object, headerRow: number,
-   *            skipped: number, duplicates: string[], warnings: string[]}}
-   */
-  function parseP6Rows(rows) {
-    const warnings = [];
-    const headerRow = findHeaderRow(rows);
-
-    if (headerRow < 0) {
-      return {
-        activities: [],
-        mapping: {},
-        headerRow: -1,
-        skipped: 0,
-        duplicates: [],
-        warnings: ['No Activity ID and Activity Name columns were found in the first 20 rows.'],
-      };
-    }
-
-    const mapping = mapColumns(rows[headerRow]);
-    const missing = ['id', 'name', 'start', 'end'].filter((f) => mapping[f] < 0);
-    if (missing.length) {
-      warnings.push(
-        `Missing column${missing.length === 1 ? '' : 's'}: ${missing
-          .map((f) => ({ id: 'Activity ID', name: 'Activity Name', start: 'Start', end: 'Finish' }[f]))
-          .join(', ')}.`
-      );
-    }
-
-    const cell = (row, field) => (mapping[field] >= 0 ? row[mapping[field]] : undefined);
-    const seen = new Map();
-    const duplicates = [];
-    const activities = [];
-    let skipped = 0;
-    let order = 0;
-    let undated = 0;
-
-    for (let i = headerRow + 1; i < rows.length; i++) {
-      const row = rows[i];
-      if (!row || !row.length) continue;
-
-      const id = String(cell(row, 'id') ?? '').trim();
-      if (!id) {
-        skipped++;
-        continue;
-      }
-      // P6 layouts repeat the header when grouped by WBS.
-      if (fold(id) === 'activity id') continue;
-
-      const start = parseP6Date(cell(row, 'start'));
-      const end = parseP6Date(cell(row, 'end'));
-      if (start == null && end == null) {
-        undated++;
-        skipped++;
-        continue;
-      }
-
-      // A milestone has one date; using it for both keeps every downstream
-      // calculation (duration, slip, variance) working without a special case.
-      const from = start ?? end;
-      const to = end ?? start;
-
-      if (seen.has(id)) {
-        duplicates.push(id);
-        continue;
-      }
-
-      const percentRaw = cell(row, 'percent');
-      const percent = percentRaw == null || percentRaw === ''
-        ? null
-        : Math.max(0, Math.min(100, Math.round(parseFloat(String(percentRaw).replace('%', '')) || 0)));
-
-      const activity = makeP6Activity({
-        id,
-        name: String(cell(row, 'name') ?? '').trim() || id,
-        wbs: String(cell(row, 'wbs') ?? '').trim(),
-        percent,
-        status: String(cell(row, 'status') ?? '').trim(),
-        order: order++,
-      });
-      activity.dates = { start: Math.min(from, to), end: Math.max(from, to) };
-
-      seen.set(id, activity);
-      activities.push(activity);
-    }
-
-    if (undated) warnings.push(`${undated} row${undated === 1 ? '' : 's'} had no readable dates and were skipped.`);
-    if (duplicates.length) {
-      warnings.push(
-        `${duplicates.length} duplicate activity ID${duplicates.length === 1 ? '' : 's'} ignored ` +
-          `(${duplicates.slice(0, 3).join(', ')}${duplicates.length > 3 ? '…' : ''}). ` +
-          'A multi-project export can repeat IDs.'
-      );
-    }
-
-    return { activities, mapping, headerRow, skipped, duplicates, warnings };
-  }
-
-  /** Read a `.xlsx`, `.csv` or `.txt` P6 export. */
-  async function readP6File(file) {
-    const name = (file.name || '').toLowerCase();
-
-    if (name.endsWith('.xlsx') || name.endsWith('.xlsm')) {
-      const buffer = await file.arrayBuffer();
-      return parseP6Rows(await readXlsx(buffer));
-    }
-
-    const text = await file.text();
-    return parseP6Rows(splitDelimited(text));
-  }
-
-  /* ── Reconciliation ────────────────────────────────────────────────────── */
-
-  /**
-   * Work out what an import would do, without doing it.
-   *
-   * The result is shown before anything is written, because an import that
-   * silently moved forty dates would be indistinguishable from one that
-   * silently moved four hundred.
-   *
-   * @param {object} register   The current `doc.p6`.
-   * @param {Array}  incoming   Activities from `parseP6Rows`.
-   * @param {string} kind       'baseline' | 'progress'
-   * @param {Set}    placedIds  Activity ids that appear on the timeline.
-   */
-  function reconcile(register, incoming, kind, placedIds = new Set()) {
-    const existing = register.activities || {};
-    const added = [];
-    const moved = [];
-    const unchanged = [];
-    const renamed = [];
-
-    for (const activity of incoming) {
-      const before = existing[activity.id];
-      const dates = activity.dates;
-
-      if (!before) {
-        added.push({ id: activity.id, name: activity.name, dates });
-        continue;
-      }
-
-      // What "moved" means depends on what we already knew. The first progress
-      // import has no previous progress, so the honest comparison is against the
-      // baseline — otherwise every activity reports "unchanged" on the very
-      // import that first shows the slip.
-      const previous = kind === 'baseline'
-        ? before.baseline
-        : before.progress || before.baseline;
-      const against = kind === 'baseline'
-        ? 'the previous baseline'
-        : before.progress ? 'the last progress import' : 'the baseline';
-
-      const startShift = previous ? Math.round((dates.start - previous.start) / MS_DAY) : null;
-      const finishShift = previous ? Math.round((dates.end - previous.end) / MS_DAY) : null;
-
-      if (before.name && activity.name && before.name !== activity.name) {
-        renamed.push({ id: activity.id, from: before.name, to: activity.name });
-      }
-
-      if (!previous || startShift !== 0 || finishShift !== 0) {
-        moved.push({
-          id: activity.id,
-          name: activity.name,
-          from: previous || null,
-          to: dates,
-          against,
-          startShift,
-          finishShift,
-          placed: placedIds.has(activity.id),
-        });
-      } else {
-        unchanged.push(activity.id);
-      }
-    }
-
-    // Activities the register knows about that this file does not mention.
-    // They are marked, never deleted: something on the timeline may point at
-    // one, and losing it silently would leave a bar with no explanation.
-    const incomingIds = new Set(incoming.map((a) => a.id));
-    const absent = Object.values(existing)
-      .filter((a) => !incomingIds.has(a.id))
-      .map((a) => ({ id: a.id, name: a.name, placed: placedIds.has(a.id) }));
-
-    return {
-      kind,
-      added,
-      moved,
-      renamed,
-      unchanged,
-      absent,
-      total: incoming.length,
-      placedAffected: moved.filter((m) => m.placed).length,
-    };
-  }
-
-  Object.defineProperty(__x, "mapColumns", { get: () => mapColumns, enumerable: true });
-  Object.defineProperty(__x, "findHeaderRow", { get: () => findHeaderRow, enumerable: true });
-  Object.defineProperty(__x, "parseP6Date", { get: () => parseP6Date, enumerable: true });
-  Object.defineProperty(__x, "parseP6Rows", { get: () => parseP6Rows, enumerable: true });
-  Object.defineProperty(__x, "readP6File", { get: () => readP6File, enumerable: true });
-  Object.defineProperty(__x, "reconcile", { get: () => reconcile, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
 // ui/p6.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/p6.js"] = function (__x, __req) {
@@ -23005,7 +22484,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
 
   const { el, clear, debounce, fold } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, fmtTimestamp, MS_DAY } = __req("core/dates.js");
+  const { fmtDate, fmtTimestamp } = __req("core/dates.js");
   const { TYPES, p6Register, p6Dates, p6Slip, p6Variance, p6Position, p6IsMilestone, p6Placed, p6PlacedIds, p6LinkedIds, statusOf } = __req("core/model.js");
 
 
@@ -23024,19 +22503,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
   const { readP6File, reconcile } = __req("io/p6.js");
   const cmd = __req("ui/commands.js");
   const { icon } = __req("ui/icons.js");
-  const { openModal, openPicker, field, textInput, selectInput, segmented, checkbox, section, emptyState, badge, chipStat, toast, confirmDialog, skeleton } = __req("ui/components.js");
-
-
-
-
-
-
-
-
-
-
-
-
+  const { openModal, openPicker, field, textInput, selectInput, segmented, checkbox, emptyState, badge, chipStat, toast, confirmDialog, skeleton } = __req("ui/components.js");
 
 
 
@@ -25303,991 +24770,6 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
-// ui/notes.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["ui/notes.js"] = function (__x, __req) {
-  /**
-   * Rich notes editor.
-   *
-   * A contenteditable surface with a compact toolbar covering the formats the
-   * brief asks for: headings, bold/italic/underline, bullet and numbered lists,
-   * checklists, tables, links and inline images. Content is stored as sanitised
-   * HTML on the object, which keeps it portable through JSON export and
-   * renderable in the hover preview and PDF output.
-   *
-   * Everything written back to the document passes through `sanitiseHtml` —
-   * notes can arrive from an imported file, and a plan should never be able to
-   * execute script because someone pasted it into a note.
-   *
-   * Imports: util, icons, components.
-   */
-
-  const { el, clear, debounce, stripHtml, readFileAsDataURL, pickFiles, bytes } = __req("core/util.js");
-  const { icon } = __req("ui/icons.js");
-  const { openModal, toast, popover, closePopover, promptDialog } = __req("ui/components.js");
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Sanitiser
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const ALLOWED_TAGS = new Set([
-    'P', 'BR', 'DIV', 'SPAN', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'CODE', 'PRE',
-    'H1', 'H2', 'H3', 'H4', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'HR',
-    'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'A', 'IMG', 'INPUT', 'LABEL',
-  ]);
-
-  const ALLOWED_ATTRS = {
-    A: ['href', 'title', 'target', 'rel'],
-    IMG: ['src', 'alt', 'width', 'height'],
-    INPUT: ['type', 'checked', 'disabled'],
-    TD: ['colspan', 'rowspan'],
-    TH: ['colspan', 'rowspan'],
-    SPAN: ['class'],
-    LI: ['class'],
-    DIV: ['class'],
-    P: ['class'],
-  };
-
-  /**
-   * Strip everything that is not on the allow-list. Runs over a detached
-   * document so nothing in the markup can load, execute or observe anything.
-   */
-  function sanitiseHtml(html) {
-    const parser = new DOMParser();
-    const parsed = parser.parseFromString(`<body>${html || ''}</body>`, 'text/html');
-    const body = parsed.body;
-
-    const walk = (node) => {
-      for (const child of Array.from(node.childNodes)) {
-        if (child.nodeType === Node.TEXT_NODE) continue;
-        if (child.nodeType !== Node.ELEMENT_NODE) {
-          child.remove();
-          continue;
-        }
-        if (!ALLOWED_TAGS.has(child.tagName)) {
-          // Keep the text, drop the wrapper — losing formatting beats losing
-          // the user's words.
-          const text = parsed.createTextNode(child.textContent || '');
-          child.replaceWith(text);
-          continue;
-        }
-        const allowed = ALLOWED_ATTRS[child.tagName] || [];
-        for (const attr of Array.from(child.attributes)) {
-          const name = attr.name.toLowerCase();
-          if (!allowed.includes(name)) {
-            child.removeAttribute(attr.name);
-            continue;
-          }
-          if (name === 'href' || name === 'src') {
-            const value = attr.value.trim().toLowerCase();
-            const safe =
-              value.startsWith('http://') ||
-              value.startsWith('https://') ||
-              value.startsWith('mailto:') ||
-              value.startsWith('data:image/') ||
-              value.startsWith('file:///') ||
-              value.startsWith('#');
-            if (!safe) child.removeAttribute(attr.name);
-          }
-        }
-        if (child.tagName === 'A') {
-          child.setAttribute('target', '_blank');
-          child.setAttribute('rel', 'noopener noreferrer');
-        }
-        if (child.tagName === 'INPUT' && child.getAttribute('type') !== 'checkbox') {
-          child.remove();
-          continue;
-        }
-        walk(child);
-      }
-    };
-
-    walk(body);
-    return body.innerHTML;
-  }
-
-  /** Plain-text preview of a note, for tooltips and search results. */
-  function notePreview(html, max = 220) {
-    const text = stripHtml(html);
-    return text.length > max ? text.slice(0, max - 1) + '…' : text;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Editor
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const TOOLBAR = [
-    [
-      { cmd: 'formatBlock', arg: 'h3', icon: 'type', title: 'Heading' },
-      { cmd: 'bold', icon: 'type', title: 'Bold', label: 'B' },
-      { cmd: 'italic', icon: 'type', title: 'Italic', label: 'I' },
-      { cmd: 'underline', icon: 'type', title: 'Underline', label: 'U' },
-      { cmd: 'strikeThrough', title: 'Strikethrough', label: 'S' },
-    ],
-    [
-      { cmd: 'insertUnorderedList', icon: 'list', title: 'Bullet list' },
-      { cmd: 'insertOrderedList', icon: 'checklist', title: 'Numbered list' },
-      { custom: 'checklist', icon: 'check-circle', title: 'Checklist item' },
-      { cmd: 'formatBlock', arg: 'blockquote', icon: 'comment', title: 'Quote' },
-    ],
-    [
-      { custom: 'table', icon: 'table', title: 'Insert table' },
-      { custom: 'link', icon: 'link', title: 'Insert link' },
-      { custom: 'image', icon: 'image', title: 'Insert image' },
-      { custom: 'rule', icon: 'minus', title: 'Horizontal rule' },
-    ],
-    [{ cmd: 'removeFormat', icon: 'eraser', title: 'Clear formatting', label: '✕' }],
-  ];
-
-  /**
-   * Build an editor surface.
-   * @returns {{root:HTMLElement, getHtml:Function, setHtml:Function, focus:Function}}
-   */
-  function noteEditor({ value = '', onChange = null, minHeight = 220 } = {}) {
-    const surface = el('div', {
-      class: 'note-surface',
-      contenteditable: 'true',
-      role: 'textbox',
-      'aria-multiline': 'true',
-      style: { minHeight: `${minHeight}px` },
-    });
-    surface.innerHTML = sanitiseHtml(value);
-
-    const emitChange = debounce(() => {
-      if (onChange) onChange(getHtml());
-    }, 260);
-
-    const exec = (cmd, arg) => {
-      surface.focus();
-      document.execCommand(cmd, false, arg);
-      emitChange();
-    };
-
-    const toolbar = el('div', { class: 'note-toolbar' });
-    TOOLBAR.forEach((group, i) => {
-      if (i > 0) toolbar.appendChild(el('div', { class: 'note-tb-sep' }));
-      for (const item of group) {
-        const button = el('button', {
-          class: 'cx-btn icon mini ghost',
-          type: 'button',
-          title: item.title,
-          'aria-label': item.title,
-          html: item.label ? `<span style="font-weight:700">${item.label}</span>` : icon(item.icon, { size: 13 }),
-          onMousedown: (e) => e.preventDefault(), // keep the selection alive
-          onClick: () => {
-            if (item.custom) runCustom(item.custom, surface, exec, emitChange);
-            else exec(item.cmd, item.arg);
-          },
-        });
-        toolbar.appendChild(button);
-      }
-    });
-
-    surface.addEventListener('input', emitChange);
-
-    // Paste as plain text unless the clipboard carries HTML we can sanitise.
-    surface.addEventListener('paste', (e) => {
-      const html = e.clipboardData?.getData('text/html');
-      if (html) {
-        e.preventDefault();
-        document.execCommand('insertHTML', false, sanitiseHtml(html));
-        emitChange();
-      }
-    });
-
-    // Checkbox toggles inside the note.
-    surface.addEventListener('click', (e) => {
-      if (e.target.matches('input[type=checkbox]')) {
-        // execCommand does not track this, so mirror the state into the markup.
-        if (e.target.checked) e.target.setAttribute('checked', '');
-        else e.target.removeAttribute('checked');
-        emitChange();
-      }
-    });
-
-    function getHtml() {
-      return sanitiseHtml(surface.innerHTML);
-    }
-
-    function setHtml(html) {
-      surface.innerHTML = sanitiseHtml(html);
-    }
-
-    const root = el('div', { class: 'note-editor' }, [toolbar, surface]);
-    return { root, getHtml, setHtml, focus: () => surface.focus(), surface };
-  }
-
-  async function runCustom(kind, surface, exec, emitChange) {
-    surface.focus();
-    switch (kind) {
-      case 'checklist':
-        document.execCommand('insertHTML', false, '<div class="note-check"><input type="checkbox"> <span>To do</span></div>');
-        emitChange();
-        break;
-
-      case 'rule':
-        document.execCommand('insertHorizontalRule');
-        emitChange();
-        break;
-
-      case 'link': {
-        const selection = window.getSelection();
-        const text = selection ? String(selection) : '';
-        const url = await promptDialog({ title: 'Insert link', label: 'URL', value: 'https://', placeholder: 'https://…' });
-        if (!url) return;
-        surface.focus();
-        if (text) document.execCommand('createLink', false, url);
-        else document.execCommand('insertHTML', false, `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
-        emitChange();
-        break;
-      }
-
-      case 'table': {
-        const size = await promptDialog({ title: 'Insert table', label: 'Columns × rows', value: '3x3', placeholder: '3x3' });
-        if (!size) return;
-        const match = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(size.trim());
-        const cols = Math.min(10, Math.max(1, match ? +match[1] : 3));
-        const rows = Math.min(20, Math.max(1, match ? +match[2] : 3));
-        let html = '<table><thead><tr>';
-        for (let c = 0; c < cols; c++) html += `<th>Column ${c + 1}</th>`;
-        html += '</tr></thead><tbody>';
-        for (let r = 0; r < rows; r++) {
-          html += '<tr>';
-          for (let c = 0; c < cols; c++) html += '<td>&nbsp;</td>';
-          html += '</tr>';
-        }
-        html += '</tbody></table><p><br></p>';
-        surface.focus();
-        document.execCommand('insertHTML', false, html);
-        emitChange();
-        break;
-      }
-
-      case 'image': {
-        const files = await pickFiles({ accept: 'image/*' });
-        if (!files.length) return;
-        const file = files[0];
-        // Notes travel inside the document, so a huge inline image would bloat
-        // every autosave. Point large files at the attachment store instead.
-        if (file.size > 1_500_000) {
-          toast({
-            tone: 'warn',
-            title: 'Image too large to inline',
-            message: `${bytes(file.size)} — add it as an attachment instead so the project stays fast.`,
-          });
-          return;
-        }
-        const dataUrl = await readFileAsDataURL(file);
-        surface.focus();
-        document.execCommand('insertHTML', false, `<img src="${dataUrl}" alt="${file.name}" style="max-width:100%">`);
-        emitChange();
-        break;
-      }
-
-      default:
-        break;
-    }
-  }
-
-  /**
-   * Open the full-screen note editor for an object.
-   * `onSave(html)` is called when the user confirms.
-   */
-  function openNoteEditor({ title, value, onSave }) {
-    const editor = noteEditor({ value, minHeight: 320 });
-    let current = value;
-    editor.root.addEventListener('input', () => {
-      current = editor.getHtml();
-    });
-
-    openModal({
-      title: `Notes — ${title}`,
-      subtitle: 'Rich text, checklists, tables, links and inline images.',
-      size: 'wide',
-      body: editor.root,
-      actions: [
-        { label: 'Cancel' },
-        {
-          label: 'Save notes',
-          kind: 'primary',
-          onClick: () => onSave(editor.getHtml()),
-        },
-      ],
-    });
-
-    setTimeout(() => editor.focus(), 60);
-  }
-
-  /** Read-only render of a note, used in hover previews and print output. */
-  function renderNote(html, { max = 0 } = {}) {
-    const node = el('div', { class: 'note-render' });
-    node.innerHTML = sanitiseHtml(html);
-    if (max) node.style.maxHeight = `${max}px`;
-    // Checkboxes are display-only outside the editor.
-    node.querySelectorAll('input[type=checkbox]').forEach((box) => {
-      box.setAttribute('disabled', '');
-    });
-    return node;
-  }
-
-  Object.defineProperty(__x, "sanitiseHtml", { get: () => sanitiseHtml, enumerable: true });
-  Object.defineProperty(__x, "notePreview", { get: () => notePreview, enumerable: true });
-  Object.defineProperty(__x, "noteEditor", { get: () => noteEditor, enumerable: true });
-  Object.defineProperty(__x, "openNoteEditor", { get: () => openNoteEditor, enumerable: true });
-  Object.defineProperty(__x, "renderNote", { get: () => renderNote, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
-// ui/attachments.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["ui/attachments.js"] = function (__x, __req) {
-  /**
-   * Attachments.
-   *
-   * File bytes live in IndexedDB, keyed by attachment id; the document holds
-   * only a lightweight record (name, type, size, when it was added). That split
-   * is what lets a project carry a 40 MB test log without every autosave having
-   * to rewrite it.
-   *
-   * The storage layer is deliberately behind one small interface here, so a
-   * future "link to a file on disk" or "sync to SharePoint" backend can be added
-   * without touching the UI.
-   *
-   * Imports: util, events, dates, storage, store, icons, components.
-   */
-
-  const { el, clear, uid, bytes, download, pickFiles } = __req("core/util.js");
-  const { emit, EV } = __req("core/events.js");
-  const { fmtTimestamp } = __req("core/dates.js");
-  const { putBlob, getBlob, deleteBlob, isFallback } = __req("core/storage.js");
-  const { getDoc, getObject, updateObject, addAttachmentRecord, removeAttachmentRecord, getAttachment } = __req("core/store.js");
-  const { icon } = __req("ui/icons.js");
-  const { toast, confirmDialog } = __req("ui/components.js");
-
-  /** Icon for a file, chosen from its extension. */
-  function iconForFile(name = '', type = '') {
-    const ext = String(name).split('.').pop().toLowerCase();
-    if (type.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return 'image';
-    if (ext === 'pdf') return 'document';
-    if (['xls', 'xlsx', 'xlsm', 'csv', 'tsv'].includes(ext)) return 'table';
-    if (['doc', 'docx', 'rtf', 'odt'].includes(ext)) return 'file';
-    if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return 'package';
-    if (['log', 'txt', 'md'].includes(ext)) return 'list';
-    if (['json', 'xml', 'yml', 'yaml'].includes(ext)) return 'cpu';
-    return 'paperclip';
-  }
-
-  /**
-   * Attach files to an object. Returns the ids that were stored.
-   * Failures are reported per file so one bad file does not lose the rest.
-   */
-  async function attachFiles(objectId, files) {
-    if (isFallback()) {
-      toast({
-        tone: 'warn',
-        title: 'Attachments unavailable',
-        message: 'This browser session has no IndexedDB, so file bytes cannot be stored locally.',
-      });
-      return [];
-    }
-
-    const obj = getObject(objectId);
-    if (!obj) return [];
-
-    const stored = [];
-    for (const file of files) {
-      const id = uid('att');
-      try {
-        await putBlob(id, file);
-        addAttachmentRecord({
-          id,
-          name: file.name,
-          type: file.type || '',
-          size: file.size,
-          added: Date.now(),
-          storage: 'idb',
-        });
-        stored.push(id);
-      } catch (err) {
-        console.error('[cx-timeline] attachment failed:', err);
-        toast({ tone: 'bad', title: `Could not attach ${file.name}`, message: err.message });
-      }
-    }
-
-    if (stored.length) {
-      const current = getObject(objectId);
-      updateObject(objectId, { attachments: [...(current.attachments || []), ...stored] }, 'Attach files');
-      toast({ tone: 'good', title: `${stored.length} file${stored.length === 1 ? '' : 's'} attached` });
-    }
-    return stored;
-  }
-
-  /** Open the picker and attach whatever the user chooses. */
-  async function promptAttach(objectId) {
-    const files = await pickFiles({ multiple: true });
-    if (files.length) await attachFiles(objectId, files);
-  }
-
-  /** Save an attachment back out to the user's disk. */
-  async function downloadAttachment(id) {
-    const record = getAttachment(id);
-    const stored = await getBlob(id);
-    if (!stored || !stored.blob) {
-      toast({ tone: 'bad', title: 'File missing', message: 'The stored bytes for this attachment could not be found.' });
-      return;
-    }
-    const filename = record?.name || stored.name || 'attachment';
-    download(filename, stored.blob, stored.type);
-    // Nothing on screen changes when a file leaves the browser, so say it did.
-    toast({ tone: 'good', title: 'File downloaded', message: `${filename} · ${bytes(stored.blob.size)} — saved to your downloads.` });
-  }
-
-  /** Open an attachment in a new tab where the browser can display it. */
-  async function openAttachment(id) {
-    const stored = await getBlob(id);
-    if (!stored || !stored.blob) {
-      toast({ tone: 'bad', title: 'File missing' });
-      return;
-    }
-    const url = URL.createObjectURL(stored.blob);
-    window.open(url, '_blank', 'noopener');
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
-  }
-
-  /** Detach from one object, and delete the bytes if nothing else refers to it. */
-  async function detachFile(objectId, attachmentId) {
-    const obj = getObject(objectId);
-    if (!obj) return;
-
-    updateObject(objectId, { attachments: (obj.attachments || []).filter((a) => a !== attachmentId) }, 'Remove attachment');
-
-    const stillUsed = getDoc().objects.some((o) => (o.attachments || []).includes(attachmentId));
-    if (!stillUsed) {
-      removeAttachmentRecord(attachmentId);
-      try {
-        await deleteBlob(attachmentId);
-      } catch {
-        /* the record is gone either way; orphaned bytes are collected later */
-      }
-    }
-  }
-
-  /**
-   * The attachment list widget used by the inspector and the object editor.
-   * Supports click-to-pick and drag-and-drop.
-   */
-  function attachmentList(objectId, { onChange = null } = {}) {
-    const root = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } });
-    const list = el('div', { class: 'att-list' });
-
-    const drop = el('div', {
-      class: 'att-drop',
-      html: icon('paperclip', { size: 14 }) + ' <span>Drop files here, or click to browse</span>',
-      onClick: async () => {
-        await promptAttach(objectId);
-        refresh();
-        onChange?.();
-      },
-    });
-
-    drop.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      drop.classList.add('over');
-    });
-    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
-    drop.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      drop.classList.remove('over');
-      const files = Array.from(e.dataTransfer?.files || []);
-      if (files.length) {
-        await attachFiles(objectId, files);
-        refresh();
-        onChange?.();
-      }
-    });
-
-    function refresh() {
-      clear(list);
-      const obj = getObject(objectId);
-      const ids = obj?.attachments || [];
-      if (!ids.length) {
-        list.appendChild(el('div', { class: 'cx-hint', text: 'No files attached.' }));
-        return;
-      }
-      for (const id of ids) {
-        const record = getAttachment(id);
-        if (!record) continue;
-        list.appendChild(
-          el('div', { class: 'att-row' }, [
-            el('span', { class: 'att-icon', html: icon(iconForFile(record.name, record.type), { size: 14 }) }),
-            el('div', { class: 'att-main' }, [
-              el('div', { class: 'att-name', text: record.name, title: record.name }),
-              el('div', { class: 'att-meta', text: `${bytes(record.size)} · ${fmtTimestamp(record.added)}` }),
-            ]),
-            el('button', {
-              class: 'cx-btn icon mini ghost',
-              title: 'Open',
-              'aria-label': `Open ${record.name}`,
-              html: icon('external', { size: 12 }),
-              onClick: () => openAttachment(id),
-            }),
-            el('button', {
-              class: 'cx-btn icon mini ghost',
-              title: 'Download',
-              'aria-label': `Download ${record.name}`,
-              html: icon('download', { size: 12 }),
-              onClick: () => downloadAttachment(id),
-            }),
-            el('button', {
-              class: 'cx-btn icon mini ghost',
-              title: 'Remove',
-              'aria-label': `Remove ${record.name}`,
-              html: icon('trash', { size: 12 }),
-              onClick: async () => {
-                const ok = await confirmDialog({
-                  title: 'Remove attachment',
-                  message: `Remove "${record.name}" from this object? The stored file is deleted if nothing else references it.`,
-                  confirmLabel: 'Remove',
-                  danger: true,
-                });
-                if (!ok) return;
-                await detachFile(objectId, id);
-                refresh();
-                onChange?.();
-              },
-            }),
-          ])
-        );
-      }
-    }
-
-    refresh();
-    root.append(list, drop);
-    return { root, refresh };
-  }
-
-  Object.defineProperty(__x, "iconForFile", { get: () => iconForFile, enumerable: true });
-  Object.defineProperty(__x, "attachFiles", { get: () => attachFiles, enumerable: true });
-  Object.defineProperty(__x, "promptAttach", { get: () => promptAttach, enumerable: true });
-  Object.defineProperty(__x, "downloadAttachment", { get: () => downloadAttachment, enumerable: true });
-  Object.defineProperty(__x, "openAttachment", { get: () => openAttachment, enumerable: true });
-  Object.defineProperty(__x, "detachFile", { get: () => detachFile, enumerable: true });
-  Object.defineProperty(__x, "attachmentList", { get: () => attachmentList, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
-// ui/dialogs.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["ui/dialogs.js"] = function (__x, __req) {
-  /**
-   * Focused editor dialogs.
-   *
-   * The inspector is always-on and shallow; this is the deep, deliberate edit —
-   * opened by double-click or Enter — with the object's schedule, details,
-   * notes and attachments on one surface.
-   *
-   * Imports: util, dates, model, store, renderer, icons, components, lists,
-   *          notes, attachments.
-   */
-
-  const { el, clear } = __req("core/util.js");
-  const { toISO, toMs, fmtDate, fmtDuration, MS_DAY } = __req("core/dates.js");
-  const { TYPES, durationDays, endForDuration } = __req("core/model.js");
-
-
-
-
-  const store = __req("core/store.js");
-  const renderer = __req("timeline/renderer.js");
-  const { icon } = __req("ui/icons.js");
-  const { openModal, field, textInput, numberInput, selectInput, rangeInput, toast, badge } = __req("ui/components.js");
-  const { managedSelect, suggestInput } = __req("ui/lists.js");
-  const { noteEditor } = __req("ui/notes.js");
-  const { attachmentList } = __req("ui/attachments.js");
-
-  /**
-   * Open the full editor for an object.
-   * Edits apply live (so the timeline updates as you type) and the dialog's
-   * Cancel restores the pre-edit state via a single undo.
-   */
-  function openObjectDialog(id) {
-    const obj = store.getObject(id);
-    if (!obj) return;
-    const def = TYPES[obj.type] || TYPES.activity;
-
-    const historyDepthBefore = store.historyState().depth;
-
-    const tabs = el('div', { class: 'cx-seg stretch', style: { marginBottom: '14px' } });
-    const panes = el('div');
-    const paneMap = new Map();
-
-    const addTab = (key, label, iconName, build) => {
-      const button = el('button', {
-        dataset: { tab: key },
-        onClick: () => selectTab(key),
-        html: icon(iconName, { size: 12 }) + `<span>${label}</span>`,
-      });
-      tabs.appendChild(button);
-      const pane = el('div', { style: { display: 'none', flexDirection: 'column', gap: '13px' } });
-      build(pane);
-      panes.appendChild(pane);
-      paneMap.set(key, { button, pane });
-    };
-
-    function selectTab(key) {
-      for (const [k, entry] of paneMap) {
-        entry.button.classList.toggle('active', k === key);
-        entry.pane.style.display = k === key ? 'flex' : 'none';
-      }
-    }
-
-    addTab('details', 'Details', 'sliders', (pane) => buildDetails(pane, obj, def));
-    addTab('notes', 'Notes', 'comment', (pane) => buildNotes(pane, obj));
-    addTab('files', 'Attachments', 'paperclip', (pane) => pane.appendChild(attachmentList(obj.id).root));
-    addTab('links', 'Dependencies', 'link', (pane) => buildLinks(pane, obj));
-
-    selectTab('details');
-
-    openModal({
-      title: obj.title || def.label,
-      subtitle: `${def.label} · ${store.getLane(obj.lane)?.name || 'No lane'}`,
-      size: 'wide',
-      body: el('div', {}, [tabs, panes]),
-      actions: [
-        {
-          label: 'Revert changes',
-          onClick: () => {
-            // Roll back exactly the edits this dialog made.
-            const steps = store.historyState().depth - historyDepthBefore;
-            for (let i = 0; i < steps; i++) store.undo();
-            renderer.requestRender();
-          },
-        },
-        'spacer',
-        { label: 'Done', kind: 'primary', autofocus: true },
-      ],
-    });
-  }
-
-  /* ── Details tab ───────────────────────────────────────────────────────── */
-
-  function buildDetails(pane, obj, def) {
-    const set = (patch, label, opts) => {
-      store.updateObject(obj.id, patch, label || 'Edit object', opts);
-      renderer.requestRender();
-    };
-
-    pane.append(
-      field('Title', textInput({
-        value: obj.title,
-        onInput: (v) => set({ title: v }, 'Rename object', { mergeKey: `dlg-title:${obj.id}` }),
-      })),
-      field('Subtitle', textInput({
-        value: obj.subtitle,
-        placeholder: 'Optional second line',
-        onInput: (v) => set({ subtitle: v }, 'Edit subtitle', { mergeKey: `dlg-sub:${obj.id}` }),
-      })),
-      el('div', { class: 'cx-row three' }, [
-        field('Lane', selectInput({
-          value: obj.lane || '',
-          options: store.orderedLanes().map((l) => ({ value: l.id, label: l.name })),
-          onChange: (v) => set({ lane: v, row: 0 }, 'Move to lane'),
-        })),
-        field('Status', managedSelect({
-          listId: 'status',
-          value: obj.status,
-          onChange: (v) => set({ status: v }, 'Change status'),
-        })),
-        field('Owner', suggestInput({
-          listId: 'owner',
-          value: obj.owner,
-          placeholder: 'Responsible engineer',
-          onInput: (v) => set({ owner: v }, 'Change owner', { mergeKey: `dlg-owner:${obj.id}` }),
-        })),
-      ])
-    );
-
-    if (def.duration) {
-      const durationOut = el('span', { class: 'mono', style: { fontSize: 'var(--fs-tiny)', color: 'var(--text-muted)' }, text: fmtDuration(durationDays(obj)) });
-      pane.appendChild(
-        el('div', { class: 'cx-row three' }, [
-          field('Start', textInput({
-            type: 'date',
-            value: toISO(obj.start),
-            onChange: (v) => {
-              const ms = toMs(v);
-              if (!Number.isFinite(ms)) return;
-              const shift = ms - obj.start;
-              set({ start: ms, end: obj.end + shift }, 'Change start date');
-            },
-          })),
-          field('Finish', textInput({
-            type: 'date',
-            value: toISO(obj.end),
-            onChange: (v) => {
-              const ms = toMs(v);
-              if (Number.isFinite(ms)) set({ end: Math.max(ms, obj.start + MS_DAY) }, 'Change finish date');
-            },
-          })),
-          field('Duration', el('div', { class: 'cx-inline' }, [
-            numberInput({
-              value: durationDays(obj),
-              min: 1,
-              onChange: (v) => {
-                set({ end: endForDuration(obj.start, v) }, 'Change duration');
-                durationOut.textContent = fmtDuration(Math.max(1, v));
-              },
-            }),
-            durationOut,
-          ])),
-        ])
-      );
-    } else {
-      pane.appendChild(
-        field('Date', textInput({
-          type: 'date',
-          value: toISO(obj.start),
-          onChange: (v) => {
-            const ms = toMs(v);
-            if (Number.isFinite(ms)) set({ start: ms, end: ms }, 'Change date');
-          },
-        }))
-      );
-    }
-
-    if (def.progress) {
-      const readout = el('span', { class: 'mono', style: { minWidth: '40px', textAlign: 'right' }, text: `${Math.round(obj.progress)}%` });
-      pane.appendChild(
-        field('Percent complete', el('div', { class: 'cx-inline' }, [
-          rangeInput({
-            value: obj.progress,
-            min: 0,
-            max: 100,
-            step: 5,
-            onInput: (v) => {
-              readout.textContent = `${v}%`;
-            },
-            onChange: (v) => set({ progress: v }, 'Change progress'),
-          }),
-          readout,
-        ]))
-      );
-    }
-
-    /* Type-specific block */
-    const data = obj.data || {};
-    const setData = (key, value, label) => set({ data: { [key]: value } }, label || 'Edit details');
-    const has = (name) => def.fields.includes(name);
-    const extra = [];
-
-    if (has('version')) {
-      extra.push(
-        el('div', { class: 'cx-row three' }, [
-          field('Version', textInput({ value: data.version || '', placeholder: '2.5.0', onInput: (v) => setData('version', v, 'Change version') })),
-          field('Release number', textInput({ value: data.releaseNumber || '', placeholder: 'REL-025', onInput: (v) => setData('releaseNumber', v, 'Change release number') })),
-          field('Build number', textInput({ value: data.buildNumber || '', placeholder: '2.5.0-rc3', onInput: (v) => setData('buildNumber', v, 'Change build number') })),
-        ]),
-        field('Approval', managedSelect({
-          listId: 'approval',
-          value: data.approval || 'none',
-          onChange: (v) => setData('approval', v, 'Change approval'),
-        }))
-      );
-    }
-
-    if (has('testPackage') || has('testKind') || has('area') || has('subsystem')) {
-      extra.push(
-        el('div', { class: 'cx-row three' }, [
-          has('subsystem')
-            ? field('Subsystem', managedSelect({
-                listId: 'subsystem',
-                value: obj.subsystem,
-                onChange: (v) => set({ subsystem: v }, 'Change subsystem'),
-              }))
-            : null,
-          has('area')
-            ? field('Area', suggestInput({ listId: 'area', value: obj.area, placeholder: 'Section / zone', onInput: (v) => set({ area: v }, 'Change area', { mergeKey: `dlg-area:${obj.id}` }) }))
-            : null,
-          has('testPackage')
-            ? field('Test package', textInput({ value: data.testPackage || '', placeholder: 'TP-DYN-01', onInput: (v) => setData('testPackage', v, 'Change test package') }))
-            : null,
-          has('testKind')
-            ? field('Test type', managedSelect({
-                listId: 'testKind',
-                value: data.testKind || '',
-                onChange: (v) => setData('testKind', v, 'Change test type'),
-              }))
-            : null,
-        ].filter(Boolean))
-      );
-    }
-
-    // A point object has no finish to record, so it gets one field and the word
-    // for it — "Actual finish" against a milestone is a question with no answer.
-    if (has('actualStart') && has('actualEnd')) {
-      extra.push(
-        el('div', { class: 'cx-row' }, [
-          field('Actual start', textInput({ type: 'date', value: data.actualStart || '', onChange: (v) => setData('actualStart', v, 'Set actual start') })),
-          field('Actual finish', textInput({ type: 'date', value: data.actualEnd || '', onChange: (v) => setData('actualEnd', v, 'Set actual finish') })),
-        ])
-      );
-    } else if (has('actualStart')) {
-      extra.push(field('Actual date', textInput({
-        type: 'date',
-        value: data.actualStart || '',
-        onChange: (v) => setData('actualStart', v, 'Set actual date'),
-      })));
-    }
-
-    if (has('severity')) {
-      extra.push(
-        el('div', { class: 'cx-row' }, [
-          field('Severity', managedSelect({
-            listId: 'severity',
-            value: data.severity || 'medium',
-            onChange: (v) => setData('severity', v, 'Change severity'),
-          })),
-          has('likelihood')
-            ? field('Likelihood', managedSelect({
-                listId: 'severity',
-                value: data.likelihood || 'medium',
-                onChange: (v) => setData('likelihood', v, 'Change likelihood'),
-              }))
-            : field('Reference', textInput({ value: data.reference || '', onInput: (v) => setData('reference', v, 'Change reference') })),
-        ])
-      );
-    }
-
-    if (has('mitigation')) {
-      const area = el('textarea', { class: 'cx-textarea', rows: 3, placeholder: 'How the risk is being managed' });
-      area.value = data.mitigation || '';
-      area.addEventListener('change', () => setData('mitigation', area.value, 'Edit mitigation'));
-      extra.push(field('Mitigation', area));
-    }
-
-    if (extra.length) {
-      pane.appendChild(el('div', { class: 'eyebrow', style: { marginTop: '4px' }, text: def.label + ' fields' }));
-      pane.append(...extra);
-    }
-
-    pane.appendChild(
-      field('Tags', textInput({
-        value: (obj.tags || []).join(', '),
-        placeholder: 'comma, separated',
-        onChange: (v) => set({ tags: v.split(',').map((t) => t.trim()).filter(Boolean) }, 'Edit tags'),
-      }))
-    );
-  }
-
-  /* ── Notes tab ─────────────────────────────────────────────────────────── */
-
-  function buildNotes(pane, obj) {
-    const editor = noteEditor({
-      value: obj.notes,
-      minHeight: 300,
-      onChange: (html) => {
-        store.updateObject(obj.id, { notes: html }, 'Edit notes', { mergeKey: `notes:${obj.id}` });
-        renderer.requestRender();
-      },
-    });
-    pane.appendChild(editor.root);
-  }
-
-  /* ── Dependencies tab ──────────────────────────────────────────────────── */
-
-  function buildLinks(pane, obj) {
-    const list = el('div', { class: 'cx-list' });
-
-    function refresh() {
-      clear(list);
-      const links = store.linksFor([obj.id]);
-      if (!links.length) {
-        list.appendChild(el('div', { class: 'cx-hint', text: 'No dependencies yet.' }));
-        return;
-      }
-      for (const link of links) {
-        const outgoing = link.from === obj.id;
-        const other = store.getObject(outgoing ? link.to : link.from);
-        if (!other) continue;
-        list.appendChild(
-          el('div', { class: 'cx-listrow' }, [
-            el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon(outgoing ? 'arrow' : 'arrow-left', { size: 12 }) }),
-            el('div', { class: 'lr-main' }, [
-              el('div', { class: 'lr-title', text: other.title }),
-              el('div', { class: 'lr-meta', text: `${link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''} · ${fmtDate(other.start, 'medium')}` }),
-            ]),
-            el('button', {
-              class: 'cx-btn icon mini ghost',
-              title: 'Remove',
-              'aria-label': 'Remove dependency',
-              html: icon('unlink', { size: 12 }),
-              onClick: () => {
-                store.removeLinks([link.id]);
-                renderer.requestRender();
-                refresh();
-              },
-            }),
-          ])
-        );
-      }
-    }
-
-    const candidates = store.getDoc().objects.filter((o) => o.id !== obj.id);
-    const picker = selectInput({
-      value: '',
-      placeholder: 'Add a successor…',
-      options: candidates.map((o) => ({ value: o.id, label: `${o.title} (${fmtDate(o.start, 'compact')})` })),
-      onChange: (v) => {
-        if (!v) return;
-        const created = store.addLink({ from: obj.id, to: v, type: 'FS' });
-        if (!created) toast({ tone: 'warn', title: 'Not linked', message: 'That link exists already or would create a loop.' });
-        renderer.requestRender();
-        refresh();
-        picker.value = '';
-      },
-    });
-
-    refresh();
-    pane.append(list, field('Add dependency', picker, 'Creates a finish-to-start link. Change the type in the inspector.'));
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Lane editor
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  function openLaneDialog(id) {
-    const lane = store.getLane(id);
-    if (!lane) return;
-    const set = (patch, label) => {
-      store.updateLane(id, patch, label || 'Edit lane');
-      renderer.requestRender();
-    };
-
-    openModal({
-      title: `Lane — ${lane.name}`,
-      body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
-        field('Name', textInput({ value: lane.name, onInput: (v) => set({ name: v }, 'Rename lane') })),
-        field('Description', textInput({ value: lane.description, placeholder: 'Optional', onInput: (v) => set({ description: v }, 'Edit lane description') })),
-        el('div', { class: 'cx-row' }, [
-          field('Colour', el('input', {
-            class: 'cx-color',
-            type: 'color',
-            value: lane.color,
-            onInput: (e) => set({ color: e.target.value }, 'Change lane colour'),
-          })),
-          field('Height (px)', numberInput({ value: lane.height, min: 28, max: 480, step: 4, onChange: (v) => set({ height: v }, 'Resize lane') })),
-        ]),
-        field('Group', textInput({ value: lane.group, placeholder: 'Optional grouping label', onInput: (v) => set({ group: v }, 'Change lane group') })),
-      ]),
-      actions: [{ label: 'Done', kind: 'primary' }],
-    });
-  }
-
-  Object.defineProperty(__x, "openObjectDialog", { get: () => openObjectDialog, enumerable: true });
-  Object.defineProperty(__x, "openLaneDialog", { get: () => openLaneDialog, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
 // io/scene.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["io/scene.js"] = function (__x, __req) {
@@ -26308,7 +24790,7 @@ __mods["io/scene.js"] = function (__x, __req) {
    */
 
   const { clamp, withAlpha, readableInk } = __req("core/util.js");
-  const { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } = __req("core/dates.js");
+  const { MS_DAY, ticks, fmtDate, toISO } = __req("core/dates.js");
   const { TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays, baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange } = __req("core/model.js");
 
 
@@ -26521,6 +25003,11 @@ __mods["io/scene.js"] = function (__x, __req) {
    * @param {boolean} [opts.showLinks]
    * @param {boolean} [opts.showToday]
    * @param {boolean} [opts.showLegend]
+   * @param {boolean} [opts.showDates]    The date line under each label.
+   * @param {boolean} [opts.showNotes]    Notes written on objects.
+   * @param {boolean} [opts.showProgress] The progress fill on a bar.
+   * @param {boolean} [opts.showBaseline] Draw the comparison with a baseline.
+   * @param {string}  [opts.baselineId]   Which baseline; the active one when absent.
    * @param {Function} [opts.filter]   Object predicate.
    * @param {object} [opts.palette]
    * @returns {{width:number, height:number, items:Array, meta:object}}
@@ -27556,7 +26043,7 @@ __mods["io/svg.js"] = function (__x, __req) {
    * refuses large data: URLs in <img>, and blob: has no length limit.
    *
    * @param {string} svg
-   * @param {{scale?:number, type?:string, quality?:number, background?:string}} opts
+   * @param {{scale?:number, type?:string, quality?:number, background?:string, width?:number, height?:number}} opts
    * @returns {Promise<Blob>}
    */
   function svgToRaster(svg, { scale = 2, type = 'image/png', quality = 0.94, background = null, width, height } = {}) {
@@ -27871,6 +26358,7 @@ __mods["io/pdf.js"] = function (__x, __req) {
    * @param {string} [opts.title]
    * @param {string} [opts.subtitle]
    * @param {boolean} [opts.multiPage] Tile horizontally when the plan is wide.
+   * @param {string} [opts.author]   The document's /Author.
    * @returns {Blob}
    */
   function sceneToPdf(scene, opts = {}) {
@@ -28016,7 +26504,6 @@ __mods["io/pdf.js"] = function (__x, __req) {
     const size = pageBox(opts);
     const margin = opts.margin ?? 26;
     const headerH = opts.title || opts.subtitle ? 34 : 12;
-    const footerH = 18;
     const contentW = size.w - margin * 2;
     const scale = fitScale(scene, opts);
 
@@ -28294,9 +26781,8 @@ __mods["io/exporters.js"] = function (__x, __req) {
    */
 
   const { download, slug, stripHtml, bytes } = __req("core/util.js");
-  const { toISO, fmtDate } = __req("core/dates.js");
-  const { TYPES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES, comparedRange } = __req("core/model.js");
-
+  const { toISO } = __req("core/dates.js");
+  const { TYPES, statusOf, subsystemOf, durationDays, projectExtent, LINK_TYPES, comparedRange } = __req("core/model.js");
 
 
   const { getDoc, getFilters, hasActiveFilters, activeBaseline } = __req("core/store.js");
@@ -28374,6 +26860,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
      CSV
      ═══════════════════════════════════════════════════════════════════════ */
 
+  /** @type {Array<[string, (o: any, ctx: any) => any]>} */
   const CSV_COLUMNS = [
     ['id', (o) => o.id],
     ['type', (o) => TYPES[o.type]?.label || o.type],
@@ -28542,7 +27029,8 @@ __mods["io/exporters.js"] = function (__x, __req) {
 
     // "Visible" means what is on screen now, which is usually what someone
     // means when they export while looking at a particular quarter.
-    let range = cfg.range === 'visible' ? visibleRange() : undefined;
+    /** @type {[number, number] | undefined} */
+    let range = cfg.range === 'visible' ? /** @type {[number, number]} */ (visibleRange()) : undefined;
     if (Array.isArray(opts.range)) range = opts.range;
 
     return buildScene(doc, {
@@ -28735,6 +27223,1553 @@ __mods["io/exporters.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/lists.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/lists.js"] = function (__x, __req) {
+  /**
+   * Editable dropdown vocabularies.
+   *
+   * Two things live here: `managedSelect()`, a dropdown that can edit its own
+   * options, and the manager dialog behind it. Every list the user can change —
+   * status, subsystem, test type, severity, approval, fonts, and the owner and
+   * area suggestion lists — is reached through these, so adding a status from
+   * the inspector and adding one from the Lists pane run the same code.
+   *
+   * Imports: util, events, model, query, store, renderer, icons, components.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const { emit, EV } = __req("core/events.js");
+  const { LIST_DEFS, LIST_IDS, TONES, listOptions, listOption } = __req("core/model.js");
+  const store = __req("core/store.js");
+  const renderer = __req("timeline/renderer.js");
+  const { icon } = __req("ui/icons.js");
+  const { facet } = __req("core/query.js");
+  const { openModal, domId, field, textInput, selectInput, colorControl, confirmDialog, toast, emptyState } = __req("ui/components.js");
+
+
+
+
+
+
+
+
+
+
+
+  /**
+   * Sentinel values for the two action rows at the foot of every managed
+   * dropdown. A leading NUL cannot occur in a real option id, so a
+   * user-defined option can never collide with them.
+   */
+  const ADD = '\u0000add';
+  const MANAGE = '\u0000manage';
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The dropdown
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * A `<select>` bound to an editable list, with "Add option…" and "Manage
+   * list…" at the bottom.
+   *
+   * A value that is not in the list (imported data, or an option someone else
+   * deleted) is still shown and still selected, marked so it is obvious why it
+   * looks different — silently dropping it would silently change the object.
+   *
+   * @param {object}   opts
+   * @param {string}   opts.listId
+   * @param {*}        opts.value
+   * @param {Function} opts.onChange
+   * @param {string}   [opts.placeholder]  Shown as the empty choice.
+   * @param {boolean}  [opts.mini]
+   * @param {boolean}  [opts.allowEmpty]   Offer a blank choice (default: true
+   *                                       unless the list def says required).
+   */
+  function managedSelect({ listId, value, onChange, placeholder, mini = false, allowEmpty = null }) {
+    const def = LIST_DEFS[listId] || { label: listId };
+    const select = el('select', { class: 'cx-select' + (mini ? ' mini' : ''), dataset: { list: listId } });
+
+    const rebuild = (current) => {
+      clear(select);
+      const empty = allowEmpty == null ? !def.required : allowEmpty;
+      if (empty) select.appendChild(el('option', { value: '', text: placeholder || '—' }));
+
+      const options = listOptions(listId);
+      for (const option of options) {
+        if (option.id === '' && empty) continue; // already covered by the blank row
+        select.appendChild(el('option', { value: option.id, text: option.label }));
+      }
+
+      // Keep an unknown value visible rather than snapping the field to blank.
+      if (current && !options.some((o) => o.id === current)) {
+        select.appendChild(el('option', { value: current, text: `${current} — not in list` }));
+      }
+
+      select.appendChild(el('option', { value: '\u0000sep', text: '──────────', disabled: true }));
+      select.appendChild(el('option', { value: ADD, text: `＋  Add ${def.label.toLowerCase()}…` }));
+      select.appendChild(el('option', { value: MANAGE, text: `⚙  Manage ${def.label.toLowerCase()}…` }));
+
+      select.value = current ?? '';
+    };
+
+    let last = value ?? '';
+    rebuild(last);
+
+    select.addEventListener('change', () => {
+      const picked = select.value;
+
+      if (picked === ADD || picked === MANAGE) {
+        // Never let a command leak out as a value.
+        select.value = last;
+        const done = (chosenId) => {
+          rebuild(chosenId ?? last);
+          if (chosenId != null && chosenId !== last) {
+            last = chosenId;
+            select.value = chosenId;
+            onChange(chosenId);
+          }
+        };
+        if (picked === ADD) promptNewOption(listId, done);
+        else openListManager(listId, () => done(null));
+        return;
+      }
+
+      if (picked === '\u0000sep') {
+        select.value = last;
+        return;
+      }
+
+      last = picked;
+      onChange(picked);
+    });
+
+    return select;
+  }
+
+  /**
+   * A text input backed by a suggestion list (owner, area).
+   *
+   * These stay free text — a plan should never block you from typing a name
+   * that is not yet on a list — but the list is offered through a `datalist`,
+   * and the manager is one click away.
+   * @param {{ listId: string, value?: any, onInput?: Function, onChange?: Function, placeholder?: string, mini?: boolean }} options
+   */
+  function suggestInput({ listId, value, onInput, onChange, placeholder, mini = false }) {
+    // The inspector and the object dialog can both be showing an Owner field at
+    // once, so the datalist needs an id of its own — a duplicate would silently
+    // hand one of them the wrong suggestions.
+    const listElementId = domId(`sg-${listId}`);
+    const input = textInput({ value, placeholder, mini, onInput, onChange });
+    input.setAttribute('list', listElementId);
+
+    const datalist = el('datalist', { id: listElementId });
+    for (const suggestion of suggestions(listId)) {
+      datalist.appendChild(el('option', { value: suggestion }));
+    }
+
+    const manage = el('button', {
+      class: 'cx-btn icon mini ghost',
+      title: `Manage ${LIST_DEFS[listId]?.label.toLowerCase() || listId} suggestions`,
+      'aria-label': `Manage ${LIST_DEFS[listId]?.label || listId} suggestions`,
+      html: icon('list', { size: 12 }),
+      onClick: () => openListManager(listId),
+    });
+
+    return el('div', { class: 'cx-inline' }, [
+      el('div', { style: { flex: '1', minWidth: '0' } }, [input, datalist]),
+      manage,
+    ]);
+  }
+
+  /**
+   * Suggestions for a free-text field: the curated list plus whatever the plan
+   * already uses. Typing a new owner should make that owner offerable on the
+   * next object without anyone having to curate a list first.
+   */
+  function suggestions(listId) {
+    const out = [];
+    const seen = new Set();
+    for (const option of listOptions(listId)) {
+      if (option.id && !seen.has(option.id)) { seen.add(option.id); out.push(option.id); }
+    }
+    const def = LIST_DEFS[listId];
+    if (def?.field) {
+      for (const entry of facet(store.getDoc(), def.field)) {
+        if (entry.value && !seen.has(entry.value)) { seen.add(entry.value); out.push(entry.value); }
+      }
+    }
+    return out;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Add an option
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Ask for a new option and add it.
+   * `onDone(id|null)` reports the id that was created, so the dropdown that
+   * launched this can select it straight away.
+   *
+   * @param {string} listId
+   * @param {(value: any) => void} [onDone]  Called with the new option, or null if cancelled.
+   */
+  function promptNewOption(listId, onDone = () => {}) {
+    const def = LIST_DEFS[listId] || { label: listId };
+    const labelInput = textInput({ value: '', placeholder: `New ${def.label.toLowerCase()}` });
+
+    let color = '#5b93f5';
+    let tone = 'neutral';
+
+    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+      field('Name', labelInput),
+      def.color ? field('Colour', colorControl({ value: color, onChange: (v) => { color = v; } })) : null,
+      def.tone
+        ? field('Tone', selectInput({
+            value: tone,
+            options: TONES.map((t) => ({ value: t, label: t[0].toUpperCase() + t.slice(1) })),
+            onChange: (v) => { tone = v; },
+          }), 'Controls the badge colour where this value is shown as a chip.')
+        : null,
+      el('div', { class: 'cx-hint', text: def.hint || '' }),
+    ].filter(Boolean));
+
+    let settled = false;
+    const modal = openModal({
+      title: `Add ${def.label.toLowerCase()}`,
+      body,
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Add',
+          kind: 'primary',
+          onClick: () => {
+            settled = true;
+            onDone(commit());
+          },
+        },
+      ],
+      onClose: () => {
+        if (!settled) onDone(null);
+      },
+    });
+
+    function commit() {
+      const label = labelInput.value.trim();
+      if (!label) return null;
+      // The id is what every object stores, so derive a stable one from the
+      // name rather than letting it drift with later renames.
+      const id = listId === 'font' ? label : slugify(label, listId);
+      const created = store.addListOption(listId, {
+        id,
+        label,
+        color: def.color ? color : undefined,
+        tone: def.tone ? tone : undefined,
+      });
+      if (!created) {
+        toast({ tone: 'warn', title: 'Already on the list', message: `"${label}" is already a ${def.label.toLowerCase()} option.` });
+        return null;
+      }
+      renderer.requestRender();
+      return created;
+    }
+
+    labelInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        settled = true;
+        const id = commit();
+        modal.close();
+        onDone(id);
+      }
+    });
+
+    setTimeout(() => labelInput.focus(), 40);
+  }
+
+  /** A url-safe id, unique within the list. */
+  function slugify(label, listId) {
+    const base =
+      String(label)
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'option';
+
+    const taken = new Set(listOptions(listId).map((o) => o.id));
+    if (!taken.has(base)) return base;
+    let n = 2;
+    while (taken.has(`${base}-${n}`)) n++;
+    return `${base}-${n}`;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The editor
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Which list the editor last showed.
+   *
+   * Every mutation writes to the store, and the dock rebuilds its pane on
+   * `doc:changed` — so without this, deleting an option would drop the reader
+   * back on the first tab mid-task.
+   */
+  let lastList = LIST_IDS[0];
+
+  /**
+   * The list editor, as a detached node.
+   *
+   * The modal and the Lists dock pane are the same widget — building it once
+   * means "add a status" behaves identically wherever it is reached, and there
+   * is only one place to change when a list grows a new property.
+   *
+   * @param {object}   [opts]
+   * @param {string}   [opts.listId]  Start on this list (default: the first).
+   * @param {boolean}  [opts.tabs]    Offer the list picker (default: true).
+   * @returns {{node: HTMLElement, refresh: Function, active: Function}}
+   */
+  function listEditor({ listId = null, tabs: showTabs = true } = {}) {
+    let active = listId && LIST_DEFS[listId] ? listId : lastList;
+
+    const tabs = el('div', { class: 'cx-seg', style: { flexWrap: 'wrap', marginBottom: '13px' } });
+    const body = el('div');
+    const node = el('div', {}, showTabs ? [tabs, body] : [body]);
+
+    if (showTabs) {
+      for (const id of LIST_IDS) {
+        tabs.appendChild(
+          el('button', { dataset: { list: id }, text: LIST_DEFS[id].label, onClick: () => selectTab(id) })
+        );
+      }
+    }
+
+    function selectTab(id) {
+      active = id;
+      lastList = id;
+      for (const button of tabs.children) button.classList.toggle('active', button.dataset.list === id);
+      renderList();
+    }
+
+    function renderList() {
+      clear(body);
+      const def = LIST_DEFS[active];
+      const options = listOptions(active);
+
+      body.appendChild(el('div', { class: 'cx-hint', style: { marginBottom: '10px' }, text: def.hint || '' }));
+
+      if (!options.length) {
+        body.appendChild(
+          emptyState({
+            iconName: 'list',
+            title: 'No options yet',
+            message: `Add the ${def.label.toLowerCase()} values this project uses.`,
+          })
+        );
+      } else {
+        const rows = el('div', { class: 'cx-list' });
+        options.forEach((option, index) => rows.appendChild(optionRow(active, def, option, index, options.length)));
+        body.appendChild(rows);
+      }
+
+      body.appendChild(
+        el('div', { style: { display: 'flex', gap: '6px', marginTop: '12px', flexWrap: 'wrap' } }, [
+          el('button', {
+            class: 'cx-btn mini primary',
+            html: icon('plus', { size: 12 }) + '<span>Add option</span>',
+            onClick: () => promptNewOption(active, () => renderList()),
+          }),
+          el('button', {
+            class: 'cx-btn mini',
+            html: icon('refresh', { size: 12 }) + '<span>Restore defaults</span>',
+            title: 'Re-add the shipped options, keeping any custom one still in use',
+            onClick: async () => {
+              const ok = await confirmDialog({
+                title: `Restore ${def.label.toLowerCase()} defaults`,
+                message: 'The shipped options come back. Custom options still used by an object are kept; unused ones are removed.',
+                confirmLabel: 'Restore',
+              });
+              if (ok) {
+                store.resetList(active);
+                changed();
+                renderList();
+              }
+            },
+          }),
+        ])
+      );
+    }
+
+    function optionRow(listId_, def, option, index, total) {
+      const usage = store.listOptionUsage(listId_, option.id);
+
+      const label = textInput({
+        value: option.label,
+        mini: true,
+        onChange: (v) => {
+          store.updateListOption(listId_, option.id, { label: v.trim() || option.id });
+          changed();
+        },
+      });
+      label.setAttribute('aria-label', `Name for ${option.label}`);
+
+      return el('div', { class: 'list-opt', dataset: { option: option.id } }, [
+        def.color
+          ? el('input', {
+              class: 'cx-color lo-swatch',
+              type: 'color',
+              value: toHex(option.color),
+              title: 'Option colour',
+              'aria-label': `Colour for ${option.label}`,
+              // `change`, not `input`: the dock pane rebuilds on doc:changed and
+              // a colour input is not covered by the typing guard, so a live
+              // stream of edits would pull the picker out from under the drag.
+              onChange: (e) => {
+                store.updateListOption(listId_, option.id, { color: e.target.value });
+                changed();
+              },
+            })
+          : el('span', { class: 'cx-dot lo-swatch', style: { background: 'var(--text-subtle)' } }),
+
+        el('div', { class: 'lo-name' }, [label]),
+
+        el('div', { class: 'lo-actions' }, [
+          iconButton('chevron-up', 'Move up', index === 0, () => {
+            store.moveListOption(listId_, option.id, -1);
+            changed();
+            renderList();
+          }),
+          iconButton('chevron-down', 'Move down', index === total - 1, () => {
+            store.moveListOption(listId_, option.id, 1);
+            changed();
+            renderList();
+          }),
+          iconButton('trash', 'Remove option', false, () => confirmRemoval(listId_, def, option, usage)),
+        ]),
+
+        el('div', { class: 'lo-foot' }, [
+          el('div', { class: 'lo-meta', text: `${option.id || '(blank)'} · ${usage ? `used by ${usage}` : 'unused'}` }),
+          def.tone
+            ? el('div', { class: 'lo-tone' }, [
+                selectInput({
+                  value: option.tone || 'neutral',
+                  mini: true,
+                  options: TONES.map((t) => ({ value: t, label: t })),
+                  onChange: (v) => {
+                    store.updateListOption(listId_, option.id, { tone: v });
+                    changed();
+                  },
+                }),
+              ])
+            : null,
+        ].filter(Boolean)),
+      ].filter(Boolean));
+    }
+
+    function confirmRemoval(listId_, def, option, usage) {
+      if (!usage) {
+        store.removeListOption(listId_, option.id);
+        changed();
+        renderList();
+        return;
+      }
+
+      // Something still points at it, so ask what those objects should become
+      // rather than leaving them referencing an option that no longer exists.
+      const replacements = listOptions(listId_).filter((o) => o.id !== option.id);
+      let reassignTo = '';
+
+      let settled = false;
+      openModal({
+        title: `Remove "${option.label}"`,
+        body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+          el('div', { style: { fontSize: 'var(--fs-small)', color: 'var(--text-muted)' }, text: `${usage} object${usage === 1 ? '' : 's'} currently use this ${def.label.toLowerCase()}.` }),
+          field('Move them to', selectInput({
+            value: '',
+            placeholder: '— leave blank —',
+            options: replacements.map((o) => ({ value: o.id, label: o.label })),
+            onChange: (v) => { reassignTo = v; },
+          }), 'Leaving it blank clears the field on those objects.'),
+        ]),
+        actions: [
+          { label: 'Cancel' },
+          {
+            label: 'Remove',
+            kind: 'danger',
+            onClick: () => {
+              settled = true;
+              const target = reassignTo ? listOption(listId_, reassignTo)?.label : '';
+              store.removeListOption(listId_, option.id, { reassignTo });
+              changed();
+              renderList();
+              toast({
+                tone: 'good',
+                title: `"${option.label}" removed`,
+                message: target
+                  ? `${usage} object${usage === 1 ? '' : 's'} moved to "${target}".`
+                  : `${usage} object${usage === 1 ? '' : 's'} had the field cleared.`,
+              });
+            },
+          },
+        ],
+        onClose: () => {
+          if (!settled) renderList();
+        },
+      });
+    }
+
+    /** One announcement for every mutation: repaint, then tell the UI. */
+    function changed() {
+      renderer.requestRender();
+      emit(EV.LISTS_CHANGED, { listId: active });
+    }
+
+    selectTab(active);
+    return { node, refresh: renderList, active: () => active };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The manager dialog
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** Open the manager for one list, or the whole set when `listId` is omitted. */
+  function openListManager(listId = null, onClose = () => {}) {
+    const editor = listEditor({ listId });
+
+    return openModal({
+      title: 'Manage lists',
+      subtitle: 'Options are saved with the project, and every change is undoable.',
+      size: 'wide',
+      body: editor.node,
+      actions: [{ label: 'Done', kind: 'primary' }],
+      onClose: () => {
+        emit(EV.LISTS_CHANGED, { listId: editor.active() });
+        onClose();
+      },
+    });
+  }
+
+  function iconButton(name, title, disabled, onClick) {
+    return el('button', {
+      class: 'cx-btn icon mini ghost',
+      title,
+      'aria-label': title,
+      disabled,
+      html: icon(name, { size: 11 }),
+      onClick,
+    });
+  }
+
+  /** Colour inputs need a concrete hex; theme tokens resolve to one. */
+  function toHex(color) {
+    if (!color) return '#5b93f5';
+    const value = String(color).trim();
+    if (value.startsWith('#')) return value.length === 4
+      ? '#' + value.slice(1).split('').map((c) => c + c).join('')
+      : value.slice(0, 7);
+
+    if (value.startsWith('var(')) {
+      try {
+        const resolved = getComputedStyle(document.documentElement).getPropertyValue(value.slice(4, -1).trim()).trim();
+        if (resolved.startsWith('#')) return resolved.length === 4
+          ? '#' + resolved.slice(1).split('').map((c) => c + c).join('')
+          : resolved.slice(0, 7);
+      } catch {
+        /* fall through to the default */
+      }
+    }
+    return '#5b93f5';
+  }
+
+  Object.defineProperty(__x, "managedSelect", { get: () => managedSelect, enumerable: true });
+  Object.defineProperty(__x, "suggestInput", { get: () => suggestInput, enumerable: true });
+  Object.defineProperty(__x, "promptNewOption", { get: () => promptNewOption, enumerable: true });
+  Object.defineProperty(__x, "listEditor", { get: () => listEditor, enumerable: true });
+  Object.defineProperty(__x, "openListManager", { get: () => openListManager, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/notes.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/notes.js"] = function (__x, __req) {
+  /**
+   * Rich notes editor.
+   *
+   * A contenteditable surface with a compact toolbar covering the formats the
+   * brief asks for: headings, bold/italic/underline, bullet and numbered lists,
+   * checklists, tables, links and inline images. Content is stored as sanitised
+   * HTML on the object, which keeps it portable through JSON export and
+   * renderable in the hover preview and PDF output.
+   *
+   * Everything written back to the document passes through `sanitiseHtml` —
+   * notes can arrive from an imported file, and a plan should never be able to
+   * execute script because someone pasted it into a note.
+   *
+   * Imports: util, icons, components.
+   */
+
+  const { el, debounce, stripHtml, readFileAsDataURL, pickFiles, bytes } = __req("core/util.js");
+  const { icon } = __req("ui/icons.js");
+  const { openModal, toast, promptDialog } = __req("ui/components.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Sanitiser
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const ALLOWED_TAGS = new Set([
+    'P', 'BR', 'DIV', 'SPAN', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'CODE', 'PRE',
+    'H1', 'H2', 'H3', 'H4', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'HR',
+    'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'A', 'IMG', 'INPUT', 'LABEL',
+  ]);
+
+  const ALLOWED_ATTRS = {
+    A: ['href', 'title', 'target', 'rel'],
+    IMG: ['src', 'alt', 'width', 'height'],
+    INPUT: ['type', 'checked', 'disabled'],
+    TD: ['colspan', 'rowspan'],
+    TH: ['colspan', 'rowspan'],
+    SPAN: ['class'],
+    LI: ['class'],
+    DIV: ['class'],
+    P: ['class'],
+  };
+
+  /**
+   * Strip everything that is not on the allow-list. Runs over a detached
+   * document so nothing in the markup can load, execute or observe anything.
+   */
+  function sanitiseHtml(html) {
+    const parser = new DOMParser();
+    const parsed = parser.parseFromString(`<body>${html || ''}</body>`, 'text/html');
+    const body = parsed.body;
+
+    const walk = (node) => {
+      for (const child of Array.from(node.childNodes)) {
+        if (child.nodeType === Node.TEXT_NODE) continue;
+        if (child.nodeType !== Node.ELEMENT_NODE) {
+          child.remove();
+          continue;
+        }
+        if (!ALLOWED_TAGS.has(child.tagName)) {
+          // Keep the text, drop the wrapper — losing formatting beats losing
+          // the user's words.
+          const text = parsed.createTextNode(child.textContent || '');
+          child.replaceWith(text);
+          continue;
+        }
+        const allowed = ALLOWED_ATTRS[child.tagName] || [];
+        for (const attr of Array.from(child.attributes)) {
+          const name = attr.name.toLowerCase();
+          if (!allowed.includes(name)) {
+            child.removeAttribute(attr.name);
+            continue;
+          }
+          if (name === 'href' || name === 'src') {
+            const value = attr.value.trim().toLowerCase();
+            const safe =
+              value.startsWith('http://') ||
+              value.startsWith('https://') ||
+              value.startsWith('mailto:') ||
+              value.startsWith('data:image/') ||
+              value.startsWith('file:///') ||
+              value.startsWith('#');
+            if (!safe) child.removeAttribute(attr.name);
+          }
+        }
+        if (child.tagName === 'A') {
+          child.setAttribute('target', '_blank');
+          child.setAttribute('rel', 'noopener noreferrer');
+        }
+        if (child.tagName === 'INPUT' && child.getAttribute('type') !== 'checkbox') {
+          child.remove();
+          continue;
+        }
+        walk(child);
+      }
+    };
+
+    walk(body);
+    return body.innerHTML;
+  }
+
+  /** Plain-text preview of a note, for tooltips and search results. */
+  function notePreview(html, max = 220) {
+    const text = stripHtml(html);
+    return text.length > max ? text.slice(0, max - 1) + '…' : text;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Editor
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const TOOLBAR = [
+    [
+      { cmd: 'formatBlock', arg: 'h3', icon: 'type', title: 'Heading' },
+      { cmd: 'bold', icon: 'type', title: 'Bold', label: 'B' },
+      { cmd: 'italic', icon: 'type', title: 'Italic', label: 'I' },
+      { cmd: 'underline', icon: 'type', title: 'Underline', label: 'U' },
+      { cmd: 'strikeThrough', title: 'Strikethrough', label: 'S' },
+    ],
+    [
+      { cmd: 'insertUnorderedList', icon: 'list', title: 'Bullet list' },
+      { cmd: 'insertOrderedList', icon: 'checklist', title: 'Numbered list' },
+      { custom: 'checklist', icon: 'check-circle', title: 'Checklist item' },
+      { cmd: 'formatBlock', arg: 'blockquote', icon: 'comment', title: 'Quote' },
+    ],
+    [
+      { custom: 'table', icon: 'table', title: 'Insert table' },
+      { custom: 'link', icon: 'link', title: 'Insert link' },
+      { custom: 'image', icon: 'image', title: 'Insert image' },
+      { custom: 'rule', icon: 'minus', title: 'Horizontal rule' },
+    ],
+    [{ cmd: 'removeFormat', icon: 'eraser', title: 'Clear formatting', label: '✕' }],
+  ];
+
+  /**
+   * Build an editor surface.
+   * @returns {{root:HTMLElement, getHtml:Function, setHtml:Function, focus:Function, surface:HTMLElement}}
+   */
+  function noteEditor({ value = '', onChange = null, minHeight = 220 } = {}) {
+    const surface = el('div', {
+      class: 'note-surface',
+      contenteditable: 'true',
+      role: 'textbox',
+      'aria-multiline': 'true',
+      style: { minHeight: `${minHeight}px` },
+    });
+    surface.innerHTML = sanitiseHtml(value);
+
+    const emitChange = debounce(() => {
+      if (onChange) onChange(getHtml());
+    }, 260);
+
+    const exec = (cmd, arg) => {
+      surface.focus();
+      document.execCommand(cmd, false, arg);
+      emitChange();
+    };
+
+    const toolbar = el('div', { class: 'note-toolbar' });
+    TOOLBAR.forEach((group, i) => {
+      if (i > 0) toolbar.appendChild(el('div', { class: 'note-tb-sep' }));
+      for (const item of group) {
+        const button = el('button', {
+          class: 'cx-btn icon mini ghost',
+          type: 'button',
+          title: item.title,
+          'aria-label': item.title,
+          html: item.label ? `<span style="font-weight:700">${item.label}</span>` : icon(item.icon, { size: 13 }),
+          onMousedown: (e) => e.preventDefault(), // keep the selection alive
+          onClick: () => {
+            if (item.custom) runCustom(item.custom, surface, exec, emitChange);
+            else exec(item.cmd, item.arg);
+          },
+        });
+        toolbar.appendChild(button);
+      }
+    });
+
+    surface.addEventListener('input', emitChange);
+
+    // Paste as plain text unless the clipboard carries HTML we can sanitise.
+    surface.addEventListener('paste', (e) => {
+      const html = e.clipboardData?.getData('text/html');
+      if (html) {
+        e.preventDefault();
+        document.execCommand('insertHTML', false, sanitiseHtml(html));
+        emitChange();
+      }
+    });
+
+    // Checkbox toggles inside the note.
+    surface.addEventListener('click', (e) => {
+      if (e.target.matches('input[type=checkbox]')) {
+        // execCommand does not track this, so mirror the state into the markup.
+        if (e.target.checked) e.target.setAttribute('checked', '');
+        else e.target.removeAttribute('checked');
+        emitChange();
+      }
+    });
+
+    function getHtml() {
+      return sanitiseHtml(surface.innerHTML);
+    }
+
+    function setHtml(html) {
+      surface.innerHTML = sanitiseHtml(html);
+    }
+
+    const root = el('div', { class: 'note-editor' }, [toolbar, surface]);
+    return { root, getHtml, setHtml, focus: () => surface.focus(), surface };
+  }
+
+  async function runCustom(kind, surface, exec, emitChange) {
+    surface.focus();
+    switch (kind) {
+      case 'checklist':
+        document.execCommand('insertHTML', false, '<div class="note-check"><input type="checkbox"> <span>To do</span></div>');
+        emitChange();
+        break;
+
+      case 'rule':
+        document.execCommand('insertHorizontalRule');
+        emitChange();
+        break;
+
+      case 'link': {
+        const selection = window.getSelection();
+        const text = selection ? String(selection) : '';
+        const url = await promptDialog({ title: 'Insert link', label: 'URL', value: 'https://', placeholder: 'https://…' });
+        if (!url) return;
+        surface.focus();
+        if (text) document.execCommand('createLink', false, url);
+        else document.execCommand('insertHTML', false, `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
+        emitChange();
+        break;
+      }
+
+      case 'table': {
+        const size = await promptDialog({ title: 'Insert table', label: 'Columns × rows', value: '3x3', placeholder: '3x3' });
+        if (!size) return;
+        const match = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(size.trim());
+        const cols = Math.min(10, Math.max(1, match ? +match[1] : 3));
+        const rows = Math.min(20, Math.max(1, match ? +match[2] : 3));
+        let html = '<table><thead><tr>';
+        for (let c = 0; c < cols; c++) html += `<th>Column ${c + 1}</th>`;
+        html += '</tr></thead><tbody>';
+        for (let r = 0; r < rows; r++) {
+          html += '<tr>';
+          for (let c = 0; c < cols; c++) html += '<td>&nbsp;</td>';
+          html += '</tr>';
+        }
+        html += '</tbody></table><p><br></p>';
+        surface.focus();
+        document.execCommand('insertHTML', false, html);
+        emitChange();
+        break;
+      }
+
+      case 'image': {
+        const files = await pickFiles({ accept: 'image/*' });
+        if (!files.length) return;
+        const file = files[0];
+        // Notes travel inside the document, so a huge inline image would bloat
+        // every autosave. Point large files at the attachment store instead.
+        if (file.size > 1_500_000) {
+          toast({
+            tone: 'warn',
+            title: 'Image too large to inline',
+            message: `${bytes(file.size)} — add it as an attachment instead so the project stays fast.`,
+          });
+          return;
+        }
+        const dataUrl = await readFileAsDataURL(file);
+        surface.focus();
+        document.execCommand('insertHTML', false, `<img src="${dataUrl}" alt="${file.name}" style="max-width:100%">`);
+        emitChange();
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  /**
+   * Open the full-screen note editor for an object.
+   * `onSave(html)` is called when the user confirms.
+   */
+  function openNoteEditor({ title, value, onSave }) {
+    const editor = noteEditor({ value, minHeight: 320 });
+
+    openModal({
+      title: `Notes — ${title}`,
+      subtitle: 'Rich text, checklists, tables, links and inline images.',
+      size: 'wide',
+      body: editor.root,
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Save notes',
+          kind: 'primary',
+          onClick: () => onSave(editor.getHtml()),
+        },
+      ],
+    });
+
+    setTimeout(() => editor.focus(), 60);
+  }
+
+  /** Read-only render of a note, used in hover previews and print output. */
+  function renderNote(html, { max = 0 } = {}) {
+    const node = el('div', { class: 'note-render' });
+    node.innerHTML = sanitiseHtml(html);
+    if (max) node.style.maxHeight = `${max}px`;
+    // Checkboxes are display-only outside the editor.
+    node.querySelectorAll('input[type=checkbox]').forEach((box) => {
+      box.setAttribute('disabled', '');
+    });
+    return node;
+  }
+
+  Object.defineProperty(__x, "sanitiseHtml", { get: () => sanitiseHtml, enumerable: true });
+  Object.defineProperty(__x, "notePreview", { get: () => notePreview, enumerable: true });
+  Object.defineProperty(__x, "noteEditor", { get: () => noteEditor, enumerable: true });
+  Object.defineProperty(__x, "openNoteEditor", { get: () => openNoteEditor, enumerable: true });
+  Object.defineProperty(__x, "renderNote", { get: () => renderNote, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/attachments.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/attachments.js"] = function (__x, __req) {
+  /**
+   * Attachments.
+   *
+   * File bytes live in IndexedDB, keyed by attachment id; the document holds
+   * only a lightweight record (name, type, size, when it was added). That split
+   * is what lets a project carry a 40 MB test log without every autosave having
+   * to rewrite it.
+   *
+   * The storage layer is deliberately behind one small interface here, so a
+   * future "link to a file on disk" or "sync to SharePoint" backend can be added
+   * without touching the UI.
+   *
+   * Imports: util, events, dates, storage, store, icons, components.
+   */
+
+  const { el, clear, uid, bytes, download, pickFiles } = __req("core/util.js");
+  const { fmtTimestamp } = __req("core/dates.js");
+  const { putBlob, getBlob, deleteBlob, isFallback } = __req("core/storage.js");
+  const { getDoc, getObject, updateObject, addAttachmentRecord, removeAttachmentRecord, getAttachment } = __req("core/store.js");
+  const { icon } = __req("ui/icons.js");
+  const { toast, confirmDialog } = __req("ui/components.js");
+
+  /** Icon for a file, chosen from its extension. */
+  function iconForFile(name = '', type = '') {
+    const ext = String(name).split('.').pop().toLowerCase();
+    if (type.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return 'image';
+    if (ext === 'pdf') return 'document';
+    if (['xls', 'xlsx', 'xlsm', 'csv', 'tsv'].includes(ext)) return 'table';
+    if (['doc', 'docx', 'rtf', 'odt'].includes(ext)) return 'file';
+    if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return 'package';
+    if (['log', 'txt', 'md'].includes(ext)) return 'list';
+    if (['json', 'xml', 'yml', 'yaml'].includes(ext)) return 'cpu';
+    return 'paperclip';
+  }
+
+  /**
+   * Attach files to an object. Returns the ids that were stored.
+   * Failures are reported per file so one bad file does not lose the rest.
+   */
+  async function attachFiles(objectId, files) {
+    if (isFallback()) {
+      toast({
+        tone: 'warn',
+        title: 'Attachments unavailable',
+        message: 'This browser session has no IndexedDB, so file bytes cannot be stored locally.',
+      });
+      return [];
+    }
+
+    const obj = getObject(objectId);
+    if (!obj) return [];
+
+    const stored = [];
+    for (const file of files) {
+      const id = uid('att');
+      try {
+        await putBlob(id, file);
+        addAttachmentRecord({
+          id,
+          name: file.name,
+          type: file.type || '',
+          size: file.size,
+          added: Date.now(),
+          storage: 'idb',
+        });
+        stored.push(id);
+      } catch (err) {
+        console.error('[cx-timeline] attachment failed:', err);
+        toast({ tone: 'bad', title: `Could not attach ${file.name}`, message: err.message });
+      }
+    }
+
+    if (stored.length) {
+      const current = getObject(objectId);
+      updateObject(objectId, { attachments: [...(current.attachments || []), ...stored] }, 'Attach files');
+      toast({ tone: 'good', title: `${stored.length} file${stored.length === 1 ? '' : 's'} attached` });
+    }
+    return stored;
+  }
+
+  /** Open the picker and attach whatever the user chooses. */
+  async function promptAttach(objectId) {
+    const files = await pickFiles({ multiple: true });
+    if (files.length) await attachFiles(objectId, files);
+  }
+
+  /** Save an attachment back out to the user's disk. */
+  async function downloadAttachment(id) {
+    const record = getAttachment(id);
+    const stored = await getBlob(id);
+    if (!stored || !stored.blob) {
+      toast({ tone: 'bad', title: 'File missing', message: 'The stored bytes for this attachment could not be found.' });
+      return;
+    }
+    const filename = record?.name || stored.name || 'attachment';
+    download(filename, stored.blob, stored.type);
+    // Nothing on screen changes when a file leaves the browser, so say it did.
+    toast({ tone: 'good', title: 'File downloaded', message: `${filename} · ${bytes(stored.blob.size)} — saved to your downloads.` });
+  }
+
+  /** Open an attachment in a new tab where the browser can display it. */
+  async function openAttachment(id) {
+    const stored = await getBlob(id);
+    if (!stored || !stored.blob) {
+      toast({ tone: 'bad', title: 'File missing' });
+      return;
+    }
+    const url = URL.createObjectURL(stored.blob);
+    window.open(url, '_blank', 'noopener');
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+
+  /** Detach from one object, and delete the bytes if nothing else refers to it. */
+  async function detachFile(objectId, attachmentId) {
+    const obj = getObject(objectId);
+    if (!obj) return;
+
+    updateObject(objectId, { attachments: (obj.attachments || []).filter((a) => a !== attachmentId) }, 'Remove attachment');
+
+    const stillUsed = getDoc().objects.some((o) => (o.attachments || []).includes(attachmentId));
+    if (!stillUsed) {
+      removeAttachmentRecord(attachmentId);
+      try {
+        await deleteBlob(attachmentId);
+      } catch {
+        /* the record is gone either way; orphaned bytes are collected later */
+      }
+    }
+  }
+
+  /**
+   * The attachment list widget used by the inspector and the object editor.
+   * Supports click-to-pick and drag-and-drop.
+   */
+  function attachmentList(objectId, { onChange = null } = {}) {
+    const root = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } });
+    const list = el('div', { class: 'att-list' });
+
+    const drop = el('div', {
+      class: 'att-drop',
+      html: icon('paperclip', { size: 14 }) + ' <span>Drop files here, or click to browse</span>',
+      onClick: async () => {
+        await promptAttach(objectId);
+        refresh();
+        onChange?.();
+      },
+    });
+
+    drop.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      drop.classList.add('over');
+    });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      drop.classList.remove('over');
+      const files = Array.from(e.dataTransfer?.files || []);
+      if (files.length) {
+        await attachFiles(objectId, files);
+        refresh();
+        onChange?.();
+      }
+    });
+
+    function refresh() {
+      clear(list);
+      const obj = getObject(objectId);
+      const ids = obj?.attachments || [];
+      if (!ids.length) {
+        list.appendChild(el('div', { class: 'cx-hint', text: 'No files attached.' }));
+        return;
+      }
+      for (const id of ids) {
+        const record = getAttachment(id);
+        if (!record) continue;
+        list.appendChild(
+          el('div', { class: 'att-row' }, [
+            el('span', { class: 'att-icon', html: icon(iconForFile(record.name, record.type), { size: 14 }) }),
+            el('div', { class: 'att-main' }, [
+              el('div', { class: 'att-name', text: record.name, title: record.name }),
+              el('div', { class: 'att-meta', text: `${bytes(record.size)} · ${fmtTimestamp(record.added)}` }),
+            ]),
+            el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Open',
+              'aria-label': `Open ${record.name}`,
+              html: icon('external', { size: 12 }),
+              onClick: () => openAttachment(id),
+            }),
+            el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Download',
+              'aria-label': `Download ${record.name}`,
+              html: icon('download', { size: 12 }),
+              onClick: () => downloadAttachment(id),
+            }),
+            el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Remove',
+              'aria-label': `Remove ${record.name}`,
+              html: icon('trash', { size: 12 }),
+              onClick: async () => {
+                const ok = await confirmDialog({
+                  title: 'Remove attachment',
+                  message: `Remove "${record.name}" from this object? The stored file is deleted if nothing else references it.`,
+                  confirmLabel: 'Remove',
+                  danger: true,
+                });
+                if (!ok) return;
+                await detachFile(objectId, id);
+                refresh();
+                onChange?.();
+              },
+            }),
+          ])
+        );
+      }
+    }
+
+    refresh();
+    root.append(list, drop);
+    return { root, refresh };
+  }
+
+  Object.defineProperty(__x, "iconForFile", { get: () => iconForFile, enumerable: true });
+  Object.defineProperty(__x, "attachFiles", { get: () => attachFiles, enumerable: true });
+  Object.defineProperty(__x, "promptAttach", { get: () => promptAttach, enumerable: true });
+  Object.defineProperty(__x, "downloadAttachment", { get: () => downloadAttachment, enumerable: true });
+  Object.defineProperty(__x, "openAttachment", { get: () => openAttachment, enumerable: true });
+  Object.defineProperty(__x, "detachFile", { get: () => detachFile, enumerable: true });
+  Object.defineProperty(__x, "attachmentList", { get: () => attachmentList, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// ui/dialogs.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/dialogs.js"] = function (__x, __req) {
+  /**
+   * Focused editor dialogs.
+   *
+   * The inspector is always-on and shallow; this is the deep, deliberate edit —
+   * opened by double-click or Enter — with the object's schedule, details,
+   * notes and attachments on one surface.
+   *
+   * Imports: util, dates, model, store, renderer, icons, components, lists,
+   *          notes, attachments.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const { toISO, toMs, fmtDate, fmtDuration, MS_DAY } = __req("core/dates.js");
+  const { TYPES, durationDays, endForDuration } = __req("core/model.js");
+
+
+
+
+  const store = __req("core/store.js");
+  const renderer = __req("timeline/renderer.js");
+  const { icon } = __req("ui/icons.js");
+  const { openModal, field, textInput, numberInput, selectInput, rangeInput, toast } = __req("ui/components.js");
+
+
+  const { managedSelect, suggestInput } = __req("ui/lists.js");
+  const { noteEditor } = __req("ui/notes.js");
+  const { attachmentList } = __req("ui/attachments.js");
+
+  /**
+   * Open the full editor for an object.
+   * Edits apply live (so the timeline updates as you type) and the dialog's
+   * Cancel restores the pre-edit state via a single undo.
+   */
+  function openObjectDialog(id) {
+    const obj = store.getObject(id);
+    if (!obj) return;
+    const def = TYPES[obj.type] || TYPES.activity;
+
+    const historyDepthBefore = store.historyState().depth;
+
+    const tabs = el('div', { class: 'cx-seg stretch', style: { marginBottom: '14px' } });
+    const panes = el('div');
+    const paneMap = new Map();
+
+    const addTab = (key, label, iconName, build) => {
+      const button = el('button', {
+        dataset: { tab: key },
+        onClick: () => selectTab(key),
+        html: icon(iconName, { size: 12 }) + `<span>${label}</span>`,
+      });
+      tabs.appendChild(button);
+      const pane = el('div', { style: { display: 'none', flexDirection: 'column', gap: '13px' } });
+      build(pane);
+      panes.appendChild(pane);
+      paneMap.set(key, { button, pane });
+    };
+
+    function selectTab(key) {
+      for (const [k, entry] of paneMap) {
+        entry.button.classList.toggle('active', k === key);
+        entry.pane.style.display = k === key ? 'flex' : 'none';
+      }
+    }
+
+    addTab('details', 'Details', 'sliders', (pane) => buildDetails(pane, obj, def));
+    addTab('notes', 'Notes', 'comment', (pane) => buildNotes(pane, obj));
+    addTab('files', 'Attachments', 'paperclip', (pane) => pane.appendChild(attachmentList(obj.id).root));
+    addTab('links', 'Dependencies', 'link', (pane) => buildLinks(pane, obj));
+
+    selectTab('details');
+
+    openModal({
+      title: obj.title || def.label,
+      subtitle: `${def.label} · ${store.getLane(obj.lane)?.name || 'No lane'}`,
+      size: 'wide',
+      body: el('div', {}, [tabs, panes]),
+      actions: [
+        {
+          label: 'Revert changes',
+          onClick: () => {
+            // Roll back exactly the edits this dialog made.
+            const steps = store.historyState().depth - historyDepthBefore;
+            for (let i = 0; i < steps; i++) store.undo();
+            renderer.requestRender();
+          },
+        },
+        'spacer',
+        { label: 'Done', kind: 'primary', autofocus: true },
+      ],
+    });
+  }
+
+  /* ── Details tab ───────────────────────────────────────────────────────── */
+
+  function buildDetails(pane, obj, def) {
+    const set = (patch, label, opts) => {
+      store.updateObject(obj.id, patch, label || 'Edit object', opts);
+      renderer.requestRender();
+    };
+
+    pane.append(
+      field('Title', textInput({
+        value: obj.title,
+        onInput: (v) => set({ title: v }, 'Rename object', { mergeKey: `dlg-title:${obj.id}` }),
+      })),
+      field('Subtitle', textInput({
+        value: obj.subtitle,
+        placeholder: 'Optional second line',
+        onInput: (v) => set({ subtitle: v }, 'Edit subtitle', { mergeKey: `dlg-sub:${obj.id}` }),
+      })),
+      el('div', { class: 'cx-row three' }, [
+        field('Lane', selectInput({
+          value: obj.lane || '',
+          options: store.orderedLanes().map((l) => ({ value: l.id, label: l.name })),
+          onChange: (v) => set({ lane: v, row: 0 }, 'Move to lane'),
+        })),
+        field('Status', managedSelect({
+          listId: 'status',
+          value: obj.status,
+          onChange: (v) => set({ status: v }, 'Change status'),
+        })),
+        field('Owner', suggestInput({
+          listId: 'owner',
+          value: obj.owner,
+          placeholder: 'Responsible engineer',
+          onInput: (v) => set({ owner: v }, 'Change owner', { mergeKey: `dlg-owner:${obj.id}` }),
+        })),
+      ])
+    );
+
+    if (def.duration) {
+      const durationOut = el('span', { class: 'mono', style: { fontSize: 'var(--fs-tiny)', color: 'var(--text-muted)' }, text: fmtDuration(durationDays(obj)) });
+      pane.appendChild(
+        el('div', { class: 'cx-row three' }, [
+          field('Start', textInput({
+            type: 'date',
+            value: toISO(obj.start),
+            onChange: (v) => {
+              const ms = toMs(v);
+              if (!Number.isFinite(ms)) return;
+              const shift = ms - obj.start;
+              set({ start: ms, end: obj.end + shift }, 'Change start date');
+            },
+          })),
+          field('Finish', textInput({
+            type: 'date',
+            value: toISO(obj.end),
+            onChange: (v) => {
+              const ms = toMs(v);
+              if (Number.isFinite(ms)) set({ end: Math.max(ms, obj.start + MS_DAY) }, 'Change finish date');
+            },
+          })),
+          field('Duration', el('div', { class: 'cx-inline' }, [
+            numberInput({
+              value: durationDays(obj),
+              min: 1,
+              onChange: (v) => {
+                set({ end: endForDuration(obj.start, v) }, 'Change duration');
+                durationOut.textContent = fmtDuration(Math.max(1, v));
+              },
+            }),
+            durationOut,
+          ])),
+        ])
+      );
+    } else {
+      pane.appendChild(
+        field('Date', textInput({
+          type: 'date',
+          value: toISO(obj.start),
+          onChange: (v) => {
+            const ms = toMs(v);
+            if (Number.isFinite(ms)) set({ start: ms, end: ms }, 'Change date');
+          },
+        }))
+      );
+    }
+
+    if (def.progress) {
+      const readout = el('span', { class: 'mono', style: { minWidth: '40px', textAlign: 'right' }, text: `${Math.round(obj.progress)}%` });
+      pane.appendChild(
+        field('Percent complete', el('div', { class: 'cx-inline' }, [
+          rangeInput({
+            value: obj.progress,
+            min: 0,
+            max: 100,
+            step: 5,
+            onInput: (v) => {
+              readout.textContent = `${v}%`;
+            },
+            onChange: (v) => set({ progress: v }, 'Change progress'),
+          }),
+          readout,
+        ]))
+      );
+    }
+
+    /* Type-specific block */
+    const data = obj.data || {};
+    const setData = (key, value, label) => set({ data: { [key]: value } }, label || 'Edit details');
+    const has = (name) => def.fields.includes(name);
+    const extra = [];
+
+    if (has('version')) {
+      extra.push(
+        el('div', { class: 'cx-row three' }, [
+          field('Version', textInput({ value: data.version || '', placeholder: '2.5.0', onInput: (v) => setData('version', v, 'Change version') })),
+          field('Release number', textInput({ value: data.releaseNumber || '', placeholder: 'REL-025', onInput: (v) => setData('releaseNumber', v, 'Change release number') })),
+          field('Build number', textInput({ value: data.buildNumber || '', placeholder: '2.5.0-rc3', onInput: (v) => setData('buildNumber', v, 'Change build number') })),
+        ]),
+        field('Approval', managedSelect({
+          listId: 'approval',
+          value: data.approval || 'none',
+          onChange: (v) => setData('approval', v, 'Change approval'),
+        }))
+      );
+    }
+
+    if (has('testPackage') || has('testKind') || has('area') || has('subsystem')) {
+      extra.push(
+        el('div', { class: 'cx-row three' }, [
+          has('subsystem')
+            ? field('Subsystem', managedSelect({
+                listId: 'subsystem',
+                value: obj.subsystem,
+                onChange: (v) => set({ subsystem: v }, 'Change subsystem'),
+              }))
+            : null,
+          has('area')
+            ? field('Area', suggestInput({ listId: 'area', value: obj.area, placeholder: 'Section / zone', onInput: (v) => set({ area: v }, 'Change area', { mergeKey: `dlg-area:${obj.id}` }) }))
+            : null,
+          has('testPackage')
+            ? field('Test package', textInput({ value: data.testPackage || '', placeholder: 'TP-DYN-01', onInput: (v) => setData('testPackage', v, 'Change test package') }))
+            : null,
+          has('testKind')
+            ? field('Test type', managedSelect({
+                listId: 'testKind',
+                value: data.testKind || '',
+                onChange: (v) => setData('testKind', v, 'Change test type'),
+              }))
+            : null,
+        ].filter(Boolean))
+      );
+    }
+
+    // A point object has no finish to record, so it gets one field and the word
+    // for it — "Actual finish" against a milestone is a question with no answer.
+    if (has('actualStart') && has('actualEnd')) {
+      extra.push(
+        el('div', { class: 'cx-row' }, [
+          field('Actual start', textInput({ type: 'date', value: data.actualStart || '', onChange: (v) => setData('actualStart', v, 'Set actual start') })),
+          field('Actual finish', textInput({ type: 'date', value: data.actualEnd || '', onChange: (v) => setData('actualEnd', v, 'Set actual finish') })),
+        ])
+      );
+    } else if (has('actualStart')) {
+      extra.push(field('Actual date', textInput({
+        type: 'date',
+        value: data.actualStart || '',
+        onChange: (v) => setData('actualStart', v, 'Set actual date'),
+      })));
+    }
+
+    if (has('severity')) {
+      extra.push(
+        el('div', { class: 'cx-row' }, [
+          field('Severity', managedSelect({
+            listId: 'severity',
+            value: data.severity || 'medium',
+            onChange: (v) => setData('severity', v, 'Change severity'),
+          })),
+          has('likelihood')
+            ? field('Likelihood', managedSelect({
+                listId: 'severity',
+                value: data.likelihood || 'medium',
+                onChange: (v) => setData('likelihood', v, 'Change likelihood'),
+              }))
+            : field('Reference', textInput({ value: data.reference || '', onInput: (v) => setData('reference', v, 'Change reference') })),
+        ])
+      );
+    }
+
+    if (has('mitigation')) {
+      const area = el('textarea', { class: 'cx-textarea', rows: 3, placeholder: 'How the risk is being managed' });
+      area.value = data.mitigation || '';
+      area.addEventListener('change', () => setData('mitigation', area.value, 'Edit mitigation'));
+      extra.push(field('Mitigation', area));
+    }
+
+    if (extra.length) {
+      pane.appendChild(el('div', { class: 'eyebrow', style: { marginTop: '4px' }, text: def.label + ' fields' }));
+      pane.append(...extra);
+    }
+
+    pane.appendChild(
+      field('Tags', textInput({
+        value: (obj.tags || []).join(', '),
+        placeholder: 'comma, separated',
+        onChange: (v) => set({ tags: v.split(',').map((t) => t.trim()).filter(Boolean) }, 'Edit tags'),
+      }))
+    );
+  }
+
+  /* ── Notes tab ─────────────────────────────────────────────────────────── */
+
+  function buildNotes(pane, obj) {
+    const editor = noteEditor({
+      value: obj.notes,
+      minHeight: 300,
+      onChange: (html) => {
+        store.updateObject(obj.id, { notes: html }, 'Edit notes', { mergeKey: `notes:${obj.id}` });
+        renderer.requestRender();
+      },
+    });
+    pane.appendChild(editor.root);
+  }
+
+  /* ── Dependencies tab ──────────────────────────────────────────────────── */
+
+  function buildLinks(pane, obj) {
+    const list = el('div', { class: 'cx-list' });
+
+    function refresh() {
+      clear(list);
+      const links = store.linksFor([obj.id]);
+      if (!links.length) {
+        list.appendChild(el('div', { class: 'cx-hint', text: 'No dependencies yet.' }));
+        return;
+      }
+      for (const link of links) {
+        const outgoing = link.from === obj.id;
+        const other = store.getObject(outgoing ? link.to : link.from);
+        if (!other) continue;
+        list.appendChild(
+          el('div', { class: 'cx-listrow' }, [
+            el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon(outgoing ? 'arrow' : 'arrow-left', { size: 12 }) }),
+            el('div', { class: 'lr-main' }, [
+              el('div', { class: 'lr-title', text: other.title }),
+              el('div', { class: 'lr-meta', text: `${link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''} · ${fmtDate(other.start, 'medium')}` }),
+            ]),
+            el('button', {
+              class: 'cx-btn icon mini ghost',
+              title: 'Remove',
+              'aria-label': 'Remove dependency',
+              html: icon('unlink', { size: 12 }),
+              onClick: () => {
+                store.removeLinks([link.id]);
+                renderer.requestRender();
+                refresh();
+              },
+            }),
+          ])
+        );
+      }
+    }
+
+    const candidates = store.getDoc().objects.filter((o) => o.id !== obj.id);
+    const picker = selectInput({
+      value: '',
+      placeholder: 'Add a successor…',
+      options: candidates.map((o) => ({ value: o.id, label: `${o.title} (${fmtDate(o.start, 'compact')})` })),
+      onChange: (v) => {
+        if (!v) return;
+        const created = store.addLink({ from: obj.id, to: v, type: 'FS' });
+        if (!created) toast({ tone: 'warn', title: 'Not linked', message: 'That link exists already or would create a loop.' });
+        renderer.requestRender();
+        refresh();
+        picker.value = '';
+      },
+    });
+
+    refresh();
+    pane.append(list, field('Add dependency', picker, 'Creates a finish-to-start link. Change the type in the inspector.'));
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Lane editor
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  function openLaneDialog(id) {
+    const lane = store.getLane(id);
+    if (!lane) return;
+    const set = (patch, label) => {
+      store.updateLane(id, patch, label || 'Edit lane');
+      renderer.requestRender();
+    };
+
+    openModal({
+      title: `Lane — ${lane.name}`,
+      body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+        field('Name', textInput({ value: lane.name, onInput: (v) => set({ name: v }, 'Rename lane') })),
+        field('Description', textInput({ value: lane.description, placeholder: 'Optional', onInput: (v) => set({ description: v }, 'Edit lane description') })),
+        el('div', { class: 'cx-row' }, [
+          field('Colour', el('input', {
+            class: 'cx-color',
+            type: 'color',
+            value: lane.color,
+            onInput: (e) => set({ color: e.target.value }, 'Change lane colour'),
+          })),
+          field('Height (px)', numberInput({ value: lane.height, min: 28, max: 480, step: 4, onChange: (v) => set({ height: v }, 'Resize lane') })),
+        ]),
+        field('Group', textInput({ value: lane.group, placeholder: 'Optional grouping label', onInput: (v) => set({ group: v }, 'Change lane group') })),
+      ]),
+      actions: [{ label: 'Done', kind: 'primary' }],
+    });
+  }
+
+  Object.defineProperty(__x, "openObjectDialog", { get: () => openObjectDialog, enumerable: true });
+  Object.defineProperty(__x, "openLaneDialog", { get: () => openLaneDialog, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/pane_util.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/pane_util.js"] = function (__x, __req) {
@@ -28804,63 +28839,27 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
    * Split out of `ui/panels.js`; see `ui/pane_util.js` for how a pane reaches the dock.
    */
 
-  const { el, clear, debounce, bytes, download } = __req("core/util.js");
-  const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } = __req("core/dates.js");
-  const { TYPES, listOptions, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline, makeProject, isDerivedBaseline } = __req("core/model.js");
-
-
-
-
-
-
-
-
-
+  const { el } = __req("core/util.js");
+  const { emit } = __req("core/events.js");
+  const { fmtDate, fmtTimestamp } = __req("core/dates.js");
+  const { TYPES, typeGroups, statusOf, subsystemOf, effectiveToday, isDerivedBaseline } = __req("core/model.js");
 
 
   const store = __req("core/store.js");
-  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } = __req("core/storage.js");
-  const cloud = __req("core/cloud.js");
-  const filestore = __req("core/filestore.js");
-  const access = __req("core/access.js");
-  const { search, summarise, facet, filterPredicate } = __req("core/query.js");
-  const { criticalPath, compareBaseline, projectHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
-  const viewport = __req("timeline/viewport.js");
+  const { summarise } = __req("core/query.js");
+  const { criticalPath, compareBaseline, projectHealth, objectHealth, linkViolations } = __req("core/analysis.js");
+
+
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
-  const { field, textInput, numberInput, selectInput, checkbox, toggle, segmented, section, emptyState, badge, chipStat, confirmDialog, promptDialog, skeleton, toast, openModal, progressBar, contextMenu } = __req("ui/components.js");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  const { field, toggle, segmented, section, emptyState, chipStat, confirmDialog, toast, progressBar } = __req("ui/components.js");
 
 
   const cmd = __req("ui/commands.js");
-  const { listEditor } = __req("ui/lists.js");
-  const { openShareDialog, paneTeam } = __req("ui/auth.js");
-  const { paneP6 } = __req("ui/p6.js");
-  const { paneLookahead } = __req("ui/lookahead.js");
   const { openObjectDialog, openLaneDialog } = __req("ui/dialogs.js");
-  const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
   const exporters = __req("io/exporters.js");
-  const { importFile, buildDocFromRows } = __req("io/importers.js");
-  const { pickFiles } = __req("core/util.js");
 
-  const { refreshPane, goToPane, iconBtn, statRow } = __req("ui/pane_util.js");
+  const { refreshPane, goToPane, iconBtn } = __req("ui/pane_util.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      Lanes
@@ -29017,7 +29016,6 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
   function paneCampaigns(root) {
     const doc = store.getDoc();
     const campaigns = doc.objects.filter((o) => o.type === 'campaign' || o.type === 'testwindow').sort((a, b) => a.start - b.start);
-    const today = effectiveToday(doc);
 
     renderObjectRegister(root, campaigns, {
       emptyTitle: 'No campaigns',
@@ -29515,63 +29513,18 @@ __mods["ui/pane_filters.js"] = function (__x, __req) {
    * Split out of `ui/panels.js`; see `ui/pane_util.js` for how a pane reaches the dock.
    */
 
-  const { el, clear, debounce, bytes, download } = __req("core/util.js");
-  const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } = __req("core/dates.js");
-  const { TYPES, listOptions, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline, makeProject, isDerivedBaseline } = __req("core/model.js");
-
-
-
-
-
-
-
-
-
-
-
+  const { el, clear, debounce } = __req("core/util.js");
+  const { fmtDate } = __req("core/dates.js");
+  const { TYPES, listOptions } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } = __req("core/storage.js");
-  const cloud = __req("core/cloud.js");
-  const filestore = __req("core/filestore.js");
-  const access = __req("core/access.js");
-  const { search, summarise, facet, filterPredicate } = __req("core/query.js");
-  const { criticalPath, compareBaseline, projectHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
-  const viewport = __req("timeline/viewport.js");
+  const { search, facet, filterPredicate } = __req("core/query.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
-  const { field, textInput, numberInput, selectInput, checkbox, toggle, segmented, section, emptyState, badge, chipStat, confirmDialog, promptDialog, skeleton, toast, openModal, progressBar, contextMenu } = __req("ui/components.js");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  const { field, textInput, checkbox, segmented, section, emptyState } = __req("ui/components.js");
   const cmd = __req("ui/commands.js");
-  const { listEditor } = __req("ui/lists.js");
-  const { openShareDialog, paneTeam } = __req("ui/auth.js");
-  const { paneP6 } = __req("ui/p6.js");
-  const { paneLookahead } = __req("ui/lookahead.js");
-  const { openObjectDialog, openLaneDialog } = __req("ui/dialogs.js");
-  const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
-  const exporters = __req("io/exporters.js");
-  const { importFile, buildDocFromRows } = __req("io/importers.js");
-  const { pickFiles } = __req("core/util.js");
+  const { openObjectDialog } = __req("ui/dialogs.js");
 
-  const { refreshPane, goToPane, iconBtn, statRow } = __req("ui/pane_util.js");
+  const { refreshPane, goToPane } = __req("ui/pane_util.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      Search
@@ -29814,63 +29767,24 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
    * Split out of `ui/panels.js`; see `ui/pane_util.js` for how a pane reaches the dock.
    */
 
-  const { el, clear, debounce, bytes, download } = __req("core/util.js");
-  const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } = __req("core/dates.js");
-  const { TYPES, listOptions, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline, makeProject, isDerivedBaseline } = __req("core/model.js");
-
-
-
-
-
-
-
-
-
-
-
+  const { el, clear } = __req("core/util.js");
+  const { fmtDate, fmtTimestamp } = __req("core/dates.js");
+  const { TYPES } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } = __req("core/storage.js");
-  const cloud = __req("core/cloud.js");
+  const { makeBackup, isHosted } = __req("core/storage.js");
   const filestore = __req("core/filestore.js");
   const access = __req("core/access.js");
-  const { search, summarise, facet, filterPredicate } = __req("core/query.js");
-  const { criticalPath, compareBaseline, projectHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
-  const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
-  const { field, textInput, numberInput, selectInput, checkbox, toggle, segmented, section, emptyState, badge, chipStat, confirmDialog, promptDialog, skeleton, toast, openModal, progressBar, contextMenu } = __req("ui/components.js");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  const { field, textInput, selectInput, toggle, segmented, section, toast, openModal, contextMenu } = __req("ui/components.js");
 
 
   const cmd = __req("ui/commands.js");
-  const { listEditor } = __req("ui/lists.js");
-  const { openShareDialog, paneTeam } = __req("ui/auth.js");
-  const { paneP6 } = __req("ui/p6.js");
-  const { paneLookahead } = __req("ui/lookahead.js");
-  const { openObjectDialog, openLaneDialog } = __req("ui/dialogs.js");
-  const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
   const exporters = __req("io/exporters.js");
   const { importFile, buildDocFromRows } = __req("io/importers.js");
   const { pickFiles } = __req("core/util.js");
 
-  const { refreshPane, goToPane, iconBtn, statRow } = __req("ui/pane_util.js");
+  const { refreshPane } = __req("ui/pane_util.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      Import / export
@@ -30400,63 +30314,21 @@ __mods["ui/pane_projects.js"] = function (__x, __req) {
    * Split out of `ui/panels.js`; see `ui/pane_util.js` for how a pane reaches the dock.
    */
 
-  const { el, clear, debounce, bytes, download } = __req("core/util.js");
-  const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } = __req("core/dates.js");
-  const { TYPES, listOptions, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline, makeProject, isDerivedBaseline } = __req("core/model.js");
-
-
-
-
-
-
-
-
-
-
-
+  const { el, clear, bytes, download } = __req("core/util.js");
+  const { fmtTimestamp, toISO } = __req("core/dates.js");
+  const { makeProject } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } = __req("core/storage.js");
+  const { listBackups, loadBackup, deleteBackup, makeBackup, switchProject, createCloudProject } = __req("core/storage.js");
+
+
   const cloud = __req("core/cloud.js");
-  const filestore = __req("core/filestore.js");
-  const access = __req("core/access.js");
-  const { search, summarise, facet, filterPredicate } = __req("core/query.js");
-  const { criticalPath, compareBaseline, projectHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
-  const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
-  const { field, textInput, numberInput, selectInput, checkbox, toggle, segmented, section, emptyState, badge, chipStat, confirmDialog, promptDialog, skeleton, toast, openModal, progressBar, contextMenu } = __req("ui/components.js");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  const { emptyState, badge, confirmDialog, promptDialog, skeleton, toast } = __req("ui/components.js");
   const cmd = __req("ui/commands.js");
-  const { listEditor } = __req("ui/lists.js");
-  const { openShareDialog, paneTeam } = __req("ui/auth.js");
-  const { paneP6 } = __req("ui/p6.js");
-  const { paneLookahead } = __req("ui/lookahead.js");
-  const { openObjectDialog, openLaneDialog } = __req("ui/dialogs.js");
-  const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
-  const exporters = __req("io/exporters.js");
-  const { importFile, buildDocFromRows } = __req("io/importers.js");
-  const { pickFiles } = __req("core/util.js");
+  const { openShareDialog } = __req("ui/auth.js");
 
-  const { refreshPane, goToPane, iconBtn, statRow } = __req("ui/pane_util.js");
+  const { refreshPane, iconBtn } = __req("ui/pane_util.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      Backups
@@ -30763,63 +30635,22 @@ __mods["ui/pane_settings.js"] = function (__x, __req) {
    * Split out of `ui/panels.js`; see `ui/pane_util.js` for how a pane reaches the dock.
    */
 
-  const { el, clear, debounce, bytes, download } = __req("core/util.js");
-  const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } = __req("core/dates.js");
-  const { TYPES, listOptions, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline, makeProject, isDerivedBaseline } = __req("core/model.js");
-
-
-
-
-
-
-
-
-
-
-
+  const { el, clear, bytes } = __req("core/util.js");
+  const { DATE_ORDERS } = __req("core/dates.js");
   const store = __req("core/store.js");
-  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } = __req("core/storage.js");
-  const cloud = __req("core/cloud.js");
-  const filestore = __req("core/filestore.js");
-  const access = __req("core/access.js");
-  const { search, summarise, facet, filterPredicate } = __req("core/query.js");
-  const { criticalPath, compareBaseline, projectHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
-  const viewport = __req("timeline/viewport.js");
+  const { usage, refreshBackupSchedule, isFallback, collectGarbage, isFileMode, purgeLocalCopy } = __req("core/storage.js");
+
+
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
-  const { field, textInput, numberInput, selectInput, checkbox, toggle, segmented, section, emptyState, badge, chipStat, confirmDialog, promptDialog, skeleton, toast, openModal, progressBar, contextMenu } = __req("ui/components.js");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  const { field, textInput, numberInput, selectInput, toggle, segmented, section, confirmDialog, toast } = __req("ui/components.js");
 
 
   const cmd = __req("ui/commands.js");
   const { listEditor } = __req("ui/lists.js");
-  const { openShareDialog, paneTeam } = __req("ui/auth.js");
-  const { paneP6 } = __req("ui/p6.js");
-  const { paneLookahead } = __req("ui/lookahead.js");
-  const { openObjectDialog, openLaneDialog } = __req("ui/dialogs.js");
   const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
-  const exporters = __req("io/exporters.js");
-  const { importFile, buildDocFromRows } = __req("io/importers.js");
-  const { pickFiles } = __req("core/util.js");
 
-  const { refreshPane, goToPane, iconBtn, statRow } = __req("ui/pane_util.js");
+  const { refreshPane, statRow } = __req("ui/pane_util.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      Dropdown lists
@@ -31058,61 +30889,14 @@ __mods["ui/panels.js"] = function (__x, __req) {
    *          theme.
    */
 
-  const { el, clear, debounce, bytes, download } = __req("core/util.js");
+  const { el, clear, debounce } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } = __req("core/dates.js");
-  const { TYPES, listOptions, typeGroups, statusOf, subsystemOf, durationDays, effectiveToday, makeBaseline, makeProject, isDerivedBaseline } = __req("core/model.js");
-
-
-
-
-
-
-
-
-
-
-
-  const store = __req("core/store.js");
-  const { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } = __req("core/storage.js");
-  const cloud = __req("core/cloud.js");
-  const filestore = __req("core/filestore.js");
-  const access = __req("core/access.js");
-  const { search, summarise, facet, filterPredicate } = __req("core/query.js");
-  const { criticalPath, compareBaseline, projectHealth, objectHealth, slipByLane, linkViolations, evaluateLink } = __req("core/analysis.js");
-  const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
-  const { field, textInput, numberInput, selectInput, checkbox, toggle, segmented, section, emptyState, badge, chipStat, confirmDialog, promptDialog, skeleton, toast, openModal, progressBar, contextMenu } = __req("ui/components.js");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  const cmd = __req("ui/commands.js");
-  const { listEditor } = __req("ui/lists.js");
-  const { openShareDialog, paneTeam } = __req("ui/auth.js");
+  const { paneTeam } = __req("ui/auth.js");
   const { paneP6 } = __req("ui/p6.js");
   const { paneLookahead } = __req("ui/lookahead.js");
-  const { openObjectDialog, openLaneDialog } = __req("ui/dialogs.js");
-  const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
   const exporters = __req("io/exporters.js");
-  const { importFile, buildDocFromRows } = __req("io/importers.js");
-  const { pickFiles } = __req("core/util.js");
 
   const { paneLanes, panePalette, paneOutline, paneReleases, paneCampaigns, paneRisks, paneLinks, paneBaselines, paneLegendSettings, paneHistory } = __req("ui/pane_plan.js");
 
@@ -31143,7 +30927,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
    * excluded so choosing one refreshes the pane immediately.
    */
   function isTypingInDock() {
-    const active_ = document.activeElement;
+    const active_ = /** @type {HTMLInputElement | null} */ (document.activeElement);
     if (!dockEl || !active_ || !dockEl.contains(active_)) return false;
     const tag = active_.tagName.toLowerCase();
     if (tag === 'textarea' || active_.isContentEditable) return true;
@@ -31581,8 +31365,8 @@ __mods["ui/shell.js"] = function (__x, __req) {
 
   const { el, clear, debounce } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, fmtTimestamp, toISO } = __req("core/dates.js");
-  const { TYPES, typeGroups, effectiveToday, projectExtent } = __req("core/model.js");
+  const { fmtDate, fmtTimestamp } = __req("core/dates.js");
+  const { typeGroups, effectiveToday, projectExtent } = __req("core/model.js");
   const store = __req("core/store.js");
   const { isFallback, isHosted, isFileMode } = __req("core/storage.js");
   const filestore = __req("core/filestore.js");
@@ -31593,11 +31377,11 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
-  const { contextMenu, popover, closePopover, promptDialog, toast, segmented, keyHint, attachTooltip } = __req("ui/components.js");
+  const { contextMenu, promptDialog, toast, segmented, keyHint } = __req("ui/components.js");
   const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
-  const { showPane, currentPane, PANES } = __req("ui/panels.js");
+  const { showPane, currentPane } = __req("ui/panels.js");
   const workspace = __req("ui/workspace.js");
-  const { accountBlock, openShareDialog } = __req("ui/auth.js");
+  const { accountBlock } = __req("ui/auth.js");
   const cmd = __req("ui/commands.js");
   const { openCommandMenu } = __req("ui/command_menu.js");
 
@@ -32410,28 +32194,10 @@ __mods["ui/inspector.js"] = function (__x, __req) {
    *          icons, components, lists, notes, attachments.
    */
 
-  const { el, clear, debounce, clamp, escapeHtml } = __req("core/util.js");
+  const { el, clear, debounce, clamp } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
   const { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } = __req("core/dates.js");
-  const { TYPES, listOptions, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, lookaheadRegister, laLinkedIds, laRollUp, laVariance, LINK_TYPES, CONNECTOR_STYLES, durationDays, endForDuration, countsWorkingDays, remainingDays, statusOf, effectiveToday, isDerivedBaseline, delayReason, notesShown } = __req("core/model.js");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  const { TYPES, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, lookaheadRegister, laLinkedIds, laRollUp, laVariance, LINK_TYPES, CONNECTOR_STYLES, durationDays, endForDuration, countsWorkingDays, remainingDays, statusOf, effectiveToday, isDerivedBaseline, delayReason, notesShown } = __req("core/model.js");
 
 
 
@@ -32441,29 +32207,13 @@ __mods["ui/inspector.js"] = function (__x, __req) {
   const { objectHealth, linkViolations, evaluateLink } = __req("core/analysis.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
-  const { field, textInput, numberInput, selectInput, checkbox, toggle, rangeInput, segmented, section, colorControl, iconPicker, popover, closePopover, emptyState, badge, chipStat, confirmDialog, contextMenu, openPicker } = __req("ui/components.js");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  const { field, textInput, numberInput, selectInput, checkbox, toggle, rangeInput, segmented, section, colorControl, iconPicker, popover, closePopover, emptyState, chipStat, confirmDialog, openPicker } = __req("ui/components.js");
 
 
 
 
   const { managedSelect, suggestInput } = __req("ui/lists.js");
-  const { openNoteEditor, renderNote, notePreview } = __req("ui/notes.js");
+  const { openNoteEditor, renderNote } = __req("ui/notes.js");
   const { resolveViolation, toggleLinkHidden } = __req("ui/commands.js");
   const { attachmentList } = __req("ui/attachments.js");
 
@@ -32488,7 +32238,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
    * should refresh immediately.
    */
   function isTypingInPanel() {
-    const active = document.activeElement;
+    const active = /** @type {HTMLInputElement | null} */ (document.activeElement);
     if (!host || !active || !host.contains(active)) return false;
     const tag = active.tagName.toLowerCase();
     if (tag === 'textarea' || active.isContentEditable) return true;
@@ -33496,8 +33246,6 @@ __mods["ui/inspector.js"] = function (__x, __req) {
     const ids = objects.map((o) => o.id);
     headerFor('Selection', `${objects.length} objects`);
 
-    const first = objects[0];
-    const allSameType = objects.every((o) => o.type === first.type);
 
     bodyEl.append(
       el('div', { style: { padding: '11px 12px', borderBottom: '1px solid var(--border)', display: 'flex', flexWrap: 'wrap', gap: '6px' } }, [
@@ -33823,7 +33571,6 @@ __mods["ui/minimap.js"] = function (__x, __req) {
   const { getDoc, orderedLanes, getSettings } = __req("core/store.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
-  const { icon } = __req("ui/icons.js");
 
   let root = null;
   let body = null;
@@ -34150,17 +33897,17 @@ __mods["ui/menus.js"] = function (__x, __req) {
    *          commands, notes, panels.
    */
 
-  const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, MS_DAY } = __req("core/dates.js");
-  const { TYPES, listOptions, typeGroups, statusOf } = __req("core/model.js");
+  const { on, EV } = __req("core/events.js");
+  const { fmtDate } = __req("core/dates.js");
+  const { TYPES, listOptions, typeGroups } = __req("core/model.js");
   const store = __req("core/store.js");
   const renderer = __req("timeline/renderer.js");
-  const { icon } = __req("ui/icons.js");
-  const { contextMenu, confirmDialog, promptDialog, toast, colorControl, popover, closePopover } = __req("ui/components.js");
+  const { contextMenu, confirmDialog, promptDialog, toast, colorControl, popover } = __req("ui/components.js");
+
+
   const cmd = __req("ui/commands.js");
   const { openListManager } = __req("ui/lists.js");
   const { openNoteEditor } = __req("ui/notes.js");
-  const { showPane } = __req("ui/panels.js");
   const { linkViolations } = __req("core/analysis.js");
   const { openObjectDialog } = __req("ui/dialogs.js");
 
@@ -34267,6 +34014,7 @@ __mods["ui/menus.js"] = function (__x, __req) {
   function statusItems(obj) {
     // The whole list, in the user's own order: which statuses suit which type
     // is a judgement only the project can make now that the list is editable.
+    /** @type {any[]} */
     const items = listOptions('status').map((option) => ({
       label: option.label + (obj.status === option.id ? '  ✓' : ''),
       onClick: () => cmd.setStatus(option.id),
@@ -34308,6 +34056,7 @@ __mods["ui/menus.js"] = function (__x, __req) {
 
   function canvasMenu({ ms, laneId, clientX, clientY }) {
     const lane = store.getLane(laneId);
+    /** @type {any[]} */
     const items = [
       { heading: `${fmtDate(ms, 'dayFull')}${lane ? ' · ' + lane.name : ''}` },
     ];
@@ -34735,7 +34484,7 @@ __mods["ui/canvas_hint.js"] = function (__x, __req) {
   function installCanvasHint(frame) {
     box = el('div', { class: 'canvas-hint', hidden: true, role: 'status' });
     frame.appendChild(box);
-    on(EV.RENDER_DONE, ({ objects } = {}) => update(objects));
+    on(EV.RENDER_DONE, (/** @type {{ objects?: number }} */ { objects } = {}) => update(objects));
   }
 
   function action(label, iconName, run, primary = false) {
@@ -34925,7 +34674,7 @@ __mods["main.js"] = function (__x, __req) {
   const { on, emit, EV } = __req("core/events.js");
   const { projectExtent, effectiveToday } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { init: initStorage, takeRecovery, getPref, setPref, saveNow, isHosted } = __req("core/storage.js");
+  const { init: initStorage, takeRecovery, saveNow } = __req("core/storage.js");
   const cloud = __req("core/cloud.js");
   const filestore = __req("core/filestore.js");
   const desktop = __req("core/desktop.js");
@@ -34953,7 +34702,7 @@ __mods["main.js"] = function (__x, __req) {
   const exporters = __req("io/exporters.js");
   const cmd = __req("ui/commands.js");
   const { toast, showTooltip, hideTooltip, confirmDialog } = __req("ui/components.js");
-  const { renderNote, notePreview } = __req("ui/notes.js");
+  const { renderNote } = __req("ui/notes.js");
   const { TYPES, statusOf, durationDays } = __req("core/model.js");
   const { fmtDate, fmtDuration, setDateOrder, getDateOrder } = __req("core/dates.js");
   const { el } = __req("core/util.js");
@@ -35429,7 +35178,7 @@ __mods["main.js"] = function (__x, __req) {
    * resolves to nothing.
    */
   function installDesktopShell() {
-    window.addEventListener('cx-shell-update', (event) => {
+    window.addEventListener('cx-shell-update', (/** @type {CustomEvent} */ event) => {
       const version = event.detail?.version || '';
       toast({
         tone: 'info',
@@ -35697,7 +35446,7 @@ __mods["main.js"] = function (__x, __req) {
       if (!e.dataTransfer?.files?.length) return;
       // Panels handle their own drops; anything reaching the document is a
       // project file the user wants to open.
-      if (e.target.closest('.att-drop')) return;
+      if (/** @type {Element} */ (e.target).closest('.att-drop')) return;
       e.preventDefault();
       emit('ui:file-dropped', { file: e.dataTransfer.files[0] });
       toast({

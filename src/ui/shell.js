@@ -12,8 +12,8 @@
 
 import { el, clear, debounce } from '../core/util.js';
 import { on, emit, EV } from '../core/events.js';
-import { fmtDate, fmtTimestamp, toISO } from '../core/dates.js';
-import { TYPES, typeGroups, effectiveToday, projectExtent } from '../core/model.js';
+import { fmtDate, fmtTimestamp } from '../core/dates.js';
+import { typeGroups, effectiveToday, projectExtent } from '../core/model.js';
 import * as store from '../core/store.js';
 import { isFallback, isHosted, isFileMode } from '../core/storage.js';
 import * as filestore from '../core/filestore.js';
@@ -24,11 +24,11 @@ import { linkViolations } from '../core/analysis.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
-import { contextMenu, popover, closePopover, promptDialog, toast, segmented, keyHint, attachTooltip } from './components.js';
+import { contextMenu, promptDialog, toast, segmented, keyHint } from './components.js';
 import { THEMES, applyTheme, getTheme } from './theme.js';
-import { showPane, currentPane, PANES } from './panels.js';
+import { showPane, currentPane } from './panels.js';
 import * as workspace from './workspace.js';
-import { accountBlock, openShareDialog } from './auth.js';
+import { accountBlock } from './auth.js';
 import * as cmd from './commands.js';
 import { openCommandMenu } from './command_menu.js';
 

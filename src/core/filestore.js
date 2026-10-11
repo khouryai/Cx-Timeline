@@ -57,13 +57,14 @@ import * as rules from './folder_rules.js';
 /* The pure rules — names, digests, whose turn the pen is — tested in Node. */
 const {
   basename, lockNameFor, isLockFile, claimNameFor, isClaimFor, isLockLitter,
-  fingerprint, hash64, parseClaim, penHolder, isStale,
+  fingerprint, parseClaim, penHolder, isStale,
 } = rules;
 
 /** How often a session restates its claim, in ms. */
 const HEARTBEAT_MS = 30000;
-/**
- * A claim older than this is treated as abandoned — a crash, or a closed lid.
+/*
+ * `STALE_MS` (core/folder_rules.js, read through `isStale()`): a claim older
+ * than this is treated as abandoned — a crash, or a closed lid.
  *
  * Four minutes, not the seventy-five seconds this started at, and the reason is
  * the folder rather than the people: OneDrive routinely takes a minute or more
@@ -73,7 +74,6 @@ const HEARTBEAT_MS = 30000;
  * wrong. Eight heartbeats of margin costs a crashed session four minutes of
  * somebody else's patience, and `takeOver()` is there for anyone with less.
  */
-const STALE_MS = rules.STALE_MS;
 /**
  * A claim file this old is deleted rather than merely ignored.
  *

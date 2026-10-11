@@ -9,9 +9,9 @@
  *          renderer, interactions, icons, components.
  */
 
-import { el, download, clamp } from '../core/util.js';
+import { el, clamp } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
-import { MS_DAY, toISO, fmtDate, addDays } from '../core/dates.js';
+import { MS_DAY, toISO, fmtDate } from '../core/dates.js';
 import { TYPES, makeBaseline, makeObject, projectExtent, effectiveToday, makeProject } from '../core/model.js';
 import * as store from '../core/store.js';
 import { saveNow, makeBackup, openFolderPlan, createFolderPlan, leaveFolder } from '../core/storage.js';

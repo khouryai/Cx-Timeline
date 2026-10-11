@@ -51,7 +51,7 @@ const MANAGE = '\u0000manage';
  *
  * @param {object}   opts
  * @param {string}   opts.listId
- * @param {string}   opts.value
+ * @param {*}        opts.value
  * @param {Function} opts.onChange
  * @param {string}   [opts.placeholder]  Shown as the empty choice.
  * @param {boolean}  [opts.mini]
@@ -125,6 +125,7 @@ export function managedSelect({ listId, value, onChange, placeholder, mini = fal
  * These stay free text — a plan should never block you from typing a name
  * that is not yet on a list — but the list is offered through a `datalist`,
  * and the manager is one click away.
+ * @param {{ listId: string, value?: any, onInput?: Function, onChange?: Function, placeholder?: string, mini?: boolean }} options
  */
 export function suggestInput({ listId, value, onInput, onChange, placeholder, mini = false }) {
   // The inspector and the object dialog can both be showing an Owner field at
@@ -181,6 +182,9 @@ function suggestions(listId) {
  * Ask for a new option and add it.
  * `onDone(id|null)` reports the id that was created, so the dropdown that
  * launched this can select it straight away.
+ *
+ * @param {string} listId
+ * @param {(value: any) => void} [onDone]  Called with the new option, or null if cancelled.
  */
 export function promptNewOption(listId, onDone = () => {}) {
   const def = LIST_DEFS[listId] || { label: listId };

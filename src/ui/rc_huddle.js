@@ -35,7 +35,7 @@
 
 import { el, clear } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
-import { toISO, addDays, todayMs } from '../core/dates.js';
+import { toISO, addDays } from '../core/dates.js';
 import * as rc from '../core/rc.js';
 import { icon } from './icons.js';
 import { selectInput, textInput, toast, badge, checkbox } from './components.js';

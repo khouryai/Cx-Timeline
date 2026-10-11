@@ -7,26 +7,16 @@
 
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
-import * as filestore from '../core/filestore.js';
-import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
-import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
-import { saveFile } from '../io/exporters.js';
+import { relinkCandidates, countable, describe } from '../core/lookahead.js';
 import {
-  keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
-  reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes,
-} from '../core/lookahead.js';
-import { icon } from './icons.js';
-import {
-  selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat,
-  segmented, openModal,
+  selectInput, textInput, badge, emptyState, checkbox, segmented, openModal,
 } from './components.js';
 import {
-  notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
-  isoToMs, nameRegister, foldName,
+  notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs,
 } from './rc_util.js';
 import { toISO, addDays } from '../core/dates.js';
 
-import { la, table, WEEK_CHOICES } from './rc_la_state.js';
+import { table } from './rc_la_state.js';
 import { checkNowButton } from './rc_ingest.js';
 import { enhanceTable } from './rc_table.js';
 import { editLines, editsBehind, editors } from '../core/la_edit.js';

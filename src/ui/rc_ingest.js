@@ -8,27 +8,17 @@
  *          components, rc_util.
  */
 
-import { el, clear } from '../core/util.js';
+import { el } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
-import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
-import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
-import { saveFile } from '../io/exporters.js';
-import {
-  keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
-  reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes,
-} from '../core/lookahead.js';
+import { parseSheet, applyLegend, readLegend } from '../io/lookahead.js';
+import { classify, countable, readGrid, rowsFrom, reassignments } from '../core/lookahead.js';
 import { icon } from './icons.js';
-import {
-  selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat,
-} from './components.js';
-import {
-  notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
-  isoToMs, nameRegister, foldName,
-} from './rc_util.js';
+import { toast } from './components.js';
+import { notifyChanged, todayISO, isoToMs, nameRegister, foldName } from './rc_util.js';
 import { toISO, addDays } from '../core/dates.js';
 
-import { la, table, WEEK_CHOICES } from './rc_la_state.js';
+import { la } from './rc_la_state.js';
 import { gridFromModel, windowDays, addDaysISO, mondayOf, SECTION_BAND } from '../core/la_edit.js';
 import { hash64 } from '../core/folder_rules.js';
 
@@ -46,6 +36,8 @@ const LOOKAHEAD_DIR = 'lookahead';
  * re-stamps a file when it syncs whether or not anybody edited it — so
  * timestamps alone would manufacture a snapshot, and therefore a change event,
  * out of a sync.
+ *
+ * @param {{ sheetName?: string, legend?: any[], silent?: boolean }} [options]
  */
 export async function ingest({ sheetName, legend, silent = false } = {}) {
   /* Once the look-ahead is written in the calendar, the workbook is the old
@@ -219,6 +211,8 @@ export function publishDays(todayIso) {
  * editor calls this whenever it has saved and gone quiet, and most of those
  * calls find nothing new. The section band's grey is put in the legend as a
  * divider the first time, because that is how `readGrid()` knows a heading.
+ *
+ * @param {{ model?: object, title?: string, silent?: boolean }} [options]  `model` is the editor's.
  */
 export async function publishFromEditor({ model, title = '', silent = true } = {}) {
   let legend = (await rc.listLegend().catch(() => []))

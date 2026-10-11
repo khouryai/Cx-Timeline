@@ -112,6 +112,7 @@ export function xmlEscape(s) {
     .replace(/"/g, '&quot;')
     // Characters XML 1.0 cannot carry at all; a pasted control character would
     // otherwise make the whole file unreadable.
+    // eslint-disable-next-line no-control-regex -- matching them is the point
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '');
 }
 

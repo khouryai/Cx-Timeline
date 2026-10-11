@@ -33,6 +33,7 @@ import * as lookahead from './lookahead.js';
 import * as timeoff from './timeoff.js';
 import * as more from './more.js';
 
+/** @type {Array<{ id: string, label: string, icon: string, render: (view: HTMLElement, options?: object) => any }>} */
 const TABS = [
   { id: 'week', label: 'My week', icon: 'calendar-check', render: week.render },
   { id: 'lookahead', label: 'Look-ahead', icon: 'calendar', render: lookahead.render },

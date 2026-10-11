@@ -5,29 +5,23 @@
  *          rc_util, rc_la_state, rc_ingest.
  */
 
-import { el, clear } from '../core/util.js';
+import { el } from '../core/util.js';
 import * as rc from '../core/rc.js';
-import * as filestore from '../core/filestore.js';
-import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
-import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
+import { applyLegend, isDark } from '../io/lookahead.js';
 import { saveFile } from '../io/exporters.js';
-import {
-  keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
-  reassignments, ABSENCE_LABELS, describeCodeCounts, isCancelMeaning,
-} from '../core/lookahead.js';
+import { readGrid, rowsFrom, describeCodeCounts, isCancelMeaning } from '../core/lookahead.js';
 import { cancellationWorkbook } from '../io/la_xlsx.js';
 import { monthLabel, weekdayLetter, isWeekend } from '../core/la_edit.js';
 import { icon } from './icons.js';
 import {
-  selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat,
+  selectInput, toast, badge, emptyState, checkbox, confirmDialog, chipStat,
 } from './components.js';
 import {
-  notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
-  isoToMs, nameRegister, foldName, cancellationLog,
+  notifyChanged, dayLabel, todayISO, formModal, isoToMs, cancellationLog,
 } from './rc_util.js';
 import { toISO, addDays } from '../core/dates.js';
 
-import { la, table, WEEK_CHOICES } from './rc_la_state.js';
+import { la, table } from './rc_la_state.js';
 import { checkNowButton } from './rc_ingest.js';
 
 /* ══════════════════════════════════════════════════════════════════════════

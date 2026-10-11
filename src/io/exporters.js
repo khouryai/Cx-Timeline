@@ -10,10 +10,9 @@
  */
 
 import { download, slug, stripHtml, bytes } from '../core/util.js';
-import { toISO, fmtDate } from '../core/dates.js';
+import { toISO } from '../core/dates.js';
 import {
-  TYPES, statusOf, subsystemOf, durationDays, projectExtent, effectiveToday, LINK_TYPES,
-  comparedRange,
+  TYPES, statusOf, subsystemOf, durationDays, projectExtent, LINK_TYPES, comparedRange,
 } from '../core/model.js';
 import { getDoc, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
 import { filterPredicate } from '../core/query.js';
@@ -90,6 +89,7 @@ export function exportJson({ pretty = true } = {}) {
    CSV
    ═══════════════════════════════════════════════════════════════════════ */
 
+/** @type {Array<[string, (o: any, ctx: any) => any]>} */
 const CSV_COLUMNS = [
   ['id', (o) => o.id],
   ['type', (o) => TYPES[o.type]?.label || o.type],
@@ -258,7 +258,8 @@ function makeScene(opts = {}) {
 
   // "Visible" means what is on screen now, which is usually what someone
   // means when they export while looking at a particular quarter.
-  let range = cfg.range === 'visible' ? visibleRange() : undefined;
+  /** @type {[number, number] | undefined} */
+  let range = cfg.range === 'visible' ? /** @type {[number, number]} */ (visibleRange()) : undefined;
   if (Array.isArray(opts.range)) range = opts.range;
 
   return buildScene(doc, {

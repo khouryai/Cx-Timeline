@@ -14,7 +14,6 @@
  */
 
 import { el, clear, uid, bytes, download, pickFiles } from '../core/util.js';
-import { emit, EV } from '../core/events.js';
 import { fmtTimestamp } from '../core/dates.js';
 import { putBlob, getBlob, deleteBlob, isFallback } from '../core/storage.js';
 import { getDoc, getObject, updateObject, addAttachmentRecord, removeAttachmentRecord, getAttachment } from '../core/store.js';

@@ -104,7 +104,7 @@ function renderItem(item) {
  * refuses large data: URLs in <img>, and blob: has no length limit.
  *
  * @param {string} svg
- * @param {{scale?:number, type?:string, quality?:number, background?:string}} opts
+ * @param {{scale?:number, type?:string, quality?:number, background?:string, width?:number, height?:number}} opts
  * @returns {Promise<Blob>}
  */
 export function svgToRaster(svg, { scale = 2, type = 'image/png', quality = 0.94, background = null, width, height } = {}) {

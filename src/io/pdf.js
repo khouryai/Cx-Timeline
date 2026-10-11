@@ -258,6 +258,7 @@ class Page {
  * @param {string} [opts.title]
  * @param {string} [opts.subtitle]
  * @param {boolean} [opts.multiPage] Tile horizontally when the plan is wide.
+ * @param {string} [opts.author]   The document's /Author.
  * @returns {Blob}
  */
 export function sceneToPdf(scene, opts = {}) {
@@ -403,7 +404,6 @@ export function fitToPdf(scene, opts = {}) {
   const size = pageBox(opts);
   const margin = opts.margin ?? 26;
   const headerH = opts.title || opts.subtitle ? 34 : 12;
-  const footerH = 18;
   const contentW = size.w - margin * 2;
   const scale = fitScale(scene, opts);
 

@@ -10,31 +10,13 @@
  *          icons, components, lists, notes, attachments.
  */
 
-import { el, clear, debounce, clamp, escapeHtml } from '../core/util.js';
+import { el, clear, debounce, clamp } from '../core/util.js';
 import { on, emit, EV } from '../core/events.js';
 import { toISO, toMs, fmtDate, fmtDuration, daysBetween, MS_DAY } from '../core/dates.js';
 import {
-  TYPES,
-  listOptions,
-  p6Dates,
-  p6Variance,
-  p6Register,
-  p6LinkedIds,
-  p6RollUp,
-  lookaheadRegister,
-  laLinkedIds,
-  laRollUp,
-  laVariance,
-  LINK_TYPES,
-  CONNECTOR_STYLES,
-  durationDays,
-  endForDuration,
-  countsWorkingDays,
-  remainingDays,
-  statusOf,
-  effectiveToday,
-  isDerivedBaseline,
-  delayReason,
+  TYPES, p6Dates, p6Variance, p6Register, p6LinkedIds, p6RollUp, lookaheadRegister, laLinkedIds,
+  laRollUp, laVariance, LINK_TYPES, CONNECTOR_STYLES, durationDays, endForDuration,
+  countsWorkingDays, remainingDays, statusOf, effectiveToday, isDerivedBaseline, delayReason,
   notesShown,
 } from '../core/model.js';
 import * as store from '../core/store.js';
@@ -42,28 +24,12 @@ import { objectHealth, linkViolations, evaluateLink } from '../core/analysis.js'
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
 import {
-  field,
-  textInput,
-  numberInput,
-  selectInput,
-  checkbox,
-  toggle,
-  rangeInput,
-  segmented,
-  section,
-  colorControl,
-  iconPicker,
-  popover,
-  closePopover,
-  emptyState,
-  badge,
-  chipStat,
-  confirmDialog,
-  contextMenu,
+  field, textInput, numberInput, selectInput, checkbox, toggle, rangeInput, segmented, section,
+  colorControl, iconPicker, popover, closePopover, emptyState, chipStat, confirmDialog,
   openPicker,
 } from './components.js';
 import { managedSelect, suggestInput } from './lists.js';
-import { openNoteEditor, renderNote, notePreview } from './notes.js';
+import { openNoteEditor, renderNote } from './notes.js';
 import { resolveViolation, toggleLinkHidden } from './commands.js';
 import { attachmentList } from './attachments.js';
 
@@ -88,7 +54,7 @@ let pendingRender = false;
  * should refresh immediately.
  */
 function isTypingInPanel() {
-  const active = document.activeElement;
+  const active = /** @type {HTMLInputElement | null} */ (document.activeElement);
   if (!host || !active || !host.contains(active)) return false;
   const tag = active.tagName.toLowerCase();
   if (tag === 'textarea' || active.isContentEditable) return true;
@@ -1096,8 +1062,6 @@ function renderMulti(objects) {
   const ids = objects.map((o) => o.id);
   headerFor('Selection', `${objects.length} objects`);
 
-  const first = objects[0];
-  const allSameType = objects.every((o) => o.type === first.type);
 
   bodyEl.append(
     el('div', { style: { padding: '11px 12px', borderBottom: '1px solid var(--border)', display: 'flex', flexWrap: 'wrap', gap: '6px' } }, [

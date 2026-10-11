@@ -17,14 +17,16 @@
 
 import { el, clear, rafBatch, withAlpha, readableInk, clamp } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
-import { MS_DAY, ticks, fmtDate, toISO, isoWeek, startOfDay } from '../core/dates.js';
-import { TYPES, statusOf, objectColor, effectiveToday, durationDays, subsystemOf } from '../core/model.js';
-import { getDoc, getSelection, isSelected, getFilters, hasActiveFilters, activeBaseline } from '../core/store.js';
+import { ticks, fmtDate, toISO } from '../core/dates.js';
+import { TYPES, statusOf, objectColor, effectiveToday } from '../core/model.js';
+import {
+  getDoc, getSelection, getFilters, hasActiveFilters, activeBaseline,
+} from '../core/store.js';
 import { filterPredicate, dateWindowPredicate } from '../core/query.js';
-import { linkViolations, criticalPath, predecessorsOf } from '../core/analysis.js';
+import { linkViolations, predecessorsOf } from '../core/analysis.js';
 import * as viewport from './viewport.js';
-import { computeLayout, stageHeight, ROW_HEIGHT } from './layout.js';
-import { fontString, textWidth, wrapText, resetTextCache } from './text.js';
+import { computeLayout, stageHeight } from './layout.js';
+import { fontString, textWidth, resetTextCache } from './text.js';
 import { routeAll, renderConnectors } from './connectors.js';
 import { icon } from '../ui/icons.js';
 

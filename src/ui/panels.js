@@ -11,61 +11,14 @@
  *          theme.
  */
 
-import { el, clear, debounce, bytes, download } from '../core/util.js';
+import { el, clear, debounce } from '../core/util.js';
 import { on, emit, EV } from '../core/events.js';
-import { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } from '../core/dates.js';
-import {
-  TYPES,
-  listOptions,
-  typeGroups,
-  statusOf,
-  subsystemOf,
-  durationDays,
-  effectiveToday,
-  makeBaseline,
-  makeProject,
-  isDerivedBaseline,
-} from '../core/model.js';
-import * as store from '../core/store.js';
-import { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } from '../core/storage.js';
-import * as cloud from '../core/cloud.js';
-import * as filestore from '../core/filestore.js';
-import * as access from '../core/access.js';
-import { search, summarise, facet, filterPredicate } from '../core/query.js';
-import { criticalPath, compareBaseline, projectHealth, objectHealth, slipByLane, linkViolations, evaluateLink } from '../core/analysis.js';
-import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
-import {
-  field,
-  textInput,
-  numberInput,
-  selectInput,
-  checkbox,
-  toggle,
-  segmented,
-  section,
-  emptyState,
-  badge,
-  chipStat,
-  confirmDialog,
-  promptDialog,
-  skeleton,
-  toast,
-  openModal,
-  progressBar,
-  contextMenu,
-} from './components.js';
-import * as cmd from './commands.js';
-import { listEditor } from './lists.js';
-import { openShareDialog, paneTeam } from './auth.js';
+import { paneTeam } from './auth.js';
 import { paneP6 } from './p6.js';
 import { paneLookahead } from './lookahead.js';
-import { openObjectDialog, openLaneDialog } from './dialogs.js';
-import { THEMES, applyTheme, getTheme } from './theme.js';
 import * as exporters from '../io/exporters.js';
-import { importFile, buildDocFromRows } from '../io/importers.js';
-import { pickFiles } from '../core/util.js';
 
 import { paneLanes, panePalette, paneOutline, paneReleases, paneCampaigns, paneRisks, paneLinks,
   paneBaselines, paneLegendSettings, paneHistory } from './pane_plan.js';
@@ -96,7 +49,7 @@ let pendingRender = false;
  * excluded so choosing one refreshes the pane immediately.
  */
 function isTypingInDock() {
-  const active_ = document.activeElement;
+  const active_ = /** @type {HTMLInputElement | null} */ (document.activeElement);
   if (!dockEl || !active_ || !dockEl.contains(active_)) return false;
   const tag = active_.tagName.toLowerCase();
   if (tag === 'textarea' || active_.isContentEditable) return true;

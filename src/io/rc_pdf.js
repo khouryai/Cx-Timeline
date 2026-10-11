@@ -31,7 +31,7 @@
 
 import { fitToPdf, fitScale, pageBox, textWidth, PAGE_SIZES } from './pdf.js';
 import { isDark } from './lookahead.js';
-import { marksOf, ABSENCE_LABELS } from '../core/lookahead.js';
+import { ABSENCE_LABELS } from '../core/lookahead.js';
 
 /* ── Metrics, in points at scale 1 ─────────────────────────────────────── */
 

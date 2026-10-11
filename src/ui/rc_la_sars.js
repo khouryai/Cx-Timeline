@@ -4,27 +4,14 @@
  * Imports: util, rc, filestore, components, rc_util, rc_la_state.
  */
 
-import { el, clear } from '../core/util.js';
+import { el } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
-import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
-import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
-import { saveFile } from '../io/exporters.js';
-import {
-  keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
-  reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes,
-} from '../core/lookahead.js';
 import { icon } from './icons.js';
-import {
-  selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat,
-} from './components.js';
-import {
-  notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
-  isoToMs, nameRegister, foldName,
-} from './rc_util.js';
-import { toISO, addDays } from '../core/dates.js';
+import { selectInput, textInput, toast, checkbox } from './components.js';
+import { notifyChanged, byId, formModal } from './rc_util.js';
 
-import { la, table, WEEK_CHOICES } from './rc_la_state.js';
+import { table } from './rc_la_state.js';
 
 const SAR_INBOX = 'sars/inbox';
 /** Where a recorded SAR is filed, under the week it authorised. */

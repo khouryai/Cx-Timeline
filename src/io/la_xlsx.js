@@ -63,6 +63,7 @@ function lines(text, width) {
  * @param {object[]} o.codes   `{ code, name, party }` — the support codes, keyed too
  * @param {string} o.title
  * @param {string} o.sheetName
+ * @param {boolean} [o.resources]  Write each activity's names row under it (default true).
  */
 export function lookaheadWorkbook({ model, days, legend = [], codes = [], title = '', sheetName = '4WLA', resources = true }) {
   const L = LAYOUT;

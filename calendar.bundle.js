@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-11T20:47:33.093Z
+ * Modules: 28   Built: 2026-10-11T20:59:57.546Z
  */
 (function () {
   'use strict';
@@ -1863,6 +1863,7 @@ __mods["core/la_edit.js"] = function (__x, __req) {
         const cells = cellList(model).filter((c) => c.row_id === op.id);
         for (const c of cells) model.cells.delete(cellKey(c.row_id, c.day));
         model.rows.splice(at, 1);
+        /** @type {object[]} */
         const restore = [{ op: 'row', id: row.id, set: pick(row, ROW_FIELDS) }];
         for (const c of cells) restore.push({ op: 'cell', row_id: c.row_id, day: c.day, color: c.color || null, text: c.text || '' });
         inverse.push(...restore.reverse());
@@ -1921,7 +1922,7 @@ __mods["core/la_edit.js"] = function (__x, __req) {
       if (want.has(c.row_id)) ops.push({ op: 'cell', row_id: c.row_id, day: c.day, color: null, text: '' });
     }
     // Children before parents: a Resource row points at its activity.
-    const rows = model.rows.filter((r) => want.has(r.id)).sort((a, b) => (b.kind === 'resource') - (a.kind === 'resource'));
+    const rows = model.rows.filter((r) => want.has(r.id)).sort((a, b) => Number(b.kind === 'resource') - Number(a.kind === 'resource'));
     for (const r of rows) ops.push({ op: 'delete_row', id: r.id });
     return ops;
   }
@@ -1989,7 +1990,7 @@ __mods["core/la_edit.js"] = function (__x, __req) {
       cells.push({ op: 'cell', row_id: e.row_id, day, color, text });
     }
 
-    const creates = restoreRows.sort((a, b) => ((a.set.kind === 'resource') - (b.set.kind === 'resource')));
+    const creates = restoreRows.sort((a, b) => Number(a.set.kind === 'resource') - Number(b.set.kind === 'resource'));
     const removals = deleteOps(model, removeRows.map((r) => r.id));
     return [...creates, ...cells, ...removals];
   }
@@ -2228,6 +2229,9 @@ __mods["core/la_edit.js"] = function (__x, __req) {
    * Blanket, Cancellation — because the editor paints with nothing else. Shading,
    * section bands and colours nobody has named are counted in the report and
    * left behind, never guessed at.
+   *
+   * @param {object} view
+   * @param {{ fromISO?: string, toISO?: string | null, legend?: any[] }} [options]
    */
   function modelFromView(view, { fromISO, toISO = null, legend = [] } = {}) {
     const shift = new Map();
@@ -2239,6 +2243,7 @@ __mods["core/la_edit.js"] = function (__x, __req) {
     const inWindow = (date) => date && date >= fromISO && (!toISO || date <= toISO);
     const idx = fieldIndexes(view.headings, view.meta);
 
+    /** @type {any[]} */
     const pending = []; // rows in sheet order, each with its cells
     const cellsOf = (marks, keepColour) => {
       const out = [];
@@ -2396,6 +2401,9 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   /**
    * A cell's value in words: the legend's meaning for its colour, then its text.
    * `meaningOf(hex)` is injected — the legend lives with the calendar.
+   *
+   * @param {{ color?: string | null, text?: string } | null} value
+   * @param {(hex: string) => string} [meaningOf]
    */
   function describeCellValue(value, meaningOf = () => '') {
     if (!value) return 'empty';
@@ -2694,6 +2702,10 @@ __mods["core/la_edit.js"] = function (__x, __req) {
    * Returns `{ issues, byCell }`: every clash as
    * `{ row_id, day, person_id, name, kind, detail }`, and the same keyed by
    * `row_id|day` for drawing.
+   *
+   * @param {object} model
+   * @param {string[]} days
+   * @param {{ resolve?: (written: string) => any, leave?: any[], isShift?: (hex: string) => boolean, shiftOf?: (hex: string) => string }} [options]
    */
   function staffingIssues(model, days, {
     resolve, leave = [], isShift = (hex) => !!hex, shiftOf = (hex) => hex,
@@ -3371,7 +3383,7 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
 
   const { el, clear } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
-  const { toISO, addDays, todayMs } = __req("core/dates.js");
+  const { toISO, addDays } = __req("core/dates.js");
   const rc = __req("core/rc.js");
   const { icon } = __req("ui/icons.js");
   const { selectInput, textInput, toast, badge, checkbox } = __req("ui/components.js");
@@ -5215,7 +5227,7 @@ __mods["ui/rc_settings.js"] = function (__x, __req) {
 
     /* ── What this is ───────────────────────────────────────────────────── */
     list.appendChild(group('About'));
-    const status = await rc.schemaStatus().catch(() => ({ state: 'unknown' }));
+    const status = await rc.schemaStatus().catch(() => ({ state: 'unknown', expected: rc.SCHEMA_VERSION, found: null }));
     list.appendChild(row({
       label: 'Database version',
       hint: status.state === 'behind'
@@ -6937,7 +6949,7 @@ __mods["io/rc_pdf.js"] = function (__x, __req) {
 
   const { fitToPdf, fitScale, pageBox, textWidth, PAGE_SIZES } = __req("io/pdf.js");
   const { isDark } = __req("io/lookahead.js");
-  const { marksOf, ABSENCE_LABELS } = __req("core/lookahead.js");
+  const { ABSENCE_LABELS } = __req("core/lookahead.js");
 
   /* ── Metrics, in points at scale 1 ─────────────────────────────────────── */
 
@@ -7391,27 +7403,17 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
    *          components, rc_util.
    */
 
-  const { el, clear } = __req("core/util.js");
+  const { el } = __req("core/util.js");
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
-  const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
-  const { calendarPdf, calendarFit, PAGE_CHOICES } = __req("io/rc_pdf.js");
-  const { saveFile } = __req("io/exporters.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes } = __req("core/lookahead.js");
-
-
-
+  const { parseSheet, applyLegend, readLegend } = __req("io/lookahead.js");
+  const { classify, countable, readGrid, rowsFrom, reassignments } = __req("core/lookahead.js");
   const { icon } = __req("ui/icons.js");
-  const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
-
-
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName } = __req("ui/rc_util.js");
-
-
-
+  const { toast } = __req("ui/components.js");
+  const { notifyChanged, todayISO, isoToMs, nameRegister, foldName } = __req("ui/rc_util.js");
   const { toISO, addDays } = __req("core/dates.js");
 
-  const { la, table, WEEK_CHOICES } = __req("ui/rc_la_state.js");
+  const { la } = __req("ui/rc_la_state.js");
   const { gridFromModel, windowDays, addDaysISO, mondayOf, SECTION_BAND } = __req("core/la_edit.js");
   const { hash64 } = __req("core/folder_rules.js");
 
@@ -7429,6 +7431,8 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
    * re-stamps a file when it syncs whether or not anybody edited it — so
    * timestamps alone would manufacture a snapshot, and therefore a change event,
    * out of a sync.
+   *
+   * @param {{ sheetName?: string, legend?: any[], silent?: boolean }} [options]
    */
   async function ingest({ sheetName, legend, silent = false } = {}) {
     /* Once the look-ahead is written in the calendar, the workbook is the old
@@ -7602,6 +7606,8 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
    * editor calls this whenever it has saved and gone quiet, and most of those
    * calls find nothing new. The section band's grey is put in the legend as a
    * divider the first time, because that is how `readGrid()` knows a heading.
+   *
+   * @param {{ model?: object, title?: string, silent?: boolean }} [options]  `model` is the editor's.
    */
   async function publishFromEditor({ model, title = '', silent = true } = {}) {
     let legend = (await rc.listLegend().catch(() => []))
@@ -8184,6 +8190,7 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
       .replace(/"/g, '&quot;')
       // Characters XML 1.0 cannot carry at all; a pasted control character would
       // otherwise make the whole file unreadable.
+      // eslint-disable-next-line no-control-regex -- matching them is the point
       .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '');
   }
 
@@ -8404,6 +8411,7 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
    * @param {object[]} o.codes   `{ code, name, party }` — the support codes, keyed too
    * @param {string} o.title
    * @param {string} o.sheetName
+   * @param {boolean} [o.resources]  Write each activity's names row under it (default true).
    */
   function lookaheadWorkbook({ model, days, legend = [], codes = [], title = '', sheetName = '4WLA', resources = true }) {
     const L = LAYOUT;
@@ -8844,7 +8852,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     undo: [],
     redo: [],
     queue: [],
-    saving: false,
+    saving: null, // the save under way, if any
     status: 'saved', // saved | saving | retry | conflict
     retryIn: 0,
     server: new Map(), // 'row:<id>' | 'cell:<row>|<day>' → the version the server holds
@@ -10108,7 +10116,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
 
   function commitEdit() {
     if (!E.editing) return;
-    const { input, r, c, row } = E.editing;
+    const { input, c, row } = E.editing;
     let value = input.value;
     cancelEdit();
     if (!E.model.rows.some((x) => x.id === row.id)) return;
@@ -10693,12 +10701,19 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     return { before: top[at].sort, after: top[at + 1]?.sort ?? null };
   }
 
+  /**
+   * @param {string} kind
+   * @param {string} [where]
+   * @param {Object<string, any>} [extra]  Fields the new row starts with.
+   */
   function insertRow(kind, where = 'below', extra = {}) {
     cancelEdit();
     const { before, after } = insertionPoint(where);
     const id = ed.newId();
+    /** @type {Object<string, any>} */
     const set = { kind, sort: ed.sortBetween(before, after), ...extra };
     if (kind === 'section') set.description = extra.description ?? 'New section';
+    /** @type {object[]} */
     const ops = [{ op: 'row', id, set }];
     if (kind === 'activity') ops.push({ op: 'row', id: ed.newId(), set: { kind: 'resource', parent_id: id, sort: set.sort + 0.001 } });
     commit(ops);
@@ -10723,6 +10738,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     const sort = ed.sortBetween(row.sort, top[at + 1]?.sort ?? null);
     const id = ed.newId();
     const { id: _, version, ...fields } = row;
+    /** @type {object[]} */
     const ops = [{ op: 'row', id, set: { ...fields, sort } }];
     for (const c of ed.cellList(E.model).filter((x) => x.row_id === row.id)) {
       ops.push({ op: 'cell', row_id: id, day: c.day, color: c.color, text: c.text });
@@ -11974,6 +11990,10 @@ __mods["core/tawr.js"] = function (__x, __req) {
    * and shift), the location, the activities with their days, one entry per day
    * worked with its combined hours, the support asked for, the SSWP numbers, the
    * work description, and its flags.
+   *
+   * @param {object} view
+   * @param {string} weekStart
+   * @param {{ resolveLocation?: (raw: string) => any, codes?: any[], descriptions?: any[], shiftHours?: object }} [options]
    */
   function extractWeek(view, weekStart, {
     resolveLocation = () => null, codes = [], descriptions = [], shiftHours = DEFAULT_SHIFT_HOURS,
@@ -12163,6 +12183,9 @@ __mods["core/tawr.js"] = function (__x, __req) {
    * drawn at export, not stored as a field. What the look-ahead cannot say is set
    * to the answer agreed for it: the three Yes/No questions No, Category of Work
    * F, power N/A. Everything left out stays blank for a person to fill.
+   *
+   * @param {object} group
+   * @param {{ settings?: Object<string, any>, profile?: Object<string, any> }} [options]
    */
   function formValues(group, { settings = {}, profile = {} } = {}) {
     const v = {
@@ -12298,29 +12321,14 @@ __mods["ui/rc_la_legend.js"] = function (__x, __req) {
    *          rc_la_state, rc_ingest.
    */
 
-  const { el, clear } = __req("core/util.js");
+  const { el } = __req("core/util.js");
   const rc = __req("core/rc.js");
-  const filestore = __req("core/filestore.js");
-  const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
-  const { calendarPdf, calendarFit, PAGE_CHOICES } = __req("io/rc_pdf.js");
-  const { saveFile } = __req("io/exporters.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes } = __req("core/lookahead.js");
-
-
-
   const { icon } = __req("ui/icons.js");
-  const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
-
-
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName } = __req("ui/rc_util.js");
-
-
-
-  const { toISO, addDays } = __req("core/dates.js");
+  const { selectInput, textInput, toast, badge, field, confirmDialog } = __req("ui/components.js");
+  const { notifyChanged, formModal, parsedView } = __req("ui/rc_util.js");
   const { lineOfCode, TAWR_LINES } = __req("core/tawr.js");
 
-  const { la, table, WEEK_CHOICES } = __req("ui/rc_la_state.js");
-  const { checkNowButton } = __req("ui/rc_ingest.js");
+  const { table } = __req("ui/rc_la_state.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      The legend
@@ -12782,7 +12790,7 @@ __mods["ui/rc_table.js"] = function (__x, __req) {
       const x = keyOf(a.cells[index]);
       const y = keyOf(b.cells[index]);
       // Blanks last whichever way round — an empty cell is not the smallest value.
-      if (!x || !y) return (!x) - (!y);
+      if (!x || !y) return Number(!x) - Number(!y);
       const cmp = collator.compare(x, y);
       return ascending ? cmp : -cmp;
     });
@@ -12820,26 +12828,16 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
 
   const { el, clear } = __req("core/util.js");
   const rc = __req("core/rc.js");
-  const filestore = __req("core/filestore.js");
-  const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
-  const { calendarPdf, calendarFit, PAGE_CHOICES } = __req("io/rc_pdf.js");
-  const { saveFile } = __req("io/exporters.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes } = __req("core/lookahead.js");
+  const { relinkCandidates, countable, describe } = __req("core/lookahead.js");
+  const { selectInput, textInput, badge, emptyState, checkbox, segmented, openModal } = __req("ui/components.js");
 
 
-
-  const { icon } = __req("ui/icons.js");
-  const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat, segmented, openModal } = __req("ui/components.js");
-
-
-
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName } = __req("ui/rc_util.js");
-
+  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs } = __req("ui/rc_util.js");
 
 
   const { toISO, addDays } = __req("core/dates.js");
 
-  const { la, table, WEEK_CHOICES } = __req("ui/rc_la_state.js");
+  const { table } = __req("ui/rc_la_state.js");
   const { checkNowButton } = __req("ui/rc_ingest.js");
   const { enhanceTable } = __req("ui/rc_table.js");
   const { editLines, editsBehind, editors } = __req("core/la_edit.js");
@@ -13432,29 +13430,23 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
    *          rc_util, rc_la_state, rc_ingest.
    */
 
-  const { el, clear } = __req("core/util.js");
+  const { el } = __req("core/util.js");
   const rc = __req("core/rc.js");
-  const filestore = __req("core/filestore.js");
-  const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
-  const { calendarPdf, calendarFit, PAGE_CHOICES } = __req("io/rc_pdf.js");
+  const { applyLegend, isDark } = __req("io/lookahead.js");
   const { saveFile } = __req("io/exporters.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, describeCodeCounts, isCancelMeaning } = __req("core/lookahead.js");
-
-
-
+  const { readGrid, rowsFrom, describeCodeCounts, isCancelMeaning } = __req("core/lookahead.js");
   const { cancellationWorkbook } = __req("io/la_xlsx.js");
   const { monthLabel, weekdayLetter, isWeekend } = __req("core/la_edit.js");
   const { icon } = __req("ui/icons.js");
-  const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
+  const { selectInput, toast, badge, emptyState, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
 
 
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName, cancellationLog } = __req("ui/rc_util.js");
-
+  const { notifyChanged, dayLabel, todayISO, formModal, isoToMs, cancellationLog } = __req("ui/rc_util.js");
 
 
   const { toISO, addDays } = __req("core/dates.js");
 
-  const { la, table, WEEK_CHOICES } = __req("ui/rc_la_state.js");
+  const { la, table } = __req("ui/rc_la_state.js");
   const { checkNowButton } = __req("ui/rc_ingest.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -14037,27 +14029,14 @@ __mods["ui/rc_la_sars.js"] = function (__x, __req) {
    * Imports: util, rc, filestore, components, rc_util, rc_la_state.
    */
 
-  const { el, clear } = __req("core/util.js");
+  const { el } = __req("core/util.js");
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
-  const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
-  const { calendarPdf, calendarFit, PAGE_CHOICES } = __req("io/rc_pdf.js");
-  const { saveFile } = __req("io/exporters.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes } = __req("core/lookahead.js");
-
-
-
   const { icon } = __req("ui/icons.js");
-  const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
+  const { selectInput, textInput, toast, checkbox } = __req("ui/components.js");
+  const { notifyChanged, byId, formModal } = __req("ui/rc_util.js");
 
-
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName } = __req("ui/rc_util.js");
-
-
-
-  const { toISO, addDays } = __req("core/dates.js");
-
-  const { la, table, WEEK_CHOICES } = __req("ui/rc_la_state.js");
+  const { table } = __req("ui/rc_la_state.js");
 
   const SAR_INBOX = 'sars/inbox';
   /** Where a recorded SAR is filed, under the week it authorised. */
@@ -14350,26 +14329,20 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
   const { el, clear } = __req("core/util.js");
   const rc = __req("core/rc.js");
-  const filestore = __req("core/filestore.js");
-  const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
+  const { isDark } = __req("io/lookahead.js");
   const { calendarPdf, calendarFit, PAGE_CHOICES } = __req("io/rc_pdf.js");
   const { saveFile } = __req("io/exporters.js");
-  const { keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf, reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes, isCancelMeaning, rowsNaming, resourceNames, cancellationNoteFor, cancellationReasonText } = __req("core/lookahead.js");
-
+  const { marksOf, ABSENCE_LABELS, isCancelMeaning, rowsNaming, resourceNames, cancellationNoteFor, cancellationReasonText } = __req("core/lookahead.js");
 
 
 
   const { icon } = __req("ui/icons.js");
-  const { selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
-
-
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, nameRegister, foldName, meMatcher, codeNodes } = __req("ui/rc_util.js");
+  const { selectInput, textInput, toast, emptyState, field, checkbox } = __req("ui/components.js");
+  const { notifyChanged, dayLabel, todayISO, formModal, parsedView, foldName, meMatcher, codeNodes } = __req("ui/rc_util.js");
 
 
 
-  const { toISO, addDays } = __req("core/dates.js");
-
-  const { la, table, WEEK_CHOICES } = __req("ui/rc_la_state.js");
+  const { la, WEEK_CHOICES } = __req("ui/rc_la_state.js");
   const { checkNowButton, lookaheadSource, EDITOR_SOURCE } = __req("ui/rc_ingest.js");
   const { renderEditor, flushEditor, openExcelExport } = __req("ui/rc_la_editor.js");
   const { renderLegend } = __req("ui/rc_la_legend.js");
@@ -18552,8 +18525,6 @@ __mods["ui/rc_tawr.js"] = function (__x, __req) {
   }
 
   /* ── Everything a request is made from ─────────────────────────────────── */
-
-  const settingValue = (rows, key) => rows.find((r) => r.key === key)?.value ?? '';
 
   async function loadContext() {
     const [snapshot, legend, locations, aliases, codes, descriptions, settingsRows, profiles] = await Promise.all([

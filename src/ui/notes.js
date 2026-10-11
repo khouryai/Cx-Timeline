@@ -14,9 +14,9 @@
  * Imports: util, icons, components.
  */
 
-import { el, clear, debounce, stripHtml, readFileAsDataURL, pickFiles, bytes } from '../core/util.js';
+import { el, debounce, stripHtml, readFileAsDataURL, pickFiles, bytes } from '../core/util.js';
 import { icon } from './icons.js';
-import { openModal, toast, popover, closePopover, promptDialog } from './components.js';
+import { openModal, toast, promptDialog } from './components.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
    Sanitiser
@@ -133,7 +133,7 @@ const TOOLBAR = [
 
 /**
  * Build an editor surface.
- * @returns {{root:HTMLElement, getHtml:Function, setHtml:Function, focus:Function}}
+ * @returns {{root:HTMLElement, getHtml:Function, setHtml:Function, focus:Function, surface:HTMLElement}}
  */
 export function noteEditor({ value = '', onChange = null, minHeight = 220 } = {}) {
   const surface = el('div', {
@@ -287,10 +287,6 @@ async function runCustom(kind, surface, exec, emitChange) {
  */
 export function openNoteEditor({ title, value, onSave }) {
   const editor = noteEditor({ value, minHeight: 320 });
-  let current = value;
-  editor.root.addEventListener('input', () => {
-    current = editor.getHtml();
-  });
 
   openModal({
     title: `Notes — ${title}`,

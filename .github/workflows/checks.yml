@@ -60,6 +60,26 @@ jobs:
           done
           exit $status
 
+  # The rules that catch a mistake rather than a preference — a name nothing
+  # defines, an import nothing reads, dead code (eslint.config.js) — and the
+  # JSDoc read as types (tsconfig.json): a call with the wrong arguments, an
+  # option nobody documented. No build step: nothing is emitted, the bundle is
+  # still the linker's.
+  lint:
+    name: Lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      - run: npm run lint
+      - run: npm run typecheck
+
   # This job needs `package-lock.json` committed, and for a long time it was
   # not: `.gitignore` held it, so `cache: npm` failed at setup, every suite step
   # was *skipped*, and the run went red in forty seconds looking exactly like a

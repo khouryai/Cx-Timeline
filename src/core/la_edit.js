@@ -556,6 +556,7 @@ export function applyOps(model, ops) {
       const cells = cellList(model).filter((c) => c.row_id === op.id);
       for (const c of cells) model.cells.delete(cellKey(c.row_id, c.day));
       model.rows.splice(at, 1);
+      /** @type {object[]} */
       const restore = [{ op: 'row', id: row.id, set: pick(row, ROW_FIELDS) }];
       for (const c of cells) restore.push({ op: 'cell', row_id: c.row_id, day: c.day, color: c.color || null, text: c.text || '' });
       inverse.push(...restore.reverse());
@@ -614,7 +615,7 @@ export function deleteOps(model, ids) {
     if (want.has(c.row_id)) ops.push({ op: 'cell', row_id: c.row_id, day: c.day, color: null, text: '' });
   }
   // Children before parents: a Resource row points at its activity.
-  const rows = model.rows.filter((r) => want.has(r.id)).sort((a, b) => (b.kind === 'resource') - (a.kind === 'resource'));
+  const rows = model.rows.filter((r) => want.has(r.id)).sort((a, b) => Number(b.kind === 'resource') - Number(a.kind === 'resource'));
   for (const r of rows) ops.push({ op: 'delete_row', id: r.id });
   return ops;
 }
@@ -682,7 +683,7 @@ export function restoreOps(model, edits) {
     cells.push({ op: 'cell', row_id: e.row_id, day, color, text });
   }
 
-  const creates = restoreRows.sort((a, b) => ((a.set.kind === 'resource') - (b.set.kind === 'resource')));
+  const creates = restoreRows.sort((a, b) => Number(a.set.kind === 'resource') - Number(b.set.kind === 'resource'));
   const removals = deleteOps(model, removeRows.map((r) => r.id));
   return [...creates, ...cells, ...removals];
 }
@@ -921,6 +922,9 @@ function fieldIndexesByHeading(headings) {
  * Blanket, Cancellation — because the editor paints with nothing else. Shading,
  * section bands and colours nobody has named are counted in the report and
  * left behind, never guessed at.
+ *
+ * @param {object} view
+ * @param {{ fromISO?: string, toISO?: string | null, legend?: any[] }} [options]
  */
 export function modelFromView(view, { fromISO, toISO = null, legend = [] } = {}) {
   const shift = new Map();
@@ -932,6 +936,7 @@ export function modelFromView(view, { fromISO, toISO = null, legend = [] } = {})
   const inWindow = (date) => date && date >= fromISO && (!toISO || date <= toISO);
   const idx = fieldIndexes(view.headings, view.meta);
 
+  /** @type {any[]} */
   const pending = []; // rows in sheet order, each with its cells
   const cellsOf = (marks, keepColour) => {
     const out = [];
@@ -1089,6 +1094,9 @@ export function rowHistory(edits, rowId) {
 /**
  * A cell's value in words: the legend's meaning for its colour, then its text.
  * `meaningOf(hex)` is injected — the legend lives with the calendar.
+ *
+ * @param {{ color?: string | null, text?: string } | null} value
+ * @param {(hex: string) => string} [meaningOf]
  */
 export function describeCellValue(value, meaningOf = () => '') {
   if (!value) return 'empty';
@@ -1387,6 +1395,10 @@ export function editors(edits) {
  * Returns `{ issues, byCell }`: every clash as
  * `{ row_id, day, person_id, name, kind, detail }`, and the same keyed by
  * `row_id|day` for drawing.
+ *
+ * @param {object} model
+ * @param {string[]} days
+ * @param {{ resolve?: (written: string) => any, leave?: any[], isShift?: (hex: string) => boolean, shiftOf?: (hex: string) => string }} [options]
  */
 export function staffingIssues(model, days, {
   resolve, leave = [], isShift = (hex) => !!hex, shiftOf = (hex) => hex,

@@ -810,6 +810,8 @@ export const SCHEMA_VERSION = 11;
  * desktop copy that has not fetched its update yet. A read that fails answers
  * `unknown` rather than guessing: the calendar has its own ways of saying the
  * database is unreachable, and a second one here would only compete.
+ *
+ * @returns {Promise<{ state: string, expected: number, found?: number | null }>}
  */
 export async function schemaStatus() {
   let rows;

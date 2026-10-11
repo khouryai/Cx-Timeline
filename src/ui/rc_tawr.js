@@ -66,8 +66,6 @@ async function getTemplate() {
 
 /* ── Everything a request is made from ─────────────────────────────────── */
 
-const settingValue = (rows, key) => rows.find((r) => r.key === key)?.value ?? '';
-
 async function loadContext() {
   const [snapshot, legend, locations, aliases, codes, descriptions, settingsRows, profiles] = await Promise.all([
     rc.latestSnapshot().catch(() => null),

@@ -14,7 +14,7 @@
  */
 
 import { el, clear } from '../core/util.js';
-import { on, emit, EV } from '../core/events.js';
+import { on, EV } from '../core/events.js';
 import * as cloud from '../core/cloud.js';
 import * as filestore from '../core/filestore.js';
 import * as access from '../core/access.js';

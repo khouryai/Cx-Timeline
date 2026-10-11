@@ -30,7 +30,7 @@ let shown = '';
 export function installCanvasHint(frame) {
   box = el('div', { class: 'canvas-hint', hidden: true, role: 'status' });
   frame.appendChild(box);
-  on(EV.RENDER_DONE, ({ objects } = {}) => update(objects));
+  on(EV.RENDER_DONE, (/** @type {{ objects?: number }} */ { objects } = {}) => update(objects));
 }
 
 function action(label, iconName, run, primary = false) {

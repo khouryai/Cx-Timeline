@@ -19,7 +19,9 @@ import {
 import * as store from '../core/store.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
-import { openModal, field, textInput, numberInput, selectInput, rangeInput, toast, badge } from './components.js';
+import {
+  openModal, field, textInput, numberInput, selectInput, rangeInput, toast,
+} from './components.js';
 import { managedSelect, suggestInput } from './lists.js';
 import { noteEditor } from './notes.js';
 import { attachmentList } from './attachments.js';

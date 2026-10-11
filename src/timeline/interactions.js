@@ -14,7 +14,9 @@
 
 import { clamp, closestData, el, hasMod, isTyping } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
-import { MS_DAY, snap as snapMs, fmtDate, toISO, addMonths, addWeeks, addWorkingDays } from '../core/dates.js';
+import {
+  MS_DAY, snap as snapMs, fmtDate, addMonths, addWeeks, addWorkingDays,
+} from '../core/dates.js';
 import { TYPES, LINK_TYPES, linkTypeBetween } from '../core/model.js';
 import * as store from '../core/store.js';
 import * as viewport from './viewport.js';

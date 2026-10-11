@@ -15,7 +15,7 @@
  */
 
 import { clamp, withAlpha, readableInk } from '../core/util.js';
-import { MS_DAY, ticks, fmtDate, toISO, startOfDay, addDays } from '../core/dates.js';
+import { MS_DAY, ticks, fmtDate, toISO } from '../core/dates.js';
 import {
   TYPES, statusOf, objectColor, effectiveToday, projectExtent, LINK_TYPES, durationDays,
   baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange,
@@ -228,6 +228,11 @@ function solid(color, palette, fallback = '#5b93f5') {
  * @param {boolean} [opts.showLinks]
  * @param {boolean} [opts.showToday]
  * @param {boolean} [opts.showLegend]
+ * @param {boolean} [opts.showDates]    The date line under each label.
+ * @param {boolean} [opts.showNotes]    Notes written on objects.
+ * @param {boolean} [opts.showProgress] The progress fill on a bar.
+ * @param {boolean} [opts.showBaseline] Draw the comparison with a baseline.
+ * @param {string}  [opts.baselineId]   Which baseline; the active one when absent.
  * @param {Function} [opts.filter]   Object predicate.
  * @param {object} [opts.palette]
  * @returns {{width:number, height:number, items:Array, meta:object}}

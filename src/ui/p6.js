@@ -22,7 +22,7 @@
 
 import { el, clear, debounce, fold } from '../core/util.js';
 import { on, emit, EV } from '../core/events.js';
-import { fmtDate, fmtTimestamp, MS_DAY } from '../core/dates.js';
+import { fmtDate, fmtTimestamp } from '../core/dates.js';
 import {
   TYPES,
   p6Register,
@@ -42,20 +42,8 @@ import { readP6File, reconcile } from '../io/p6.js';
 import * as cmd from './commands.js';
 import { icon } from './icons.js';
 import {
-  openModal,
-  openPicker,
-  field,
-  textInput,
-  selectInput,
-  segmented,
-  checkbox,
-  section,
-  emptyState,
-  badge,
-  chipStat,
-  toast,
-  confirmDialog,
-  skeleton,
+  openModal, openPicker, field, textInput, selectInput, segmented, checkbox, emptyState, badge,
+  chipStat, toast, confirmDialog, skeleton,
 } from './components.js';
 
 /* ══════════════════════════════════════════════════════════════════════════

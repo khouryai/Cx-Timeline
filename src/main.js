@@ -20,7 +20,7 @@ import { debounce } from './core/util.js';
 import { on, emit, EV } from './core/events.js';
 import { projectExtent, effectiveToday } from './core/model.js';
 import * as store from './core/store.js';
-import { init as initStorage, takeRecovery, getPref, setPref, saveNow, isHosted } from './core/storage.js';
+import { init as initStorage, takeRecovery, saveNow } from './core/storage.js';
 import * as cloud from './core/cloud.js';
 import * as filestore from './core/filestore.js';
 import * as desktop from './core/desktop.js';
@@ -48,7 +48,7 @@ import { lockPlan, setAccount } from './core/access.js';
 import * as exporters from './io/exporters.js';
 import * as cmd from './ui/commands.js';
 import { toast, showTooltip, hideTooltip, confirmDialog } from './ui/components.js';
-import { renderNote, notePreview } from './ui/notes.js';
+import { renderNote } from './ui/notes.js';
 import { TYPES, statusOf, durationDays } from './core/model.js';
 import { fmtDate, fmtDuration, setDateOrder, getDateOrder } from './core/dates.js';
 import { el } from './core/util.js';
@@ -524,7 +524,7 @@ function installFolderHandling() {
  * resolves to nothing.
  */
 function installDesktopShell() {
-  window.addEventListener('cx-shell-update', (event) => {
+  window.addEventListener('cx-shell-update', (/** @type {CustomEvent} */ event) => {
     const version = event.detail?.version || '';
     toast({
       tone: 'info',
@@ -792,7 +792,7 @@ function installClipboardBridge() {
     if (!e.dataTransfer?.files?.length) return;
     // Panels handle their own drops; anything reaching the document is a
     // project file the user wants to open.
-    if (e.target.closest('.att-drop')) return;
+    if (/** @type {Element} */ (e.target).closest('.att-drop')) return;
     e.preventDefault();
     emit('ui:file-dropped', { file: e.dataTransfer.files[0] });
     toast({

@@ -20,26 +20,20 @@
 
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
-import * as filestore from '../core/filestore.js';
-import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
+import { isDark } from '../io/lookahead.js';
 import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
 import { saveFile } from '../io/exporters.js';
 import {
-  keyRows, classify, relinkCandidates, countable, describe, readGrid, rowsFrom, marksOf,
-  reassignments, ABSENCE_LABELS, cancellationEvents, attachCancellationNotes, isCancelMeaning,
-  rowsNaming, resourceNames, cancellationNoteFor, cancellationReasonText,
+  marksOf, ABSENCE_LABELS, isCancelMeaning, rowsNaming, resourceNames, cancellationNoteFor,
+  cancellationReasonText,
 } from '../core/lookahead.js';
 import { icon } from './icons.js';
+import { selectInput, textInput, toast, emptyState, field, checkbox } from './components.js';
 import {
-  selectInput, textInput, toast, badge, emptyState, field, checkbox, confirmDialog, chipStat,
-} from './components.js';
-import {
-  notifyChanged, byId, dayLabel, todayISO, formModal, parsedView,
-  isoToMs, nameRegister, foldName, meMatcher, codeNodes,
+  notifyChanged, dayLabel, todayISO, formModal, parsedView, foldName, meMatcher, codeNodes,
 } from './rc_util.js';
-import { toISO, addDays } from '../core/dates.js';
 
-import { la, table, WEEK_CHOICES } from './rc_la_state.js';
+import { la, WEEK_CHOICES } from './rc_la_state.js';
 import { checkNowButton, lookaheadSource, EDITOR_SOURCE } from './rc_ingest.js';
 import { renderEditor, flushEditor, openExcelExport } from './rc_la_editor.js';
 import { renderLegend } from './rc_la_legend.js';

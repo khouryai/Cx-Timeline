@@ -169,7 +169,7 @@ export async function renderSettings(host) {
 
   /* ── What this is ───────────────────────────────────────────────────── */
   list.appendChild(group('About'));
-  const status = await rc.schemaStatus().catch(() => ({ state: 'unknown' }));
+  const status = await rc.schemaStatus().catch(() => ({ state: 'unknown', expected: rc.SCHEMA_VERSION, found: null }));
   list.appendChild(row({
     label: 'Database version',
     hint: status.state === 'behind'

@@ -14,7 +14,6 @@ import { projectExtent, objectColor, effectiveToday, TYPES } from '../core/model
 import { getDoc, orderedLanes, getSettings } from '../core/store.js';
 import * as viewport from '../timeline/viewport.js';
 import * as renderer from '../timeline/renderer.js';
-import { icon } from './icons.js';
 
 let root = null;
 let body = null;

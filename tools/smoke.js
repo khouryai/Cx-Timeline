@@ -146,6 +146,19 @@ async function main() {
   await page.keyboard.press('Control+z');
   await page.waitForTimeout(250);
 
+  // The project's name typed letter by letter is one step of undo, as every
+  // other field typed into is (the inspector passes a mergeKey to setMeta).
+  const nameTyped = await page.evaluate(() => {
+    const store = window.__CX_MODULES.req('core/store.js');
+    const name = store.getDoc().name;
+    const depth = store.historyState().depth;
+    for (const typed of ['P', 'Pl', 'Pla', 'Plan']) store.setMeta({ name: typed }, 'Rename project', { mergeKey: 'projname' });
+    const steps = store.historyState().depth - depth;
+    store.undo();
+    return { steps, restored: store.getDoc().name === name };
+  });
+  check('a project name typed letter by letter is one step of undo', nameTyped.steps === 1 && nameTyped.restored, JSON.stringify(nameTyped));
+
   console.log('\nTyping in panels');
   // Regression: every keystroke writes to the store, which used to rebuild the
   // panel and throw focus out of the input after a single character.

@@ -227,8 +227,8 @@ export function renderConnectors(svg, routed, { selectedLinkIds = new Set(), onS
 
     if (item.label) {
       const text = document.createElementNS(SVG_NS, 'text');
-      text.setAttribute('x', item.mid.x);
-      text.setAttribute('y', item.mid.y - 4);
+      text.setAttribute('x', String(item.mid.x));
+      text.setAttribute('y', String(item.mid.y - 4));
       text.setAttribute('text-anchor', 'middle');
       text.setAttribute('class', 'tl-link-label' + (item.violated ? ' violated' : ''));
       text.textContent = item.label;

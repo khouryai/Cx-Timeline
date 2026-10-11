@@ -113,7 +113,7 @@ function sortBy(table, index) {
     const x = keyOf(a.cells[index]);
     const y = keyOf(b.cells[index]);
     // Blanks last whichever way round — an empty cell is not the smallest value.
-    if (!x || !y) return (!x) - (!y);
+    if (!x || !y) return Number(!x) - Number(!y);
     const cmp = collator.compare(x, y);
     return ascending ? cmp : -cmp;
   });

@@ -325,7 +325,7 @@ function taskCard(entry, iso, ctx) {
             type: 'button',
             html: `${icon('trash', { size: 14 })}<span>Remove</span>`,
             'aria-label': `Remove ${entry.task || 'this task'} from ${dayLabel(iso, 'day')}`,
-            onClick: () => withdraw(entry, iso, ctx),
+            onClick: () => withdraw(entry, iso),
           })
           : null,
       ])
@@ -357,6 +357,8 @@ function rowLabel(row, locs) {
  * fills the rest in and keeps the link, which is what later lets a block be
  * recorded against the row BART scheduled. `alsoOn` offers the week's other
  * working days, so one form covers a stint.
+ *
+ * @param {{ title: string, confirmLabel: string, values?: Object<string, any>, note?: string | null, sheetRows?: any[], alsoOn?: string[], ctx: any, onSave: Function }} options
  */
 function taskForm({
   title, confirmLabel, values = {}, note = null, sheetRows = [], alsoOn = [], ctx, onSave,

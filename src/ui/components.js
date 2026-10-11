@@ -9,7 +9,7 @@
  * Imports: util, events, icons.
  */
 
-import { el, clear, escapeHtml, uid, IS_MAC, clamp, fold } from '../core/util.js';
+import { el, clear, uid, IS_MAC, clamp, fold } from '../core/util.js';
 import { on, EV } from '../core/events.js';
 import { icon, searchIcons, hasIcon } from './icons.js';
 
@@ -29,6 +29,7 @@ const modalStack = [];
  * @param {Array}  [opts.actions]          [{label, kind, onClick, autofocus}]
  * @param {string} [opts.size]             '' | 'wide' | 'xl'
  * @param {Function} [opts.onClose]
+ * @param {boolean} [opts.dismissible]  false: a click outside or Escape does not close it.
  * @returns {{close:Function, root:HTMLElement, body:HTMLElement}}
  */
 export function openModal(opts) {
@@ -143,8 +144,9 @@ export function modalOpen() {
   return modalStack.length > 0;
 }
 
-/* ── Confirm / prompt ──────────────────────────────────────────────────── */
-
+/* ── Confirm / prompt ────────────────────────────────────────────────────
+ * @param {{ title: string, message?: any, confirmLabel?: string, cancelLabel?: string, danger?: boolean }} options
+ */
 export function confirmDialog({ title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false }) {
   return new Promise((resolve) => {
     let settled = false;
@@ -162,6 +164,7 @@ export function confirmDialog({ title, message, confirmLabel = 'Confirm', cancel
   });
 }
 
+/** @param {{ title: string, label?: string, value?: string, placeholder?: string, multiline?: boolean, confirmLabel?: string }} options */
 export function promptDialog({ title, label, value = '', placeholder = '', multiline = false, confirmLabel = 'Save' }) {
   return new Promise((resolve) => {
     const input = multiline
@@ -482,6 +485,7 @@ export function field(label, control, hint) {
   ]);
 }
 
+/** @param {{ value?: any, placeholder?: string, type?: string, onInput?: Function, onChange?: Function, mini?: boolean, [attr: string]: any }} options */
 export function textInput({ value = '', placeholder = '', type = 'text', onInput, onChange, mini = false, ...rest }) {
   const input = el('input', {
     class: 'cx-input' + (mini ? ' mini' : ''),
@@ -495,6 +499,7 @@ export function textInput({ value = '', placeholder = '', type = 'text', onInput
   return input;
 }
 
+/** @param {{ value?: number, min?: number, max?: number, step?: number, onChange?: Function, mini?: boolean }} options */
 export function numberInput({ value = 0, min, max, step = 1, onChange, mini = false }) {
   const input = el('input', { class: 'cx-input' + (mini ? ' mini' : ''), type: 'number', min, max, step });
   input.value = value;
@@ -502,6 +507,7 @@ export function numberInput({ value = 0, min, max, step = 1, onChange, mini = fa
   return input;
 }
 
+/** @param {{ value?: any, options: any[], onChange?: Function, mini?: boolean, placeholder?: string, disabled?: boolean }} options */
 export function selectInput({ value, options, onChange, mini = false, placeholder, disabled = false }) {
   const select = el('select', { class: 'cx-select' + (mini ? ' mini' : '') });
   // A field with one possible answer is shown, not hidden: "Resource: you" says
@@ -517,12 +523,14 @@ export function selectInput({ value, options, onChange, mini = false, placeholde
   return select;
 }
 
+/** @param {{ value?: string, onChange?: Function }} options */
 export function colorInput({ value = '#5b93f5', onChange }) {
   const input = el('input', { class: 'cx-color', type: 'color', value: value || '#5b93f5' });
   if (onChange) input.addEventListener('input', () => onChange(input.value));
   return input;
 }
 
+/** @param {{ label: any, checked?: boolean, onChange?: Function }} options */
 export function checkbox({ label, checked = false, onChange }) {
   const input = el('input', { type: 'checkbox' });
   input.checked = !!checked;
@@ -530,6 +538,7 @@ export function checkbox({ label, checked = false, onChange }) {
   return el('label', { class: 'cx-check' }, [input, el('span', { text: label })]);
 }
 
+/** @param {{ label: any, checked?: boolean, onChange?: Function }} options */
 export function toggle({ label, checked = false, onChange }) {
   const input = el('input', { type: 'checkbox' });
   input.checked = !!checked;
@@ -537,6 +546,7 @@ export function toggle({ label, checked = false, onChange }) {
   return el('label', { class: 'cx-switch' }, [input, el('span', { text: label })]);
 }
 
+/** @param {{ value?: number, min?: number, max?: number, step?: number, onInput?: Function, onChange?: Function }} options */
 export function rangeInput({ value = 0, min = 0, max = 100, step = 1, onInput, onChange }) {
   const input = el('input', { class: 'cx-range', type: 'range', min, max, step });
   input.value = value;
@@ -545,7 +555,11 @@ export function rangeInput({ value = 0, min = 0, max = 100, step = 1, onInput, o
   return input;
 }
 
-/** Segmented button row. `options` = [{value, label, icon, title}] */
+/**
+ * Segmented button row. `options` = [{value, label, icon, title}]
+ *
+ * @param {{ value?: any, options: any[], onChange?: Function, stretch?: boolean }} options
+ */
 export function segmented({ value, options, onChange, stretch = false }) {
   const wrap = el('div', { class: 'cx-seg' + (stretch ? ' stretch' : ''), role: 'group' });
   for (const opt of options) {
@@ -586,7 +600,11 @@ export function section(title, children, { collapsed = false, actions = null, id
   return wrap;
 }
 
-/** Empty-state block. */
+/**
+ * Empty-state block.
+ *
+ * @param {{ iconName?: string, title: string, message?: any, action?: { label: string, onClick: Function } | null }} options
+ */
 export function emptyState({ iconName = 'inbox', title, message, action }) {
   return el('div', { class: 'cx-empty' }, [
     hasIcon(iconName) ? el('div', { class: 'ce-icon', html: icon(iconName, { size: 26 }) }) : null,
@@ -719,6 +737,7 @@ export function chipStat(label, value, tone = 'muted') {
 /**
  * Searchable icon grid. Calls `onPick(name)` and returns the panel element,
  * ready to drop into a popover or modal.
+ * @param {{ value?: string, onPick?: Function }} options
  */
 export function iconPicker({ value, onPick }) {
   const search = el('input', { class: 'cx-input mini', type: 'search', placeholder: 'Search icons…' });
@@ -764,6 +783,7 @@ export const PALETTE = [
   '#ffffff', '#e5e7eb', '#9ca3af', '#6b7280', '#4b5563', '#374151', '#1f2937', '#111827', '#0b0f1a', '#000000',
 ];
 
+/** @param {{ value?: string, onPick?: Function, colors?: string[] }} options */
 export function swatchGrid({ value, onPick, colors = PALETTE }) {
   const grid = el('div', { class: 'cx-swatches' });
   for (const color of colors) {
@@ -780,7 +800,11 @@ export function swatchGrid({ value, onPick, colors = PALETTE }) {
   return grid;
 }
 
-/** Colour control: swatch input plus the shared palette in a popover. */
+/**
+ * Colour control: swatch input plus the shared palette in a popover.
+ *
+ * @param {{ value?: string, onChange?: Function, allowInherit?: boolean }} options
+ */
 export function colorControl({ value, onChange, allowInherit = false }) {
   const swatch = el('input', { class: 'cx-color', type: 'color', value: value || '#5b93f5' });
   swatch.addEventListener('input', () => onChange(swatch.value));

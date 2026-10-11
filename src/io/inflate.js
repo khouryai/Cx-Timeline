@@ -106,7 +106,6 @@ function fixedTrees() {
  */
 export function inflateRaw(data) {
   const reader = new BitReader(data);
-  const out = [];
   let output = new Uint8Array(Math.max(1024, data.length * 4));
   let length = 0;
 

@@ -33,13 +33,11 @@ import { isReadOnly } from './cloud.js';
 import { isViewer as folderViewer } from './filestore.js';
 import { planLocked, readView, writeView } from './access.js';
 import {
-  normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES,
-  syncLists, defaultLists, LIST_DEFS, listUsage,
-  emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds,
-  p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, isDerivedBaseline,
-  syncDurationBasis,
-  emptyLookahead, lookaheadRegister, lookaheadActivity, makeLookaheadEntry, laLinkedIds,
-  laPlacedIds, laRollUp,
+  normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists,
+  defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity,
+  p6Dates, p6PlacedIds, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot,
+  syncDurationBasis, emptyLookahead, lookaheadRegister, lookaheadActivity, makeLookaheadEntry,
+  laLinkedIds, laPlacedIds, laRollUp,
 } from './model.js';
 import { History, diff, apply } from './history.js';
 /* A leaf: only the pure reconciliation of one read of the sheet against the
@@ -877,10 +875,13 @@ export function setViewState(patch) {
   }, 'view');
 }
 
-export function setMeta(patch, label = 'Edit project details') {
+export function setMeta(patch, label = 'Edit project details', opts = {}) {
+  // `opts` reaches `edit()`: the inspector's name field passes a mergeKey so a
+  // name typed letter by letter is one step of undo, and it used to be dropped
+  // here — every keystroke was its own.
   return edit(label, (d) => {
     Object.assign(d, patch);
-  });
+  }, opts);
 }
 
 /* ── Baselines ─────────────────────────────────────────────────────────── */

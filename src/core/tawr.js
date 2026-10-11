@@ -387,6 +387,10 @@ function codeRegister(codes) {
  * and shift), the location, the activities with their days, one entry per day
  * worked with its combined hours, the support asked for, the SSWP numbers, the
  * work description, and its flags.
+ *
+ * @param {object} view
+ * @param {string} weekStart
+ * @param {{ resolveLocation?: (raw: string) => any, codes?: any[], descriptions?: any[], shiftHours?: object }} [options]
  */
 export function extractWeek(view, weekStart, {
   resolveLocation = () => null, codes = [], descriptions = [], shiftHours = DEFAULT_SHIFT_HOURS,
@@ -576,6 +580,9 @@ const supportText = (items) => items.map((s) => (s.count > 1 ? `${s.count} x ${s
  * drawn at export, not stored as a field. What the look-ahead cannot say is set
  * to the answer agreed for it: the three Yes/No questions No, Category of Work
  * F, power N/A. Everything left out stays blank for a person to fill.
+ *
+ * @param {object} group
+ * @param {{ settings?: Object<string, any>, profile?: Object<string, any> }} [options]
  */
 export function formValues(group, { settings = {}, profile = {} } = {}) {
   const v = {

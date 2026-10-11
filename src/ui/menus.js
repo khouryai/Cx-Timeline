@@ -9,17 +9,17 @@
  *          commands, notes, panels.
  */
 
-import { on, emit, EV } from '../core/events.js';
-import { fmtDate, MS_DAY } from '../core/dates.js';
-import { TYPES, listOptions, typeGroups, statusOf } from '../core/model.js';
+import { on, EV } from '../core/events.js';
+import { fmtDate } from '../core/dates.js';
+import { TYPES, listOptions, typeGroups } from '../core/model.js';
 import * as store from '../core/store.js';
 import * as renderer from '../timeline/renderer.js';
-import { icon } from './icons.js';
-import { contextMenu, confirmDialog, promptDialog, toast, colorControl, popover, closePopover } from './components.js';
+import {
+  contextMenu, confirmDialog, promptDialog, toast, colorControl, popover,
+} from './components.js';
 import * as cmd from './commands.js';
 import { openListManager } from './lists.js';
 import { openNoteEditor } from './notes.js';
-import { showPane } from './panels.js';
 import { linkViolations } from '../core/analysis.js';
 import { openObjectDialog } from './dialogs.js';
 
@@ -126,6 +126,7 @@ function violationItems(obj) {
 function statusItems(obj) {
   // The whole list, in the user's own order: which statuses suit which type
   // is a judgement only the project can make now that the list is editable.
+  /** @type {any[]} */
   const items = listOptions('status').map((option) => ({
     label: option.label + (obj.status === option.id ? '  ✓' : ''),
     onClick: () => cmd.setStatus(option.id),
@@ -167,6 +168,7 @@ function openNotes(obj) {
 
 function canvasMenu({ ms, laneId, clientX, clientY }) {
   const lane = store.getLane(laneId);
+  /** @type {any[]} */
   const items = [
     { heading: `${fmtDate(ms, 'dayFull')}${lane ? ' · ' + lane.name : ''}` },
   ];

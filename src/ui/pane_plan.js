@@ -4,63 +4,27 @@
  * Split out of `ui/panels.js`; see `ui/pane_util.js` for how a pane reaches the dock.
  */
 
-import { el, clear, debounce, bytes, download } from '../core/util.js';
-import { on, emit, EV } from '../core/events.js';
-import { fmtDate, fmtTimestamp, fmtDuration, toISO, toMs, MS_DAY, DATE_ORDERS } from '../core/dates.js';
+import { el } from '../core/util.js';
+import { emit } from '../core/events.js';
+import { fmtDate, fmtTimestamp } from '../core/dates.js';
 import {
-  TYPES,
-  listOptions,
-  typeGroups,
-  statusOf,
-  subsystemOf,
-  durationDays,
-  effectiveToday,
-  makeBaseline,
-  makeProject,
-  isDerivedBaseline,
+  TYPES, typeGroups, statusOf, subsystemOf, effectiveToday, isDerivedBaseline,
 } from '../core/model.js';
 import * as store from '../core/store.js';
-import { listBackups, loadBackup, deleteBackup, makeBackup, usage, refreshBackupSchedule, isFallback, collectGarbage, switchProject, createCloudProject, isHosted, isFileMode, purgeLocalCopy } from '../core/storage.js';
-import * as cloud from '../core/cloud.js';
-import * as filestore from '../core/filestore.js';
-import * as access from '../core/access.js';
-import { search, summarise, facet, filterPredicate } from '../core/query.js';
-import { criticalPath, compareBaseline, projectHealth, objectHealth, slipByLane, linkViolations, evaluateLink } from '../core/analysis.js';
-import * as viewport from '../timeline/viewport.js';
+import { summarise } from '../core/query.js';
+import {
+  criticalPath, compareBaseline, projectHealth, objectHealth, linkViolations,
+} from '../core/analysis.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
 import {
-  field,
-  textInput,
-  numberInput,
-  selectInput,
-  checkbox,
-  toggle,
-  segmented,
-  section,
-  emptyState,
-  badge,
-  chipStat,
-  confirmDialog,
-  promptDialog,
-  skeleton,
-  toast,
-  openModal,
-  progressBar,
-  contextMenu,
+  field, toggle, segmented, section, emptyState, chipStat, confirmDialog, toast, progressBar,
 } from './components.js';
 import * as cmd from './commands.js';
-import { listEditor } from './lists.js';
-import { openShareDialog, paneTeam } from './auth.js';
-import { paneP6 } from './p6.js';
-import { paneLookahead } from './lookahead.js';
 import { openObjectDialog, openLaneDialog } from './dialogs.js';
-import { THEMES, applyTheme, getTheme } from './theme.js';
 import * as exporters from '../io/exporters.js';
-import { importFile, buildDocFromRows } from '../io/importers.js';
-import { pickFiles } from '../core/util.js';
 
-import { refreshPane, goToPane, iconBtn, statRow } from './pane_util.js';
+import { refreshPane, goToPane, iconBtn } from './pane_util.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
    Lanes
@@ -217,7 +181,6 @@ export function paneReleases(root) {
 export function paneCampaigns(root) {
   const doc = store.getDoc();
   const campaigns = doc.objects.filter((o) => o.type === 'campaign' || o.type === 'testwindow').sort((a, b) => a.start - b.start);
-  const today = effectiveToday(doc);
 
   renderObjectRegister(root, campaigns, {
     emptyTitle: 'No campaigns',

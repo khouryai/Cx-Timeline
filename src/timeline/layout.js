@@ -25,7 +25,7 @@
 import { clamp } from '../core/util.js';
 import { MS_DAY, daysBetween } from '../core/dates.js';
 import {
-  TYPES, objectRange, baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange,
+  TYPES, baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange,
 } from '../core/model.js';
 import { getDoc, orderedLanes, getLane, activeBaseline } from '../core/store.js';
 import { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } from './viewport.js';

@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 20   Built: 2026-10-11T20:47:33.120Z
+ * Modules: 20   Built: 2026-10-11T20:59:57.568Z
  */
 (function () {
   'use strict';
@@ -1659,6 +1659,8 @@ __mods["core/rc.js"] = function (__x, __req) {
    * desktop copy that has not fetched its update yet. A read that fails answers
    * `unknown` rather than guessing: the calendar has its own ways of saying the
    * database is unreachable, and a second one here would only compete.
+   *
+   * @returns {Promise<{ state: string, expected: number, found?: number | null }>}
    */
   async function schemaStatus() {
     let rows;
@@ -2816,7 +2818,7 @@ __mods["ui/components.js"] = function (__x, __req) {
    * Imports: util, events, icons.
    */
 
-  const { el, clear, escapeHtml, uid, IS_MAC, clamp, fold } = __req("core/util.js");
+  const { el, clear, uid, IS_MAC, clamp, fold } = __req("core/util.js");
   const { on, EV } = __req("core/events.js");
   const { icon, searchIcons, hasIcon } = __req("ui/icons.js");
 
@@ -2836,6 +2838,7 @@ __mods["ui/components.js"] = function (__x, __req) {
    * @param {Array}  [opts.actions]          [{label, kind, onClick, autofocus}]
    * @param {string} [opts.size]             '' | 'wide' | 'xl'
    * @param {Function} [opts.onClose]
+   * @param {boolean} [opts.dismissible]  false: a click outside or Escape does not close it.
    * @returns {{close:Function, root:HTMLElement, body:HTMLElement}}
    */
   function openModal(opts) {
@@ -2950,8 +2953,9 @@ __mods["ui/components.js"] = function (__x, __req) {
     return modalStack.length > 0;
   }
 
-  /* ── Confirm / prompt ──────────────────────────────────────────────────── */
-
+  /* ── Confirm / prompt ────────────────────────────────────────────────────
+   * @param {{ title: string, message?: any, confirmLabel?: string, cancelLabel?: string, danger?: boolean }} options
+   */
   function confirmDialog({ title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false }) {
     return new Promise((resolve) => {
       let settled = false;
@@ -2969,6 +2973,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     });
   }
 
+  /** @param {{ title: string, label?: string, value?: string, placeholder?: string, multiline?: boolean, confirmLabel?: string }} options */
   function promptDialog({ title, label, value = '', placeholder = '', multiline = false, confirmLabel = 'Save' }) {
     return new Promise((resolve) => {
       const input = multiline
@@ -3289,6 +3294,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     ]);
   }
 
+  /** @param {{ value?: any, placeholder?: string, type?: string, onInput?: Function, onChange?: Function, mini?: boolean, [attr: string]: any }} options */
   function textInput({ value = '', placeholder = '', type = 'text', onInput, onChange, mini = false, ...rest }) {
     const input = el('input', {
       class: 'cx-input' + (mini ? ' mini' : ''),
@@ -3302,6 +3308,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     return input;
   }
 
+  /** @param {{ value?: number, min?: number, max?: number, step?: number, onChange?: Function, mini?: boolean }} options */
   function numberInput({ value = 0, min, max, step = 1, onChange, mini = false }) {
     const input = el('input', { class: 'cx-input' + (mini ? ' mini' : ''), type: 'number', min, max, step });
     input.value = value;
@@ -3309,6 +3316,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     return input;
   }
 
+  /** @param {{ value?: any, options: any[], onChange?: Function, mini?: boolean, placeholder?: string, disabled?: boolean }} options */
   function selectInput({ value, options, onChange, mini = false, placeholder, disabled = false }) {
     const select = el('select', { class: 'cx-select' + (mini ? ' mini' : '') });
     // A field with one possible answer is shown, not hidden: "Resource: you" says
@@ -3324,12 +3332,14 @@ __mods["ui/components.js"] = function (__x, __req) {
     return select;
   }
 
+  /** @param {{ value?: string, onChange?: Function }} options */
   function colorInput({ value = '#5b93f5', onChange }) {
     const input = el('input', { class: 'cx-color', type: 'color', value: value || '#5b93f5' });
     if (onChange) input.addEventListener('input', () => onChange(input.value));
     return input;
   }
 
+  /** @param {{ label: any, checked?: boolean, onChange?: Function }} options */
   function checkbox({ label, checked = false, onChange }) {
     const input = el('input', { type: 'checkbox' });
     input.checked = !!checked;
@@ -3337,6 +3347,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     return el('label', { class: 'cx-check' }, [input, el('span', { text: label })]);
   }
 
+  /** @param {{ label: any, checked?: boolean, onChange?: Function }} options */
   function toggle({ label, checked = false, onChange }) {
     const input = el('input', { type: 'checkbox' });
     input.checked = !!checked;
@@ -3344,6 +3355,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     return el('label', { class: 'cx-switch' }, [input, el('span', { text: label })]);
   }
 
+  /** @param {{ value?: number, min?: number, max?: number, step?: number, onInput?: Function, onChange?: Function }} options */
   function rangeInput({ value = 0, min = 0, max = 100, step = 1, onInput, onChange }) {
     const input = el('input', { class: 'cx-range', type: 'range', min, max, step });
     input.value = value;
@@ -3352,7 +3364,11 @@ __mods["ui/components.js"] = function (__x, __req) {
     return input;
   }
 
-  /** Segmented button row. `options` = [{value, label, icon, title}] */
+  /**
+   * Segmented button row. `options` = [{value, label, icon, title}]
+   *
+   * @param {{ value?: any, options: any[], onChange?: Function, stretch?: boolean }} options
+   */
   function segmented({ value, options, onChange, stretch = false }) {
     const wrap = el('div', { class: 'cx-seg' + (stretch ? ' stretch' : ''), role: 'group' });
     for (const opt of options) {
@@ -3393,7 +3409,11 @@ __mods["ui/components.js"] = function (__x, __req) {
     return wrap;
   }
 
-  /** Empty-state block. */
+  /**
+   * Empty-state block.
+   *
+   * @param {{ iconName?: string, title: string, message?: any, action?: { label: string, onClick: Function } | null }} options
+   */
   function emptyState({ iconName = 'inbox', title, message, action }) {
     return el('div', { class: 'cx-empty' }, [
       hasIcon(iconName) ? el('div', { class: 'ce-icon', html: icon(iconName, { size: 26 }) }) : null,
@@ -3526,6 +3546,7 @@ __mods["ui/components.js"] = function (__x, __req) {
   /**
    * Searchable icon grid. Calls `onPick(name)` and returns the panel element,
    * ready to drop into a popover or modal.
+   * @param {{ value?: string, onPick?: Function }} options
    */
   function iconPicker({ value, onPick }) {
     const search = el('input', { class: 'cx-input mini', type: 'search', placeholder: 'Search icons…' });
@@ -3571,6 +3592,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     '#ffffff', '#e5e7eb', '#9ca3af', '#6b7280', '#4b5563', '#374151', '#1f2937', '#111827', '#0b0f1a', '#000000',
   ];
 
+  /** @param {{ value?: string, onPick?: Function, colors?: string[] }} options */
   function swatchGrid({ value, onPick, colors = PALETTE }) {
     const grid = el('div', { class: 'cx-swatches' });
     for (const color of colors) {
@@ -3587,7 +3609,11 @@ __mods["ui/components.js"] = function (__x, __req) {
     return grid;
   }
 
-  /** Colour control: swatch input plus the shared palette in a popover. */
+  /**
+   * Colour control: swatch input plus the shared palette in a popover.
+   *
+   * @param {{ value?: string, onChange?: Function, allowInherit?: boolean }} options
+   */
   function colorControl({ value, onChange, allowInherit = false }) {
     const swatch = el('input', { class: 'cx-color', type: 'color', value: value || '#5b93f5' });
     swatch.addEventListener('input', () => onChange(swatch.value));
@@ -5094,6 +5120,9 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    * activities for reference with no shift against them, and writing those would
    * make the register mostly noise — and, worse, make every one of them look
    * like scope the first time it *did* get a shift.
+   *
+   * @param {object} view
+   * @param {{ snapshotId?: string | null, locate?: (raw: string) => Promise<string | null>, locationColumn?: number | null }} [options]
    */
   async function rowsFrom(view, {
     snapshotId = null, locate = async () => null, locationColumn = null,
@@ -5897,6 +5926,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
       groups.get(key).push({ ...d, day });
     }
 
+    /** @type {any[]} */
     const out = [];
     for (const [key, list] of groups) {
       list.sort((a, b) => a.day.localeCompare(b.day));
@@ -5960,6 +5990,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
       groups.get(group).list.push({ ...d, day });
     }
 
+    /** @type {any[]} */
     const out = [];
     for (const { key, codes, list } of groups.values()) {
       list.sort((a, b) => a.day.localeCompare(b.day));
@@ -6323,6 +6354,10 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    * when the axis is undated): `[{ date, col, meaning, hex, shift, cancelled,
    * text, names, mine }]`. `shift` is true when the paint is work; `mine` when
    * `isMe` answers yes for a name on that day.
+   *
+   * @param {object} view
+   * @param {object} activity
+   * @param {{ fromISO?: string | null, isMe?: (name: string) => boolean }} [options]
    */
   function activityDays(view, activity, { fromISO = null, isMe = () => false } = {}) {
     const marks = new Map((activity?.marks || []).map((m) => [m.col, m]));
@@ -6424,6 +6459,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     const usedAdded = new Set();
     const stillRemoved = [];
     for (const r of removed.sort((a, b) => a.date.localeCompare(b.date))) {
+      /** @type {number | null} */
       let best = null;
       let bestGap = Infinity;
       added.forEach((a, i) => {
@@ -6615,7 +6651,6 @@ __mods["io/inflate.js"] = function (__x, __req) {
    */
   function inflateRaw(data) {
     const reader = new BitReader(data);
-    const out = [];
     let output = new Uint8Array(Math.max(1024, data.length * 4));
     let length = 0;
 
@@ -8879,7 +8914,7 @@ __mods["mobile/week.js"] = function (__x, __req) {
               type: 'button',
               html: `${icon('trash', { size: 14 })}<span>Remove</span>`,
               'aria-label': `Remove ${entry.task || 'this task'} from ${dayLabel(iso, 'day')}`,
-              onClick: () => withdraw(entry, iso, ctx),
+              onClick: () => withdraw(entry, iso),
             })
             : null,
         ])
@@ -8911,6 +8946,8 @@ __mods["mobile/week.js"] = function (__x, __req) {
    * fills the rest in and keeps the link, which is what later lets a block be
    * recorded against the row BART scheduled. `alsoOn` offers the week's other
    * working days, so one form covers a stint.
+   *
+   * @param {{ title: string, confirmLabel: string, values?: Object<string, any>, note?: string | null, sheetRows?: any[], alsoOn?: string[], ctx: any, onSave: Function }} options
    */
   function taskForm({
     title, confirmLabel, values = {}, note = null, sheetRows = [], alsoOn = [], ctx, onSave,
@@ -9781,6 +9818,7 @@ __mods["mobile/shell.js"] = function (__x, __req) {
   const timeoff = __req("mobile/timeoff.js");
   const more = __req("mobile/more.js");
 
+  /** @type {Array<{ id: string, label: string, icon: string, render: (view: HTMLElement, options?: object) => any }>} */
   const TABS = [
     { id: 'week', label: 'My week', icon: 'calendar-check', render: week.render },
     { id: 'lookahead', label: 'Look-ahead', icon: 'calendar', render: lookahead.render },

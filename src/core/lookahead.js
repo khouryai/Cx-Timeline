@@ -673,6 +673,9 @@ export function locationColumnOf(view) {
  * activities for reference with no shift against them, and writing those would
  * make the register mostly noise — and, worse, make every one of them look
  * like scope the first time it *did* get a shift.
+ *
+ * @param {object} view
+ * @param {{ snapshotId?: string | null, locate?: (raw: string) => Promise<string | null>, locationColumn?: number | null }} [options]
  */
 export async function rowsFrom(view, {
   snapshotId = null, locate = async () => null, locationColumn = null,
@@ -1476,6 +1479,7 @@ export function cancellationEvents(days, { from = null } = {}) {
     groups.get(key).push({ ...d, day });
   }
 
+  /** @type {any[]} */
   const out = [];
   for (const [key, list] of groups) {
     list.sort((a, b) => a.day.localeCompare(b.day));
@@ -1539,6 +1543,7 @@ export function supportCancellationEvents(days, { from = null } = {}) {
     groups.get(group).list.push({ ...d, day });
   }
 
+  /** @type {any[]} */
   const out = [];
   for (const { key, codes, list } of groups.values()) {
     list.sort((a, b) => a.day.localeCompare(b.day));
@@ -1902,6 +1907,10 @@ export function activityTitle(view, activity) {
  * when the axis is undated): `[{ date, col, meaning, hex, shift, cancelled,
  * text, names, mine }]`. `shift` is true when the paint is work; `mine` when
  * `isMe` answers yes for a name on that day.
+ *
+ * @param {object} view
+ * @param {object} activity
+ * @param {{ fromISO?: string | null, isMe?: (name: string) => boolean }} [options]
  */
 export function activityDays(view, activity, { fromISO = null, isMe = () => false } = {}) {
   const marks = new Map((activity?.marks || []).map((m) => [m.col, m]));
@@ -2003,6 +2012,7 @@ export function changesForMe(beforeRows, afterRows, isMe, { from = null, to = nu
   const usedAdded = new Set();
   const stillRemoved = [];
   for (const r of removed.sort((a, b) => a.date.localeCompare(b.date))) {
+    /** @type {number | null} */
     let best = null;
     let bestGap = Infinity;
     added.forEach((a, i) => {

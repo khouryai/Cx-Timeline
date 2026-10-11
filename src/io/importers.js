@@ -14,7 +14,7 @@
  */
 
 import { readFileAsText, readFileAsArrayBuffer, fold } from '../core/util.js';
-import { toMs, toISO, MS_DAY, addDays, todayMs, getDateOrder } from '../core/dates.js';
+import { toISO, MS_DAY, addDays, todayMs, getDateOrder } from '../core/dates.js';
 import {
   makeProject,
   makeObject,
@@ -100,7 +100,7 @@ async function importCsvFile(file) {
  * exports use semicolons).
  */
 export function splitDelimited(text) {
-  const clean = text.replace(/^﻿/, '');
+  const clean = text.replace(/^\uFEFF/, ''); // a byte-order mark, as Excel writes one
   const sample = clean.slice(0, 4000);
   const counts = {
     ',': (sample.match(/,/g) || []).length,

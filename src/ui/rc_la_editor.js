@@ -78,7 +78,7 @@ const E = {
   undo: [],
   redo: [],
   queue: [],
-  saving: false,
+  saving: null, // the save under way, if any
   status: 'saved', // saved | saving | retry | conflict
   retryIn: 0,
   server: new Map(), // 'row:<id>' | 'cell:<row>|<day>' → the version the server holds
@@ -1342,7 +1342,7 @@ function cancelEdit() {
 
 function commitEdit() {
   if (!E.editing) return;
-  const { input, r, c, row } = E.editing;
+  const { input, c, row } = E.editing;
   let value = input.value;
   cancelEdit();
   if (!E.model.rows.some((x) => x.id === row.id)) return;
@@ -1927,12 +1927,19 @@ function insertionPoint(where = 'below') {
   return { before: top[at].sort, after: top[at + 1]?.sort ?? null };
 }
 
+/**
+ * @param {string} kind
+ * @param {string} [where]
+ * @param {Object<string, any>} [extra]  Fields the new row starts with.
+ */
 function insertRow(kind, where = 'below', extra = {}) {
   cancelEdit();
   const { before, after } = insertionPoint(where);
   const id = ed.newId();
+  /** @type {Object<string, any>} */
   const set = { kind, sort: ed.sortBetween(before, after), ...extra };
   if (kind === 'section') set.description = extra.description ?? 'New section';
+  /** @type {object[]} */
   const ops = [{ op: 'row', id, set }];
   if (kind === 'activity') ops.push({ op: 'row', id: ed.newId(), set: { kind: 'resource', parent_id: id, sort: set.sort + 0.001 } });
   commit(ops);
@@ -1957,6 +1964,7 @@ function duplicateRow(row) {
   const sort = ed.sortBetween(row.sort, top[at + 1]?.sort ?? null);
   const id = ed.newId();
   const { id: _, version, ...fields } = row;
+  /** @type {object[]} */
   const ops = [{ op: 'row', id, set: { ...fields, sort } }];
   for (const c of ed.cellList(E.model).filter((x) => x.row_id === row.id)) {
     ops.push({ op: 'cell', row_id: id, day: c.day, color: c.color, text: c.text });
