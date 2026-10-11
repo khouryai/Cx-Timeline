@@ -45,8 +45,9 @@ import { writeChannel } from './desktop.js';
  * a browser downloads has no use for any of that: about half of the bundles is
  * comment and indentation, so the published copy is minified here, after every
  * literal this script rewrites and before anything is named after its bytes.
- * Identifiers keep their names (`keepNames`), so a reported failure's stack
- * still says which function it was in.
+ * Names are not kept (`keepNames` cost the main bundle a twentieth of its
+ * size): a reported failure records its area and message, never a stack, and
+ * the only `.name` anything reads is a DOMException's, which is the browser's.
  *
  * A dependency, so `npm ci` must have run. Refusing is deliberate: a deploy
  * that quietly fell back to the unminified files would double every download
@@ -66,7 +67,6 @@ function minifyFile(file) {
   const { code } = esbuild.transformSync(source, {
     loader,
     minify: true,
-    keepNames: loader === 'js',
     // The bundles' `/*!` banner says what the file is and that it is generated.
     legalComments: 'inline',
   });

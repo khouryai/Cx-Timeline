@@ -29,7 +29,7 @@ import {
   byId, dayLabel, todayISO, isoToMs, weekStart, goToTab, STATUS_BY_ID, SHIFTS, nameRegister,
   assignmentIndex, availability, lookaheadWithResources, meMatcher, notifyChanged,
 } from './rc_util.js';
-import { changesForMe } from '../core/lookahead.js';
+import { changesForMe } from '../core/la_register.js';
 
 const ABSENCE_WORDS = { pto: 'Off — on the PTO row', office: 'In the office', other: 'On another project' };
 

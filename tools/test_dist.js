@@ -141,6 +141,8 @@ check('it loads the same config and the same calendar client as the site',
    bundle carries the calendar and not one module of the timeline or the plan. */
 const phoneModules = registered(read(phoneBundle || 'missing'));
 check('the phone bundle carries the calendar client', phoneModules.includes('core/rc.js'));
+check('but not the register, which only the calendar\u2019s screens compare readings with',
+  phoneModules.length > 0 && !phoneModules.includes('core/la_register.js'));
 check('and nothing of the timeline or the plan\u2019s storage',
   phoneModules.length > 0 && !phoneModules.some((m) =>
     /^(timeline\/|core\/(store|storage|filestore|cloud|desktop|model)\.js|io\/(exporters|scene|pdf)\.js|main\.js)/.test(m)),
@@ -202,6 +204,9 @@ check('and the main bundle asks for exactly that file',
   Boolean(calendarFile) && read(hashedBundle || '').includes(`"${calendarFile}"`));
 check('so the page nobody opens the calendar on does not carry it',
   registered(read(hashedBundle || '')).length > 0 && !registered(read(hashedBundle || '')).includes('ui/rc.js'));
+check('nor the register the calendar builds from its readings — the timeline reads a sheet, it never compares two',
+  !registered(read(hashedBundle || '')).includes('core/la_register.js')
+    && registered(read(calendarFile || '')).includes('core/la_register.js'));
 
 /* The calendar's own stylesheet travels with it: hashed like every other, named
    in the main bundle where the loader fetches it, and not linked by the page —

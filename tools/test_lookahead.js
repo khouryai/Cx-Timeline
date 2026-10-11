@@ -44,7 +44,12 @@ function throws(name, fn, pattern) {
  * They are loaded rather than bundled so a failure points at the source line.
  */
 const la = await import(path.join(ROOT, 'src/io/lookahead.js'));
-const cls = await import(path.join(ROOT, 'src/core/lookahead.js'));
+// Reading a sheet and the register built from readings are two modules (the
+// register is the calendar's alone); the suites read them as one.
+const cls = {
+  ...(await import(path.join(ROOT, 'src/core/lookahead.js'))),
+  ...(await import(path.join(ROOT, 'src/core/la_register.js'))),
+};
 const pdf = await import(path.join(ROOT, 'src/io/rc_pdf.js'));
 
 /* ══════════════════════════════════════════════════════════════════════════

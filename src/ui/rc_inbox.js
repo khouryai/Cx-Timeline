@@ -25,7 +25,7 @@
 
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
-import { changesForMe } from '../core/lookahead.js';
+import { changesForMe } from '../core/la_register.js';
 import * as ed from '../core/la_edit.js';
 import { icon } from './icons.js';
 import { toast, badge, emptyState } from './components.js';

@@ -7,7 +7,7 @@
 
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
-import { relinkCandidates, countable, describe } from '../core/lookahead.js';
+import { relinkCandidates, countable, describe } from '../core/la_register.js';
 import {
   selectInput, textInput, badge, emptyState, checkbox, segmented, openModal,
 } from './components.js';

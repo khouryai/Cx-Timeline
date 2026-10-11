@@ -20,7 +20,12 @@ import { buildLookaheadWorkbook } from './fixtures/xlsx_fixture.js';
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const ed = await import(path.join(ROOT, 'src/core/la_edit.js'));
 const la = await import(path.join(ROOT, 'src/io/lookahead.js'));
-const cls = await import(path.join(ROOT, 'src/core/lookahead.js'));
+// Reading a sheet and the register built from readings are two modules (the
+// register is the calendar's alone); the suites read them as one.
+const cls = {
+  ...(await import(path.join(ROOT, 'src/core/lookahead.js'))),
+  ...(await import(path.join(ROOT, 'src/core/la_register.js'))),
+};
 
 let passed = 0;
 const failures = [];
