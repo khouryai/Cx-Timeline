@@ -2025,6 +2025,56 @@ async function main() {
   check('project reloads from storage', (await page.evaluate(() => document.querySelector('#toolbar .tt-name').textContent)) === titleBefore);
   check('objects present after reload', (await page.locator('.tl-obj').count()) > 8);
 
+  /* A plan far taller than the screen: only the rows in view, and a margin,
+     get nodes. The plan is put back afterwards, without saving. */
+  console.log('\nA tall plan');
+  const tall = await page.evaluate(async () => {
+    const req = window.__CX_MODULES.req;
+    const store = req('core/store.js');
+    const renderer = req('timeline/renderer.js');
+    const original = JSON.parse(JSON.stringify(store.getDoc()));
+    const doc = JSON.parse(JSON.stringify(original));
+    const proto = doc.objects.find((o) => o.type === 'activity') || doc.objects[0];
+    const lane0 = doc.lanes[0];
+    const t0 = Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`);
+    doc.lanes = [];
+    doc.objects = [];
+    doc.links = [];
+    for (let l = 0; l < 60; l++) {
+      doc.lanes.push({ ...lane0, id: `TL${l}`, name: `Tall lane ${l}`, order: l, collapsed: false, hidden: false });
+      for (let k = 0; k < 20; k++) {
+        const start = t0 + ((k * 3 + l) % 30) * 86400000;
+        doc.objects.push({ ...proto, id: `TO${l}-${k}`, lane: `TL${l}`, title: `Package ${l}.${k}`, start, end: start + 4 * 86400000 });
+      }
+    }
+    store.replaceDoc(doc);
+    renderer.renderNow();
+    const scroll = document.querySelector('.tl-scroll');
+    const atTop = document.querySelectorAll('.tl-obj').length;
+    const lastLaneDrawn = () => Boolean(document.querySelector('.tl-obj[data-obj-id^="TO59-"]'));
+    const farAtTop = lastLaneDrawn();
+    // The last lane's first object, selected while it is far out of view.
+    store.setSelection(['TO59-0']);
+    renderer.renderNow();
+    const selectedDrawn = Boolean(renderer.elementFor('TO59-0'));
+    store.clearSelection();
+    scroll.scrollTop = scroll.scrollHeight;
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await new Promise((r) => setTimeout(r, 100));
+    const farAtBottom = lastLaneDrawn();
+    const firstLaneAtBottom = Boolean(document.querySelector('.tl-obj[data-obj-id^="TO0-"]'));
+    scroll.scrollTop = 0;
+    store.replaceDoc(original);
+    store.markClean();
+    renderer.renderNow();
+    return { total: doc.objects.length, atTop, farAtTop, selectedDrawn, farAtBottom, firstLaneAtBottom };
+  });
+  check('a tall plan draws only the rows in view and a margin — not every object it has',
+    tall.atTop > 0 && tall.atTop < tall.total / 3 && !tall.farAtTop, `${tall.atTop} of ${tall.total} drawn`);
+  check('the selection is drawn wherever it is, for the keyboard and a drag', tall.selectedDrawn);
+  check('scrolling down draws the rows it reaches, and lets go of the ones it left',
+    tall.farAtBottom && !tall.firstLaneAtBottom, JSON.stringify(tall));
+
   console.log('\nConsole');
   const meaningful = consoleErrors.filter((e) => !/favicon|fonts\.googleapis|net::ERR/i.test(e));
   check('no console errors', meaningful.length === 0, meaningful.slice(0, 4).join(' | '));

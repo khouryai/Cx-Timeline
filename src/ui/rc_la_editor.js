@@ -511,6 +511,54 @@ function draw() {
 }
 
 /**
+ * Redraw after an edit — only the days it touched, where that is all it changed.
+ *
+ * Painting a week, typing a code, a paste, a fill, an undo of any of those:
+ * nearly every edit is cell ops alone, and none of them can change which rows
+ * are shown (the filter reads a row's own fields, never its days), so the
+ * grid's structure is what it was. Rebuilding it anyway cost a five-week sheet
+ * thousands of nodes per keystroke, and dropped the keyboard with them (see
+ * the trap in CLAUDE.md). Here the touched days are drawn again in place, with
+ * every day whose staffing clash came or went — a name typed on one day can
+ * clash another — and the support totals beneath. Anything else — a row op,
+ * a clash count that changed the toolbar, a grid not on screen — is `draw()`.
+ */
+function redrawAfter(ops) {
+  const host = E.root;
+  const body = host?.querySelector('.lae-grid tbody');
+  if (!body || !E.view || E.editing || !ops.every((op) => op.op === 'cell')) { draw(); return; }
+  const clashCount = (staff) => new Set(staff.issues.map((i) => `${i.person_id}|${i.day}|${i.kind}`)).size;
+  const before = E.staff;
+  const after = staffing(E.view.days);
+  if (clashCount(after) !== clashCount(before)) { draw(); return; }
+  E.staff = after;
+
+  const said = (byCell, key) => (byCell.get(key) || []).map((x) => x.detail).join('\n');
+  const keys = new Set(ops.map((op) => ed.cellKey(op.row_id, op.day)));
+  for (const key of new Set([...before.byCell.keys(), ...after.byCell.keys()])) {
+    if (said(before.byCell, key) !== said(after.byCell, key)) keys.add(key);
+  }
+
+  const active = document.activeElement;
+  const refocus = !active || active === document.body;
+  const today = todayISO();
+  const rowsById = new Map(E.view.rows.map((r) => [r.id, r]));
+  const column = new Map(E.view.days.map((d, i) => [d, i]));
+  for (const key of keys) {
+    const [rowId, day] = key.split('|');
+    const row = rowsById.get(rowId);
+    const i = column.get(day);
+    if (!row || i == null) continue; // folded away, filtered out or off the window
+    const td = body.querySelector(`tr[data-id="${CSS.escape(rowId)}"] td[data-c="${META + i}"]`);
+    if (td) td.replaceWith(dayCell(row, day, i, today));
+  }
+  host.querySelector('.lae-grid tfoot tr')?.replaceWith(totalsRow(E.view.days, today));
+  paintSelection();
+  refreshStatus();
+  if (refocus) host.querySelector('.lae-scroll')?.focus({ preventScroll: true });
+}
+
+/**
  * Is everybody on the team named where they can be? Only the names rows and
  * the PTO row, against the roster and the leave booked in the calendar — never
  * the support an activity asks for (`staffingIssues()` in `core/la_edit.js`).
@@ -751,24 +799,7 @@ function grid(rows, days) {
   table.appendChild(body);
 
   /* What is asked for, day by day. */
-  const totals = ed.supportTotals(E.model, days);
-  const foot = el('tr', { class: 'lae-totals' });
-  foot.appendChild(el('td', { class: 'lae-handle' }));
-  foot.appendChild(el('td', {
-    class: 'lae-meta lae-meta-last lae-totals-label', colspan: String(META),
-    text: 'Support requested',
-    title: 'Every support code on every activity, counted per day',
-  }));
-  days.forEach((d) => {
-    const counts = totals.byDay.get(d);
-    const text = counts && counts.size ? ed.describeCounts(counts, E.codes).replace(/ · /g, '\n') : '';
-    foot.appendChild(el('td', {
-      class: `lae-total${ed.isWeekend(d) ? ' lae-weekend' : ''}${d === today ? ' lae-today' : ''}`,
-      text,
-      title: text ? `${d}: ${ed.describeCounts(counts, E.codes)}` : '',
-    }));
-  });
-  table.appendChild(el('tfoot', {}, [foot]));
+  table.appendChild(el('tfoot', {}, [totalsRow(days, today)]));
 
   const scroller = el('div', { class: 'lae-scroll', tabindex: '0', 'aria-label': 'Look-ahead editor grid' }, [table]);
   if (!rows.length) {
@@ -816,55 +847,80 @@ function bodyRow(row, r, days, today) {
     tr.appendChild(td);
   });
 
-  days.forEach((d, i) => {
-    const c = META + i;
-    const cell = row.kind === 'section' ? null : ed.getCell(E.model, row.id, d);
-    const cls = ['lae-cell', 'lae-day'];
-    if (ed.isWeekend(d)) cls.push('lae-weekend');
-    if (d === today) cls.push('lae-today');
-    if (cell?.color) {
-      cls.push('lae-painted');
-      if (isDark(cell.color)) cls.push('lae-dark');
-      const known = E.legendAll.find((e) => e.argb === cell.color);
-      if (known && /cancel/i.test(known.meaning || '')) cls.push('lae-cancel');
-    }
-    let title = '';
-    if (row.kind === 'activity' && cell?.text) {
-      const parsed = ed.parseSupport(cell.text, E.codes);
-      if (parsed.unknown.length && looksLikeCodes(cell.text)) {
-        cls.push('lae-unknown-code');
-        title = `Not a support code yet: ${parsed.unknown.join(', ')} — add it under Legend → Support codes`;
-      } else if (parsed.tokens.length && looksLikeCodes(cell.text)) {
-        title = parsed.tokens.map((t) => codeName(t.code)).join(' + ');
-      }
-      const struck = ed.cancelledTokens(cell.text);
-      if (struck.length && looksLikeCodes(cell.text)) {
-        title = [title, `Cancelled: ${struck.map(codeName).join(' + ')}`, reasonFor(row, d, struck.join('.'))]
-          .filter(Boolean).join(' · ');
-      }
-    }
-    if (cell?.color) {
-      const meaning = E.legendAll.find((e) => e.argb === cell.color)?.meaning;
-      const why = cls.includes('lae-cancel') ? reasonFor(row, d) : '';
-      if (meaning) title = [meaning, why, title].filter(Boolean).join(' · ');
-    }
-    // Names are wider than a day; the whole list is one hover away.
-    if (!title && cell?.text) title = cell.text;
-    const clashes = E.staff.byCell.get(ed.cellKey(row.id, d));
-    if (clashes?.length) {
-      cls.push('lae-clash');
-      title = [...new Set(clashes.map((x) => x.detail))].join('\n') + (title ? `\n${title}` : '');
-    }
-    const td = el('td', {
-      class: cls.join(' '), dataset: { c: String(c) }, title,
-    }, row.kind === 'activity'
-      ? codeNodes(cell?.text || '', 'lae-code-cancelled', (code) => reasonFor(row, d, code))
-      : [cell?.text || '']);
-    if (cell?.color) td.style.backgroundColor = `#${cell.color}`;
-    if (!editable(row, c)) td.classList.add('lae-fixed');
-    tr.appendChild(td);
-  });
+  days.forEach((d, i) => tr.appendChild(dayCell(row, d, i, today)));
   return tr;
+}
+
+/** The support asked for, day by day: the grid's last row. */
+function totalsRow(days, today) {
+  const totals = ed.supportTotals(E.model, days);
+  const foot = el('tr', { class: 'lae-totals' });
+  foot.appendChild(el('td', { class: 'lae-handle' }));
+  foot.appendChild(el('td', {
+    class: 'lae-meta lae-meta-last lae-totals-label', colspan: String(META),
+    text: 'Support requested',
+    title: 'Every support code on every activity, counted per day',
+  }));
+  days.forEach((d) => {
+    const counts = totals.byDay.get(d);
+    const text = counts && counts.size ? ed.describeCounts(counts, E.codes).replace(/ · /g, '\n') : '';
+    foot.appendChild(el('td', {
+      class: `lae-total${ed.isWeekend(d) ? ' lae-weekend' : ''}${d === today ? ' lae-today' : ''}`,
+      text,
+      title: text ? `${d}: ${ed.describeCounts(counts, E.codes)}` : '',
+    }));
+  });
+  return foot;
+}
+
+/** One day of one row, as drawn — the unit an edit that only touches cells redraws. */
+function dayCell(row, d, i, today) {
+  const c = META + i;
+  const cell = row.kind === 'section' ? null : ed.getCell(E.model, row.id, d);
+  const cls = ['lae-cell', 'lae-day'];
+  if (ed.isWeekend(d)) cls.push('lae-weekend');
+  if (d === today) cls.push('lae-today');
+  if (cell?.color) {
+    cls.push('lae-painted');
+    if (isDark(cell.color)) cls.push('lae-dark');
+    const known = E.legendAll.find((e) => e.argb === cell.color);
+    if (known && /cancel/i.test(known.meaning || '')) cls.push('lae-cancel');
+  }
+  let title = '';
+  if (row.kind === 'activity' && cell?.text) {
+    const parsed = ed.parseSupport(cell.text, E.codes);
+    if (parsed.unknown.length && looksLikeCodes(cell.text)) {
+      cls.push('lae-unknown-code');
+      title = `Not a support code yet: ${parsed.unknown.join(', ')} — add it under Legend → Support codes`;
+    } else if (parsed.tokens.length && looksLikeCodes(cell.text)) {
+      title = parsed.tokens.map((t) => codeName(t.code)).join(' + ');
+    }
+    const struck = ed.cancelledTokens(cell.text);
+    if (struck.length && looksLikeCodes(cell.text)) {
+      title = [title, `Cancelled: ${struck.map(codeName).join(' + ')}`, reasonFor(row, d, struck.join('.'))]
+        .filter(Boolean).join(' · ');
+    }
+  }
+  if (cell?.color) {
+    const meaning = E.legendAll.find((e) => e.argb === cell.color)?.meaning;
+    const why = cls.includes('lae-cancel') ? reasonFor(row, d) : '';
+    if (meaning) title = [meaning, why, title].filter(Boolean).join(' · ');
+  }
+  // Names are wider than a day; the whole list is one hover away.
+  if (!title && cell?.text) title = cell.text;
+  const clashes = E.staff.byCell.get(ed.cellKey(row.id, d));
+  if (clashes?.length) {
+    cls.push('lae-clash');
+    title = [...new Set(clashes.map((x) => x.detail))].join('\n') + (title ? `\n${title}` : '');
+  }
+  const td = el('td', {
+    class: cls.join(' '), dataset: { c: String(c) }, title,
+  }, row.kind === 'activity'
+    ? codeNodes(cell?.text || '', 'lae-code-cancelled', (code) => reasonFor(row, d, code))
+    : [cell?.text || '']);
+  if (cell?.color) td.style.backgroundColor = `#${cell.color}`;
+  if (!editable(row, c)) td.classList.add('lae-fixed');
+  return td;
 }
 
 function codeName(code) {
@@ -1342,7 +1398,7 @@ function commit(ops, { keepRedo = false, ask = false } = {}) {
   if (E.undo.length > 200) E.undo.shift();
   if (!keepRedo) E.redo = [];
   enqueue(useful);
-  draw();
+  redrawAfter(useful);
   if (removed.length) askAboutRemovedResources(removed);
 }
 
@@ -1506,7 +1562,7 @@ function undo() {
   const again = ed.applyOps(E.model, entry.inverse);
   E.redo.push({ ops: entry.inverse, inverse: again });
   enqueue(entry.inverse);
-  draw();
+  redrawAfter(entry.inverse);
 }
 
 function redo() {
@@ -1515,7 +1571,7 @@ function redo() {
   const again = ed.applyOps(E.model, entry.inverse);
   E.undo.push({ ops: entry.inverse, inverse: again });
   enqueue(entry.inverse);
-  draw();
+  redrawAfter(entry.inverse);
 }
 
 function paint(color) {

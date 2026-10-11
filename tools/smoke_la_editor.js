@@ -112,10 +112,15 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     (await page.locator('#rc-frame .lae-codes .lae-code').allInnerTexts()).join(',') === 'X,WIT,TCE');
 
   /* ── Typing ───────────────────────────────────────────────────────── */
+  // The grid is marked, so the check below can tell a patched day from a sheet rebuilt.
+  await page.evaluate(() => { document.querySelector('#rc-frame .lae-grid').dataset.drawn = 'before'; });
   await cell('IXL Regression Testing', day(0)).click();
   await page.keyboard.type('x . wit');
   await page.keyboard.press('Enter');
   await saved();
+  check('a day typed into redraws that day, not the sheet — the grid is the one it was, and keeps the keyboard',
+    await page.evaluate(() => document.querySelector('#rc-frame .lae-grid')?.dataset.drawn === 'before'
+      && document.activeElement?.classList.contains('lae-scroll')));
   check('typing into a day writes it, as the sheet writes it', (await cell('IXL Regression Testing', day(0)).innerText()).trim() === 'X.WIT');
   check('and it is saved', (await serverCell('IXL Regression Testing', day(0)))?.text === 'X.WIT');
   check('Enter moves down, as a spreadsheet does',

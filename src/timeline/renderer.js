@@ -100,10 +100,13 @@ export function mount(host) {
   host.appendChild(dom.root);
 
   // The gutter mirrors the canvas's vertical scroll so lane labels stay
-  // aligned with their rows.
+  // aligned with their rows — and once the view nears the edge of the rows
+  // the last render drew, the next band is drawn (see `drawnBand`).
   dom.scroll.addEventListener('scroll', () => {
     scrollTop = dom.scroll.scrollTop;
     dom.gutterInner.style.transform = `translateY(${-scrollTop}px)`;
+    if (band && (scrollTop < band.top + CULL_MARGIN / 2
+      || scrollTop + viewport.getHeight() > band.bottom - CULL_MARGIN / 2)) requestRender();
   });
 
   mounted = true;
@@ -143,10 +146,40 @@ export function measure() {
 /** Coalesced render — safe to call as often as you like. */
 export const requestRender = rafBatch(() => renderNow());
 
+/* ── Drawing what can be seen ──────────────────────────────────────────── */
+
+/**
+ * How far above and below the visible rows objects are still drawn, in px.
+ *
+ * The layout already leaves out what is outside the visible dates; this is the
+ * other axis. A plan of sixty lanes drew every one of them on every render —
+ * 2,400 objects took 40 ms a frame, a drag ran at twenty-five frames a second
+ * and the rows nobody could see cost most of it. Now only the rows in view and
+ * a margin either side get nodes; scrolling past half the margin draws the next
+ * band. The packing, the links and every count still see the whole layout, so
+ * nothing about where anything goes depends on what is drawn. The selection is
+ * always drawn wherever it is, so its node is there for the keyboard and a drag,
+ * and so is an object being revealed, for its flash.
+ */
+const CULL_MARGIN = 800;
+/** The rows the last render drew objects for: { top, bottom } in stage px. */
+let band = null;
+/** An object `revealObject()` is bringing into view, drawn wherever it is. */
+let revealing = null;
+
+function drawnBand() {
+  return { top: scrollTop - CULL_MARGIN, bottom: scrollTop + viewport.getHeight() + CULL_MARGIN };
+}
+
+function onScreen(rect, keep) {
+  return keep.has(rect.id) || (rect.y + rect.h >= band.top && rect.y <= band.bottom);
+}
+
 export function renderNow() {
   if (!mounted) return;
   const doc = getDoc();
   const settings = doc.settings;
+  band = drawnBand();
 
   const predicate = hasActiveFilters() ? filterPredicate(doc, getFilters()) : null;
   /* The date window always hides — see `dateWindowPredicate()` — so what is
@@ -371,12 +404,26 @@ function labelFor(scaleId, tick) {
 /* ── Lane gutter ───────────────────────────────────────────────────────── */
 
 function renderGutter(layout) {
-  clear(dom.gutterInner);
   const doc = getDoc();
+  const counts = new Map();
+  for (const o of doc.objects) counts.set(o.lane, (counts.get(o.lane) || 0) + 1);
+
+  /* Rebuilt only when something it shows changed. It used to be rebuilt on
+     every render — every frame of a drag — and counted each lane's objects
+     with a pass over the whole plan, which on sixty lanes was a third of the
+     frame. */
+  const signature = layout.geometry.lanes.map(({ lane, height }) =>
+    [lane.id, lane.name, lane.color, lane.locked, lane.collapsed, height, counts.get(lane.id) || 0].join('\u0001')).join('\u0002');
+  if (dom.gutterInner.dataset.sig === signature) {
+    dom.gutterInner.style.transform = `translateY(${-scrollTop}px)`;
+    return;
+  }
+  dom.gutterInner.dataset.sig = signature;
+  clear(dom.gutterInner);
 
   for (const entry of layout.geometry.lanes) {
     const lane = entry.lane;
-    const count = doc.objects.filter((o) => o.lane === lane.id).length;
+    const count = counts.get(lane.id) || 0;
 
     const node = el('div', {
       class: 'tl-lane-label' + (lane.locked ? ' locked' : '') + (lane.collapsed ? ' collapsed' : ''),
@@ -468,8 +515,11 @@ function renderObjects(layout, settings, upstream) {
   const seen = new Set();
   const selection = new Set(getSelection());
   const violations = linkViolations(getDoc());
+  const keep = new Set(selection);
+  if (revealing) keep.add(revealing);
 
   for (const rect of layout.rects) {
+    if (!onScreen(rect, keep)) continue;
     seen.add(rect.id);
     let node = objectNodes.get(rect.id);
     if (!node) {
@@ -996,9 +1046,10 @@ function renderNotes(layout) {
   dom.overlay.querySelectorAll('.tl-note').forEach((n) => n.remove());
 
   const fragment = document.createDocumentFragment();
+  const keep = new Set(getSelection());
   for (const rect of layout.rects) {
     const note = rect.note;
-    if (!note || rect.dimmed) continue;
+    if (!note || rect.dimmed || !onScreen(rect, keep)) continue;
 
     const node = el('div', {
       class: 'tl-note',
@@ -1040,9 +1091,10 @@ function renderActuals(layout) {
   dom.overlay.querySelectorAll('.tl-actual, .tl-actual-shift').forEach((n) => n.remove());
 
   const fragment = document.createDocumentFragment();
+  const keep = new Set(getSelection());
   for (const rect of layout.rects) {
     const actual = rect.actual;
-    if (!actual) continue;
+    if (!actual || !onScreen(rect, keep)) continue;
 
     // Late is the case a review is about, so it is the one that gets the
     // warning colour; finishing early is good news and says so.
@@ -1133,13 +1185,16 @@ function renderBaseline(layout, settings) {
 
   // Every rectangle here was measured and packed by `computeLayout` — including
   // the ghosts, which is why nothing below has to ask whether it fits.
+  const keep = new Set(getSelection());
   for (const rect of layout.rects) {
     const ghost = rect.ghost;
     if (!ghost) continue;
 
     const { snap, startShift, endShift } = ghost;
     const tone = endShift > 0 ? 'slip' : endShift < 0 ? 'ahead' : 'reshaped';
+    // Counted for the banner wherever it is; drawn only where it can be seen.
     counts[tone]++;
+    if (!onScreen(rect, keep)) continue;
 
     const reason = ghost.reason;
     const node = el('div', {
@@ -1451,6 +1506,9 @@ export function revealObject(id, { center = true } = {}) {
     viewport.centerOn(obj.start + (TYPES[obj.type]?.duration ? (obj.end - obj.start) / 2 : 0), center ? 0.5 : 0.3);
   }
 
+  // Drawn wherever it is, for as long as it flashes — it may be rows away
+  // from what is on screen until the smooth scroll arrives.
+  revealing = id;
   renderNow();
   const rect = lastLayout?.byId.get(id);
   if (rect) {
@@ -1461,7 +1519,10 @@ export function revealObject(id, { center = true } = {}) {
   const node = objectNodes.get(id);
   if (node) {
     node.classList.add('search-hit');
-    setTimeout(() => node.classList.remove('search-hit'), 3200);
+    setTimeout(() => {
+      node.classList.remove('search-hit');
+      if (revealing === id) revealing = null;
+    }, 3200);
   }
 }
 
