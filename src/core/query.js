@@ -27,8 +27,12 @@ export function filterPredicate(doc, filters) {
   const subsystems = new Set(f.subsystems || []);
   const areas = new Set(f.areas || []);
   const tags = new Set(f.tags || []);
-  const from = f.from ? toMs(f.from) : null;
-  const to = f.to ? toMs(f.to) : null;
+  // The window's own test, not a second copy of it. The copy here said
+  // `end < from` where the window says `end <= from` — an end is exclusive, so
+  // a bar finishing the day before the window was hidden on screen and still
+  // matched here: "Select matching" picked up something nobody could see, and
+  // a filtered export carried it.
+  const inWindow = dateWindowPredicate(f);
 
   return (obj) => {
     if (types.size && !types.has(obj.type)) return false;
@@ -39,12 +43,7 @@ export function filterPredicate(doc, filters) {
     if (areas.size && !areas.has(obj.area)) return false;
     if (tags.size && !(obj.tags || []).some((t) => tags.has(t))) return false;
 
-    if (from != null || to != null) {
-      const start = obj.start;
-      const end = TYPES[obj.type]?.duration ? obj.end : obj.start + MS_DAY;
-      if (from != null && end < from) return false;
-      if (to != null && start > to) return false;
-    }
+    if (inWindow && !inWindow(obj)) return false;
 
     // Any term is enough. Every other dimension here narrows, so the text box
     // would too — but the thing people actually type into it is a list of the

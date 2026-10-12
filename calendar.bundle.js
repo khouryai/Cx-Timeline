@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 29   Built: 2026-10-11T21:25:24.061Z
+ * Modules: 29   Built: 2026-10-12T01:20:18.774Z
  */
 (function () {
   'use strict';
@@ -4144,23 +4144,30 @@ __mods["ui/rc_huddle.js"] = function (__x, __req) {
     const queue = readQueue();
     if (!queue.length || !rc.isSignedIn()) return 0;
 
-    const remaining = [];
+    /* What this pass settled — sent, or refused for good — by the entry's own
+       uuid. The stored queue is read again at the end and only those come off.
+       It used to be overwritten with this pass's leftovers, so an outcome
+       recorded (and queued) while the flush was still sending, on the bad wifi
+       that is the reason there is a queue at all, was erased when it finished;
+       and of two flushes at once, the later write dropped what the other kept. */
+    const settled = new Set();
+    const keyOf = (entry) => entry.clientUuid || JSON.stringify(entry);
     let sent = 0;
     for (const entry of queue) {
       try {
         await rc.recordActual(entry);
+        settled.add(keyOf(entry));
         sent++;
       } catch (err) {
-        if (/fetch|network/i.test(String(err.message))) remaining.push(entry);
-        else {
-          console.warn('[cx-timeline] a queued outcome was refused and dropped:', err.message);
-          // The one failure here that loses somebody's words: it goes on the record.
-          rc.reportError('huddle:queue-dropped', `${entry.date}: ${err.message}`);
-          toast({ tone: 'warn', message: `An entry from ${entry.date} was refused: ${err.message}` });
-        }
+        if (/fetch|network/i.test(String(err.message))) continue;
+        settled.add(keyOf(entry));
+        console.warn('[cx-timeline] a queued outcome was refused and dropped:', err.message);
+        // The one failure here that loses somebody's words: it goes on the record.
+        rc.reportError('huddle:queue-dropped', `${entry.date}: ${err.message}`);
+        toast({ tone: 'warn', message: `An entry from ${entry.date} was refused: ${err.message}` });
       }
     }
-    writeQueue(remaining);
+    writeQueue(readQueue().filter((entry) => !settled.has(keyOf(entry))));
     if (sent) notifyChanged('actuals');
     return sent;
   }
@@ -8967,8 +8974,21 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
    * The package around one worksheet: content types, relationships, the
    * workbook part (with its print titles) and a minimal core-properties part.
    */
+  /**
+   * A name Excel will open a sheet under. It refuses a workbook whose sheet is
+   * named with `[ ] : * ? / \`, starts or ends with an apostrophe, or runs past
+   * 31 characters — "We found a problem with some content" — and the name here
+   * is an administrator's setting (`lookahead_sheet`), free text, so
+   * "4WLA 10/12" or a long revision title made a file nobody could open.
+   */
+  function sheetNameFor(name) {
+    const clean = String(name ?? '').replace(/[[\]:*?/\\]+/g, ' ').replace(/\s+/g, ' ').trim()
+      .replace(/^'+|'+$/g, '').slice(0, 31).trim();
+    return clean || 'Sheet1';
+  }
+
   function workbookParts({ sheetName, sheetXml, stylesXml, printTitles = null, title = '' }) {
-    const name = xmlEscape(sheetName);
+    const name = xmlEscape(sheetNameFor(sheetName));
     const defined = printTitles
       ? `<definedNames><definedName name="_xlnm.Print_Titles" localSheetId="0">'${name.replace(/'/g, "''")}'!${printTitles}</definedName></definedNames>`
       : '';
@@ -9028,6 +9048,7 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
   Object.defineProperty(__x, "zipStore", { get: () => zipStore, enumerable: true });
   Object.defineProperty(__x, "xmlEscape", { get: () => xmlEscape, enumerable: true });
   Object.defineProperty(__x, "styleBook", { get: () => styleBook, enumerable: true });
+  Object.defineProperty(__x, "sheetNameFor", { get: () => sheetNameFor, enumerable: true });
   Object.defineProperty(__x, "workbookParts", { get: () => workbookParts, enumerable: true });
 };
 
@@ -13383,10 +13404,11 @@ __mods["ui/rc_table.js"] = function (__x, __req) {
    * week plan, the huddle — are left alone, and so is any table with a spanning
    * cell, where a row is not a record and sorting would tear it apart.
    *
-   * Imports: util, icons, exporters.
+   * Imports: util, dates, icons, exporters.
    */
 
-  const { el } = __req("core/util.js");
+  const { el, csvField } = __req("core/util.js");
+  const { toISO, todayMs } = __req("core/dates.js");
   const { icon } = __req("ui/icons.js");
   const { saveFile } = __req("io/exporters.js");
 
@@ -13485,8 +13507,7 @@ __mods["ui/rc_table.js"] = function (__x, __req) {
   }
 
   function csvCell(value) {
-    const text = String(value ?? '').replace(/\s+/g, ' ').trim();
-    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    return csvField(String(value ?? '').replace(/\s+/g, ' ').trim());
   }
 
   function exportCsv(table) {
@@ -13495,7 +13516,7 @@ __mods["ui/rc_table.js"] = function (__x, __req) {
     for (const row of table.tBodies[0].rows) {
       lines.push([...row.cells].map((c) => csvCell(c.dataset.csv ?? c.textContent)).join(','));
     }
-    const stamp = new Date().toISOString().slice(0, 10);
+    const stamp = toISO(todayMs());
     const name = String(table.dataset.csv).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     saveFile(`${name}-${stamp}.csv`, lines.join('\r\n') + '\r\n', 'text/csv', 'Table');
   }
@@ -14117,7 +14138,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
    *          rc_util, rc_la_state, rc_ingest.
    */
 
-  const { el } = __req("core/util.js");
+  const { el, csvField } = __req("core/util.js");
   const rc = __req("core/rc.js");
   const { applyLegend, isDark } = __req("io/lookahead.js");
   const { saveFile } = __req("io/exporters.js");
@@ -14693,7 +14714,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
   }
 
   function cancellationCsv(events) {
-    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const q = (v) => csvField(v, { quote: true });
     const lines = [['activity', 'location', 'kind', 'bart_resources', 'start', 'end', 'days', 'reads', 'first_seen', 'last_seen', 'responsible', 'reason', 'recorded_at'].join(',')];
     for (const e of events) {
       lines.push([
@@ -14714,10 +14735,11 @@ __mods["ui/rc_la_sars.js"] = function (__x, __req) {
   /**
    * Look-ahead → Site access: SARs, filed and linked to the rows they cover.
    *
-   * Imports: util, rc, filestore, components, rc_util, rc_la_state.
+   * Imports: util, dates, rc, filestore, components, rc_util, rc_la_state.
    */
 
   const { el } = __req("core/util.js");
+  const { toISO, localDayMs } = __req("core/dates.js");
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
   const { icon } = __req("ui/icons.js");
@@ -14765,7 +14787,7 @@ __mods["ui/rc_la_sars.js"] = function (__x, __req) {
         [`${pdfs.length} PDF(s) waiting in ${SAR_INBOX}/`, 'Dropped', ''],
         pdfs.map((f) => el('tr', {}, [
           el('td', { text: f.name }),
-          el('td', { class: 'rc-hint', text: new Date(f.modified).toISOString().slice(0, 10) }),
+          el('td', { class: 'rc-hint', text: toISO(localDayMs(f.modified)) }),
           el('td', {}, [
             el('button', {
               class: 'cx-btn mini primary',
@@ -17724,7 +17746,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
    * Imports: util, rc, icons, components, rc_util.
    */
 
-  const { el, clear } = __req("core/util.js");
+  const { el, clear, csvField } = __req("core/util.js");
   const rc = __req("core/rc.js");
   const { icon } = __req("ui/icons.js");
   const { toast, badge, chipStat, emptyState, selectInput } = __req("ui/components.js");
@@ -18036,7 +18058,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
       const rows = Object.values(data.tables).reduce(
         (n, t) => n + (Array.isArray(t) ? t.length : 0), 0);
       saveFile(
-        `resource-calendar-${new Date().toISOString().slice(0, 10)}.json`,
+        `resource-calendar-${todayISO()}.json`,
         JSON.stringify(data, null, 2),
         'application/json',
         `${rows} rows across ${Object.keys(data.tables).length} tables`
@@ -18061,10 +18083,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
          it was exported from would be the worse of the two to find out about. */
       const takesShifts = new Set(people.filter((p) => p.scheduled !== false).map((p) => p.id));
 
-      const esc = (v) => {
-        const s = String(v ?? '');
-        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-      };
+      const esc = (v) => csvField(v);
       const header = ['Date', 'Person', 'Subsystem', 'Status', 'Signal', 'Category', 'Location'];
       const lines = [header.join(',')];
       const rows = effort.filter((r) => takesShifts.has(r.person_id));

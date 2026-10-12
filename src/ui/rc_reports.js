@@ -21,7 +21,7 @@
  * Imports: util, rc, icons, components, rc_util.
  */
 
-import { el, clear } from '../core/util.js';
+import { el, clear, csvField } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import { icon } from './icons.js';
 import { toast, badge, chipStat, emptyState, selectInput } from './components.js';
@@ -333,7 +333,7 @@ async function backItUp() {
     const rows = Object.values(data.tables).reduce(
       (n, t) => n + (Array.isArray(t) ? t.length : 0), 0);
     saveFile(
-      `resource-calendar-${new Date().toISOString().slice(0, 10)}.json`,
+      `resource-calendar-${todayISO()}.json`,
       JSON.stringify(data, null, 2),
       'application/json',
       `${rows} rows across ${Object.keys(data.tables).length} tables`
@@ -358,10 +358,7 @@ async function exportCsv(from, to) {
        it was exported from would be the worse of the two to find out about. */
     const takesShifts = new Set(people.filter((p) => p.scheduled !== false).map((p) => p.id));
 
-    const esc = (v) => {
-      const s = String(v ?? '');
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
+    const esc = (v) => csvField(v);
     const header = ['Date', 'Person', 'Subsystem', 'Status', 'Signal', 'Category', 'Location'];
     const lines = [header.join(',')];
     const rows = effort.filter((r) => takesShifts.has(r.person_id));

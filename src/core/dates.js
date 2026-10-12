@@ -59,8 +59,17 @@ function pad(n) {
 
 /** Today at UTC midnight, from the system clock. */
 export function todayMs() {
-  const now = new Date();
-  return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  return localDayMs(Date.now());
+}
+
+/**
+ * The calendar day an instant falls on *here*, at UTC midnight — the date a
+ * person would write for it. Not `toISOString().slice(0, 10)`: that is the date
+ * in Greenwich, which in California is tomorrow from five in the afternoon.
+ */
+export function localDayMs(instant) {
+  const d = new Date(instant);
+  return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
 /* ── Truncation ────────────────────────────────────────────────────────── */

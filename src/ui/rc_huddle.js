@@ -110,23 +110,30 @@ export async function flushQueue() {
   const queue = readQueue();
   if (!queue.length || !rc.isSignedIn()) return 0;
 
-  const remaining = [];
+  /* What this pass settled — sent, or refused for good — by the entry's own
+     uuid. The stored queue is read again at the end and only those come off.
+     It used to be overwritten with this pass's leftovers, so an outcome
+     recorded (and queued) while the flush was still sending, on the bad wifi
+     that is the reason there is a queue at all, was erased when it finished;
+     and of two flushes at once, the later write dropped what the other kept. */
+  const settled = new Set();
+  const keyOf = (entry) => entry.clientUuid || JSON.stringify(entry);
   let sent = 0;
   for (const entry of queue) {
     try {
       await rc.recordActual(entry);
+      settled.add(keyOf(entry));
       sent++;
     } catch (err) {
-      if (/fetch|network/i.test(String(err.message))) remaining.push(entry);
-      else {
-        console.warn('[cx-timeline] a queued outcome was refused and dropped:', err.message);
-        // The one failure here that loses somebody's words: it goes on the record.
-        rc.reportError('huddle:queue-dropped', `${entry.date}: ${err.message}`);
-        toast({ tone: 'warn', message: `An entry from ${entry.date} was refused: ${err.message}` });
-      }
+      if (/fetch|network/i.test(String(err.message))) continue;
+      settled.add(keyOf(entry));
+      console.warn('[cx-timeline] a queued outcome was refused and dropped:', err.message);
+      // The one failure here that loses somebody's words: it goes on the record.
+      rc.reportError('huddle:queue-dropped', `${entry.date}: ${err.message}`);
+      toast({ tone: 'warn', message: `An entry from ${entry.date} was refused: ${err.message}` });
     }
   }
-  writeQueue(remaining);
+  writeQueue(readQueue().filter((entry) => !settled.has(keyOf(entry))));
   if (sent) notifyChanged('actuals');
   return sent;
 }

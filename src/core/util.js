@@ -151,11 +151,35 @@ export function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
-/** Strip tags and collapse whitespace — for search indexing and previews. */
+/**
+ * Strip tags and collapse whitespace — for search indexing and previews.
+ *
+ * Parsed in a document of its own, which loads nothing and runs nothing. It
+ * used to be `innerHTML` on a `div` of this page, and an element of a live
+ * document fetches its images whether or not it is attached — so a note
+ * carrying `<img src=x onerror=…>`, in a plan file somebody else wrote, ran
+ * its handler the moment the plan was searched or exported. The deployed
+ * site's policy refused it; a page opened from disk has no policy.
+ */
 export function stripHtml(html) {
-  const div = document.createElement('div');
-  div.innerHTML = html || '';
-  return (div.textContent || '').replace(/\s+/g, ' ').trim();
+  if (!html) return '';
+  const parsed = new DOMParser().parseFromString(String(html), 'text/html');
+  return (parsed.body?.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * One CSV field: quoted where RFC 4180 needs it, and defused where a
+ * spreadsheet would run it. A field starting `=`, `+`, `-`, `@`, a tab or a
+ * carriage return is a formula to Excel and Calc — a task named
+ * `=HYPERLINK(…)`, typed by anybody on the team, ran when an administrator
+ * opened the export — so it is written with a leading apostrophe, which both
+ * show as text and never print. A plain number (`-3`, `+2.5`) is left alone:
+ * a variance column is negative numbers, and must stay numeric.
+ */
+export function csvField(value, { quote = false } = {}) {
+  let text = value == null ? '' : String(value);
+  if (/^[=+\-@\t\r]./s.test(text) && !/^[+-]?\d+(\.\d+)?$/.test(text)) text = `'${text}`;
+  return quote || /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 export function truncate(s, n = 60) {

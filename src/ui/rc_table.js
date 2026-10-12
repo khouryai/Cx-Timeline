@@ -19,10 +19,11 @@
  * week plan, the huddle — are left alone, and so is any table with a spanning
  * cell, where a row is not a record and sorting would tear it apart.
  *
- * Imports: util, icons, exporters.
+ * Imports: util, dates, icons, exporters.
  */
 
-import { el } from '../core/util.js';
+import { el, csvField } from '../core/util.js';
+import { toISO, todayMs } from '../core/dates.js';
 import { icon } from './icons.js';
 import { saveFile } from '../io/exporters.js';
 
@@ -121,8 +122,7 @@ function sortBy(table, index) {
 }
 
 function csvCell(value) {
-  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  return csvField(String(value ?? '').replace(/\s+/g, ' ').trim());
 }
 
 function exportCsv(table) {
@@ -131,7 +131,7 @@ function exportCsv(table) {
   for (const row of table.tBodies[0].rows) {
     lines.push([...row.cells].map((c) => csvCell(c.dataset.csv ?? c.textContent)).join(','));
   }
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = toISO(todayMs());
   const name = String(table.dataset.csv).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   saveFile(`${name}-${stamp}.csv`, lines.join('\r\n') + '\r\n', 'text/csv', 'Table');
 }

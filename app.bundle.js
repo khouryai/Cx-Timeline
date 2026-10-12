@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 60   Built: 2026-10-11T21:25:23.975Z
+ * Modules: 60   Built: 2026-10-12T01:20:18.685Z
  */
 (function () {
   'use strict';
@@ -178,11 +178,35 @@ __mods["core/util.js"] = function (__x, __req) {
       .replace(/'/g, '&#39;');
   }
 
-  /** Strip tags and collapse whitespace — for search indexing and previews. */
+  /**
+   * Strip tags and collapse whitespace — for search indexing and previews.
+   *
+   * Parsed in a document of its own, which loads nothing and runs nothing. It
+   * used to be `innerHTML` on a `div` of this page, and an element of a live
+   * document fetches its images whether or not it is attached — so a note
+   * carrying `<img src=x onerror=…>`, in a plan file somebody else wrote, ran
+   * its handler the moment the plan was searched or exported. The deployed
+   * site's policy refused it; a page opened from disk has no policy.
+   */
   function stripHtml(html) {
-    const div = document.createElement('div');
-    div.innerHTML = html || '';
-    return (div.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!html) return '';
+    const parsed = new DOMParser().parseFromString(String(html), 'text/html');
+    return (parsed.body?.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  /**
+   * One CSV field: quoted where RFC 4180 needs it, and defused where a
+   * spreadsheet would run it. A field starting `=`, `+`, `-`, `@`, a tab or a
+   * carriage return is a formula to Excel and Calc — a task named
+   * `=HYPERLINK(…)`, typed by anybody on the team, ran when an administrator
+   * opened the export — so it is written with a leading apostrophe, which both
+   * show as text and never print. A plain number (`-3`, `+2.5`) is left alone:
+   * a variance column is negative numbers, and must stay numeric.
+   */
+  function csvField(value, { quote = false } = {}) {
+    let text = value == null ? '' : String(value);
+    if (/^[=+\-@\t\r]./s.test(text) && !/^[+-]?\d+(\.\d+)?$/.test(text)) text = `'${text}`;
+    return quote || /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }
 
   function truncate(s, n = 60) {
@@ -425,6 +449,7 @@ __mods["core/util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "rafBatch", { get: () => rafBatch, enumerable: true });
   Object.defineProperty(__x, "escapeHtml", { get: () => escapeHtml, enumerable: true });
   Object.defineProperty(__x, "stripHtml", { get: () => stripHtml, enumerable: true });
+  Object.defineProperty(__x, "csvField", { get: () => csvField, enumerable: true });
   Object.defineProperty(__x, "truncate", { get: () => truncate, enumerable: true });
   Object.defineProperty(__x, "slug", { get: () => slug, enumerable: true });
   Object.defineProperty(__x, "fold", { get: () => fold, enumerable: true });
@@ -676,8 +701,17 @@ __mods["core/dates.js"] = function (__x, __req) {
 
   /** Today at UTC midnight, from the system clock. */
   function todayMs() {
-    const now = new Date();
-    return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+    return localDayMs(Date.now());
+  }
+
+  /**
+   * The calendar day an instant falls on *here*, at UTC midnight — the date a
+   * person would write for it. Not `toISOString().slice(0, 10)`: that is the date
+   * in Greenwich, which in California is tomorrow from five in the afternoon.
+   */
+  function localDayMs(instant) {
+    const d = new Date(instant);
+    return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
   }
 
   /* ── Truncation ────────────────────────────────────────────────────────── */
@@ -1154,6 +1188,7 @@ __mods["core/dates.js"] = function (__x, __req) {
   Object.defineProperty(__x, "toISO", { get: () => toISO, enumerable: true });
   Object.defineProperty(__x, "toISOMinutes", { get: () => toISOMinutes, enumerable: true });
   Object.defineProperty(__x, "todayMs", { get: () => todayMs, enumerable: true });
+  Object.defineProperty(__x, "localDayMs", { get: () => localDayMs, enumerable: true });
   Object.defineProperty(__x, "startOfDay", { get: () => startOfDay, enumerable: true });
   Object.defineProperty(__x, "endOfDay", { get: () => endOfDay, enumerable: true });
   Object.defineProperty(__x, "startOfWeek", { get: () => startOfWeek, enumerable: true });
@@ -2228,7 +2263,7 @@ __mods["core/model.js"] = function (__x, __req) {
   function makeBaseline(doc, name) {
     return {
       id: uid('bl'),
-      name: name || `Baseline ${new Date().toISOString().slice(0, 10)}`,
+      name: name || `Baseline ${toISO(todayMs())}`,
       created: Date.now(),
       note: '',
       snapshot: doc.objects.map((o) => ({
@@ -10011,8 +10046,10 @@ __mods["core/storage.js"] = function (__x, __req) {
 
   function startBackupTimer() {
     clearInterval(backupTimer);
-    const minutes = getDoc().settings.autoBackupMinutes || 60;
-    if (minutes <= 0) return;
+    // `?? 60`, not `|| 60`: 0 is the setting's own "never" (its hint says so),
+    // and `|| 60` turned it back into an hour, so the line below never ran.
+    const minutes = Number(getDoc().settings.autoBackupMinutes ?? 60);
+    if (!(minutes > 0)) return;
     backupTimer = setInterval(() => {
       makeBackup('scheduled').catch(() => {});
     }, minutes * 60_000);
@@ -11179,8 +11216,12 @@ __mods["core/query.js"] = function (__x, __req) {
     const subsystems = new Set(f.subsystems || []);
     const areas = new Set(f.areas || []);
     const tags = new Set(f.tags || []);
-    const from = f.from ? toMs(f.from) : null;
-    const to = f.to ? toMs(f.to) : null;
+    // The window's own test, not a second copy of it. The copy here said
+    // `end < from` where the window says `end <= from` — an end is exclusive, so
+    // a bar finishing the day before the window was hidden on screen and still
+    // matched here: "Select matching" picked up something nobody could see, and
+    // a filtered export carried it.
+    const inWindow = dateWindowPredicate(f);
 
     return (obj) => {
       if (types.size && !types.has(obj.type)) return false;
@@ -11191,12 +11232,7 @@ __mods["core/query.js"] = function (__x, __req) {
       if (areas.size && !areas.has(obj.area)) return false;
       if (tags.size && !(obj.tags || []).some((t) => tags.has(t))) return false;
 
-      if (from != null || to != null) {
-        const start = obj.start;
-        const end = TYPES[obj.type]?.duration ? obj.end : obj.start + MS_DAY;
-        if (from != null && end < from) return false;
-        if (to != null && start > to) return false;
-      }
+      if (inWindow && !inWindow(obj)) return false;
 
       // Any term is enough. Every other dimension here narrows, so the text box
       // would too — but the thing people actually type into it is a list of the
@@ -14806,13 +14842,13 @@ __mods["timeline/renderer.js"] = function (__x, __req) {
     }
 
     const node = objectNodes.get(id);
-    if (node) {
-      node.classList.add('search-hit');
-      setTimeout(() => {
-        node.classList.remove('search-hit');
-        if (revealing === id) revealing = null;
-      }, 3200);
-    }
+    node?.classList.add('search-hit');
+    // Let go of it whether or not it was drawn — an object the filter hides has
+    // no node, and holding its id would keep it drawn wherever it is for good.
+    setTimeout(() => {
+      node?.classList.remove('search-hit');
+      if (revealing === id) revealing = null;
+    }, 3200);
   }
 
   /** The DOM node currently representing an object, if it is on screen. */
@@ -16141,6 +16177,12 @@ __mods["core/rc.js"] = function (__x, __req) {
       const changed = (next?.id || null) !== (user?.id || null);
       user = next;
       if (!next) { person = null; preview = null; }
+      // The bell follows the session: closed when it ends (a lapsed token too,
+      // not only signOut()), and opened again for whoever signs in next if a
+      // screen is still listening — an editor left open across the sign-in
+      // registered once and would otherwise poll slowly for the rest of the day.
+      if (!next) closeBell();
+      else if (changed && bellListeners.size) { closeBell(); openBell(); }
       if (changed) emit(EV.RC_AUTH_CHANGED, { user, event });
     });
 
@@ -19738,7 +19780,9 @@ __mods["io/importers.js"] = function (__x, __req) {
 
   const { readFileAsText, readFileAsArrayBuffer, fold } = __req("core/util.js");
   const { toISO, MS_DAY, addDays, todayMs, getDateOrder } = __req("core/dates.js");
-  const { makeProject, makeObject, makeLane, makeLink, normalise, validate, TYPES, listOptions } = __req("core/model.js");
+  const { makeProject, makeObject, makeLane, makeLink, normalise, validate, TYPES, listOptions, countsWorkingDays, endForDuration } = __req("core/model.js");
+
+
 
 
 
@@ -19824,13 +19868,7 @@ __mods["io/importers.js"] = function (__x, __req) {
    */
   function splitDelimited(text) {
     const clean = text.replace(/^\uFEFF/, ''); // a byte-order mark, as Excel writes one
-    const sample = clean.slice(0, 4000);
-    const counts = {
-      ',': (sample.match(/,/g) || []).length,
-      ';': (sample.match(/;/g) || []).length,
-      '\t': (sample.match(/\t/g) || []).length,
-    };
-    const delimiter = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+    const delimiter = delimiterOf(clean);
 
     const rows = [];
     let row = [];
@@ -19859,7 +19897,9 @@ __mods["io/importers.js"] = function (__x, __req) {
       } else if (ch === delimiter) {
         row.push(cell);
         cell = '';
-      } else if (ch === '\n') {
+      } else if (ch === '\n' || (ch === '\r' && clean[i + 1] !== '\n')) {
+        // A bare carriage return ends a row too: Excel for Mac's "CSV (Macintosh)"
+        // writes nothing else, and read as text it was one row of everything.
         row.push(cell);
         rows.push(row);
         row = [];
@@ -19875,6 +19915,31 @@ __mods["io/importers.js"] = function (__x, __req) {
     }
 
     return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
+  }
+
+  /**
+   * The separator, read off the header line — outside quotes.
+   *
+   * It used to be whichever of comma, semicolon and tab appeared most often in
+   * the first 4,000 characters, quoted text included. A tab-separated sheet
+   * whose descriptions carry commas ("Install, test and commission") out-counted
+   * its own tabs, was split on the commas, and imported as nonsense. The header
+   * is column names, which seldom carry punctuation, and the one line where every
+   * separator is a separator. A tie goes to tab, then semicolon: a comma in a
+   * header is far likelier to be text than a tab is.
+   */
+  function delimiterOf(text) {
+    const counts = { '\t': 0, ';': 0, ',': 0 };
+    let quoted = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === '"') quoted = !quoted;
+      else if (!quoted && (ch === '\n' || ch === '\r')) {
+        if (counts['\t'] || counts[';'] || counts[',']) break;
+      } else if (!quoted && ch in counts) counts[ch]++;
+    }
+    const [best, n] = Object.entries(counts).reduce((a, b) => (b[1] > a[1] ? b : a));
+    return n ? best : ',';
   }
 
   /* ── Column mapping ────────────────────────────────────────────────────── */
@@ -19985,8 +20050,12 @@ __mods["io/importers.js"] = function (__x, __req) {
       let end = parseDate(get('end'));
       const durationText = get('duration');
       if (!Number.isFinite(end) && durationText) {
-        const days = parseDuration(durationText);
-        if (Number.isFinite(days)) end = addDays(start, Math.max(1, Math.round(days)));
+        // In the plan's own unit, and through the same inverse the inspector's
+        // duration field uses: "10" from Microsoft Project is ten working days,
+        // and used to be laid out as ten calendar days — a bar the inspector
+        // then read back as eight.
+        const days = parseDuration(durationText, countsWorkingDays());
+        if (Number.isFinite(days)) end = endForDuration(start, days);
       }
 
       /* Type */
@@ -20128,17 +20197,24 @@ __mods["io/importers.js"] = function (__x, __req) {
   }
 
   /** "12 days", "3 wks", "5d", "8h" → days. */
-  function parseDuration(value) {
+  /**
+   * A duration in the plan's own days. On a working-day plan a week is five
+   * days and a month twenty — what Microsoft Project means by "1 wk" and
+   * "1 mon" — and on a calendar plan seven and 30.44. An hour is an eighth of a
+   * day and a minute a 480th: "30 mins" used to read as thirty months, because
+   * anything starting with "m" that was not exactly "mo" was taken as months.
+   */
+  function parseDuration(value, working = true) {
     const text = String(value).trim().toLowerCase();
     const match = /^([\d.]+)\s*([a-z]*)/.exec(text);
     if (!match) return NaN;
     const n = parseFloat(match[1]);
     if (!Number.isFinite(n)) return NaN;
     const unit = match[2];
-    if (unit.startsWith('w')) return n * 7;
-    if (unit.startsWith('mo')) return n * 30.44;
+    if (unit.startsWith('w')) return n * (working ? 5 : 7);
+    if (unit.startsWith('mi')) return n / 480;
+    if (unit.startsWith('m')) return n * (working ? 20 : 30.44);
     if (unit.startsWith('h')) return n / 8;
-    if (unit.startsWith('m') && unit !== 'mo') return n * 30.44;
     return n;
   }
 
@@ -26121,9 +26197,11 @@ __mods["io/pdf.js"] = function (__x, __req) {
     return text.length;
   }
 
+  /** A PDF date string. It ends in `Z`, so every part of it is UTC — local hours there were a lie off by the offset. */
   function pdfDate(date) {
     const pad = (n) => String(n).padStart(2, '0');
-    return `D:${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}Z`;
+    return `D:${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}`
+      + `${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}Z`;
   }
 
   Object.defineProperty(__x, "PAGE_SIZES", { get: () => PAGE_SIZES, enumerable: true });
@@ -26149,7 +26227,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
    *          pdf, components.
    */
 
-  const { download, slug, stripHtml, bytes } = __req("core/util.js");
+  const { download, slug, stripHtml, bytes, csvField } = __req("core/util.js");
   const { toISO } = __req("core/dates.js");
   const { TYPES, statusOf, subsystemOf, durationDays, projectExtent, LINK_TYPES, comparedRange } = __req("core/model.js");
 
@@ -26345,10 +26423,7 @@ __mods["io/exporters.js"] = function (__x, __req) {
     const body = rows
       .map((row) =>
         row
-          .map((cell) => {
-            const value = cell == null ? '' : String(cell);
-            return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-          })
+          .map((cell) => csvField(cell))
           .join(',')
       )
       .join('\r\n');

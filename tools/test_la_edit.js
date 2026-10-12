@@ -543,6 +543,15 @@ console.log('\nThe Excel export');
     struckBack.rows.some((r) => r.cells.some((c) => c.value === 'X.~WIT' && c.hex === 'FFFF00')));
   check('and the key says what the strike means', /taken off/.test(struckSheet));
 
+  // The sheet's name is an administrator's setting, free text — and Excel will
+  // not open a workbook whose sheet is named with a slash or past 31 characters.
+  const named = xl.lookaheadWorkbook({ model: m, days, legend: LEGEND, codes: CODES, sheetName: 'Four Week Look-Ahead 10/12 (Rev 3) — Main Line' });
+  const namedBook = new TextDecoder().decode(la.readZip(named.buffer.slice(named.byteOffset, named.byteOffset + named.byteLength)).get('xl/workbook.xml'));
+  const sheetName = (/<sheet name="([^"]*)"/.exec(namedBook) || [])[1] || '';
+  check('a sheet named past what Excel allows is written under a name Excel opens',
+    sheetName.length > 0 && sheetName.length <= 31 && !/[[\]:*?/\\]/.test(sheetName), JSON.stringify(sheetName));
+  check('and the print titles name the same sheet', namedBook.includes(`'${sheetName}'!`));
+
   // The cancellation log as a calendar workbook.
   const cw = xl.cancellationWorkbook({
     days: ['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04'],
@@ -850,14 +859,24 @@ console.log('\nReading a look-ahead longer than one page');
     };
     return q;
   };
+  // Realtime, as far as the bell uses it: channels opened and removed, and the
+  // session's changes handed to whoever listens for them.
+  const channels = { open: 0, removed: 0 };
+  let authChanged = null;
   globalThis.window = {
     CX_CONFIG: { rcSupabaseUrl: 'https://rc-test.example', rcSupabaseAnonKey: 'k' },
     supabase: {
       createClient: () => ({
         auth: {
           getSession: () => Promise.resolve({ data: { session: { user: { id: 'u1' } } } }),
-          onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
+          onAuthStateChange: (fn) => { authChanged = fn; return { data: { subscription: { unsubscribe() {} } } }; },
         },
+        channel: () => {
+          channels.open++;
+          const ch = { on: () => ch, subscribe: (status) => { status?.('SUBSCRIBED'); return ch; } };
+          return ch;
+        },
+        removeChannel: () => { channels.removed++; return Promise.resolve('ok'); },
         from: query,
         rpc: () => Promise.resolve({ data: null, error: null }),
       }),
@@ -879,6 +898,19 @@ console.log('\nReading a look-ahead longer than one page');
   grewBy = 5;
   const grown = await rc.listLaCells('2026-10-01', '2026-10-31');
   check('rows written while it was being read are not lost to a stale count', grown.length === 2005, `${grown.length} of 2005`);
+
+  // The bell follows the session: an editor that stays open across a sign-out
+  // and a sign-in hears changes again, for the account now signed in.
+  const stop = rc.onLookaheadChange(() => {});
+  const liveAtFirst = rc.lookaheadLive();
+  authChanged('SIGNED_OUT', null);
+  const afterSignOut = { live: rc.lookaheadLive(), removed: channels.removed };
+  authChanged('SIGNED_IN', { user: { id: 'u2' } });
+  check('the bell closes when the session ends, however it ends', liveAtFirst && !afterSignOut.live && afterSignOut.removed === 1,
+    JSON.stringify(afterSignOut));
+  check('and opens again for whoever signs in next, while a screen still listens',
+    rc.lookaheadLive() && channels.open === 2, JSON.stringify(channels));
+  stop();
   delete globalThis.window;
 }
 

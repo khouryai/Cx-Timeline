@@ -9,7 +9,7 @@
  *          pdf, components.
  */
 
-import { download, slug, stripHtml, bytes } from '../core/util.js';
+import { download, slug, stripHtml, bytes, csvField } from '../core/util.js';
 import { toISO } from '../core/dates.js';
 import {
   TYPES, statusOf, subsystemOf, durationDays, projectExtent, LINK_TYPES, comparedRange,
@@ -205,10 +205,7 @@ function toCsv(rows) {
   const body = rows
     .map((row) =>
       row
-        .map((cell) => {
-          const value = cell == null ? '' : String(cell);
-          return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-        })
+        .map((cell) => csvField(cell))
         .join(',')
     )
     .join('\r\n');

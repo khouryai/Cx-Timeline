@@ -458,9 +458,9 @@ CX_SITE=dist node tools/run_tests.js smoke smoke_calendar   # against a publishe
 | `test_lookahead.js` | 268 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
-| `test_la_edit.js` | 180 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, and every page of a long read fetched together |
-| `smoke.js` | 313 | the application, local mode — a tall plan drawn by the rows in view, offline, less motion and the System theme — **any console error fails the run** |
-| `smoke_calendar.js` | 605 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
+| `test_la_edit.js` | 184 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, and every page of a long read fetched together |
+| `smoke.js` | 324 | the application, local mode — a tall plan drawn by the rows in view, offline, less motion and the System theme, files from elsewhere (imports, notes, CSV), and dates away from Greenwich — **any console error fails the run** |
+| `smoke_calendar.js` | 606 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 105 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, a phone opening the site sent to it, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 70 | the desktop shell and its updates |
@@ -532,6 +532,26 @@ Each of these has caused a real bug:
   was kept as current — the inbox re-read the newest look-ahead reading while
   the editor's next one was being written, and Done editing then drew the
   older reading. Every write goes through `landed()`; a new write path must too.
+- **`innerHTML` on an element of this page runs what it parses.** An element
+  of a live document fetches its images whether or not it is attached, so
+  `stripHtml()` setting a `div`'s `innerHTML` to a note carrying
+  `<img src=x onerror=…>` ran the handler — from a plan file somebody else
+  wrote. Parse text you did not write with `DOMParser`; it builds a document
+  that loads and runs nothing (`stripHtml()`, `sanitiseHtml()`).
+- **`toISOString().slice(0, 10)` of an instant is Greenwich's date.** For a
+  UTC-midnight value it is the date; for *now*, or a file's modified time, it
+  is tomorrow in California from five in the afternoon. A date a person reads
+  comes from `todayMs()` or `localDayMs(instant)`.
+- **`setting || default` turns a meaningful 0 into the default.** "0 disables
+  scheduled backups" read `autoBackupMinutes || 60`, so 0 meant an hour. Use
+  `??` for any setting where 0 or an empty string is an answer.
+- **A queue written back from the copy it started with loses what arrived
+  meanwhile.** The huddle's flush overwrote the stored queue with its own
+  leftovers, erasing an outcome queued while it was sending. Take off what was
+  settled, by id, from the queue as it is *now*.
+- **A CSV cell starting `=`, `+`, `-` or `@` is a formula to Excel.** Every CSV
+  writer goes through `csvField()`, which writes such a cell as text and leaves
+  a plain number alone.
 - **A Playwright test types before a dialog's field has focus.** Opening a
   modal focuses its field on a timer; wait for `document.activeElement` to be
   the input before `keyboard.type()`, or the first characters go nowhere.

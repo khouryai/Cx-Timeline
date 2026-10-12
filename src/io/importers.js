@@ -24,6 +24,8 @@ import {
   validate,
   TYPES,
   listOptions,
+  countsWorkingDays,
+  endForDuration,
 } from '../core/model.js';
 import { getDoc } from '../core/store.js';
 import { readZip, zipText } from './inflate.js';
@@ -101,13 +103,7 @@ async function importCsvFile(file) {
  */
 export function splitDelimited(text) {
   const clean = text.replace(/^\uFEFF/, ''); // a byte-order mark, as Excel writes one
-  const sample = clean.slice(0, 4000);
-  const counts = {
-    ',': (sample.match(/,/g) || []).length,
-    ';': (sample.match(/;/g) || []).length,
-    '\t': (sample.match(/\t/g) || []).length,
-  };
-  const delimiter = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+  const delimiter = delimiterOf(clean);
 
   const rows = [];
   let row = [];
@@ -136,7 +132,9 @@ export function splitDelimited(text) {
     } else if (ch === delimiter) {
       row.push(cell);
       cell = '';
-    } else if (ch === '\n') {
+    } else if (ch === '\n' || (ch === '\r' && clean[i + 1] !== '\n')) {
+      // A bare carriage return ends a row too: Excel for Mac's "CSV (Macintosh)"
+      // writes nothing else, and read as text it was one row of everything.
       row.push(cell);
       rows.push(row);
       row = [];
@@ -152,6 +150,31 @@ export function splitDelimited(text) {
   }
 
   return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
+}
+
+/**
+ * The separator, read off the header line — outside quotes.
+ *
+ * It used to be whichever of comma, semicolon and tab appeared most often in
+ * the first 4,000 characters, quoted text included. A tab-separated sheet
+ * whose descriptions carry commas ("Install, test and commission") out-counted
+ * its own tabs, was split on the commas, and imported as nonsense. The header
+ * is column names, which seldom carry punctuation, and the one line where every
+ * separator is a separator. A tie goes to tab, then semicolon: a comma in a
+ * header is far likelier to be text than a tab is.
+ */
+function delimiterOf(text) {
+  const counts = { '\t': 0, ';': 0, ',': 0 };
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') quoted = !quoted;
+    else if (!quoted && (ch === '\n' || ch === '\r')) {
+      if (counts['\t'] || counts[';'] || counts[',']) break;
+    } else if (!quoted && ch in counts) counts[ch]++;
+  }
+  const [best, n] = Object.entries(counts).reduce((a, b) => (b[1] > a[1] ? b : a));
+  return n ? best : ',';
 }
 
 /* ── Column mapping ────────────────────────────────────────────────────── */
@@ -262,8 +285,12 @@ export function parseTabular(rows, sourceName = 'import') {
     let end = parseDate(get('end'));
     const durationText = get('duration');
     if (!Number.isFinite(end) && durationText) {
-      const days = parseDuration(durationText);
-      if (Number.isFinite(days)) end = addDays(start, Math.max(1, Math.round(days)));
+      // In the plan's own unit, and through the same inverse the inspector's
+      // duration field uses: "10" from Microsoft Project is ten working days,
+      // and used to be laid out as ten calendar days — a bar the inspector
+      // then read back as eight.
+      const days = parseDuration(durationText, countsWorkingDays());
+      if (Number.isFinite(days)) end = endForDuration(start, days);
     }
 
     /* Type */
@@ -405,17 +432,24 @@ export function parseDate(value) {
 }
 
 /** "12 days", "3 wks", "5d", "8h" → days. */
-function parseDuration(value) {
+/**
+ * A duration in the plan's own days. On a working-day plan a week is five
+ * days and a month twenty — what Microsoft Project means by "1 wk" and
+ * "1 mon" — and on a calendar plan seven and 30.44. An hour is an eighth of a
+ * day and a minute a 480th: "30 mins" used to read as thirty months, because
+ * anything starting with "m" that was not exactly "mo" was taken as months.
+ */
+function parseDuration(value, working = true) {
   const text = String(value).trim().toLowerCase();
   const match = /^([\d.]+)\s*([a-z]*)/.exec(text);
   if (!match) return NaN;
   const n = parseFloat(match[1]);
   if (!Number.isFinite(n)) return NaN;
   const unit = match[2];
-  if (unit.startsWith('w')) return n * 7;
-  if (unit.startsWith('mo')) return n * 30.44;
+  if (unit.startsWith('w')) return n * (working ? 5 : 7);
+  if (unit.startsWith('mi')) return n / 480;
+  if (unit.startsWith('m')) return n * (working ? 20 : 30.44);
   if (unit.startsWith('h')) return n / 8;
-  if (unit.startsWith('m') && unit !== 'mo') return n * 30.44;
   return n;
 }
 

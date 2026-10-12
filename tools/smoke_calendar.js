@@ -662,6 +662,7 @@ async function main() {
 
   check('an outcome entered with no connection is not lost',
     await page.evaluate(() => JSON.parse(localStorage.getItem('cxrc.queue') || '[]').length === 1));
+  const queuedEntry = await page.evaluate(() => JSON.parse(localStorage.getItem('cxrc.queue') || '[]')[0]);
   check('and nothing reached the server', await page.evaluate(
     (n) => window.__rc.rows.rc_actuals.length === n, before));
   check('the screen says how many are waiting',
@@ -682,6 +683,31 @@ async function main() {
   check('carrying what was said with it, rather than only that something happened',
     await page.evaluate(() =>
       window.__rc.rows.rc_actuals.some((a) => a.note === 'Half the loops proved')));
+
+  /* An outcome queued while the queue is still draining — a slow network,
+     somebody pressing the next status — is kept. The flush used to overwrite
+     the stored queue with its own leftovers when it finished, erasing it. */
+  const race = await page.evaluate(async (template) => {
+    const huddle = window.__CX_MODULES.req('ui/rc_huddle.js');
+    const sentOne = { ...template, clientUuid: '0b4d0000-0000-4000-8000-00000000000a', note: 'Sent while draining' };
+    const lateOne = { ...template, clientUuid: '0b4d0000-0000-4000-8000-00000000000b', note: 'Queued while draining' };
+    localStorage.setItem('cxrc.queue', JSON.stringify([sentOne]));
+    window.__rc.writeLatency = 400;
+    const draining = huddle.flushQueue();
+    await new Promise((r) => setTimeout(r, 100));
+    const stored = JSON.parse(localStorage.getItem('cxrc.queue') || '[]');
+    localStorage.setItem('cxrc.queue', JSON.stringify([...stored, lateOne]));
+    await draining;
+    window.__rc.writeLatency = 0;
+    const left = JSON.parse(localStorage.getItem('cxrc.queue') || '[]');
+    localStorage.setItem('cxrc.queue', '[]');
+    return {
+      left: left.map((e) => e.note),
+      arrived: window.__rc.rows.rc_actuals.some((a) => a.note === 'Sent while draining'),
+    };
+  }, queuedEntry);
+  check('an outcome queued while the queue drains is kept, and the one being sent is not sent twice',
+    race.arrived && JSON.stringify(race.left) === JSON.stringify(['Queued while draining']), JSON.stringify(race));
 
   /* ── The meeting, written down ────────────────────────────────────────
      A huddle answers three questions and then evaporates. The people who most
@@ -2152,6 +2178,7 @@ async function main() {
   };
   const selects = () => page.evaluate(() => window.__rc.calls
     .filter((c) => c.kind === 'select').map((c) => c.table));
+  const lapsStarted = Date.now();
   await lap();
   /* How many the first lap reads depends on how long ago the sections above
      read the same things — past thirty seconds they are read again, and on a
@@ -2163,8 +2190,16 @@ async function main() {
   const count = (table) => sweep.filter((t) => t === table).length;
   check('six visits move at most one grid',
     count('rc_lookahead_snapshots') <= 1, `${count('rc_lookahead_snapshots')} grid read(s)`);
-  check('and read the roster at most twice — once scheduled, once everybody',
-    count('rc_people') <= 2, `${count('rc_people')} roster read(s)`);
+  /* The roster is asked several different questions — who is scheduled, who is
+     active, and (the inbox, refreshing on its own time) everybody, retired
+     included — and each is one read, however many visits ask it. Counting the
+     table's reads instead failed whenever the inbox happened to refresh during
+     the laps, a third question rather than a second read. */
+  const rosterReads = await page.evaluate(() => window.__rc.calls
+    .filter((c) => c.kind === 'select' && c.table === 'rc_people').map((c) => c.filters.join('&') || 'all'));
+  const repeated = rosterReads.filter((q, i) => rosterReads.indexOf(q) !== i);
+  check('and ask the roster each of its questions once',
+    rosterReads.length >= 2 && repeated.length === 0, `${rosterReads.join(' | ')} in ${((Date.now() - lapsStarted) / 1000).toFixed(1)}s`);
   const again = sweep.slice(firstLap);
   check('the second lap round the same three tabs reads nothing new', again.length === 0,
     again.length ? `re-read ${again.join(', ')}` : `${firstLap} read(s) on the first lap, none on the second`);

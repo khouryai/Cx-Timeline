@@ -1033,7 +1033,7 @@ export function makeLink(props = {}) {
 export function makeBaseline(doc, name) {
   return {
     id: uid('bl'),
-    name: name || `Baseline ${new Date().toISOString().slice(0, 10)}`,
+    name: name || `Baseline ${toISO(todayMs())}`,
     created: Date.now(),
     note: '',
     snapshot: doc.objects.map((o) => ({

@@ -528,8 +528,10 @@ export function takeRecovery(currentDoc) {
 
 function startBackupTimer() {
   clearInterval(backupTimer);
-  const minutes = getDoc().settings.autoBackupMinutes || 60;
-  if (minutes <= 0) return;
+  // `?? 60`, not `|| 60`: 0 is the setting's own "never" (its hint says so),
+  // and `|| 60` turned it back into an hour, so the line below never ran.
+  const minutes = Number(getDoc().settings.autoBackupMinutes ?? 60);
+  if (!(minutes > 0)) return;
   backupTimer = setInterval(() => {
     makeBackup('scheduled').catch(() => {});
   }, minutes * 60_000);

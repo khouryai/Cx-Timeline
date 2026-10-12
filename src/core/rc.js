@@ -119,6 +119,12 @@ async function start() {
     const changed = (next?.id || null) !== (user?.id || null);
     user = next;
     if (!next) { person = null; preview = null; }
+    // The bell follows the session: closed when it ends (a lapsed token too,
+    // not only signOut()), and opened again for whoever signs in next if a
+    // screen is still listening — an editor left open across the sign-in
+    // registered once and would otherwise poll slowly for the rest of the day.
+    if (!next) closeBell();
+    else if (changed && bellListeners.size) { closeBell(); openBell(); }
     if (changed) emit(EV.RC_AUTH_CHANGED, { user, event });
   });
 

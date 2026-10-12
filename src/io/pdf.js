@@ -652,7 +652,9 @@ function byteLength(text) {
   return text.length;
 }
 
+/** A PDF date string. It ends in `Z`, so every part of it is UTC — local hours there were a lie off by the offset. */
 function pdfDate(date) {
   const pad = (n) => String(n).padStart(2, '0');
-  return `D:${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}Z`;
+  return `D:${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}`
+    + `${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}Z`;
 }

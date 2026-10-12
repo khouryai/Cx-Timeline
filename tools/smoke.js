@@ -2088,6 +2088,122 @@ async function main() {
   check('scrolling down draws the rows it reaches, and lets go of the ones it left',
     tall.farAtBottom && !tall.firstLaneAtBottom, JSON.stringify(tall));
 
+  /* What comes in from somebody else's file, and what goes out to somebody
+     else's spreadsheet, is handled as theirs: parsed for what it says, never
+     run. */
+  console.log('\nFiles from elsewhere');
+  const files = await page.evaluate(async () => {
+    const req = window.__CX_MODULES.req;
+    const util = req('core/util.js');
+    const io = req('io/importers.js');
+    const model = req('core/model.js');
+    window.__ran = 0;
+    const stripped = util.stripHtml('<p>Install <img src="x" onerror="window.__ran = 1">and test</p>');
+    await new Promise((r) => setTimeout(r, 400));
+    // More commas in the text than tabs in the file: the old count split on them.
+    const tsv = 'Task\tStart\tDuration\n'
+      + 'Install, test, commission, hand over, close out\t2026-10-05\t10\n'
+      + 'Survey, mark up, cut, pull, terminate, test\t2026-10-05\t2 wks\n'
+      + 'Cut over\t2026-10-19\t30 mins\n';
+    const tab = io.splitDelimited(tsv);
+    const mac = io.splitDelimited('Task,Start\rAlpha,2026-10-05\rBeta,2026-10-06\r');
+    const parsed = io.parseTabular(tab, 'test.tsv');
+    const ofTitle = (t) => parsed.objects?.find((o) => o.title === t);
+    const days = (o) => (o ? model.durationDays(o) : null);
+    return {
+      stripped, ran: window.__ran,
+      columns: tab[1]?.length, firstCell: tab[1]?.[0],
+      macRows: mac.length,
+      ten: days(ofTitle('Install, test, commission, hand over, close out')),
+      twoWeeks: days(ofTitle('Survey, mark up, cut, pull, terminate, test')),
+      halfHour: days(ofTitle('Cut over')),
+      csv: ['=HYPERLINK("http://x","y")', '+SUM(A1)', '@cmd', '-3', '+2.5', '-', 'plain'].map((v) => util.csvField(v)),
+    };
+  });
+  check('a note\u2019s markup is read for its words and nothing in it runs', files.stripped === 'Install and test' && files.ran === 0, JSON.stringify([files.stripped, files.ran]));
+  check('a tab-separated sheet is split on its tabs, however many commas its text holds',
+    files.columns === 3 && files.firstCell === 'Install, test, commission, hand over, close out', `${files.columns} columns, "${files.firstCell}"`);
+  check('a file with old Mac line endings is read as its rows', files.macRows === 3, `${files.macRows} rows`);
+  check('an imported duration of 10 is ten days as the plan counts them — the inspector reads back 10',
+    files.ten === 10, String(files.ten));
+  check('and "2 wks" is ten working days', files.twoWeeks === 10, String(files.twoWeeks));
+  check('and "30 mins" is part of a day, not thirty months', files.halfHour === 1, String(files.halfHour));
+  check('a cell a spreadsheet would run as a formula is exported as text, and a number stays a number',
+    JSON.stringify(files.csv) === JSON.stringify(['"\'=HYPERLINK(""http://x"",""y"")"', "'+SUM(A1)", "'@cmd", '-3', '+2.5', '-', 'plain']),
+    JSON.stringify(files.csv));
+
+  /* The date window is one test, wherever it is asked. A bar finishing the
+     day before the window opens is outside it on screen, and so outside it
+     for "Select matching" and a filtered export. */
+  const windowed = await page.evaluate(() => {
+    const req = window.__CX_MODULES.req;
+    const query = req('core/query.js');
+    const doc = req('core/store.js').getDoc();
+    const day = 86400000;
+    const from = Date.UTC(2026, 9, 12);
+    const iso = new Date(from).toISOString().slice(0, 10);
+    const before = { type: 'activity', start: from - 5 * day, end: from, lane: doc.lanes[0]?.id };
+    const across = { ...before, end: from + day };
+    const filters = { from: iso };
+    const shown = query.dateWindowPredicate(filters);
+    const matches = query.filterPredicate(doc, filters);
+    return { shownBefore: shown(before), matchesBefore: matches(before), shownAcross: shown(across), matchesAcross: matches(across) };
+  });
+  check('a bar ending the day before the date window is outside it for the filter as on screen',
+    !windowed.shownBefore && !windowed.matchesBefore && windowed.shownAcross && windowed.matchesAcross, JSON.stringify(windowed));
+
+  /* "0 disables scheduled backups", as the setting's hint says. It read the
+     interval as `|| 60`, so 0 meant an hour and backups ran on regardless. */
+  const timers = await page.evaluate(() => {
+    const req = window.__CX_MODULES.req;
+    const store = req('core/store.js');
+    const storage = req('core/storage.js');
+    const was = store.getSettings().autoBackupMinutes;
+    const started = [];
+    const real = window.setInterval;
+    window.setInterval = (fn, ms, ...rest) => { started.push(ms); return real(fn, ms, ...rest); };
+    try {
+      store.setSetting('autoBackupMinutes', 0, 'test');
+      storage.refreshBackupSchedule();
+      const atZero = started.filter((ms) => ms >= 60000).length;
+      store.setSetting('autoBackupMinutes', 15, 'test');
+      storage.refreshBackupSchedule();
+      return { atZero, atFifteen: started.includes(15 * 60000) };
+    } finally {
+      window.setInterval = real;
+      store.setSetting('autoBackupMinutes', was, 'test');
+      storage.refreshBackupSchedule();
+    }
+  });
+  check('an automatic backup interval of 0 schedules no backups, and 15 schedules them every quarter hour',
+    timers.atZero === 0 && timers.atFifteen, JSON.stringify(timers));
+
+  /* Dates written for a person are that person's dates. In Kiritimati (UTC+14)
+     the suites' pinned 14:00 UTC is already four in the morning of the next
+     day — the case California meets every evening, the other way round. */
+  console.log('\nAway from Greenwich');
+  {
+    const away = pinClock(await browser.newContext({ timezoneId: 'Pacific/Kiritimati', viewport: { width: 1200, height: 800 } }));
+    const there = await away.newPage();
+    await there.goto(`http://localhost:${PORT}/index.html`, { waitUntil: 'load' });
+    await there.waitForSelector('.tl-root', { timeout: 15000 });
+    const dates = await there.evaluate(async () => {
+      const req = window.__CX_MODULES.req;
+      const d = new Date();
+      const local = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const baseline = req('core/model.js').makeBaseline(req('core/store.js').getDoc()).name;
+      const scene = req('io/scene.js').buildScene(req('core/store.js').getDoc(), { maxWidth: 800 });
+      const blob = req('io/pdf.js').sceneToPdf(scene, { title: 'x' });
+      const text = new TextDecoder('latin1').decode(new Uint8Array(await blob.arrayBuffer()));
+      const created = (/\/CreationDate \(D:(\d{14})Z\)/.exec(text) || [])[1] || '';
+      return { local, utcHour: d.getUTCHours(), baseline, created };
+    });
+    await away.close();
+    check('a baseline taken today is named for today where it was taken', dates.baseline === `Baseline ${dates.local}`, `${dates.baseline} (local ${dates.local})`);
+    check('and a PDF\u2019s creation time, which says UTC, is UTC',
+      dates.created.slice(8, 10) === String(dates.utcHour).padStart(2, '0'), `${dates.created} at ${dates.utcHour}:00 UTC`);
+  }
+
   /* With no network the timeline still opens: the site's service worker keeps
      the page and what it loads (sw.js), and the plan is this browser's own. */
   console.log('\nOffline');

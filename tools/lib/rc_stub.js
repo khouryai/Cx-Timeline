@@ -669,7 +669,9 @@ export function fakeSdk() {
     /* Every read is recorded with what it asked for. The two numbers a
        performance check needs are how many reads a tab makes and how many of
        them carry a grid — a full snapshot is the one heavy row in the schema. */
-    const read = { kind: 'select', table, columns: '*', limit: null };
+    // `filters` says which question a read asked, so a test can tell the same
+    // read twice from two different reads of one table.
+    const read = { kind: 'select', table, columns: '*', limit: null, filters: [] };
     // Recorded when the read is awaited, not when the builder is made: a write
     // builds one of these too and never reads through it.
     const api = {
@@ -678,10 +680,10 @@ export function fakeSdk() {
         if (options?.count) read.count = options.count;
         return api;
       },
-      eq(col, v) { rows = rows.filter((r) => r[col] === v); return api; },
-      neq(col, v) { rows = rows.filter((r) => r[col] !== v); return api; },
-      gte(col, v) { rows = rows.filter((r) => r[col] >= v); return api; },
-      lte(col, v) { rows = rows.filter((r) => r[col] <= v); return api; },
+      eq(col, v) { read.filters.push(`${col}=${v}`); rows = rows.filter((r) => r[col] === v); return api; },
+      neq(col, v) { read.filters.push(`${col}!=${v}`); rows = rows.filter((r) => r[col] !== v); return api; },
+      gte(col, v) { read.filters.push(`${col}>=${v}`); rows = rows.filter((r) => r[col] >= v); return api; },
+      lte(col, v) { read.filters.push(`${col}<=${v}`); rows = rows.filter((r) => r[col] <= v); return api; },
       is() { return api; },
       in(col, vs) { rows = rows.filter((r) => vs.includes(r[col])); return api; },
       /* Ordered only where the order is the answer: the newest reading is

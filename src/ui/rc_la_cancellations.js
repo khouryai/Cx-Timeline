@@ -5,7 +5,7 @@
  *          rc_util, rc_la_state, rc_ingest.
  */
 
-import { el } from '../core/util.js';
+import { el, csvField } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import { applyLegend, isDark } from '../io/lookahead.js';
 import { saveFile } from '../io/exporters.js';
@@ -581,7 +581,7 @@ function recordCancellation(event) {
 }
 
 function cancellationCsv(events) {
-  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const q = (v) => csvField(v, { quote: true });
   const lines = [['activity', 'location', 'kind', 'bart_resources', 'start', 'end', 'days', 'reads', 'first_seen', 'last_seen', 'responsible', 'reason', 'recorded_at'].join(',')];
   for (const e of events) {
     lines.push([

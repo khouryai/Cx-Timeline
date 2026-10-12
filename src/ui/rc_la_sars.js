@@ -1,10 +1,11 @@
 /**
  * Look-ahead → Site access: SARs, filed and linked to the rows they cover.
  *
- * Imports: util, rc, filestore, components, rc_util, rc_la_state.
+ * Imports: util, dates, rc, filestore, components, rc_util, rc_la_state.
  */
 
 import { el } from '../core/util.js';
+import { toISO, localDayMs } from '../core/dates.js';
 import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
 import { icon } from './icons.js';
@@ -52,7 +53,7 @@ export async function renderSars(host) {
       [`${pdfs.length} PDF(s) waiting in ${SAR_INBOX}/`, 'Dropped', ''],
       pdfs.map((f) => el('tr', {}, [
         el('td', { text: f.name }),
-        el('td', { class: 'rc-hint', text: new Date(f.modified).toISOString().slice(0, 10) }),
+        el('td', { class: 'rc-hint', text: toISO(localDayMs(f.modified)) }),
         el('td', {}, [
           el('button', {
             class: 'cx-btn mini primary',

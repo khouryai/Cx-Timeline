@@ -202,8 +202,21 @@ export function styleBook({ font = 'Arial', size = 10 } = {}) {
  * The package around one worksheet: content types, relationships, the
  * workbook part (with its print titles) and a minimal core-properties part.
  */
+/**
+ * A name Excel will open a sheet under. It refuses a workbook whose sheet is
+ * named with `[ ] : * ? / \`, starts or ends with an apostrophe, or runs past
+ * 31 characters — "We found a problem with some content" — and the name here
+ * is an administrator's setting (`lookahead_sheet`), free text, so
+ * "4WLA 10/12" or a long revision title made a file nobody could open.
+ */
+export function sheetNameFor(name) {
+  const clean = String(name ?? '').replace(/[[\]:*?/\\]+/g, ' ').replace(/\s+/g, ' ').trim()
+    .replace(/^'+|'+$/g, '').slice(0, 31).trim();
+  return clean || 'Sheet1';
+}
+
 export function workbookParts({ sheetName, sheetXml, stylesXml, printTitles = null, title = '' }) {
-  const name = xmlEscape(sheetName);
+  const name = xmlEscape(sheetNameFor(sheetName));
   const defined = printTitles
     ? `<definedNames><definedName name="_xlnm.Print_Titles" localSheetId="0">'${name.replace(/'/g, "''")}'!${printTitles}</definedName></definedNames>`
     : '';

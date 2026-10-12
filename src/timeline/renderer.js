@@ -1519,13 +1519,13 @@ export function revealObject(id, { center = true } = {}) {
   }
 
   const node = objectNodes.get(id);
-  if (node) {
-    node.classList.add('search-hit');
-    setTimeout(() => {
-      node.classList.remove('search-hit');
-      if (revealing === id) revealing = null;
-    }, 3200);
-  }
+  node?.classList.add('search-hit');
+  // Let go of it whether or not it was drawn — an object the filter hides has
+  // no node, and holding its id would keep it drawn wherever it is for good.
+  setTimeout(() => {
+    node?.classList.remove('search-hit');
+    if (revealing === id) revealing = null;
+  }, 3200);
 }
 
 /** The DOM node currently representing an object, if it is on screen. */
