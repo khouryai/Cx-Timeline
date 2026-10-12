@@ -1301,6 +1301,68 @@ async function main() {
     stuck.rows.every((t) => t >= stuck.box - 1 && t < stuck.box + 120)
       && stuck.rows[1] > stuck.rows[0] && stuck.rows[2] > stuck.rows[1], JSON.stringify(stuck));
 
+  /* The activity columns stay put while the days scroll sideways — every one
+     of them, at the place it started, in the header and the body alike — and
+     nothing scrolls over them: not the days going sideways, and not the rows
+     going up under the headings. A heading drawn at the same depth as the day
+     numbers was covered by them the moment the grid moved. */
+  const side = await page.evaluate(() => {
+    const scroller = document.querySelector('#rc-frame .la-grid').closest('.rc-scroll');
+    const frozen = () => [...document.querySelectorAll('#rc-frame .la-grid tr')]
+      .flatMap((tr) => [...tr.querySelectorAll('.la-meta:not(.la-meta-all)')]);
+    const lefts = () => frozen().map((td) => Math.round(td.getBoundingClientRect().left));
+    // A frozen cell is covered when what is on top at its middle is not it.
+    const covered = (cells) => cells.filter((td) => {
+      const r = td.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return !(hit && td.contains(hit));
+    }).map((td) => td.textContent.trim() || td.className);
+    const headings = () => [...document.querySelectorAll('#rc-frame .la-grid thead .la-meta-head')];
+    const before = lefts();
+    scroller.scrollLeft = scroller.scrollWidth;
+    const after = lefts();
+    const scrolled = scroller.scrollLeft;
+    const sideways = covered([...headings(),
+      ...document.querySelectorAll('#rc-frame .la-grid tbody tr:first-child .la-meta')]);
+    scroller.scrollTop = 200;
+    const down = covered(headings());
+    scroller.scrollTop = 0;
+    scroller.scrollLeft = 0;
+    return {
+      scrolled, count: before.length,
+      moved: before.filter((x, i) => Math.abs(x - after[i]) > 1).length, sideways, down,
+    };
+  });
+  check('the activity columns are frozen while the days scroll sideways',
+    side.scrolled > 100 && side.count > 6 && side.moved === 0, JSON.stringify(side));
+  check('and their headings stay on top, scrolled sideways or down',
+    !side.sideways.length && !side.down.length, JSON.stringify(side));
+  /* Measured once, the offsets went stale whenever the columns changed width
+     afterwards — a font arriving, a zoom — and one frozen column slid over the
+     next. The first column grows here as it would when a wider face lands. */
+  const regrown = await page.evaluate(async () => {
+    const table = document.querySelector('#rc-frame .la-grid');
+    const scroller = table.closest('.rc-scroll');
+    const ids = [...table.querySelectorAll('tbody tr:first-child .la-meta')];
+    const was = ids.map((td) => td.style.left);
+    ids[0].style.minWidth = `${ids[0].getBoundingClientRect().width + 60}px`;
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    scroller.scrollLeft = scroller.scrollWidth;
+    const overlaps = ids.slice(1).filter((td, i) =>
+      td.getBoundingClientRect().left < ids[i].getBoundingClientRect().right - 1).length;
+    const now = ids.map((td) => td.style.left);
+    scroller.scrollLeft = 0;
+    ids[0].style.minWidth = '';
+    return { was, now, overlaps };
+  });
+  check('and today\'s headings are frozen with the rest of the header',
+    await page.evaluate(() => {
+      const cells = [...document.querySelectorAll('#rc-frame .la-grid thead th.la-today')];
+      return cells.length >= 2 && cells.every((th) => getComputedStyle(th).position === 'sticky');
+    }));
+  check('and follow the columns when their widths change',
+    regrown.overlaps === 0 && regrown.now.join() !== regrown.was.join(), JSON.stringify(regrown));
+
   // Filtering redraws the rows and leaves the field alone — rebuilding an
   // input under the caret is the trap this project has hit three times.
   const laFilter = page.locator('#rc-frame input[placeholder^="Filter activities"]');

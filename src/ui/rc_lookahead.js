@@ -699,33 +699,16 @@ function grid_(view, today, isMe = null, snapshotId = null, notes = []) {
 
   /* The frozen columns have to be told where they start, and only the browser
      knows how wide the content made them. Measured once the table is in the
-     document, on the next frame. */
-  requestAnimationFrame(() => {
+     document, on the next frame — and again whenever it changes size: a font
+     arriving, a zoom or a heading wrapping moves the columns, and a stale
+     offset lets one frozen column slide over the next, or a header row under
+     another. */
+  const freeze = () => {
     freezeHead(head);
-    const firstRow = table_.querySelector('tbody tr');
-    if (!firstRow) return;
-    let left = 0;
-    const widths = [...firstRow.querySelectorAll('.la-meta')].map((td) => td.getBoundingClientRect().width);
-    widths.forEach((width, i) => {
-      /* Every cell in that column, heading included — the heading row now has
-         one cell per column rather than one spanning the lot, so it has to be
-         frozen at the same offsets or the names slide out from over their
-         values. The two rows that still span everything are pinned at zero,
-         which is where a cell covering all of them starts. */
-      for (const cell of table_.querySelectorAll(`.la-meta:nth-child(${i + 1})`)) {
-        if (!cell.classList.contains('la-meta-all')) cell.style.left = `${left}px`;
-      }
-      left += width;
-    });
-    for (const th of table_.querySelectorAll('thead .la-meta-all')) th.style.left = '0px';
-    // The month label pins just past the frozen columns; only the browser
-    // knows how wide the content made them.
-    table_.style.setProperty('--la-meta-w', `${left}px`);
-  });
-
-  /* A header row can change height after the first frame — a font arriving, a
-     heading wrapping — and a stale offset lets one row slide under another. */
-  if (typeof ResizeObserver === 'function') new ResizeObserver(() => freezeHead(head)).observe(head);
+    freezeSide(table_);
+  };
+  requestAnimationFrame(freeze);
+  if (typeof ResizeObserver === 'function') new ResizeObserver(freeze).observe(table_);
 
   if (!rows.length) {
     return el('p', {
@@ -736,6 +719,32 @@ function grid_(view, today, isMe = null, snapshotId = null, notes = []) {
     });
   }
   return wrap;
+}
+
+/**
+ * Pin the activity columns at the widths the content made them. Every cell in
+ * a column, heading included — the heading row has one cell per column rather
+ * than one spanning the lot, so it has to be frozen at the same offsets or the
+ * names slide out from over their values. The two rows that still span
+ * everything are pinned at zero, which is where a cell covering all of them
+ * starts. A table not laid out yet (hidden, or not in the document) measures
+ * nothing and is left until it is.
+ */
+function freezeSide(table) {
+  const firstRow = table.querySelector('tbody tr');
+  if (!firstRow) return;
+  const widths = [...firstRow.querySelectorAll('.la-meta')].map((td) => td.getBoundingClientRect().width);
+  if (!widths.some((w) => w > 0)) return;
+  let left = 0;
+  widths.forEach((width, i) => {
+    for (const cell of table.querySelectorAll(`.la-meta:nth-child(${i + 1})`)) {
+      if (!cell.classList.contains('la-meta-all')) cell.style.left = `${left}px`;
+    }
+    left += width;
+  });
+  for (const th of table.querySelectorAll('thead .la-meta-all')) th.style.left = '0px';
+  // The month label pins just past the frozen columns.
+  table.style.setProperty('--la-meta-w', `${left}px`);
 }
 
 /**

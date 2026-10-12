@@ -752,7 +752,12 @@
   max-height: min(70vh, 720px);
   overflow: auto;
 }
-.rc-scroll .rc-table thead th {
+/* Not the look-ahead, which freezes its own header and its activity columns at
+   depths of their own (calendar.css). This rule is the more specific one, so it
+   used to win there and put every heading at one depth: the day numbers slid
+   over Activity, Description and Location going sideways, and the rows over
+   them going down. */
+.rc-scroll .rc-table:not(.la-grid) thead th {
   position: sticky;
   top: 0;
   z-index: 1;

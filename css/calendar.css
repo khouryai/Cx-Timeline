@@ -289,10 +289,12 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
 /* Today is a line down the grid rather than a tinted cell: a fill would be one
    more colour competing with the workbook's own, and the whole point of this
    view is that the colours are BART's. */
-.la-grid .la-today {
-  border-left: 2px solid var(--accent, #e60012);
-  position: relative;
-}
+.la-grid .la-today { border-left: 2px solid var(--accent, #e60012); }
+/* The body's cells only. On a heading this outranked `position: sticky`, so
+   today's day number and weekday scrolled away with the rows — and the offset
+   that pins each header row was read as a nudge, drawing them over the rows
+   below. */
+.la-grid td.la-today { position: relative; }
 .la-grid thead th.la-today { color: var(--accent, #e60012); }
 
 /* The month band is its own row with its own weight, and the label inside it
