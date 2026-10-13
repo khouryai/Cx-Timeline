@@ -40,6 +40,7 @@ import {
 import {
   SHIFTS, shiftLabel, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, isoToMs, byId, availability,
   notifyChanged, formModal, nameRegister, lookaheadWithResources, assignmentIndex, outcomeLookup,
+  cancelledOn, watchForNewReading,
 } from '../ui/rc_util.js';
 
 /** The Monday on screen, or null for this week. */
@@ -92,6 +93,8 @@ export async function render(root) {
     register: nameRegister(everybody.length ? everybody : scheduled, aliases),
   });
   const outcomeFor = outcomeLookup(actuals);
+  // A day called off in the 4WLA reaches the phone as soon as it is published.
+  watchForNewReading(root, sheet.snapshotId);
   const redraw = () => { clear(root); return render(root); };
 
   const ctx = {
@@ -234,6 +237,7 @@ function dayCard(iso, state, ctx) {
           text: [row.raw_label || `row ${row.sheet_row}`,
             ctx.locs.get(row.location_id)?.name || row.raw_location].filter(Boolean).join(' · '),
         }),
+        cancelledOn(row, iso) ? badge('Cancelled', 'bad') : null,
       ]));
     }
   }
@@ -259,6 +263,9 @@ function taskCard(entry, iso, ctx) {
   const shift = entry.shift && entry.shift !== 'day' ? shiftLabel(entry.shift) : null;
 
   const flags = [
+    /* Called off in the 4WLA — the same flag, and the same reading, as the
+       week plan's. */
+    entry.cancelled ? badge('Cancelled', 'bad') : null,
     /* The workbook is the assumption, so only a day somebody typed carries a
        flag — the rule the week plan and the huddle follow. */
     !entry.from_lookahead && entry.id ? badge('Manual', 'warn') : null,
@@ -270,7 +277,8 @@ function taskCard(entry, iso, ctx) {
   ].filter(Boolean);
 
   return el('article', {
-    class: ['m-task', entry.absence ? 'm-task-away' : '', outcome ? `m-done m-done-${outcome.status}` : '']
+    class: ['m-task', entry.absence ? 'm-task-away' : '', entry.cancelled ? 'm-task-cancelled' : '',
+      outcome ? `m-done m-done-${outcome.status}` : '']
       .filter(Boolean).join(' '),
   }, [
     el('div', { class: 'm-task-title', text: entry.task || '—' }),

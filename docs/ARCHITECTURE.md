@@ -1093,6 +1093,30 @@ shows a blank against a name with no way to tell "nothing planned" from
 "nothing said". A span of days becomes one row per day, and days already
 planned, on leave or not worked are skipped and counted rather than doubled.
 
+### A day the 4WLA cancels reaches the week plan by itself
+
+A cancellation painted in the look-ahead used to stop at the look-ahead. The
+week plan derived who is on what from the Resource row and never looked at what
+the activity line's paint *said*, so a red day drew the team on it as an
+ordinary day shift — and it read the sheet once, when the tab was opened, so
+even a correct reading arrived only when somebody happened to reopen it.
+
+Now a derived day carries `cancelled` from `assignmentIndex()`, by
+`cancelledOn()` — a meaning matching /cancel/, or a day stored as the bare
+`#hex` of a legend entry that is one (`lookaheadWithResources()` names those),
+which is the rule `rc_cancelled_days` counts the log by, so the log and the plan
+cannot disagree about a day. The day is still drawn, struck through with a
+"Cancelled" badge: somebody was going to be there, and a blank would not say
+why. A Resource row's red never reaches `cells` (see *The look-ahead now says
+who*), so marking the names is still not a cancellation.
+
+The week plan and the phone's week follow the bell as the look-ahead view does
+— `watchForNewReading()`, now in `ui/rc_util.js` and shared by all three — and
+redraw once the newer reading is published, which the editor does a couple of
+seconds after the painting stops. An edit that has not been published yet is
+not a reading, and changes nothing on them. One watch per screen: a tab that
+redraws in place (stepping a week) replaces its watch rather than adding one.
+
 ### Today is a column, not a hairline
 
 **Today is a column, not a hairline.** A week grid is read by running a finger
@@ -2572,8 +2596,8 @@ suites fail on a bare call, naming the policy. A helper that takes the row
 
 `rc_la_beacon` is one row a trigger touches whenever an edit is logged or a
 reading is taken, published to Supabase Realtime. `onLookaheadChange()` in
-`core/rc.js` keeps one channel for the page; the editor and the calendar's view
-ask what changed the moment it rings, exactly as their polls did. It says only
+`core/rc.js` keeps one channel for the page; the editor, the calendar's view,
+the week plan and the phone's week ask what changed the moment it rings, exactly as their polls did. It says only
 *that* something changed: Realtime applies the same policies, so it could not
 have been `rc_la_edits` (an administrator's), and it must not be
 `rc_lookahead_snapshots`, whose rows carry the whole grid. While the bell is

@@ -1590,6 +1590,53 @@ async function main() {
   check('and it is not reported as a name nobody could place',
     !/^Victor$/m.test(resText), resText.split('\n').filter((l) => /^Victor/.test(l)).join(' | '));
 
+  /* ── A day called off in the 4WLA ─────────────────────────────────────
+     An administrator paints Victor's Tuesday on the fibre re-termination red in
+     the editor, and it is published. The open week plan hears the bell and
+     redraws by itself — nobody clicks anything — with the day struck through
+     and said in words. The paint is stored as the bare colour, which is what a
+     day read before red was mapped looks like: the legend calls `#FF0000` a
+     cancellation, and that is the rule the cancellation log counts by too. */
+  {
+    const victorRow = page.locator('#rc-frame .rc-resources tr', { hasText: 'Victor Okonkwo' });
+    check('before: nothing on the week plan is drawn as cancelled',
+      (await page.locator('#rc-frame .rc-res-cancelled').count()) === 0);
+    await page.evaluate(() => {
+      const S = window.__rc.rows;
+      const newest = [...S.rc_lookahead_snapshots]
+        .sort((a, b) => String(b.taken_at).localeCompare(String(a.taken_at)))[0];
+      S.rc_lookahead_snapshots.push({ ...newest, id: 'snap-cancel', taken_at: new Date(Date.now() + 1000).toISOString() });
+      for (const r of S.rc_lookahead_rows) if (r.snapshot_id === newest.id) r.snapshot_id = 'snap-cancel';
+      const rei = S.rc_lookahead_rows.find((r) => r.id === 'lar3');
+      const tuesday = Object.keys(rei.resources)[0];
+      rei.cells = { ...rei.cells, [tuesday]: '#FF0000' };
+      window.__rcCancelWas = newest.id;
+      window.__rc.ring();
+    });
+    await page.locator('#rc-frame .rc-res-cancelled').first().waitFor({ timeout: 5000 }).catch(() => {});
+    const cancelled = victorRow.locator('.rc-res-job.rc-res-cancelled', { hasText: 'REI Fiber Re-termination' });
+    check('a day cancelled in the 4WLA reaches the open week plan by itself, as it is published',
+      (await cancelled.count()) === 1, (await victorRow.innerText()).replace(/\n/g, ' | ').slice(0, 140));
+    check('and it says so in words, not only with a line through it',
+      (await cancelled.locator('.cx-badge', { hasText: 'Cancelled' }).count()) === 1);
+    check('and only that day is cancelled',
+      (await page.locator('#rc-frame .rc-res-cancelled').count()) === 1,
+      String(await page.locator('#rc-frame .rc-res-cancelled').count()));
+    await page.evaluate(() => {
+      const S = window.__rc.rows;
+      S.rc_lookahead_snapshots.splice(S.rc_lookahead_snapshots.findIndex((x) => x.id === 'snap-cancel'), 1);
+      for (const r of S.rc_lookahead_rows) if (r.snapshot_id === 'snap-cancel') r.snapshot_id = window.__rcCancelWas;
+      const rei = S.rc_lookahead_rows.find((r) => r.id === 'lar3');
+      rei.cells = {};
+      window.__rc.ring();
+    });
+    await page.waitForFunction(() => !document.querySelector('#rc-frame .rc-res-cancelled'), null, { timeout: 5000 })
+      .catch(() => {});
+    check('and putting the day back takes the cancellation off again, also by itself',
+      (await page.locator('#rc-frame .rc-res-cancelled').count()) === 0
+      && /REI Fiber Re-termination/.test(await victorRow.innerText()));
+  }
+
   /* ── A misspelling ────────────────────────────────────────────────────
      "Victor Okonkow" — one transposed pair of letters, typed into a spreadsheet
      at speed. It used to cost him the whole day: nothing in the register folds

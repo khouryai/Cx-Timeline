@@ -31,6 +31,7 @@ import { icon } from './icons.js';
 import { selectInput, textInput, toast, emptyState, field, checkbox } from './components.js';
 import {
   notifyChanged, dayLabel, todayISO, formModal, parsedView, foldName, meMatcher, codeNodes,
+  watchForNewReading,
 } from './rc_util.js';
 
 import { la, WEEK_CHOICES } from './rc_la_state.js';
@@ -43,11 +44,6 @@ import { renderSars } from './rc_la_sars.js';
 import { openActivity } from './rc_activity.js';
 
 const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'sars'];
-
-/** How often an open calendar asks whether a newer reading has been published. */
-const WATCH_MS = 10000;
-/** While the bell is connected (`rc.lookaheadLive()`), a poll is only a check on it. */
-const WATCH_LIVE_MS = 120000;
 
 export async function render(root) {
   /* The calendar is the team's; the register around it is not.
@@ -147,47 +143,6 @@ async function renderEditing(host) {
   const body = el('div');
   host.appendChild(body);
   await renderEditor(body);
-}
-
-/**
- * Redraw the calendar when somebody publishes a newer reading — the other
- * administrator editing, or this one in another window. Told the moment it
- * happens by the bell (`rc.onLookaheadChange()`), and asked every few seconds
- * as well while the bell is not connected; never while somebody is typing into
- * its filter or has a dialog open, because redrawing takes the field away. A
- * ring that lands then is not lost: the next poll asks again.
- */
-function watchForNewReading(host, seenId) {
-  let asked = 0;
-  let done = false;
-  const stop = () => {
-    done = true;
-    clearInterval(timer);
-    unring();
-  };
-  const look = async () => {
-    if (done) return;
-    if (!host.isConnected) { stop(); return; }
-    if (document.hidden || document.querySelector('.cx-modal-overlay')) return;
-    const active = document.activeElement;
-    if (active && host.contains(active)
-      && active.matches('input:not([type=checkbox]):not([type=radio]), textarea, select')) return;
-    asked = Date.now();
-    try {
-      const id = await rc.newestSnapshotId();
-      if (done || id == null || id === seenId || !host.isConnected) return;
-      stop();
-      rc.forgetReads();
-      notifyChanged('lookahead');
-    } catch {
-      /* the next tick asks again */
-    }
-  };
-  const timer = setInterval(() => {
-    if (rc.lookaheadLive() && Date.now() - asked < WATCH_LIVE_MS) return;
-    look();
-  }, WATCH_MS);
-  const unring = rc.onLookaheadChange(look);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

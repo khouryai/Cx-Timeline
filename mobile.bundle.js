@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 20   Built: 2026-10-12T22:25:39.386Z
+ * Modules: 20   Built: 2026-10-13T17:49:02.551Z
  */
 (function () {
   'use strict';
@@ -6856,7 +6856,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   const { el } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const { toISO, todayMs, fmtDate, addDays, MS_DAY } = __req("core/dates.js");
-  const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS, cellTokens, cancellationEvents, supportCancellationEvents, attachCancellationNotes, bartCodes } = __req("core/lookahead.js");
+  const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS, cellTokens, cancellationEvents, supportCancellationEvents, attachCancellationNotes, bartCodes, isCancelMeaning } = __req("core/lookahead.js");
 
 
 
@@ -7014,6 +7014,64 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
 
   function notifyChanged(what) {
     emit(EV.RC_CHANGED, { what });
+  }
+
+  /** How often a screen drawn from the look-ahead asks whether a newer reading has been published. */
+  const WATCH_MS = 10000;
+  /** While the bell is connected (`rc.lookaheadLive()`), a poll is only a check on it. */
+  const WATCH_LIVE_MS = 120000;
+  /** The watch each host has running, so drawing it again replaces it rather than adding one. */
+  const watching = new WeakMap();
+
+  /**
+   * Redraw a screen drawn from the look-ahead when somebody publishes a newer
+   * reading — an administrator painting a cancellation in the editor, a workbook
+   * read, this one in another window. Told the moment it happens by the bell
+   * (`rc.onLookaheadChange()`), and asked every few seconds as well while the bell
+   * is not connected; never while somebody is typing into a field of the screen or
+   * has a dialog open, because redrawing takes the field away. A ring that lands
+   * then is not lost: the next poll asks again.
+   *
+   * `seenId` is the reading the screen was drawn from. A ring that is only an
+   * edit — the editor publishes once the typing stops — finds the same reading
+   * and changes nothing. One watch per host: a screen that redraws itself in
+   * place (the week plan stepping a week) stops the one it started before.
+   */
+  function watchForNewReading(host, seenId) {
+    watching.get(host)?.();
+    let asked = 0;
+    let done = false;
+    const stop = () => {
+      done = true;
+      clearInterval(timer);
+      unring();
+      if (watching.get(host) === stop) watching.delete(host);
+    };
+    const look = async () => {
+      if (done) return;
+      if (!host.isConnected) { stop(); return; }
+      if (document.hidden || document.querySelector('.cx-modal-overlay')) return;
+      const active = document.activeElement;
+      if (active && host.contains(active)
+        && active.matches('input:not([type=checkbox]):not([type=radio]), textarea, select')) return;
+      asked = Date.now();
+      try {
+        const id = await rc.newestSnapshotId();
+        if (done || id == null || id === seenId || !host.isConnected) return;
+        stop();
+        rc.forgetReads();
+        notifyChanged('lookahead');
+      } catch {
+        /* the next tick asks again */
+      }
+    };
+    const timer = setInterval(() => {
+      if (rc.lookaheadLive() && Date.now() - asked < WATCH_LIVE_MS) return;
+      look();
+    }, WATCH_MS);
+    const unring = rc.onLookaheadChange(look);
+    watching.set(host, stop);
+    return stop;
   }
 
   /**
@@ -7463,8 +7521,14 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       rc.listLocationAliases().catch(() => []),
     ]);
 
-    const laRows = newestPerKey(stored, new Map(snapshots.map((s, i) => [s.id, i])));
-    if (!snapshot?.grid) return { rows: laRows, absences: [] };
+    const laRows = namedCancellations(
+      newestPerKey(stored, new Map(snapshots.map((s, i) => [s.id, i]))),
+      legendRows
+    );
+    /* Which reading this is, so a screen drawn from it can tell when a newer one
+       has been published — see `watchForNewReading()`. */
+    const snapshotId = snapshot?.id ?? null;
+    if (!snapshot?.grid) return { rows: laRows, absences: [], snapshotId };
 
     const view = parsedView(snapshot, legendRows);
     const rows = graftLocations(
@@ -7477,7 +7541,44 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
        whole four-to-six weeks and a caller asking about one week must not be told
        who is off in another. */
     const absences = absencesFrom(view).filter((a) => a.date >= fromISO && a.date <= toISO);
-    return { rows, absences };
+    return { rows, absences, snapshotId };
+  }
+
+  /**
+   * Give a day stored as a bare colour the legend's word for it, where that word
+   * is a cancellation.
+   *
+   * A day read before red was mapped is stored as `#hex`, and it is cancelled all
+   * the same once the legend says what the colour is — which is the rule
+   * `rc_cancelled_days` reads the log by. Without this the log would list the day
+   * as cancelled while the week plan still drew the team on it. Only cancellation
+   * is named here: what any other colour means is the legend's to say when the
+   * sheet is next read, and the shift a day is drawn as stays what it was.
+   */
+  function namedCancellations(laRows, legendRows) {
+    const cancel = new Map((legendRows || [])
+      .filter((l) => isCancelMeaning(l.meaning))
+      .map((l) => [`#${l.argb}`, l.meaning]));
+    if (!cancel.size) return laRows;
+    return (laRows || []).map((row) => {
+      let cells = null;
+      for (const [date, said] of Object.entries(row.cells || {})) {
+        if (!cancel.has(said)) continue;
+        cells = cells || { ...row.cells };
+        cells[date] = cancel.get(said);
+      }
+      return cells ? { ...row, cells } : row;
+    });
+  }
+
+  /**
+   * Did the look-ahead cancel this activity on this day? The activity line's own
+   * paint — a Resource row's red is somebody marking names and never reaches
+   * `cells` (see `rowsFrom()`). One test, so the week plan, the phone and the
+   * cancellation log cannot disagree about which days were called off.
+   */
+  function cancelledOn(row, iso) {
+    return isCancelMeaning(row?.cells?.[iso]);
   }
 
   /**
@@ -7790,6 +7891,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
           location_id: null,
           raw_location: null,
           category_id: categoryFor(kind),
+          cancelled: false,
           shift: 'day',
           lookahead_row_id: null,
           carry_chain_id: null,
@@ -7817,6 +7919,10 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
           location_id: row.location_id || null,
           raw_location: row.raw_location || null,
           category_id: null,
+          /* The sheet still names them, and the day is still drawn — a day called
+             off is something the person needs to see, not a blank — but as
+             cancelled, never as work they are expected at. */
+          cancelled: cancelledOn(row, iso),
           shift: shiftFor(row.cells?.[iso]),
           lookahead_row_id: row.id || null,
           carry_chain_id: null,
@@ -7943,6 +8049,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "codeNodes", { get: () => codeNodes, enumerable: true });
   Object.defineProperty(__x, "cancellationLog", { get: () => cancellationLog, enumerable: true });
   Object.defineProperty(__x, "notifyChanged", { get: () => notifyChanged, enumerable: true });
+  Object.defineProperty(__x, "watchForNewReading", { get: () => watchForNewReading, enumerable: true });
   Object.defineProperty(__x, "orgNav", { get: () => orgNav, enumerable: true });
   Object.defineProperty(__x, "goToTab", { get: () => goToTab, enumerable: true });
   Object.defineProperty(__x, "STATUSES", { get: () => STATUSES, enumerable: true });
@@ -7962,6 +8069,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "newestPerKey", { get: () => newestPerKey, enumerable: true });
   Object.defineProperty(__x, "parsedView", { get: () => parsedView, enumerable: true });
   Object.defineProperty(__x, "lookaheadWithResources", { get: () => lookaheadWithResources, enumerable: true });
+  Object.defineProperty(__x, "cancelledOn", { get: () => cancelledOn, enumerable: true });
   Object.defineProperty(__x, "graftLocations", { get: () => graftLocations, enumerable: true });
   Object.defineProperty(__x, "graftResources", { get: () => graftResources, enumerable: true });
   Object.defineProperty(__x, "resourceAssignments", { get: () => resourceAssignments, enumerable: true });
@@ -8016,7 +8124,8 @@ __mods["mobile/week.js"] = function (__x, __req) {
   const { textInput, selectInput, segmented, toast, badge, field, confirmDialog } = __req("ui/components.js");
 
 
-  const { SHIFTS, shiftLabel, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, isoToMs, byId, availability, notifyChanged, formModal, nameRegister, lookaheadWithResources, assignmentIndex, outcomeLookup } = __req("ui/rc_util.js");
+  const { SHIFTS, shiftLabel, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, isoToMs, byId, availability, notifyChanged, formModal, nameRegister, lookaheadWithResources, assignmentIndex, outcomeLookup, cancelledOn, watchForNewReading } = __req("ui/rc_util.js");
+
 
 
 
@@ -8071,6 +8180,8 @@ __mods["mobile/week.js"] = function (__x, __req) {
       register: nameRegister(everybody.length ? everybody : scheduled, aliases),
     });
     const outcomeFor = outcomeLookup(actuals);
+    // A day called off in the 4WLA reaches the phone as soon as it is published.
+    watchForNewReading(root, sheet.snapshotId);
     const redraw = () => { clear(root); return render(root); };
 
     const ctx = {
@@ -8213,6 +8324,7 @@ __mods["mobile/week.js"] = function (__x, __req) {
             text: [row.raw_label || `row ${row.sheet_row}`,
               ctx.locs.get(row.location_id)?.name || row.raw_location].filter(Boolean).join(' · '),
           }),
+          cancelledOn(row, iso) ? badge('Cancelled', 'bad') : null,
         ]));
       }
     }
@@ -8238,6 +8350,9 @@ __mods["mobile/week.js"] = function (__x, __req) {
     const shift = entry.shift && entry.shift !== 'day' ? shiftLabel(entry.shift) : null;
 
     const flags = [
+      /* Called off in the 4WLA — the same flag, and the same reading, as the
+         week plan's. */
+      entry.cancelled ? badge('Cancelled', 'bad') : null,
       /* The workbook is the assumption, so only a day somebody typed carries a
          flag — the rule the week plan and the huddle follow. */
       !entry.from_lookahead && entry.id ? badge('Manual', 'warn') : null,
@@ -8249,7 +8364,8 @@ __mods["mobile/week.js"] = function (__x, __req) {
     ].filter(Boolean);
 
     return el('article', {
-      class: ['m-task', entry.absence ? 'm-task-away' : '', outcome ? `m-done m-done-${outcome.status}` : '']
+      class: ['m-task', entry.absence ? 'm-task-away' : '', entry.cancelled ? 'm-task-cancelled' : '',
+        outcome ? `m-done m-done-${outcome.status}` : '']
         .filter(Boolean).join(' '),
     }, [
       el('div', { class: 'm-task-title', text: entry.task || '—' }),

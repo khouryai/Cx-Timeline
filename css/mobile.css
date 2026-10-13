@@ -456,6 +456,14 @@ body.m-app {
 .m-task.m-task-away {
   border-left-color: var(--rc-offproject);
 }
+/* Called off in the 4WLA: struck through, edged in red, and badged in words. */
+.m-task.m-task-cancelled {
+  border-left-color: var(--bad);
+}
+.m-task.m-task-cancelled .m-task-title {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
 .m-task.m-done-completed {
   border-left-color: var(--good);
 }

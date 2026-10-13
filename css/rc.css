@@ -517,6 +517,15 @@
    set back rather than badged, because it is one of several things in a cell. */
 .rc-res-job.rc-res-away { color: var(--text-muted); font-style: italic; }
 
+/* A day the 4WLA called off. Still drawn — somebody was going to be there —
+   but struck through and edged in red, beside a "Cancelled" badge that says it
+   in words. */
+.rc-res-job.rc-res-cancelled { border-left-color: var(--bad); }
+.rc-res-job.rc-res-cancelled .rc-res-task {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
 /* What BART asked for, set apart from what was decided. Bordered rather than
    tinted, because a tint would read as a status. */
 .rc-res-asked {

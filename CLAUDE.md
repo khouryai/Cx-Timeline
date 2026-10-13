@@ -252,6 +252,7 @@ alternative shipped once and went wrong.
 - The cancellation log is what the look-ahead says now (the newest reading covering each date), lists only BART's resources, and draws as a calendar exportable to Excel. [→](docs/ARCHITECTURE.md#the-cancellation-log-is-what-the-look-ahead-says-now-and-barts)
 - A wrong cancellation is removed from the log by a `dismissed` note, never deleted, and can be put back; a stored "Resource" label is never a cancellation. [→](docs/ARCHITECTURE.md#a-cancellation-can-be-removed-from-the-log-and-put-back)
 - The week plan is one tab, and it used to be two. [→](docs/ARCHITECTURE.md#the-week-plan-is-one-tab-and-it-used-to-be-two)
+- A day the 4WLA cancels is drawn cancelled in the week plan and the phone's week (`cancelledOn()`, the log's rule), and both redraw by the bell when a newer reading is published (`watchForNewReading()`). [→](docs/ARCHITECTURE.md#a-day-the-4wla-cancels-reaches-the-week-plan-by-itself)
 - Today is a column, not a hairline. [→](docs/ARCHITECTURE.md#today-is-a-column-not-a-hairline)
 - The workbook is the assumption, so only a hand-typed day is flagged. [→](docs/ARCHITECTURE.md#the-workbook-is-the-assumption-so-only-a-hand-typed-day-is-flagged)
 - The huddle reads the same index, so half the team stops reading as unplanned. [→](docs/ARCHITECTURE.md#the-huddle-reads-the-same-index-so-half-the-team-stops-reading-as-unplanned)
@@ -460,7 +461,7 @@ CX_SITE=dist node tools/run_tests.js smoke smoke_calendar   # against a publishe
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
 | `test_la_edit.js` | 184 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, and every page of a long read fetched together |
 | `smoke.js` | 324 | the application, local mode — a tall plan drawn by the rows in view, offline, less motion and the System theme, files from elsewhere (imports, notes, CSV), and dates away from Greenwich — **any console error fails the run** |
-| `smoke_calendar.js` | 610 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 615 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 105 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, a phone opening the site sent to it, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 70 | the desktop shell and its updates |

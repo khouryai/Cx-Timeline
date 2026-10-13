@@ -57,7 +57,7 @@ import {
   SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability,
   notifyChanged, formModal, nameRegister, foldName, goToTab,
   ambiguousFirstNames, lookaheadWithResources, assignmentIndex,
-  locationRegister, unmatchedLocations, outcomeLookup, shiftLabel,
+  locationRegister, unmatchedLocations, outcomeLookup, shiftLabel, cancelledOn, watchForNewReading,
 } from './rc_util.js';
 
 /** Which week is on screen. Null means the one containing today. */
@@ -116,6 +116,11 @@ export async function render(root) {
       rc.listPeople().catch(() => []),
     ]);
   const laRows = sheet.rows;
+  /* The 4WLA is the plan for the days it names, so a day called off in it — a
+     cancellation painted in the editor, a workbook read — has to reach this
+     screen without anybody reopening it. Redrawn as soon as the newer reading
+     is published. */
+  watchForNewReading(root, sheet.snapshotId);
 
   const locs = byId(locations);
   const cats = byId(categories);
@@ -241,15 +246,24 @@ export async function render(root) {
         const status = outcome ? STATUS_BY_ID.get(outcome.status) : null;
         parts.push(el('div', {
           class: ['rc-res-job', entry.absence ? 'rc-res-away' : '',
+            entry.cancelled ? 'rc-res-cancelled' : '',
             outcome ? `rc-res-done rc-res-${outcome.status}` : ''].filter(Boolean).join(' '),
         }, [
-          el('div', { class: 'rc-res-task', text: entry.task || '—' }),
+          el('div', {
+            class: 'rc-res-task',
+            text: entry.task || '—',
+            title: entry.cancelled ? 'Cancelled in the 4WLA for this day.' : null,
+          }),
           el('div', { class: 'rc-hint', text: [
             locs.get(entry.location_id)?.name || entry.raw_location,
             cats.get(entry.category_id)?.name,
             entry.shift && entry.shift !== 'day' ? shiftLabel(entry.shift) : null,
           ].filter(Boolean).join(' · ') }),
           el('div', { class: 'rc-res-flags' }, [
+            /* Called off in the 4WLA. Said in words as well as struck through:
+               a line through the task alone is colour and decoration, and the
+               day is still drawn because somebody planned to be here. */
+            entry.cancelled ? badge('Cancelled', 'bad') : null,
             /* The workbook is the assumption, so only a day somebody typed in
                carries a flag. A derived day has `id: null` by design, which is
                what tells the two apart. */
@@ -357,6 +371,7 @@ export async function render(root) {
           }, [
             el('span', { class: 'rc-eyebrow', text: '4WLA' }),
             el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 44) }),
+            cancelledOn(row, iso) ? badge('Cancelled', 'bad') : null,
             el('div', {
               class: 'rc-hint',
               /* The place the register knows, and the sheet's own spelling only
