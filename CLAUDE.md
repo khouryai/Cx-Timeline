@@ -9,6 +9,13 @@
 are committed on purpose: they are what a deploy serves, with no build step at
 the edge.
 
+## A saved plan, not started
+
+`docs/PLAN_ONEDRIVE_ONLY.md` is the owner's plan to drop Supabase and the
+website and run everything from OneDrive through the desktop app. It is saved
+for later. **Do not start it unless asked**, and read it whole first when you
+are.
+
 ## Hosted, with a local mode for tests
 
 The application runs against Supabase (accounts, projects, backups, sharing).
