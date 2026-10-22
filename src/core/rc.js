@@ -873,7 +873,7 @@ export function listSettings() {
  * "could not update the legend", on one screen, weeks after the deploy that
  * needed it; this turns it into one sentence at sign-in naming the two files.
  */
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 /**
  * Whether the database is the one this build was written against.
@@ -1459,7 +1459,20 @@ export const addAnnotation = (row) => insert('rc_change_annotations', [row]).the
  */
 export const updateLookaheadRowCells = (id, cells) => update('rc_lookahead_rows', id, { cells });
 
-export const addCancellationNote = (row) => insert('rc_cancellation_notes', [row]).then((r) => r[0]);
+/**
+ * Log what somebody said about a cancellation. `la_row_id` is the editor's row
+ * it is about (schema 14); a database from before then has no such column, and
+ * the note is written without it rather than not at all — found by its words,
+ * as every note was.
+ */
+export const addCancellationNote = (row) => insert('rc_cancellation_notes', [row])
+  .catch((err) => {
+    if (!('la_row_id' in row) || !/la_row_id/.test(String(err?.message || ''))) throw err;
+    const rest = { ...row };
+    delete rest.la_row_id;
+    return insert('rc_cancellation_notes', [rest]);
+  })
+  .then((r) => r[0]);
 
 /* ── Accounts ──────────────────────────────────────────────────────────── */
 

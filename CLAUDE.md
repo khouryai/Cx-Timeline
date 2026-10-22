@@ -472,17 +472,17 @@ CX_SITE=dist node tools/run_tests.js smoke smoke_calendar   # against a publishe
 | Suite | Checks | What it covers |
 |---|---|---|
 | `test_dist.js` | 73 | every deployment shape, every bundle fingerprinted, that the plan has no backend in any of them, and the phone app in the calendar shape only, with the site sending phones to it, the site's service worker, and that the calendar's register and stylesheet stay out of the pages that do not open it |
-| `test_lookahead.js` | 268 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
+| `test_lookahead.js` | 274 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
-| `test_la_edit.js` | 231 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, every page of a long read fetched together, P6 extracts read, searched and compared, and the master export's workbook and schedule |
+| `test_la_edit.js` | 233 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, every page of a long read fetched together, P6 extracts read, searched and compared, and the master export's workbook and schedule |
 | `smoke.js` | 324 | the application, local mode — a tall plan drawn by the rows in view, offline, less motion and the System theme, files from elsewhere (imports, notes, CSV), and dates away from Greenwich — **any console error fails the run** |
-| `smoke_calendar.js` | 685 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`) — its past weeks and a hover that repaints nothing — who made each change and every edit, TAWRs (`smoke_tawr.js`), P6 activities linked to rows (`smoke_la_p6.js`), the master export and its schedule (`smoke_master_export.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 690 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`) — its past weeks and a hover that repaints nothing — who made each change and every edit, TAWRs (`smoke_tawr.js`), P6 activities linked to rows (`smoke_la_p6.js`), the master export and its schedule (`smoke_master_export.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 105 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, a phone opening the site sent to it, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 70 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
-| `test_sql.js` | 446 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, changes naming the editor's row, the schema stamp, and that `migrate.sql` upgrades an old project, policies that ask who you are once per query, every foreign key indexed, the bell, P6 activities imported and their reasons, and the look-ahead day by day |
+| `test_sql.js` | 449 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, changes naming the editor's row, the schema stamp, and that `migrate.sql` upgrades an old project, policies that ask who you are once per query, every foreign key indexed, the bell, P6 activities imported and their reasons, the look-ahead day by day, and old cancellation reasons given their row |
 | `test_xlsx_compat.js` | 18 | the Excel export opened, re-saved and printed by LibreOffice Calc, and the master export's sheets read out by it (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**
@@ -583,6 +583,18 @@ Each of these has caused a real bug:
   live project's 31,772 reading rows that was over a minute, so the log and
   the inbox timed out. Join to it once and pick with `distinct on`; time a
   new view against a realistic volume, not the test fixtures.
+- **A unique fingerprint is not "the same as the newest".** The editor's
+  publish skipped a grid identical to the newest reading and stored the rest
+  under their content hash, which `rc_lookahead_snapshots.file_hash` holds
+  unique — so painting a day red and back recreated an older reading's hash,
+  the insert collided, and every publish after it failed: the editor drew the
+  day put back and the calendar drew it cancelled. The stored hash carries a
+  suffix (`storedHash()`), compared by `sameContent()`; the stub enforces the
+  uniqueness, so the smoke suite catches it.
+- **A note found by a row's words is lost when the words change.** Reasons
+  were matched to the log by the activity's label, which includes the Activity
+  ID — filling it in afterwards orphaned every reason logged on that row. A
+  note now names the editor row (`la_row_id`) and is found by it first.
 
 ## Git
 

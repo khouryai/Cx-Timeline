@@ -32,6 +32,11 @@ drop table if exists public.rc_invitations cascade;
 -- Before the master export: no look-ahead day by day. Dropped first — it reads
 -- the row id below, and a column a view reads cannot be dropped under it.
 drop view if exists public.rc_lookahead_days;
+-- Before a reason followed its row: notes found by their words alone, and
+-- cancellation views that never named the row (they read the column below).
+drop view if exists public.rc_cancelled_days;
+drop view if exists public.rc_cancelled_support_days;
+alter table public.rc_cancellation_notes drop column if exists la_row_id;
 -- Before Changes could say who: no row id on a reading or a change, and a
 -- kind list that has never heard of `details_changed`.
 alter table public.rc_lookahead_rows drop column if exists la_row_id;

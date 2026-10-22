@@ -472,11 +472,15 @@ export function fakeSdk() {
           const at = r.taken_at || taken.get(r.snapshot_id) || null;
           const row = out.get(key) || {
             raw_label: r.raw_label || '', raw_location: r.raw_location || '', location_id: r.location_id || null,
-            day, first_seen: at, last_seen: at, reads: 0, marks: null, _snaps: new Set(), _marksAt: null,
+            day, first_seen: at, last_seen: at, reads: 0, marks: null, la_row_id: null, _snaps: new Set(), _marksAt: null,
           };
           row._snaps.add(r.snapshot_id);
           row.reads = row._snaps.size;
-          if (readOf(r) === newestFor(day)) row._current = true;
+          if (readOf(r) === newestFor(day)) {
+            row._current = true;
+            // The editor's row, from the newest reading — what a note is found by first.
+            if (r.la_row_id) row.la_row_id = r.la_row_id;
+          }
           if (at && (!row.first_seen || at < row.first_seen)) row.first_seen = at;
           if (at && (!row.last_seen || at > row.last_seen)) row.last_seen = at;
           const marks = marksOf(r, day);
@@ -848,6 +852,14 @@ export function fakeSdk() {
               return { select: () => Promise.resolve({ data: null, error: { message: 'new row for relation "rc_change_events" violates check constraint "rc_change_events_kind_check"' } }) };
             }
             const list = S.rows[table] || (S.rows[table] = []);
+            /* `unique (file_hash)`, as Postgres refuses it: a reading whose
+               fingerprint an older one already has. A stub that let it in hid
+               the publish that failed every time a day was put back the way
+               an earlier reading had it. */
+            if (table === 'rc_lookahead_snapshots'
+              && [].concat(rows).some((r) => r.file_hash && list.some((s) => s.file_hash === r.file_hash))) {
+              return { select: () => Promise.resolve({ data: null, error: { message: 'duplicate key value violates unique constraint "rc_lookahead_snapshots_file_hash_key"' } }) };
+            }
             /* Column defaults. Postgres fills `active` in; a stub that did not
                would make a freshly inserted row invisible to every read that
                filters on it — which looks exactly like the write failing. */

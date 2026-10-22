@@ -136,7 +136,7 @@ export async function ingest({ sheetName, legend, silent = false } = {}) {
     run.file_mtime = new Date(file.modified).toISOString();
 
     const previous = await rc.latestSnapshot();
-    if (previous && previous.file_hash === hash) {
+    if (previous && sameContent(previous.file_hash, hash)) {
       run.outcome = 'unchanged';
       await rc.addIngestRun(run);
       if (!silent) toast({ message: 'The look-ahead has not changed since the last snapshot.' });
@@ -232,7 +232,7 @@ export async function publishFromEditor({ model, title = '', silent = true } = {
      way it was a minute ago went unpublished. */
   rc.forgetReads();
   const previous = await rc.latestSnapshot();
-  if (previous && previous.file_hash === hash) return { changed: false, events: [] };
+  if (previous && sameContent(previous.file_hash, hash)) return { changed: false, events: [] };
   const run = {
     ran_at: new Date().toISOString(),
     outcome: 'error',
@@ -277,6 +277,24 @@ export async function writtenView(fromISO, toISO, legendRows) {
 }
 
 /**
+ * A reading's stored fingerprint: what its contents hash to, and when it was
+ * taken. `rc_lookahead_snapshots.file_hash` is unique, and a look-ahead put
+ * back the way an earlier reading had it — a day painted cancelled, then
+ * yellow again — hashes to that earlier reading: stored bare, the database
+ * refused the reading, every publish after it failed the same way, and the
+ * calendar went on drawing the cancellation. The content is still what is
+ * compared (`sameContent()`), so an unchanged look-ahead is still not read twice.
+ */
+function storedHash(hash) {
+  return `${hash}#${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/** Whether a stored fingerprint is these contents — with or without the stamp `storedHash()` adds. */
+function sameContent(stored, hash) {
+  return String(stored ?? '').split('#')[0] === hash;
+}
+
+/**
  * Store a read of the look-ahead and derive everything that hangs off it.
  *
  * The second half of what "Check now" always did, taken out so the editor can
@@ -289,7 +307,7 @@ export async function writtenView(fromISO, toISO, legendRows) {
 async function publishGrid({ grid, legend, declared = [], hash, run, previous, silent = false, notify = true }) {
   try {
     const snapshot = await rc.addSnapshot({
-      file_hash: hash,
+      file_hash: storedHash(hash),
       file_mtime: run.file_mtime,
       sheet_name: grid.sheet,
       grid: {

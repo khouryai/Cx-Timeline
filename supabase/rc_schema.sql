@@ -446,6 +446,21 @@ alter table public.rc_cancellation_notes add column if not exists codes text;
  */
 alter table public.rc_cancellation_notes add column if not exists dismissed boolean not null default false;
 
+/*
+ * The look-ahead editor's row a note is about (`rc_la_rows.id`), where it was
+ * written about one.
+ *
+ * A note used to be found by the activity's words alone — every frozen
+ * column of the row run together — so filling in an Activity ID, linking it
+ * to P6 or correcting a description changed the words, and every reason
+ * logged against that row fell out of the log with nothing on screen to say
+ * so: they read as days nobody had explained. Kept beside the words, never
+ * instead of them: a note from before the editor has only the words, and is
+ * still found by them. No foreign key — a note outlives the row it is about,
+ * as `rc_la_edits.row_id` does.
+ */
+alter table public.rc_cancellation_notes add column if not exists la_row_id uuid;
+
 -- ══════════════════════════════════════════════════════════════════════════
 -- Site Access Requests
 -- ══════════════════════════════════════════════════════════════════════════
@@ -1573,7 +1588,7 @@ create or replace view public.rc_lookahead_cover with (security_invoker = true) 
 create or replace view public.rc_cancelled_days with (security_invoker = true) as
   with red as (
     select coalesce(r.raw_label, '') as raw_label, coalesce(r.raw_location, '') as raw_location,
-           r.location_id, r.snapshot_id, s.taken_at, d.key::date as day, r.bart_marks ->> d.key as marks
+           r.location_id, r.snapshot_id, s.taken_at, d.key::date as day, r.bart_marks ->> d.key as marks, r.la_row_id
       from public.rc_lookahead_rows r
       join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
       cross join lateral jsonb_each_text(r.cells) d
@@ -1593,7 +1608,10 @@ create or replace view public.rc_cancelled_days with (security_invoker = true) a
          min(red.taken_at)               as first_seen,
          max(red.taken_at)               as last_seen,
          count(distinct red.snapshot_id) as reads,
-         (array_agg(red.marks) filter (where red.snapshot_id = newest.snapshot_id))[1] as marks
+         (array_agg(red.marks) filter (where red.snapshot_id = newest.snapshot_id))[1] as marks,
+         -- The editor's row, from the newest reading: what a note is found by first.
+         (array_agg(red.la_row_id) filter (where red.snapshot_id = newest.snapshot_id
+                                         and red.la_row_id is not null))[1] as la_row_id
     from red join newest on newest.day = red.day
    group by red.raw_label, red.raw_location, red.day
   having bool_or(red.snapshot_id = newest.snapshot_id);
@@ -1612,7 +1630,7 @@ create or replace view public.rc_cancelled_days with (security_invoker = true) a
 create or replace view public.rc_cancelled_support_days with (security_invoker = true) as
   with struck as (
     select coalesce(r.raw_label, '') as raw_label, coalesce(r.raw_location, '') as raw_location,
-           r.location_id, r.snapshot_id, s.taken_at, d.key::date as day, d.value as marks
+           r.location_id, r.snapshot_id, s.taken_at, d.key::date as day, d.value as marks, r.la_row_id
       from public.rc_lookahead_rows r
       join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
       cross join lateral jsonb_each_text(r.bart_marks) d
@@ -1634,7 +1652,10 @@ create or replace view public.rc_cancelled_support_days with (security_invoker =
          min(struck.taken_at)               as first_seen,
          max(struck.taken_at)               as last_seen,
          count(distinct struck.snapshot_id) as reads,
-         (array_agg(struck.marks) filter (where struck.snapshot_id = newest.snapshot_id))[1] as marks
+         (array_agg(struck.marks) filter (where struck.snapshot_id = newest.snapshot_id))[1] as marks,
+         -- The editor's row, from the newest reading: what a note is found by first.
+         (array_agg(struck.la_row_id) filter (where struck.snapshot_id = newest.snapshot_id
+                                         and struck.la_row_id is not null))[1] as la_row_id
     from struck join newest on newest.day = struck.day
    group by struck.raw_label, struck.raw_location, struck.day
   having bool_or(struck.snapshot_id = newest.snapshot_id);
@@ -3304,5 +3325,23 @@ create index if not exists rc_la_seen_snapshot_id_fk_idx on public.rc_la_seen (s
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '13')
+/*
+ * Notes written before they carried the row, given it where their words name
+ * exactly one editor row in the readings — the words the row had when the
+ * note was written, which is what the reading of that week stored. Words two
+ * rows have shared are left to be found by the words, as before. Re-runnable:
+ * only a note with no row is touched.
+ */
+update public.rc_cancellation_notes n
+   set la_row_id = m.la_row_id
+  from (select raw_label, coalesce(raw_location, '') as raw_location, (array_agg(distinct la_row_id))[1] as la_row_id
+          from public.rc_lookahead_rows
+         where la_row_id is not null and raw_label is not null
+         group by raw_label, coalesce(raw_location, '')
+        having count(distinct la_row_id) = 1) m
+ where n.la_row_id is null
+   and m.raw_label = n.raw_label
+   and m.raw_location = coalesce(n.raw_location, '');
+
+insert into public.rc_settings (key, value) values ('schema_version', '14')
 on conflict (key) do update set value = excluded.value, updated_at = now();

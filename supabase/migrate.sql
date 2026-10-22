@@ -147,6 +147,10 @@ alter table public.rc_cancellation_notes
 -- And whether the note takes the cancellation out of the log altogether.
 alter table public.rc_cancellation_notes
   add column if not exists dismissed boolean not null default false;
+-- And the look-ahead editor's row it is about, so the reason follows the row
+-- when its Activity ID or description changes (see rc_schema.sql).
+alter table public.rc_cancellation_notes
+  add column if not exists la_row_id uuid;
 
 -- ── The team can read the look-ahead, and plan their own days ─────────────
 -- Both are policy changes, and `rc_schema.sql` drops and recreates every policy

@@ -467,7 +467,7 @@ function visibleRows() {
 function reasonFor(row, day, codes = '') {
   const key = ed.cancellationKey(row);
   return cancellationReasonText(cancellationNoteFor(E.notes, {
-    label: key.raw_label, meta: [key.raw_location], day, codes,
+    label: key.raw_label, meta: [key.raw_location], day, codes, rowId: key.la_row_id,
   }));
 }
 
@@ -566,11 +566,9 @@ function redrawDays(keys) {
  */
 function redrawNoted(runs) {
   const keys = new Set();
-  const keyOf = (row) => { const k = ed.cancellationKey(row); return `${k.raw_label}|${k.raw_location}`; };
   for (const run of runs) {
-    // A note is found by the row's label, so a row worded the same shows it too.
-    const noted = keyOf(run.row);
-    const rows = (E.view?.rows || []).filter((r) => r.id === run.row.id || (r.kind === 'activity' && keyOf(r) === noted));
+    // A note is found by its row, so another row worded the same does not show it.
+    const rows = (E.view?.rows || []).filter((r) => r.id === run.row.id);
     for (const row of rows) {
       for (let d = run.start; d <= run.end; d = ed.addDaysISO(d, 1)) keys.add(ed.cellKey(row.id, d));
     }

@@ -1572,6 +1572,42 @@ console.log('\nWhat changed for me');
     cls.cancellationReasonText(note({ reason: null, party: 'Hitachi' })) === 'Hitachi');
 }
 
+{
+  /* ── A reason follows its row when the row's words change ──────────────
+     A note written in the editor carries the row (`la_row_id`). Filling in the
+     Activity ID afterwards changes every word the log and the hover used to
+     find it by; found by the row, the reason stays — and a different row that
+     reads the same never takes it. A note from before ids is found by words. */
+  const red = (label, day, rowId) => ({ raw_label: label, raw_location: 'Y10', day, marks: '', la_row_id: rowId,
+    first_seen: '2026-10-01T10:00:00Z', last_seen: '2026-10-02T10:00:00Z', reads: 1 });
+  const days = [
+    red('IXL · Night mode SAT', '2026-10-05', 'row-a'),       // a week still read before the ID was typed
+    red('C123 · IXL · Night mode SAT', '2026-10-12', 'row-a'), // a week read after it
+    red('IXL · Night mode SAT', '2026-10-12', 'row-b'),       // another row worded as row-a was
+  ];
+  const events = cls.cancellationEvents(days, { from: '2026-09-01' });
+  const a = events.filter((e) => e.laRowId === 'row-a');
+  check('one row\'s days stay one activity when its words change', a.length === 2 && a.every((e) => e.keys.length === 1),
+    JSON.stringify(a.map((e) => e.keys)));
+  const note = { id: 'n1', raw_label: 'IXL · Night mode SAT', raw_location: 'Y10', la_row_id: 'row-a',
+    start_date: '2026-10-12', end_date: '2026-10-12', party: 'BART', reason: 'Possession not granted',
+    codes: null, created_at: '2026-10-02T11:00:00Z', supersedes_id: null, dismissed: false };
+  const noted = cls.attachCancellationNotes(events, [note]);
+  const renamed = noted.find((e) => e.laRowId === 'row-a' && e.start === '2026-10-12');
+  const twin = noted.find((e) => e.laRowId === 'row-b');
+  check('a reason logged before the Activity ID was typed is still the log\'s afterwards',
+    renamed?.note?.id === 'n1' && renamed.label === 'C123 · IXL · Night mode SAT', JSON.stringify(renamed));
+  check('another row reading the same words does not take that row\'s reason', twin && twin.note === null);
+  const old = { ...note, id: 'n0', la_row_id: null, start_date: '2026-10-05', end_date: '2026-10-05', reason: 'Old note' };
+  check('a note written before rows had ids is still found by its words',
+    cls.attachCancellationNotes(events, [old]).find((e) => e.start === '2026-10-05')?.note?.id === 'n0');
+  const hover = (label, rowId) => cls.cancellationReasonText(cls.cancellationNoteFor([note],
+    { label, meta: ['Y10'], day: '2026-10-12', rowId }));
+  check('the hover finds the reason by the row after its words change',
+    hover('C123 · IXL · Night mode SAT', 'row-a') === 'BART — Possession not granted');
+  check('…and not on another row worded as it once was', hover('IXL · Night mode SAT', 'row-b') === '');
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

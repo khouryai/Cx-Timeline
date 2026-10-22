@@ -830,6 +830,25 @@ values ('Cable pull', 'TPSS 12', date '2026-09-07', date '2026-09-09', 'Hitachi'
 select assert((select count(*) from public.rc_cancellation_notes where raw_label = 'Cable pull') = 2,
   'a correction is an additional row');
 
+-- A reason follows its row: a note names the editor's row, and the log names
+-- it too, from the newest reading — so filling in an Activity ID, which
+-- changes the words, does not part the two.
+insert into public.rc_lookahead_snapshots (file_hash, sheet_name, grid, taken_at)
+values ('hash-cx-row', '4WLA', '{"rows":[]}'::jsonb, timestamptz '2026-09-09 08:00+00');
+select id as cxr from public.rc_lookahead_snapshots where file_hash = 'hash-cx-row' \gset
+insert into public.rc_lookahead_rows (snapshot_id, week_start, row_key, raw_location, raw_label, cells, la_row_id) values
+  (:'cxr', date '2026-09-21', 'cx|r', 'Y10', 'C123 · Signal test',
+   '{"2026-09-22":"Cancellation"}'::jsonb, 'cafe0000-0000-4000-8000-000000000001');
+select assert((select la_row_id from public.rc_cancelled_days
+                where raw_label = 'C123 · Signal test' and day = date '2026-09-22') = 'cafe0000-0000-4000-8000-000000000001',
+  'the log names the editor row a cancelled day is on');
+insert into public.rc_cancellation_notes (raw_label, raw_location, start_date, end_date, party, reason, la_row_id)
+values ('Signal test', 'Y10', date '2026-09-22', date '2026-09-22', 'BART', 'Shutdown overran',
+        'cafe0000-0000-4000-8000-000000000001');
+select assert((select la_row_id from public.rc_cancellation_notes where reason = 'Shutdown overran')
+                = 'cafe0000-0000-4000-8000-000000000001',
+  'and a note names the row it is about, whatever the row says now');
+
 select refuses(:'carol',
   format('insert into public.rc_cancellation_notes (raw_label, start_date, end_date, party) values (%L, %L, %L, %L)',
          'Cable pull', '2026-09-07', '2026-09-07', 'BART'),
@@ -842,8 +861,8 @@ select assert((select count(*) from public.rc_cancelled_days where raw_label = '
 select act_as(:'alice');
 
 -- Leave the register as the sections below expect it: their counts know
--- nothing of these three reads or of red being mapped this early.
-delete from public.rc_lookahead_snapshots where id in (:'cx0', :'cx1', :'cx2');
+-- nothing of these four reads or of red being mapped this early.
+delete from public.rc_lookahead_snapshots where id in (:'cx0', :'cx1', :'cx2', :'cxr');
 delete from public.rc_legend where argb = 'FF0000' and valid_from = date '2026-02-02';
 
 -- ══════════════════════════════════════════════════════════════════════════

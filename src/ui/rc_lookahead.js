@@ -743,11 +743,11 @@ function grid_(view, today, isMe = null, snapshotId = null, notes = [], p6 = nul
    * per day. Used for the activity and for its Resource row alike, because the
    * two are the same shape and drawing them twice is how they drift apart.
    */
-  const line = (meta, marks, { klass = '', what = '', resource = false, open = null }) => {
+  const line = (meta, marks, { klass = '', what = '', resource = false, open = null, rowId = null }) => {
     const label = meta.filter(Boolean).join(' · ');
     // Why it was cancelled, as logged — for the day, or for one struck-out code.
     const reason = (date, codes = '') => (date && !resource
-      ? cancellationReasonText(cancellationNoteFor(notes, { label, meta, day: date, codes }))
+      ? cancellationReasonText(cancellationNoteFor(notes, { label, meta, day: date, codes, rowId }))
       : '');
     return el('tr', {
     class: klass,
@@ -813,6 +813,7 @@ function grid_(view, today, isMe = null, snapshotId = null, notes = [], p6 = nul
       // Styled as names, because that is what the cells hold. The paint on an
       // absence row means nothing the legend knows about.
       resource: Boolean(a.absence),
+      rowId: a.id || null,
       open: a.heading || a.absence ? null
         : () => openActivity({ row: { raw_label: a.meta.filter(Boolean).join(' · '), snapshot_id: snapshotId, sheet_row: a.row } }),
     }));

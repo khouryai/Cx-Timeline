@@ -163,10 +163,37 @@ function main() {
       throw new Error(`migrate.sql alone did not bring back the row ids and the details kind (${whoColumns}/3)`);
     }
     console.log('✓ migrate.sql alone brings an older project the columns Changes names people by');
+    /* A reason logged before notes carried their row is given the row on the
+       way up — where its words name exactly one editor row in the readings,
+       and never where two rows have shared them. */
+    // Replica mode: the note needs an author, and no account exists yet to be one.
+    psql(['-d', 'cxt', '-v', 'ON_ERROR_STOP=1', '-qc', `
+      set session_replication_role = replica;
+      insert into public.rc_lookahead_snapshots (id, file_hash, sheet_name, grid, taken_at) values
+        ('0bf00000-0000-4000-8000-000000000001', 'backfill-1', '4WLA', '{"rows":[]}', now());
+      insert into public.rc_lookahead_rows (snapshot_id, week_start, row_key, raw_location, raw_label, cells, la_row_id) values
+        ('0bf00000-0000-4000-8000-000000000001', date '2026-09-07', 'bf|a', 'W40', 'Backfill one row', '{}', '0bf00000-0000-4000-8000-0000000000a1'),
+        ('0bf00000-0000-4000-8000-000000000001', date '2026-09-07', 'bf|b', 'W40', 'Backfill two rows', '{}', '0bf00000-0000-4000-8000-0000000000b1'),
+        ('0bf00000-0000-4000-8000-000000000001', date '2026-09-07', 'bf|c', 'W40', 'Backfill two rows', '{}', '0bf00000-0000-4000-8000-0000000000b2');
+      insert into public.rc_cancellation_notes (raw_label, raw_location, start_date, end_date, party, author) values
+        ('Backfill one row', 'W40', date '2026-09-07', date '2026-09-07', 'BART', gen_random_uuid()),
+        ('Backfill two rows', 'W40', date '2026-09-07', date '2026-09-07', 'BART', gen_random_uuid());`]);
     load('supabase/rc_schema.sql');
     if (functionsPresent() !== String(accountFns.length)) {
       throw new Error('rc_schema.sql did not restore every function after a downgrade');
     }
+    const backfilled = psql(['-d', 'cxt', '-tAc', `
+      select string_agg(raw_label || '=' || coalesce(la_row_id::text, 'none'), ',' order by raw_label)
+        from public.rc_cancellation_notes where raw_label like 'Backfill%'`]).trim();
+    if (backfilled !== 'Backfill one row=0bf00000-0000-4000-8000-0000000000a1,Backfill two rows=none') {
+      throw new Error(`rc_schema.sql did not give old notes their row, and only where the words name one (${backfilled})`);
+    }
+    psql(['-d', 'cxt', '-v', 'ON_ERROR_STOP=1', '-qc', `
+      set session_replication_role = replica;
+      delete from public.rc_cancellation_notes where raw_label like 'Backfill%';
+      delete from public.rc_lookahead_rows where row_key like 'bf|%';
+      delete from public.rc_lookahead_snapshots where file_hash = 'backfill-1';`]);
+    console.log('✓ rc_schema.sql gives a note written before rows had ids its row, where its words name only one');
     // …and the other way round: the schema file alone, with no migrate, has to
     // converge too. It is the one people re-run when something looks wrong.
     load('supabase/rc_schema.sql');

@@ -375,6 +375,8 @@ console.log('\nCancellations, as the log will know them');
     const hit = published.find((p) => p.raw_label === key.raw_label && (p.raw_location || '') === key.raw_location);
     check(`a note recorded in the editor is keyed as the log keys "${row.description}"`, Boolean(hit),
       `${key.raw_label} @ ${key.raw_location}`);
+    check(`…and carries the row the published reading names "${row.description}"`,
+      Boolean(hit) && key.la_row_id === row.id && hit.la_row_id === row.id, `${key.la_row_id} / ${hit?.la_row_id}`);
   }
   /* BART resources struck out of a day that went ahead. */
   check('a struck-out code is written with a tilde and no longer asked for',

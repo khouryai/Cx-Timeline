@@ -856,6 +856,81 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await page.waitForSelector('#rc-frame .lae-grid', { timeout: 10000 });
   await grid().focus();
 
+  /* ── A reason follows its row; a day put back is published put back ──
+     A reason logged when a day is painted red was found by the row's words,
+     so filling in the Activity ID afterwards lost it from the log and the
+     hover. And painting the day back made the grid what an older reading
+     already was: the stored fingerprint is unique, the publish collided with
+     that reading, and the calendar went on drawing the day cancelled while
+     the editor drew it put back. */
+  const toggleRow = 'ATS Site Test';
+  let toggleDay = null;
+  for (const n of [7, 8, 9, 10, 11, 14, 15]) {
+    if (!(await serverCell(toggleRow, day(n)))?.color) { toggleDay = day(n); break; }
+  }
+  const toggleId = (await server()).rows.find((r) => r.description === toggleRow)?.id;
+  const idWas = (await server()).rows.find((r) => r.id === toggleId)?.activity_id || '';
+  const readCell = () => page.evaluate(({ desc, iso }) => {
+    const row = [...document.querySelectorAll('#rc-frame .la-grid tbody tr')]
+      .find((tr) => [...tr.querySelectorAll('td.la-meta')].some((td) => td.textContent.trim() === desc));
+    const td = [...(row?.querySelectorAll('td.la-day') || [])].find((c) => (c.title || '').includes(iso));
+    return td ? { cancelled: td.classList.contains('la-cancel'), title: td.title } : null;
+  }, { desc: toggleRow, iso: toggleDay });
+  const typeId = async (text) => {
+    await rowLoc(toggleRow).locator('td.lae-meta-activity_id').click();
+    if (text) {
+      await page.keyboard.type(text);
+      await page.keyboard.press('Enter');
+    } else {
+      await page.keyboard.press('Delete');
+    }
+    await saved();
+  };
+  const snapshotsBefore = await page.evaluate(() => window.__rc.rows.rc_lookahead_snapshots.length);
+  await cell(toggleRow, toggleDay).click();
+  await page.keyboard.press('Alt+3');
+  await saved();
+  const askWhy = page.locator('.cx-modal', { hasText: 'Why was this cancelled?' });
+  await askWhy.waitFor({ timeout: 3000 }).catch(() => {});
+  await askWhy.locator('select').selectOption('BART');
+  await askWhy.locator('textarea').fill('Signal shutdown overran');
+  await askWhy.locator('.cx-modal-foot button', { hasText: 'Record' }).click();
+  await page.waitForTimeout(400);
+  const rowNote = await page.evaluate(() => (window.__rc.rows.rc_cancellation_notes || []).slice(-1)[0]);
+  check('a reason logged in the editor names the row it is about',
+    rowNote?.reason === 'Signal shutdown overran' && rowNote?.la_row_id === toggleId, JSON.stringify(rowNote));
+  await typeId('ZZ-9001');
+  await page.locator('#rc-frame .la-edit-switch').click();
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 15000 });
+  await page.waitForTimeout(300);
+  const renamedCell = await readCell();
+  check('the Activity ID typed after the reason was logged reaches the calendar',
+    await page.evaluate(({ id }) => window.__rc.rows.rc_cancelled_days
+      .some((d) => d.la_row_id === id && /ZZ-9001/.test(d.raw_label)), { id: toggleId }));
+  check('and the day still gives the reason logged before the Activity ID changed',
+    renamedCell?.cancelled && /Signal shutdown overran/.test(renamedCell.title), JSON.stringify(renamedCell));
+
+  await page.locator('#rc-frame .la-edit-switch').click();
+  await page.waitForSelector('#rc-frame .lae-grid', { timeout: 10000 });
+  await cell(toggleRow, toggleDay).click();
+  await page.keyboard.press('Alt+0');
+  await saved();
+  await typeId(idWas);
+  await page.locator('#rc-frame .la-edit-switch').click();
+  // A publish that fails keeps the editor open, which is the failure checked below.
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  const putBack = await readCell();
+  const publishErrors = await page.evaluate(() => [...document.querySelectorAll('.cx-toast')]
+    .map((t) => t.textContent).filter((t) => /duplicate key|could not publish/i.test(t)));
+  check('a day painted back as an older reading had it is drawn put back once Done is pressed',
+    putBack && !putBack.cancelled && !publishErrors.length, JSON.stringify({ putBack, publishErrors }));
+  check('as a reading of its own, each time it was published',
+    (await page.evaluate(() => window.__rc.rows.rc_lookahead_snapshots.length)) >= snapshotsBefore + 2);
+  if (!(await page.locator('#rc-frame .lae-grid').count())) await page.locator('#rc-frame .la-edit-switch').click();
+  await page.waitForSelector('#rc-frame .lae-grid', { timeout: 10000 });
+  await grid().focus();
+
   /* ── Publishing: the rest of the calendar reads what was written ──── */
   /* Names written, published, then taken off and Edit switched off at once:
      the calendar used to open while the first publish was still writing, and

@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 20   Built: 2026-10-22T17:25:03.869Z
+ * Modules: 20   Built: 2026-10-22T18:59:49.849Z
  */
 (function () {
   'use strict';
@@ -1759,7 +1759,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 13;
+  const SCHEMA_VERSION = 14;
 
   /**
    * Whether the database is the one this build was written against.
@@ -2345,7 +2345,20 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   const updateLookaheadRowCells = (id, cells) => update('rc_lookahead_rows', id, { cells });
 
-  const addCancellationNote = (row) => insert('rc_cancellation_notes', [row]).then((r) => r[0]);
+  /**
+   * Log what somebody said about a cancellation. `la_row_id` is the editor's row
+   * it is about (schema 14); a database from before then has no such column, and
+   * the note is written without it rather than not at all — found by its words,
+   * as every note was.
+   */
+  const addCancellationNote = (row) => insert('rc_cancellation_notes', [row])
+    .catch((err) => {
+      if (!('la_row_id' in row) || !/la_row_id/.test(String(err?.message || ''))) throw err;
+      const rest = { ...row };
+      delete rest.la_row_id;
+      return insert('rc_cancellation_notes', [rest]);
+    })
+    .then((r) => r[0]);
 
   /* ── Accounts ──────────────────────────────────────────────────────────── */
 
@@ -5538,19 +5551,45 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     return String(label || '').split(' · ').some(isResourceLabel);
   }
 
+  /** An activity and its location, as words — how a note found it before rows had ids. */
+  function wordsKey(r) {
+    return `${suggestionKey(r.raw_label)}|${suggestionKey(r.raw_location)}`;
+  }
+
+  /* A later day of the same editor row whose words have changed since — its
+     Activity ID filled in, its description corrected — is still the same event:
+     it takes the newer words, and keeps the older ones a note may have been
+     written against. */
+  function joinWords(event, d) {
+    const k = wordsKey(d);
+    if (event.keys.includes(k)) return;
+    event.keys.push(k);
+    event.key = k;
+    event.label = d.raw_label || '';
+    event.location = d.raw_location || '';
+  }
+
+  /**
+   * Days cancelled outright, as events.
+   *
+   * Consecutive days of one activity are one event. An activity is the editor's
+   * row where the reading carries it (`la_row_id`), so changing the row's words
+   * neither splits an event nor loses what was said about it; a reading from the
+   * workbook has only the words, and is grouped by them and the location.
+   */
   function cancellationEvents(days, { from = null } = {}) {
     const groups = new Map();
     for (const d of days || []) {
       const day = String(d.day || '').slice(0, 10);
       if (!day || (from && day < from) || isNamesLabel(d.raw_label)) continue;
-      const key = `${suggestionKey(d.raw_label)}|${suggestionKey(d.raw_location)}`;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push({ ...d, day });
+      const group = d.la_row_id ? `row:${d.la_row_id}` : wordsKey(d);
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push({ ...d, day });
     }
 
     /** @type {any[]} */
     const out = [];
-    for (const [key, list] of groups) {
+    for (const list of groups.values()) {
       list.sort((a, b) => a.day.localeCompare(b.day));
       let event = null;
       for (const d of list) {
@@ -5562,11 +5601,14 @@ __mods["core/lookahead.js"] = function (__x, __req) {
           event.reads = Math.max(event.reads, d.reads || 0);
           event.locationId = event.locationId || d.location_id || null;
           event.marks.push(d.marks || '');
+          joinWords(event, d);
           continue;
         }
         if (event) out.push(event);
         event = {
-          key,
+          key: wordsKey(d),
+          keys: [wordsKey(d)],
+          laRowId: d.la_row_id || null,
           kind: 'activity',
           codes: '',
           label: d.raw_label || '',
@@ -5606,15 +5648,14 @@ __mods["core/lookahead.js"] = function (__x, __req) {
       if (!day || (from && day < from) || isNamesLabel(d.raw_label)) continue;
       const codes = [...new Set(cellTokens(d.marks).filter((t) => t.cancelled).map((t) => t.code))].sort().join('.');
       if (!codes) continue;
-      const key = `${suggestionKey(d.raw_label)}|${suggestionKey(d.raw_location)}`;
-      const group = `${key}|${codes}`;
-      if (!groups.has(group)) groups.set(group, { key, codes, list: [] });
+      const group = `${d.la_row_id ? `row:${d.la_row_id}` : wordsKey(d)}|${codes}`;
+      if (!groups.has(group)) groups.set(group, { codes, list: [] });
       groups.get(group).list.push({ ...d, day });
     }
 
     /** @type {any[]} */
     const out = [];
-    for (const { key, codes, list } of groups.values()) {
+    for (const { codes, list } of groups.values()) {
       list.sort((a, b) => a.day.localeCompare(b.day));
       let event = null;
       for (const d of list) {
@@ -5626,11 +5667,14 @@ __mods["core/lookahead.js"] = function (__x, __req) {
           event.reads = Math.max(event.reads, d.reads || 0);
           event.locationId = event.locationId || d.location_id || null;
           event.marks.push(d.marks || '');
+          joinWords(event, d);
           continue;
         }
         if (event) out.push(event);
         event = {
-          key,
+          key: wordsKey(d),
+          keys: [wordsKey(d)],
+          laRowId: d.la_row_id || null,
           kind: 'support',
           codes,
           label: d.raw_label || '',
@@ -5718,8 +5762,17 @@ __mods["core/lookahead.js"] = function (__x, __req) {
       if (!mine.size || !theirs.size) return !mine.size && !theirs.size;
       return [...theirs].some((c) => mine.has(c));
     };
+    /* The row first: a note written about an editor row is that row's, whatever
+       its words say now — and never another row's that happens to read the same.
+       A note or an event with no row falls back to the words. */
+    const about = (event) => {
+      const byWords = (event.keys || [event.key]).flatMap((k) => byKey.get(k) || []);
+      const byRow = event.laRowId ? (notes || []).filter((n) => n.la_row_id === event.laRowId) : [];
+      return [...new Set([...byRow, ...byWords])]
+        .filter((n) => !(event.laRowId && n.la_row_id) || n.la_row_id === event.laRowId);
+    };
     return events.map((event) => {
-      const touching = (byKey.get(event.key) || [])
+      const touching = about(event)
         .filter((n) => sameKind(n, event))
         .filter((n) => String(n.start_date) <= event.end && String(n.end_date) >= event.start)
         .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
@@ -5740,9 +5793,10 @@ __mods["core/lookahead.js"] = function (__x, __req) {
    * about the day never a code's. The newest note still standing wins; one that
    * took the day out of the log says it was never a cancellation, so it gives
    * no reason. `meta` is the row's frozen cells, whichever of them is the
-   * location.
+   * location. `rowId` is the editor's row, where the grid knows it: a note
+   * written about that row is found whatever the row's words have become.
    */
-  function cancellationNoteFor(notes, { label, meta = [], day, codes = '' }) {
+  function cancellationNoteFor(notes, { label, meta = [], day, codes = '', rowId = null }) {
     if (!notes?.length || !day) return null;
     const superseded = new Set(notes.map((n) => n.supersedes_id).filter(Boolean));
     const key = suggestionKey(label);
@@ -5751,8 +5805,10 @@ __mods["core/lookahead.js"] = function (__x, __req) {
     const mine = codesOf(codes);
     const hit = notes
       .filter((n) => !superseded.has(n.id))
-      .filter((n) => suggestionKey(n.raw_label) === key)
-      .filter((n) => !suggestionKey(n.raw_location) || places.has(suggestionKey(n.raw_location)))
+      .filter((n) => (rowId && n.la_row_id
+        ? n.la_row_id === rowId
+        : suggestionKey(n.raw_label) === key
+          && (!suggestionKey(n.raw_location) || places.has(suggestionKey(n.raw_location)))))
       .filter((n) => String(n.start_date).slice(0, 10) <= day && String(n.end_date).slice(0, 10) >= day)
       .filter((n) => {
         const theirs = codesOf(n.codes);

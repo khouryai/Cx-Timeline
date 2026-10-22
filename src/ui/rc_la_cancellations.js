@@ -330,8 +330,9 @@ async function cancellationCalendar(events, from, to) {
 
   const byActivity = new Map();
   for (const e of events) {
-    if (!byActivity.has(e.key)) byActivity.set(e.key, { label: e.label, location: e.location, events: [] });
-    byActivity.get(e.key).events.push(e);
+    const activity = e.laRowId || e.key;
+    if (!byActivity.has(activity)) byActivity.set(activity, { label: e.label, location: e.location, events: [] });
+    byActivity.get(activity).events.push(e);
   }
   const rows = [...byActivity.values()].sort((a, b) => a.label.localeCompare(b.label) || a.location.localeCompare(b.location));
 
@@ -506,6 +507,7 @@ function removeCancellation(event) {
       await rc.addCancellationNote({
         raw_label: event.label,
         raw_location: event.location,
+        la_row_id: event.laRowId || null,
         start_date: event.start,
         end_date: event.end,
         party: event.note?.party || 'Other',
@@ -525,6 +527,7 @@ async function restoreCancellation(event) {
   await rc.addCancellationNote({
     raw_label: event.label,
     raw_location: event.location,
+    la_row_id: event.laRowId || null,
     start_date: event.start,
     end_date: event.end,
     party: before?.party || event.note?.party || 'Other',
@@ -568,6 +571,7 @@ function recordCancellation(event) {
       await rc.addCancellationNote({
         raw_label: event.label,
         raw_location: event.location,
+        la_row_id: event.laRowId || null,
         start_date: event.start,
         end_date: event.end,
         party: party.value,

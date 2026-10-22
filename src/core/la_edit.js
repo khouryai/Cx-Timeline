@@ -394,12 +394,17 @@ export function describeCounts(counts, codes) {
  * two strings — so a note recorded at the moment somebody paints a day red has
  * to be keyed the way the log will key the event, or it will never be found.
  * `tools/test_la_edit.js` holds this to what `rowsFrom()` actually produces.
+ *
+ * And the row itself (`la_row_id`), which the published reading carries too:
+ * the words change when somebody fills in the Activity ID or corrects the
+ * description, and a note found only by them fell out of the log when they did.
  */
 export function cancellationKey(row) {
   const meta = metaValues(row);
   return {
     raw_label: meta.filter(Boolean).join(' · '),
     raw_location: row.location || '',
+    la_row_id: row.id || null,
   };
 }
 

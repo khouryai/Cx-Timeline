@@ -2050,7 +2050,13 @@ on 6, rows from 7, a section band painted across its six activity columns (how
 `readGrid()` has always told a heading from work) and never across the days.
 `publishFromEditor()` in `ui/rc_ingest.js` hands that grid to `publishGrid()` —
 the second half of what a workbook read always did — deduplicated on content,
-covering the week just gone and the five ahead. The editor publishes a couple of
+covering the week just gone and the five ahead. Deduplicated against the newest
+reading only, so the fingerprint stored is the content's hash with a suffix
+(`storedHash()`, compared by `sameContent()`): `file_hash` is unique, and a day
+painted red and painted back makes the grid exactly what an older reading was —
+storing the bare hash collided with that reading, the publish failed, and every
+publish after it failed too, so the calendar went on drawing the day cancelled
+while the editor drew it put back. The editor publishes a couple of
 seconds after its saves go quiet, and immediately when another section is
 opened, *quietly* (no `RC_CHANGED`), because a redraw of the whole tab every time
 it saved would throw away the cell somebody is typing in.
@@ -2204,6 +2210,21 @@ why, and records it with `addCancellationNote()` keyed by `cancellationKey()` �
 the label and location `rowsFrom()` writes, so the note lands on the event the
 log derives from the next publish. The paint is saved either way: the question
 never holds up the edit, and skipping it leaves the log to ask as it always did.
+
+**The note names the row as well as the words** (`la_row_id`, schema 14). The
+label is every frozen column of the row run together, Activity ID included, so
+filling in the ID, linking it to P6 or correcting the description after a reason
+was logged changed the words, and the reason fell out of the log and off the
+hover with nothing to say so — it read as a day nobody had explained, and the
+reasons were typed in again by hand. Now `cancellationKey()` carries the row's
+id, the cancellation views name the row from the newest reading, and
+`attachCancellationNotes()` and `cancellationNoteFor()` find a note by its row
+where both have one, by its words otherwise (a note from the workbook era, an
+event from a workbook reading). One row's days are one event however its words
+changed between readings, and two rows that read the same never share a reason.
+`rc_schema.sql` gives a note written before then its row where its words name
+exactly one editor row in the readings, and leaves it to its words where two
+rows have shared them.
 
 ### Going back is new edits, not a rewind
 

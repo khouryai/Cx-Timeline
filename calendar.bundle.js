@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 33   Built: 2026-10-22T17:25:03.825Z
+ * Modules: 33   Built: 2026-10-22T18:59:49.825Z
  */
 (function () {
   'use strict';
@@ -2495,12 +2495,17 @@ __mods["core/la_edit.js"] = function (__x, __req) {
    * two strings — so a note recorded at the moment somebody paints a day red has
    * to be keyed the way the log will key the event, or it will never be found.
    * `tools/test_la_edit.js` holds this to what `rowsFrom()` actually produces.
+   *
+   * And the row itself (`la_row_id`), which the published reading carries too:
+   * the words change when somebody fills in the Activity ID or corrects the
+   * description, and a note found only by them fell out of the log when they did.
    */
   function cancellationKey(row) {
     const meta = metaValues(row);
     return {
       raw_label: meta.filter(Boolean).join(' · '),
       raw_location: row.location || '',
+      la_row_id: row.id || null,
     };
   }
 
@@ -8791,7 +8796,7 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
       run.file_mtime = new Date(file.modified).toISOString();
 
       const previous = await rc.latestSnapshot();
-      if (previous && previous.file_hash === hash) {
+      if (previous && sameContent(previous.file_hash, hash)) {
         run.outcome = 'unchanged';
         await rc.addIngestRun(run);
         if (!silent) toast({ message: 'The look-ahead has not changed since the last snapshot.' });
@@ -8887,7 +8892,7 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
        way it was a minute ago went unpublished. */
     rc.forgetReads();
     const previous = await rc.latestSnapshot();
-    if (previous && previous.file_hash === hash) return { changed: false, events: [] };
+    if (previous && sameContent(previous.file_hash, hash)) return { changed: false, events: [] };
     const run = {
       ran_at: new Date().toISOString(),
       outcome: 'error',
@@ -8932,6 +8937,24 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
   }
 
   /**
+   * A reading's stored fingerprint: what its contents hash to, and when it was
+   * taken. `rc_lookahead_snapshots.file_hash` is unique, and a look-ahead put
+   * back the way an earlier reading had it — a day painted cancelled, then
+   * yellow again — hashes to that earlier reading: stored bare, the database
+   * refused the reading, every publish after it failed the same way, and the
+   * calendar went on drawing the cancellation. The content is still what is
+   * compared (`sameContent()`), so an unchanged look-ahead is still not read twice.
+   */
+  function storedHash(hash) {
+    return `${hash}#${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  }
+
+  /** Whether a stored fingerprint is these contents — with or without the stamp `storedHash()` adds. */
+  function sameContent(stored, hash) {
+    return String(stored ?? '').split('#')[0] === hash;
+  }
+
+  /**
    * Store a read of the look-ahead and derive everything that hangs off it.
    *
    * The second half of what "Check now" always did, taken out so the editor can
@@ -8944,7 +8967,7 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
   async function publishGrid({ grid, legend, declared = [], hash, run, previous, silent = false, notify = true }) {
     try {
       const snapshot = await rc.addSnapshot({
-        file_hash: hash,
+        file_hash: storedHash(hash),
         file_mtime: run.file_mtime,
         sheet_name: grid.sheet,
         grid: {
@@ -11396,7 +11419,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   function reasonFor(row, day, codes = '') {
     const key = ed.cancellationKey(row);
     return cancellationReasonText(cancellationNoteFor(E.notes, {
-      label: key.raw_label, meta: [key.raw_location], day, codes,
+      label: key.raw_label, meta: [key.raw_location], day, codes, rowId: key.la_row_id,
     }));
   }
 
@@ -11495,11 +11518,9 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
    */
   function redrawNoted(runs) {
     const keys = new Set();
-    const keyOf = (row) => { const k = ed.cancellationKey(row); return `${k.raw_label}|${k.raw_location}`; };
     for (const run of runs) {
-      // A note is found by the row's label, so a row worded the same shows it too.
-      const noted = keyOf(run.row);
-      const rows = (E.view?.rows || []).filter((r) => r.id === run.row.id || (r.kind === 'activity' && keyOf(r) === noted));
+      // A note is found by its row, so another row worded the same does not show it.
+      const rows = (E.view?.rows || []).filter((r) => r.id === run.row.id);
       for (const row of rows) {
         for (let d = run.start; d <= run.end; d = ed.addDaysISO(d, 1)) keys.add(ed.cellKey(row.id, d));
       }
@@ -16287,8 +16308,9 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
 
     const byActivity = new Map();
     for (const e of events) {
-      if (!byActivity.has(e.key)) byActivity.set(e.key, { label: e.label, location: e.location, events: [] });
-      byActivity.get(e.key).events.push(e);
+      const activity = e.laRowId || e.key;
+      if (!byActivity.has(activity)) byActivity.set(activity, { label: e.label, location: e.location, events: [] });
+      byActivity.get(activity).events.push(e);
     }
     const rows = [...byActivity.values()].sort((a, b) => a.label.localeCompare(b.label) || a.location.localeCompare(b.location));
 
@@ -16463,6 +16485,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
         await rc.addCancellationNote({
           raw_label: event.label,
           raw_location: event.location,
+          la_row_id: event.laRowId || null,
           start_date: event.start,
           end_date: event.end,
           party: event.note?.party || 'Other',
@@ -16482,6 +16505,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
     await rc.addCancellationNote({
       raw_label: event.label,
       raw_location: event.location,
+      la_row_id: event.laRowId || null,
       start_date: event.start,
       end_date: event.end,
       party: before?.party || event.note?.party || 'Other',
@@ -16525,6 +16549,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
         await rc.addCancellationNote({
           raw_label: event.label,
           raw_location: event.location,
+          la_row_id: event.laRowId || null,
           start_date: event.start,
           end_date: event.end,
           party: party.value,
@@ -18547,11 +18572,11 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
      * per day. Used for the activity and for its Resource row alike, because the
      * two are the same shape and drawing them twice is how they drift apart.
      */
-    const line = (meta, marks, { klass = '', what = '', resource = false, open = null }) => {
+    const line = (meta, marks, { klass = '', what = '', resource = false, open = null, rowId = null }) => {
       const label = meta.filter(Boolean).join(' · ');
       // Why it was cancelled, as logged — for the day, or for one struck-out code.
       const reason = (date, codes = '') => (date && !resource
-        ? cancellationReasonText(cancellationNoteFor(notes, { label, meta, day: date, codes }))
+        ? cancellationReasonText(cancellationNoteFor(notes, { label, meta, day: date, codes, rowId }))
         : '');
       return el('tr', {
       class: klass,
@@ -18617,6 +18642,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         // Styled as names, because that is what the cells hold. The paint on an
         // absence row means nothing the legend knows about.
         resource: Boolean(a.absence),
+        rowId: a.id || null,
         open: a.heading || a.absence ? null
           : () => openActivity({ row: { raw_label: a.meta.filter(Boolean).join(' · '), snapshot_id: snapshotId, sheet_row: a.row } }),
       }));
