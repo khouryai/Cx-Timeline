@@ -1728,6 +1728,23 @@ days: asked day by day over every reading, a real project's 31,772 reading
 rows took over a minute; by the week it is a tenth of a second. It is a view,
 never stored, and read every page (`rc.lookaheadDays()`, `rc.readAll()`).
 
+**And the weeks no reading has.** A reading covers the week just gone and the
+five ahead, so a week written in the editor further back than that — history
+filled in after the fact — is in the editor's tables and in no reading, and the
+export left it out. `writtenOnlyDays()` draws those weeks, and only those,
+through the publish path (`writtenView()` → `rowsFrom()`), into rows shaped
+like the view's, so the look-ahead and shifts sheets reach from the first day
+anything was written; a week any reading holds is still read from the newest
+of them. The Source column says which each day came from.
+
+**The 4WLA beside it is the whole record too.** It was this week and the next
+three, named for those dates — so the grid somebody opens to see what the
+look-ahead said lost each week as it passed, and the folder gained a new file
+every day. `lookaheadFileNow()` now draws every week written, from the first
+day anything was (`laCellSpan()`) to the last and never less than four weeks
+from this one, within the export's own dates, and files it as
+`4WLA_Latest.xlsx` (`lookaheadLatestName()`), replaced like the workbook.
+
 The writer is `tableWorkbook()` in `io/xlsx_write.js`: typed cells (a date is
 Excel's day number with a date format, a number a number, everything else
 inline text, which is never a formula), the heading row frozen and filtered,

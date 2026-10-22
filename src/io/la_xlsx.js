@@ -293,8 +293,20 @@ export function lookaheadWorkbook({ model, days, legend = [], codes = [], title 
 
 /** "4WLA 2026-09-21 to 2026-10-18.xlsx" — the window is in the name, so two exports never look alike. */
 export function lookaheadFileName(days, sheetName = '4WLA') {
-  const safe = String(sheetName || '4WLA').replace(/[\\/:*?"<>|]+/g, ' ').trim() || '4WLA';
-  return `${safe} ${days[0]} to ${days[days.length - 1]}.xlsx`;
+  return `${safeSheetName(sheetName)} ${days[0]} to ${days[days.length - 1]}.xlsx`;
+}
+
+/**
+ * The name the master export files the 4WLA under: one name, replaced by every
+ * export, as the workbook beside it is. Named for its dates it was a new file
+ * every day the record grew, and the folder filled with yesterday's copies.
+ */
+export function lookaheadLatestName(sheetName = '4WLA') {
+  return `${safeSheetName(sheetName)}_Latest.xlsx`;
+}
+
+function safeSheetName(sheetName) {
+  return String(sheetName || '4WLA').replace(/[\\/:*?"<>|]+/g, ' ').trim() || '4WLA';
 }
 
 /**

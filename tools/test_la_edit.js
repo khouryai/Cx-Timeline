@@ -516,6 +516,9 @@ console.log('\nThe Excel export');
   check('a cell of names is given the height to show all of them',
     /<row r="\d+" ht="[\d.]+" customHeight="1">(?:(?!<\/row>).)*Victor, Rosa/.test(sheet));
   check('the file is named for its window', xl.lookaheadFileName(days) === '4WLA 2026-09-21 to 2026-10-18.xlsx');
+  check('and the master export\'s copy has one name, whatever weeks it holds',
+    xl.lookaheadLatestName('4WLA') === '4WLA_Latest.xlsx' && xl.lookaheadLatestName('CBTC: 4WLA') === 'CBTC  4WLA_Latest.xlsx',
+    xl.lookaheadLatestName('CBTC: 4WLA'));
   check('the same look-ahead makes the same file', bytes.length === xl.lookaheadWorkbook({
     model: m, days, legend: LEGEND, codes: CODES, title: 'CBTC Four Week Look-Ahead',
   }).length);

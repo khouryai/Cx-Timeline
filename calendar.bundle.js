@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 33   Built: 2026-10-22T18:59:49.825Z
+ * Modules: 33   Built: 2026-10-22T22:12:16.657Z
  */
 (function () {
   'use strict';
@@ -10219,8 +10219,20 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
 
   /** "4WLA 2026-09-21 to 2026-10-18.xlsx" — the window is in the name, so two exports never look alike. */
   function lookaheadFileName(days, sheetName = '4WLA') {
-    const safe = String(sheetName || '4WLA').replace(/[\\/:*?"<>|]+/g, ' ').trim() || '4WLA';
-    return `${safe} ${days[0]} to ${days[days.length - 1]}.xlsx`;
+    return `${safeSheetName(sheetName)} ${days[0]} to ${days[days.length - 1]}.xlsx`;
+  }
+
+  /**
+   * The name the master export files the 4WLA under: one name, replaced by every
+   * export, as the workbook beside it is. Named for its dates it was a new file
+   * every day the record grew, and the folder filled with yesterday's copies.
+   */
+  function lookaheadLatestName(sheetName = '4WLA') {
+    return `${safeSheetName(sheetName)}_Latest.xlsx`;
+  }
+
+  function safeSheetName(sheetName) {
+    return String(sheetName || '4WLA').replace(/[\\/:*?"<>|]+/g, ' ').trim() || '4WLA';
   }
 
   /**
@@ -10345,6 +10357,7 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "lookaheadWorkbook", { get: () => lookaheadWorkbook, enumerable: true });
   Object.defineProperty(__x, "lookaheadFileName", { get: () => lookaheadFileName, enumerable: true });
+  Object.defineProperty(__x, "lookaheadLatestName", { get: () => lookaheadLatestName, enumerable: true });
   Object.defineProperty(__x, "cancellationWorkbook", { get: () => cancellationWorkbook, enumerable: true });
 };
 
@@ -10992,7 +11005,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
 
 
   const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
-  const { lookaheadWorkbook, lookaheadFileName } = __req("io/la_xlsx.js");
+  const { lookaheadWorkbook, lookaheadFileName, lookaheadLatestName } = __req("io/la_xlsx.js");
   const { saveFile } = __req("io/exporters.js");
   const { icon } = __req("ui/icons.js");
   const { toast, confirmDialog, contextMenu, openModal, textInput, selectInput, segmented, emptyState, attachTooltip, checkbox } = __req("ui/components.js");
@@ -13822,24 +13835,38 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   }
 
   /**
-   * The 4WLA as an .xlsx, built without asking — this week and the next three,
-   * names rows included — for the master export to file beside its workbook.
-   * Null until the look-ahead is written here: before that the workbook in the
-   * folder is the 4WLA, and the editor's tables would be an old copy of it.
+   * The 4WLA as an .xlsx, built without asking — names rows included — for the
+   * master export to file beside its workbook: every week written here, from the
+   * first day anything was (`laCellSpan()`) to the last, and never less than this
+   * week and the next three. `from` and `to` are the export's own dates, and
+   * narrow it; weeks nothing was ever written in are never drawn, however far
+   * back the dates reach. It used to be this week and the next three only, so
+   * the record of what the look-ahead said went out of the file as each week
+   * passed. Null until the look-ahead is written here: before that the workbook
+   * in the folder is the 4WLA, and the editor's tables would be an old copy of
+   * it — and null when the dates asked for hold nothing written.
    */
-  async function lookaheadFileNow({ weeks = 4 } = {}) {
+  async function lookaheadFileNow({ from = null, to = null } = {}) {
     const settings = await rc.listSettings().catch(() => []);
     const said = (key) => settings.find((r) => r.key === key)?.value;
     if (said('lookahead_source') !== EDITOR_SOURCE) return null;
+    const span = await rc.laCellSpan().catch(() => ({ first: null, last: null }));
+    const thisMonday = ed.mondayOf(todayISO());
+    const first = [span.first, thisMonday].filter(Boolean).sort()[0];
+    const last = [span.last, ed.addDaysISO(thisMonday, 27)].filter(Boolean).sort().pop();
+    const start = ed.mondayOf(from && from > first ? from : first);
+    const end = to && to < last ? to : last;
+    if (end < start) return null;
+    const weeks = Math.floor((Date.parse(end) - Date.parse(start)) / (7 * 864e5)) + 1;
+    const days = ed.windowDays(start, weeks);
     const src = await exportSource();
-    const days = ed.windowDays(ed.mondayOf(todayISO()), weeks);
     await src.ensure(days);
     const sheetName = said('lookahead_sheet') || '4WLA';
     const bytes = lookaheadWorkbook({
       model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
       resources: true,
     });
-    return { bytes, name: lookaheadFileName(days, sheetName) };
+    return { bytes, name: lookaheadLatestName(sheetName), from: days[0], to: days[days.length - 1] };
   }
 
   /** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
@@ -16997,7 +17024,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
 
   const { p6Index, p6Status } = __req("core/la_p6.js");
   const { FIELDS, addDaysISO, mondayOf } = __req("core/la_edit.js");
-  const { describe: describeChange } = __req("core/la_register.js");
+  const { describe: describeChange, rowsFrom } = __req("core/la_register.js");
   const { cleanSchedule, isDue, nextSlot } = __req("core/export_schedule.js");
   const { icon } = __req("ui/icons.js");
   const { openModal, toast, checkbox, selectInput, field } = __req("ui/components.js");
@@ -17007,6 +17034,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
 
   const { KIND_LABELS } = __req("ui/rc_la_changes.js");
   const { lookaheadFileNow } = __req("ui/rc_la_editor.js");
+  const { writtenView } = __req("ui/rc_ingest.js");
 
   /** The folder, inside the shared one, the workbooks are filed in. */
   const EXPORT_DIR = 'exports';
@@ -17161,13 +17189,69 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
       roleOf: new Map(legendRows.map((l) => [String(l.meaning || ''), l.role || 'shift'])),
       cancelHex: new Set(legendRows.filter((l) => isCancelMeaning(l.meaning)).map((l) => `#${String(l.argb).toUpperCase()}`)),
     };
-    ctx.days = once(() => rc.lookaheadDays(range.from, range.to));
+    ctx.days = once(async () => {
+      const read = await rc.lookaheadDays(range.from, range.to);
+      if (ctx.source !== 'editor') return read;
+      const written = await writtenOnlyDays(ctx, read, range);
+      return written.length ? [...read, ...written].sort((a, b) => a.day.localeCompare(b.day)) : read;
+    });
     ctx.actuals = once(() => rc.readAll('rc_actuals_current', { column: 'work_date', from: range.from, to: range.to }));
     ctx.who = (userId) => (userId ? ctx.personByUser.get(userId)?.name || '' : '');
     ctx.name = (personId) => (personId ? ctx.personById.get(personId)?.name || '' : '');
     ctx.place = (locationId, raw = '') => (locationId ? ctx.locationById.get(locationId)?.name || raw || '' : raw || '');
     ctx.source = settings.find((r) => r.key === 'lookahead_source')?.value || 'workbook';
     return ctx;
+  }
+
+  /**
+   * The days written in the calendar that no reading holds, shaped as
+   * `rc_lookahead_days` rows.
+   *
+   * A reading covers the week just gone and the five ahead, so a week written
+   * further back than that — the history filled in after the fact — is in the
+   * editor's tables and in no reading, and the export left it out. Those weeks,
+   * and only those, are drawn through the publish path (`writtenView()` →
+   * `rowsFrom()`), the derivation every reading's rows come from, so a week
+   * from here and a week from a reading say the same thing in the same words. A
+   * week any reading holds is still read from the newest of them. Nothing is
+   * stored, and `taken_at` is null: no reading was taken of these.
+   */
+  async function writtenOnlyDays(ctx, read, range) {
+    const span = await rc.laCellSpan().catch(() => ({ first: null, last: null }));
+    if (!span.first || !span.last) return [];
+    const from = mondayOf(range.from && range.from > span.first ? range.from : span.first);
+    const to = range.to && range.to < span.last ? range.to : span.last;
+    const covered = new Set(read.map((d) => String(d.week_start).slice(0, 10)));
+    const missing = [];
+    for (let w = from; w <= to && missing.length < 520; w = addDaysISO(w, 7)) if (!covered.has(w)) missing.push(w);
+    if (!missing.length) return [];
+    const view = await writtenView(missing[0], addDaysISO(missing[missing.length - 1], 6), ctx.legendRows);
+    const resolved = new Map();
+    const rows = await rowsFrom(view, {
+      locate: async (text) => {
+        const key = String(text || '').trim();
+        if (!key) return null;
+        if (!resolved.has(key)) resolved.set(key, await rc.resolveLocation(key).catch(() => null));
+        return resolved.get(key);
+      },
+    });
+    const wanted = new Set(missing);
+    const out = [];
+    for (const r of rows) {
+      if (!wanted.has(r.week_start)) continue;
+      for (const day of new Set([...Object.keys(r.cells), ...Object.keys(r.bart_marks), ...Object.keys(r.resources)])) {
+        if ((range.from && day < range.from) || (range.to && day > range.to)) continue;
+        out.push({
+          // One row of the look-ahead in one week, as a reading's row is — the shifts sheet groups by it.
+          row_id: `written:${r.la_row_id || r.row_key}:${r.week_start}`,
+          snapshot_id: null, taken_at: null, week_start: r.week_start, row_key: r.row_key, sheet_row: r.sheet_row,
+          location_id: r.location_id, raw_location: r.raw_location, raw_label: r.raw_label, subsystem: null,
+          la_row_id: r.la_row_id, day,
+          paint: r.cells[day] ?? null, marks: r.bart_marks[day] ?? null, names: r.resources[day] ?? null,
+        });
+      }
+    }
+    return out;
   }
 
   /** The P6 activity a row names — its Activity ID, or any part of the label as read. */
@@ -17223,6 +17307,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
           { heading: 'Support asked for' }, { heading: 'Support cancelled' },
           { heading: 'Names on the day', width: 32 },
           { heading: 'From the reading of', kind: 'datetime' },
+          { heading: 'Source' },
         ],
         rows: days.map((d) => {
           const row = d.la_row_id ? byId.get(d.la_row_id) : null;
@@ -17241,7 +17326,8 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
             describeCodeCounts(countCodes([d.marks || ''])),
             describeCodeCounts(countCodes([d.marks || ''], { cancelled: true })),
             d.names || '',
-            d.taken_at,
+            d.taken_at || '',
+            d.taken_at ? 'A reading' : 'The calendar as written — no reading has this week',
           ];
         }),
         empty: 'No reading covers these dates.',
@@ -17557,7 +17643,8 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
         ['The look-ahead is written in', ctx.source === 'editor' ? 'The calendar (Edit)' : 'The workbook', ''],
         ['How a day of the look-ahead is read', 'The newest reading of its week', 'Each week comes from the newest reading taken of it — '
           + 'the rule the week plan reads by — so a week the window has rolled past keeps the last reading that had it, and older readings '
-          + 'of the same week are still on the record in the calendar.'],
+          + 'of the same week are still on the record in the calendar. A week written in the calendar that no reading has — '
+          + 'further back than the week just gone, filled in afterwards — comes from the calendar as written, and says so in its Source column.'],
         ['', '', ''],
         ['Sheet', 'Rows', 'What it holds'],
         ...sheets.map((s) => {
@@ -17570,7 +17657,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
     const bytes = await tableWorkbook({ sheets: [about, ...sheets], title: 'CX Timeline — master export' });
 
     let companion = null;
-    if (settings.companion) companion = await lookaheadFileNow().catch(() => null);
+    if (settings.companion) companion = await lookaheadFileNow({ from: range.from, to: range.to }).catch(() => null);
 
     return {
       bytes,
@@ -17687,7 +17774,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
     const from = el('input', { type: 'date', class: 'cx-input', value: s.from || '' });
     const to = el('input', { type: 'date', class: 'cx-input', value: s.to || '' });
     const dates = el('div', { class: 'rc-mx-dates' }, [field('From', from), field('To', to)]);
-    const companion = checkbox({ label: 'Also the 4WLA in its own layout — this week and the next three, as Export to Excel makes it', checked: s.companion });
+    const companion = checkbox({ label: 'Also the 4WLA in its own layout — every week written in these dates, as Export to Excel makes it', checked: s.companion });
 
     const every = selectInput({
       value: s.schedule.every,

@@ -9,22 +9,36 @@
  * its reason and rows linked to P6 to carry.
  */
 
-import { readZip } from '../src/io/lookahead.js';
+import { readZip, parseSheet } from '../src/io/lookahead.js';
+import { readGrid } from '../src/core/lookahead.js';
 
 /** The workbook the page builds, as Node sees it: sheet names and each sheet's XML. */
 async function workbookIn(page) {
   const b64 = await page.evaluate(async () => {
     const mx = window.__CX_MODULES.req('ui/rc_master_export.js');
     const out = await mx.buildMasterExport({ ...mx.loadSettings(), sheets: mx.SHEETS.map((s) => s.id), range: 'all' });
-    let s = '';
-    for (const b of out.bytes) s += String.fromCharCode(b);
-    return { bytes: btoa(s), sheets: out.sheets, failed: out.failed, companion: out.companion ? out.companion.name : null };
+    const b64 = (bytes) => {
+      let s = '';
+      for (const b of bytes) s += String.fromCharCode(b);
+      return btoa(s);
+    };
+    return {
+      bytes: b64(out.bytes), sheets: out.sheets, failed: out.failed,
+      companion: out.companion ? out.companion.name : null,
+      companionBytes: out.companion ? b64(out.companion.bytes) : null,
+    };
   });
   const files = readZip(Uint8Array.from(Buffer.from(b64.bytes, 'base64')).buffer);
   const text = (name) => new TextDecoder().decode(files.get(name) || new Uint8Array());
   const names = [...text('xl/workbook.xml').matchAll(/<sheet name="([^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, '&'));
   const sheet = (name) => text(`xl/worksheets/sheet${names.indexOf(name) + 1}.xml`);
-  return { ...b64, names, sheet, deflated: [...files.keys()].length > 0 };
+  /* The 4WLA beside it, read back the way a workbook is read, for the days it covers. */
+  let companionDays = [];
+  if (b64.companionBytes) {
+    const buf = Uint8Array.from(Buffer.from(b64.companionBytes, 'base64')).buffer;
+    companionDays = readGrid(parseSheet(buf, '4WLA'), { anchorISO: '2026-09-23' }).days.map((d) => d.date).filter(Boolean);
+  }
+  return { ...b64, names, sheet, companionDays, deflated: [...files.keys()].length > 0 };
 }
 
 export async function masterExport(page, { check }) {
@@ -53,7 +67,36 @@ export async function masterExport(page, { check }) {
     /rows on \d+ sheets[\s\S]*Saved to the shared folder — exports\/LookAhead_Latest\.xlsx/.test(await said.innerText().catch(() => '')),
     await said.innerText().catch(() => ''));
 
+  /* A day written in the editor two months ago: the record the export is
+     taken away for, which the 4WLA beside it used to leave out — it was this
+     week and the next three only. */
+  const longAgo = await page.evaluate(() => {
+    const S = window.__rc.rows;
+    const row = S.rc_la_rows.find((r) => r.kind === 'activity' && !r.archived);
+    const shift = S.rc_legend.find((l) => (l.role || 'shift') === 'shift' && !/cancel/i.test(l.meaning || ''));
+    const d = new Date(Date.now() - 60 * 864e5).toISOString().slice(0, 10);
+    S.rc_la_cells.push({ row_id: row.id, day: d, color: String(shift.argb).toUpperCase(), text: 'X', version: 1 });
+    // Written behind the client's back, so what it remembers reading is forgotten.
+    window.__CX_MODULES.req('core/rc.js').forgetReads();
+    return { day: d, label: row.description };
+  });
   const book = await workbookIn(page);
+  const thisMonday = await page.evaluate(() => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+    return d.toISOString().slice(0, 10);
+  });
+  check('the 4WLA beside it has one name, replaced each time, not one named for its dates',
+    book.companion === '4WLA_Latest.xlsx', book.companion);
+  check('and it reaches back to the first week anything was written, not only this week and the next three',
+    book.companionDays.length > 28 && book.companionDays[0] <= longAgo.day && book.companionDays.includes(longAgo.day),
+    `${book.companionDays[0]} to ${book.companionDays[book.companionDays.length - 1]} (written ${longAgo.day})`);
+  const laDates = [...book.sheet('Look-ahead').matchAll(/<c r="A\d+" s="\d+"><v>(\d{5})<\/v>/g)]
+    .map((m) => new Date((Number(m[1]) - 25569) * 864e5).toISOString().slice(0, 10)).sort();
+  check('the look-ahead sheet carries the weeks already gone, back to the day written two months ago',
+    laDates.length > 0 && laDates[0] <= longAgo.day && laDates.some((d) => d < thisMonday), `${laDates[0]} to ${laDates[laDates.length - 1]}`);
+  check('and says that a week no reading has comes from the calendar as written',
+    /The calendar as written — no reading has this week/.test(book.sheet('Look-ahead')) && /A reading</.test(book.sheet('Look-ahead')));
   const want = ['About', 'Look-ahead', 'Shifts worked', 'Cancellations', 'Changes', 'Huddle outcomes', 'Blockers', 'Leave',
     'P6 activities', 'TAWRs', 'SARs', 'Team', 'Locations', 'Legend', 'Support codes'];
   check('the workbook has a sheet for each, About first', JSON.stringify(book.names) === JSON.stringify(want), book.names.join(', '));

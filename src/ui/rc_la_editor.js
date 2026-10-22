@@ -40,7 +40,7 @@ import {
   cancellationNoteFor, cancellationReasonText,
 } from '../core/lookahead.js';
 import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
-import { lookaheadWorkbook, lookaheadFileName } from '../io/la_xlsx.js';
+import { lookaheadWorkbook, lookaheadFileName, lookaheadLatestName } from '../io/la_xlsx.js';
 import { saveFile } from '../io/exporters.js';
 import { icon } from './icons.js';
 import {
@@ -2870,24 +2870,38 @@ async function exportSource() {
 }
 
 /**
- * The 4WLA as an .xlsx, built without asking — this week and the next three,
- * names rows included — for the master export to file beside its workbook.
- * Null until the look-ahead is written here: before that the workbook in the
- * folder is the 4WLA, and the editor's tables would be an old copy of it.
+ * The 4WLA as an .xlsx, built without asking — names rows included — for the
+ * master export to file beside its workbook: every week written here, from the
+ * first day anything was (`laCellSpan()`) to the last, and never less than this
+ * week and the next three. `from` and `to` are the export's own dates, and
+ * narrow it; weeks nothing was ever written in are never drawn, however far
+ * back the dates reach. It used to be this week and the next three only, so
+ * the record of what the look-ahead said went out of the file as each week
+ * passed. Null until the look-ahead is written here: before that the workbook
+ * in the folder is the 4WLA, and the editor's tables would be an old copy of
+ * it — and null when the dates asked for hold nothing written.
  */
-export async function lookaheadFileNow({ weeks = 4 } = {}) {
+export async function lookaheadFileNow({ from = null, to = null } = {}) {
   const settings = await rc.listSettings().catch(() => []);
   const said = (key) => settings.find((r) => r.key === key)?.value;
   if (said('lookahead_source') !== EDITOR_SOURCE) return null;
+  const span = await rc.laCellSpan().catch(() => ({ first: null, last: null }));
+  const thisMonday = ed.mondayOf(todayISO());
+  const first = [span.first, thisMonday].filter(Boolean).sort()[0];
+  const last = [span.last, ed.addDaysISO(thisMonday, 27)].filter(Boolean).sort().pop();
+  const start = ed.mondayOf(from && from > first ? from : first);
+  const end = to && to < last ? to : last;
+  if (end < start) return null;
+  const weeks = Math.floor((Date.parse(end) - Date.parse(start)) / (7 * 864e5)) + 1;
+  const days = ed.windowDays(start, weeks);
   const src = await exportSource();
-  const days = ed.windowDays(ed.mondayOf(todayISO()), weeks);
   await src.ensure(days);
   const sheetName = said('lookahead_sheet') || '4WLA';
   const bytes = lookaheadWorkbook({
     model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
     resources: true,
   });
-  return { bytes, name: lookaheadFileName(days, sheetName) };
+  return { bytes, name: lookaheadLatestName(sheetName), from: days[0], to: days[days.length - 1] };
 }
 
 /** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
