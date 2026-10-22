@@ -88,6 +88,7 @@ export async function masterExport(page, { check }) {
   const count = () => page.evaluate(() => Object.keys(window.__files || {}).filter((k) => k === 'exports/LookAhead_Latest.xlsx').length);
   const n0 = await count();
   check('a schedule just saved does not export straight away', (await tick(0)) === false && (await count()) === n0);
+  const filedBefore = await page.evaluate(() => window.__files['exports/LookAhead_Latest.xlsx']);
   const lastAt = () => page.evaluate(() => JSON.parse(localStorage.getItem('cx.rc.masterExport') || '{}').last?.at || 0);
   const at0 = await lastAt();
   const ran = await tick(86400000);
@@ -96,6 +97,8 @@ export async function masterExport(page, { check }) {
   check('and only once for that slot', (await tick(86400000 + 60000)) === false);
   check('into the same file, replaced rather than added beside — always LookAhead_Latest.xlsx',
     (await count()) === 1 && !(await page.evaluate(() => Object.keys(window.__files || {}).some((k) => /^exports\/.*master export/i.test(k)))));
+  check('and what is in it is the new export, not the old one kept',
+    Boolean(filedBefore) && (await page.evaluate(() => window.__files['exports/LookAhead_Latest.xlsx'])) !== filedBefore);
   check('the time it ran is remembered on this computer',
     await page.evaluate(() => Boolean(JSON.parse(localStorage.getItem('cx.rc.masterExport') || '{}').lastRun)));
   // Back off, so nothing else in the suite meets a schedule.

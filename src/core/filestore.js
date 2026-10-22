@@ -1676,7 +1676,9 @@ export async function intakeWrite(rel, data) {
   const name = parts.pop();
   const dir = await webFolder(parts.join('/'), { create: true });
   const handle = await dir.getFileHandle(name, { create: true });
-  const writable = await handle.createWritable();
+  // Replaced whole: a file written again under its name — the master export's
+  // LookAhead_Latest.xlsx — never keeps the tail of a longer one before it.
+  const writable = await handle.createWritable({ keepExistingData: false });
   await writable.write(data);
   await writable.close();
   const file = await handle.getFile();

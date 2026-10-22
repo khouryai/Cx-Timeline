@@ -1331,6 +1331,21 @@ mod tests {
     }
 
     #[test]
+    fn writing_a_name_again_replaces_the_file_whole() {
+        // The master export is always exports/LookAhead_Latest.xlsx: each run
+        // must replace the last, shorter or longer, never sit beside it.
+        let dir = Scratch::new("replace-intake");
+        write_file(dir.path(), "exports/LookAhead_Latest.xlsx", b"the first, longer export").unwrap();
+        write_file(dir.path(), "exports/LookAhead_Latest.xlsx", b"second").unwrap();
+        assert_eq!(fs::read(dir.path().join("exports/LookAhead_Latest.xlsx")).unwrap(), b"second");
+        let names: Vec<String> = fs::read_dir(dir.path().join("exports"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["LookAhead_Latest.xlsx".to_string()]);
+    }
+
+    #[test]
     fn stat_reports_the_stamp_without_reading_the_file() {
         let dir = Scratch::new("stat");
         write_file(dir.path(), "lookahead/x.xlsx", b"twelve bytes").unwrap();

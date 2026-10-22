@@ -1750,7 +1750,11 @@ into `exports/` in the shared folder through the intake door the look-ahead
 and the SARs already use (`filestore.intakeWrite()`), always as
 `LookAhead_Latest.xlsx`, replacing the last one — one name, so a report or a
 page that links to it keeps working and is always the newest; when it was made
-is on its About sheet — with the 4WLA in its own
+is on its About sheet. It is replaced whole (a browser's writable opened
+without the old data, the desktop's write-then-rename), and a workbook open in
+Excel, which Windows will not let anybody replace, is said as that, not as the
+bare error; a scheduled run tries again half an hour later. A download cannot
+replace anything — browsers number a second copy — and the dialog says so — with the 4WLA in its own
 layout beside it once the look-ahead is written here; with no folder
 connected it is downloaded. The settings are this computer's
 (`localStorage`), because the folder and the clock are.

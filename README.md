@@ -589,7 +589,7 @@ npm run test:folder   #  89 checks — the shared folder, in a browser
 npm run test:desktop  #  64 checks — the desktop shell, and its updates
 npm run test:hosted   #  49 checks — sign-in, sharing and read-only mode
 npm run test:sql      # 304 checks — both permission models, on real PostgreSQL
-npm run test:rust     #  33 checks — the plan, lock and intake rules; no webview needed
+npm run test:rust     #  34 checks — the plan, lock and intake rules; no webview needed
 ```
 
 After editing anything under `src/`, run `npm run build` — `index.html` loads

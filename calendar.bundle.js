@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 33   Built: 2026-10-22T16:36:01.501Z
+ * Modules: 33   Built: 2026-10-22T17:25:03.825Z
  */
 (function () {
   'use strict';
@@ -17562,8 +17562,19 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
    */
   async function deliver(result) {
     if (filestore.hasFolder?.()) {
-      await filestore.intakeWrite(`${EXPORT_DIR}/${result.name}`, result.bytes);
-      if (result.companion) await filestore.intakeWrite(`${EXPORT_DIR}/${result.companion.name}`, result.companion.bytes);
+      /* Written under the same name, so the last export is replaced, not kept
+         beside. Windows will not replace a workbook somebody has open in Excel,
+         and the error it gives says nothing of the sort — so it is said here. */
+      const replace = async (name, bytes) => {
+        try {
+          await filestore.intakeWrite(`${EXPORT_DIR}/${name}`, bytes);
+        } catch (err) {
+          throw new Error(`${EXPORT_DIR}/${name} could not be replaced — if it is open in Excel, close it and export again `
+            + `(a scheduled export tries again by itself). ${err.message}`);
+        }
+      };
+      await replace(result.name, result.bytes);
+      if (result.companion) await replace(result.companion.name, result.companion.bytes);
       return { where: 'folder', path: `${EXPORT_DIR}/${result.name}` };
     }
     saveFile(result.name, result.bytes, XLSX, 'Master export');
@@ -17717,8 +17728,9 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
         el('p', {
           class: 'rc-hint rc-mx-where',
           text: folder
-            ? `Saved into ${EXPORT_DIR}/ in the shared folder, beside the plan — on a synced folder it reaches everybody who has it.`
-            : 'Downloaded to this computer. Open the shared folder in the timeline and it is saved into exports/ there instead.',
+            ? `Saved as ${EXPORT_DIR}/${EXPORT_NAME} in the shared folder, replacing the last one — on a synced folder it reaches everybody who has it.`
+            : `Downloaded to this computer as ${EXPORT_NAME}. A browser never overwrites a download, so a second one arrives as `
+              + `"LookAhead_Latest (1).xlsx" — open the shared folder in the timeline and it is saved into ${EXPORT_DIR}/ there, replacing the last.`,
         }),
         field('On a schedule', every),
         el('div', { class: 'rc-mx-when' }, [dayField, atField, hoursField]),

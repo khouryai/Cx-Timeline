@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 60   Built: 2026-10-22T16:36:01.158Z
+ * Modules: 60   Built: 2026-10-22T17:25:03.674Z
  */
 (function () {
   'use strict';
@@ -6038,7 +6038,9 @@ __mods["core/filestore.js"] = function (__x, __req) {
     const name = parts.pop();
     const dir = await webFolder(parts.join('/'), { create: true });
     const handle = await dir.getFileHandle(name, { create: true });
-    const writable = await handle.createWritable();
+    // Replaced whole: a file written again under its name — the master export's
+    // LookAhead_Latest.xlsx — never keeps the tail of a longer one before it.
+    const writable = await handle.createWritable({ keepExistingData: false });
     await writable.write(data);
     await writable.close();
     const file = await handle.getFile();
