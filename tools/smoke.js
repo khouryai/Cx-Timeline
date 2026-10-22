@@ -82,7 +82,14 @@ async function main() {
 
   console.log('\nBoot');
   await page.goto(`http://localhost:${PORT}/index.html`, { waitUntil: 'load' });
-  await page.waitForSelector('.tl-root', { timeout: 15000 });
+  /* CI starts this alongside three other browser suites, and this first, cold
+     load of the unminified bundle once took longer than fifteen seconds to
+     draw — a crash before any check had run, passing on the same commit
+     straight after. Room to boot, and what the page said if it still does not. */
+  await page.waitForSelector('.tl-root', { timeout: 45000 }).catch((err) => {
+    console.log(`the timeline did not draw; the page said: ${consoleErrors.join(' | ') || 'nothing'}`);
+    throw err;
+  });
   await page.waitForTimeout(1400);
 
   /* The timeline is most of what anybody opens, and it needs neither the
