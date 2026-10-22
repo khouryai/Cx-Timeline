@@ -2275,8 +2275,14 @@ async function main() {
      second lap then reads it again for a reason that has nothing to do with
      what is under test. Forgotten here, every read starts its thirty seconds
      in the first lap. */
-  await page.evaluate(() => {
+  /* And the inbox counted afresh. Its count on the Organisation tab is kept
+     for a minute and taken again on the next visit after that — so a minute
+     that ran out mid-lap read the inbox's sources in the second lap (the
+     snapshot list, rc_la_seen), which is the inbox keeping time, not a tab
+     reading again. Drawn here, off screen, the count starts its minute now. */
+  await page.evaluate(async () => {
     window.__CX_MODULES.req('core/rc.js').forgetReads();
+    await window.__CX_MODULES.req('ui/rc_inbox.js').renderInbox(document.createElement('div'));
     window.__rc.calls.length = 0;
   });
   const lap = async () => {
