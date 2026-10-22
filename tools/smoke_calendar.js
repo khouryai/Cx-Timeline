@@ -2317,7 +2317,12 @@ async function main() {
   const repeated = rosterReads.filter((q, i) => rosterReads.indexOf(q) !== i);
   check('and ask the roster each of its questions once',
     rosterReads.length >= 2 && repeated.length === 0, `${rosterReads.join(' | ')} in ${((Date.now() - lapsStarted) / 1000).toFixed(1)}s`);
-  const again = sweep.slice(firstLap);
+  /* rc_la_seen is read by none of the three tabs — only by the header's two
+     counts (My day's changes and the inbox), each kept for a minute and taken
+     again on the first visit after it, so one of them running out mid-lap is
+     a header keeping time, not a tab reading again. It is left out of the
+     second lap's reads for that reason alone. */
+  const again = sweep.slice(firstLap).filter((t) => t !== 'rc_la_seen');
   check('the second lap round the same three tabs reads nothing new', again.length === 0,
     again.length ? `re-read ${again.join(', ')}` : `${firstLap} read(s) on the first lap, none on the second`);
   /* The other half — a write empties it — is what the legend checks above
