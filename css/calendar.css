@@ -145,6 +145,21 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   max-width: 260px;
 }
 .la-grid thead .la-meta { z-index: 4; }
+/* The frozen body cells rule their edges with shadows, not borders. A sticky
+   cell's border is see-through in this table — transparent or not — so the
+   days scrolling under it showed along every edge: a band's hatch, an unmapped
+   cell's outline, a shift's colour, in hairlines down the activity columns.
+   A shadow is painted on the cell itself. Each edge is its own property, so a
+   row kind changes one edge and the hover bar (`--la-mark`) adds to them. */
+.la-grid tbody .la-meta {
+  border-right-width: 0;
+  border-bottom-width: 0;
+  --la-mark: 0 0 transparent;
+  --la-rule-t: 0 0 transparent;
+  --la-rule-r: inset -1px 0 0 var(--border);
+  --la-rule-b: inset 0 -1px 0 var(--border);
+  box-shadow: var(--la-mark), var(--la-rule-t), var(--la-rule-r), var(--la-rule-b);
+}
 /* The body wraps, as the editor's does: an activity's description and a day's
    names are read whole, and the row grows to hold them. A day column stops
    widening at a readable measure and wraps the names inside it instead. */
@@ -169,6 +184,7 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   vertical-align: bottom;
 }
 .la-grid .la-meta.la-last { border-right: 2px solid var(--border-strong); }
+.la-grid tbody .la-meta.la-last { border-right-width: 0; --la-rule-r: inset -2px 0 0 var(--border-strong); }
 
 .la-grid thead th {
   position: sticky;
@@ -242,6 +258,7 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   border-top: 2px solid var(--border-strong);
 }
 .la-grid tr.la-head-row .la-day { border-top: 2px solid var(--border-strong); }
+.la-grid tbody tr.la-head-row .la-meta { border-top-width: 0; --la-rule-t: inset 0 2px 0 var(--border-strong); }
 /* A section band runs the whole width of the calendar, the activity columns
    and every day, so the rows under it read as one group — the band BART's
    sheet draws and the export writes. Fixed shading, like the weekends, which
@@ -262,6 +279,7 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   font-style: italic;
   color: var(--text-muted);
 }
+.la-grid tbody tr.la-resource-row > td.la-meta { border-bottom-width: 0; --la-rule-b: inset 0 -1px 0 var(--border-strong); }
 /* "PTO" and "Other Group / Project" stand on their own rather than under an
    activity, so unlike the Resource row they get their top border back — a row
    about a person is not a continuation of the line above it, and drawn as one it
@@ -274,6 +292,7 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   font-weight: 600;
   color: var(--text-muted);
 }
+.la-grid tbody tr.la-absence-row > td.la-meta { border-top-width: 0; --la-rule-t: inset 0 1px 0 var(--border); }
 
 /* The names are words, not marks, so they get the text face and room to be
    read — a mono 10px column of "R. Okafor" is not legible at any zoom. */
@@ -394,6 +413,26 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   color: var(--text-main);
 }
 .la-only-mine { font-weight: 600; }
+/* Back, this week, forward — the editor's pager, on the read view. */
+.la-pager { display: flex; align-items: center; gap: 4px; }
+.la-pager-range {
+  font-family: var(--f-mono);
+  font-size: var(--fs-tiny);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-main);
+  padding: 0 6px;
+  white-space: nowrap;
+}
+.la-written-note { margin: 0 0 8px; }
+/* A reason given instead of a P6 activity reads as a word, not an ID. */
+.la-grid td.la-p6-flag { font-style: italic; color: var(--text-muted); }
+/* The row under the pointer, marked without repainting anything: a bar down
+   the first frozen column, so a day far to the right can be read back to its
+   activity. Every colour on the grid is the workbook's — a shift, a band, a
+   weekend, a hatch — and a hover fill would be one more, drawn over them. */
+.la-grid tbody tr:hover > td.la-meta:first-child { --la-mark: inset 3px 0 0 var(--primary); }
+.la-grid tbody tr:hover > td:first-child:not(.la-meta) { box-shadow: inset 3px 0 0 var(--primary); }
 .la-grid td.la-openable { cursor: pointer; }
 .la-grid td.la-openable:hover { text-decoration: underline; text-underline-offset: 3px; }
 .la-grid td.la-openable:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }

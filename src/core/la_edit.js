@@ -511,6 +511,28 @@ export function cellList(model) {
   return [...model.cells.values()];
 }
 
+/** A row as `rc_la_rows` answers it, in the model's shape: numbers as numbers, flags as booleans. */
+export function cleanRow(r) {
+  return {
+    ...blankRow(r.kind, {}),
+    ...r,
+    sort: Number(r.sort) || 0,
+    level: Number(r.level) || 0,
+    archived: !!r.archived,
+  };
+}
+
+/** A cell as `rc_la_cells` answers it: the day as a date, the colour in capitals. */
+export function cleanCell(c) {
+  return {
+    row_id: c.row_id,
+    day: String(c.day).slice(0, 10),
+    color: c.color ? String(c.color).toUpperCase() : null,
+    text: c.text || '',
+    version: c.version || 0,
+  };
+}
+
 export function getCell(model, rowId, day) {
   return model.cells.get(cellKey(rowId, day)) || null;
 }

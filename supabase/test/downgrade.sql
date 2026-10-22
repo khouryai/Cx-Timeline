@@ -21,6 +21,10 @@ alter table public.rc_locations drop column if exists tawr_area;
 drop table if exists public.rc_support_codes;
 drop function if exists public.rc_compact_snapshots();
 drop table if exists public.rc_la_seen;
+-- Before P6 activities: no list for the Activity ID column to be filled from.
+drop function if exists public.rc_p6_import(uuid, jsonb, boolean);
+drop table if exists public.rc_p6_activities;
+drop table if exists public.rc_p6_flags;
 -- Before the bell: pages polled, and nothing rang when the look-ahead changed.
 drop table if exists public.rc_la_beacon;
 drop function if exists public.rc_la_ring() cascade;

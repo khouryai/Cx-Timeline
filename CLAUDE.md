@@ -147,6 +147,8 @@ io/rc_pdf → io/pdf · io/lookahead         the calendar drawn for print — no
 core/la_edit → core/lookahead             the look-ahead editor's model — no DOM
 core/la_register → core/lookahead         readings stored as rows, and compared —
                                           the calendar's alone (calendar.bundle.js)
+core/la_p6                                a leaf: the P6 list a look-ahead row names —
+                                          an extract read, searched, compared — no DOM
 io/la_xlsx → core/la_edit · io/xlsx_write the 4WLA as an .xlsx — no DOM
 core/tawr → core/lookahead                a look-ahead week as TAWRs — no DOM
 io/tawr_pdf → io/inflate · io/pdf         BART's fillable PDF, filled — no DOM
@@ -318,7 +320,7 @@ alternative shipped once and went wrong.
 - Weekends (`--la-weekend`) and section bands (`--la-band`) are fixed grey shading in the editor and the view alike — not legend colours; a painted shift covers them. [→](docs/ARCHITECTURE.md#weekends-and-section-bands-are-fixed-shading-the-same-in-both-views)
 - The editor is the calendar with **Edit** switched on (`la.editing`), not a section beside it; switching off saves and publishes, waiting for a publish already under way, and the read view redraws when a newer reading lands. [→](docs/ARCHITECTURE.md#the-editor-is-the-calendar-with-edit-switched-on)
 - The calendar is the look-ahead's source once the editor is adopted (`rc_settings.lookahead_source = 'editor'`); "Check now" then refuses to read the workbook. [→](docs/ARCHITECTURE.md#the-calendar-is-the-look-aheads-source-and-the-workbook-is-something-it-produces)
-- The editor publishes the grid a workbook read used to produce (`gridFromModel()` → `publishGrid()`), so nothing downstream reads a second source. Never teach a screen to read `rc_la_*` directly. [→](docs/ARCHITECTURE.md#the-editor-publishes-the-grid-the-workbook-used-to-produce)
+- The editor publishes the grid a workbook read used to produce (`gridFromModel()` → `publishGrid()`), so nothing downstream reads a second source. Never teach a screen to read `rc_la_*` directly — the read view's weeks past the reading go through the publish path (`writtenView()`), not beside it. [→](docs/ARCHITECTURE.md#the-editor-publishes-the-grid-the-workbook-used-to-produce)
 - Every edit is an op from `core/la_edit.js` with an inverse, written only through `rc_la_apply()`, stamped at send time with the version it expects. [→](docs/ARCHITECTURE.md#every-edit-is-an-op-with-an-inverse-sent-with-the-version-it-expects)
 - Only an activity's days are painted, only with the legend's shift colours; names rows are never painted. [→](docs/ARCHITECTURE.md#what-may-be-written-where)
 - Support codes are a register (`rc_support_codes`); an unknown code is kept and marked, never dropped or guessed. [→](docs/ARCHITECTURE.md#support-codes-are-a-register-like-the-colours)
@@ -332,6 +334,9 @@ alternative shipped once and went wrong.
 - A staffing clash is about the team (names rows, the PTO row, booked leave, two shifts in a day) — never the support codes, and never a name the roster does not know. [→](docs/ARCHITECTURE.md#a-staffing-clash-is-about-the-team-never-about-the-support)
 - A day's or a row's history is `rc_la_edits` read for one place; nothing is reconstructed. [→](docs/ARCHITECTURE.md#a-days-history-is-the-edit-log-read-for-one-place)
 - Readings are compacted, never deleted: only an editor reading's grid goes (`rc_compact_snapshots()`); rows, change events and links stay. [→](docs/ARCHITECTURE.md#readings-are-compacted-never-deleted)
+- The Activity ID is filled from P6: the list (`rc_p6_activities`) is imported from an extract, previewed first, written by `rc_p6_import()` with what it leaves out marked `missing`, never deleted; typing in the column searches it by name or ID, Alt+K links the selection, and a row with no P6 activity gives a reason from `rc_p6_flags` in the same column. It is never taken from the plan's `doc.p6`. [→](docs/ARCHITECTURE.md#the-activity-id-is-filled-from-p6-and-a-row-without-one-says-why)
+- The read view pages a week at a time and "Everything" reaches every week ever written; a window past the reading is drawn from the editor's tables through the publish path (`writtenView()`), never stored, and says so. [→](docs/ARCHITECTURE.md#the-calendar-pages-back-past-the-reading-from-what-the-editor-holds)
+- Hovering the look-ahead repaints nothing — a bar marks the row — and its frozen columns rule their edges with shadows, not borders. [→](docs/ARCHITECTURE.md#hovering-the-look-ahead-repaints-nothing)
 
 ### Track access work requests (TAWR)
 
@@ -466,14 +471,14 @@ CX_SITE=dist node tools/run_tests.js smoke smoke_calendar   # against a publishe
 | `test_lookahead.js` | 268 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
-| `test_la_edit.js` | 184 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, and every page of a long read fetched together |
+| `test_la_edit.js` | 214 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, every page of a long read fetched together, and P6 extracts read, searched and compared |
 | `smoke.js` | 324 | the application, local mode — a tall plan drawn by the rows in view, offline, less motion and the System theme, files from elsewhere (imports, notes, CSV), and dates away from Greenwich — **any console error fails the run** |
-| `smoke_calendar.js` | 615 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`), who made each change and every edit, TAWRs (`smoke_tawr.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 664 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`) — its past weeks and a hover that repaints nothing — who made each change and every edit, TAWRs (`smoke_tawr.js`), P6 activities linked to rows (`smoke_la_p6.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 105 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, a phone opening the site sent to it, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 70 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
-| `test_sql.js` | 420 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, changes naming the editor's row, the schema stamp, and that `migrate.sql` upgrades an old project, policies that ask who you are once per query, every foreign key indexed, and the bell |
+| `test_sql.js` | 441 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, changes naming the editor's row, the schema stamp, and that `migrate.sql` upgrades an old project, policies that ask who you are once per query, every foreign key indexed, the bell, and P6 activities imported and their reasons |
 | `test_xlsx_compat.js` | 14 | the Excel export opened, re-saved and printed by LibreOffice Calc (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**
@@ -563,6 +568,11 @@ Each of these has caused a real bug:
 - **A Playwright test types before a dialog's field has focus.** Opening a
   modal focuses its field on a timer; wait for `document.activeElement` to be
   the input before `keyboard.type()`, or the first characters go nowhere.
+- **A redraw that waits on the network lands under whatever is typed by then.**
+  "Cancel and log" drew the editor's whole grid once its note was written,
+  and on a slow connection that was after the next cell had been opened — the
+  box being typed in went with the old grid. Draw again only what the answer
+  changed, in place (`redrawNoted()`, `redrawDays()`), never the grid.
 
 ## Git
 

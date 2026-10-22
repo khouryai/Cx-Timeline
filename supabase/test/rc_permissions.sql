@@ -1616,6 +1616,59 @@ select refuses(:'carol', 'insert into public.rc_support_codes (code, name) value
   'a member adding a code');
 select refuses(:'carol', 'update public.rc_support_codes set name = ''Changed''', 'a member renaming one');
 
+-- P6 activities: the schedule's IDs, imported through one function in batches
+-- that share an import id, the last of which marks what the extract left out.
+-- Nothing is deleted, and only an administrator imports.
+select act_as(:'alice');
+select assert((select string_agg(label, ',' order by sort) from public.rc_p6_flags) = 'Troubleshooting,Regression,Support',
+  'the reasons a row may give instead of a P6 activity are seeded');
+select public.rc_p6_import('53000000-0000-0000-0000-000000000001',
+  '[{"activity_id":"CX-1040","name":"IXL Regression Testing","wbs":"L1.PH2"},{"activity_id":" CX-1041 ","name":"ATS Site Test"}]'::jsonb, false);
+select public.rc_p6_import('53000000-0000-0000-0000-000000000001',
+  '[{"activity_id":"CX-2000","name":"Traction power"},{"activity_id":"","name":"No ID"}]'::jsonb, true);
+select assert((select count(*) from public.rc_p6_activities) = 3,
+  'an administrator imports an extract in batches, and a row with no ID is left out');
+select assert((select name from public.rc_p6_activities where activity_id = 'CX-1041') = 'ATS Site Test',
+  'an ID is stored without the spaces round it');
+select assert((select imported_by from public.rc_p6_activities where activity_id = 'CX-1040') = :'alice',
+  'and says who imported it');
+select assert((public.rc_p6_import('53000000-0000-0000-0000-000000000002',
+  ('[{"activity_id":"CX-1040","name":"IXL Regression Testing, Phase 2"},{"activity_id":"CX-2000","name":"Traction power"},'
+  || '{"activity_id":"CX-3000","name":"Cable pull"}]')::jsonb, true) ->> 'missing')::int = 1,
+  'importing a later extract says how many it left out');
+select assert((select missing from public.rc_p6_activities where activity_id = 'CX-1041'),
+  'and marks that one missing rather than deleting it — a row may still name it');
+select assert((select name from public.rc_p6_activities where activity_id = 'CX-1040') = 'IXL Regression Testing, Phase 2',
+  'a renamed activity takes its new name');
+select public.rc_p6_import('53000000-0000-0000-0000-000000000003', '[{"activity_id":"CX-1041","name":"ATS Site Test"}]'::jsonb, false);
+select assert(not (select missing from public.rc_p6_activities where activity_id = 'CX-1041'),
+  'and one back in a later extract is found again');
+select refuses(:'alice', $q$select public.rc_p6_import(null, '[]'::jsonb, true)$q$,
+  'an import with no id for its batches to share');
+select refuses(:'alice', $q$insert into public.rc_p6_activities (activity_id, name) values ('CX-9', 'Around the function')$q$,
+  'even an administrator writing an activity around the function');
+select refuses(:'alice', $q$delete from public.rc_p6_activities$q$, 'or deleting one');
+select act_as(:'alice');
+insert into public.rc_p6_flags (label, sort) values ('Punch list', 40);
+select assert(exists (select 1 from public.rc_p6_flags where label = 'Punch list'), 'an administrator adds a reason');
+select refuses(:'alice', $q$insert into public.rc_p6_flags (label) values ('  support')$q$,
+  'a reason already on the list, in any case or spacing');
+select act_as(:'alice');
+update public.rc_p6_flags set active = false where label = 'Punch list';
+select assert(not (select active from public.rc_p6_flags where label = 'Punch list'), 'and retires one');
+select refuses(:'alice', $q$delete from public.rc_p6_flags where label = 'Punch list'$q$,
+  'but never deletes one — the rows flagged with it keep saying so');
+select act_as(:'carol');
+select assert((select count(*) from public.rc_p6_activities) = 4, 'a member reads the activities');
+select assert((select count(*) from public.rc_p6_flags) = 4, 'and the reasons');
+select refuses(:'carol', $q$select public.rc_p6_import('53000000-0000-0000-0000-000000000004', '[{"activity_id":"CX-1","name":"Mine"}]'::jsonb, true)$q$,
+  'a member importing an extract');
+select refuses(:'carol', $q$update public.rc_p6_activities set name = 'Changed'$q$, 'a member renaming an activity');
+select refuses(:'carol', $q$insert into public.rc_p6_flags (label) values ('Waiting on BART')$q$, 'a member adding a reason');
+select refuses(:'carol', $q$update public.rc_p6_flags set label = 'Changed'$q$, 'a member rewording one');
+select act_as(:'dave');
+select assert((select count(*) from public.rc_p6_activities) = 4, 'a viewer reads them too, as the look-ahead that names them');
+
 -- Keeping the readings in check: an old editor reading loses its grid, never
 -- itself; the last of each day, a workbook read and anything recent are whole.
 select act_as(:'alice');

@@ -24,8 +24,10 @@ export const la = {
   showQuietRows: false,
   /** Whether the names on each activity's Resource row are drawn. */
   showResources: true,
-  /** How much of the calendar to show, in weeks from this one; 0 is everything. */
+  /** How much of the calendar to show, in weeks from `calendarStart`; 0 is everything. */
   calendarWeeks: 4,
+  /** The Monday the calendar's window starts on, paged a week at a time; null is this week's. */
+  calendarStart: null,
   /** 'workbook' until the look-ahead is written in the calendar, then 'editor'. */
   source: 'workbook',
   /**

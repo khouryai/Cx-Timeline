@@ -2416,6 +2416,107 @@ is waiting, and the administrator's inbox lists who has changes they have not
 seen and who has never opened My day. Reminders stay inside the application:
 nothing is emailed from it, by design.
 
+### The Activity ID is filled from P6, and a row without one says why
+
+The look-ahead's first column has always been the Activity ID, and the IDs are
+P6's — typed from memory, so a row with a typo in it joined to nothing and
+looked exactly like one that did. Linking a row to the schedule is what lets
+its details be joined to P6 and to anything else keyed on it, so the column is
+now filled from the schedule's own list.
+
+- **The list is the calendar's own register** (`rc_p6_activities`: ID, name,
+  WBS), imported under Look-ahead → P6 activities from whatever extract the
+  scheduler sends — an `.xlsx` (the first visible sheet with Activity ID and
+  Activity Name columns, TASK first, which is where P6's own export puts them),
+  a `.csv`, or P6's `.xer`. `core/la_p6.js` reads it, a leaf with no DOM, so
+  every rule is tested in Node: the header found under P6's title lines, field
+  names (`task_code`, `task_name`) as well as labels, a group band (an ID with no
+  name) left out and counted, an ID written twice kept once and reported, and
+  "Activity Code" never read as the ID — in P6 an activity code is a
+  classification.
+- **An import is previewed before anything is written** — how many were read
+  and from where, the first few as read so a wrongly mapped column is caught,
+  how many are new or renamed (`p6Diff()`) — and written by `rc_p6_import()`
+  in batches that share an import id. The last batch marks every activity that
+  import did not see as `missing`; nothing is deleted, because a row may still
+  name it and its name is still the best description of what that row was. An
+  administrator's alone, refused with a reason; there is no write grant on the
+  table at all.
+- **A row names an activity by writing its ID**, as it always did, so the
+  published reading, the change register, the Excel export and every other
+  reader carry it with nothing taught. Nothing points back from the register to
+  the rows: an import never touches the look-ahead, and several rows may name
+  one activity — a week of commissioning lines is routinely one P6 activity.
+- **Typing in the Activity ID searches it** (`searchP6()`): every word typed
+  somewhere in the ID, the name or the WBS, in any order, the ID also read with
+  its punctuation gone ("cx1040" finds "CX-1040"); the whole ID first, then IDs
+  starting with it, then names whose words start with every word typed, and an
+  activity the latest extract left out after all of them. Enter or Tab takes
+  the match and moves on; Escape puts the list away and keeps what was typed,
+  which is written as typed — in the list's own spelling where it is an ID the
+  list has in another case (`p6Canonical()`), never corrected beyond that.
+  **Alt+K** (Ctrl+K is the application's "go to") links every selected
+  activity to one P6 activity from a picker that opens on the activities the
+  look-ahead already names, each saying how many rows name it — one undo takes
+  the whole link back. Linking a row with no description writes the P6 name
+  as its description; a description somebody wrote is never replaced.
+- **A row with no P6 activity says why**, with a reason from `rc_p6_flags`
+  (Troubleshooting, Regression, Support to start) written in the same column,
+  so the column always answers one of three ways: a P6 activity, a stated
+  reason, or neither yet. The editor marks each without relying on colour — an
+  ID, a dashed pill for a reason, a wavy underline for something neither list
+  has, a faint "Link P6…" for nothing — the toolbar counts what is still to do
+  and goes to the next of it, and the section counts the whole look-ahead. A
+  reason is retired, never deleted, and reworded only while no row carries it:
+  reworded under them, those rows would stop matching it.
+- **The read view names the activity on the hover** and finds a row by its P6
+  name in the filter, reading only the IDs on screen (`p6ActivitiesByIds()`),
+  never the whole list. Because it reads only those, an ID the list does not
+  have is left saying only itself there — it cannot tell a typo from an import
+  nobody has run.
+
+This list is imported into the calendar by an administrator; it is never taken
+from the plan's own P6 register (`doc.p6`), which stays in the plan file — the
+rule that plan data never reaches Supabase is untouched, and the two registers
+are separate on purpose.
+
+### The calendar pages back past the reading, from what the editor holds
+
+A reading covers the week just gone and the five ahead (`publishDays()`), so
+the calendar's "Everything" stopped a week back however long the look-ahead had
+been written here, and the read view had no way back at all. It now pages a week
+at a time — back, this week, forward, as Edit does — and "Everything" covers
+every week anything was ever written in (`rc.laCellSpan()`, two one-row reads
+along the day index).
+
+Weeks the reading covers are drawn from the reading, as always — the four weeks
+from today nearly always are. A window reaching past it is drawn, whole, from
+the editor's tables through the steps a publish takes (`writtenView()` in
+`ui/rc_ingest.js`: `gridFromModel()`, the legend, `readGrid()`), so a week
+drawn that way and the same week drawn from a reading are one picture, archived
+rows off both. Nothing is stored — the reading is still what every other screen
+reads — and the screen says so: those weeks are what the look-ahead says now,
+not a reading taken at the time, which stays the record of what it said then.
+Weeks from before the calendar became the source were never written here, and
+are only in the workbook's old readings. It is the one place a
+screen reads `rc_la_*` to draw the look-ahead, and it does so through the
+publish path rather than beside it. Paging stops at the first and last week
+anything was written; a workbook's reading is the whole sheet, so that is as
+far as it pages. The PDF export takes its weeks from the Monday on screen.
+
+### Hovering the look-ahead repaints nothing
+
+The calendar's tables shade the row under the pointer, and the look-ahead grid
+is one of them — so the fill outranked the section band (the heading went dark
+under its own dark ink) and, being the `background` shorthand, reset the strike
+through a cancelled day and the hatch on an unmapped colour while the pointer
+was on them. The look-ahead is left out of that rule, as the PTO grid already
+was, and marks the row under the pointer with a bar down its first column
+instead: every colour on the grid is the workbook's. Its frozen columns now rule
+their edges with inset shadows rather than borders, because a sticky cell's
+border is see-through in this table — transparent or not — and the days
+scrolling under it showed along every edge in hairlines.
+
 ## Track access work requests
 
 BART wants a System Access / Track Allocation Work Request (a TAWR) for every
@@ -2639,6 +2740,12 @@ with it the keyboard: the trap about a redraw dropping focus no longer arises on
 the path every keystroke takes. `dayCell()` and `totalsRow()` are the one way a
 day or the totals are drawn, so the two paths cannot disagree.
 
+A note logged from the editor — *Cancel and log*, or the reason asked when a
+day is painted cancelled — draws its days again the same way (`redrawNoted()`),
+so hovering them says the reason. It used to be `draw()`, and the note lands
+when the network answers: on a slow connection that was after the next cell had
+been opened, and the box being typed in went with the old grid.
+
 ### The timeline draws the rows in view
 
 The layout already left out what is outside the visible dates. Objects, notes,
@@ -2762,6 +2869,17 @@ fit and the signature is drawn. `smoke_tawr.js` walks the screen: drafts,
 template upload (and a revised form refused), the profile and signature, the
 wording, edits surviving regeneration, approve, the downloaded PDF read back,
 revise and discard.
+
+`smoke_la_p6.js` walks P6 activities once the editor is the source: an extract
+previewed with nothing written, imported, and imported again with one left
+out (marked, not deleted); an unknown ID marked and the toolbar going to the
+next; typing a name's words in any order and taking the match; Escape keeping
+what was typed and an ID in the wrong case written as P6 spells it; a blank
+description taking the P6 name; two rows linked to one activity with Alt+K
+and taken back with one undo; a reason from the picker; and the IDs reaching
+the read view's hover and filter, the published reading's rows and the Excel
+export, then the section's counts, search and reasons. The Node half is in
+`test_la_edit.js`.
 
 `smoke_hosted.js` boots it with a configured backend and a stubbed client, so
 the gate, invitations, sharing and read-only mode are covered without a

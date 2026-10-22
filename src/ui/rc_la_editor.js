@@ -20,15 +20,21 @@
  *
  * Only an administrator reaches it; `rc_la_apply()` refuses anybody else.
  *
- * Imports: util, rc, core/la_edit, core/lookahead, io/lookahead, io/la_xlsx,
- *          io/exporters, filestore, icons, components, rc_util, rc_ingest,
- *          rc_la_state.
+ * The Activity ID column is filled from P6 rather than from memory: typing in
+ * it searches the schedule's activities by name or ID, Alt+K links every
+ * selected activity at once, and a row with no P6 activity says why from a
+ * short list (`ui/rc_la_p6.js`, `core/la_p6.js`).
+ *
+ * Imports: util, rc, core/la_edit, core/la_p6, core/lookahead, io/lookahead,
+ *          io/la_xlsx, io/exporters, filestore, icons, components, rc_util,
+ *          rc_ingest, rc_la_state, rc_la_p6.
  */
 
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
 import * as ed from '../core/la_edit.js';
+import * as p6 from '../core/la_p6.js';
 import {
   readGrid, isCancelMeaning, countCodes, describeCodeCounts, cellTokens,
   cancellationNoteFor, cancellationReasonText,
@@ -44,6 +50,7 @@ import {
 import { notifyChanged, todayISO, nameRegister, foldName, codeNodes } from './rc_util.js';
 import { publishFromEditor, publishDays, EDITOR_SOURCE } from './rc_ingest.js';
 import { la } from './rc_la_state.js';
+import { loadP6, openP6Picker, openP6Import, p6Words } from './rc_la_p6.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
    State
@@ -99,6 +106,8 @@ const E = {
   leaveKinds: new Map(),
   staff: { issues: [], byCell: new Map() },
   scroll: { left: 0, top: 0 },
+  // The schedule's activities and the reasons a row has none (`loadP6()`).
+  p6: { available: false, entries: [], flags: [], index: p6.p6Index() },
 };
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -116,7 +125,7 @@ export async function renderEditor(host) {
     return;
   }
 
-  const [settings, legend, codes, people, aliases, leaveKinds, notes] = await Promise.all([
+  const [settings, legend, codes, people, aliases, leaveKinds, notes, schedule] = await Promise.all([
     rc.listSettings().catch(() => []),
     rc.listLegend().catch(() => []),
     rc.listSupportCodes({ includeRetired: true }).catch(() => []),
@@ -125,8 +134,10 @@ export async function renderEditor(host) {
     rc.listLeaveKinds().catch(() => []),
     // The reasons logged for cancellations, shown when a cancelled day is hovered.
     rc.listCancellationNotes().catch(() => []),
+    loadP6(),
   ]);
   E.notes = notes;
+  E.p6 = schedule;
   /* The same exact register the week plan reads names with — full name, alias,
      or a first name only one person has. A name it cannot place is somebody
      else's person, and the staffing check leaves it alone. */
@@ -219,7 +230,7 @@ function neededRange() {
 async function load() {
   const { from, to } = neededRange();
   const [rows, cells] = await Promise.all([rc.listLaRows(), rc.listLaCells(from, to)]);
-  E.model = ed.makeModel(rows.map(cleanRow), cells.map(cleanCell));
+  E.model = ed.makeModel(rows.map(ed.cleanRow), cells.map(ed.cleanCell));
   E.loaded = { from, to };
   E.server = new Map();
   for (const r of E.model.rows) E.server.set(`row:${r.id}`, r.version || 0);
@@ -244,7 +255,7 @@ async function ensureLoaded() {
   const fetchFrom = E.loaded && from >= E.loaded.from ? ed.addDaysISO(E.loaded.to, 1) : lo;
   const fetchTo = E.loaded && to <= E.loaded.to ? ed.addDaysISO(E.loaded.from, -1) : hi;
   const cells = await rc.listLaCells(fetchFrom, fetchTo);
-  for (const c of cells.map(cleanCell)) {
+  for (const c of cells.map(ed.cleanCell)) {
     const key = ed.cellKey(c.row_id, c.day);
     if (!E.model.cells.has(key)) {
       E.model.cells.set(key, c);
@@ -253,26 +264,6 @@ async function ensureLoaded() {
   }
   E.loaded = { from: lo, to: hi };
   await loadLeave();
-}
-
-function cleanRow(r) {
-  return {
-    ...ed.blankRow(r.kind, {}),
-    ...r,
-    sort: Number(r.sort) || 0,
-    level: Number(r.level) || 0,
-    archived: !!r.archived,
-  };
-}
-
-function cleanCell(c) {
-  return {
-    row_id: c.row_id,
-    day: String(c.day).slice(0, 10),
-    color: c.color ? String(c.color).toUpperCase() : null,
-    text: c.text || '',
-    version: c.version || 0,
-  };
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -449,7 +440,9 @@ function visibleRows() {
   }
   if (!needle) return out;
   // A filter keeps the rows that match, the names under them and the sections above.
-  const text = (r) => [r.activity_id, r.description, r.location, r.sswp, r.party, r.work_hours].join(' ').toLowerCase();
+  // The P6 name of the activity a row names counts too: the row may word it differently.
+  const text = (r) => [r.activity_id, r.description, r.location, r.sswp, r.party, r.work_hours,
+    p6.p6Status(r.activity_id, E.p6.index).entry?.name || ''].join(' ').toLowerCase();
   const keep = new Set();
   out.forEach((r) => {
     if (r.kind !== 'resource' && text(r).includes(needle)) keep.add(r.id);
@@ -541,6 +534,17 @@ function redrawAfter(ops) {
 
   const active = document.activeElement;
   const refocus = !active || active === document.body;
+  redrawDays(keys);
+  host.querySelector('.lae-grid tfoot tr')?.replaceWith(totalsRow(E.view.days, todayISO()));
+  paintSelection();
+  refreshStatus();
+  if (refocus) host.querySelector('.lae-scroll')?.focus({ preventScroll: true });
+}
+
+/** Draw these days (`cellKey()`s) again where they stand, and nothing else. */
+function redrawDays(keys) {
+  const body = E.root?.querySelector('.lae-grid tbody');
+  if (!body || !E.view) return;
   const today = todayISO();
   const rowsById = new Map(E.view.rows.map((r) => [r.id, r]));
   const column = new Map(E.view.days.map((d, i) => [d, i]));
@@ -552,10 +556,30 @@ function redrawAfter(ops) {
     const td = body.querySelector(`tr[data-id="${CSS.escape(rowId)}"] td[data-c="${META + i}"]`);
     if (td) td.replaceWith(dayCell(row, day, i, today));
   }
-  host.querySelector('.lae-grid tfoot tr')?.replaceWith(totalsRow(E.view.days, today));
+}
+
+/**
+ * Draw the days a note was just logged against again, so hovering them says
+ * the reason — in place, as an edit does. The note lands when the network
+ * answers, and by then somebody may be typing in the next cell: redrawing the
+ * whole grid here took the box they were typing in away with the old one.
+ */
+function redrawNoted(runs) {
+  const keys = new Set();
+  const keyOf = (row) => { const k = ed.cancellationKey(row); return `${k.raw_label}|${k.raw_location}`; };
+  for (const run of runs) {
+    // A note is found by the row's label, so a row worded the same shows it too.
+    const noted = keyOf(run.row);
+    const rows = (E.view?.rows || []).filter((r) => r.id === run.row.id || (r.kind === 'activity' && keyOf(r) === noted));
+    for (const row of rows) {
+      for (let d = run.start; d <= run.end; d = ed.addDaysISO(d, 1)) keys.add(ed.cellKey(row.id, d));
+    }
+  }
+  const active = document.activeElement;
+  redrawDays(keys);
   paintSelection();
-  refreshStatus();
-  if (refocus) host.querySelector('.lae-scroll')?.focus({ preventScroll: true });
+  // The dialog that asked has gone, and took the keyboard with it.
+  if (!active || active === document.body) E.root?.querySelector('.lae-scroll')?.focus({ preventScroll: true });
 }
 
 /**
@@ -725,8 +749,47 @@ function toolbar(days) {
   });
   search.classList.add('lae-search');
 
-  bar.append(range, add, palette, support, search, right);
+  bar.append(...[range, add, palette, support, p6Group(), search, right].filter(Boolean));
   return bar;
+}
+
+/**
+ * P6: link the selected activities, and how many are still to do — one press
+ * from the next of them. Before anything is imported it is the way to import.
+ */
+function p6Group() {
+  if (!E.p6.available) return null;
+  if (!E.p6.entries.length) {
+    return el('div', { class: 'lae-group lae-p6-group' }, [
+      el('button', {
+        class: 'cx-btn mini lae-p6-import', type: 'button', html: icon('upload', { size: 12 }) + '<span>Import P6 activities</span>',
+        title: 'Read the schedule\'s activity IDs and names from a P6 extract, so rows can be linked to them',
+        onClick: () => importP6(),
+      }),
+    ]);
+  }
+  const coverage = p6.p6Coverage(E.model.rows, E.p6.index);
+  const todo = coverage.empty + coverage.unknown;
+  const why = [
+    coverage.empty ? `${coverage.empty} with no Activity ID` : null,
+    coverage.unknown ? `${coverage.unknown} with an ID the P6 list does not have` : null,
+  ].filter(Boolean).join(' · ');
+  return el('div', { class: 'lae-group lae-p6-group' }, [
+    el('button', {
+      class: 'cx-btn mini lae-p6-link', type: 'button', html: icon('link', { size: 12 }) + '<span>Link to P6</span>',
+      title: 'Link the selected activities to a P6 activity, or say why they have none  (Alt+K)',
+      onClick: () => linkSelection(),
+    }),
+    coverage.activities
+      ? el('button', {
+        class: `cx-btn mini ghost lae-p6-todo${todo ? ' lae-p6-open' : ''}`, type: 'button',
+        text: todo ? `${todo} not linked` : 'All linked',
+        title: todo ? `${why} — go to the next one` : 'Every activity names a P6 activity or says why it has none',
+        disabled: !todo,
+        onClick: () => nextUnlinked(),
+      })
+      : null,
+  ].filter(Boolean));
 }
 
 function statusText() {
@@ -844,11 +907,31 @@ function bodyRow(row, r, days, today) {
     });
     if (row.kind === 'section' && c === 1) td.style.paddingLeft = `${8 + (row.level || 0) * 14}px`;
     if (!editable(row, c)) td.classList.add('lae-fixed');
+    if (c === 0 && row.kind === 'activity') markP6(td, value);
     tr.appendChild(td);
   });
 
   days.forEach((d, i) => tr.appendChild(dayCell(row, d, i, today)));
   return tr;
+}
+
+/**
+ * What an activity's Activity ID says, on its cell: a P6 activity (its name on
+ * the hover), a reason it has none, something neither list has — marked, never
+ * corrected — or nothing yet. Before anything is imported every ID is simply
+ * what was typed, and only a reason is recognised.
+ */
+function markP6(td, value) {
+  if (!E.p6.available) return;
+  const status = p6.p6Status(value, E.p6.index);
+  if (!E.p6.entries.length && status.kind !== 'flagged') return;
+  td.classList.add(`lae-p6-${status.kind}`);
+  if (status.kind === 'linked' && status.entry.missing) td.classList.add('lae-p6-missing');
+  // A reason is a word, not an ID: drawn on a pill, so the column reads at a glance.
+  if (status.kind === 'flagged') td.replaceChildren(el('span', { class: 'lae-p6-pill', text: value }));
+  td.title = status.kind === 'empty' ? 'No P6 activity yet — type to search P6, or Alt+K'
+    : status.kind === 'unknown' ? `${p6Words(value, status)} — type to search P6, or Alt+K`
+      : p6Words(value, status);
 }
 
 /** The support asked for, day by day: the grid's last row. */
@@ -1175,6 +1258,12 @@ function onKey(e) {
     else if (E.legend[n - 1]) paint(E.legend[n - 1].argb);
     return;
   }
+  // Alt+K links the selection to P6 — Ctrl+K is the whole application's "go to".
+  if (e.altKey && !mod && (e.code === 'KeyK' || k.toLowerCase() === 'k')) {
+    e.preventDefault();
+    linkSelection();
+    return;
+  }
 
   switch (k) {
     case 'ArrowUp': return move(-1, 0, e.shiftKey);
@@ -1294,12 +1383,99 @@ function startEdit(initial) {
     drawNames();
   }
 
+  // Save and move on, as Enter and Tab do — down, or across.
+  const finish = (key, shift) => {
+    commitEdit();
+    if (key === 'Tab') select(r, Math.min(Math.max(0, c + (shift ? -1 : 1)), E.view.cols - 1));
+    else select(Math.max(0, Math.min(r + (shift ? -1 : 1), E.view.rows.length - 1)), c);
+    focusGrid();
+  };
+
+  /* P6, while typing into an activity's Activity ID: the schedule's activities
+     that fit what is typed — any of the name, the ID or the WBS — and the
+     reasons a row may give instead. Arrows choose; Enter or Tab takes one and
+     moves on; Escape puts the list away and keeps what was typed, which is
+     written as typed (in the list's own spelling where it is an ID the list
+     has). Opened on what is already there, nothing is chosen until something
+     is typed, so Enter leaves the cell as it was. */
+  let p6List = null;
+  let p6Found = [];
+  let p6Pick = -1;
+  if (row.kind === 'activity' && c === 0 && E.p6.available && (E.p6.entries.length || E.p6.flags.length)) {
+    p6List = el('div', {
+      class: 'lae-edit-hint lae-p6-hint', role: 'listbox', 'aria-label': 'P6 activities',
+      style: `left:${box.left - host.left + scroller.scrollLeft}px;top:${box.bottom - host.top + scroller.scrollTop + 2}px`,
+    });
+    scroller.appendChild(p6List);
+    hint = p6List;
+    const uses = p6.p6Coverage(E.model.rows, E.p6.index).uses;
+    const choose = (i) => {
+      p6Pick = i;
+      for (const [k, b] of [...p6List.querySelectorAll('.lae-p6-opt')].entries()) {
+        b.classList.toggle('lae-p6-on', k === p6Pick);
+        b.setAttribute('aria-selected', String(k === p6Pick));
+      }
+      p6List.querySelector('.lae-p6-on')?.scrollIntoView({ block: 'nearest' });
+    };
+    const takeP6 = (i, key = 'Enter', shift = false) => {
+      const o = p6Found[i];
+      if (!o) return;
+      if (o.kind === 'more') {
+        const query = input.value;
+        cancelEdit();
+        linkRows([row], query);
+        return;
+      }
+      input.value = o.kind === 'p6' ? o.entry.activity_id : o.flag.label;
+      finish(key, shift);
+    };
+    const drawP6 = () => {
+      p6Found = p6Options(input.value);
+      p6Pick = p6Found.length ? Math.min(p6Pick, p6Found.length - 1) : -1;
+      // Nothing matched: Enter writes what was typed rather than opening the list.
+      if (p6Pick >= 0 && p6Found[p6Pick].kind === 'more') p6Pick = -1;
+      clear(p6List);
+      p6List.hidden = !p6Found.length;
+      if (!input.value.trim() && E.p6.entries.length) {
+        p6List.appendChild(el('div', { class: 'lae-p6-help', text: 'Type a name or an ID to search P6 — or say why there is none' }));
+      }
+      p6Found.forEach((o, i) => p6List.appendChild(p6Option(o, i === p6Pick, uses, () => takeP6(i))));
+      placeHint(p6List, box, host, scroller);
+    };
+    p6List.choose = choose;
+    p6List.take = takeP6;
+    input.addEventListener('input', () => { p6Pick = 0; drawP6(); });
+    if (initial != null) p6Pick = 0;
+    drawP6();
+  }
+
   E.editing = { input, hint, r, c, row };
   input.focus();
   if (initial == null) input.select();
   else input.setSelectionRange(input.value.length, input.value.length);
 
   input.addEventListener('keydown', (e) => {
+    const p6Open = p6List && !p6List.hidden && p6Found.length;
+    if (p6Open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      const down = e.key === 'ArrowDown';
+      p6List.choose(p6Pick < 0 ? (down ? 0 : p6Found.length - 1) : (p6Pick + (down ? 1 : -1) + p6Found.length) % p6Found.length);
+      e.stopPropagation();
+      return;
+    }
+    if (p6Open && p6Pick >= 0 && (e.key === 'Enter' || e.key === 'Tab')) {
+      e.preventDefault();
+      p6List.take(p6Pick, e.key, e.shiftKey);
+      e.stopPropagation();
+      return;
+    }
+    if (p6Open && e.key === 'Escape') {
+      e.preventDefault();
+      p6List.hidden = true;
+      p6Pick = -1;
+      e.stopPropagation();
+      return;
+    }
     // With a name on offer, the arrows choose and Enter or Tab takes it;
     // with none, they do what they always do.
     if (names && found.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
@@ -1318,8 +1494,7 @@ function startEdit(initial) {
       e.stopPropagation();
       return;
     }
-    if (e.key === 'Enter') { e.preventDefault(); commitEdit(); select(Math.min(r + (e.shiftKey ? -1 : 1), E.view.rows.length - 1), c); focusGrid(); }
-    else if (e.key === 'Tab') { e.preventDefault(); commitEdit(); select(r, Math.min(Math.max(0, c + (e.shiftKey ? -1 : 1)), E.view.cols - 1)); focusGrid(); }
+    if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); finish(e.key, e.shiftKey); }
     else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); focusGrid(); }
     e.stopPropagation();
   });
@@ -1328,6 +1503,48 @@ function startEdit(initial) {
 
 function focusGrid() {
   E.root?.querySelector('.lae-scroll')?.focus({ preventScroll: true });
+}
+
+/** Below the cell, or above it where below would run off the bottom of the grid. */
+function placeHint(node, box, host, scroller) {
+  if (node.hidden) return;
+  const height = node.offsetHeight;
+  const above = box.bottom + height + 4 > host.bottom && box.top - height - 4 > host.top;
+  node.style.top = `${(above ? box.top - height - 2 : box.bottom + 2) - host.top + scroller.scrollTop}px`;
+}
+
+/**
+ * What the Activity ID cell offers for what is typed: the P6 activities that
+ * fit it, the reasons that fit it (every reason, before anything is typed), and
+ * the whole list a press away.
+ */
+function p6Options(text) {
+  const q = String(text ?? '').trim();
+  const out = [];
+  if (q) for (const entry of p6.searchP6(E.p6.entries, q, { limit: 7 })) out.push({ kind: 'p6', entry });
+  for (const flag of p6.matchFlags(E.p6.flags, q).slice(0, q ? 3 : 8)) out.push({ kind: 'flag', flag });
+  if (q && E.p6.entries.length) out.push({ kind: 'more' });
+  return out;
+}
+
+function p6Option(o, on, uses, take) {
+  const n = o.kind === 'p6' ? uses.get(o.entry.activity_id) || 0 : 0;
+  const kids = o.kind === 'p6'
+    ? [
+      el('span', { class: 'lae-p6-id', text: o.entry.activity_id }),
+      el('span', { class: 'lae-p6-name', text: o.entry.name }),
+      n ? el('span', { class: 'lae-p6-uses', text: `${n} row${n === 1 ? '' : 's'}` }) : null,
+      o.entry.missing ? el('span', { class: 'lae-p6-uses', text: 'not in the latest extract' }) : null,
+    ]
+    : o.kind === 'flag'
+      ? [el('span', { class: 'lae-p6-id', text: 'Not in P6' }), el('span', { class: 'lae-p6-name', text: o.flag.label })]
+      : [el('span', { class: 'lae-p6-more', html: `${icon('search', { size: 11 })}<span>Search all P6 activities…</span>` })];
+  return el('button', {
+    class: `lae-p6-opt lae-p6-opt-${o.kind}${on ? ' lae-p6-on' : ''}`, type: 'button', role: 'option',
+    'aria-selected': String(on),
+    title: o.kind === 'p6' ? p6Words(o.entry.activity_id, { kind: 'linked', entry: o.entry }) : '',
+    onMouseDown: (ev) => { ev.preventDefault(); take(); },
+  }, kids.filter(Boolean));
 }
 
 function cancelEdit() {
@@ -1348,6 +1565,10 @@ function commitEdit() {
   if (!E.model.rows.some((x) => x.id === row.id)) return;
   if (c < META) {
     const key = row.kind === 'activity' ? ed.FIELDS[c].key : 'description';
+    if (key === 'activity_id' && E.p6.available) {
+      commit(linkOps([E.model.rows.find((x) => x.id === row.id)], p6.p6Canonical(value, E.p6.index)));
+      return;
+    }
     if ((row[key] ?? '') === value) return;
     commit([{ op: 'row', id: row.id, set: { [key]: value } }]);
     return;
@@ -1509,7 +1730,7 @@ function askAboutRemovedResources(removed, { chosen = null } = {}) {
           reason: reason.value.trim() || null,
         }));
       }
-      draw();
+      redrawNoted(runs);
       toast({ tone: 'good', message: `Cancelled and logged — ${[...new Set(runs.map((r) => r.code))].join(', ')}, ${party.value}.` });
     } catch (err) {
       toast({ tone: 'bad', message: err.message, timeout: 10000 });
@@ -1649,7 +1870,7 @@ function askWhyCancelled(runs) {
                 reason: reason.value.trim() || null,
               }));
             }
-            draw();
+            redrawNoted(runs);
             toast({ tone: 'good', message: `Recorded in the cancellation log — ${party.value}.` });
           } catch (err) {
             toast({ tone: 'bad', message: err.message, timeout: 10000 });
@@ -1712,6 +1933,112 @@ function clearSelection({ colour = false } = {}) {
     ops.push({ op: 'cell', row_id: s.row.id, day: s.day, color: colour ? null : cell.color, text: '' });
   }
   commit(ops);
+}
+
+/* ── P6 ────────────────────────────────────────────────────────────────── */
+
+/**
+ * The ops that write one Activity ID onto activities — and, on any that has no
+ * description yet, the P6 activity's name as its description, so a row begun
+ * from its activity reads as that activity at once. A description somebody
+ * wrote is never replaced.
+ *
+ * @param {object[]} rows
+ * @param {string} value
+ * @param {{ fill?: boolean }} [options]
+ */
+function linkOps(rows, value, { fill = true } = {}) {
+  const status = p6.p6Status(value, E.p6.index);
+  const ops = [];
+  for (const row of rows.filter(Boolean)) {
+    const set = {};
+    if ((row.activity_id ?? '') !== value) set.activity_id = value;
+    if (fill && status.kind === 'linked' && status.entry.name && !String(row.description ?? '').trim()) {
+      set.description = status.entry.name;
+    }
+    if (Object.keys(set).length) ops.push({ op: 'row', id: row.id, set });
+  }
+  return ops;
+}
+
+/** The activities a set of rows is about: a names row stands for the activity above it. */
+function activitiesIn(rows) {
+  const out = [];
+  for (const r of rows) {
+    const a = r?.kind === 'resource' ? E.model.rows.find((x) => x.id === r.parent_id) : r;
+    if (a?.kind === 'activity' && !out.includes(a)) out.push(a);
+  }
+  return out;
+}
+
+/** Alt+K: link every selected activity to one P6 activity, or give them all one reason. */
+function linkSelection(query = '') {
+  if (!E.p6.available) {
+    toast({ tone: 'warn', message: 'This database has no P6 tables yet — run supabase/rc_schema.sql.', timeout: 8000 });
+    return;
+  }
+  const rows = activitiesIn(selectedRows());
+  if (!rows.length) {
+    toast({ message: 'Select the activities to link first — a P6 activity is linked to an activity\'s row.' });
+    return;
+  }
+  linkRows(rows, query);
+}
+
+function linkRows(rows, query = '') {
+  const one = rows.length === 1 ? rows[0] : null;
+  openP6Picker({
+    title: one ? 'Link to a P6 activity' : `Link ${rows.length} activities to one P6 activity`,
+    subtitle: one ? (one.description || one.activity_id || 'An activity with no description yet')
+      : 'Several rows may name one activity — a week of work is often one P6 activity',
+    p6: E.p6,
+    uses: p6.p6Coverage(E.model.rows, E.p6.index).uses,
+    query,
+    current: one ? one.activity_id : null,
+    onPick: ({ value, entry, flag, fill }) => {
+      const current = rows.map((r) => E.model.rows.find((x) => x.id === r.id));
+      const ops = linkOps(current, value, { fill });
+      commit(ops);
+      if (!ops.length) return;
+      toast({
+        tone: 'good',
+        message: entry
+          ? `${current.length === 1 ? 'Linked' : `Linked ${current.length} activities`} to ${entry.activity_id} — ${entry.name}.`
+          : `${current.length === 1 ? 'Flagged' : `Flagged ${current.length} activities`} as not in P6: ${flag?.label || value}.`,
+        action: { label: 'Undo', onClick: () => undo() },
+        timeout: 6000,
+      });
+    },
+    onClear: rows.some((r) => r.activity_id) ? () => {
+      commit(rows.filter((r) => r.activity_id).map((r) => ({ op: 'row', id: r.id, set: { activity_id: '' } })));
+    } : null,
+    onImport: () => importP6(),
+  });
+}
+
+/** The next activity with no P6 activity and no reason, after the caret — wrapping round. */
+function nextUnlinked() {
+  const rows = E.view.rows;
+  const open = (row) => row?.kind === 'activity' && ['empty', 'unknown'].includes(p6.p6Status(row.activity_id, E.p6.index).kind);
+  for (let k = 1; k <= rows.length; k++) {
+    const r = (E.focus.r + k) % rows.length;
+    if (open(rows[r])) {
+      select(r, 0);
+      focusGrid();
+      return;
+    }
+  }
+  toast({ message: 'The ones still to link are in folded sections, archived, or hidden by the search.' });
+}
+
+function importP6() {
+  openP6Import({
+    host: E.root,
+    onDone: async () => {
+      E.p6 = await loadP6();
+      draw();
+    },
+  });
 }
 
 /** The selection as a block of `{ color, text }`, for copying and filling. */
@@ -2119,6 +2446,12 @@ function cellMenu(x, y, row) {
       ? { label: 'History of this day…', icon: 'history', onClick: () => historyDialog(one, E.view.days[E.focus.c - META]) }
       : null,
     one ? { label: 'History of this row…', icon: 'history', onClick: () => historyDialog(one, null) } : null,
+    E.p6.available && activitiesIn(rows).length
+      ? {
+        label: activitiesIn(rows).length > 1 ? `Link ${activitiesIn(rows).length} activities to P6…` : 'Link to P6…',
+        icon: 'link', key: 'alt+k', onClick: () => linkSelection(),
+      }
+      : null,
     'sep',
     { heading: 'Row' },
     { label: 'Insert activity above', icon: 'plus', onClick: () => insertRow('activity', 'above') },
@@ -2173,6 +2506,7 @@ function moreMenu(e) {
     { label: 'Fold every section', icon: 'chevron-up', onClick: () => { for (const r of E.model.rows) if (r.kind === 'section') E.collapsed.add(r.id); draw(); } },
     { label: 'Unfold every section', icon: 'chevron-down', onClick: () => { E.collapsed.clear(); draw(); } },
     { label: 'Sheet title…', icon: 'type', onClick: () => titleDialog() },
+    E.p6.available ? { label: 'Import P6 activities…', icon: 'upload', onClick: () => importP6() } : null,
     { label: 'Keyboard and mouse…', icon: 'help', onClick: () => helpDialog() },
     'sep',
     { label: 'Take me back to an earlier moment…', icon: 'history', onClick: () => restoreDialog() },
@@ -2188,7 +2522,24 @@ function detailsDialog(row) {
   const form = el('div', { class: 'lae-form' });
   for (const f of ed.FIELDS) {
     inputs[f.key] = textInput({ value: row[f.key] || '' });
-    form.appendChild(el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: f.heading }), inputs[f.key]]));
+    const control = f.key === 'activity_id' && E.p6.available
+      ? el('div', { class: 'lae-p6-field' }, [inputs[f.key], el('button', {
+        class: 'cx-btn mini', type: 'button', html: icon('link', { size: 12 }) + '<span>Find in P6…</span>',
+        onClick: () => openP6Picker({
+          title: 'Link to a P6 activity',
+          subtitle: inputs.description.value || row.description || '',
+          p6: E.p6,
+          uses: p6.p6Coverage(E.model.rows, E.p6.index).uses,
+          current: inputs.activity_id.value,
+          onPick: ({ value, entry, fill }) => {
+            inputs.activity_id.value = value;
+            if (fill && entry?.name && !inputs.description.value.trim()) inputs.description.value = entry.name;
+          },
+          onImport: () => importP6(),
+        }),
+      })])
+      : inputs[f.key];
+    form.appendChild(el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: f.heading }), control]));
   }
   const days = E.view.days;
   const totals = ed.supportTotals(E.model, days).byRow.get(row.id);
@@ -2226,6 +2577,7 @@ function detailsDialog(row) {
       { label: 'Cancel' },
       {
         label: 'Save', kind: 'primary', onClick: () => {
+          if (E.p6.available) inputs.activity_id.value = p6.p6Canonical(inputs.activity_id.value, E.p6.index);
           const set = {};
           for (const f of ed.FIELDS) if ((row[f.key] || '') !== inputs[f.key].value) set[f.key] = inputs[f.key].value;
           if (Object.keys(set).length) commit([{ op: 'row', id: row.id, set }]);
@@ -2299,6 +2651,8 @@ function helpDialog() {
     ['Delete', 'Clear the text (Shift+Delete: the colour too)'],
     ['Alt+1 … Alt+9', 'Paint with a legend colour (Alt+0 clears it)'],
     ['Code buttons', 'Add support to every selected day (Shift+click takes one away)'],
+    ['Type in Activity ID', 'Search P6 by name or ID — Enter takes the match, Escape keeps what you typed'],
+    ['Alt+K', 'Link every selected activity to one P6 activity, or say why they have none'],
     ['Drag the square at the corner', 'Repeat the selection across or down'],
     ['Ctrl+D / Ctrl+R', 'Fill down / fill right'],
     ['Ctrl+C, Ctrl+X, Ctrl+V', 'Copy, cut and paste — to and from Excel, colours included'],
@@ -2499,7 +2853,7 @@ async function exportSource() {
     rc.listLaRows(),
   ]);
   const src = {
-    model: ed.makeModel(rows.map(cleanRow), []),
+    model: ed.makeModel(rows.map(ed.cleanRow), []),
     legend: legendInForce(legend).shifts,
     codes,
     title: settings.find((r) => r.key === 'lookahead_title')?.value || '',
@@ -2511,7 +2865,7 @@ async function exportSource() {
     const to = days[days.length - 1];
     if (src.loaded && from >= src.loaded.from && to <= src.loaded.to) return;
     const cells = await rc.listLaCells(from, to);
-    src.model = ed.makeModel(rows.map(cleanRow), cells.map(cleanCell));
+    src.model = ed.makeModel(rows.map(ed.cleanRow), cells.map(ed.cleanCell));
     src.loaded = { from, to };
   };
   return src;
@@ -2615,7 +2969,7 @@ async function ensureWindow(days) {
   const to = days[days.length - 1];
   if (E.loaded && from >= E.loaded.from && to <= E.loaded.to) return;
   const cells = await rc.listLaCells(from, to);
-  for (const c of cells.map(cleanCell)) {
+  for (const c of cells.map(ed.cleanCell)) {
     const key = ed.cellKey(c.row_id, c.day);
     if (!E.model.cells.has(key)) {
       E.model.cells.set(key, c);

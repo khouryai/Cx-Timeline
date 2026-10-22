@@ -367,6 +367,19 @@ out of having both registers: rows with no SAR, which is work planned without
 confirmed access, and SARs with no rows, which is access booked for work that
 has gone.
 
+**Rows are linked to P6.** Once the look-ahead is written in the calendar, its
+Activity ID column is filled from the schedule's own list rather than from
+memory: import a P6 extract under Look-ahead → P6 activities (`.xlsx`, `.csv`
+or `.xer` — Activity ID and Activity Name are all it needs, WBS is used when it
+is there), and in Edit, typing in the column searches it by any words of the
+name or by ID; **Alt+K** links every selected activity at once, and several rows
+may name one activity. A row with no P6 activity says why instead —
+Troubleshooting, Regression, Support, or whatever the list holds — so the column
+always answers, and the export, the published reading and everything joining on
+the ID carry it. A later extract updates names and marks what it left out,
+never deleting it. The calendar pages back a week at a time, and *Everything*
+reaches every week ever written, not just the week before the latest reading.
+
 ### On a phone
 
 A calendar deployment also publishes **CX Calendar**, a phone app at `/m/` that

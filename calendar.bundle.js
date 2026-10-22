@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 29   Built: 2026-10-13T17:49:02.528Z
+ * Modules: 31   Built: 2026-10-22T12:09:09.302Z
  */
 (function () {
   'use strict';
@@ -2612,6 +2612,28 @@ __mods["core/la_edit.js"] = function (__x, __req) {
     return [...model.cells.values()];
   }
 
+  /** A row as `rc_la_rows` answers it, in the model's shape: numbers as numbers, flags as booleans. */
+  function cleanRow(r) {
+    return {
+      ...blankRow(r.kind, {}),
+      ...r,
+      sort: Number(r.sort) || 0,
+      level: Number(r.level) || 0,
+      archived: !!r.archived,
+    };
+  }
+
+  /** A cell as `rc_la_cells` answers it: the day as a date, the colour in capitals. */
+  function cleanCell(c) {
+    return {
+      row_id: c.row_id,
+      day: String(c.day).slice(0, 10),
+      color: c.color ? String(c.color).toUpperCase() : null,
+      text: c.text || '',
+      version: c.version || 0,
+    };
+  }
+
   function getCell(model, rowId, day) {
     return model.cells.get(cellKey(rowId, day)) || null;
   }
@@ -3609,6 +3631,8 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   Object.defineProperty(__x, "cellKey", { get: () => cellKey, enumerable: true });
   Object.defineProperty(__x, "makeModel", { get: () => makeModel, enumerable: true });
   Object.defineProperty(__x, "cellList", { get: () => cellList, enumerable: true });
+  Object.defineProperty(__x, "cleanRow", { get: () => cleanRow, enumerable: true });
+  Object.defineProperty(__x, "cleanCell", { get: () => cleanCell, enumerable: true });
   Object.defineProperty(__x, "getCell", { get: () => getCell, enumerable: true });
   Object.defineProperty(__x, "applyOps", { get: () => applyOps, enumerable: true });
   Object.defineProperty(__x, "stamp", { get: () => stamp, enumerable: true });
@@ -3667,8 +3691,10 @@ __mods["ui/rc_la_state.js"] = function (__x, __req) {
     showQuietRows: false,
     /** Whether the names on each activity's Resource row are drawn. */
     showResources: true,
-    /** How much of the calendar to show, in weeks from this one; 0 is everything. */
+    /** How much of the calendar to show, in weeks from `calendarStart`; 0 is everything. */
     calendarWeeks: 4,
+    /** The Monday the calendar's window starts on, paged a week at a time; null is this week's. */
+    calendarStart: null,
     /** 'workbook' until the look-ahead is written in the calendar, then 'editor'. */
     source: 'workbook',
     /**
@@ -8192,6 +8218,439 @@ __mods["io/rc_pdf.js"] = function (__x, __req) {
   Object.defineProperty(__x, "PAGE_CHOICES", { get: () => PAGE_CHOICES, enumerable: true });
 };
 
+// core/la_p6.js
+__mods["core/la_p6.js"] = function (__x, __req) {
+  /**
+   * P6 activities for the look-ahead: the schedule's own IDs, read from an
+   * extract, searched by name, and what a row's Activity ID says about it.
+   *
+   * The look-ahead's first column has always been the Activity ID, and the IDs
+   * are P6's — typed by hand, when they were typed at all. A row carrying its P6
+   * ID can be joined to the schedule and to anything else keyed on it; a row with
+   * a typo in it can be joined to nothing, and looks exactly like one that can.
+   * So the calendar keeps the schedule's own list (`rc_p6_activities`), imported
+   * from whatever extract the scheduler sends, and the editor offers it as the
+   * column is typed into.
+   *
+   * Not every row is in P6. Troubleshooting, a regression run, support for
+   * somebody else — real work the schedule does not carry. Those rows say why
+   * instead, with a word from a short list (`rc_p6_flags`) written in the same
+   * column, so the column always answers one of three ways: a P6 activity, a
+   * stated reason, or — marked, never guessed at — neither yet. Several rows may
+   * name one activity; one commissioning activity is routinely a week of lines on
+   * the sheet.
+   *
+   * No DOM and no network, so every rule here is tested in Node
+   * (`tools/test_la_edit.js`).
+   *
+   * Imports: nothing (a leaf).
+   */
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Reading an extract
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Lower case, accents off, everything that is not a letter or a digit one
+   * space — so "(*)Activity ID", "activity_id" and "Activity  ID" are one heading,
+   * and "Réglage" is found by typing "reglage".
+   */
+  function foldP6(text) {
+    return String(text ?? '')
+      .normalize('NFKD')
+      .replace(/[̀-ͯ]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * The headings each field answers to, folded, most specific first.
+   *
+   * P6 names a column after whatever the layout called it, and its own
+   * spreadsheet export writes the database names above the labels — `task_code`
+   * over "Activity ID", `task_name` over "Activity Name". "Activity Code" is left
+   * out on purpose: in P6 an activity code is a classification ("Phase", "Area"),
+   * and reading one as the ID would link every row to the wrong thing.
+   */
+  const HEADINGS = {
+    activity_id: [/^activity id$/, /^act(ivity)? (id|no|number)$/, /^task (id|code)$/, /^id$/],
+    name: [/^activity name$/, /^act(ivity)? (name|description|title)$/, /^task name$/, /^description$/, /^name$/],
+    wbs: [/^wbs$/, /^wbs (code|path|name|id|short name)$/, /^work breakdown/],
+  };
+
+  const clean = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
+
+  /** Which column is which: an index per field, or -1. */
+  function mapP6Columns(headerRow) {
+    const headings = (headerRow || []).map(foldP6);
+    const used = new Set();
+    /** @type {Object<string, number>} */
+    const found = {};
+    for (const [field, patterns] of Object.entries(HEADINGS)) {
+      found[field] = -1;
+      for (const pattern of patterns) {
+        const at = headings.findIndex((h, i) => !used.has(i) && pattern.test(h));
+        if (at >= 0) {
+          found[field] = at;
+          used.add(at);
+          break;
+        }
+      }
+    }
+    return found;
+  }
+
+  /**
+   * The header is the first row, within the top twenty-five, with both an ID and
+   * a name column. P6 puts a title, a filter description and a blank line above
+   * its headings, so the first row is rarely the one.
+   */
+  function findHeader(rows) {
+    const limit = Math.min((rows || []).length, 25);
+    for (let i = 0; i < limit; i++) {
+      const m = mapP6Columns(rows[i]);
+      if (m.activity_id >= 0 && m.name >= 0) return i;
+    }
+    return -1;
+  }
+
+  const isIdHeading = (value) => HEADINGS.activity_id.some((p) => p.test(foldP6(value)));
+
+  /**
+   * An extract's rows of cells, as activities: `{ activity_id, name, wbs }`.
+   *
+   * Every activity once, by its ID — the only thing P6 gives that survives a
+   * rename. A row with an ID and no name is left out and counted: in a layout
+   * exported grouped by WBS those are the group bands, and a P6 activity always
+   * has a name. A heading repeated further down (each group's, or the labels P6
+   * writes under its field names) is skipped without comment.
+   *
+   * @returns {{ activities: Array<{ activity_id: string, name: string, wbs: string }>,
+   *   headerRow: number, mapping: Object<string, number>, duplicates: string[], unnamed: number,
+   *   warnings: string[] }}
+   */
+  function readP6Rows(rows) {
+    const headerRow = findHeader(rows);
+    if (headerRow < 0) {
+      return {
+        activities: [], headerRow, mapping: {}, duplicates: [], unnamed: 0,
+        warnings: ['No "Activity ID" and "Activity Name" columns were found in the first 25 rows.'],
+      };
+    }
+    const mapping = mapP6Columns(rows[headerRow]);
+    const byId = new Map();
+    const duplicates = new Set();
+    let unnamed = 0;
+    for (let i = headerRow + 1; i < rows.length; i++) {
+      const row = rows[i] || [];
+      const id = clean(row[mapping.activity_id]);
+      if (!id || isIdHeading(id)) continue;
+      const name = clean(row[mapping.name]);
+      if (!name) {
+        unnamed++;
+        continue;
+      }
+      if (byId.has(id)) {
+        duplicates.add(id);
+        continue;
+      }
+      byId.set(id, { activity_id: id, name, wbs: mapping.wbs >= 0 ? clean(row[mapping.wbs]) : '' });
+    }
+    const warnings = [];
+    if (unnamed) {
+      warnings.push(`${unnamed} row${unnamed === 1 ? '' : 's'} with an ID and no name ${unnamed === 1 ? 'was' : 'were'} left out — group headings, most likely.`);
+    }
+    if (duplicates.size) {
+      const some = [...duplicates].slice(0, 3).join(', ');
+      warnings.push(`${duplicates.size} ID${duplicates.size === 1 ? '' : 's'} appeared more than once (${some}${duplicates.size > 3 ? '…' : ''}); `
+        + 'the first of each was kept. An extract of several projects can repeat an ID.');
+    }
+    return { activities: [...byId.values()], headerRow, mapping, duplicates: [...duplicates], unnamed, warnings };
+  }
+
+  /**
+   * A delimited text file as rows of cells: commas, semicolons or tabs, whichever
+   * the first lines use most, with quoted fields as a spreadsheet writes them.
+   */
+  function splitTable(text) {
+    let s = String(text ?? '');
+    if (s.charCodeAt(0) === 0xfeff) s = s.slice(1);
+    const head = s.split(/\r\n|\n|\r/).slice(0, 30);
+    const count = (ch) => head.reduce((n, line) => n + line.split(ch).length - 1, 0);
+    // Ties go left to right: a tab is never in a name, a comma often is.
+    const delimiter = ['\t', ';', ','].reduce((best, ch) => (count(ch) > count(best) ? ch : best), '\t');
+    const sep = count(delimiter) ? delimiter : ',';
+
+    const rows = [];
+    let row = [];
+    let field = '';
+    let quoted = false;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (quoted) {
+        if (c !== '"') field += c;
+        else if (s[i + 1] === '"') { field += '"'; i++; } else quoted = false;
+      } else if (c === '"' && field === '') {
+        quoted = true;
+      } else if (c === sep) {
+        row.push(field);
+        field = '';
+      } else if (c === '\n' || c === '\r') {
+        if (c === '\r' && s[i + 1] === '\n') i++;
+        row.push(field);
+        rows.push(row);
+        row = [];
+        field = '';
+      } else {
+        field += c;
+      }
+    }
+    if (field !== '' || row.length) {
+      row.push(field);
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  /**
+   * P6's own export format, a `.xer`: tables of tab-separated records. The
+   * activities are the TASK table — `task_code` is the Activity ID, `task_name`
+   * its name — and the WBS is written out from PROJWBS as P6 shows its code,
+   * every level's short name joined by dots.
+   */
+  function readXer(text) {
+    const tables = new Map();
+    let table = null;
+    let fields = null;
+    for (const line of String(text ?? '').split(/\r\n|\n|\r/)) {
+      if (line.startsWith('%T\t')) {
+        table = line.slice(3).trim();
+        fields = null;
+        if (!tables.has(table)) tables.set(table, []);
+      } else if (line.startsWith('%F\t')) {
+        fields = line.slice(3).split('\t');
+      } else if (line.startsWith('%R\t') && table && fields) {
+        const values = line.slice(3).split('\t');
+        const record = {};
+        fields.forEach((f, i) => { record[f] = values[i] ?? ''; });
+        tables.get(table).push(record);
+      }
+    }
+    const tasks = tables.get('TASK') || [];
+    if (!tasks.length) {
+      return {
+        activities: [], headerRow: -1, mapping: {}, duplicates: [], unnamed: 0,
+        warnings: ['That .xer file has no TASK table, so there are no activities in it.'],
+      };
+    }
+    const wbs = new Map((tables.get('PROJWBS') || []).map((w) => [w.wbs_id, w]));
+    const code = (id) => {
+      const parts = [];
+      const seen = new Set();
+      for (let w = wbs.get(id); w && !seen.has(w.wbs_id); w = wbs.get(w.parent_wbs_id)) {
+        seen.add(w.wbs_id);
+        parts.unshift(w.wbs_short_name || w.wbs_name || '');
+      }
+      return parts.filter(Boolean).join('.');
+    };
+    return readP6Rows([
+      ['Activity ID', 'Activity Name', 'WBS'],
+      ...tasks.map((t) => [t.task_code, t.task_name, code(t.wbs_id)]),
+    ]);
+  }
+
+  /**
+   * A parsed worksheet (`parseSheet()` in `io/lookahead.js`) as rows of cells,
+   * each value at its column — the shape `readP6Rows()` reads.
+   */
+  function gridRows(grid) {
+    return (grid?.rows || [])
+      .slice()
+      .sort((a, b) => a.row - b.row)
+      .map((r) => {
+        const out = [];
+        for (const c of r.cells || []) out[c.col - 1] = c.value;
+        return Array.from(out, (v) => v ?? '');
+      });
+  }
+
+  /** What kind of file an extract is, by its name: 'xlsx', 'xer', 'text', or null. */
+  function p6FileKind(name) {
+    const n = String(name || '').toLowerCase();
+    if (/\.(xlsx|xlsm)$/.test(n)) return 'xlsx';
+    if (/\.xer$/.test(n)) return 'xer';
+    if (/\.(csv|tsv|txt)$/.test(n)) return 'text';
+    return null;
+  }
+
+  /**
+   * What importing would do to the register, before anything is written:
+   * activities new to it, ones whose name or WBS moved, ones a previous extract
+   * left out that are back, and ones this extract leaves out — which are marked
+   * `missing`, never deleted, because a row of the look-ahead may still name one.
+   */
+  function p6Diff(register, incoming) {
+    const before = new Map((register || []).map((a) => [a.activity_id, a]));
+    const present = new Set();
+    const added = [];
+    const changed = [];
+    const back = [];
+    let unchanged = 0;
+    for (const a of incoming || []) {
+      present.add(a.activity_id);
+      const was = before.get(a.activity_id);
+      if (!was) {
+        added.push(a);
+        continue;
+      }
+      if (was.missing) back.push(a);
+      if ((was.name || '') !== (a.name || '') || (was.wbs || '') !== (a.wbs || '')) changed.push({ ...a, from: was.name || '' });
+      else if (!was.missing) unchanged++;
+    }
+    const missing = (register || []).filter((a) => !present.has(a.activity_id) && !a.missing);
+    return { total: (incoming || []).length, added, changed, back, unchanged, missing };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Finding one
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+  /**
+   * The activities that fit what was typed, best first.
+   *
+   * Every word typed has to be somewhere in the ID, the name or the WBS, in any
+   * order — "regression ixl" finds "IXL Regression Testing" — and the ID is also
+   * read with its punctuation gone, so "cx1040" finds "CX-1040". Then the ID typed
+   * whole, an ID starting with it, a name whose words start with every word
+   * typed, and the rest; an activity the latest extract left out comes after all
+   * of those, and ties go in the ID's own order. Nothing typed finds nothing:
+   * fifteen hundred activities in ID order is not an answer.
+   */
+  function searchP6(entries, query, { limit = 50 } = {}) {
+    const q = foldP6(query);
+    const terms = q.split(' ').filter(Boolean);
+    if (!terms.length) return [];
+    const compactQ = q.replace(/ /g, '');
+    const scored = [];
+    for (const e of entries || []) {
+      const id = foldP6(e.activity_id);
+      const name = foldP6(e.name);
+      const hay = `${id} ${name} ${foldP6(e.wbs)}`;
+      const compact = hay.replace(/ /g, '');
+      if (!terms.every((t) => hay.includes(t) || compact.includes(t))) continue;
+      const idCompact = id.replace(/ /g, '');
+      const words = name.split(' ');
+      let score = 5;
+      if (idCompact === compactQ) score = 0;
+      else if (idCompact.startsWith(compactQ)) score = 1;
+      else if (terms.every((t) => words.some((w) => w.startsWith(t)))) score = 2;
+      else if (idCompact.includes(compactQ)) score = 3;
+      else if (name.includes(q)) score = 4;
+      if (e.missing) score += 10;
+      scored.push({ e, score });
+    }
+    scored.sort((a, b) => a.score - b.score || collator.compare(a.e.activity_id, b.e.activity_id));
+    return scored.slice(0, limit).map((x) => x.e);
+  }
+
+  /** The reasons on the list that fit what was typed — every live one when nothing was. */
+  function matchFlags(flags, query) {
+    const q = foldP6(query);
+    return (flags || []).filter((f) => f.active !== false && (!q || foldP6(f.label).includes(q)));
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     What a row's Activity ID says
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The register and the reasons, as lookups. An ID is matched exactly, or — when
+   * only one activity has it in any case — whatever the case it was typed in;
+   * two IDs that differ only in case are both left to the exact match.
+   */
+  function p6Index(entries = [], flags = []) {
+    const byId = new Map();
+    const byFold = new Map();
+    for (const e of entries || []) {
+      byId.set(e.activity_id, e);
+      const k = String(e.activity_id).toLowerCase();
+      byFold.set(k, byFold.has(k) ? null : e);
+    }
+    const byFlag = new Map();
+    for (const f of flags || []) byFlag.set(String(f.label).trim().toLowerCase(), f);
+    return { byId, byFold, flags: byFlag, size: byId.size };
+  }
+
+  /**
+   * One of four answers about what is written in a row's Activity ID:
+   * `linked` (a P6 activity — `entry`), `flagged` (a reason it has none —
+   * `flag`), `unknown` (something neither list has), or `empty`.
+   */
+  function p6Status(value, index) {
+    const v = String(value ?? '').trim();
+    if (!v) return { kind: 'empty' };
+    const entry = index?.byId.get(v) || index?.byFold.get(v.toLowerCase()) || null;
+    if (entry) return { kind: 'linked', entry };
+    const flag = index?.flags.get(v.toLowerCase()) || null;
+    if (flag) return { kind: 'flagged', flag };
+    return { kind: 'unknown' };
+  }
+
+  /**
+   * What to write for what was typed: the register's own spelling of an ID it
+   * has, or the list's spelling of a reason — "cx-1040 " is written "CX-1040" —
+   * and anything else exactly as typed.
+   */
+  function p6Canonical(value, index) {
+    const status = p6Status(value, index);
+    if (status.kind === 'linked') return status.entry.activity_id;
+    if (status.kind === 'flagged') return status.flag.label;
+    return String(value ?? '').trim();
+  }
+
+  /**
+   * How the look-ahead's activities stand against the register: how many are
+   * linked, flagged, carry something neither list has, or carry nothing — and
+   * how many rows name each activity and each reason. Archived rows are off the
+   * sheet and are not counted.
+   */
+  function p6Coverage(rows, index) {
+    const out = { activities: 0, linked: 0, flagged: 0, unknown: 0, empty: 0, uses: new Map(), byFlag: new Map() };
+    for (const r of rows || []) {
+      if (r.kind !== 'activity' || r.archived) continue;
+      out.activities++;
+      const status = p6Status(r.activity_id, index);
+      out[status.kind]++;
+      if (status.kind === 'linked') {
+        const id = status.entry.activity_id;
+        out.uses.set(id, (out.uses.get(id) || 0) + 1);
+      } else if (status.kind === 'flagged') {
+        const label = status.flag.label;
+        out.byFlag.set(label, (out.byFlag.get(label) || 0) + 1);
+      }
+    }
+    return out;
+  }
+
+  Object.defineProperty(__x, "foldP6", { get: () => foldP6, enumerable: true });
+  Object.defineProperty(__x, "mapP6Columns", { get: () => mapP6Columns, enumerable: true });
+  Object.defineProperty(__x, "readP6Rows", { get: () => readP6Rows, enumerable: true });
+  Object.defineProperty(__x, "splitTable", { get: () => splitTable, enumerable: true });
+  Object.defineProperty(__x, "readXer", { get: () => readXer, enumerable: true });
+  Object.defineProperty(__x, "gridRows", { get: () => gridRows, enumerable: true });
+  Object.defineProperty(__x, "p6FileKind", { get: () => p6FileKind, enumerable: true });
+  Object.defineProperty(__x, "p6Diff", { get: () => p6Diff, enumerable: true });
+  Object.defineProperty(__x, "searchP6", { get: () => searchP6, enumerable: true });
+  Object.defineProperty(__x, "matchFlags", { get: () => matchFlags, enumerable: true });
+  Object.defineProperty(__x, "p6Index", { get: () => p6Index, enumerable: true });
+  Object.defineProperty(__x, "p6Status", { get: () => p6Status, enumerable: true });
+  Object.defineProperty(__x, "p6Canonical", { get: () => p6Canonical, enumerable: true });
+  Object.defineProperty(__x, "p6Coverage", { get: () => p6Coverage, enumerable: true });
+};
+
 // ui/rc_ingest.js
 __mods["ui/rc_ingest.js"] = function (__x, __req) {
   /**
@@ -8216,7 +8675,9 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
   const { toISO, addDays } = __req("core/dates.js");
 
   const { la } = __req("ui/rc_la_state.js");
-  const { gridFromModel, windowDays, addDaysISO, mondayOf, SECTION_BAND } = __req("core/la_edit.js");
+  const { gridFromModel, windowDays, addDaysISO, mondayOf, SECTION_BAND, makeModel, cleanRow, cleanCell } = __req("core/la_edit.js");
+
+
   const { hash64 } = __req("core/folder_rules.js");
 
   /** Where the workbook lives, relative to the folder the plan is in. */
@@ -8435,6 +8896,39 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
       file_mtime: new Date().toISOString(),
     };
     return publishGrid({ grid, legend, declared: [], hash, run, previous, silent, notify: false });
+  }
+
+  /**
+   * The look-ahead as written in the editor, for days no reading covers.
+   *
+   * A reading covers the week just gone and the five ahead, and the editor's
+   * tables hold every day ever written — so paging the calendar back past the
+   * reading, or asking it for everything, is answered from those. Drawn through
+   * the steps a publish takes — `gridFromModel()`, the legend, `readGrid()` — so
+   * a week drawn this way and the same week drawn from a reading are one picture
+   * (archived rows are off both). Nothing is stored: it is a view, and the
+   * reading is still what every other screen reads.
+   *
+   * @param {string} fromISO
+   * @param {string} toISO
+   * @param {any[]} legendRows  `rc.listLegend()`, as the reading is drawn against.
+   */
+  async function writtenView(fromISO, toISO, legendRows) {
+    const [rows, cells, settings] = await Promise.all([
+      rc.listLaRows(),
+      rc.listLaCells(fromISO, toISO),
+      rc.listSettings().catch(() => []),
+    ]);
+    const days = [];
+    for (let d = fromISO; d <= toISO; d = addDaysISO(d, 1)) days.push(d);
+    const legend = (legendRows || []).map((r) => ({ argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
+    // The band is how a heading is told from work; a publish puts it in the register the first time.
+    if (!legend.some((e) => String(e.argb).toUpperCase() === SECTION_BAND)) {
+      legend.push({ argb: SECTION_BAND, meaning: 'Section band', role: 'divider', valid_from: '' });
+    }
+    const title = settings.find((r) => r.key === 'lookahead_title')?.value || '';
+    const grid = applyLegend(gridFromModel(makeModel(rows.map(cleanRow), cells.map(cleanCell)), days, { title }), legend);
+    return { ...readGrid(grid, { anchorISO: fromISO }), unknown: grid.unknown || [] };
   }
 
   /**
@@ -8873,6 +9367,7 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
   Object.defineProperty(__x, "lookaheadSource", { get: () => lookaheadSource, enumerable: true });
   Object.defineProperty(__x, "publishDays", { get: () => publishDays, enumerable: true });
   Object.defineProperty(__x, "publishFromEditor", { get: () => publishFromEditor, enumerable: true });
+  Object.defineProperty(__x, "writtenView", { get: () => writtenView, enumerable: true });
   Object.defineProperty(__x, "checkNowButton", { get: () => checkNowButton, enumerable: true });
 };
 
@@ -9586,6 +10081,606 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
   Object.defineProperty(__x, "cancellationWorkbook", { get: () => cancellationWorkbook, enumerable: true });
 };
 
+// ui/rc_la_p6.js
+__mods["ui/rc_la_p6.js"] = function (__x, __req) {
+  /**
+   * Look-ahead → P6 activities: the schedule's IDs, imported from an extract,
+   * and the reasons a row has none — with the picker the editor links a row by.
+   *
+   * The look-ahead's Activity ID column is how a row is joined to the schedule
+   * and to anything else keyed on P6, so it is filled from the schedule's own
+   * list rather than typed from memory. This module reads that list in from
+   * whatever extract the scheduler sends (`.xlsx`, `.csv` or P6's own `.xer`),
+   * shows what an import would change before writing anything, and keeps the
+   * short list of reasons a row may give instead — Troubleshooting, Regression,
+   * Support. The rules are `core/la_p6.js`; this is where they meet a person.
+   *
+   * Imports: util, rc, core/la_p6, core/la_edit, io/lookahead, icons,
+   *          components, rc_util, rc_la_state, rc_ingest.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const p6 = __req("core/la_p6.js");
+  const { newId } = __req("core/la_edit.js");
+  const { readZip, readSheets, parseSheet } = __req("io/lookahead.js");
+  const { icon } = __req("ui/icons.js");
+  const { textInput, toast, emptyState, openModal, checkbox, badge, field } = __req("ui/components.js");
+  const { notifyChanged, formModal } = __req("ui/rc_util.js");
+  const { la, table } = __req("ui/rc_la_state.js");
+  const { EDITOR_SOURCE } = __req("ui/rc_ingest.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The register, as everything here reads it
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The activities and the reasons, with their lookups (`p6Index()`).
+   *
+   * `available` is false on a database that has not had `rc_schema.sql` run
+   * since P6 activities arrived: the reads are refused, and every P6 control
+   * stands down and says what to run, rather than offering an empty list as if
+   * nothing had ever been imported.
+   */
+  async function loadP6() {
+    try {
+      const [entries, flags] = await Promise.all([rc.listP6Activities(), rc.listP6Flags({ includeRetired: true })]);
+      return { available: true, entries, flags, index: p6.p6Index(entries, flags) };
+    } catch (err) {
+      return { available: false, error: err, entries: [], flags: [], index: p6.p6Index([], []) };
+    }
+  }
+
+  const SCHEMA_BEHIND = 'This database has no P6 tables yet. Run supabase/rc_schema.sql — Organisation → Settings says '
+    + 'which version the database is at.';
+
+  /** A row's Activity ID in words, for the hover — the same wording in the editor and the read view. */
+  function p6Words(value, status) {
+    if (status.kind === 'linked') {
+      const e = status.entry;
+      return `${e.activity_id} — ${e.name}${e.wbs ? ` (${e.wbs})` : ''}${e.missing ? ' · not in the latest P6 extract' : ''}`;
+    }
+    if (status.kind === 'flagged') {
+      return `Not in P6: ${status.flag.label}${status.flag.active === false ? ' (a retired reason)' : ''}`;
+    }
+    if (status.kind === 'unknown') return `${String(value).trim()} is not in the P6 list`;
+    return '';
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Importing an extract
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** A text file's characters: UTF-8 where it is, Windows' own encoding where it is not — as an .xer often is. */
+  async function textOf(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      return new TextDecoder('windows-1252').decode(bytes);
+    }
+  }
+
+  /**
+   * The activities in an extract, and where in it they were found.
+   *
+   * A workbook is read sheet by sheet until one has an Activity ID and an
+   * Activity Name column — TASK first, which is where P6's own spreadsheet
+   * export puts them — so a cover sheet or a sheet of relationships in front of
+   * the activities does not stop it. Hidden sheets are passed over.
+   */
+  async function readExtract(file) {
+    const kind = p6.p6FileKind(file.name);
+    if (!kind) {
+      throw new Error(`${file.name} is not a file this reads. Export the activities from P6, or save them from Excel, `
+        + 'as .xlsx, .csv or .xer.');
+    }
+    if (kind === 'xer') return { ...p6.readXer(await textOf(file)), from: 'its TASK table' };
+    if (kind === 'text') return { ...p6.readP6Rows(p6.splitTable(await textOf(file))), from: 'the file' };
+    const buffer = await file.arrayBuffer();
+    const sheets = readSheets(readZip(buffer)).filter((s) => s.state === 'visible' && s.zipPath);
+    const ordered = [...sheets.filter((s) => /^task$/i.test(s.name)), ...sheets.filter((s) => !/^task$/i.test(s.name))];
+    let first = null;
+    for (const sheet of ordered) {
+      const read = p6.readP6Rows(p6.gridRows(parseSheet(buffer, sheet.name)));
+      if (read.headerRow >= 0) return { ...read, from: `the "${sheet.name}" sheet` };
+      first = first || read;
+    }
+    return first || { activities: [], warnings: ['That workbook has no visible sheet to read.'], from: '' };
+  }
+
+  const count = (n, one, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+  /**
+   * Pick an extract, see what importing it would change, and import it.
+   *
+   * Nothing is written until the preview is confirmed: how many activities were
+   * read and from where, the first few as they were read (so a column mapped
+   * wrongly is caught before it is imported), how many are new or renamed, and —
+   * said out loud — how many in the register this extract leaves out, which are
+   * marked missing rather than deleted. `host` holds the file input while it is
+   * open; `onDone` runs once the import has landed.
+   *
+   * @param {{ host?: HTMLElement | null, onDone?: Function | null }} [options]
+   */
+  function openP6Import({ host = null, onDone = null } = {}) {
+    const where = host || document.body;
+    for (const old of where.querySelectorAll(':scope > input.p6-file')) old.remove();
+    const input = el('input', { class: 'p6-file', type: 'file', accept: '.xlsx,.xlsm,.csv,.tsv,.txt,.xer', hidden: true });
+    where.appendChild(input);
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return;
+      let read;
+      let register;
+      try {
+        [read, register] = await Promise.all([readExtract(file), rc.listP6Activities()]);
+      } catch (err) {
+        toast({ tone: 'bad', message: err.message, timeout: 12000 });
+        return;
+      }
+      if (!read.activities.length) {
+        toast({ tone: 'bad', message: `Nothing to import from ${file.name}: ${read.warnings.join(' ') || 'no activities in it.'}`, timeout: 12000 });
+        return;
+      }
+      previewImport(file, read, register, onDone);
+    });
+    input.click();
+    return input;
+  }
+
+  function previewImport(file, read, register, onDone) {
+    const diff = p6.p6Diff(register, read.activities);
+    const lines = [
+      `${count(read.activities.length, 'activity', 'activities')} read from ${read.from}.`,
+      register.length
+        ? [
+          diff.added.length ? `${count(diff.added.length, 'new one')}` : null,
+          diff.changed.length ? `${diff.changed.length.toLocaleString()} renamed or moved in the WBS` : null,
+          diff.back.length ? `${diff.back.length.toLocaleString()} back after a previous extract left them out` : null,
+          diff.unchanged ? `${diff.unchanged.toLocaleString()} unchanged` : null,
+        ].filter(Boolean).join(' · ') + '.'
+        : 'The first import: the list is empty until this one.',
+    ];
+    const sample = read.activities.slice(0, 5);
+    openP6Preview({
+      title: `Import ${file.name}`,
+      lines,
+      missing: diff.missing,
+      warnings: read.warnings || [],
+      sample,
+      confirmLabel: `Import ${count(read.activities.length, 'activity', 'activities')}`,
+      onConfirm: async () => {
+        const done = await rc.importP6Activities(read.activities, { importId: newId() });
+        toast({
+          tone: 'good',
+          message: `Imported ${count(done.written, 'P6 activity', 'P6 activities')}`
+            + (done.missing ? ` — ${count(done.missing, 'activity', 'activities')} no longer in the extract ${done.missing === 1 ? 'was' : 'were'} kept and marked.` : '.'),
+          timeout: 7000,
+        });
+        notifyChanged('p6');
+        if (onDone) await onDone(done);
+      },
+    });
+  }
+
+  function openP6Preview({ title, lines, missing, warnings, sample, confirmLabel, onConfirm }) {
+    formModal({
+      title,
+      confirmLabel,
+      body: el('div', { class: 'lae-form p6-preview' }, [
+        ...lines.map((text) => el('p', { class: 'p6-preview-line', text })),
+        missing.length
+          ? el('p', {
+            class: 'rc-hint rc-warn',
+            text: `${count(missing.length, 'activity', 'activities')} in the calendar's list ${missing.length === 1 ? 'is' : 'are'} not in this extract `
+              + `(${missing.slice(0, 4).map((a) => a.activity_id).join(', ')}${missing.length > 4 ? '…' : ''}). `
+              + 'They are kept and marked, never deleted — a row of the look-ahead may still name one.',
+          })
+          : null,
+        ...warnings.map((text) => el('p', { class: 'rc-hint', text })),
+        el('div', { class: 'rc-eyebrow', text: 'As read — check the columns are the right ones' }),
+        table(['Activity ID', 'Activity name', 'WBS'], sample.map((a) => el('tr', {}, [
+          el('td', { class: 'rc-mono', text: a.activity_id }),
+          el('td', { text: a.name }),
+          el('td', { class: 'rc-hint', text: a.wbs || '—' }),
+        ]))),
+      ]),
+      onConfirm,
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Choosing one
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const SHOWN = 60;
+
+  /**
+   * Choose what an Activity ID says: a P6 activity, found by typing any part of
+   * its name, its ID or its WBS, or a reason the row has none.
+   *
+   * Before anything is typed it lists the activities the look-ahead already
+   * names, most-named first — linking the next line of a week of work to the
+   * activity the last line went to is the common case. Each says how many rows
+   * name it, so linking another is a choice made knowingly, never refused.
+   *
+   * `onPick` gets `{ value, entry, flag, fill }`: the text to write, the
+   * activity or reason it is, and whether to fill a blank description with the
+   * activity's name. `onClear` offers taking the ID off; `onImport` offers an
+   * import when the list is empty.
+   *
+   * @param {{ title: string, subtitle?: string, p6: any, uses?: Map<string, number>, query?: string,
+   *   current?: string | null, onPick: Function, onClear?: Function | null, onImport?: Function | null }} options
+   */
+  function openP6Picker({
+    title, subtitle = '', p6: ctx, uses = new Map(), query = '', current = null, onPick, onClear = null, onImport = null,
+  }) {
+    let handle = null;
+    let found = [];
+    let cursor = 0;
+    const fill = checkbox({ label: 'Fill a blank description with the P6 name', checked: true });
+    fill.classList.add('p6-fill');
+    const search = textInput({
+      value: query,
+      placeholder: ctx.entries.length
+        ? `Search ${count(ctx.entries.length, 'activity', 'activities')} — name, ID or WBS`
+        : 'No P6 activities imported yet',
+      'aria-label': 'Search P6 activities',
+    });
+    search.classList.add('p6-search');
+    const note = el('div', { class: 'rc-hint p6-picker-note' });
+    const list = el('div', { class: 'cx-picker-list p6-picker-list', role: 'listbox', 'aria-label': 'P6 activities' });
+
+    const take = (choice) => {
+      handle?.close();
+      onPick({ ...choice, fill: fill.querySelector('input').checked });
+    };
+
+    const draw = () => {
+      clear(list);
+      const q = search.value.trim();
+      if (!ctx.entries.length) {
+        list.appendChild(emptyState({
+          iconName: 'upload',
+          title: 'No P6 activities yet',
+          message: 'Import an extract from P6 — an .xlsx, .csv or .xer with Activity ID and Activity Name columns — and '
+            + 'its activities are offered here.',
+          action: onImport ? { label: 'Import a P6 extract…', onClick: () => { handle?.close(); onImport(); } } : null,
+        }));
+        note.textContent = '';
+        return;
+      }
+      if (q) {
+        found = p6.searchP6(ctx.entries, q, { limit: SHOWN + 1 });
+        note.textContent = found.length
+          ? (found.length > SHOWN ? `The first ${SHOWN} — keep typing to narrow it.` : '')
+          : `Nothing in P6 matches "${q}". Try fewer words, or part of the ID.`;
+        found = found.slice(0, SHOWN);
+      } else {
+        found = [...uses.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], undefined, { numeric: true }))
+          .map(([id]) => ctx.index.byId.get(id))
+          .filter(Boolean)
+          .slice(0, SHOWN);
+        note.textContent = found.length
+          ? 'Already on the look-ahead — or type to search them all.'
+          : `Type any part of an activity's name, its ID or its WBS.`;
+      }
+      cursor = Math.min(cursor, Math.max(0, found.length - 1));
+      found.forEach((entry, i) => {
+        const n = uses.get(entry.activity_id) || 0;
+        list.appendChild(el('div', {
+          class: `cx-picker-item p6-item${i === cursor ? ' on' : ''}${entry.activity_id === current ? ' p6-current' : ''}`,
+          role: 'option',
+          'aria-selected': String(i === cursor),
+          dataset: { id: entry.activity_id },
+          onClick: () => take({ value: entry.activity_id, entry }),
+        }, [
+          el('span', { class: 'p6-id', text: entry.activity_id }),
+          el('span', { class: 'p6-name', text: entry.name }),
+          el('span', { class: 'p6-meta' }, [
+            entry.wbs ? el('span', { text: entry.wbs }) : null,
+            n ? el('span', { class: 'p6-uses', text: `on ${count(n, 'row')}` }) : null,
+            entry.activity_id === current ? el('span', { class: 'p6-uses', text: 'this row' }) : null,
+            entry.missing ? badge('Not in the latest extract', 'warn') : null,
+          ].filter(Boolean)),
+        ]));
+      });
+      list.querySelector('.p6-item.on')?.scrollIntoView({ block: 'nearest' });
+    };
+
+    search.addEventListener('input', () => { cursor = 0; draw(); });
+    search.addEventListener('keydown', (e) => {
+      if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && found.length) {
+        e.preventDefault();
+        cursor = (cursor + (e.key === 'ArrowDown' ? 1 : -1) + found.length) % found.length;
+        draw();
+      } else if (e.key === 'Enter' && found[cursor]) {
+        e.preventDefault();
+        take({ value: found[cursor].activity_id, entry: found[cursor] });
+      }
+    });
+
+    const flags = ctx.flags.filter((f) => f.active !== false);
+    const reasons = el('div', { class: 'p6-reasons' }, [
+      el('div', { class: 'rc-eyebrow', text: 'Not in P6 — say why' }),
+      flags.length
+        ? el('div', { class: 'p6-reason-list' }, flags.map((flag) => el('button', {
+          class: `cx-btn mini p6-reason${String(current || '').trim().toLowerCase() === flag.label.toLowerCase() ? ' primary' : ''}`,
+          type: 'button',
+          text: flag.label,
+          title: `No P6 activity: ${flag.label}`,
+          onClick: () => take({ value: flag.label, flag }),
+        })))
+        : el('p', { class: 'rc-hint', text: 'No reasons on the list. Add them under Look-ahead → P6 activities.' }),
+    ]);
+
+    draw();
+    handle = openModal({
+      title,
+      subtitle,
+      size: 'wide',
+      body: el('div', { class: 'p6-picker' }, [search, fill, note, list, reasons]),
+      actions: [
+        { label: 'Cancel' },
+        onClear ? { label: 'Take the Activity ID off', onClick: () => onClear() } : null,
+      ].filter(Boolean),
+    });
+    setTimeout(() => {
+      search.focus();
+      search.setSelectionRange(search.value.length, search.value.length);
+    }, 40);
+    return handle;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The section
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Look-ahead → P6 activities.
+   *
+   * What was imported and when, how the look-ahead's activities stand against
+   * it — linked, flagged, or still to do, one press from the editor — a search
+   * over the whole list, and the reasons a row may give instead of an ID.
+   */
+  async function renderP6(host) {
+    const [ctx, rows, people] = await Promise.all([
+      loadP6(),
+      rc.listLaRows().catch(() => []),
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+    ]);
+    const written = la.source === EDITOR_SOURCE;
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'P6 activities' }),
+      ctx.available ? el('button', {
+        class: 'cx-btn mini primary p6-import',
+        type: 'button',
+        html: icon('upload', { size: 12 }) + '<span>Import a P6 extract…</span>',
+        title: 'An .xlsx, .csv or .xer from P6 with Activity ID and Activity Name columns',
+        onClick: () => openP6Import({ host }),
+      }) : null,
+    ].filter(Boolean)));
+
+    if (!ctx.available) {
+      host.appendChild(emptyState({ iconName: 'warning', title: 'Not set up in this database yet', message: SCHEMA_BEHIND }));
+      return;
+    }
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'The schedule\'s activity IDs and names, read from a P6 extract. In Edit, typing in a row\'s Activity ID '
+        + 'searches them by name or ID, and Alt+K links every selected activity at once — several rows may name one '
+        + 'activity. A row with no P6 activity says why, from the list at the bottom. Importing again brings names up to '
+        + 'date and adds new activities; one a later extract leaves out is kept and marked, never deleted.',
+    }));
+
+    if (!ctx.entries.length) {
+      host.appendChild(emptyState({
+        iconName: 'upload',
+        title: 'Nothing imported yet',
+        message: 'Export the activities from P6 — Activity ID and Activity Name are all it needs; WBS is used if it is '
+          + 'there — as .xlsx, .csv or .xer, and import it here.',
+        action: { label: 'Import a P6 extract…', onClick: () => openP6Import({ host }) },
+      }));
+    } else {
+      const newest = ctx.entries.reduce((a, b) => (String(a.imported_at || '') > String(b.imported_at || '') ? a : b));
+      const who = people.find((p) => p.user_id && p.user_id === newest.imported_by)?.name;
+      const missing = ctx.entries.filter((e) => e.missing).length;
+      host.appendChild(el('div', { class: 'p6-summary' }, [
+        el('span', { class: 'p6-summary-count', text: count(ctx.entries.length, 'activity', 'activities') }),
+        el('span', {
+          class: 'rc-hint',
+          style: 'margin:0',
+          text: [
+            newest.imported_at ? `last imported ${new Date(newest.imported_at).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : null,
+            who ? `by ${who}` : null,
+            missing ? `${missing.toLocaleString()} not in the latest extract` : null,
+          ].filter(Boolean).join(' · '),
+        }),
+      ]));
+    }
+
+    /* ── How the look-ahead stands ─────────────────────────────────────── */
+    const coverage = p6.p6Coverage(rows, ctx.index);
+    if (written && coverage.activities) {
+      host.appendChild(el('div', { style: 'height:20px' }));
+      host.appendChild(el('div', { class: 'rc-section-head' }, [
+        el('h3', { text: 'The look-ahead\'s activities' }),
+        el('button', {
+          class: 'cx-btn mini',
+          type: 'button',
+          html: icon('edit', { size: 12 }) + '<span>Link them in the editor</span>',
+          onClick: () => { la.section = 'calendar'; la.editing = true; notifyChanged('lookahead'); },
+        }),
+      ]));
+      const todo = coverage.empty + coverage.unknown;
+      host.appendChild(el('div', { class: 'p6-coverage' }, [
+        stat('Linked to P6', coverage.linked, 'good'),
+        stat('Not in P6, with a reason', coverage.flagged, 'info'),
+        stat('Still to link', todo, todo ? 'warn' : 'good'),
+      ]));
+      const said = [
+        coverage.byFlag.size ? `Reasons given: ${[...coverage.byFlag.entries()].map(([label, n]) => `${label} ${n}`).join(', ')}.` : null,
+        coverage.unknown ? `${count(coverage.unknown, 'activity', 'activities')} ${coverage.unknown === 1 ? 'carries' : 'carry'} an ID the P6 list does not have `
+          + `(${[...new Set(rows.filter((r) => r.kind === 'activity' && !r.archived && p6.p6Status(r.activity_id, ctx.index).kind === 'unknown').map((r) => r.activity_id.trim()))].slice(0, 5).join(', ')}) — `
+          + 'a typo, or an activity from an older extract.' : null,
+      ].filter(Boolean).join(' ');
+      if (said) host.appendChild(el('p', { class: 'rc-hint', text: said }));
+    } else if (!written) {
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: 'Rows are linked in the look-ahead editor. The look-ahead is still read from the workbook here, so there is '
+          + 'nothing to link yet — the list can be imported ahead of that.',
+      }));
+    }
+
+    /* ── The list ──────────────────────────────────────────────────────── */
+    if (ctx.entries.length) {
+      host.appendChild(el('div', { style: 'height:20px' }));
+      host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Find an activity' })]));
+      const find = textInput({ placeholder: 'Name, ID or WBS — "ixl regression", "1040"', mini: true, 'aria-label': 'Find a P6 activity' });
+      find.classList.add('p6-find');
+      const results = el('div');
+      /* The results are redrawn, never the box: rebuilding a field under the
+         caret is the trap this project keeps relearning. */
+      const drawResults = () => {
+        clear(results);
+        const q = find.value.trim();
+        const shown = q
+          ? p6.searchP6(ctx.entries, q, { limit: 101 })
+          : [...coverage.uses.keys()].map((id) => ctx.index.byId.get(id)).filter(Boolean)
+            .sort((a, b) => a.activity_id.localeCompare(b.activity_id, undefined, { numeric: true }));
+        if (!shown.length) {
+          results.appendChild(el('p', {
+            class: 'rc-hint',
+            text: q ? `Nothing matches "${q}".` : 'No row of the look-ahead names a P6 activity yet. Type above to search the list.',
+          }));
+          return;
+        }
+        if (!q) results.appendChild(el('p', { class: 'rc-hint', style: 'margin:0 0 6px', text: 'The activities the look-ahead names. Type to search them all.' }));
+        const t = table(['Activity ID', 'Name', 'WBS', 'Rows'], shown.slice(0, 100).map((e) => el('tr', {
+          class: e.missing ? 'rc-inactive' : '',
+        }, [
+          el('td', { class: 'rc-mono', text: e.activity_id }),
+          el('td', {}, [e.name, e.missing ? el('span', { style: 'margin-left:6px' }, [badge('Not in the latest extract', 'warn')]) : null].filter(Boolean)),
+          el('td', { class: 'rc-hint', text: e.wbs || '—' }),
+          el('td', { class: 'rc-num', text: String(coverage.uses.get(e.activity_id) || '') }),
+        ])));
+        t.querySelector('table').dataset.plain = '1';
+        results.appendChild(t);
+        if (shown.length > 100) results.appendChild(el('p', { class: 'rc-hint', text: 'The first hundred — keep typing to narrow it.' }));
+      };
+      find.addEventListener('input', drawResults);
+      host.appendChild(el('div', { style: 'max-width:340px;margin-bottom:10px' }, [find]));
+      host.appendChild(results);
+      drawResults();
+    }
+
+    /* ── Reasons ───────────────────────────────────────────────────────── */
+    host.appendChild(el('div', { style: 'height:24px' }));
+    await reasonsAdmin(host, ctx, rows);
+  }
+
+  function stat(label, n, tone) {
+    return el('div', { class: `p6-stat p6-stat-${tone}` }, [
+      el('span', { class: 'p6-stat-n', text: n.toLocaleString() }),
+      el('span', { class: 'p6-stat-label', text: label }),
+    ]);
+  }
+
+  /**
+   * Why a row has no P6 activity: the reasons the editor offers beside the
+   * activities. Written into the row as the Activity ID, so a reason is reworded
+   * only while no row carries it — reworded under them, those rows would stop
+   * matching it — and retired rather than deleted, so the rows that give it keep
+   * saying so.
+   */
+  async function reasonsAdmin(host, ctx, rows) {
+    const flags = ctx.flags;
+    const usedBy = (flag) => rows.filter((r) => r.kind === 'activity'
+      && String(r.activity_id || '').trim().toLowerCase() === flag.label.trim().toLowerCase()).length;
+    const wrap = el('div', { class: 'p6-flags-admin' });
+    wrap.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'Rows with no P6 activity' }),
+      el('button', {
+        class: 'cx-btn mini primary',
+        type: 'button',
+        html: icon('plus', { size: 12 }) + '<span>Add a reason</span>',
+        onClick: () => editFlag(null, ctx),
+      }),
+    ]));
+    wrap.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Work the schedule does not carry still goes on the look-ahead — it says why instead of an ID. The editor '
+        + 'offers these beside the P6 activities, and the reason is written in the Activity ID column, so the export and '
+        + 'everything else reading the look-ahead carry it too.',
+    }));
+    if (!flags.length) {
+      wrap.appendChild(el('p', { class: 'rc-hint', text: 'No reasons yet.' }));
+    } else {
+      wrap.appendChild(table(['Reason', 'Rows', ''], flags.map((f) => {
+        const used = usedBy(f);
+        return el('tr', { class: f.active === false ? 'rc-inactive' : '' }, [
+          el('td', { text: f.label }),
+          el('td', { class: 'rc-num', text: used ? String(used) : '' }),
+          el('td', { style: 'text-align:right;white-space:nowrap' }, [
+            used ? null : el('button', { class: 'cx-btn mini ghost', type: 'button', text: 'Edit', onClick: () => editFlag(f, ctx) }),
+            el('button', {
+              class: 'cx-btn mini ghost',
+              type: 'button',
+              text: f.active === false ? 'Restore' : 'Retire',
+              title: f.active === false ? 'Offer it again' : 'Stop offering it. Rows already flagged with it keep saying so.',
+              onClick: async () => {
+                try {
+                  await rc.updateP6Flag(f.id, { active: f.active === false });
+                  notifyChanged('p6');
+                } catch (err) {
+                  toast({ tone: 'bad', message: err.message });
+                }
+              },
+            }),
+          ].filter(Boolean)),
+        ]);
+      })));
+    }
+    host.appendChild(wrap);
+  }
+
+  function editFlag(existing, ctx) {
+    const label = textInput({ value: existing?.label || '', placeholder: 'Troubleshooting', maxlength: '60' });
+    formModal({
+      title: existing ? `Reason: ${existing.label}` : 'Add a reason',
+      confirmLabel: existing ? 'Save' : 'Add',
+      body: el('div', { class: 'lae-form' }, [
+        field('Reason, as the row will say it', label, 'Written in the Activity ID column of a row with no P6 activity.'),
+      ]),
+      onConfirm: async () => {
+        const value = label.value.trim().replace(/\s+/g, ' ');
+        if (!value) throw new Error('Say what the reason is.');
+        if (value.length > 60) throw new Error('Sixty characters at most — it sits in the Activity ID column.');
+        const clash = ctx.flags.find((f) => f.label.trim().toLowerCase() === value.toLowerCase() && f.id !== existing?.id);
+        if (clash) throw new Error(`"${clash.label}" is already on the list${clash.active === false ? ' (retired — restore it instead)' : ''}.`);
+        if (ctx.index.byFold.get(value.toLowerCase()) || ctx.index.byId.get(value)) {
+          throw new Error(`${value} is a P6 activity ID, so a row carrying it would read as linked to that activity.`);
+        }
+        if (existing) await rc.updateP6Flag(existing.id, { label: value });
+        else await rc.addP6Flag({ label: value, active: true, sort: Math.max(0, ...ctx.flags.map((f) => f.sort || 0)) + 10 });
+        notifyChanged('p6');
+      },
+    });
+  }
+
+  Object.defineProperty(__x, "loadP6", { get: () => loadP6, enumerable: true });
+  Object.defineProperty(__x, "p6Words", { get: () => p6Words, enumerable: true });
+  Object.defineProperty(__x, "openP6Import", { get: () => openP6Import, enumerable: true });
+  Object.defineProperty(__x, "openP6Picker", { get: () => openP6Picker, enumerable: true });
+  Object.defineProperty(__x, "renderP6", { get: () => renderP6, enumerable: true });
+};
+
 // ui/rc_la_editor.js
 __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   /**
@@ -9610,15 +10705,21 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
    *
    * Only an administrator reaches it; `rc_la_apply()` refuses anybody else.
    *
-   * Imports: util, rc, core/la_edit, core/lookahead, io/lookahead, io/la_xlsx,
-   *          io/exporters, filestore, icons, components, rc_util, rc_ingest,
-   *          rc_la_state.
+   * The Activity ID column is filled from P6 rather than from memory: typing in
+   * it searches the schedule's activities by name or ID, Alt+K links every
+   * selected activity at once, and a row with no P6 activity says why from a
+   * short list (`ui/rc_la_p6.js`, `core/la_p6.js`).
+   *
+   * Imports: util, rc, core/la_edit, core/la_p6, core/lookahead, io/lookahead,
+   *          io/la_xlsx, io/exporters, filestore, icons, components, rc_util,
+   *          rc_ingest, rc_la_state, rc_la_p6.
    */
 
   const { el, clear } = __req("core/util.js");
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
   const ed = __req("core/la_edit.js");
+  const p6 = __req("core/la_p6.js");
   const { readGrid, isCancelMeaning, countCodes, describeCodeCounts, cellTokens, cancellationNoteFor, cancellationReasonText } = __req("core/lookahead.js");
 
 
@@ -9634,6 +10735,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   const { notifyChanged, todayISO, nameRegister, foldName, codeNodes } = __req("ui/rc_util.js");
   const { publishFromEditor, publishDays, EDITOR_SOURCE } = __req("ui/rc_ingest.js");
   const { la } = __req("ui/rc_la_state.js");
+  const { loadP6, openP6Picker, openP6Import, p6Words } = __req("ui/rc_la_p6.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      State
@@ -9689,6 +10791,8 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     leaveKinds: new Map(),
     staff: { issues: [], byCell: new Map() },
     scroll: { left: 0, top: 0 },
+    // The schedule's activities and the reasons a row has none (`loadP6()`).
+    p6: { available: false, entries: [], flags: [], index: p6.p6Index() },
   };
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -9706,7 +10810,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       return;
     }
 
-    const [settings, legend, codes, people, aliases, leaveKinds, notes] = await Promise.all([
+    const [settings, legend, codes, people, aliases, leaveKinds, notes, schedule] = await Promise.all([
       rc.listSettings().catch(() => []),
       rc.listLegend().catch(() => []),
       rc.listSupportCodes({ includeRetired: true }).catch(() => []),
@@ -9715,8 +10819,10 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       rc.listLeaveKinds().catch(() => []),
       // The reasons logged for cancellations, shown when a cancelled day is hovered.
       rc.listCancellationNotes().catch(() => []),
+      loadP6(),
     ]);
     E.notes = notes;
+    E.p6 = schedule;
     /* The same exact register the week plan reads names with — full name, alias,
        or a first name only one person has. A name it cannot place is somebody
        else's person, and the staffing check leaves it alone. */
@@ -9809,7 +10915,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   async function load() {
     const { from, to } = neededRange();
     const [rows, cells] = await Promise.all([rc.listLaRows(), rc.listLaCells(from, to)]);
-    E.model = ed.makeModel(rows.map(cleanRow), cells.map(cleanCell));
+    E.model = ed.makeModel(rows.map(ed.cleanRow), cells.map(ed.cleanCell));
     E.loaded = { from, to };
     E.server = new Map();
     for (const r of E.model.rows) E.server.set(`row:${r.id}`, r.version || 0);
@@ -9834,7 +10940,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     const fetchFrom = E.loaded && from >= E.loaded.from ? ed.addDaysISO(E.loaded.to, 1) : lo;
     const fetchTo = E.loaded && to <= E.loaded.to ? ed.addDaysISO(E.loaded.from, -1) : hi;
     const cells = await rc.listLaCells(fetchFrom, fetchTo);
-    for (const c of cells.map(cleanCell)) {
+    for (const c of cells.map(ed.cleanCell)) {
       const key = ed.cellKey(c.row_id, c.day);
       if (!E.model.cells.has(key)) {
         E.model.cells.set(key, c);
@@ -9843,26 +10949,6 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     }
     E.loaded = { from: lo, to: hi };
     await loadLeave();
-  }
-
-  function cleanRow(r) {
-    return {
-      ...ed.blankRow(r.kind, {}),
-      ...r,
-      sort: Number(r.sort) || 0,
-      level: Number(r.level) || 0,
-      archived: !!r.archived,
-    };
-  }
-
-  function cleanCell(c) {
-    return {
-      row_id: c.row_id,
-      day: String(c.day).slice(0, 10),
-      color: c.color ? String(c.color).toUpperCase() : null,
-      text: c.text || '',
-      version: c.version || 0,
-    };
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -10039,7 +11125,9 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     }
     if (!needle) return out;
     // A filter keeps the rows that match, the names under them and the sections above.
-    const text = (r) => [r.activity_id, r.description, r.location, r.sswp, r.party, r.work_hours].join(' ').toLowerCase();
+    // The P6 name of the activity a row names counts too: the row may word it differently.
+    const text = (r) => [r.activity_id, r.description, r.location, r.sswp, r.party, r.work_hours,
+      p6.p6Status(r.activity_id, E.p6.index).entry?.name || ''].join(' ').toLowerCase();
     const keep = new Set();
     out.forEach((r) => {
       if (r.kind !== 'resource' && text(r).includes(needle)) keep.add(r.id);
@@ -10131,6 +11219,17 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
 
     const active = document.activeElement;
     const refocus = !active || active === document.body;
+    redrawDays(keys);
+    host.querySelector('.lae-grid tfoot tr')?.replaceWith(totalsRow(E.view.days, todayISO()));
+    paintSelection();
+    refreshStatus();
+    if (refocus) host.querySelector('.lae-scroll')?.focus({ preventScroll: true });
+  }
+
+  /** Draw these days (`cellKey()`s) again where they stand, and nothing else. */
+  function redrawDays(keys) {
+    const body = E.root?.querySelector('.lae-grid tbody');
+    if (!body || !E.view) return;
     const today = todayISO();
     const rowsById = new Map(E.view.rows.map((r) => [r.id, r]));
     const column = new Map(E.view.days.map((d, i) => [d, i]));
@@ -10142,10 +11241,30 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       const td = body.querySelector(`tr[data-id="${CSS.escape(rowId)}"] td[data-c="${META + i}"]`);
       if (td) td.replaceWith(dayCell(row, day, i, today));
     }
-    host.querySelector('.lae-grid tfoot tr')?.replaceWith(totalsRow(E.view.days, today));
+  }
+
+  /**
+   * Draw the days a note was just logged against again, so hovering them says
+   * the reason — in place, as an edit does. The note lands when the network
+   * answers, and by then somebody may be typing in the next cell: redrawing the
+   * whole grid here took the box they were typing in away with the old one.
+   */
+  function redrawNoted(runs) {
+    const keys = new Set();
+    const keyOf = (row) => { const k = ed.cancellationKey(row); return `${k.raw_label}|${k.raw_location}`; };
+    for (const run of runs) {
+      // A note is found by the row's label, so a row worded the same shows it too.
+      const noted = keyOf(run.row);
+      const rows = (E.view?.rows || []).filter((r) => r.id === run.row.id || (r.kind === 'activity' && keyOf(r) === noted));
+      for (const row of rows) {
+        for (let d = run.start; d <= run.end; d = ed.addDaysISO(d, 1)) keys.add(ed.cellKey(row.id, d));
+      }
+    }
+    const active = document.activeElement;
+    redrawDays(keys);
     paintSelection();
-    refreshStatus();
-    if (refocus) host.querySelector('.lae-scroll')?.focus({ preventScroll: true });
+    // The dialog that asked has gone, and took the keyboard with it.
+    if (!active || active === document.body) E.root?.querySelector('.lae-scroll')?.focus({ preventScroll: true });
   }
 
   /**
@@ -10315,8 +11434,47 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     });
     search.classList.add('lae-search');
 
-    bar.append(range, add, palette, support, search, right);
+    bar.append(...[range, add, palette, support, p6Group(), search, right].filter(Boolean));
     return bar;
+  }
+
+  /**
+   * P6: link the selected activities, and how many are still to do — one press
+   * from the next of them. Before anything is imported it is the way to import.
+   */
+  function p6Group() {
+    if (!E.p6.available) return null;
+    if (!E.p6.entries.length) {
+      return el('div', { class: 'lae-group lae-p6-group' }, [
+        el('button', {
+          class: 'cx-btn mini lae-p6-import', type: 'button', html: icon('upload', { size: 12 }) + '<span>Import P6 activities</span>',
+          title: 'Read the schedule\'s activity IDs and names from a P6 extract, so rows can be linked to them',
+          onClick: () => importP6(),
+        }),
+      ]);
+    }
+    const coverage = p6.p6Coverage(E.model.rows, E.p6.index);
+    const todo = coverage.empty + coverage.unknown;
+    const why = [
+      coverage.empty ? `${coverage.empty} with no Activity ID` : null,
+      coverage.unknown ? `${coverage.unknown} with an ID the P6 list does not have` : null,
+    ].filter(Boolean).join(' · ');
+    return el('div', { class: 'lae-group lae-p6-group' }, [
+      el('button', {
+        class: 'cx-btn mini lae-p6-link', type: 'button', html: icon('link', { size: 12 }) + '<span>Link to P6</span>',
+        title: 'Link the selected activities to a P6 activity, or say why they have none  (Alt+K)',
+        onClick: () => linkSelection(),
+      }),
+      coverage.activities
+        ? el('button', {
+          class: `cx-btn mini ghost lae-p6-todo${todo ? ' lae-p6-open' : ''}`, type: 'button',
+          text: todo ? `${todo} not linked` : 'All linked',
+          title: todo ? `${why} — go to the next one` : 'Every activity names a P6 activity or says why it has none',
+          disabled: !todo,
+          onClick: () => nextUnlinked(),
+        })
+        : null,
+    ].filter(Boolean));
   }
 
   function statusText() {
@@ -10434,11 +11592,31 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       });
       if (row.kind === 'section' && c === 1) td.style.paddingLeft = `${8 + (row.level || 0) * 14}px`;
       if (!editable(row, c)) td.classList.add('lae-fixed');
+      if (c === 0 && row.kind === 'activity') markP6(td, value);
       tr.appendChild(td);
     });
 
     days.forEach((d, i) => tr.appendChild(dayCell(row, d, i, today)));
     return tr;
+  }
+
+  /**
+   * What an activity's Activity ID says, on its cell: a P6 activity (its name on
+   * the hover), a reason it has none, something neither list has — marked, never
+   * corrected — or nothing yet. Before anything is imported every ID is simply
+   * what was typed, and only a reason is recognised.
+   */
+  function markP6(td, value) {
+    if (!E.p6.available) return;
+    const status = p6.p6Status(value, E.p6.index);
+    if (!E.p6.entries.length && status.kind !== 'flagged') return;
+    td.classList.add(`lae-p6-${status.kind}`);
+    if (status.kind === 'linked' && status.entry.missing) td.classList.add('lae-p6-missing');
+    // A reason is a word, not an ID: drawn on a pill, so the column reads at a glance.
+    if (status.kind === 'flagged') td.replaceChildren(el('span', { class: 'lae-p6-pill', text: value }));
+    td.title = status.kind === 'empty' ? 'No P6 activity yet — type to search P6, or Alt+K'
+      : status.kind === 'unknown' ? `${p6Words(value, status)} — type to search P6, or Alt+K`
+        : p6Words(value, status);
   }
 
   /** The support asked for, day by day: the grid's last row. */
@@ -10765,6 +11943,12 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       else if (E.legend[n - 1]) paint(E.legend[n - 1].argb);
       return;
     }
+    // Alt+K links the selection to P6 — Ctrl+K is the whole application's "go to".
+    if (e.altKey && !mod && (e.code === 'KeyK' || k.toLowerCase() === 'k')) {
+      e.preventDefault();
+      linkSelection();
+      return;
+    }
 
     switch (k) {
       case 'ArrowUp': return move(-1, 0, e.shiftKey);
@@ -10884,12 +12068,99 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       drawNames();
     }
 
+    // Save and move on, as Enter and Tab do — down, or across.
+    const finish = (key, shift) => {
+      commitEdit();
+      if (key === 'Tab') select(r, Math.min(Math.max(0, c + (shift ? -1 : 1)), E.view.cols - 1));
+      else select(Math.max(0, Math.min(r + (shift ? -1 : 1), E.view.rows.length - 1)), c);
+      focusGrid();
+    };
+
+    /* P6, while typing into an activity's Activity ID: the schedule's activities
+       that fit what is typed — any of the name, the ID or the WBS — and the
+       reasons a row may give instead. Arrows choose; Enter or Tab takes one and
+       moves on; Escape puts the list away and keeps what was typed, which is
+       written as typed (in the list's own spelling where it is an ID the list
+       has). Opened on what is already there, nothing is chosen until something
+       is typed, so Enter leaves the cell as it was. */
+    let p6List = null;
+    let p6Found = [];
+    let p6Pick = -1;
+    if (row.kind === 'activity' && c === 0 && E.p6.available && (E.p6.entries.length || E.p6.flags.length)) {
+      p6List = el('div', {
+        class: 'lae-edit-hint lae-p6-hint', role: 'listbox', 'aria-label': 'P6 activities',
+        style: `left:${box.left - host.left + scroller.scrollLeft}px;top:${box.bottom - host.top + scroller.scrollTop + 2}px`,
+      });
+      scroller.appendChild(p6List);
+      hint = p6List;
+      const uses = p6.p6Coverage(E.model.rows, E.p6.index).uses;
+      const choose = (i) => {
+        p6Pick = i;
+        for (const [k, b] of [...p6List.querySelectorAll('.lae-p6-opt')].entries()) {
+          b.classList.toggle('lae-p6-on', k === p6Pick);
+          b.setAttribute('aria-selected', String(k === p6Pick));
+        }
+        p6List.querySelector('.lae-p6-on')?.scrollIntoView({ block: 'nearest' });
+      };
+      const takeP6 = (i, key = 'Enter', shift = false) => {
+        const o = p6Found[i];
+        if (!o) return;
+        if (o.kind === 'more') {
+          const query = input.value;
+          cancelEdit();
+          linkRows([row], query);
+          return;
+        }
+        input.value = o.kind === 'p6' ? o.entry.activity_id : o.flag.label;
+        finish(key, shift);
+      };
+      const drawP6 = () => {
+        p6Found = p6Options(input.value);
+        p6Pick = p6Found.length ? Math.min(p6Pick, p6Found.length - 1) : -1;
+        // Nothing matched: Enter writes what was typed rather than opening the list.
+        if (p6Pick >= 0 && p6Found[p6Pick].kind === 'more') p6Pick = -1;
+        clear(p6List);
+        p6List.hidden = !p6Found.length;
+        if (!input.value.trim() && E.p6.entries.length) {
+          p6List.appendChild(el('div', { class: 'lae-p6-help', text: 'Type a name or an ID to search P6 — or say why there is none' }));
+        }
+        p6Found.forEach((o, i) => p6List.appendChild(p6Option(o, i === p6Pick, uses, () => takeP6(i))));
+        placeHint(p6List, box, host, scroller);
+      };
+      p6List.choose = choose;
+      p6List.take = takeP6;
+      input.addEventListener('input', () => { p6Pick = 0; drawP6(); });
+      if (initial != null) p6Pick = 0;
+      drawP6();
+    }
+
     E.editing = { input, hint, r, c, row };
     input.focus();
     if (initial == null) input.select();
     else input.setSelectionRange(input.value.length, input.value.length);
 
     input.addEventListener('keydown', (e) => {
+      const p6Open = p6List && !p6List.hidden && p6Found.length;
+      if (p6Open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        const down = e.key === 'ArrowDown';
+        p6List.choose(p6Pick < 0 ? (down ? 0 : p6Found.length - 1) : (p6Pick + (down ? 1 : -1) + p6Found.length) % p6Found.length);
+        e.stopPropagation();
+        return;
+      }
+      if (p6Open && p6Pick >= 0 && (e.key === 'Enter' || e.key === 'Tab')) {
+        e.preventDefault();
+        p6List.take(p6Pick, e.key, e.shiftKey);
+        e.stopPropagation();
+        return;
+      }
+      if (p6Open && e.key === 'Escape') {
+        e.preventDefault();
+        p6List.hidden = true;
+        p6Pick = -1;
+        e.stopPropagation();
+        return;
+      }
       // With a name on offer, the arrows choose and Enter or Tab takes it;
       // with none, they do what they always do.
       if (names && found.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
@@ -10908,8 +12179,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
         e.stopPropagation();
         return;
       }
-      if (e.key === 'Enter') { e.preventDefault(); commitEdit(); select(Math.min(r + (e.shiftKey ? -1 : 1), E.view.rows.length - 1), c); focusGrid(); }
-      else if (e.key === 'Tab') { e.preventDefault(); commitEdit(); select(r, Math.min(Math.max(0, c + (e.shiftKey ? -1 : 1)), E.view.cols - 1)); focusGrid(); }
+      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); finish(e.key, e.shiftKey); }
       else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); focusGrid(); }
       e.stopPropagation();
     });
@@ -10918,6 +12188,48 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
 
   function focusGrid() {
     E.root?.querySelector('.lae-scroll')?.focus({ preventScroll: true });
+  }
+
+  /** Below the cell, or above it where below would run off the bottom of the grid. */
+  function placeHint(node, box, host, scroller) {
+    if (node.hidden) return;
+    const height = node.offsetHeight;
+    const above = box.bottom + height + 4 > host.bottom && box.top - height - 4 > host.top;
+    node.style.top = `${(above ? box.top - height - 2 : box.bottom + 2) - host.top + scroller.scrollTop}px`;
+  }
+
+  /**
+   * What the Activity ID cell offers for what is typed: the P6 activities that
+   * fit it, the reasons that fit it (every reason, before anything is typed), and
+   * the whole list a press away.
+   */
+  function p6Options(text) {
+    const q = String(text ?? '').trim();
+    const out = [];
+    if (q) for (const entry of p6.searchP6(E.p6.entries, q, { limit: 7 })) out.push({ kind: 'p6', entry });
+    for (const flag of p6.matchFlags(E.p6.flags, q).slice(0, q ? 3 : 8)) out.push({ kind: 'flag', flag });
+    if (q && E.p6.entries.length) out.push({ kind: 'more' });
+    return out;
+  }
+
+  function p6Option(o, on, uses, take) {
+    const n = o.kind === 'p6' ? uses.get(o.entry.activity_id) || 0 : 0;
+    const kids = o.kind === 'p6'
+      ? [
+        el('span', { class: 'lae-p6-id', text: o.entry.activity_id }),
+        el('span', { class: 'lae-p6-name', text: o.entry.name }),
+        n ? el('span', { class: 'lae-p6-uses', text: `${n} row${n === 1 ? '' : 's'}` }) : null,
+        o.entry.missing ? el('span', { class: 'lae-p6-uses', text: 'not in the latest extract' }) : null,
+      ]
+      : o.kind === 'flag'
+        ? [el('span', { class: 'lae-p6-id', text: 'Not in P6' }), el('span', { class: 'lae-p6-name', text: o.flag.label })]
+        : [el('span', { class: 'lae-p6-more', html: `${icon('search', { size: 11 })}<span>Search all P6 activities…</span>` })];
+    return el('button', {
+      class: `lae-p6-opt lae-p6-opt-${o.kind}${on ? ' lae-p6-on' : ''}`, type: 'button', role: 'option',
+      'aria-selected': String(on),
+      title: o.kind === 'p6' ? p6Words(o.entry.activity_id, { kind: 'linked', entry: o.entry }) : '',
+      onMouseDown: (ev) => { ev.preventDefault(); take(); },
+    }, kids.filter(Boolean));
   }
 
   function cancelEdit() {
@@ -10938,6 +12250,10 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     if (!E.model.rows.some((x) => x.id === row.id)) return;
     if (c < META) {
       const key = row.kind === 'activity' ? ed.FIELDS[c].key : 'description';
+      if (key === 'activity_id' && E.p6.available) {
+        commit(linkOps([E.model.rows.find((x) => x.id === row.id)], p6.p6Canonical(value, E.p6.index)));
+        return;
+      }
       if ((row[key] ?? '') === value) return;
       commit([{ op: 'row', id: row.id, set: { [key]: value } }]);
       return;
@@ -11099,7 +12415,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
             reason: reason.value.trim() || null,
           }));
         }
-        draw();
+        redrawNoted(runs);
         toast({ tone: 'good', message: `Cancelled and logged — ${[...new Set(runs.map((r) => r.code))].join(', ')}, ${party.value}.` });
       } catch (err) {
         toast({ tone: 'bad', message: err.message, timeout: 10000 });
@@ -11239,7 +12555,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
                   reason: reason.value.trim() || null,
                 }));
               }
-              draw();
+              redrawNoted(runs);
               toast({ tone: 'good', message: `Recorded in the cancellation log — ${party.value}.` });
             } catch (err) {
               toast({ tone: 'bad', message: err.message, timeout: 10000 });
@@ -11302,6 +12618,112 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       ops.push({ op: 'cell', row_id: s.row.id, day: s.day, color: colour ? null : cell.color, text: '' });
     }
     commit(ops);
+  }
+
+  /* ── P6 ────────────────────────────────────────────────────────────────── */
+
+  /**
+   * The ops that write one Activity ID onto activities — and, on any that has no
+   * description yet, the P6 activity's name as its description, so a row begun
+   * from its activity reads as that activity at once. A description somebody
+   * wrote is never replaced.
+   *
+   * @param {object[]} rows
+   * @param {string} value
+   * @param {{ fill?: boolean }} [options]
+   */
+  function linkOps(rows, value, { fill = true } = {}) {
+    const status = p6.p6Status(value, E.p6.index);
+    const ops = [];
+    for (const row of rows.filter(Boolean)) {
+      const set = {};
+      if ((row.activity_id ?? '') !== value) set.activity_id = value;
+      if (fill && status.kind === 'linked' && status.entry.name && !String(row.description ?? '').trim()) {
+        set.description = status.entry.name;
+      }
+      if (Object.keys(set).length) ops.push({ op: 'row', id: row.id, set });
+    }
+    return ops;
+  }
+
+  /** The activities a set of rows is about: a names row stands for the activity above it. */
+  function activitiesIn(rows) {
+    const out = [];
+    for (const r of rows) {
+      const a = r?.kind === 'resource' ? E.model.rows.find((x) => x.id === r.parent_id) : r;
+      if (a?.kind === 'activity' && !out.includes(a)) out.push(a);
+    }
+    return out;
+  }
+
+  /** Alt+K: link every selected activity to one P6 activity, or give them all one reason. */
+  function linkSelection(query = '') {
+    if (!E.p6.available) {
+      toast({ tone: 'warn', message: 'This database has no P6 tables yet — run supabase/rc_schema.sql.', timeout: 8000 });
+      return;
+    }
+    const rows = activitiesIn(selectedRows());
+    if (!rows.length) {
+      toast({ message: 'Select the activities to link first — a P6 activity is linked to an activity\'s row.' });
+      return;
+    }
+    linkRows(rows, query);
+  }
+
+  function linkRows(rows, query = '') {
+    const one = rows.length === 1 ? rows[0] : null;
+    openP6Picker({
+      title: one ? 'Link to a P6 activity' : `Link ${rows.length} activities to one P6 activity`,
+      subtitle: one ? (one.description || one.activity_id || 'An activity with no description yet')
+        : 'Several rows may name one activity — a week of work is often one P6 activity',
+      p6: E.p6,
+      uses: p6.p6Coverage(E.model.rows, E.p6.index).uses,
+      query,
+      current: one ? one.activity_id : null,
+      onPick: ({ value, entry, flag, fill }) => {
+        const current = rows.map((r) => E.model.rows.find((x) => x.id === r.id));
+        const ops = linkOps(current, value, { fill });
+        commit(ops);
+        if (!ops.length) return;
+        toast({
+          tone: 'good',
+          message: entry
+            ? `${current.length === 1 ? 'Linked' : `Linked ${current.length} activities`} to ${entry.activity_id} — ${entry.name}.`
+            : `${current.length === 1 ? 'Flagged' : `Flagged ${current.length} activities`} as not in P6: ${flag?.label || value}.`,
+          action: { label: 'Undo', onClick: () => undo() },
+          timeout: 6000,
+        });
+      },
+      onClear: rows.some((r) => r.activity_id) ? () => {
+        commit(rows.filter((r) => r.activity_id).map((r) => ({ op: 'row', id: r.id, set: { activity_id: '' } })));
+      } : null,
+      onImport: () => importP6(),
+    });
+  }
+
+  /** The next activity with no P6 activity and no reason, after the caret — wrapping round. */
+  function nextUnlinked() {
+    const rows = E.view.rows;
+    const open = (row) => row?.kind === 'activity' && ['empty', 'unknown'].includes(p6.p6Status(row.activity_id, E.p6.index).kind);
+    for (let k = 1; k <= rows.length; k++) {
+      const r = (E.focus.r + k) % rows.length;
+      if (open(rows[r])) {
+        select(r, 0);
+        focusGrid();
+        return;
+      }
+    }
+    toast({ message: 'The ones still to link are in folded sections, archived, or hidden by the search.' });
+  }
+
+  function importP6() {
+    openP6Import({
+      host: E.root,
+      onDone: async () => {
+        E.p6 = await loadP6();
+        draw();
+      },
+    });
   }
 
   /** The selection as a block of `{ color, text }`, for copying and filling. */
@@ -11709,6 +13131,12 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
         ? { label: 'History of this day…', icon: 'history', onClick: () => historyDialog(one, E.view.days[E.focus.c - META]) }
         : null,
       one ? { label: 'History of this row…', icon: 'history', onClick: () => historyDialog(one, null) } : null,
+      E.p6.available && activitiesIn(rows).length
+        ? {
+          label: activitiesIn(rows).length > 1 ? `Link ${activitiesIn(rows).length} activities to P6…` : 'Link to P6…',
+          icon: 'link', key: 'alt+k', onClick: () => linkSelection(),
+        }
+        : null,
       'sep',
       { heading: 'Row' },
       { label: 'Insert activity above', icon: 'plus', onClick: () => insertRow('activity', 'above') },
@@ -11763,6 +13191,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       { label: 'Fold every section', icon: 'chevron-up', onClick: () => { for (const r of E.model.rows) if (r.kind === 'section') E.collapsed.add(r.id); draw(); } },
       { label: 'Unfold every section', icon: 'chevron-down', onClick: () => { E.collapsed.clear(); draw(); } },
       { label: 'Sheet title…', icon: 'type', onClick: () => titleDialog() },
+      E.p6.available ? { label: 'Import P6 activities…', icon: 'upload', onClick: () => importP6() } : null,
       { label: 'Keyboard and mouse…', icon: 'help', onClick: () => helpDialog() },
       'sep',
       { label: 'Take me back to an earlier moment…', icon: 'history', onClick: () => restoreDialog() },
@@ -11778,7 +13207,24 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     const form = el('div', { class: 'lae-form' });
     for (const f of ed.FIELDS) {
       inputs[f.key] = textInput({ value: row[f.key] || '' });
-      form.appendChild(el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: f.heading }), inputs[f.key]]));
+      const control = f.key === 'activity_id' && E.p6.available
+        ? el('div', { class: 'lae-p6-field' }, [inputs[f.key], el('button', {
+          class: 'cx-btn mini', type: 'button', html: icon('link', { size: 12 }) + '<span>Find in P6…</span>',
+          onClick: () => openP6Picker({
+            title: 'Link to a P6 activity',
+            subtitle: inputs.description.value || row.description || '',
+            p6: E.p6,
+            uses: p6.p6Coverage(E.model.rows, E.p6.index).uses,
+            current: inputs.activity_id.value,
+            onPick: ({ value, entry, fill }) => {
+              inputs.activity_id.value = value;
+              if (fill && entry?.name && !inputs.description.value.trim()) inputs.description.value = entry.name;
+            },
+            onImport: () => importP6(),
+          }),
+        })])
+        : inputs[f.key];
+      form.appendChild(el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: f.heading }), control]));
     }
     const days = E.view.days;
     const totals = ed.supportTotals(E.model, days).byRow.get(row.id);
@@ -11816,6 +13262,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
         { label: 'Cancel' },
         {
           label: 'Save', kind: 'primary', onClick: () => {
+            if (E.p6.available) inputs.activity_id.value = p6.p6Canonical(inputs.activity_id.value, E.p6.index);
             const set = {};
             for (const f of ed.FIELDS) if ((row[f.key] || '') !== inputs[f.key].value) set[f.key] = inputs[f.key].value;
             if (Object.keys(set).length) commit([{ op: 'row', id: row.id, set }]);
@@ -11889,6 +13336,8 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       ['Delete', 'Clear the text (Shift+Delete: the colour too)'],
       ['Alt+1 … Alt+9', 'Paint with a legend colour (Alt+0 clears it)'],
       ['Code buttons', 'Add support to every selected day (Shift+click takes one away)'],
+      ['Type in Activity ID', 'Search P6 by name or ID — Enter takes the match, Escape keeps what you typed'],
+      ['Alt+K', 'Link every selected activity to one P6 activity, or say why they have none'],
       ['Drag the square at the corner', 'Repeat the selection across or down'],
       ['Ctrl+D / Ctrl+R', 'Fill down / fill right'],
       ['Ctrl+C, Ctrl+X, Ctrl+V', 'Copy, cut and paste — to and from Excel, colours included'],
@@ -12089,7 +13538,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       rc.listLaRows(),
     ]);
     const src = {
-      model: ed.makeModel(rows.map(cleanRow), []),
+      model: ed.makeModel(rows.map(ed.cleanRow), []),
       legend: legendInForce(legend).shifts,
       codes,
       title: settings.find((r) => r.key === 'lookahead_title')?.value || '',
@@ -12101,7 +13550,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       const to = days[days.length - 1];
       if (src.loaded && from >= src.loaded.from && to <= src.loaded.to) return;
       const cells = await rc.listLaCells(from, to);
-      src.model = ed.makeModel(rows.map(cleanRow), cells.map(cleanCell));
+      src.model = ed.makeModel(rows.map(ed.cleanRow), cells.map(ed.cleanCell));
       src.loaded = { from, to };
     };
     return src;
@@ -12205,7 +13654,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     const to = days[days.length - 1];
     if (E.loaded && from >= E.loaded.from && to <= E.loaded.to) return;
     const cells = await rc.listLaCells(from, to);
-    for (const c of cells.map(cleanCell)) {
+    for (const c of cells.map(ed.cleanCell)) {
       const key = ed.cellKey(c.row_id, c.day);
       if (!E.model.cells.has(key)) {
         E.model.cells.set(key, c);
@@ -15142,7 +16591,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * showing a smooth history that is not true.
    *
    * Imports: util, events, dates, rc, filestore, io/lookahead, core/lookahead,
-   *          icons, components, rc_util.
+   *          core/la_edit, core/la_p6, icons, components, rc_util.
    */
 
   const { el, clear } = __req("core/util.js");
@@ -15154,6 +16603,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
 
 
+  const { mondayOf, addDaysISO } = __req("core/la_edit.js");
+  const { p6Index, p6Status } = __req("core/la_p6.js");
   const { icon } = __req("ui/icons.js");
   const { selectInput, textInput, toast, emptyState, field, checkbox } = __req("ui/components.js");
   const { notifyChanged, dayLabel, todayISO, formModal, parsedView, foldName, meMatcher, codeNodes, watchForNewReading } = __req("ui/rc_util.js");
@@ -15162,15 +16613,16 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
 
   const { la, WEEK_CHOICES } = __req("ui/rc_la_state.js");
-  const { checkNowButton, lookaheadSource, EDITOR_SOURCE } = __req("ui/rc_ingest.js");
+  const { checkNowButton, lookaheadSource, EDITOR_SOURCE, writtenView } = __req("ui/rc_ingest.js");
   const { renderEditor, flushEditor, openExcelExport } = __req("ui/rc_la_editor.js");
   const { renderLegend } = __req("ui/rc_la_legend.js");
   const { renderChanges, renderSnapshots } = __req("ui/rc_la_changes.js");
   const { renderCancellations } = __req("ui/rc_la_cancellations.js");
   const { renderSars } = __req("ui/rc_la_sars.js");
+  const { renderP6, p6Words } = __req("ui/rc_la_p6.js");
   const { openActivity } = __req("ui/rc_activity.js");
 
-  const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'sars'];
+  const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6', 'sars'];
 
   async function render(root) {
     /* The calendar is the team's; the register around it is not.
@@ -15200,7 +16652,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         type: 'button',
         text: {
           calendar: 'Calendar', cancellations: 'Cancellations', changes: 'Changes',
-          snapshots: 'Snapshots', legend: 'Legend', sars: 'Site access',
+          snapshots: 'Snapshots', legend: 'Legend', p6: 'P6 activities', sars: 'Site access',
         }[id],
         'aria-pressed': String(id === la.section),
         onClick: async () => {
@@ -15224,6 +16676,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     else if (la.section === 'changes') await renderChanges(host);
     else if (la.section === 'snapshots') await renderSnapshots(host);
     else if (la.section === 'legend') await renderLegend(host);
+    else if (la.section === 'p6') await renderP6(host);
     else await renderSars(host);
   }
 
@@ -15338,7 +16791,6 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
        `parsedView()`. The snapshot's own timestamp is what pins the axis to a
        year (`datePlease()`); the weekday letters on the sheet then check it. */
     const view = parsedView(snapshot, legendRows);
-    const grid = { unknown: view.unknown };
 
     if (!view.days.length) {
       host.appendChild(emptyState({
@@ -15402,13 +16854,71 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     };
     drawRange();
 
+    /* Which weeks can be shown: the reading's, and — once the look-ahead is
+       written here — every week anything was ever written in. A reading covers
+       only the week just gone and the five ahead, so "Everything" used to stop a
+       week back; the weeks before it are drawn from what the editor holds. */
+    const reading = readingSpan(view);
+    const reach = await reachOf(reading, written);
+    const viewFor = viewChooser({ view, reading, reach, written, legendRows, today });
+    const p6Of = p6Chooser();
+
+    /* Back and forward a week at a time, as Edit does, and back to this week. */
+    const pager = el('div', { class: 'la-pager' });
+    const turn = (delta) => {
+      const next = addDaysISO(la.calendarStart || mondayOf(today), delta);
+      la.calendarStart = next === mondayOf(today) ? null : next;
+      draw();
+    };
+    const drawPager = (days) => {
+      clear(pager);
+      const all = !la.calendarWeeks;
+      const start = la.calendarStart || mondayOf(today);
+      const dates = days.filter((d) => d.date).map((d) => d.date);
+      pager.append(
+        pagerButton('chevron-left', 'Previous week', all || !reach.first || start <= mondayOf(reach.first), () => turn(-7)),
+        el('button', {
+          class: 'cx-btn mini ghost', type: 'button', text: 'This week',
+          title: 'Start the window on this week\'s Monday', disabled: all || !la.calendarStart,
+          onClick: () => { la.calendarStart = null; draw(); },
+        }),
+        pagerButton('chevron-right', 'Next week', all || !reach.last || addDaysISO(start, 7) > reach.last, () => turn(7)),
+        el('span', {
+          class: 'la-pager-range',
+          text: dates.length ? `${dayLabel(dates[0], 'medium')} – ${dayLabel(dates[dates.length - 1], 'medium')}` : '',
+        }),
+      );
+    };
+
     const body = el('div');
-    const draw = () => {
+    let drawing = 0;
+    const draw = async () => {
+      const turnNo = ++drawing;
+      let source = view;
+      try {
+        source = await viewFor(la.calendarWeeks, la.calendarStart);
+      } catch (err) {
+        rc.reportError('lookahead:past-weeks', err);
+        toast({ tone: 'bad', message: `The weeks before the reading could not be read — ${err.message}`, timeout: 10000 });
+      }
+      const p6 = await p6Of(source);
+      if (turnNo !== drawing) return;
       clear(body);
+      /* Said whenever the weeks on screen were drawn from the editor rather than
+         from a reading: a reading is evidence of what the look-ahead said that
+         day, and this is what it says now. */
+      if (source !== view) {
+        body.appendChild(el('p', {
+          class: 'rc-hint la-written-note',
+          text: 'These weeks are drawn from the look-ahead as it is written now, not from a reading taken at the time.',
+        }));
+      }
       const onlyMine = Boolean(isMe && la.onlyMine);
-      const shown = drawn(windowed(view, today), la.calendarFilter, la.showQuietRows, la.showResources, onlyMine ? isMe : null);
+      const shown = drawn(windowed(source, today), la.calendarFilter, la.showQuietRows, la.showResources,
+        onlyMine ? isMe : null, p6?.names);
+      drawPager(shown.days);
       clear(strip);
-      strip.appendChild(legendStrip(legend, grid.unknown, paintOn(shown)));
+      strip.appendChild(legendStrip(legend, source.unknown, paintOn(shown)));
       if (onlyMine && !shown.activities.length) {
         body.appendChild(emptyState({
           iconName: 'calendar',
@@ -15418,7 +16928,16 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         }));
         return;
       }
-      body.appendChild(grid_(shown, today, isMe, snapshot.id, notes));
+      if (!shown.days.length) {
+        body.appendChild(emptyState({
+          iconName: 'calendar',
+          title: 'Nothing on the look-ahead in these weeks',
+          message: 'The look-ahead says nothing for the weeks on screen.',
+          action: { label: 'Back to this week', onClick: () => { la.calendarStart = null; draw(); } },
+        }));
+        return;
+      }
+      body.appendChild(grid_(shown, today, isMe, source === view ? snapshot.id : null, notes, p6));
     };
     // Redraw the rows only, never the input: rebuilding the field under the
     // caret is the trap this project has already been bitten by three times.
@@ -15429,14 +16948,15 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       style: 'display:flex;align-items:center;gap:16px;margin-bottom:10px;flex-wrap:wrap',
     }, [
       el('div', { style: 'flex:1;min-width:240px;max-width:340px' }, [search]),
+      dated ? pager : null,
       dated ? range : null,
       mine,
       quiet,
       resources,
-      /* The whole view, not the windowed one: the dialog picks its own weeks, and
-         handing it what is on screen would quietly cap the export at whatever the
-         range buttons were last set to. */
-      exportButton({ view, legendRows, today, sheetName: snapshot.sheet_name, isMe }),
+      /* What chooses the view, not the view on screen: the dialog picks its own
+         weeks, and handing it what is drawn would quietly cap the export at
+         whatever the range buttons were last set to. */
+      exportButton({ viewFor, p6Of, legendRows, today, sheetName: snapshot.sheet_name, isMe }),
       /* The editor's own export, offered here too: the same workbook in the 4WLA
          layout, built from what the editor holds rather than from this reading.
          Only once the look-ahead is written here — before that, the workbook in
@@ -15450,8 +16970,98 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       }) : null,
     ].filter(Boolean)));
     host.appendChild(body);
-    draw();
+    await draw();
+  }
 
+  function pagerButton(name, label, disabled, onClick) {
+    return el('button', {
+      class: 'cx-btn mini ghost icon', type: 'button', 'aria-label': label, title: label,
+      html: icon(name, { size: 14 }), disabled, onClick,
+    });
+  }
+
+  /** The first and last dated day a reading covers, or nulls where its dates could not be read. */
+  function readingSpan(view) {
+    const dates = view.days.filter((d) => d.date).map((d) => d.date);
+    return { first: dates[0] || null, last: dates[dates.length - 1] || null };
+  }
+
+  /**
+   * How far the calendar can page: the reading's own days, and — once the
+   * look-ahead is written here — from the first day anything was written to the
+   * last. A workbook's reading is the whole sheet, so that is as far as it goes.
+   */
+  async function reachOf(reading, written) {
+    let { first, last } = reading;
+    if (written) {
+      const span = await rc.laCellSpan().catch(() => ({ first: null, last: null }));
+      if (span.first && (!first || span.first < first)) first = span.first;
+      if (span.last && (!last || span.last > last)) last = span.last;
+    }
+    return { first, last };
+  }
+
+  /**
+   * The view to draw a window from: the reading, wherever it covers every day of
+   * the window — which is the four weeks from today, nearly always — and
+   * otherwise the look-ahead as written (`writtenView()`), for the whole window
+   * so one grid never mixes the two. Each window is read once per drawing of the
+   * tab; a newer reading redraws the tab and starts afresh.
+   */
+  function viewChooser({ view, reading, reach, written, legendRows, today }) {
+    const made = new Map();
+    return async (weeks, start) => {
+      if (!written || !reading.first) return view;
+      let from;
+      let to;
+      if (!weeks) {
+        if (!reach.first) return view;
+        const firstMonday = mondayOf(reach.first);
+        const lastSunday = addDaysISO(mondayOf(reach.last), 6);
+        from = firstMonday < reading.first ? firstMonday : reading.first;
+        to = lastSunday > reading.last ? lastSunday : reading.last;
+      } else {
+        from = start || mondayOf(today);
+        to = addDaysISO(from, weeks * 7 - 1);
+      }
+      if (from >= reading.first && to <= reading.last) return view;
+      const key = `${from}|${to}`;
+      if (!made.has(key)) {
+        made.set(key, writtenView(from, to, legendRows).catch((err) => { made.delete(key); throw err; }));
+      }
+      return made.get(key);
+    };
+  }
+
+  /** Which of a view's activity columns is the Activity ID: by its heading, as the sheet writes it. */
+  function activityIdColumn(view) {
+    return (view.headings || []).findIndex((h) => /activity\s*id/i.test(String(h || '')));
+  }
+
+  /**
+   * The P6 names for the activities a view names, and the reasons a row may give
+   * instead — read once per view, and only the IDs on it, never the whole list.
+   * Null where the sheet has no Activity ID column. A database without the P6
+   * tables simply has no names to give.
+   */
+  function p6Chooser() {
+    const seen = new WeakMap();
+    return (view) => {
+      if (!seen.has(view)) {
+        seen.set(view, (async () => {
+          const col = activityIdColumn(view);
+          if (col < 0) return null;
+          const ids = [...new Set(view.activities.filter((a) => !a.heading && !a.absence)
+            .map((a) => String(a.meta[col] || '').trim()).filter(Boolean))];
+          const [entries, flags] = await Promise.all([
+            ids.length ? rc.p6ActivitiesByIds(ids).catch(() => []) : [],
+            rc.listP6Flags({ includeRetired: true }).catch(() => []),
+          ]);
+          return { col, index: p6Index(entries, flags), names: new Map(entries.map((e) => [e.activity_id, e.name])) };
+        })());
+      }
+      return seen.get(view);
+    };
   }
 
   /**
@@ -15459,24 +17069,24 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    *
    * The past is dropped rather than scrolled past: this sheet carries a quarter
    * of finished weeks to the left of today, and a look-ahead that opens on
-   * March is not a look-ahead. "Everything" is one click away for the times the
-   * question really is what happened.
+   * March is not a look-ahead. The window pages back and forward a week at a
+   * time from this one (`start`, a Monday), and "Everything" is one click away
+   * for the times the question really is what happened.
    *
    * If the dates could not be resolved — the weekday letters did not agree —
    * nothing is narrowed, because narrowing on a reading that might be a year out
-   * would hide real work. Same if the window turns out to be empty: a calendar
-   * showing nothing is not an answer.
+   * would hide real work. Same if this week's window turns out to be empty: a
+   * calendar showing nothing is not an answer. A window somebody paged to is
+   * shown as it is, empty or not — falling back to the whole sheet there would
+   * look like the buttons doing something else.
    */
-  function windowed(view, today, weeks = la.calendarWeeks) {
+  function windowed(view, today, weeks = la.calendarWeeks, start = la.calendarStart) {
     const narrowed = (() => {
       if (!weeks || !view.days.some((d) => d.date)) return view.days;
-      const ms = new Date(`${today}T00:00:00Z`).getTime();
-      const monday = ms - ((new Date(ms).getUTCDay() + 6) % 7) * 86400000;
-      const from = new Date(monday).toISOString().slice(0, 10);
-      const to = new Date(monday + (weeks * 7 - 1) * 86400000).toISOString().slice(0, 10);
+      const from = start || mondayOf(today);
+      const to = addDaysISO(from, weeks * 7 - 1);
       const days = view.days.filter((d) => !d.date || (d.date >= from && d.date <= to));
-      // A window with nothing in it is not an answer; fall back to the sheet.
-      return days.length ? days : view.days;
+      return days.length || start ? days : view.days;
     })();
 
     /* Whether a row has anything scheduled is a question about *the weeks on
@@ -15515,7 +17125,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * that was itself kept. That second clause is the parent case, and dropping it
    * would throw away the outer level of every section that has rows.
    */
-  function drawn(view, filter, showQuiet, withResources = la.showResources, isMe = null) {
+  function drawn(view, filter, showQuiet, withResources = la.showResources, isMe = null, p6Names = null) {
     const terms = String(filter || '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean);
     let rows = view.activities;
 
@@ -15574,9 +17184,12 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       rows = rows.filter((a) => {
         /* The names on the Resource row are part of the haystack: looking for
            where somebody is this week is one of the two reasons anybody types in
-           this box, and it would find nothing if only the activity line counted. */
+           this box, and it would find nothing if only the activity line counted.
+           So is the P6 name of the activity a row names, which the row itself
+           may word differently. */
         const hay = [...a.meta, ...(a.resource?.marks || []).map((m) => m.value),
-          ...(a.absence ? a.marks.map((m) => m.value) : [])]
+          ...(a.absence ? a.marks.map((m) => m.value) : []),
+          ...(p6Names ? a.meta.map((v) => p6Names.get(String(v || '').trim()) || '') : [])]
           .join(' ').toLowerCase();
         return terms.some((t) => hay.includes(t));
       });
@@ -15629,8 +17242,12 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     });
   }
 
-  /** The grid itself. Split out so the filter can redraw it without the header. */
-  function grid_(view, today, isMe = null, snapshotId = null, notes = []) {
+  /**
+   * The grid itself. Split out so the filter can redraw it without the header.
+   * `p6` (from `p6Chooser()`) names the P6 activity an Activity ID points at,
+   * on its hover, and marks a reason given instead.
+   */
+  function grid_(view, today, isMe = null, snapshotId = null, notes = [], p6 = null) {
     const rows = view.activities;
 
     /* The month band. Each label spans its own run of days, which is what the
@@ -15708,16 +17325,25 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       return el('tr', {
       class: klass,
     }, [
-      ...meta.map((value, i) => el('td', {
-        class: 'la-meta' + (i === meta.length - 1 ? ' la-last' : '') + (open ? ' la-openable' : ''),
-        text: value,
-        title: open ? `${value}${value ? ' — ' : ''}open the whole activity` : value,
-        // The first column is the one keyboard stop for the row.
-        tabindex: open && i === 0 ? '0' : null,
-        role: open && i === 0 ? 'button' : null,
-        onClick: open || null,
-        onKeydown: open && i === 0 ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } } : null,
-      })),
+      ...meta.map((value, i) => {
+        /* The Activity ID says which P6 activity it is, or why there is none.
+           An ID the list does not have is left saying only itself: this view
+           reads the IDs on screen, not the whole list, so it cannot tell a typo
+           from an import nobody has run. */
+        const status = p6 && open && i === p6.col ? p6Status(value, p6.index) : null;
+        const said = status && (status.kind === 'linked' || status.kind === 'flagged') ? p6Words(value, status) : value;
+        return el('td', {
+          class: 'la-meta' + (i === meta.length - 1 ? ' la-last' : '') + (open ? ' la-openable' : '')
+            + (status?.kind === 'flagged' ? ' la-p6-flag' : ''),
+          text: value,
+          title: open ? `${said}${said ? ' — ' : ''}open the whole activity` : value,
+          // The first column is the one keyboard stop for the row.
+          tabindex: open && i === 0 ? '0' : null,
+          role: open && i === 0 ? 'button' : null,
+          onClick: open || null,
+          onKeydown: open && i === 0 ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } } : null,
+        });
+      }),
       ...view.days.map((d) => {
         const mark = marks.get(d.col);
         const classes = ['la-day'];
@@ -15930,7 +17556,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * answers — a bigger sheet, fewer weeks, the names off — are all in this
    * dialog.
    */
-  function exportDialog({ view, legendRows, today, sheetName, isMe = null }) {
+  function exportDialog({ viewFor, p6Of, legendRows, today, sheetName, isMe = null }) {
     const weeks = selectInput({
       value: String(la.calendarWeeks || 0),
       options: [
@@ -15963,13 +17589,17 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     const on = (box) => box.querySelector('input').checked;
     const readout = el('p', { class: 'rc-hint' });
 
-    /* What is actually going to be drawn, from the same two functions the screen
-       draws through — so the export cannot show a different set of rows from the
-       grid it was started from. */
-    const chosen = () => {
-      const narrowed = windowed(view, today, Number(weeks.value) || 0);
+    /* What is actually going to be drawn, from the same functions the screen
+       draws through — the same view for the same weeks, from the Monday on
+       screen — so the export cannot show a different set of rows from the grid
+       it was started from. */
+    const chosen = async () => {
+      const count = Number(weeks.value) || 0;
+      const source = await viewFor(count, la.calendarStart);
+      const p6 = await p6Of(source);
+      const narrowed = windowed(source, today, count);
       const rows = drawn(narrowed, on(withFilter) ? la.calendarFilter : '', on(withQuiet), on(withResources),
-        withMine && on(withMine) ? isMe : null);
+        withMine && on(withMine) ? isMe : null, p6?.names);
       return {
         view: rows,
         opts: {
@@ -15987,14 +17617,25 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
           title: title.value.trim() || 'Look-ahead',
           subtitle: [
             `${sheetName || '4WLA'}`,
-            Number(weeks.value) ? `${weeks.value} weeks from ${dayLabel(today, 'medium')}` : 'whole sheet',
+            count ? `${count} weeks from ${dayLabel(la.calendarStart || mondayOf(today), 'medium')}` : 'whole sheet',
           ].join('  ·  '),
         },
       };
     };
 
-    const refresh = () => {
-      const { view: shown, opts } = chosen();
+    let asked = 0;
+    const refresh = async () => {
+      const mine = ++asked;
+      let picked;
+      try {
+        picked = await chosen();
+      } catch (err) {
+        readout.className = 'rc-hint rc-warn';
+        readout.textContent = `Those weeks could not be read — ${err.message}`;
+        return;
+      }
+      if (mine !== asked) return;
+      const { view: shown, opts } = picked;
       if (!shown.activities.length) {
         readout.className = 'rc-hint rc-warn';
         readout.textContent = 'Nothing to draw with those choices — widen the weeks, or bring the '
@@ -16040,7 +17681,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       ].filter(Boolean)),
       confirmLabel: 'Export PDF',
       onConfirm: async () => {
-        const { view: shown, opts } = chosen();
+        const { view: shown, opts } = await chosen();
         if (!shown.activities.length) throw new Error('There is nothing to draw with those choices.');
         const blob = calendarPdf(shown, opts);
         const whose = withMine && on(withMine) ? `-${foldName(rc.me()?.name || 'mine') || 'mine'}` : '';

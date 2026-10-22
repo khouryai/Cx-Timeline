@@ -2828,6 +2828,124 @@ grant select, insert on public.rc_la_seen to authenticated;
 grant usage on sequence public.rc_la_seen_id_seq to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════
+-- P6 activities: the schedule's IDs, for the look-ahead's rows to name
+--
+-- The look-ahead's first column is the Activity ID, and the IDs are P6's. They
+-- used to be typed by hand, so a row with a typo in it joined to nothing and
+-- looked exactly like one that did. The schedule's own list is kept here,
+-- imported from whatever extract the scheduler sends (Look-ahead → P6
+-- activities), and the editor offers it as the column is typed into.
+--
+-- A row names an activity by writing its ID — several rows may name one — and
+-- nothing here points back at the rows, so importing never touches the
+-- look-ahead and a row is never broken by an import. An activity a later
+-- extract leaves out is marked `missing`, never deleted: a row may still name
+-- it, and its name is still the best description of what that row was.
+--
+-- A row with no P6 activity says why instead, with a reason from
+-- `rc_p6_flags` — Troubleshooting, Regression, Support — written in the same
+-- column. The list is the team's to read and an administrator's to keep, and a
+-- reason is retired rather than deleted: rows already flagged with it keep
+-- saying so.
+-- ══════════════════════════════════════════════════════════════════════════
+
+create table if not exists public.rc_p6_activities (
+  activity_id text primary key check (btrim(activity_id) <> ''),
+  name        text not null default '',
+  wbs         text not null default '',
+  missing     boolean not null default false,
+  -- Which import last saw it; the one that sees it no longer marks it missing.
+  import_id   uuid,
+  imported_at timestamptz not null default now(),
+  imported_by uuid references auth.users(id) on delete set null
+);
+
+create table if not exists public.rc_p6_flags (
+  id         uuid primary key default gen_random_uuid(),
+  label      text not null check (btrim(label) <> '' and char_length(label) <= 60),
+  active     boolean not null default true,
+  sort       integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+-- One spelling per reason: a row is matched to it in any case.
+create unique index if not exists rc_p6_flags_label_idx on public.rc_p6_flags (lower(btrim(label)));
+
+insert into public.rc_p6_flags (label, sort)
+select v.label, v.sort from (values
+  ('Troubleshooting', 10),
+  ('Regression', 20),
+  ('Support', 30)
+) as v(label, sort)
+where not exists (select 1 from public.rc_p6_flags where lower(btrim(label)) = lower(v.label));
+
+alter table public.rc_p6_activities enable row level security;
+alter table public.rc_p6_flags      enable row level security;
+
+-- Both are the team's to read, as the look-ahead that names them is.
+drop policy if exists rc_p6_activities_read on public.rc_p6_activities;
+create policy rc_p6_activities_read on public.rc_p6_activities for select to authenticated using (true);
+drop policy if exists rc_p6_flags_read on public.rc_p6_flags;
+create policy rc_p6_flags_read on public.rc_p6_flags for select to authenticated using (true);
+drop policy if exists rc_p6_flags_write on public.rc_p6_flags;
+create policy rc_p6_flags_write on public.rc_p6_flags for all to authenticated
+  using ((select public.rc_is_admin())) with check ((select public.rc_is_admin()));
+
+-- The activities are written only by `rc_p6_import()`; the reasons are added,
+-- edited and retired, never deleted.
+revoke all on public.rc_p6_activities from public, anon, authenticated;
+revoke all on public.rc_p6_flags      from public, anon, authenticated;
+grant select on public.rc_p6_activities to authenticated;
+grant select, insert, update on public.rc_p6_flags to authenticated;
+
+-- One batch of an extract. Every activity in it is written — new ones added,
+-- names and WBS brought up to date, a missing one found again — stamped with
+-- the import it came in; the last batch (`p_finish`) then marks every activity
+-- that import did not see as missing. In batches, so a schedule of ten
+-- thousand activities never has to be one request, and an administrator's
+-- alone: refused with a reason, never by matching nothing.
+create or replace function public.rc_p6_import(p_import uuid, p_rows jsonb, p_finish boolean default false)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_written integer := 0;
+  v_missing integer := 0;
+begin
+  if not public.rc_is_admin() then
+    raise exception 'only an administrator may import P6 activities' using errcode = '42501';
+  end if;
+  if p_import is null then
+    raise exception 'an import needs an id, shared by its batches';
+  end if;
+
+  insert into public.rc_p6_activities as a (activity_id, name, wbs, missing, import_id, imported_at, imported_by)
+  select distinct on (btrim(r->>'activity_id'))
+         btrim(r->>'activity_id'), btrim(coalesce(r->>'name', '')), btrim(coalesce(r->>'wbs', '')),
+         false, p_import, now(), auth.uid()
+    from jsonb_array_elements(coalesce(p_rows, '[]'::jsonb)) as r
+   where btrim(coalesce(r->>'activity_id', '')) <> ''
+  on conflict (activity_id) do update
+     set name = excluded.name, wbs = excluded.wbs, missing = false,
+         import_id = excluded.import_id, imported_at = excluded.imported_at, imported_by = excluded.imported_by;
+  get diagnostics v_written = row_count;
+
+  if p_finish then
+    update public.rc_p6_activities set missing = true
+     where import_id is distinct from p_import and not missing;
+    get diagnostics v_missing = row_count;
+  end if;
+
+  return jsonb_build_object('written', v_written, 'missing', v_missing);
+end;
+$$;
+
+revoke all on function public.rc_p6_import(uuid, jsonb, boolean) from public, anon;
+grant execute on function public.rc_p6_import(uuid, jsonb, boolean) to authenticated;
+
+-- ══════════════════════════════════════════════════════════════════════════
 -- Track access work requests (TAWRs)
 --
 -- BART's System Access / Track Allocation Work Request, one per location and
@@ -3144,5 +3262,5 @@ create index if not exists rc_la_seen_snapshot_id_fk_idx on public.rc_la_seen (s
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '11')
+insert into public.rc_settings (key, value) values ('schema_version', '12')
 on conflict (key) do update set value = excluded.value, updated_at = now();

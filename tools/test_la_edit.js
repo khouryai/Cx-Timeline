@@ -914,6 +914,163 @@ console.log('\nReading a look-ahead longer than one page');
   delete globalThis.window;
 }
 
+console.log('\nP6 activities');
+{
+  const p6 = await import(path.join(ROOT, 'src/core/la_p6.js'));
+  const xw = await import(path.join(ROOT, 'src/io/xlsx_write.js'));
+
+  check('a heading is folded the way P6 and Excel write it',
+    p6.foldP6('(*)Activity  ID') === 'activity id' && p6.foldP6('task_code') === 'task code' && p6.foldP6('Réglage') === 'reglage');
+
+  // A layout export: a title and a filter line above the headings, WBS bands, a
+  // repeated heading under each group, and an ID written twice.
+  const layout = [
+    ['Line 1 — Commissioning schedule'],
+    ['Filter: all activities'],
+    [],
+    ['Activity ID', 'Activity Name', 'Original Duration', 'WBS'],
+    ['L1.PH2', '', '', ''],
+    ['CX-1040', 'IXL Regression Testing', '5', 'L1.PH2.IXL'],
+    ['Activity ID', 'Activity Name', '', ''],
+    ['CX-1041', '  ATS   Site Test ', '3', 'L1.PH2.ATS'],
+    ['CX-1040', 'IXL Regression Testing (again)', '5', 'L1.PH2.IXL'],
+    ['', '', '', ''],
+  ];
+  const read = p6.readP6Rows(layout);
+  check('the header row is found under the title P6 puts above it', read.headerRow === 3 && read.mapping.wbs === 3,
+    JSON.stringify({ at: read.headerRow, mapping: read.mapping }));
+  check('every activity is read once, by its ID, with its name and WBS',
+    read.activities.length === 2 && read.activities[1].name === 'ATS Site Test' && read.activities[0].wbs === 'L1.PH2.IXL',
+    JSON.stringify(read.activities));
+  check('a group band — an ID with no name — is left out and counted, and a repeated heading skipped',
+    read.unnamed === 1 && !read.activities.some((a) => /activity id/i.test(a.activity_id)), read.warnings.join(' | '));
+  check('an ID written twice keeps its first name and says so',
+    read.duplicates.join() === 'CX-1040' && read.activities[0].name === 'IXL Regression Testing' && /more than once/.test(read.warnings.join(' ')));
+  check('a sheet with no Activity ID and Activity Name columns says what it looked for',
+    p6.readP6Rows([['ID', 'Start'], ['1', 'x']]).headerRow === -1
+      && /Activity ID/.test(p6.readP6Rows([['Code', 'Start']]).warnings[0]));
+  check('"Activity Code" is never read as the ID — in P6 it is a classification',
+    p6.mapP6Columns(['Activity Code', 'Activity Name', 'Activity ID']).activity_id === 2);
+
+  // P6's own spreadsheet export: the database names, then the labels under them.
+  const exportRows = [['task_code', 'status_code', 'task_name', 'wbs_id'], ['Activity ID', 'Activity Status', 'Activity Name', 'WBS Code'],
+    ['A1000', 'Not Started', 'Energise TPSS 12', 'L1.TP']];
+  const fromExport = p6.readP6Rows(exportRows);
+  check('P6\'s own export is read by its field names, the labels under them skipped',
+    fromExport.activities.length === 1 && fromExport.activities[0].activity_id === 'A1000' && fromExport.activities[0].wbs === 'L1.TP',
+    JSON.stringify(fromExport.activities));
+
+  const csv = '﻿Activity ID;Activity Name;WBS\r\nCX-1;"Pull cable; bay 3";L1\r\nCX-2;"Test ""as built""\nsecond line";L1\r\n';
+  const table = p6.splitTable(csv);
+  check('a delimited file is split on what it uses — semicolons here — with quoted fields whole',
+    table.length === 3 && table[1][1] === 'Pull cable; bay 3' && table[2][1] === 'Test "as built"\nsecond line' && table[0][0] === 'Activity ID',
+    JSON.stringify(table));
+  check('and a tab beats a comma in a name', p6.splitTable('Activity ID\tActivity Name\nX-1\tTest, retest\n')[1][1] === 'Test, retest');
+
+  const xer = ['ERMHDR\t19.12', '%T\tPROJWBS', '%F\twbs_id\tproj_node_flag\twbs_short_name\twbs_name\tparent_wbs_id',
+    '%R\t10\tY\tL1\tLine 1\t', '%R\t11\tN\tPH2\tPhase 2\t10', '%R\t12\tN\tIXL\tInterlocking\t11',
+    '%T\tTASK', '%F\ttask_id\twbs_id\ttask_code\ttask_name', '%R\t900\t12\tCX-1040\tIXL Regression Testing',
+    '%R\t901\t11\tCX-1041\tATS Site Test', '%E'].join('\r\n');
+  const fromXer = p6.readXer(xer);
+  check('an .xer is read from its TASK table, with the WBS written out as P6 shows its code',
+    fromXer.activities.length === 2 && fromXer.activities[0].activity_id === 'CX-1040' && fromXer.activities[0].wbs === 'L1.PH2.IXL'
+      && fromXer.activities[1].wbs === 'L1.PH2', JSON.stringify(fromXer.activities));
+  check('an .xer with no TASK table says so', /TASK/.test(p6.readXer('%T\tPROJECT\n%F\tproj_id\n%R\t1\n').warnings[0]));
+
+  // A workbook, read through the same parser that reads the look-ahead.
+  const cellXml = (r, values) => `<row r="${r}">${values.map((v, i) => (v === '' ? ''
+    : `<c r="${ed.colLetters(i + 1)}${r}" t="inlineStr"><is><t>${xw.xmlEscape(v)}</t></is></c>`)).join('')}</row>`;
+  const sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+    + layout.map((values, i) => cellXml(i + 1, values)).join('') + '</sheetData></worksheet>';
+  const bytes = xw.zipStore(xw.workbookParts({ sheetName: 'TASK', sheetXml, stylesXml: xw.styleBook().xml() }));
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const fromBook = p6.readP6Rows(p6.gridRows(la.parseSheet(buffer, 'TASK')));
+  check('a workbook\'s sheet reads the same as the rows it holds',
+    JSON.stringify(fromBook.activities) === JSON.stringify(read.activities), JSON.stringify(fromBook.activities));
+  check('what kind of file an extract is, by its name',
+    p6.p6FileKind('Schedule.XLSX') === 'xlsx' && p6.p6FileKind('a.xer') === 'xer' && p6.p6FileKind('a.csv') === 'text'
+      && p6.p6FileKind('a.xls') === null);
+
+  const register = [
+    { activity_id: 'CX-1040', name: 'IXL Regression Testing', wbs: 'L1.PH2.IXL' },
+    { activity_id: 'CX-1041', name: 'ATS Site Test', wbs: '' },
+    { activity_id: 'CX-2000', name: 'Traction power', wbs: '', missing: true },
+    { activity_id: 'CX-3000', name: 'Cable pull', wbs: '' },
+  ];
+  const diff = p6.p6Diff(register, [
+    { activity_id: 'CX-1040', name: 'IXL Regression Testing, Phase 2', wbs: 'L1.PH2.IXL' },
+    { activity_id: 'CX-1041', name: 'ATS Site Test', wbs: '' },
+    { activity_id: 'CX-2000', name: 'Traction power', wbs: '' },
+    { activity_id: 'CX-5000', name: 'New one', wbs: '' },
+  ]);
+  check('an import is described before it is made: new, renamed, back, unchanged — and left out',
+    diff.added.map((a) => a.activity_id).join() === 'CX-5000' && diff.changed.map((a) => a.activity_id).join() === 'CX-1040'
+      && diff.changed[0].from === 'IXL Regression Testing' && diff.back.map((a) => a.activity_id).join() === 'CX-2000'
+      && diff.unchanged === 1 && diff.missing.map((a) => a.activity_id).join() === 'CX-3000', JSON.stringify(diff));
+
+  const many = [
+    ...register,
+    { activity_id: 'CX-104', name: 'Something else', wbs: '' },
+    { activity_id: 'B-1', name: 'Regression of IXL software', wbs: 'L1.PH3' },
+    { activity_id: 'Q-9', name: 'Old IXL regression', wbs: '', missing: true },
+  ];
+  const ids = (list) => list.map((e) => e.activity_id).join(',');
+  check('every word typed is found somewhere, in any order', ids(p6.searchP6(many, 'regression ixl')).split(',').sort().join() === 'B-1,CX-1040,Q-9',
+    ids(p6.searchP6(many, 'regression ixl')));
+  check('an activity the latest extract left out comes after the rest', ids(p6.searchP6(many, 'regression ixl')).endsWith('Q-9'));
+  check('the ID found with its punctuation gone', ids(p6.searchP6(many, 'cx1040')) === 'CX-1040');
+  check('the ID typed whole comes first, then IDs that start with it',
+    ids(p6.searchP6(many, 'CX-104')).startsWith('CX-104,CX-1040,CX-1041'), ids(p6.searchP6(many, 'CX-104')));
+  check('a name whose words start with what is typed beats a match inside a word',
+    ids(p6.searchP6([{ activity_id: 'Z1', name: 'Pretesting', wbs: '' }, { activity_id: 'Z2', name: 'Test run', wbs: '' }], 'test')) === 'Z2,Z1');
+  check('nothing typed finds nothing', p6.searchP6(many, '  ').length === 0);
+  check('and the list is cut where it is asked to be', p6.searchP6(many, 'c', { limit: 2 }).length === 2);
+
+  const flags = [
+    { id: 'f1', label: 'Troubleshooting', active: true },
+    { id: 'f2', label: 'Regression', active: true },
+    { id: 'f3', label: 'Retired reason', active: false },
+  ];
+  check('the reasons that fit what is typed, never a retired one',
+    p6.matchFlags(flags, 'trou').map((f) => f.id).join() === 'f1' && p6.matchFlags(flags, '').length === 2
+      && p6.matchFlags(flags, 'retired').length === 0);
+
+  const index = p6.p6Index([...register, { activity_id: 'ab-1', name: 'Lower', wbs: '' }, { activity_id: 'AB-1', name: 'Upper', wbs: '' }], flags);
+  const kind = (v) => p6.p6Status(v, index).kind;
+  check('an Activity ID is a P6 activity, a reason, neither, or nothing',
+    kind('CX-1040') === 'linked' && kind(' troubleshooting ') === 'flagged' && kind('CDRL 9.04.29') === 'unknown' && kind('  ') === 'empty');
+  check('an ID typed in another case is the same activity, while only one has it',
+    p6.p6Status('cx-1041', index).entry?.activity_id === 'CX-1041' && kind('Ab-1') === 'unknown' && p6.p6Status('AB-1', index).entry?.name === 'Upper');
+  check('a retired reason still says what a row flagged with it means', kind('retired reason') === 'flagged');
+  check('what is written is the list\'s own spelling, or what was typed',
+    p6.p6Canonical(' cx-1040 ', index) === 'CX-1040' && p6.p6Canonical('REGRESSION', index) === 'Regression'
+      && p6.p6Canonical(' TBD ', index) === 'TBD');
+
+  const rows = [
+    ed.blankRow('section', { description: 'W40' }),
+    ed.blankRow('activity', { activity_id: 'CX-1040' }),
+    ed.blankRow('activity', { activity_id: 'cx-1040' }),
+    ed.blankRow('activity', { activity_id: 'Regression' }),
+    ed.blankRow('activity', { activity_id: 'CDRL 9.04.29' }),
+    ed.blankRow('activity', { activity_id: '' }),
+    ed.blankRow('activity', { activity_id: '', archived: true }),
+    ed.blankRow('resource', {}),
+  ];
+  const coverage = p6.p6Coverage(rows, index);
+  check('how the look-ahead stands: linked, flagged, neither, nothing — archived rows off the count',
+    coverage.activities === 5 && coverage.linked === 2 && coverage.flagged === 1 && coverage.unknown === 1 && coverage.empty === 1,
+    JSON.stringify({ ...coverage, uses: [...coverage.uses], byFlag: [...coverage.byFlag] }));
+  check('and how many rows name each activity and each reason — several may name one',
+    coverage.uses.get('CX-1040') === 2 && coverage.byFlag.get('Regression') === 1);
+
+  check('a row and a cell as the server answers them, in the model\'s shape',
+    ed.cleanRow({ id: 'r', kind: 'activity', sort: '2048', level: null, archived: 0 }).sort === 2048
+      && ed.cleanRow({ id: 'r', kind: 'activity' }).archived === false
+      && ed.cleanCell({ row_id: 'r', day: '2026-10-05T00:00:00', color: 'ffff00' }).color === 'FFFF00'
+      && ed.cleanCell({ row_id: 'r', day: '2026-10-05T00:00:00' }).day === '2026-10-05');
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

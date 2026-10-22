@@ -20,7 +20,9 @@ import { notifyChanged, todayISO, isoToMs, nameRegister, foldName } from './rc_u
 import { toISO, addDays } from '../core/dates.js';
 
 import { la } from './rc_la_state.js';
-import { gridFromModel, windowDays, addDaysISO, mondayOf, SECTION_BAND } from '../core/la_edit.js';
+import {
+  gridFromModel, windowDays, addDaysISO, mondayOf, SECTION_BAND, makeModel, cleanRow, cleanCell,
+} from '../core/la_edit.js';
 import { hash64 } from '../core/folder_rules.js';
 
 /** Where the workbook lives, relative to the folder the plan is in. */
@@ -239,6 +241,39 @@ export async function publishFromEditor({ model, title = '', silent = true } = {
     file_mtime: new Date().toISOString(),
   };
   return publishGrid({ grid, legend, declared: [], hash, run, previous, silent, notify: false });
+}
+
+/**
+ * The look-ahead as written in the editor, for days no reading covers.
+ *
+ * A reading covers the week just gone and the five ahead, and the editor's
+ * tables hold every day ever written — so paging the calendar back past the
+ * reading, or asking it for everything, is answered from those. Drawn through
+ * the steps a publish takes — `gridFromModel()`, the legend, `readGrid()` — so
+ * a week drawn this way and the same week drawn from a reading are one picture
+ * (archived rows are off both). Nothing is stored: it is a view, and the
+ * reading is still what every other screen reads.
+ *
+ * @param {string} fromISO
+ * @param {string} toISO
+ * @param {any[]} legendRows  `rc.listLegend()`, as the reading is drawn against.
+ */
+export async function writtenView(fromISO, toISO, legendRows) {
+  const [rows, cells, settings] = await Promise.all([
+    rc.listLaRows(),
+    rc.listLaCells(fromISO, toISO),
+    rc.listSettings().catch(() => []),
+  ]);
+  const days = [];
+  for (let d = fromISO; d <= toISO; d = addDaysISO(d, 1)) days.push(d);
+  const legend = (legendRows || []).map((r) => ({ argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
+  // The band is how a heading is told from work; a publish puts it in the register the first time.
+  if (!legend.some((e) => String(e.argb).toUpperCase() === SECTION_BAND)) {
+    legend.push({ argb: SECTION_BAND, meaning: 'Section band', role: 'divider', valid_from: '' });
+  }
+  const title = settings.find((r) => r.key === 'lookahead_title')?.value || '';
+  const grid = applyLegend(gridFromModel(makeModel(rows.map(cleanRow), cells.map(cleanCell)), days, { title }), legend);
+  return { ...readGrid(grid, { anchorISO: fromISO }), unknown: grid.unknown || [] };
 }
 
 /**

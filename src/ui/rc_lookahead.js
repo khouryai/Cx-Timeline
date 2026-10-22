@@ -15,7 +15,7 @@
  * showing a smooth history that is not true.
  *
  * Imports: util, events, dates, rc, filestore, io/lookahead, core/lookahead,
- *          icons, components, rc_util.
+ *          core/la_edit, core/la_p6, icons, components, rc_util.
  */
 
 import { el, clear } from '../core/util.js';
@@ -27,6 +27,8 @@ import {
   marksOf, ABSENCE_LABELS, isCancelMeaning, rowsNaming, resourceNames, cancellationNoteFor,
   cancellationReasonText,
 } from '../core/lookahead.js';
+import { mondayOf, addDaysISO } from '../core/la_edit.js';
+import { p6Index, p6Status } from '../core/la_p6.js';
 import { icon } from './icons.js';
 import { selectInput, textInput, toast, emptyState, field, checkbox } from './components.js';
 import {
@@ -35,15 +37,16 @@ import {
 } from './rc_util.js';
 
 import { la, WEEK_CHOICES } from './rc_la_state.js';
-import { checkNowButton, lookaheadSource, EDITOR_SOURCE } from './rc_ingest.js';
+import { checkNowButton, lookaheadSource, EDITOR_SOURCE, writtenView } from './rc_ingest.js';
 import { renderEditor, flushEditor, openExcelExport } from './rc_la_editor.js';
 import { renderLegend } from './rc_la_legend.js';
 import { renderChanges, renderSnapshots } from './rc_la_changes.js';
 import { renderCancellations } from './rc_la_cancellations.js';
 import { renderSars } from './rc_la_sars.js';
+import { renderP6, p6Words } from './rc_la_p6.js';
 import { openActivity } from './rc_activity.js';
 
-const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'sars'];
+const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6', 'sars'];
 
 export async function render(root) {
   /* The calendar is the team's; the register around it is not.
@@ -73,7 +76,7 @@ export async function render(root) {
       type: 'button',
       text: {
         calendar: 'Calendar', cancellations: 'Cancellations', changes: 'Changes',
-        snapshots: 'Snapshots', legend: 'Legend', sars: 'Site access',
+        snapshots: 'Snapshots', legend: 'Legend', p6: 'P6 activities', sars: 'Site access',
       }[id],
       'aria-pressed': String(id === la.section),
       onClick: async () => {
@@ -97,6 +100,7 @@ export async function render(root) {
   else if (la.section === 'changes') await renderChanges(host);
   else if (la.section === 'snapshots') await renderSnapshots(host);
   else if (la.section === 'legend') await renderLegend(host);
+  else if (la.section === 'p6') await renderP6(host);
   else await renderSars(host);
 }
 
@@ -211,7 +215,6 @@ async function renderCalendar(host) {
      `parsedView()`. The snapshot's own timestamp is what pins the axis to a
      year (`datePlease()`); the weekday letters on the sheet then check it. */
   const view = parsedView(snapshot, legendRows);
-  const grid = { unknown: view.unknown };
 
   if (!view.days.length) {
     host.appendChild(emptyState({
@@ -275,13 +278,71 @@ async function renderCalendar(host) {
   };
   drawRange();
 
+  /* Which weeks can be shown: the reading's, and — once the look-ahead is
+     written here — every week anything was ever written in. A reading covers
+     only the week just gone and the five ahead, so "Everything" used to stop a
+     week back; the weeks before it are drawn from what the editor holds. */
+  const reading = readingSpan(view);
+  const reach = await reachOf(reading, written);
+  const viewFor = viewChooser({ view, reading, reach, written, legendRows, today });
+  const p6Of = p6Chooser();
+
+  /* Back and forward a week at a time, as Edit does, and back to this week. */
+  const pager = el('div', { class: 'la-pager' });
+  const turn = (delta) => {
+    const next = addDaysISO(la.calendarStart || mondayOf(today), delta);
+    la.calendarStart = next === mondayOf(today) ? null : next;
+    draw();
+  };
+  const drawPager = (days) => {
+    clear(pager);
+    const all = !la.calendarWeeks;
+    const start = la.calendarStart || mondayOf(today);
+    const dates = days.filter((d) => d.date).map((d) => d.date);
+    pager.append(
+      pagerButton('chevron-left', 'Previous week', all || !reach.first || start <= mondayOf(reach.first), () => turn(-7)),
+      el('button', {
+        class: 'cx-btn mini ghost', type: 'button', text: 'This week',
+        title: 'Start the window on this week\'s Monday', disabled: all || !la.calendarStart,
+        onClick: () => { la.calendarStart = null; draw(); },
+      }),
+      pagerButton('chevron-right', 'Next week', all || !reach.last || addDaysISO(start, 7) > reach.last, () => turn(7)),
+      el('span', {
+        class: 'la-pager-range',
+        text: dates.length ? `${dayLabel(dates[0], 'medium')} – ${dayLabel(dates[dates.length - 1], 'medium')}` : '',
+      }),
+    );
+  };
+
   const body = el('div');
-  const draw = () => {
+  let drawing = 0;
+  const draw = async () => {
+    const turnNo = ++drawing;
+    let source = view;
+    try {
+      source = await viewFor(la.calendarWeeks, la.calendarStart);
+    } catch (err) {
+      rc.reportError('lookahead:past-weeks', err);
+      toast({ tone: 'bad', message: `The weeks before the reading could not be read — ${err.message}`, timeout: 10000 });
+    }
+    const p6 = await p6Of(source);
+    if (turnNo !== drawing) return;
     clear(body);
+    /* Said whenever the weeks on screen were drawn from the editor rather than
+       from a reading: a reading is evidence of what the look-ahead said that
+       day, and this is what it says now. */
+    if (source !== view) {
+      body.appendChild(el('p', {
+        class: 'rc-hint la-written-note',
+        text: 'These weeks are drawn from the look-ahead as it is written now, not from a reading taken at the time.',
+      }));
+    }
     const onlyMine = Boolean(isMe && la.onlyMine);
-    const shown = drawn(windowed(view, today), la.calendarFilter, la.showQuietRows, la.showResources, onlyMine ? isMe : null);
+    const shown = drawn(windowed(source, today), la.calendarFilter, la.showQuietRows, la.showResources,
+      onlyMine ? isMe : null, p6?.names);
+    drawPager(shown.days);
     clear(strip);
-    strip.appendChild(legendStrip(legend, grid.unknown, paintOn(shown)));
+    strip.appendChild(legendStrip(legend, source.unknown, paintOn(shown)));
     if (onlyMine && !shown.activities.length) {
       body.appendChild(emptyState({
         iconName: 'calendar',
@@ -291,7 +352,16 @@ async function renderCalendar(host) {
       }));
       return;
     }
-    body.appendChild(grid_(shown, today, isMe, snapshot.id, notes));
+    if (!shown.days.length) {
+      body.appendChild(emptyState({
+        iconName: 'calendar',
+        title: 'Nothing on the look-ahead in these weeks',
+        message: 'The look-ahead says nothing for the weeks on screen.',
+        action: { label: 'Back to this week', onClick: () => { la.calendarStart = null; draw(); } },
+      }));
+      return;
+    }
+    body.appendChild(grid_(shown, today, isMe, source === view ? snapshot.id : null, notes, p6));
   };
   // Redraw the rows only, never the input: rebuilding the field under the
   // caret is the trap this project has already been bitten by three times.
@@ -302,14 +372,15 @@ async function renderCalendar(host) {
     style: 'display:flex;align-items:center;gap:16px;margin-bottom:10px;flex-wrap:wrap',
   }, [
     el('div', { style: 'flex:1;min-width:240px;max-width:340px' }, [search]),
+    dated ? pager : null,
     dated ? range : null,
     mine,
     quiet,
     resources,
-    /* The whole view, not the windowed one: the dialog picks its own weeks, and
-       handing it what is on screen would quietly cap the export at whatever the
-       range buttons were last set to. */
-    exportButton({ view, legendRows, today, sheetName: snapshot.sheet_name, isMe }),
+    /* What chooses the view, not the view on screen: the dialog picks its own
+       weeks, and handing it what is drawn would quietly cap the export at
+       whatever the range buttons were last set to. */
+    exportButton({ viewFor, p6Of, legendRows, today, sheetName: snapshot.sheet_name, isMe }),
     /* The editor's own export, offered here too: the same workbook in the 4WLA
        layout, built from what the editor holds rather than from this reading.
        Only once the look-ahead is written here — before that, the workbook in
@@ -323,8 +394,98 @@ async function renderCalendar(host) {
     }) : null,
   ].filter(Boolean)));
   host.appendChild(body);
-  draw();
+  await draw();
+}
 
+function pagerButton(name, label, disabled, onClick) {
+  return el('button', {
+    class: 'cx-btn mini ghost icon', type: 'button', 'aria-label': label, title: label,
+    html: icon(name, { size: 14 }), disabled, onClick,
+  });
+}
+
+/** The first and last dated day a reading covers, or nulls where its dates could not be read. */
+function readingSpan(view) {
+  const dates = view.days.filter((d) => d.date).map((d) => d.date);
+  return { first: dates[0] || null, last: dates[dates.length - 1] || null };
+}
+
+/**
+ * How far the calendar can page: the reading's own days, and — once the
+ * look-ahead is written here — from the first day anything was written to the
+ * last. A workbook's reading is the whole sheet, so that is as far as it goes.
+ */
+async function reachOf(reading, written) {
+  let { first, last } = reading;
+  if (written) {
+    const span = await rc.laCellSpan().catch(() => ({ first: null, last: null }));
+    if (span.first && (!first || span.first < first)) first = span.first;
+    if (span.last && (!last || span.last > last)) last = span.last;
+  }
+  return { first, last };
+}
+
+/**
+ * The view to draw a window from: the reading, wherever it covers every day of
+ * the window — which is the four weeks from today, nearly always — and
+ * otherwise the look-ahead as written (`writtenView()`), for the whole window
+ * so one grid never mixes the two. Each window is read once per drawing of the
+ * tab; a newer reading redraws the tab and starts afresh.
+ */
+function viewChooser({ view, reading, reach, written, legendRows, today }) {
+  const made = new Map();
+  return async (weeks, start) => {
+    if (!written || !reading.first) return view;
+    let from;
+    let to;
+    if (!weeks) {
+      if (!reach.first) return view;
+      const firstMonday = mondayOf(reach.first);
+      const lastSunday = addDaysISO(mondayOf(reach.last), 6);
+      from = firstMonday < reading.first ? firstMonday : reading.first;
+      to = lastSunday > reading.last ? lastSunday : reading.last;
+    } else {
+      from = start || mondayOf(today);
+      to = addDaysISO(from, weeks * 7 - 1);
+    }
+    if (from >= reading.first && to <= reading.last) return view;
+    const key = `${from}|${to}`;
+    if (!made.has(key)) {
+      made.set(key, writtenView(from, to, legendRows).catch((err) => { made.delete(key); throw err; }));
+    }
+    return made.get(key);
+  };
+}
+
+/** Which of a view's activity columns is the Activity ID: by its heading, as the sheet writes it. */
+function activityIdColumn(view) {
+  return (view.headings || []).findIndex((h) => /activity\s*id/i.test(String(h || '')));
+}
+
+/**
+ * The P6 names for the activities a view names, and the reasons a row may give
+ * instead — read once per view, and only the IDs on it, never the whole list.
+ * Null where the sheet has no Activity ID column. A database without the P6
+ * tables simply has no names to give.
+ */
+function p6Chooser() {
+  const seen = new WeakMap();
+  return (view) => {
+    if (!seen.has(view)) {
+      seen.set(view, (async () => {
+        const col = activityIdColumn(view);
+        if (col < 0) return null;
+        const ids = [...new Set(view.activities.filter((a) => !a.heading && !a.absence)
+          .map((a) => String(a.meta[col] || '').trim()).filter(Boolean))];
+        const [entries, flags] = await Promise.all([
+          ids.length ? rc.p6ActivitiesByIds(ids).catch(() => []) : [],
+          rc.listP6Flags({ includeRetired: true }).catch(() => []),
+        ]);
+        return { col, index: p6Index(entries, flags), names: new Map(entries.map((e) => [e.activity_id, e.name])) };
+      })());
+    }
+    return seen.get(view);
+  };
 }
 
 /**
@@ -332,24 +493,24 @@ async function renderCalendar(host) {
  *
  * The past is dropped rather than scrolled past: this sheet carries a quarter
  * of finished weeks to the left of today, and a look-ahead that opens on
- * March is not a look-ahead. "Everything" is one click away for the times the
- * question really is what happened.
+ * March is not a look-ahead. The window pages back and forward a week at a
+ * time from this one (`start`, a Monday), and "Everything" is one click away
+ * for the times the question really is what happened.
  *
  * If the dates could not be resolved — the weekday letters did not agree —
  * nothing is narrowed, because narrowing on a reading that might be a year out
- * would hide real work. Same if the window turns out to be empty: a calendar
- * showing nothing is not an answer.
+ * would hide real work. Same if this week's window turns out to be empty: a
+ * calendar showing nothing is not an answer. A window somebody paged to is
+ * shown as it is, empty or not — falling back to the whole sheet there would
+ * look like the buttons doing something else.
  */
-function windowed(view, today, weeks = la.calendarWeeks) {
+function windowed(view, today, weeks = la.calendarWeeks, start = la.calendarStart) {
   const narrowed = (() => {
     if (!weeks || !view.days.some((d) => d.date)) return view.days;
-    const ms = new Date(`${today}T00:00:00Z`).getTime();
-    const monday = ms - ((new Date(ms).getUTCDay() + 6) % 7) * 86400000;
-    const from = new Date(monday).toISOString().slice(0, 10);
-    const to = new Date(monday + (weeks * 7 - 1) * 86400000).toISOString().slice(0, 10);
+    const from = start || mondayOf(today);
+    const to = addDaysISO(from, weeks * 7 - 1);
     const days = view.days.filter((d) => !d.date || (d.date >= from && d.date <= to));
-    // A window with nothing in it is not an answer; fall back to the sheet.
-    return days.length ? days : view.days;
+    return days.length || start ? days : view.days;
   })();
 
   /* Whether a row has anything scheduled is a question about *the weeks on
@@ -388,7 +549,7 @@ function windowed(view, today, weeks = la.calendarWeeks) {
  * that was itself kept. That second clause is the parent case, and dropping it
  * would throw away the outer level of every section that has rows.
  */
-function drawn(view, filter, showQuiet, withResources = la.showResources, isMe = null) {
+function drawn(view, filter, showQuiet, withResources = la.showResources, isMe = null, p6Names = null) {
   const terms = String(filter || '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean);
   let rows = view.activities;
 
@@ -447,9 +608,12 @@ function drawn(view, filter, showQuiet, withResources = la.showResources, isMe =
     rows = rows.filter((a) => {
       /* The names on the Resource row are part of the haystack: looking for
          where somebody is this week is one of the two reasons anybody types in
-         this box, and it would find nothing if only the activity line counted. */
+         this box, and it would find nothing if only the activity line counted.
+         So is the P6 name of the activity a row names, which the row itself
+         may word differently. */
       const hay = [...a.meta, ...(a.resource?.marks || []).map((m) => m.value),
-        ...(a.absence ? a.marks.map((m) => m.value) : [])]
+        ...(a.absence ? a.marks.map((m) => m.value) : []),
+        ...(p6Names ? a.meta.map((v) => p6Names.get(String(v || '').trim()) || '') : [])]
         .join(' ').toLowerCase();
       return terms.some((t) => hay.includes(t));
     });
@@ -502,8 +666,12 @@ function fitToBottom(wrap) {
   });
 }
 
-/** The grid itself. Split out so the filter can redraw it without the header. */
-function grid_(view, today, isMe = null, snapshotId = null, notes = []) {
+/**
+ * The grid itself. Split out so the filter can redraw it without the header.
+ * `p6` (from `p6Chooser()`) names the P6 activity an Activity ID points at,
+ * on its hover, and marks a reason given instead.
+ */
+function grid_(view, today, isMe = null, snapshotId = null, notes = [], p6 = null) {
   const rows = view.activities;
 
   /* The month band. Each label spans its own run of days, which is what the
@@ -581,16 +749,25 @@ function grid_(view, today, isMe = null, snapshotId = null, notes = []) {
     return el('tr', {
     class: klass,
   }, [
-    ...meta.map((value, i) => el('td', {
-      class: 'la-meta' + (i === meta.length - 1 ? ' la-last' : '') + (open ? ' la-openable' : ''),
-      text: value,
-      title: open ? `${value}${value ? ' — ' : ''}open the whole activity` : value,
-      // The first column is the one keyboard stop for the row.
-      tabindex: open && i === 0 ? '0' : null,
-      role: open && i === 0 ? 'button' : null,
-      onClick: open || null,
-      onKeydown: open && i === 0 ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } } : null,
-    })),
+    ...meta.map((value, i) => {
+      /* The Activity ID says which P6 activity it is, or why there is none.
+         An ID the list does not have is left saying only itself: this view
+         reads the IDs on screen, not the whole list, so it cannot tell a typo
+         from an import nobody has run. */
+      const status = p6 && open && i === p6.col ? p6Status(value, p6.index) : null;
+      const said = status && (status.kind === 'linked' || status.kind === 'flagged') ? p6Words(value, status) : value;
+      return el('td', {
+        class: 'la-meta' + (i === meta.length - 1 ? ' la-last' : '') + (open ? ' la-openable' : '')
+          + (status?.kind === 'flagged' ? ' la-p6-flag' : ''),
+        text: value,
+        title: open ? `${said}${said ? ' — ' : ''}open the whole activity` : value,
+        // The first column is the one keyboard stop for the row.
+        tabindex: open && i === 0 ? '0' : null,
+        role: open && i === 0 ? 'button' : null,
+        onClick: open || null,
+        onKeydown: open && i === 0 ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } } : null,
+      });
+    }),
     ...view.days.map((d) => {
       const mark = marks.get(d.col);
       const classes = ['la-day'];
@@ -803,7 +980,7 @@ function legendStrip(legend, unknown, onScreen = null) {
  * answers — a bigger sheet, fewer weeks, the names off — are all in this
  * dialog.
  */
-function exportDialog({ view, legendRows, today, sheetName, isMe = null }) {
+function exportDialog({ viewFor, p6Of, legendRows, today, sheetName, isMe = null }) {
   const weeks = selectInput({
     value: String(la.calendarWeeks || 0),
     options: [
@@ -836,13 +1013,17 @@ function exportDialog({ view, legendRows, today, sheetName, isMe = null }) {
   const on = (box) => box.querySelector('input').checked;
   const readout = el('p', { class: 'rc-hint' });
 
-  /* What is actually going to be drawn, from the same two functions the screen
-     draws through — so the export cannot show a different set of rows from the
-     grid it was started from. */
-  const chosen = () => {
-    const narrowed = windowed(view, today, Number(weeks.value) || 0);
+  /* What is actually going to be drawn, from the same functions the screen
+     draws through — the same view for the same weeks, from the Monday on
+     screen — so the export cannot show a different set of rows from the grid
+     it was started from. */
+  const chosen = async () => {
+    const count = Number(weeks.value) || 0;
+    const source = await viewFor(count, la.calendarStart);
+    const p6 = await p6Of(source);
+    const narrowed = windowed(source, today, count);
     const rows = drawn(narrowed, on(withFilter) ? la.calendarFilter : '', on(withQuiet), on(withResources),
-      withMine && on(withMine) ? isMe : null);
+      withMine && on(withMine) ? isMe : null, p6?.names);
     return {
       view: rows,
       opts: {
@@ -860,14 +1041,25 @@ function exportDialog({ view, legendRows, today, sheetName, isMe = null }) {
         title: title.value.trim() || 'Look-ahead',
         subtitle: [
           `${sheetName || '4WLA'}`,
-          Number(weeks.value) ? `${weeks.value} weeks from ${dayLabel(today, 'medium')}` : 'whole sheet',
+          count ? `${count} weeks from ${dayLabel(la.calendarStart || mondayOf(today), 'medium')}` : 'whole sheet',
         ].join('  ·  '),
       },
     };
   };
 
-  const refresh = () => {
-    const { view: shown, opts } = chosen();
+  let asked = 0;
+  const refresh = async () => {
+    const mine = ++asked;
+    let picked;
+    try {
+      picked = await chosen();
+    } catch (err) {
+      readout.className = 'rc-hint rc-warn';
+      readout.textContent = `Those weeks could not be read — ${err.message}`;
+      return;
+    }
+    if (mine !== asked) return;
+    const { view: shown, opts } = picked;
     if (!shown.activities.length) {
       readout.className = 'rc-hint rc-warn';
       readout.textContent = 'Nothing to draw with those choices — widen the weeks, or bring the '
@@ -913,7 +1105,7 @@ function exportDialog({ view, legendRows, today, sheetName, isMe = null }) {
     ].filter(Boolean)),
     confirmLabel: 'Export PDF',
     onConfirm: async () => {
-      const { view: shown, opts } = chosen();
+      const { view: shown, opts } = await chosen();
       if (!shown.activities.length) throw new Error('There is nothing to draw with those choices.');
       const blob = calendarPdf(shown, opts);
       const whose = withMine && on(withMine) ? `-${foldName(rc.me()?.name || 'mine') || 'mine'}` : '';

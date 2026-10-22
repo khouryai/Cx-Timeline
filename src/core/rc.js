@@ -502,6 +502,7 @@ export async function exportEverything() {
     'rc_categories', 'rc_parties',
     'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries', 'rc_client_errors',
     'rc_la_rows', 'rc_la_cells', 'rc_la_edits', 'rc_support_codes', 'rc_la_seen',
+    'rc_p6_activities', 'rc_p6_flags',
     'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
     'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
     'rc_tawrs', 'rc_tawr_descriptions', 'rc_tawr_settings', 'rc_tawr_profiles',
@@ -582,6 +583,19 @@ export function listLaRows() {
 /** The cells between two dates, both inclusive. */
 export function listLaCells(fromISO, toISO) {
   return selectAll('rc_la_cells', (q) => q.gte('day', fromISO).lte('day', toISO).order('day').order('row_id'));
+}
+
+/**
+ * The first and last day anything is written on the look-ahead: how far the
+ * calendar's read view pages back, and what "Everything" covers once the
+ * look-ahead is written here. Two one-row reads along the day index; null
+ * days when nothing is written at all.
+ */
+export async function laCellSpan() {
+  const edge = (ascending) => select('rc_la_cells', (q) => q.order('day', { ascending }).limit(1), { columns: 'day' })
+    .then((rows) => (rows[0]?.day ? String(rows[0].day).slice(0, 10) : null));
+  const [first, last] = await Promise.all([edge(true), edge(false)]);
+  return { first, last };
 }
 
 /**
@@ -744,6 +758,60 @@ export function listSupportCodes({ includeRetired = false } = {}) {
 export const addSupportCode = (row) => insert('rc_support_codes', [row]).then((r) => r[0]);
 export const updateSupportCode = (id, patch) => update('rc_support_codes', id, patch);
 
+/* ── P6 activities, for the look-ahead's rows to name ─────────────────── */
+
+/** Every activity imported from P6 — thousands of them, so every page. */
+export function listP6Activities() {
+  return selectAll('rc_p6_activities', (q) => q.order('activity_id'));
+}
+
+/**
+ * The activities a reading names, by ID — what the calendar's read view draws
+ * beside them. In slices, because the IDs travel in the URL.
+ */
+export async function p6ActivitiesByIds(ids) {
+  const want = [...new Set((ids || []).filter(Boolean))];
+  const out = [];
+  for (let i = 0; i < want.length; i += 200) {
+    const slice = want.slice(i, i + 200);
+    out.push(...await select('rc_p6_activities', (q) => q.in('activity_id', slice),
+      { columns: 'activity_id,name,wbs,missing' }));
+  }
+  return out;
+}
+
+/** Why a row has no P6 activity: the list a row is flagged from. */
+export function listP6Flags({ includeRetired = false } = {}) {
+  return select('rc_p6_flags', (q) => (includeRetired ? q : q.eq('active', true)).order('sort').order('label'));
+}
+export const addP6Flag = (row) => insert('rc_p6_flags', [row]).then((r) => r[0]);
+export const updateP6Flag = (id, patch) => update('rc_p6_flags', id, patch);
+
+/**
+ * Import an extract's activities, `{ activity_id, name, wbs }`, through
+ * `rc_p6_import()`: in batches that share one import id, the last of which
+ * marks every activity the extract left out as missing. Answers how many were
+ * written and how many went missing.
+ *
+ * @param {Array<{ activity_id: string, name?: string, wbs?: string }>} activities
+ * @param {{ importId: string, batch?: number }} options
+ */
+export async function importP6Activities(activities, { importId, batch = 1000 }) {
+  if (!activities?.length) throw new Error('There are no activities to import.');
+  let written = 0;
+  let missing = 0;
+  for (let i = 0; i < activities.length; i += batch) {
+    const done = await rpc('rc_p6_import', {
+      p_import: importId,
+      p_rows: activities.slice(i, i + batch),
+      p_finish: i + batch >= activities.length,
+    });
+    written += Number(done?.written) || 0;
+    missing += Number(done?.missing) || 0;
+  }
+  return { written, missing };
+}
+
 /* ── Problems the calendar ran into ──────────────────────────────────── */
 
 const REPORT_LIMIT = 20;
@@ -805,7 +873,7 @@ export function listSettings() {
  * "could not update the legend", on one screen, weeks after the deploy that
  * needed it; this turns it into one sentence at sign-in naming the two files.
  */
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 /**
  * Whether the database is the one this build was written against.

@@ -2249,7 +2249,8 @@ async function main() {
   await page.evaluate(() => window.__CX_MODULES.req('ui/theme.js').applyTheme('system', { persist: false, syncDoc: false }));
   const onLight = await page.evaluate(() => document.documentElement.dataset.theme);
   await page.emulateMedia({ colorScheme: 'dark' });
-  await page.waitForTimeout(100);
+  // The browser tells the page at its next frame, which a busy machine makes later than 100 ms.
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark', null, { timeout: 3000 }).catch(() => {});
   const onDark = await page.evaluate(() => document.documentElement.dataset.theme);
   const stillSystem = await page.evaluate(() => window.__CX_MODULES.req('ui/theme.js').getTheme());
   check('System draws Light on a computer set to light', onLight === 'light', onLight);

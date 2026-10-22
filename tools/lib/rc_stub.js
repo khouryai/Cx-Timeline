@@ -388,6 +388,14 @@ export function fakeSdk() {
     rc_la_rows: [],
     rc_la_cells: [],
     rc_la_edits: [],
+    /* The schedule's activities, empty until somebody imports an extract, and
+       the reasons a row has none — seeded by `rc_schema.sql`, as here. */
+    rc_p6_activities: [],
+    rc_p6_flags: [
+      { id: 'pf1', label: 'Troubleshooting', active: true, sort: 10 },
+      { id: 'pf2', label: 'Regression', active: true, sort: 20 },
+      { id: 'pf3', label: 'Support', active: true, sort: 30 },
+    ],
     rc_settings: [
       { key: 'lookahead_sheet', value: '4WLA' },
       // The version this build expects, so the banner below is the exception.
@@ -693,6 +701,10 @@ export function fakeSdk() {
       order(col, { ascending = true } = {}) {
         if (/^rc_lookahead_snapshot/.test(table) && col === 'taken_at') {
           rows.sort((a, b) => String(a.taken_at || '').localeCompare(String(b.taken_at || '')) * (ascending ? 1 : -1));
+        }
+        // The first and last written day, which is how far the calendar pages back.
+        if (table === 'rc_la_cells' && col === 'day') {
+          rows.sort((a, b) => String(a.day || '').localeCompare(String(b.day || '')) * (ascending ? 1 : -1));
         }
         return api;
       },
@@ -1006,6 +1018,34 @@ export function fakeSdk() {
             return Promise.resolve({ data: results, error: null });
           }
           if (name === 'rc_la_revision') return Promise.resolve({ data: S.laRevision || 0, error: null });
+          /* A batch of a P6 extract, as the function writes it: every activity
+             upserted by its ID and stamped with the import, and on the last
+             batch everything that import did not see marked missing. */
+          if (name === 'rc_p6_import') {
+            if (S.role !== 'admin') {
+              return Promise.resolve({ data: null, error: { message: 'only an administrator may import P6 activities' } });
+            }
+            if (S.offline) return Promise.resolve({ data: null, error: { message: 'Failed to fetch' } });
+            const list = S.rows.rc_p6_activities || (S.rows.rc_p6_activities = []);
+            let written = 0;
+            for (const r of args.p_rows || []) {
+              const id = String(r.activity_id || '').trim();
+              if (!id) continue;
+              const row = { activity_id: id, name: String(r.name || '').trim(), wbs: String(r.wbs || '').trim(),
+                missing: false, import_id: args.p_import, imported_at: new Date().toISOString(), imported_by: USER.id };
+              const hit = list.find((a) => a.activity_id === id);
+              if (hit) Object.assign(hit, row);
+              else list.push(row);
+              written++;
+            }
+            let missing = 0;
+            if (args.p_finish) {
+              for (const a of list) {
+                if (a.import_id !== args.p_import && !a.missing) { a.missing = true; missing++; }
+              }
+            }
+            return Promise.resolve({ data: { written, missing }, error: null });
+          }
           if (name === 'rc_clear_client_errors') {
             const list = S.rows.rc_client_errors || [];
             const keep = list.filter((r) => (r.created_at || '') >= args.p_before);

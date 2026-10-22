@@ -137,8 +137,13 @@
 }
 /* Not the PTO grid: there the cell *is* its colour, and a hover fill painted
    over every cell in the row turned a person's leave white the moment the
-   pointer crossed it. That grid highlights the name cell instead. */
-.rc-table:not(.rc-pto-grid) tbody tr:hover td { background: var(--surface-2); }
+   pointer crossed it. That grid highlights the name cell instead.
+   Nor the look-ahead, for the same reason: the fill outranked the section
+   band, so a heading went dark under its own dark ink, and the shorthand reset
+   `background-image`, so a cancelled day lost its strike and an unmapped colour
+   its hatch while the pointer was on them. It marks the row its own way
+   (calendar.css). */
+.rc-table:not(.rc-pto-grid):not(.la-grid) tbody tr:hover td { background: var(--surface-2); }
 .rc-pto-grid tbody tr:hover td.rc-pto-name { background: var(--surface-2); }
 .rc-table .rc-num { text-align: right; font-family: var(--f-mono); }
 .rc-table .rc-inactive td { opacity: 0.45; }
@@ -1258,6 +1263,139 @@
 }
 .lae-name:hover,
 .lae-name.lae-name-on { background: var(--info-light); }
+
+/* ── P6 in the Activity ID column ─────────────────────────────────────────
+   What a row's ID says, without relying on colour: a P6 activity reads as an
+   ID, a reason reads as a word in italics on a pill, an ID neither list has
+   is underlined the way an unknown support code is, and an activity with
+   nothing yet says so faintly. The hover names the activity in full. */
+.lae-grid td.lae-p6-linked { font-family: var(--f-mono); font-size: 10px; }
+.lae-grid td.lae-p6-linked.lae-p6-missing { text-decoration: line-through dotted var(--warn); }
+.lae-p6-pill {
+  display: inline-block;
+  padding: 0 4px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  font-size: 10px;
+  font-style: italic;
+  overflow-wrap: break-word;
+  color: var(--text-muted);
+}
+.lae-grid td.lae-p6-unknown {
+  text-decoration: underline wavy var(--warn);
+  text-underline-offset: 3px;
+}
+.lae-grid td.lae-p6-empty::before {
+  content: 'Link P6…';
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.lae-edit-hint.lae-p6-hint {
+  flex-direction: column;
+  width: 460px;
+  max-height: 300px;
+  overflow: auto;
+  padding: 4px;
+  gap: 1px;
+}
+.lae-p6-help {
+  padding: 4px 8px 6px;
+  font-size: var(--fs-tiny);
+  color: var(--text-muted);
+}
+.lae-p6-opt {
+  display: grid;
+  grid-template-columns: 96px 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  text-align: left;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-main);
+  font: inherit;
+  font-size: var(--fs-tiny);
+  white-space: normal;
+  cursor: pointer;
+}
+.lae-p6-opt:hover,
+.lae-p6-opt.lae-p6-on { background: var(--info-light); }
+.lae-p6-id {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+.lae-p6-opt-flag .lae-p6-id {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.lae-p6-opt-flag .lae-p6-name { font-style: italic; }
+.lae-p6-uses {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.lae-p6-opt-more { grid-template-columns: 1fr; border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; }
+.lae-p6-more { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); }
+.lae-p6-todo.lae-p6-open { color: var(--warn); border-color: var(--warn-border); }
+.lae-p6-field { display: flex; gap: 6px; align-items: center; }
+.lae-p6-field .cx-input { flex: 1; min-width: 0; }
+
+/* The picker: a search over the whole list, then the reasons. */
+.p6-picker { display: flex; flex-direction: column; gap: var(--space-2); }
+.p6-picker .p6-fill { margin: 0; }
+.p6-picker-note { margin: 0; }
+.p6-picker-list { max-height: 360px; overflow: auto; }
+.p6-item {
+  display: grid;
+  grid-template-columns: minmax(90px, max-content) 1fr;
+  column-gap: 12px;
+  row-gap: 2px;
+  align-items: baseline;
+}
+.p6-item .p6-id { font-family: var(--f-mono); font-size: var(--fs-tiny); font-weight: 700; color: var(--text-main); }
+.p6-item .p6-name { color: var(--text-main); }
+.p6-item .p6-meta {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+  font-size: var(--fs-tiny);
+  color: var(--text-muted);
+}
+.p6-item .p6-uses { font-family: var(--f-mono); font-size: 10px; color: var(--text-faint); }
+.p6-item.p6-current { box-shadow: inset 3px 0 0 var(--info); }
+.p6-reasons { border-top: 1px solid var(--border); padding-top: var(--space-3); }
+.p6-reason-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+
+/* The section. */
+.p6-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3); margin: var(--space-2) 0; }
+.p6-summary-count { font-family: var(--f-display); font-size: 15px; font-weight: 700; color: var(--text-main); }
+.p6-coverage { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.p6-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+.p6-stat-n { font-family: var(--f-mono); font-size: 18px; font-weight: 700; color: var(--text-main); }
+.p6-stat-label { font-size: var(--fs-tiny); color: var(--text-muted); }
+.p6-stat-good { border-color: var(--good-border, var(--border)); }
+.p6-stat-warn { border-color: var(--warn-border); }
+.p6-stat-warn .p6-stat-n { color: var(--warn); }
+.p6-preview-line { margin: 0 0 4px; color: var(--text-main); }
 .lae-cancel-form { grid-template-columns: 1fr; }
 .lae-cancel-runs {
   margin: 0;

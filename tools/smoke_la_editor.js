@@ -726,6 +726,42 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     (await serverCell('IXL Regression Testing', bulkDay))?.text === bulkBefore && (await page.locator('.cx-modal').count()) === 0);
   await grid().focus();
 
+  /* The note comes back after the editor has moved on. "Cancel and log" writes
+     its note over the network, and the whole grid used to be drawn again when
+     it landed — taking away the cell somebody had started typing in by then. */
+  const notesBeforeLanding = await notesAt();
+  await page.evaluate(() => { window.__rc.writeLatency = 800; });
+  await cell('IXL Regression Testing', bulkDay).dblclick();
+  await page.waitForSelector('#rc-frame .lae-editor');
+  await page.locator('#rc-frame .lae-editor').fill('X');
+  await page.keyboard.press('Tab');
+  const landing = page.locator('.cx-modal', { hasText: 'BART resource' });
+  await landing.waitFor({ timeout: 4000 });
+  await landing.locator('textarea').fill('Not needed after all');
+  await landing.locator('button', { hasText: 'Cancel and log' }).click();
+  await cell('IXL Regression Testing', day(5)).dblclick();
+  await page.waitForSelector('#rc-frame .lae-editor');
+  await page.keyboard.type('X.T');
+  await page.waitForFunction((n) => (window.__rc.rows.rc_cancellation_notes || []).length > n, notesBeforeLanding, { timeout: 5000 });
+  await page.waitForTimeout(400);
+  const typing = await page.evaluate(() => {
+    const input = document.querySelector('#rc-frame .lae-editor');
+    return input ? { value: input.value, focused: document.activeElement === input } : null;
+  });
+  check('a logged note coming back leaves the cell being typed in alone',
+    typing?.value === 'X.T' && typing.focused, JSON.stringify(typing));
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => {
+    window.__rc.writeLatency = 0;
+    const list = window.__rc.rows.rc_cancellation_notes;
+    const at = list.findIndex((n) => n.reason === 'Not needed after all');
+    if (at >= 0) list.splice(at, 1);
+  });
+  await cell('IXL Regression Testing', bulkDay).click({ button: 'right' });
+  await page.locator('.cx-menu .cx-menu-item', { hasText: 'Reinstate cancelled resources' }).click();
+  await saved();
+  await grid().focus();
+
   /* ── A read made while a write is on its way ──────────────────────────
      Reads are remembered for thirty seconds and forgotten on every write — but
      forgotten when the write was *sent*, so a read made while it was on its way
@@ -857,6 +893,86 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   check('and hovering it there says the reason logged',
     await page.evaluate(() => [...document.querySelectorAll('#rc-frame .la-grid .la-code-cancelled')]
       .some((n) => /Witness not required for testing/.test(n.title))));
+
+  /* Hovering a row repaints nothing. The calendar's tables shade the row under
+     the pointer, and on the look-ahead that fill outranked the section band —
+     the heading went dark under its own dark ink — and reset the strike on a
+     cancelled day and the hatch on an unmapped one while the pointer was on
+     them. The row is marked with a bar down its first column instead. */
+  const paintOf = (sel) => page.evaluate((s) => [...document.querySelectorAll(s)]
+    .map((td) => `${getComputedStyle(td).backgroundColor}|${getComputedStyle(td).backgroundImage}`), sel);
+  const bandRow = '#rc-frame .la-grid tbody tr.la-head-row';
+  const cancelledRow = '#rc-frame .la-grid tbody tr:has(td.la-cancel)';
+  const beforeHover = { band: await paintOf(`${bandRow} > td`), cancelled: await paintOf(`${cancelledRow} > td`) };
+  await page.locator(`${bandRow} td.la-day`).first().hover();
+  const bandHovered = await paintOf(`${bandRow} > td`);
+  const bar = await page.evaluate((s) => getComputedStyle(document.querySelector(`${s} > td`)).boxShadow, bandRow);
+  if (await page.locator(`${cancelledRow} td.la-cancel`).count()) await page.locator(`${cancelledRow} td.la-cancel`).first().hover();
+  const cancelledHovered = await paintOf(`${cancelledRow} > td`);
+  await page.mouse.move(2, 2);
+  check('hovering a row of the look-ahead repaints nothing on it — the band, the days, the strike through a cancellation',
+    beforeHover.band.length > 1 && JSON.stringify(beforeHover.band) === JSON.stringify(bandHovered)
+      && beforeHover.cancelled.length > 1 && JSON.stringify(beforeHover.cancelled) === JSON.stringify(cancelledHovered)
+      && cancelledHovered.some((p) => /linear-gradient/.test(p)),
+    `${bandHovered.find((p, i) => p !== beforeHover.band[i]) || ''} ${cancelledHovered.find((p, i) => p !== beforeHover.cancelled[i]) || ''}`);
+  check('the row under the pointer is marked by a bar down its first column instead', /inset/.test(bar) && /3px/.test(bar), bar);
+  check('the frozen columns rule their edges with shadows, so the days scrolling under them never show through',
+    await page.evaluate(() => {
+      const td = document.querySelector('#rc-frame .la-grid tbody td.la-meta');
+      const cs = getComputedStyle(td);
+      return cs.borderRightWidth === '0px' && cs.borderBottomWidth === '0px' && /inset/.test(cs.boxShadow);
+    }));
+
+  /* The weeks before the reading. A reading covers the week just gone and the
+     five ahead, so "Everything" stopped a week back however long the look-ahead
+     had been written here. Days written three weeks ago, which no reading
+     carries, are drawn from what the editor holds — paged to a week at a time,
+     or all at once. */
+  const pastMonday = day(-21);
+  await page.evaluate(({ iso, next }) => {
+    const ats = window.__rc.rows.rc_la_rows.find((r) => r.description === 'ATS Site Test');
+    window.__rc.rows.rc_la_cells.push({ row_id: ats.id, day: iso, color: 'FFFF00', text: 'X.EARLIER', version: 1 });
+    window.__rc.rows.rc_la_cells.push({ row_id: ats.id, day: next, color: 'FFFF00', text: 'X', version: 1 });
+    const { req } = window.__CX_MODULES;
+    req('core/rc.js').forgetReads();
+    req('core/events.js').emit('rc:changed', { what: 'test' });
+  }, { iso: pastMonday, next: day(-20) });
+  await page.waitForSelector('#rc-frame .la-pager', { timeout: 10000 });
+  await page.waitForTimeout(300);
+  // "Show cells" in the cancellation log, earlier, left the calendar on everything.
+  await page.locator('#rc-frame .rc-tab', { hasText: /^4 weeks$/ }).click();
+  await page.waitForTimeout(300);
+  const firstDayShown = async () => (await page.locator('#rc-frame .la-grid thead th.la-num').first().innerText()).trim();
+  const gridText = () => page.locator('#rc-frame .la-grid').innerText();
+  const noteShown = () => page.locator('#rc-frame .la-written-note').count();
+  check('four weeks open on this week, drawn from the reading', (await firstDayShown()) === String(Number(monday.slice(8, 10)))
+    && (await noteShown()) === 0,
+  `${await firstDayShown()}, ${await page.locator('#rc-frame .la-grid thead th.la-num').count()} days, note ${await noteShown()}, `
+    + `${await page.locator('#rc-frame .la-pager-range').innerText().catch(() => '')}, `
+    + `${(await page.locator('#rc-frame .rc-tab[aria-pressed="true"]').allInnerTexts()).join('/')}`);
+  await page.locator('#rc-frame .rc-tab', { hasText: /^Everything$/ }).click();
+  await page.waitForFunction(() => /X\.EARLIER/.test(document.querySelector('#rc-frame .la-grid')?.innerText || ''), null, { timeout: 8000 }).catch(() => {});
+  check('"Everything" reaches back to the first week anything was written — not just the week before the reading',
+    (await firstDayShown()) === String(Number(pastMonday.slice(8, 10))) && /X\.EARLIER/.test(await gridText()),
+    `${await firstDayShown()}, ${await page.locator('#rc-frame .la-grid thead th.la-num').count()} days`);
+  check('and says those weeks are drawn from the look-ahead as written, not from a reading', (await noteShown()) === 1);
+  await page.locator('#rc-frame .rc-tab', { hasText: /^4 weeks$/ }).click();
+  await page.waitForTimeout(300);
+  const previousWeek = page.locator('#rc-frame .la-pager button[aria-label="Previous week"]');
+  for (let i = 0; i < 3; i++) {
+    await previousWeek.click();
+    await page.waitForTimeout(250);
+  }
+  await page.waitForFunction(() => /X\.EARLIER/.test(document.querySelector('#rc-frame .la-grid')?.innerText || ''), null, { timeout: 8000 }).catch(() => {});
+  check('it pages back a week at a time, as Edit does, to days no reading carries',
+    (await firstDayShown()) === String(Number(pastMonday.slice(8, 10))) && /X\.EARLIER/.test(await gridText())
+      && (await page.locator('#rc-frame .la-grid thead th.la-num').count()) === 28,
+    await page.locator('#rc-frame .la-pager-range').innerText());
+  check('and no further back than the first week anything was written', await previousWeek.isDisabled());
+  await page.locator('#rc-frame .la-pager button', { hasText: 'This week' }).click();
+  await page.waitForTimeout(300);
+  check('"This week" brings it back, drawn from the reading again',
+    (await firstDayShown()) === String(Number(monday.slice(8, 10))) && (await noteShown()) === 0);
   check('and it no longer offers to read the workbook',
     (await page.locator('#rc-frame button', { hasText: 'Check now' }).count()) === 0
       && (await page.locator('#rc-frame .la-edit-switch[aria-pressed="false"]').count()) === 1);
