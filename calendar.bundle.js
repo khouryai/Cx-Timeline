@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 31   Built: 2026-10-22T12:09:09.302Z
+ * Modules: 33   Built: 2026-10-22T15:59:57.964Z
  */
 (function () {
   'use strict';
@@ -9413,6 +9413,41 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
   /** `[{ name, data }]` → the bytes of a ZIP holding them, uncompressed. */
   function zipStore(files) {
     const enc = new TextEncoder();
+    return zipEntries(files.map((file) => ({
+      name: file.name,
+      data: typeof file.data === 'string' ? enc.encode(file.data) : file.data,
+    })));
+  }
+
+  /**
+   * The same ZIP, deflated — for a workbook big enough for it to matter.
+   *
+   * The master export carries a year of the look-ahead day by day, and stored
+   * that is tens of megabytes landing in a synced folder every day; spreadsheet
+   * XML deflates to a tenth of that. The browser's own `CompressionStream` does
+   * the work (Node has it too, which keeps this testable), and where it is
+   * missing the file is simply written stored — bigger, never broken.
+   */
+  async function zipDeflate(files) {
+    const enc = new TextEncoder();
+    const entries = files.map((file) => ({
+      name: file.name,
+      data: typeof file.data === 'string' ? enc.encode(file.data) : file.data,
+    }));
+    try {
+      for (const entry of entries) {
+        const stream = new Blob([entry.data]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+        entry.packed = new Uint8Array(await new Response(stream).arrayBuffer());
+      }
+    } catch {
+      for (const entry of entries) delete entry.packed;
+    }
+    return zipEntries(entries);
+  }
+
+  /** `[{ name, data, packed? }]` → a ZIP; an entry with `packed` is stored deflated. */
+  function zipEntries(entries) {
+    const enc = new TextEncoder();
     const parts = [];
     const central = [];
     let offset = 0;
@@ -9420,48 +9455,50 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
     const dosTime = 0;
     const dosDate = ((2026 - 1980) << 9) | (1 << 5) | 1;
 
-    for (const file of files) {
-      const name = enc.encode(file.name);
-      const data = typeof file.data === 'string' ? enc.encode(file.data) : file.data;
+    for (const entry of entries) {
+      const name = enc.encode(entry.name);
+      const { data } = entry;
+      const body = entry.packed || data;
+      const method = entry.packed ? 8 : 0;
       const crc = crc32(data);
 
       const local = new DataView(new ArrayBuffer(30));
       local.setUint32(0, 0x04034b50, true);
       local.setUint16(4, 20, true); // version needed
       local.setUint16(6, 0x0800, true); // UTF-8 names
-      local.setUint16(8, 0, true); // stored
+      local.setUint16(8, method, true);
       local.setUint16(10, dosTime, true);
       local.setUint16(12, dosDate, true);
       local.setUint32(14, crc, true);
-      local.setUint32(18, data.length, true);
+      local.setUint32(18, body.length, true);
       local.setUint32(22, data.length, true);
       local.setUint16(26, name.length, true);
       local.setUint16(28, 0, true);
-      parts.push(new Uint8Array(local.buffer), name, data);
+      parts.push(new Uint8Array(local.buffer), name, body);
 
       const dir = new DataView(new ArrayBuffer(46));
       dir.setUint32(0, 0x02014b50, true);
       dir.setUint16(4, 20, true);
       dir.setUint16(6, 20, true);
       dir.setUint16(8, 0x0800, true);
-      dir.setUint16(10, 0, true);
+      dir.setUint16(10, method, true);
       dir.setUint16(12, dosTime, true);
       dir.setUint16(14, dosDate, true);
       dir.setUint32(16, crc, true);
-      dir.setUint32(20, data.length, true);
+      dir.setUint32(20, body.length, true);
       dir.setUint32(24, data.length, true);
       dir.setUint16(28, name.length, true);
       dir.setUint32(42, offset, true);
       central.push(new Uint8Array(dir.buffer), name);
 
-      offset += 30 + name.length + data.length;
+      offset += 30 + name.length + body.length;
     }
 
     const dirSize = central.reduce((n, p) => n + p.length, 0);
     const end = new DataView(new ArrayBuffer(22));
     end.setUint32(0, 0x06054b50, true);
-    end.setUint16(8, files.length, true);
-    end.setUint16(10, files.length, true);
+    end.setUint16(8, entries.length, true);
+    end.setUint16(10, entries.length, true);
     end.setUint32(12, dirSize, true);
     end.setUint32(16, offset, true);
 
@@ -9498,8 +9535,8 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
   /**
    * The style table, built from what the sheet asks for.
    *
-   * A style is described as `{ bold, size, color, fill, border, h, v, wrap,
-   * shrink }` and `id()` returns its index in `cellXfs`, adding it the first time
+   * A style is described as `{ bold, italic, size, color, fill, border, h, v,
+   * wrap, shrink, numFmt }` and `id()` returns its index in `cellXfs`, adding it the first time
    * — so the workbook carries exactly the styles its cells use and no more.
    */
   function styleBook({ font = 'Arial', size = 10 } = {}) {
@@ -9510,7 +9547,7 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
     const index = new Map();
 
     const fontId = (s) => {
-      const xml = `<font>${s.bold ? '<b/>' : ''}<sz val="${s.size || size}"/>`
+      const xml = `<font>${s.bold ? '<b/>' : ''}${s.italic ? '<i/>' : ''}<sz val="${s.size || size}"/>`
         + `<color rgb="FF${s.color || '000000'}"/><name val="${font}"/><family val="2"/></font>`;
       let at = fonts.indexOf(xml);
       if (at < 0) { fonts.push(xml); at = fonts.length - 1; }
@@ -9547,8 +9584,11 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
       const f = fontId(s);
       const fi = fillId(s.fill);
       const b = borderId(s.border);
-      xfs.push(`<xf numFmtId="0" fontId="${f}" fillId="${fi}" borderId="${b}" xfId="0"`
-        + ` applyFont="1"${fi ? ' applyFill="1"' : ''}${b ? ' applyBorder="1"' : ''}`
+      // A built-in number format by its id (14 a date, 22 a date and time) —
+      // built-ins need no <numFmts> entry, and every program reads them.
+      const nf = s.numFmt || 0;
+      xfs.push(`<xf numFmtId="${nf}" fontId="${f}" fillId="${fi}" borderId="${b}" xfId="0"`
+        + ` applyFont="1"${nf ? ' applyNumberFormat="1"' : ''}${fi ? ' applyFill="1"' : ''}${b ? ' applyBorder="1"' : ''}`
         + `${align ? ' applyAlignment="1">' + align + '</xf>' : '/>'}`);
       index.set(key, xfs.length - 1);
       return xfs.length - 1;
@@ -9647,12 +9687,216 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
     ];
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     A workbook of tables
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** The most a cell may hold; Excel refuses to open a file with more. */
+  const CELL_LIMIT = 32767;
+  /** Rows on one sheet, the heading included. */
+  const ROW_LIMIT = 1048576;
+
+  /** A, B, … Z, AA, AB … — the letters of a column, 0-based. */
+  function columnLetters(i) {
+    let n = i + 1;
+    let out = '';
+    while (n > 0) {
+      const r = (n - 1) % 26;
+      out = String.fromCharCode(65 + r) + out;
+      n = Math.floor((n - 1) / 26);
+    }
+    return out;
+  }
+
+  /** A `YYYY-MM-DD` as Excel's day number, or null when it is not one. */
+  function dateSerial(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso ?? ''));
+    if (!m) return null;
+    return Date.UTC(+m[1], +m[2] - 1, +m[3]) / 86400000 + 25569;
+  }
+
+  /**
+   * An instant as Excel's day number and fraction, in this computer's time —
+   * a spreadsheet has no time zones, and the person opening it reads the clock
+   * on their wall, not Greenwich's.
+   */
+  function dateTimeSerial(value) {
+    if (value == null || value === '') return null;
+    const d = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(d.getTime())) return null;
+    return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds())
+      / 86400000 + 25569;
+  }
+
+  /**
+   * Several tables as one .xlsx — a sheet each, for reading and filtering.
+   *
+   * `sheets` is `[{ name, columns: [{ heading, kind?, width?, wrap? }], rows:
+   * [[value, …]], empty? }]`. A column's `kind` says what its values are, so
+   * Excel can sort and sum them: `number`, `date` (`YYYY-MM-DD`), `datetime`
+   * (an instant) or text, the default. A value that is not what its column says
+   * is written as text rather than lost. Every sheet opens with its heading row
+   * frozen and a filter on it; `empty` is the line written under the headings
+   * when there are no rows, so a blank sheet says why.
+   *
+   * Text is written inline and is never a formula, whatever it starts with —
+   * the spreadsheet trap a CSV has (`csvField()`) does not arise here.
+   *
+   * Returns a promise of the bytes, deflated (`zipDeflate()`).
+   */
+  async function tableWorkbook({ sheets, title = '' }) {
+    const styles = styleBook({ size: 10 });
+    const st = {
+      head: styles.id({ bold: true, color: 'FFFFFF', fill: 'E60012', border: 'lrtb', v: 'center' }),
+      text: styles.id({}),
+      wrap: styles.id({ wrap: true, v: 'top' }),
+      date: styles.id({ numFmt: 14, h: 'left' }),
+      datetime: styles.id({ numFmt: 22, h: 'left' }),
+      number: styles.id({}),
+      note: styles.id({ italic: true, color: '666666' }),
+    };
+    const used = new Set();
+    const named = sheets.map((sheet) => {
+      let name = sheetNameFor(sheet.name);
+      for (let n = 2; used.has(name.toLowerCase()); n++) name = sheetNameFor(`${sheetNameFor(sheet.name).slice(0, 27)} (${n})`);
+      used.add(name.toLowerCase());
+      return { ...sheet, name };
+    });
+
+    const textCell = (ref, value, style) => {
+      const s = String(value).slice(0, CELL_LIMIT);
+      return `<c r="${ref}" t="inlineStr" s="${style}"><is><t xml:space="preserve">${xmlEscape(s)}</t></is></c>`;
+    };
+    const cell = (ref, value, column) => {
+      if (value == null || value === '') return '';
+      if (typeof value === 'boolean') return textCell(ref, value ? 'Yes' : 'No', st.text);
+      const kind = column?.kind || 'text';
+      if (kind === 'number' && typeof value === 'number' && Number.isFinite(value)) {
+        return `<c r="${ref}" s="${st.number}"><v>${value}</v></c>`;
+      }
+      if (kind === 'date') {
+        const serial = dateSerial(value);
+        if (serial != null) return `<c r="${ref}" s="${st.date}"><v>${serial}</v></c>`;
+      }
+      if (kind === 'datetime') {
+        const serial = dateTimeSerial(value);
+        if (serial != null) return `<c r="${ref}" s="${st.datetime}"><v>${serial.toFixed(6)}</v></c>`;
+      }
+      return textCell(ref, value, column?.wrap ? st.wrap : st.text);
+    };
+
+    const widthOf = (column, i, rows) => {
+      if (column.width) return column.width;
+      if (column.kind === 'date') return 12;
+      if (column.kind === 'datetime') return 17;
+      let longest = String(column.heading || '').length;
+      for (const row of rows.slice(0, 300)) longest = Math.max(longest, String(row[i] ?? '').length);
+      return Math.min(60, Math.max(8, longest + 2));
+    };
+
+    const sheetXml = named.map((sheet) => {
+      const columns = sheet.columns || [];
+      const rows = (sheet.rows || []).slice(0, ROW_LIMIT - 1);
+      const last = columnLetters(Math.max(0, columns.length - 1));
+      const out = [];
+      out.push(`<row r="1">${columns.map((c, i) => textCell(`${columnLetters(i)}1`, c.heading || '', st.head)).join('')}</row>`);
+      rows.forEach((row, r) => {
+        const n = r + 2;
+        out.push(`<row r="${n}">${columns.map((c, i) => cell(`${columnLetters(i)}${n}`, row[i], c)).join('')}</row>`);
+      });
+      if (!rows.length && sheet.empty) out.push(`<row r="2">${textCell('A2', sheet.empty, st.note)}</row>`);
+      const lastRow = Math.max(1, rows.length + 1);
+      const cols = columns.map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${widthOf(c, i, rows)}" customWidth="1"/>`).join('');
+      return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        + `<dimension ref="A1:${last}${lastRow}"/>`
+        + '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
+        + '<selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>'
+        + '<sheetFormatPr defaultRowHeight="15"/>'
+        + (cols ? `<cols>${cols}</cols>` : '')
+        + `<sheetData>${out.join('')}</sheetData>`
+        + (columns.length ? `<autoFilter ref="A1:${last}${lastRow}"/>` : '')
+        + '</worksheet>';
+    });
+
+    const quoted = (name) => `'${xmlEscape(name).replace(/'/g, "''")}'`;
+    const defined = named.map((sheet, i) => {
+      const columns = sheet.columns || [];
+      if (!columns.length) return '';
+      const lastRow = Math.max(1, Math.min(ROW_LIMIT, (sheet.rows || []).length + 1));
+      const last = columnLetters(columns.length - 1);
+      return `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">${quoted(sheet.name)}!$A$1:$${last}$${lastRow}</definedName>`;
+    }).join('');
+
+    const files = [
+      {
+        name: '[Content_Types].xml',
+        data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+          + '<Default Extension="xml" ContentType="application/xml"/>'
+          + '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+          + named.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')
+          + '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+          + '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+          + '</Types>',
+      },
+      {
+        name: '_rels/.rels',
+        data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+          + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+          + '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+          + '</Relationships>',
+      },
+      {
+        name: 'docProps/core.xml',
+        data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          + '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+          + 'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
+          + 'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+          + `<dc:title>${xmlEscape(title)}</dc:title><dc:creator>CX Timeline</dc:creator>`
+          + '</cp:coreProperties>',
+      },
+      {
+        name: 'xl/workbook.xml',
+        data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+          + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+          + '<bookViews><workbookView xWindow="0" yWindow="0" windowWidth="28800" windowHeight="15000"/></bookViews>'
+          + `<sheets>${named.map((sheet, i) => `<sheet name="${xmlEscape(sheet.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets>`
+          + (defined ? `<definedNames>${defined}</definedNames>` : '')
+          + '</workbook>',
+      },
+      {
+        name: 'xl/_rels/workbook.xml.rels',
+        data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+          + named.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')
+          + `<Relationship Id="rId${named.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>`
+          + '</Relationships>',
+      },
+      // Built last: every style a cell asked for is in the book by now.
+      { name: 'xl/styles.xml', data: styles.xml() },
+      ...sheetXml.map((xml, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: xml })),
+    ];
+    return zipDeflate(files);
+  }
+
   Object.defineProperty(__x, "crc32", { get: () => crc32, enumerable: true });
   Object.defineProperty(__x, "zipStore", { get: () => zipStore, enumerable: true });
+  Object.defineProperty(__x, "zipDeflate", { get: () => zipDeflate, enumerable: true });
   Object.defineProperty(__x, "xmlEscape", { get: () => xmlEscape, enumerable: true });
   Object.defineProperty(__x, "styleBook", { get: () => styleBook, enumerable: true });
   Object.defineProperty(__x, "sheetNameFor", { get: () => sheetNameFor, enumerable: true });
   Object.defineProperty(__x, "workbookParts", { get: () => workbookParts, enumerable: true });
+  Object.defineProperty(__x, "CELL_LIMIT", { get: () => CELL_LIMIT, enumerable: true });
+  Object.defineProperty(__x, "ROW_LIMIT", { get: () => ROW_LIMIT, enumerable: true });
+  Object.defineProperty(__x, "columnLetters", { get: () => columnLetters, enumerable: true });
+  Object.defineProperty(__x, "dateSerial", { get: () => dateSerial, enumerable: true });
+  Object.defineProperty(__x, "dateTimeSerial", { get: () => dateTimeSerial, enumerable: true });
+  Object.defineProperty(__x, "tableWorkbook", { get: () => tableWorkbook, enumerable: true });
 };
 
 // io/la_xlsx.js
@@ -13556,6 +13800,27 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     return src;
   }
 
+  /**
+   * The 4WLA as an .xlsx, built without asking — this week and the next three,
+   * names rows included — for the master export to file beside its workbook.
+   * Null until the look-ahead is written here: before that the workbook in the
+   * folder is the 4WLA, and the editor's tables would be an old copy of it.
+   */
+  async function lookaheadFileNow({ weeks = 4 } = {}) {
+    const settings = await rc.listSettings().catch(() => []);
+    const said = (key) => settings.find((r) => r.key === key)?.value;
+    if (said('lookahead_source') !== EDITOR_SOURCE) return null;
+    const src = await exportSource();
+    const days = ed.windowDays(ed.mondayOf(todayISO()), weeks);
+    await src.ensure(days);
+    const sheetName = said('lookahead_sheet') || '4WLA';
+    const bytes = lookaheadWorkbook({
+      model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
+      resources: true,
+    });
+    return { bytes, name: lookaheadFileName(days, sheetName) };
+  }
+
   /** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
   async function openExcelExport() {
     let src;
@@ -13861,6 +14126,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "renderEditor", { get: () => renderEditor, enumerable: true });
   Object.defineProperty(__x, "flushEditor", { get: () => flushEditor, enumerable: true });
+  Object.defineProperty(__x, "lookaheadFileNow", { get: () => lookaheadFileNow, enumerable: true });
   Object.defineProperty(__x, "openExcelExport", { get: () => openExcelExport, enumerable: true });
 };
 
@@ -15683,6 +15949,7 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
 
 
   Object.defineProperty(__x, "renderChanges", { get: () => renderChanges, enumerable: true });
+  Object.defineProperty(__x, "KIND_LABELS", { get: () => KIND_LABELS, enumerable: true });
   Object.defineProperty(__x, "renderSnapshots", { get: () => renderSnapshots, enumerable: true });
 };
 
@@ -16572,6 +16839,953 @@ __mods["ui/rc_la_sars.js"] = function (__x, __req) {
   Object.defineProperty(__x, "renderSars", { get: () => renderSars, enumerable: true });
 };
 
+// core/export_schedule.js
+__mods["core/export_schedule.js"] = function (__x, __req) {
+  /**
+   * When a repeating export is due — the rule alone, no DOM and no clock of its
+   * own, so `tools/test_la_edit.js` can walk it across days in Node.
+   *
+   * A schedule is `{ every, at, weekday, hours }`:
+   *   - `every: 'off'`   — never;
+   *   - `every: 'day'`   — each day at `at` ("HH:MM", this computer's time);
+   *   - `every: 'week'`  — each week on `weekday` (1 Monday … 7 Sunday) at `at`;
+   *   - `every: 'hours'` — every `hours` hours since the last run.
+   *
+   * **A slot missed is run late, once.** The export runs in the page, so it runs
+   * only while the calendar is open; a computer that was off at six in the
+   * morning exports when somebody opens the calendar at eight, and a week
+   * closed does not come back as seven files. What is compared is the latest
+   * slot that has passed against the last run: one run covers every slot
+   * before it.
+   *
+   * Imports: nothing.
+   */
+
+  const EVERY = ['off', 'day', 'week', 'hours'];
+
+  /** "06:30" → [6, 30], or the fallback when it is not a time. */
+  function hoursMinutes(at, fallback = [6, 0]) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(at ?? '').trim());
+    if (!m) return fallback;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    return h < 24 && min < 60 ? [h, min] : fallback;
+  }
+
+  /** A schedule with every field present and in range — what is stored and compared. */
+  function cleanSchedule(s = {}) {
+    const every = EVERY.includes(s.every) ? s.every : 'off';
+    const [h, m] = hoursMinutes(s.at);
+    const weekday = Number.isInteger(Number(s.weekday)) && s.weekday >= 1 && s.weekday <= 7 ? Number(s.weekday) : 1;
+    const hours = Math.min(168, Math.max(1, Math.round(Number(s.hours) || 24)));
+    return { every, at: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`, weekday, hours };
+  }
+
+  /**
+   * The most recent slot at or before `now` (ms), or null for a schedule that
+   * has no fixed slots ('off', 'hours'). Local time: "six in the morning" is the
+   * clock on this computer's wall, not Greenwich's.
+   */
+  function lastSlot(schedule, now) {
+    const s = cleanSchedule(schedule);
+    if (s.every !== 'day' && s.every !== 'week') return null;
+    const [h, m] = hoursMinutes(s.at);
+    const d = new Date(now);
+    const slot = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m, 0, 0);
+    if (s.every === 'day') {
+      if (slot.getTime() > now) slot.setDate(slot.getDate() - 1);
+      return slot.getTime();
+    }
+    const weekday = slot.getDay() || 7; // 1 Monday … 7 Sunday
+    slot.setDate(slot.getDate() - ((weekday - s.weekday + 7) % 7));
+    if (slot.getTime() > now) slot.setDate(slot.getDate() - 7);
+    return slot.getTime();
+  }
+
+  /** The next slot after `now` (ms) — what the dialog says is coming. Null when off. */
+  function nextSlot(schedule, lastRun, now) {
+    const s = cleanSchedule(schedule);
+    if (s.every === 'off') return null;
+    if (s.every === 'hours') return (lastRun ?? now) + s.hours * 3600000;
+    const last = lastSlot(s, now);
+    const step = new Date(last);
+    step.setDate(step.getDate() + (s.every === 'day' ? 1 : 7));
+    return step.getTime();
+  }
+
+  /**
+   * Whether an export is due now: a slot has passed since the last run (or, for
+   * 'hours', that many hours have). `lastRun` null means never — and a schedule
+   * that has never run waits for its first slot rather than firing the moment
+   * it is saved, so `since` (when it was switched on) stands in for it.
+   */
+  function isDue(schedule, { lastRun = null, since = null } = {}, now) {
+    const s = cleanSchedule(schedule);
+    if (s.every === 'off') return false;
+    const from = lastRun ?? since;
+    if (s.every === 'hours') return from == null || now - from >= s.hours * 3600000;
+    const slot = lastSlot(s, now);
+    return slot != null && (from == null || from < slot);
+  }
+
+  Object.defineProperty(__x, "EVERY", { get: () => EVERY, enumerable: true });
+  Object.defineProperty(__x, "cleanSchedule", { get: () => cleanSchedule, enumerable: true });
+  Object.defineProperty(__x, "lastSlot", { get: () => lastSlot, enumerable: true });
+  Object.defineProperty(__x, "nextSlot", { get: () => nextSlot, enumerable: true });
+  Object.defineProperty(__x, "isDue", { get: () => isDue, enumerable: true });
+};
+
+// ui/rc_master_export.js
+__mods["ui/rc_master_export.js"] = function (__x, __req) {
+  /**
+   * The master export: everything useful the calendar holds, as one Excel
+   * workbook — and the same workbook on a schedule, into the shared folder.
+   *
+   * One sheet per question somebody takes the record away to answer: what the
+   * look-ahead said each day, who covered which shift, what was cancelled and
+   * why, what moved between readings and why, what the huddle recorded, the
+   * blockers, the leave, P6, the TAWRs and SARs, and the registers that explain
+   * the rest. Each sheet is read the way the screen that shows it reads — the
+   * same views, the same `assignmentIndex()`, the same `cancellationLog()` — so
+   * the workbook and the calendar cannot tell two stories. Every read goes
+   * through the policies, so what lands in the file is what this account may
+   * see; a sheet that cannot be read is written empty and named in About,
+   * never left out silently.
+   *
+   * **The schedule runs here, in the page.** There is no server to run it and
+   * nothing is emailed from this application (that is structural), so it runs
+   * on the computer the calendar is open on — a browser tab or the desktop app —
+   * and a slot missed while it was closed is run once when it next opens
+   * (`core/export_schedule.js`). The file goes into `exports/` in the shared
+   * folder through the intake door the look-ahead and SARs already use
+   * (`filestore.intakeWrite()`); with no folder connected it is downloaded.
+   * Its settings are this computer's, because the folder and the clock are.
+   */
+
+  const { el } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const filestore = __req("core/filestore.js");
+  const { tableWorkbook } = __req("io/xlsx_write.js");
+  const { saveFile } = __req("io/exporters.js");
+  const { isCancelMeaning, countCodes, describeCodeCounts, ABSENCE_LABELS, absencesFrom } = __req("core/lookahead.js");
+
+
+  const { p6Index, p6Status } = __req("core/la_p6.js");
+  const { FIELDS, addDaysISO, mondayOf } = __req("core/la_edit.js");
+  const { describe: describeChange } = __req("core/la_register.js");
+  const { cleanSchedule, isDue, nextSlot } = __req("core/export_schedule.js");
+  const { icon } = __req("ui/icons.js");
+  const { openModal, toast, checkbox, selectInput, field } = __req("ui/components.js");
+  const { todayISO, nameRegister, assignmentIndex, outcomeLookup, availability, shiftLabel, shiftFor, STATUS_BY_ID, cancellationLog, parsedView } = __req("ui/rc_util.js");
+
+
+
+  const { KIND_LABELS } = __req("ui/rc_la_changes.js");
+  const { lookaheadFileNow } = __req("ui/rc_la_editor.js");
+
+  /** The folder, inside the shared one, the workbooks are filed in. */
+  const EXPORT_DIR = 'exports';
+  const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const STORE_KEY = 'cx.rc.masterExport';
+  /** How long a scheduled export that failed waits before it is tried again. */
+  const RETRY_MS = 30 * 60000;
+
+  /** What can go in, in the order the workbook has it. `reference` is four small sheets. */
+  const SHEETS = [
+    { id: 'lookahead', label: 'The look-ahead, day by day', hint: 'every activity and day — shift, support asked for and cancelled, who was named, and its P6 activity' },
+    { id: 'shifts', label: 'Shifts worked', hint: 'who covered which shift, on what and where, and how the huddle said it went' },
+    { id: 'cancellations', label: 'Cancellations', hint: 'every day and BART resource cancelled, with the party responsible and the reason' },
+    { id: 'changes', label: 'Changes', hint: 'what moved between readings, and the reason given for it' },
+    { id: 'outcomes', label: 'Huddle outcomes', hint: 'completed, partial, carried over, blocked, reassigned, away' },
+    { id: 'blockers', label: 'Blockers', hint: 'every blocker raised, who owns it and where it stands' },
+    { id: 'leave', label: 'Leave', hint: 'leave booked and asked for' },
+    { id: 'p6', label: 'P6 activities', hint: 'the list, and how many look-ahead rows name each activity' },
+    { id: 'tawrs', label: 'TAWRs', hint: 'track access work requests' },
+    { id: 'sars', label: 'SARs', hint: 'site access requests and how many rows each covers' },
+    { id: 'reference', label: 'The registers', hint: 'the team, the locations, the legend and the support codes' },
+  ];
+
+  const RANGES = [
+    { id: 'all', label: 'Everything recorded', weeks: null },
+    { id: '4', label: 'The last 4 weeks and everything ahead', weeks: 4 },
+    { id: '13', label: 'The last 13 weeks and everything ahead', weeks: 13 },
+    { id: '26', label: 'The last 26 weeks and everything ahead', weeks: 26 },
+    { id: '52', label: 'The last 52 weeks and everything ahead', weeks: 52 },
+    { id: 'custom', label: 'Between two dates', weeks: null },
+  ];
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     This computer's settings
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** The defaults: every sheet, everything recorded, the 4WLA beside it, no schedule. */
+  function defaults() {
+    return {
+      sheets: SHEETS.map((s) => s.id),
+      range: 'all',
+      from: '',
+      to: '',
+      companion: true,
+      schedule: cleanSchedule({ every: 'off', at: '06:00', weekday: 1, hours: 24 }),
+      since: null,
+      lastRun: null,
+      failedAt: null,
+      last: null,
+    };
+  }
+
+  function loadSettings() {
+    let stored = {};
+    try {
+      stored = JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {};
+    } catch {
+      stored = {};
+    }
+    const base = defaults();
+    return {
+      ...base,
+      ...stored,
+      sheets: Array.isArray(stored.sheets) ? stored.sheets.filter((id) => SHEETS.some((s) => s.id === id)) : base.sheets,
+      schedule: cleanSchedule(stored.schedule || base.schedule),
+    };
+  }
+
+  function saveSettings(settings) {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(settings));
+    } catch {
+      // No storage: the export still runs now, it just cannot be remembered.
+    }
+  }
+
+  /** The dates a range asks for; null at either end is "as far as the record goes". */
+  function rangeDates(settings, today = todayISO()) {
+    const choice = RANGES.find((r) => r.id === settings.range) || RANGES[0];
+    if (choice.id === 'custom') {
+      return { from: settings.from || null, to: settings.to || null, label: `${settings.from || 'the start'} to ${settings.to || 'the end'}` };
+    }
+    if (!choice.weeks) return { from: null, to: null, label: 'Everything recorded' };
+    return { from: addDaysISO(mondayOf(today), -7 * choice.weeks), to: null, label: choice.label };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Building the workbook
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const weekday = (iso) => (iso
+    ? new Date(`${String(iso).slice(0, 10)}T00:00:00Z`).toLocaleDateString(undefined, { weekday: 'short', timeZone: 'UTC' })
+    : '');
+
+  /** Every day from one ISO date to another, inclusive. */
+  function daysBetween(from, to) {
+    const out = [];
+    for (let d = from; d && to && d <= to && out.length < 4000; d = addDaysISO(d, 1)) out.push(d);
+    return out;
+  }
+
+  /** Local "2026-09-23 1405", for a file name that sorts and does not collide. */
+  function stamp(now = new Date()) {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}${p(now.getMinutes())}`;
+  }
+
+  /**
+   * The context every sheet reads from — the registers, read once, and the two
+   * heavy reads the look-ahead and shifts sheets share, each made once and only
+   * if a sheet asks for it.
+   */
+  async function context(range) {
+    const [people, aliases, locations, categories, parties, legendRows, codes, entries, flags, laRows, settings, leaveKinds] = await Promise.all([
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+      rc.listPersonAliases().catch(() => []),
+      rc.listLocations({ includeInactive: true }).catch(() => []),
+      rc.listCategories({ includeInactive: true }).catch(() => []),
+      rc.readAll('rc_parties').catch(() => []),
+      rc.listLegend({ includeInactive: true }).catch(() => []),
+      rc.listSupportCodes({ includeRetired: true }).catch(() => []),
+      rc.listP6Activities().catch(() => []),
+      rc.listP6Flags({ includeRetired: true }).catch(() => []),
+      rc.listLaRows().catch(() => []),
+      rc.listSettings().catch(() => []),
+      rc.readAll('rc_leave_kinds').catch(() => []),
+    ]);
+    const once = (fn) => {
+      let p = null;
+      return () => (p = p || fn());
+    };
+    const ctx = {
+      ...range,
+      people,
+      locations,
+      categories,
+      parties,
+      legendRows,
+      codes,
+      p6Entries: entries,
+      p6: p6Index(entries, flags),
+      laRows,
+      settings,
+      personById: new Map(people.map((p) => [p.id, p])),
+      personByUser: new Map(people.filter((p) => p.user_id).map((p) => [p.user_id, p])),
+      locationById: new Map(locations.map((l) => [l.id, l])),
+      categoryById: new Map(categories.map((c) => [c.id, c])),
+      partyById: new Map(parties.map((p) => [p.id, p])),
+      leaveKindById: new Map(leaveKinds.map((k) => [k.id, k])),
+      register: nameRegister(people, aliases),
+      roleOf: new Map(legendRows.map((l) => [String(l.meaning || ''), l.role || 'shift'])),
+      cancelHex: new Set(legendRows.filter((l) => isCancelMeaning(l.meaning)).map((l) => `#${String(l.argb).toUpperCase()}`)),
+    };
+    ctx.days = once(() => rc.lookaheadDays(range.from, range.to));
+    ctx.actuals = once(() => rc.readAll('rc_actuals_current', { column: 'work_date', from: range.from, to: range.to }));
+    ctx.who = (userId) => (userId ? ctx.personByUser.get(userId)?.name || '' : '');
+    ctx.name = (personId) => (personId ? ctx.personById.get(personId)?.name || '' : '');
+    ctx.place = (locationId, raw = '') => (locationId ? ctx.locationById.get(locationId)?.name || raw || '' : raw || '');
+    ctx.source = settings.find((r) => r.key === 'lookahead_source')?.value || 'workbook';
+    return ctx;
+  }
+
+  /** The P6 activity a row names — its Activity ID, or any part of the label as read. */
+  function p6Of(ctx, activityId, label) {
+    const candidates = [activityId, ...String(label || '').split(' · ')].map((v) => String(v || '').trim()).filter(Boolean);
+    for (const c of candidates) {
+      const status = p6Status(c, ctx.p6);
+      if (status.kind === 'linked' || status.kind === 'flagged') return status;
+    }
+    return null;
+  }
+
+  /** The sections an editor row sits under, outermost first: "Phase 2 › Signals". */
+  function sectionsOf(byId, row) {
+    const out = [];
+    let at = row ? byId.get(row.parent_id) : null;
+    for (let guard = 0; at && guard < 10; guard++) {
+      if (at.kind === 'section') out.unshift(at.description);
+      at = byId.get(at.parent_id);
+    }
+    return out.filter(Boolean).join(' › ');
+  }
+
+  /** Which colour a day was painted, in words — and whether it is a shift, a cancellation or neither. */
+  function paintOf(ctx, paint) {
+    const said = String(paint || '');
+    if (!said) return { words: '', cancelled: false, shift: '' };
+    if (said.startsWith('#')) {
+      const cancelled = ctx.cancelHex.has(said.toUpperCase());
+      return { words: cancelled ? `Cancelled (${said})` : `Colour ${said}, not in the legend`, cancelled, shift: '' };
+    }
+    const cancelled = isCancelMeaning(said);
+    const role = ctx.roleOf.get(said) || 'shift';
+    return { words: said, cancelled, shift: !cancelled && role === 'shift' ? shiftLabel(shiftFor(said)) : '' };
+  }
+
+  const BUILDERS = {
+    async lookahead(ctx) {
+      const days = await ctx.days();
+      const byId = new Map(ctx.laRows.map((r) => [r.id, r]));
+      const fields = FIELDS.map((f) => ({ heading: f.heading, key: f.key }));
+      return [{
+        name: 'Look-ahead',
+        columns: [
+          { heading: 'Date', kind: 'date' }, { heading: 'Day' }, { heading: 'Week starting', kind: 'date' },
+          { heading: 'Section' },
+          ...fields.map((f) => ({ heading: f.heading, wrap: f.key === 'description', width: f.key === 'description' ? 48 : undefined })),
+          { heading: 'Activity, as read', width: 48 },
+          { heading: 'P6 activity ID' }, { heading: 'P6 activity name', width: 40 }, { heading: 'P6 WBS' },
+          { heading: 'Not in P6 — reason' },
+          { heading: 'Location (register)' }, { heading: 'Subsystem' },
+          { heading: 'Painted as' }, { heading: 'Shift' }, { heading: 'Cancelled' },
+          { heading: 'Support asked for' }, { heading: 'Support cancelled' },
+          { heading: 'Names on the day', width: 32 },
+          { heading: 'From the reading of', kind: 'datetime' },
+        ],
+        rows: days.map((d) => {
+          const row = d.la_row_id ? byId.get(d.la_row_id) : null;
+          const p6 = p6Of(ctx, row?.activity_id, d.raw_label);
+          const paint = paintOf(ctx, d.paint);
+          return [
+            d.day, weekday(d.day), d.week_start, row ? sectionsOf(byId, row) : '',
+            ...fields.map((f) => (row ? row[f.key] || '' : '')),
+            d.raw_label || '',
+            p6?.kind === 'linked' ? p6.entry.activity_id : '',
+            p6?.kind === 'linked' ? p6.entry.name : '',
+            p6?.kind === 'linked' ? p6.entry.wbs || '' : '',
+            p6?.kind === 'flagged' ? p6.flag.label : '',
+            ctx.place(d.location_id, ''), d.subsystem || '',
+            paint.words, paint.shift, paint.words ? paint.cancelled : '',
+            describeCodeCounts(countCodes([d.marks || ''])),
+            describeCodeCounts(countCodes([d.marks || ''], { cancelled: true })),
+            d.names || '',
+            d.taken_at,
+          ];
+        }),
+        empty: 'No reading covers these dates.',
+      }];
+    },
+
+    async shifts(ctx) {
+      const [plan, actuals, leave, latest, days] = await Promise.all([
+        rc.readAll('rc_plan_current', { column: 'work_date', from: ctx.from, to: ctx.to }),
+        ctx.actuals(),
+        rc.readAll('rc_leave', { column: 'start_date' }),
+        rc.latestSnapshot().catch(() => null),
+        ctx.days(),
+      ]);
+      /* The look-ahead's rows, rebuilt from the days: what `assignmentIndex()`
+         takes, a day stored as the bare red of a cancellation named as one. */
+      const rows = new Map();
+      for (const d of days) {
+        const row = rows.get(d.row_id) || {
+          id: d.row_id, raw_label: d.raw_label, raw_location: d.raw_location, location_id: d.location_id,
+          week_start: d.week_start, cells: {}, resources: {}, bart_marks: {},
+        };
+        if (d.paint) row.cells[d.day] = ctx.cancelHex.has(String(d.paint).toUpperCase()) ? 'Cancellation' : d.paint;
+        if (d.names) row.resources[d.day] = d.names;
+        if (d.marks) row.bart_marks[d.day] = d.marks;
+        rows.set(d.row_id, row);
+      }
+      // The PTO row is read off the latest reading only, as the week plan reads it.
+      const absences = latest?.grid ? absencesFrom(parsedView(latest, ctx.legendRows)) : [];
+      const index = assignmentIndex({ planRows: plan, laRows: [...rows.values()], register: ctx.register, absences, categories: ctx.categories });
+      const outcomeFor = outcomeLookup(actuals);
+
+      const dates = [...days.map((d) => d.day), ...plan.map((p) => p.work_date), ...actuals.map((a) => a.work_date)].filter(Boolean).sort();
+      const from = ctx.from || dates[0];
+      const to = ctx.to || [dates[dates.length - 1], todayISO()].filter(Boolean).sort().pop();
+      const out = [];
+      for (const iso of daysBetween(from, to)) {
+        for (const person of ctx.people) {
+          const entries = index.on(person.id, iso);
+          for (const entry of entries) {
+            const outcome = outcomeFor(entry, person.id, iso);
+            out.push([
+              iso, weekday(iso), person.name, person.subsystem || '',
+              entry.absence ? '' : shiftLabel(entry.shift || 'day'),
+              entry.task || (entry.absence ? ABSENCE_LABELS[entry.absence] : ''),
+              ctx.place(entry.location_id, entry.raw_location),
+              entry.absence ? 'The look-ahead\'s PTO / Office / Other row' : entry.from_lookahead ? 'The look-ahead' : 'Planned in the calendar',
+              Boolean(entry.cancelled),
+              outcome ? STATUS_BY_ID.get(outcome.status)?.label || outcome.status : '',
+              outcome?.note || '', outcome?.blocked_reason || '',
+            ]);
+          }
+          if (entries.length) continue;
+          const free = availability(person, iso, leave);
+          if (free.state === 'leave' && free.leave) {
+            out.push([iso, weekday(iso), person.name, person.subsystem || '', '',
+              `Leave — ${ctx.leaveKindById.get(free.leave.kind_id)?.name || 'leave'}`, '', 'Booked leave', false, '', free.leave.note || '', '']);
+          }
+        }
+      }
+      return [{
+        name: 'Shifts worked',
+        columns: [
+          { heading: 'Date', kind: 'date' }, { heading: 'Day' }, { heading: 'Person' }, { heading: 'Subsystem' },
+          { heading: 'Shift' }, { heading: 'Activity or task', width: 48 }, { heading: 'Location' },
+          { heading: 'From' }, { heading: 'Cancelled' }, { heading: 'Outcome' },
+          { heading: 'Outcome note', width: 40, wrap: true }, { heading: 'Blocked because', width: 32 },
+        ],
+        rows: out,
+        empty: 'Nobody is planned or named on the look-ahead in these dates.',
+      }];
+    },
+
+    async cancellations(ctx) {
+      const events = (await cancellationLog(ctx.from || '2000-01-01')).filter((e) => !ctx.to || e.start <= ctx.to);
+      return [{
+        name: 'Cancellations',
+        columns: [
+          { heading: 'From', kind: 'date' }, { heading: 'To', kind: 'date' }, { heading: 'Days', kind: 'number' },
+          { heading: 'What' }, { heading: 'Activity', width: 48 }, { heading: 'Location' },
+          { heading: 'Resources cancelled' }, { heading: 'Responsible party' }, { heading: 'Reason', width: 48, wrap: true },
+          { heading: 'Logged by' }, { heading: 'Logged at', kind: 'datetime' },
+          { heading: 'Readings that showed it', kind: 'number' }, { heading: 'First seen', kind: 'datetime' }, { heading: 'Last seen', kind: 'datetime' },
+          { heading: 'Removed from the log' },
+        ],
+        rows: events.map((e) => [
+          e.start, e.end, e.days, e.kind === 'support' ? 'BART resource cancelled' : 'Activity cancelled',
+          e.label || '', e.location || '', describeCodeCounts(e.resources), e.note?.party || '', e.note?.reason || '',
+          ctx.who(e.note?.author), e.note?.created_at || '', e.reads || 0, e.firstSeen || '', e.lastSeen || '', Boolean(e.dismissed),
+        ]),
+        empty: 'Nothing was cancelled in these dates.',
+      }];
+    },
+
+    async changes(ctx) {
+      const [events, notes] = await Promise.all([
+        rc.readAll('rc_change_events', { column: 'detected_at', from: ctx.from, to: ctx.to ? `${ctx.to}T23:59:59` : null }),
+        rc.readAll('rc_change_annotations').catch(() => []),
+      ]);
+      // The newest annotation for each event is the answer; the ones under it are its history.
+      const said = new Map();
+      for (const a of [...notes].sort((x, y) => String(x.created_at).localeCompare(String(y.created_at)))) said.set(a.change_event_id, a);
+      return [{
+        name: 'Changes',
+        columns: [
+          { heading: 'Detected', kind: 'datetime' }, { heading: 'Week starting', kind: 'date' }, { heading: 'Kind' },
+          { heading: 'What changed', width: 60, wrap: true }, { heading: 'Location' },
+          { heading: 'Reason given', width: 48, wrap: true }, { heading: 'Party' }, { heading: 'Noted as' }, { heading: 'Noted by' },
+        ],
+        rows: events.map((e) => {
+          const a = said.get(e.id);
+          return [
+            e.detected_at, e.week_start || '', KIND_LABELS[e.kind] || e.kind,
+            describeChange({ ...e, weekStart: e.week_start, rowKey: e.row_key }), ctx.place(e.location_id, ''),
+            a?.note || '', a?.party_id ? ctx.partyById.get(a.party_id)?.name || '' : '', a?.kind || '', ctx.who(a?.author),
+          ];
+        }),
+        empty: 'No change was recorded in these dates.',
+      }];
+    },
+
+    async outcomes(ctx) {
+      const actuals = await ctx.actuals();
+      const labels = new Map((await rc.lookaheadRowsByIds(actuals.map((a) => a.lookahead_row_id)).catch(() => []))
+        .map((r) => [r.id, r.raw_label]));
+      return [{
+        name: 'Huddle outcomes',
+        columns: [
+          { heading: 'Date', kind: 'date' }, { heading: 'Person' }, { heading: 'Shift' }, { heading: 'Outcome' },
+          { heading: 'Family' }, { heading: 'Category' }, { heading: 'Location' }, { heading: 'Activity', width: 48 },
+          { heading: 'Note', width: 48, wrap: true }, { heading: 'Blocked because', width: 32 }, { heading: 'Blocked by' },
+          { heading: 'Photo' }, { heading: 'Recorded', kind: 'datetime' }, { heading: 'Recorded by' },
+        ],
+        rows: actuals.map((a) => {
+          const status = STATUS_BY_ID.get(a.status);
+          return [
+            a.work_date, ctx.name(a.person_id), shiftLabel(a.shift || 'day'), status?.label || a.status, status?.family || '',
+            ctx.categoryById.get(a.category_id)?.name || '', ctx.place(a.location_id, ''), labels.get(a.lookahead_row_id) || '',
+            a.note || '', a.blocked_reason || '', a.blocked_party_id ? ctx.partyById.get(a.blocked_party_id)?.name || '' : '',
+            Boolean(a.evidence_path), a.created_at, ctx.who(a.created_by),
+          ];
+        }),
+        empty: 'The huddle recorded nothing in these dates.',
+      }];
+    },
+
+    async blockers(ctx) {
+      const rows = await rc.readAll('rc_blockers_current', { column: 'raised_on', from: ctx.from, to: ctx.to });
+      return [{
+        name: 'Blockers',
+        columns: [
+          { heading: 'Raised', kind: 'date' }, { heading: 'Raised for' }, { heading: 'Location' },
+          { heading: 'What is in the way', width: 48, wrap: true }, { heading: 'Party' }, { heading: 'State' },
+          { heading: 'Owner' }, { heading: 'Due', kind: 'date' }, { heading: 'Latest note', width: 48, wrap: true },
+          { heading: 'Last updated', kind: 'datetime' }, { heading: 'Age in days', kind: 'number' },
+        ],
+        rows: rows.map((b) => [
+          b.raised_on, ctx.name(b.person_id), ctx.place(b.location_id, ''), b.summary || '',
+          b.party_id ? ctx.partyById.get(b.party_id)?.name || '' : '', b.state || 'open',
+          ctx.name(b.owner_id), b.due_date || '', b.last_note || '', b.last_update || '',
+          b.age_days == null ? '' : Number(b.age_days),
+        ]),
+        empty: 'No blocker was raised in these dates.',
+      }];
+    },
+
+    async leave(ctx) {
+      const rows = (await rc.readAll('rc_leave', { column: 'start_date' }))
+        .filter((l) => (!ctx.from || l.end_date >= ctx.from) && (!ctx.to || l.start_date <= ctx.to));
+      const span = (l) => Math.round((Date.parse(l.end_date) - Date.parse(l.start_date)) / 86400000) + 1;
+      return [{
+        name: 'Leave',
+        columns: [
+          { heading: 'Person' }, { heading: 'Kind' }, { heading: 'From', kind: 'date' }, { heading: 'To', kind: 'date' },
+          { heading: 'Calendar days', kind: 'number' }, { heading: 'Status' }, { heading: 'First day' }, { heading: 'Last day' },
+          { heading: 'Note', width: 40, wrap: true }, { heading: 'Asked', kind: 'datetime' },
+        ],
+        rows: rows.map((l) => [
+          ctx.name(l.person_id), ctx.leaveKindById.get(l.kind_id)?.name || '', l.start_date, l.end_date, span(l),
+          l.status || '', l.start_portion || '', l.end_portion || '', l.note || '', l.created_at,
+        ]),
+        empty: 'No leave in these dates.',
+      }];
+    },
+
+    async p6(ctx) {
+      const uses = new Map();
+      for (const r of ctx.laRows) {
+        if (r.kind !== 'activity' || r.archived) continue;
+        const status = p6Status(r.activity_id, ctx.p6);
+        if (status.kind === 'linked') uses.set(status.entry.activity_id, (uses.get(status.entry.activity_id) || 0) + 1);
+      }
+      return [{
+        name: 'P6 activities',
+        columns: [
+          { heading: 'Activity ID' }, { heading: 'Activity name', width: 48 }, { heading: 'WBS', width: 32 },
+          { heading: 'In the latest extract' }, { heading: 'Look-ahead rows naming it', kind: 'number' },
+          { heading: 'Imported', kind: 'datetime' },
+        ],
+        rows: ctx.p6Entries.map((e) => [e.activity_id, e.name || '', e.wbs || '', !e.missing, uses.get(e.activity_id) || 0, e.imported_at || '']),
+        empty: 'No P6 extract has been imported — Look-ahead → P6 activities.',
+      }];
+    },
+
+    async tawrs(ctx) {
+      const rows = (await rc.listTawrsFrom(ctx.from || '2000-01-01')).filter((t) => !ctx.to || t.week_start <= ctx.to);
+      return [{
+        name: 'TAWRs',
+        columns: [
+          { heading: 'Week starting', kind: 'date' }, { heading: 'First day', kind: 'date' }, { heading: 'Location' },
+          { heading: 'Shift' }, { heading: 'Status' }, { heading: 'Created', kind: 'datetime' }, { heading: 'Created by' },
+          { heading: 'Approved', kind: 'datetime' }, { heading: 'Approved by' },
+        ],
+        rows: rows.map((t) => [
+          t.week_start, t.first_day || '', t.location_name || ctx.place(t.location_id, ''), shiftLabel(t.shift), t.status || '',
+          t.created_at, ctx.who(t.created_by), t.approved_at || '', ctx.who(t.approved_by),
+        ]),
+        empty: 'No TAWR in these dates.',
+      }];
+    },
+
+    async sars(ctx) {
+      const [sars, links] = await Promise.all([rc.listSars(), rc.listSarLinks().catch(() => [])]);
+      const linked = new Map();
+      for (const l of links) linked.set(l.sar_id, (linked.get(l.sar_id) || 0) + 1);
+      const rows = sars.filter((s) => (!ctx.from || !s.week_start || s.week_start >= addDaysISO(ctx.from, -6))
+        && (!ctx.to || !s.week_start || s.week_start <= ctx.to));
+      return [{
+        name: 'SARs',
+        columns: [
+          { heading: 'SAR number' }, { heading: 'Revision', kind: 'number' }, { heading: 'Location' },
+          { heading: 'Week starting', kind: 'date' }, { heading: 'Starts', kind: 'datetime' }, { heading: 'Ends', kind: 'datetime' },
+          { heading: 'Authorised hours', kind: 'number' }, { heading: 'Look-ahead rows covered', kind: 'number' }, { heading: 'File', width: 40 },
+        ],
+        rows: rows.map((s) => [
+          s.sar_number, s.revision ?? '', ctx.place(s.location_id, s.raw_location), s.week_start || '', s.start_at || '', s.end_at || '',
+          s.authorized_hours == null ? '' : Number(s.authorized_hours), linked.get(s.id) || 0, s.storage_path || '',
+        ]),
+        empty: 'No SAR in these dates.',
+      }];
+    },
+
+    async reference(ctx) {
+      const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      return [
+        {
+          name: 'Team',
+          columns: [
+            { heading: 'Name' }, { heading: 'Email' }, { heading: 'Title' }, { heading: 'Subsystem' }, { heading: 'Role' },
+            { heading: 'Takes shifts' }, { heading: 'Active' }, { heading: 'Working days' },
+          ],
+          rows: ctx.people.map((p) => [
+            p.name, p.email || '', p.title || '', p.subsystem || '', p.role || '', p.scheduled !== false, p.active !== false,
+            (Array.isArray(p.working_days) ? p.working_days : [1, 2, 3, 4, 5]).map((d) => days[d - 1]).filter(Boolean).join(' '),
+          ]),
+        },
+        {
+          name: 'Locations',
+          columns: [{ heading: 'Name' }, { heading: 'Code' }, { heading: 'Active' }],
+          rows: ctx.locations.map((l) => [l.name, l.code || '', l.active !== false]),
+        },
+        {
+          name: 'Legend',
+          columns: [{ heading: 'Colour' }, { heading: 'Meaning' }, { heading: 'Role' }, { heading: 'In force from', kind: 'date' }, { heading: 'Active' }],
+          rows: ctx.legendRows.map((l) => [`#${l.argb}`, l.meaning || '', l.role || 'shift', l.valid_from || '', l.active !== false]),
+        },
+        {
+          name: 'Support codes',
+          columns: [{ heading: 'Code' }, { heading: 'Name' }, { heading: 'Party' }, { heading: 'Active' }],
+          rows: ctx.codes.map((c) => [c.code, c.name || '', c.party || 'BART', c.active !== false]),
+        },
+      ];
+    },
+  };
+
+  const NAMES = {
+    lookahead: ['Look-ahead'], shifts: ['Shifts worked'], cancellations: ['Cancellations'], changes: ['Changes'],
+    outcomes: ['Huddle outcomes'], blockers: ['Blockers'], leave: ['Leave'], p6: ['P6 activities'], tawrs: ['TAWRs'],
+    sars: ['SARs'], reference: ['Team', 'Locations', 'Legend', 'Support codes'],
+  };
+
+  /**
+   * The workbook, from what `settings` asks for. Returns `{ bytes, name,
+   * sheets, failed, companion }`: `sheets` is what went in and how many rows
+   * each has, `failed` what could not be read and why, and `companion` the 4WLA
+   * in its own layout when it was asked for and the look-ahead is written here.
+   */
+  async function buildMasterExport(settings = loadSettings(), { now = new Date() } = {}) {
+    const range = rangeDates(settings);
+    const ctx = await context(range);
+    const wanted = SHEETS.filter((s) => settings.sheets.includes(s.id));
+    const sheets = [];
+    const failed = [];
+    /* One at a time, in order, and each on its own: a sheet the policies refuse
+       (TAWRs to anybody but an administrator) or a database without a view yet
+       is written empty and named, never allowed to lose the rest. */
+    for (const want of wanted) {
+      try {
+        sheets.push(...await BUILDERS[want.id](ctx));
+      } catch (err) {
+        failed.push({ id: want.id, label: want.label, message: err.message });
+        for (const name of NAMES[want.id]) sheets.push({ name, columns: [{ heading: name }], rows: [], empty: `Could not be read: ${err.message}` });
+      }
+    }
+
+    const about = {
+      name: 'About',
+      columns: [{ heading: 'Item', width: 28 }, { heading: 'Value', width: 40 }, { heading: 'Detail', width: 90, wrap: true }],
+      rows: [
+        ['Exported', now.toLocaleString(), now.toISOString()],
+        ['Exported by', rc.me()?.name || rc.currentUser?.()?.email || '', ''],
+        ['Dates', range.label, range.from || range.to ? `${range.from || 'the start'} to ${range.to || 'the end'}` : ''],
+        ['The look-ahead is written in', ctx.source === 'editor' ? 'The calendar (Edit)' : 'The workbook', ''],
+        ['How a day of the look-ahead is read', 'The newest reading of its week', 'Each week comes from the newest reading taken of it — '
+          + 'the rule the week plan reads by — so a week the window has rolled past keeps the last reading that had it, and older readings '
+          + 'of the same week are still on the record in the calendar.'],
+        ['', '', ''],
+        ['Sheet', 'Rows', 'What it holds'],
+        ...sheets.map((s) => {
+          const meta = SHEETS.find((x) => NAMES[x.id].includes(s.name));
+          const fail = failed.find((f) => NAMES[f.id].includes(s.name));
+          return [s.name, fail ? 'Could not be read' : String(s.rows.length), fail ? fail.message : meta?.hint || ''];
+        }),
+      ],
+    };
+    const bytes = await tableWorkbook({ sheets: [about, ...sheets], title: 'CX Timeline — master export' });
+
+    let companion = null;
+    if (settings.companion) companion = await lookaheadFileNow().catch(() => null);
+
+    return {
+      bytes,
+      name: `CX master export ${stamp(now)}.xlsx`,
+      sheets: sheets.map((s) => ({ name: s.name, rows: s.rows.length })),
+      failed,
+      companion,
+    };
+  }
+
+  /**
+   * Put the workbook — and the 4WLA beside it — where it goes: `exports/` in
+   * the shared folder when one is connected, the downloads folder otherwise.
+   */
+  async function deliver(result) {
+    if (filestore.hasFolder?.()) {
+      await filestore.intakeWrite(`${EXPORT_DIR}/${result.name}`, result.bytes);
+      if (result.companion) await filestore.intakeWrite(`${EXPORT_DIR}/${result.companion.name}`, result.companion.bytes);
+      return { where: 'folder', path: `${EXPORT_DIR}/${result.name}` };
+    }
+    saveFile(result.name, result.bytes, XLSX, 'Master export');
+    if (result.companion) saveFile(result.companion.name, result.companion.bytes, XLSX, '4WLA');
+    return { where: 'download', path: result.name };
+  }
+
+  /** Build, deliver, and remember how it went. */
+  async function runMasterExport(settings = loadSettings()) {
+    const result = await buildMasterExport(settings);
+    const went = await deliver(result);
+    const rows = result.sheets.reduce((n, s) => n + s.rows, 0);
+    saveSettings({ ...loadSettings(), last: { at: Date.now(), ...went, rows, failed: result.failed.length } });
+    return { ...result, ...went, rows };
+  }
+
+  function saidWhere(out) {
+    return out.where === 'folder' ? `Saved to the shared folder — ${out.path}` : `Downloaded — ${out.path}`;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The schedule
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  let started = false;
+  let running = false;
+
+  /**
+   * Look once a minute for an export that is due, on this computer. Started
+   * when the calendar starts; it acts only for an administrator who is not
+   * seeing it as somebody else, and only while the page is open — which is the
+   * whole of what a page can promise.
+   */
+  function startScheduledExports() {
+    if (started) return;
+    started = true;
+    setTimeout(() => { scheduledTick(); }, 20000);
+    setInterval(() => { scheduledTick(); }, 60000);
+  }
+
+  async function scheduledTick(now = Date.now()) {
+    if (running || !rc.isSignedIn() || !rc.isAdmin() || rc.previewing()) return false;
+    const s = loadSettings();
+    if (!isDue(s.schedule, { lastRun: s.lastRun, since: s.since }, now)) return false;
+    if (s.failedAt && now - s.failedAt < RETRY_MS) return false;
+    /* Claimed before it runs, so a second tab looking a moment later finds it
+       done rather than exporting the same thing twice. */
+    saveSettings({ ...s, lastRun: now });
+    running = true;
+    try {
+      const out = await runMasterExport(s);
+      saveSettings({ ...loadSettings(), lastRun: now, failedAt: null });
+      toast({ tone: out.failed.length ? 'warn' : 'info', title: 'Scheduled master export', message: saidWhere(out), timeout: 6000 });
+      return true;
+    } catch (err) {
+      saveSettings({ ...loadSettings(), lastRun: s.lastRun, failedAt: now });
+      rc.reportError('master-export:scheduled', err);
+      toast({ tone: 'bad', title: 'The scheduled master export failed', message: `${err.message} — it is tried again in half an hour.`, timeout: 12000 });
+      return false;
+    } finally {
+      running = false;
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The dialog
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+  function when(ms) {
+    if (!ms) return '';
+    return new Date(ms).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function openMasterExport() {
+    const s = loadSettings();
+    const boxes = SHEETS.map((sheet) => {
+      const box = checkbox({ label: `${sheet.label} — ${sheet.hint}`, checked: s.sheets.includes(sheet.id) });
+      box.dataset.sheet = sheet.id;
+      box.classList.add('rc-mx-sheet');
+      return box;
+    });
+    const range = selectInput({ value: s.range, options: RANGES.map((r) => ({ value: r.id, label: r.label })) });
+    const from = el('input', { type: 'date', class: 'cx-input', value: s.from || '' });
+    const to = el('input', { type: 'date', class: 'cx-input', value: s.to || '' });
+    const dates = el('div', { class: 'rc-mx-dates' }, [field('From', from), field('To', to)]);
+    const companion = checkbox({ label: 'Also the 4WLA in its own layout — this week and the next three, as Export to Excel makes it', checked: s.companion });
+
+    const every = selectInput({
+      value: s.schedule.every,
+      options: [
+        { value: 'off', label: 'Only when I press Export now' },
+        { value: 'day', label: 'Every day' },
+        { value: 'week', label: 'Every week' },
+        { value: 'hours', label: 'Every few hours' },
+      ],
+    });
+    every.classList.add('rc-mx-every');
+    const at = el('input', { type: 'time', class: 'cx-input rc-mx-at', value: s.schedule.at });
+    const day = selectInput({ value: String(s.schedule.weekday), options: WEEKDAYS.map((d, i) => ({ value: String(i + 1), label: d })) });
+    const hours = el('input', { type: 'number', class: 'cx-input rc-mx-hours', min: '1', max: '168', value: String(s.schedule.hours) });
+    const atField = field('At', at);
+    const dayField = field('On', day);
+    const hoursField = field('Every how many hours', hours);
+    const status = el('p', { class: 'rc-hint rc-mx-status' });
+
+    const read = () => ({
+      ...loadSettings(),
+      sheets: boxes.filter((b) => b.querySelector('input').checked).map((b) => b.dataset.sheet),
+      range: range.value,
+      from: from.value,
+      to: to.value,
+      companion: companion.querySelector('input').checked,
+      schedule: cleanSchedule({ every: every.value, at: at.value, weekday: Number(day.value), hours: Number(hours.value) }),
+    });
+    const show = () => {
+      dates.hidden = range.value !== 'custom';
+      atField.hidden = every.value !== 'day' && every.value !== 'week';
+      dayField.hidden = every.value !== 'week';
+      hoursField.hidden = every.value !== 'hours';
+      const now = Date.now();
+      const next = read();
+      const last = s.last ? `Last export ${when(s.last.at)} — ${s.last.where === 'folder' ? `into the shared folder, ${s.last.path}` : 'downloaded'}. ` : 'Not exported from this computer yet. ';
+      const coming = next.schedule.every === 'off' ? ''
+        : `Next ${when(nextSlot(next.schedule, s.lastRun ?? s.since ?? now, now))}.`;
+      status.textContent = last + coming;
+    };
+    for (const c of [range, every, at, day, hours]) c.addEventListener('change', show);
+    show();
+
+    const save = () => {
+      const next = read();
+      const was = loadSettings();
+      const changed = JSON.stringify(was.schedule) !== JSON.stringify(next.schedule);
+      // Switched on or changed now: the first export is at the next slot, not this minute.
+      if (changed) { next.since = Date.now(); next.lastRun = null; next.failedAt = null; }
+      saveSettings(next);
+      return next;
+    };
+
+    const folder = filestore.hasFolder?.();
+    openModal({
+      title: 'Master export',
+      subtitle: 'Everything useful the calendar holds, as one Excel workbook',
+      body: el('div', { class: 'cx-form rc-mx-form' }, [
+        el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'What goes in — a sheet each' }), el('div', { class: 'rc-mx-sheets' }, boxes)]),
+        field('Dates', range),
+        dates,
+        companion,
+        el('p', {
+          class: 'rc-hint rc-mx-where',
+          text: folder
+            ? `Saved into ${EXPORT_DIR}/ in the shared folder, beside the plan — on a synced folder it reaches everybody who has it.`
+            : 'Downloaded to this computer. Open the shared folder in the timeline and it is saved into exports/ there instead.',
+        }),
+        field('On a schedule', every),
+        el('div', { class: 'rc-mx-when' }, [dayField, atField, hoursField]),
+        el('p', {
+          class: 'rc-hint',
+          text: 'A schedule runs on this computer, while the calendar is open on it — in a browser tab or the desktop app. '
+            + 'A time missed while it was closed is exported once, the next time it opens.',
+        }),
+        status,
+      ]),
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Save', onClick: () => {
+            const next = save();
+            toast({ message: next.schedule.every === 'off' ? 'Saved. Nothing is exported on a schedule.' : 'Saved. The schedule runs while the calendar is open here.' });
+          },
+        },
+        {
+          label: 'Export now', kind: 'primary', autofocus: true, onClick: () => {
+            const next = save();
+            if (!next.sheets.length) {
+              toast({ message: 'Tick at least one sheet to export.' });
+              return false;
+            }
+            toast({ message: 'Building the master export…', timeout: 3000 });
+            runMasterExport(next).then((out) => {
+              toast({
+                tone: out.failed.length ? 'warn' : 'good',
+                title: `Master export — ${out.rows.toLocaleString()} rows on ${out.sheets.length} sheets`,
+                message: saidWhere(out) + (out.failed.length ? ` · could not read: ${out.failed.map((f) => f.label).join(', ')}` : ''),
+                timeout: 9000,
+              });
+            }).catch((err) => {
+              rc.reportError('master-export', err);
+              toast({ tone: 'bad', message: `The master export failed — ${err.message}`, timeout: 12000 });
+            });
+            return undefined;
+          },
+        },
+      ],
+    });
+  }
+
+  /** The button that opens it — the same everywhere it is offered. */
+  function masterExportButton() {
+    return el('button', {
+      class: 'cx-btn mini primary rc-master-export',
+      type: 'button',
+      html: icon('download', { size: 12 }) + '<span>Master export</span>',
+      title: 'Everything useful the calendar holds, as one Excel workbook — now, or on a schedule',
+      onClick: () => openMasterExport(),
+    });
+  }
+
+  Object.defineProperty(__x, "EXPORT_DIR", { get: () => EXPORT_DIR, enumerable: true });
+  Object.defineProperty(__x, "SHEETS", { get: () => SHEETS, enumerable: true });
+  Object.defineProperty(__x, "RANGES", { get: () => RANGES, enumerable: true });
+  Object.defineProperty(__x, "loadSettings", { get: () => loadSettings, enumerable: true });
+  Object.defineProperty(__x, "rangeDates", { get: () => rangeDates, enumerable: true });
+  Object.defineProperty(__x, "buildMasterExport", { get: () => buildMasterExport, enumerable: true });
+  Object.defineProperty(__x, "runMasterExport", { get: () => runMasterExport, enumerable: true });
+  Object.defineProperty(__x, "startScheduledExports", { get: () => startScheduledExports, enumerable: true });
+  Object.defineProperty(__x, "scheduledTick", { get: () => scheduledTick, enumerable: true });
+  Object.defineProperty(__x, "openMasterExport", { get: () => openMasterExport, enumerable: true });
+  Object.defineProperty(__x, "masterExportButton", { get: () => masterExportButton, enumerable: true });
+};
+
 // ui/rc_lookahead.js
 __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   /**
@@ -16621,6 +17835,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { renderSars } = __req("ui/rc_la_sars.js");
   const { renderP6, p6Words } = __req("ui/rc_la_p6.js");
   const { openActivity } = __req("ui/rc_activity.js");
+  const { masterExportButton } = __req("ui/rc_master_export.js");
 
   const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6', 'sars'];
 
@@ -16766,6 +17981,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       // Once it is written here there is nothing to check; Edit is the way in.
       admin && !written ? checkNowButton() : null,
       admin ? editSwitch() : null,
+      // Everything the calendar holds, as one workbook — the look-ahead is where it is looked for first.
+      admin ? masterExportButton() : null,
     ].filter(Boolean)));
     watchForNewReading(host, snapshot?.id ?? null);
 
@@ -19480,6 +20697,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
   const { toast, badge, chipStat, emptyState, selectInput } = __req("ui/components.js");
   const { byId, dayLabel, todayISO, isoToMs, STATUS_BY_ID } = __req("ui/rc_util.js");
   const { saveFile } = __req("io/exporters.js");
+  const { masterExportButton } = __req("ui/rc_master_export.js");
 
   /** Ranges people actually ask for, plus the one that matters most: any. */
   const RANGES = [
@@ -19603,6 +20821,7 @@ __mods["ui/rc_reports.js"] = function (__x, __req) {
         html: icon('download', { size: 12 }) + '<span>CSV</span>',
         onClick: () => exportCsv(from, to),
       }),
+      rc.isAdmin() ? masterExportButton() : null,
       rc.isAdmin() ? el('button', {
         class: 'cx-btn mini ghost',
         text: 'Back it up',
@@ -22159,6 +23378,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
   const tawr = __req("ui/rc_tawr.js");
   const { enhanceTables } = __req("ui/rc_table.js");
   const { inboxCount } = __req("ui/rc_inbox.js");
+  const { startScheduledExports } = __req("ui/rc_master_export.js");
 
   /**
    * The tabs, in the order the work actually happens: run today's meeting, plan
@@ -22254,6 +23474,8 @@ __mods["ui/rc.js"] = function (__x, __req) {
       console.warn('[cx-timeline] resource calendar init failed:', err.message);
     }
     render();
+    // A master export on a schedule runs on this computer while the calendar is open.
+    startScheduledExports();
   }
 
   /* ── Router ────────────────────────────────────────────────────────────── */

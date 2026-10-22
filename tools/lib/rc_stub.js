@@ -489,6 +489,32 @@ export function fakeSdk() {
       }
       return [...out.values()].filter((row) => row._current).map(({ _snaps, _marksAt, _current, ...row }) => row);
     },
+    /* `rc_lookahead_days`: every activity and day, each week from the newest
+       read of it — the week plan's rule (`newestPerKey()`). Ordered by day, as
+       the export asks. */
+    get rc_lookahead_days() {
+      const taken = new Map(this.rc_lookahead_snapshots.map((x) => [x.id, String(x.taken_at || '')]));
+      const newest = new Map();
+      for (const r of this.rc_lookahead_rows) {
+        const at = taken.get(r.snapshot_id) || '';
+        const held = newest.get(r.week_start);
+        if (!held || at > held.at) newest.set(r.week_start, { id: r.snapshot_id, at });
+      }
+      const out = [];
+      for (const r of this.rc_lookahead_rows) {
+        if (newest.get(r.week_start)?.id !== r.snapshot_id) continue;
+        for (const day of Object.keys({ ...(r.cells || {}), ...(r.bart_marks || {}), ...(r.resources || {}) })) {
+          out.push({
+            row_id: r.id || `${r.snapshot_id}|${r.sheet_row}|${r.row_key}`, snapshot_id: r.snapshot_id,
+            taken_at: taken.get(r.snapshot_id) || null, week_start: r.week_start, row_key: r.row_key,
+            sheet_row: r.sheet_row ?? null, location_id: r.location_id || null, raw_location: r.raw_location ?? null,
+            raw_label: r.raw_label ?? null, subsystem: r.subsystem ?? null, la_row_id: r.la_row_id || null, day,
+            paint: r.cells?.[day] ?? null, marks: r.bart_marks?.[day] ?? null, names: r.resources?.[day] ?? null,
+          });
+        }
+      }
+      return out.sort((a, b) => a.day.localeCompare(b.day) || String(a.row_id).localeCompare(String(b.row_id)));
+    },
     rc_blockers: [],
     rc_blocker_updates: [],
     /* The view is what is true now; the tables keep how it got that way. The

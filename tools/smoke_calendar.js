@@ -31,6 +31,7 @@ import { pinClock, pinNodeClock } from './lib/clock.js';
 import { lookaheadEditor } from './smoke_la_editor.js';
 import { tawrRequests } from './smoke_tawr.js';
 import { lookaheadP6 } from './smoke_la_p6.js';
+import { masterExport } from './smoke_master_export.js';
 import { fakeSdk, SCHEMA_VERSION } from './lib/rc_stub.js';
 import path from 'node:path';
 import url from 'node:url';
@@ -2990,6 +2991,7 @@ async function main() {
   await tawrRequests(page, { check, shot: process.env.CX_TAWR_SHOT || null });
 
   await lookaheadP6(page, { check, shot: process.env.CX_P6_SHOT || null });
+  await masterExport(page, { check });
 
   /* ── A tablet in the room ─────────────────────────────────────────────
      The meeting is run standing, on a tablet, and a tablet in landscape is

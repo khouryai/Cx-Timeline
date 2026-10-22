@@ -1580,10 +1580,12 @@ create or replace view public.rc_cancelled_days with (security_invoker = true) a
      where d.value ilike '%cancel%'
         or d.value in (select '#' || l.argb from public.rc_legend l where l.meaning ilike '%cancel%')
   ), newest as (
-    select x.day, (select c.snapshot_id from public.rc_lookahead_cover c
-                    where x.day between c.first_day and c.last_day
-                    order by c.taken_at desc limit 1) as snapshot_id
+    -- One join, sorted once: a lookup per day re-read every reading's span for
+    -- each day, and on a project with 31,772 reading rows that was a minute.
+    select distinct on (x.day) x.day, c.snapshot_id
       from (select distinct day from red) x
+      join public.rc_lookahead_cover c on x.day between c.first_day and c.last_day
+     order by x.day, c.taken_at desc, c.snapshot_id desc
   )
   select red.raw_label, red.raw_location,
          (array_agg(red.location_id) filter (where red.location_id is not null))[1] as location_id,
@@ -1619,10 +1621,12 @@ create or replace view public.rc_cancelled_support_days with (security_invoker =
        and coalesce(r.cells ->> d.key, '') not in
            (select '#' || l.argb from public.rc_legend l where l.meaning ilike '%cancel%')
   ), newest as (
-    select x.day, (select c.snapshot_id from public.rc_lookahead_cover c
-                    where x.day between c.first_day and c.last_day
-                    order by c.taken_at desc limit 1) as snapshot_id
+    -- One join, sorted once: a lookup per day re-read every reading's span for
+    -- each day, and on a project with 31,772 reading rows that was a minute.
+    select distinct on (x.day) x.day, c.snapshot_id
       from (select distinct day from struck) x
+      join public.rc_lookahead_cover c on x.day between c.first_day and c.last_day
+     order by x.day, c.taken_at desc, c.snapshot_id desc
   )
   select struck.raw_label, struck.raw_location,
          (array_agg(struck.location_id) filter (where struck.location_id is not null))[1] as location_id,
@@ -1634,6 +1638,42 @@ create or replace view public.rc_cancelled_support_days with (security_invoker =
     from struck join newest on newest.day = struck.day
    group by struck.raw_label, struck.raw_location, struck.day
   having bool_or(struck.snapshot_id = newest.snapshot_id);
+
+/*
+ * The look-ahead as it stands for every day any reading covered: one row per
+ * activity and day, from the newest reading of that day's week.
+ *
+ * What the master export writes as "the look-ahead, day by day". A reading
+ * covers the week just gone and the five ahead, so no one reading is the
+ * history; `rc_lookahead_rows` keeps every reading, so all of them together
+ * repeat each week once per reading. The newest reading that says anything
+ * about a week is that week's answer — the rule the week plan reads by
+ * (`newestPerKey()` in ui/rc_util.js) — so a week the window has rolled past
+ * keeps the last reading that had it, and workbook readings from before the
+ * editor was adopted are in it like any other.
+ *
+ * By the week and not the day, and that is what makes it affordable: the
+ * newest reading per week is a sort of the rows, and only its rows are opened
+ * up into days. Asked day by day over every reading it was a 31,772-row
+ * project's minute-long query; this is a tenth of a second. Derived, never
+ * stored, and `security_invoker` so the rows' own policies decide who sees it.
+ */
+create or replace view public.rc_lookahead_days with (security_invoker = true) as
+  with newest as (
+    select distinct on (r.week_start) r.week_start, r.snapshot_id
+      from public.rc_lookahead_rows r
+      join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
+     order by r.week_start, s.taken_at desc, r.snapshot_id desc
+  )
+  select r.id as row_id, r.snapshot_id, s.taken_at, r.week_start, r.row_key, r.sheet_row,
+         r.location_id, r.raw_location, r.raw_label, r.subsystem, r.la_row_id, d.key::date as day,
+         r.cells ->> d.key      as paint,
+         r.bart_marks ->> d.key as marks,
+         r.resources ->> d.key  as names
+    from newest n
+    join public.rc_lookahead_rows r on r.week_start = n.week_start and r.snapshot_id = n.snapshot_id
+    join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
+    cross join lateral jsonb_object_keys(r.cells || r.bart_marks || r.resources) d(key);
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Deleting a reference row, where deleting it is honest
@@ -2210,11 +2250,13 @@ grant select, insert on public.rc_cancellation_notes to authenticated;
 revoke all on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
               public.rc_rows_without_sar, public.rc_sars_without_rows,
               public.rc_lookahead_snapshot_meta, public.rc_actuals_current,
-              public.rc_cancelled_days, public.rc_cancelled_support_days, public.rc_lookahead_cover from public, anon;
+              public.rc_cancelled_days, public.rc_cancelled_support_days, public.rc_lookahead_cover,
+              public.rc_lookahead_days from public, anon;
 grant select on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
                 public.rc_rows_without_sar, public.rc_sars_without_rows,
                 public.rc_lookahead_snapshot_meta, public.rc_actuals_current,
-                public.rc_cancelled_days, public.rc_cancelled_support_days, public.rc_lookahead_cover to authenticated;
+                public.rc_cancelled_days, public.rc_cancelled_support_days, public.rc_lookahead_cover,
+                public.rc_lookahead_days to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Storage: the two things that are files
@@ -3262,5 +3304,5 @@ create index if not exists rc_la_seen_snapshot_id_fk_idx on public.rc_la_seen (s
 -- this file changes shape — `tools/test_sql.js` fails when the two disagree.
 -- ══════════════════════════════════════════════════════════════════════════
 
-insert into public.rc_settings (key, value) values ('schema_version', '12')
+insert into public.rc_settings (key, value) values ('schema_version', '13')
 on conflict (key) do update set value = excluded.value, updated_at = now();

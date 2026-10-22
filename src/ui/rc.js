@@ -30,6 +30,7 @@ import * as reports from './rc_reports.js';
 import * as tawr from './rc_tawr.js';
 import { enhanceTables } from './rc_table.js';
 import { inboxCount } from './rc_inbox.js';
+import { startScheduledExports } from './rc_master_export.js';
 
 /**
  * The tabs, in the order the work actually happens: run today's meeting, plan
@@ -125,6 +126,8 @@ async function init() {
     console.warn('[cx-timeline] resource calendar init failed:', err.message);
   }
   render();
+  // A master export on a schedule runs on this computer while the calendar is open.
+  startScheduledExports();
 }
 
 /* ── Router ────────────────────────────────────────────────────────────── */

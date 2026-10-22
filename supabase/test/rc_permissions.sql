@@ -755,6 +755,32 @@ select assert((select count(*) from public.rc_cancelled_days
                 where raw_label = 'IXL night mode testing' and day = date '2026-09-04') = 1,
   'a day no newer reading covers keeps the last word it had');
 
+-- The look-ahead day by day, for the master export: each week from the newest
+-- reading of it, as the week plan reads.
+select assert((select count(*) from public.rc_lookahead_days
+                where raw_label = 'Cable pull' and day = date '2026-09-07') = 1,
+  'a day two readings cover is in the look-ahead once');
+select assert((select snapshot_id from public.rc_lookahead_days
+                where raw_label = 'Cable pull' and day = date '2026-09-07') = :'cx2',
+  'and from the newer of them');
+select assert((select paint from public.rc_lookahead_days
+                where raw_label = 'Cable pull' and day = date '2026-09-09') = '#FF0000',
+  'with what that reading painted the day');
+select assert((select count(*) from public.rc_lookahead_days where snapshot_id = :'cx1') = 0,
+  'an older reading of the same week is not the look-ahead');
+-- A week no later reading reaches keeps the reading that had it — taken out
+-- again, so no later check counts it.
+insert into public.rc_lookahead_snapshots (file_hash, sheet_name, grid, taken_at)
+values ('hash-days-old', '4WLA', '{"rows":[]}'::jsonb, timestamptz '2025-01-08 08:00+00');
+select id as dold from public.rc_lookahead_snapshots where file_hash = 'hash-days-old' \gset
+insert into public.rc_lookahead_rows (snapshot_id, week_start, row_key, raw_location, raw_label, cells) values
+  (:'dold', date '2025-01-06', 'old|a', 'Yard 9', 'Long-ago survey', '{"2025-01-07":"Day Shift"}'::jsonb);
+select assert((select count(*) from public.rc_lookahead_days
+                where raw_label = 'Long-ago survey' and day = date '2025-01-07') = 1,
+  'a week only an older reading reached is still in the history');
+delete from public.rc_lookahead_rows where snapshot_id = :'dold';
+delete from public.rc_lookahead_snapshots where id = :'dold';
+
 -- What BART had been asked for goes with a red day: the newest read's marks.
 update public.rc_lookahead_rows set bart_marks = '{"2026-09-07":"X.WIT"}'::jsonb where row_key = 'cx|a';
 update public.rc_lookahead_rows set bart_marks = '{"2026-09-07":"X.X.WIT"}'::jsonb where row_key = 'cx|b';

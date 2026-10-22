@@ -157,6 +157,45 @@ if (fs.existsSync(resavedPath)) {
   check('the header stays frozen', /state="frozen"/.test(sheetXml));
 }
 
+/* The master export's workbook: several sheets of plain tables, deflated.
+   Calc opens it and writes every sheet out as CSV, which is what says the
+   dates arrived as dates, the numbers as numbers and the text as text. */
+console.log('\nThe master export, opened by LibreOffice Calc');
+{
+  const xw = await import(path.join(ROOT, 'src/io/xlsx_write.js'));
+  const book = await xw.tableWorkbook({
+    title: 'Master export',
+    sheets: [
+      { name: 'Look-ahead', columns: [{ heading: 'Date', kind: 'date' }, { heading: 'Activity' }, { heading: 'Days', kind: 'number' }],
+        rows: [[monday, 'IXL Regression Testing', 3], [day(1), '=SUM(A1:A9)', 1]] },
+      { name: 'Shifts worked', columns: [{ heading: 'Person' }, { heading: 'Shift' }], rows: [['Dana', 'Night']] },
+      { name: 'Leave', columns: [{ heading: 'Person' }], rows: [], empty: 'No leave in these dates.' },
+    ],
+  });
+  const master = path.join(dir, 'master.xlsx');
+  fs.writeFileSync(master, book);
+  const csvDir = path.join(dir, 'master-csv');
+  fs.mkdirSync(csvDir);
+  try {
+    execFileSync(bin, ['--headless', '--norestore', '--convert-to',
+      'csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,false,false,false,-1', '--outdir', csvDir, master], {
+      env: { ...process.env, HOME: home }, stdio: 'pipe', timeout: 180000,
+    });
+  } catch (err) {
+    check('LibreOffice opens the master export', false, String(err.stderr || err.message).slice(0, 200));
+  }
+  const csv = fs.readdirSync(csvDir);
+  check('LibreOffice opens the master export, every sheet of it', ['Look-ahead', 'Shifts worked', 'Leave']
+    .every((name) => csv.some((f) => f.includes(name))), csv.join(', '));
+  const read = (name) => fs.readFileSync(path.join(csvDir, csv.find((f) => f.includes(name)) || ''), 'utf8');
+  const look = csv.some((f) => f.includes('Look-ahead')) ? read('Look-ahead') : '';
+  check('a date arrives as a date, not a day number or a string of digits',
+    new RegExp(monday.slice(0, 4)).test(look) && !/46\d{3}/.test(look), look.split('\n')[1]);
+  check('a number arrives as a number, and text that looks like a formula as text',
+    /,3\s*$/m.test(look) && /=SUM\(A1:A9\)/.test(look), look);
+  check('an empty sheet says why', csv.some((f) => f.includes('Leave')) && /No leave in these dates/.test(read('Leave')));
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {

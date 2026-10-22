@@ -45,6 +45,7 @@ import { renderCancellations } from './rc_la_cancellations.js';
 import { renderSars } from './rc_la_sars.js';
 import { renderP6, p6Words } from './rc_la_p6.js';
 import { openActivity } from './rc_activity.js';
+import { masterExportButton } from './rc_master_export.js';
 
 const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6', 'sars'];
 
@@ -190,6 +191,8 @@ async function renderCalendar(host) {
     // Once it is written here there is nothing to check; Edit is the way in.
     admin && !written ? checkNowButton() : null,
     admin ? editSwitch() : null,
+    // Everything the calendar holds, as one workbook — the look-ahead is where it is looked for first.
+    admin ? masterExportButton() : null,
   ].filter(Boolean)));
   watchForNewReading(host, snapshot?.id ?? null);
 

@@ -141,7 +141,8 @@ ui/workspace · ui/calendar_loader         the calendar, fetched on first use:
     ui/rc → ui/rc_myday · ui/rc_roster → ui/rc_inbox · ui/rc_settings · ui/rc_activity
           · ui/rc_huddle · ui/rc_week · ui/rc_pto · ui/rc_reports
           · ui/rc_lookahead → ui/rc_la_editor · ui/rc_la_* · ui/rc_ingest → ui/rc_la_state
-          · ui/rc_table · ui/rc_tawr      → ui/rc_util   (calendar.bundle.js)
+          · ui/rc_table · ui/rc_tawr · ui/rc_master_export
+                                          → ui/rc_util   (calendar.bundle.js)
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
 io/rc_pdf → io/pdf · io/lookahead         the calendar drawn for print — no DOM
 core/la_edit → core/lookahead             the look-ahead editor's model — no DOM
@@ -149,6 +150,7 @@ core/la_register → core/lookahead         readings stored as rows, and compare
                                           the calendar's alone (calendar.bundle.js)
 core/la_p6                                a leaf: the P6 list a look-ahead row names —
                                           an extract read, searched, compared — no DOM
+core/export_schedule                      a leaf: when a scheduled master export is due
 io/la_xlsx → core/la_edit · io/xlsx_write the 4WLA as an .xlsx — no DOM
 core/tawr → core/lookahead                a look-ahead week as TAWRs — no DOM
 io/tawr_pdf → io/inflate · io/pdf         BART's fillable PDF, filled — no DOM
@@ -287,6 +289,8 @@ alternative shipped once and went wrong.
 - The look-ahead's window moving is not a change of scope. [→](docs/ARCHITECTURE.md#the-look-aheads-window-moving-is-not-a-change-of-scope)
 - A plan is revised, never edited. [→](docs/ARCHITECTURE.md#a-plan-is-revised-never-edited)
 - The calendar's data can be taken out whole. [→](docs/ARCHITECTURE.md#the-calendars-data-can-be-taken-out-whole)
+- The master export is one Excel workbook, a sheet per question, each read through the function its screen uses (`assignmentIndex()`, `cancellationLog()`, `describe()`) and through the policies; the look-ahead's history is `rc_lookahead_days`, each week from its newest reading — by the week, never day by day over every reading, which took a minute on a real project. [→](docs/ARCHITECTURE.md#the-master-export-is-one-workbook-read-the-way-the-screens-read)
+- A scheduled master export runs in the page on this computer, catches a missed slot up once, and files into `exports/` in the shared folder (downloads without one); its settings are this computer's. [→](docs/ARCHITECTURE.md#the-master-export-runs-on-a-schedule-in-the-page-and-files-into-the-shared-folder)
 - A SAR is recorded, filed and linked in that order, and each step can fail alone. [→](docs/ARCHITECTURE.md#a-sar-is-recorded-filed-and-linked-in-that-order-and-each-step-can-fail-alone)
 - The calendar is used standing up, so it stops assuming a wide screen. [→](docs/ARCHITECTURE.md#the-calendar-is-used-standing-up-so-it-stops-assuming-a-wide-screen)
 
@@ -471,15 +475,15 @@ CX_SITE=dist node tools/run_tests.js smoke smoke_calendar   # against a publishe
 | `test_lookahead.js` | 268 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
-| `test_la_edit.js` | 214 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, every page of a long read fetched together, and P6 extracts read, searched and compared |
+| `test_la_edit.js` | 231 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, every page of a long read fetched together, P6 extracts read, searched and compared, and the master export's workbook and schedule |
 | `smoke.js` | 324 | the application, local mode — a tall plan drawn by the rows in view, offline, less motion and the System theme, files from elsewhere (imports, notes, CSV), and dates away from Greenwich — **any console error fails the run** |
-| `smoke_calendar.js` | 664 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`) — its past weeks and a hover that repaints nothing — who made each change and every edit, TAWRs (`smoke_tawr.js`), P6 activities linked to rows (`smoke_la_p6.js`), a tablet, and that plan data never leaves |
+| `smoke_calendar.js` | 683 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`) — its past weeks and a hover that repaints nothing — who made each change and every edit, TAWRs (`smoke_tawr.js`), P6 activities linked to rows (`smoke_la_p6.js`), the master export and its schedule (`smoke_master_export.js`), a tablet, and that plan data never leaves |
 | `smoke_mobile.js` | 105 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, a phone opening the site sent to it, and that no timeline loads |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 70 | the desktop shell and its updates |
 | `smoke_hosted.js` | 49 | sign-in, invites, read-only |
-| `test_sql.js` | 441 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, changes naming the editor's row, the schema stamp, and that `migrate.sql` upgrades an old project, policies that ask who you are once per query, every foreign key indexed, the bell, and P6 activities imported and their reasons |
-| `test_xlsx_compat.js` | 14 | the Excel export opened, re-saved and printed by LibreOffice Calc (skips where Calc is absent; the `xlsx` CI job installs it) |
+| `test_sql.js` | 446 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, changes naming the editor's row, the schema stamp, and that `migrate.sql` upgrades an old project, policies that ask who you are once per query, every foreign key indexed, the bell, P6 activities imported and their reasons, and the look-ahead day by day |
+| `test_xlsx_compat.js` | 18 | the Excel export opened, re-saved and printed by LibreOffice Calc, and the master export's sheets read out by it (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**
 (`tools/lib/clock.js` shifts `Date` in Node and in every page). Build fixtures
@@ -573,6 +577,12 @@ Each of these has caused a real bug:
   and on a slow connection that was after the next cell had been opened — the
   box being typed in went with the old grid. Draw again only what the answer
   changed, in place (`redrawNoted()`, `redrawDays()`), never the grid.
+- **A per-row subquery over a view re-runs the whole view per row.**
+  `rc_cancelled_days` asked `rc_lookahead_cover` for the newest reading once
+  per cancelled day, and the cover aggregates every reading's rows — on the
+  live project's 31,772 reading rows that was over a minute, so the log and
+  the inbox timed out. Join to it once and pick with `distinct on`; time a
+  new view against a realistic volume, not the test fixtures.
 
 ## Git
 

@@ -1702,6 +1702,56 @@ allowed" must not look alike in something somebody may restore from. SAR PDFs
 stay in Storage — they are already files, and a hundred megabytes of base64
 is not a backup anybody would successfully restore.
 
+### The master export is one workbook, read the way the screens read
+
+**The master export is one workbook, read the way the screens read.**
+`ui/rc_master_export.js` writes everything useful the calendar holds as one
+`.xlsx`, a sheet per question somebody takes the record away to answer: the
+look-ahead day by day (with each row's P6 activity), the shifts worked, the
+cancellations with their party and reason, the changes between readings with
+theirs, the huddle's outcomes, blockers, leave, P6, TAWRs, SARs, and the team,
+locations, legend and support codes that explain the rest, under an *About*
+sheet that says what each holds. Every sheet comes from the function its
+screen uses — `assignmentIndex()` for who covered which shift,
+`cancellationLog()` for the log, `describe()` for a change — so the file and
+the calendar cannot tell two stories, and through the policies like
+`exportEverything()`, so a sheet the account may not read is written empty and
+named in About, never dropped. The JSON backup stays: it is for restoring,
+and this is for reading.
+
+The look-ahead's history is `rc_lookahead_days`: one row per activity and day,
+each week from the newest reading of it — the rule the week plan reads by
+(`newestPerKey()`) — so a week the window rolled past keeps the last reading
+that had it, workbook readings from before the editor included. By the week
+and not the day because only the newest reading's rows are then opened up into
+days: asked day by day over every reading, a real project's 31,772 reading
+rows took over a minute; by the week it is a tenth of a second. It is a view,
+never stored, and read every page (`rc.lookaheadDays()`, `rc.readAll()`).
+
+The writer is `tableWorkbook()` in `io/xlsx_write.js`: typed cells (a date is
+Excel's day number with a date format, a number a number, everything else
+inline text, which is never a formula), the heading row frozen and filtered,
+and the package deflated with the browser's own `CompressionStream`, because a
+year of the look-ahead stored is tens of megabytes landing in a synced folder.
+
+### The master export runs on a schedule in the page, and files into the shared folder
+
+**The master export runs on a schedule in the page, and files into the shared
+folder.** There is no server to run it, and nothing is emailed from this
+application, so a schedule (every day, every week, or every few hours) runs on
+the computer the calendar is open on — a browser tab or the desktop app — for
+an administrator who is not previewing somebody else. A slot missed while it
+was closed is exported once when it next opens, never once per missed slot,
+and a schedule just switched on waits for its first slot
+(`core/export_schedule.js`, pure and tested in Node). The run is claimed before
+it starts, so a second tab finds it done; one that fails is reported
+(`master-export:scheduled`) and tried again half an hour later. The file goes
+into `exports/` in the shared folder through the intake door the look-ahead
+and the SARs already use (`filestore.intakeWrite()`), with the 4WLA in its own
+layout beside it once the look-ahead is written here; with no folder
+connected it is downloaded. The settings are this computer's
+(`localStorage`), because the folder and the clock are.
+
 ### A SAR is recorded, filed and linked in that order, and each step can fail alone
 
 **A SAR is recorded, filed and linked in that order, and each step can fail
@@ -2880,6 +2930,16 @@ and taken back with one undo; a reason from the picker; and the IDs reaching
 the read view's hover and filter, the published reading's rows and the Excel
 export, then the section's counts, search and reasons. The Node half is in
 `test_la_edit.js`.
+
+`smoke_master_export.js` presses *Master export* on the look-ahead: every sheet
+offered and ticked, *Export now* filing the workbook and the 4WLA into
+`exports/` in the shared folder and saying so, and the workbook read back —
+every sheet present, nothing refused, the look-ahead's days with their P6
+activity and real dates, who covered which shift, the cancellations with their
+reasons. Then the schedule: saved, it does not fire at once; a day later it
+exports by itself, once. The writer's typed cells and the schedule's rule are
+in `test_la_edit.js`, and `test_xlsx_compat.js` has LibreOffice Calc open the
+workbook and write every sheet back out.
 
 `smoke_hosted.js` boots it with a configured backend and a stubbed client, so
 the gate, invitations, sharing and read-only mode are covered without a

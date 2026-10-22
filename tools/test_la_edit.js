@@ -1071,6 +1071,67 @@ console.log('\nP6 activities');
       && ed.cleanCell({ row_id: 'r', day: '2026-10-05T00:00:00' }).day === '2026-10-05');
 }
 
+/* ── The master export: its workbook and its schedule ──────────────────── */
+console.log('\nThe master export');
+{
+  const xw = await import(path.join(ROOT, 'src/io/xlsx_write.js'));
+  const sch = await import(path.join(ROOT, 'src/core/export_schedule.js'));
+
+  const bytes = await xw.tableWorkbook({
+    title: 'Test',
+    sheets: [
+      { name: 'Days', columns: [{ heading: 'Date', kind: 'date' }, { heading: 'Count', kind: 'number' }, { heading: 'Note' }, { heading: 'At', kind: 'datetime' }],
+        rows: [['2026-09-23', 3, '=HYPERLINK("x")', '2026-09-23T14:00:00Z'], ['not a date', 'four', true, null]] },
+      { name: 'Days', columns: [{ heading: 'Other' }], rows: [], empty: 'Nothing in these dates.' },
+      { name: 'a/b:c', columns: [{ heading: 'x' }], rows: [['y'.repeat(40000)]] },
+    ],
+  });
+  const files = la.readZip(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  const text = (name) => new TextDecoder().decode(files.get(name) || new Uint8Array());
+  const names = [...text('xl/workbook.xml').matchAll(/<sheet name="([^"]+)"/g)].map((m) => m[1]);
+  check('a workbook of tables reads back, a sheet each, deflated', names.length === 3 && files.size === 9
+    && bytes.length < [...files.values()].reduce((n, f) => n + f.length, 0), names.join(', '));
+  check('two sheets asked for under one name are both kept, and a name Excel refuses is cleaned',
+    names[1] === 'Days (2)' && names[2] === 'a b c', names.join(', '));
+  const one = text('xl/worksheets/sheet1.xml');
+  check('a date is Excel\'s day number, styled as a date', /<c r="A2" s="(\d+)"><v>46288<\/v><\/c>/.test(one)
+    && /numFmtId="14"/.test(text('xl/styles.xml')));
+  check('a number is a number', /<c r="B2" s="\d+"><v>3<\/v><\/c>/.test(one));
+  check('text that looks like a formula stays text — never something Excel runs',
+    /<c r="C2" t="inlineStr"[^>]*><is><t xml:space="preserve">=HYPERLINK\(&quot;x&quot;\)<\/t>/.test(one) && !/<f>/.test(one));
+  check('a value that is not what its column says is written as text, not lost',
+    /<c r="A3" t="inlineStr"[^>]*><is><t xml:space="preserve">not a date/.test(one) && /four/.test(one) && />Yes</.test(one));
+  check('the heading row is frozen and filtered', /state="frozen"/.test(one) && /<autoFilter ref="A1:D3"\/>/.test(one)
+    && /_xlnm\._FilterDatabase/.test(text('xl/workbook.xml')));
+  check('an empty sheet says why', /Nothing in these dates\./.test(text('xl/worksheets/sheet2.xml')));
+  check('a cell is kept to what Excel will open', (text('xl/worksheets/sheet3.xml').match(/y{100,}/) || [''])[0].length === xw.CELL_LIMIT);
+  check('columns past Z are lettered as Excel letters them', xw.columnLetters(0) === 'A' && xw.columnLetters(25) === 'Z'
+    && xw.columnLetters(26) === 'AA' && xw.columnLetters(701) === 'ZZ' && xw.columnLetters(702) === 'AAA');
+
+  const at = (y, m, d, h = 0, min = 0) => new Date(y, m - 1, d, h, min).getTime();
+  const daily = { every: 'day', at: '06:00' };
+  check('a daily schedule is due once six has passed, and not before',
+    sch.isDue(daily, { lastRun: at(2026, 9, 22, 7) }, at(2026, 9, 23, 6, 1))
+      && !sch.isDue(daily, { lastRun: at(2026, 9, 22, 7) }, at(2026, 9, 23, 5, 59)));
+  check('and not twice for the same morning', !sch.isDue(daily, { lastRun: at(2026, 9, 23, 6, 1) }, at(2026, 9, 23, 18)));
+  check('a computer that was off at six exports when it is next opened — once, however many mornings it missed',
+    sch.isDue(daily, { lastRun: at(2026, 9, 18, 6, 2) }, at(2026, 9, 23, 8))
+      && !sch.isDue(daily, { lastRun: at(2026, 9, 23, 8) }, at(2026, 9, 23, 9)));
+  check('a schedule just switched on waits for its first time rather than firing at once',
+    !sch.isDue(daily, { since: at(2026, 9, 23, 10) }, at(2026, 9, 23, 10, 1))
+      && sch.isDue(daily, { since: at(2026, 9, 23, 10) }, at(2026, 9, 24, 6)));
+  const weekly = { every: 'week', weekday: 1, at: '07:30' };
+  check('a weekly one comes round on its day', sch.lastSlot(weekly, at(2026, 9, 23, 12)) === at(2026, 9, 21, 7, 30)
+    && sch.lastSlot(weekly, at(2026, 9, 21, 7)) === at(2026, 9, 14, 7, 30)
+    && sch.nextSlot(weekly, null, at(2026, 9, 23, 12)) === at(2026, 9, 28, 7, 30));
+  check('an hourly one counts hours from the last run', sch.isDue({ every: 'hours', hours: 6 }, { lastRun: at(2026, 9, 23, 6) }, at(2026, 9, 23, 12))
+    && !sch.isDue({ every: 'hours', hours: 6 }, { lastRun: at(2026, 9, 23, 6) }, at(2026, 9, 23, 11, 59)));
+  check('off is never due, and a stored schedule that makes no sense is cleaned rather than trusted',
+    !sch.isDue({ every: 'off' }, {}, Date.now())
+      && JSON.stringify(sch.cleanSchedule({ every: 'sometimes', at: '25:99', weekday: 9, hours: -3 }))
+        === JSON.stringify({ every: 'off', at: '06:00', weekday: 1, hours: 1 }));
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

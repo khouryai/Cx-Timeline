@@ -2088,3 +2088,10 @@ button.rc-myday-task-open:focus-visible { outline: 2px solid var(--primary); out
 }
 .rc-tawr-descriptions { margin-top: 24px; }
 .rc-tawr-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ── The master export ─────────────────────────────────────────────────── */
+.rc-mx-sheets { display: flex; flex-direction: column; gap: 6px; }
+.rc-mx-dates, .rc-mx-when { display: flex; gap: 12px; flex-wrap: wrap; }
+.rc-mx-dates > .cx-field, .rc-mx-when > .cx-field { flex: 1 1 140px; margin: 0; }
+.rc-mx-dates[hidden], .rc-mx-when > [hidden] { display: none; }
+.rc-mx-status { margin: 0; }

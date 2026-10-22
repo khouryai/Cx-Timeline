@@ -29,6 +29,9 @@ drop table if exists public.rc_p6_flags;
 drop table if exists public.rc_la_beacon;
 drop function if exists public.rc_la_ring() cascade;
 drop table if exists public.rc_invitations cascade;
+-- Before the master export: no look-ahead day by day. Dropped first — it reads
+-- the row id below, and a column a view reads cannot be dropped under it.
+drop view if exists public.rc_lookahead_days;
 -- Before Changes could say who: no row id on a reading or a change, and a
 -- kind list that has never heard of `details_changed`.
 alter table public.rc_lookahead_rows drop column if exists la_row_id;

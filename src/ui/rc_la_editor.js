@@ -2871,6 +2871,27 @@ async function exportSource() {
   return src;
 }
 
+/**
+ * The 4WLA as an .xlsx, built without asking — this week and the next three,
+ * names rows included — for the master export to file beside its workbook.
+ * Null until the look-ahead is written here: before that the workbook in the
+ * folder is the 4WLA, and the editor's tables would be an old copy of it.
+ */
+export async function lookaheadFileNow({ weeks = 4 } = {}) {
+  const settings = await rc.listSettings().catch(() => []);
+  const said = (key) => settings.find((r) => r.key === key)?.value;
+  if (said('lookahead_source') !== EDITOR_SOURCE) return null;
+  const src = await exportSource();
+  const days = ed.windowDays(ed.mondayOf(todayISO()), weeks);
+  await src.ensure(days);
+  const sheetName = said('lookahead_sheet') || '4WLA';
+  const bytes = lookaheadWorkbook({
+    model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
+    resources: true,
+  });
+  return { bytes, name: lookaheadFileName(days, sheetName) };
+}
+
 /** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
 export async function openExcelExport() {
   let src;

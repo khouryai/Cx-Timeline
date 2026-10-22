@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 20   Built: 2026-10-22T12:09:09.326Z
+ * Modules: 20   Built: 2026-10-22T15:59:57.989Z
  */
 (function () {
   'use strict';
@@ -1759,7 +1759,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 12;
+  const SCHEMA_VERSION = 13;
 
   /**
    * Whether the database is the one this build was written against.
@@ -2199,6 +2199,37 @@ __mods["core/rc.js"] = function (__x, __req) {
   function lookaheadBetween(fromISO, toISO) {
     return select('rc_lookahead_rows', (q) =>
       q.gte('week_start', fromISO).lte('week_start', toISO).order('sheet_row'));
+  }
+
+  /**
+   * The look-ahead day by day — one row per activity and day, each week from
+   * the newest reading of it (`rc_lookahead_days`), for every day any reading
+   * covered or only those between two dates. Every page of it: a year is tens
+   * of thousands of rows. What the master export writes.
+   */
+  function lookaheadDays(fromISO = null, toISO = null) {
+    return selectAll('rc_lookahead_days', (q) => {
+      let out = q;
+      if (fromISO) out = out.gte('day', fromISO);
+      if (toISO) out = out.lte('day', toISO);
+      return out.order('day').order('row_id');
+    });
+  }
+
+  /**
+   * Every row of a table or view this account may read, every page of it,
+   * optionally only where `column` falls between two dates — for the master
+   * export, which wants the whole record rather than a screen's worth. Ordered
+   * by that column and then the id, the unique key the pages line up on.
+   */
+  function readAll(table, { column = null, from = null, to = null } = {}) {
+    return selectAll(table, (q) => {
+      let out = q;
+      if (column && from) out = out.gte(column, from);
+      if (column && to) out = out.lte(column, to);
+      if (column) out = out.order(column);
+      return out.order('id');
+    });
   }
 
   /**
@@ -2647,6 +2678,8 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "addPlanEntries", { get: () => addPlanEntries, enumerable: true });
   Object.defineProperty(__x, "lookaheadForWeek", { get: () => lookaheadForWeek, enumerable: true });
   Object.defineProperty(__x, "lookaheadBetween", { get: () => lookaheadBetween, enumerable: true });
+  Object.defineProperty(__x, "lookaheadDays", { get: () => lookaheadDays, enumerable: true });
+  Object.defineProperty(__x, "readAll", { get: () => readAll, enumerable: true });
   Object.defineProperty(__x, "supersedePlan", { get: () => supersedePlan, enumerable: true });
   Object.defineProperty(__x, "withdrawPlan", { get: () => withdrawPlan, enumerable: true });
   Object.defineProperty(__x, "reassignPlan", { get: () => reassignPlan, enumerable: true });

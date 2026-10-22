@@ -288,7 +288,7 @@ function attribute(event, parties) {
   });
 }
 
-const KIND_LABELS = {
+export const KIND_LABELS = {
   scope_added: 'Scope added', scope_removed: 'Scope removed', cancellation: 'Cancelled',
   shift_changed: 'Shift changed', resource_changed: 'Resources', location_shift: 'Moved site',
   details_changed: 'Details', window_advanced: 'Window advanced', window_retired: 'Window retired',

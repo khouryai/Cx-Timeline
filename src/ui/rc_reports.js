@@ -27,6 +27,7 @@ import { icon } from './icons.js';
 import { toast, badge, chipStat, emptyState, selectInput } from './components.js';
 import { byId, dayLabel, todayISO, isoToMs, STATUS_BY_ID } from './rc_util.js';
 import { saveFile } from '../io/exporters.js';
+import { masterExportButton } from './rc_master_export.js';
 
 /** Ranges people actually ask for, plus the one that matters most: any. */
 const RANGES = [
@@ -150,6 +151,7 @@ function controls(root, from, to) {
       html: icon('download', { size: 12 }) + '<span>CSV</span>',
       onClick: () => exportCsv(from, to),
     }),
+    rc.isAdmin() ? masterExportButton() : null,
     rc.isAdmin() ? el('button', {
       class: 'cx-btn mini ghost',
       text: 'Back it up',

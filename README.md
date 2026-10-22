@@ -367,6 +367,18 @@ out of having both registers: rows with no SAR, which is work planned without
 confirmed access, and SARs with no rows, which is access booked for work that
 has gone.
 
+**The master export.** *Master export* — on the look-ahead and in Reports —
+writes everything useful the calendar holds as one Excel workbook: the
+look-ahead day by day with each row's P6 activity, the shifts worked and by
+whom, every cancellation with the party responsible and the reason, the
+changes between readings and why, the huddle's outcomes, blockers, leave, P6,
+TAWRs, SARs and the registers, under an *About* sheet. Choose the sheets and
+the dates, then *Export now* or a schedule — every day, every week or every
+few hours. It is filed into `exports/` in the shared folder (with the 4WLA in
+its own layout beside it), or downloaded where no folder is connected. A
+schedule runs on the computer the calendar is open on, and a time missed while
+it was closed is exported once, the next time it opens.
+
 **Rows are linked to P6.** Once the look-ahead is written in the calendar, its
 Activity ID column is filled from the schedule's own list rather than from
 memory: import a P6 extract under Look-ahead → P6 activities (`.xlsx`, `.csv`
