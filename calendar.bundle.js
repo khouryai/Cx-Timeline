@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 33   Built: 2026-10-22T15:59:57.964Z
+ * Modules: 33   Built: 2026-10-22T16:36:01.501Z
  */
 (function () {
   'use strict';
@@ -16985,6 +16985,12 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
 
   /** The folder, inside the shared one, the workbooks are filed in. */
   const EXPORT_DIR = 'exports';
+  /**
+   * One name, replaced by every export: a workbook somebody links to — a
+   * Power BI source, a SharePoint page, a pivot in another file — keeps working
+   * and is always the newest. When it was made is on its About sheet.
+   */
+  const EXPORT_NAME = 'LookAhead_Latest.xlsx';
   const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   const STORE_KEY = 'cx.rc.masterExport';
   /** How long a scheduled export that failed waits before it is tried again. */
@@ -17083,11 +17089,6 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
     return out;
   }
 
-  /** Local "2026-09-23 1405", for a file name that sorts and does not collide. */
-  function stamp(now = new Date()) {
-    const p = (n) => String(n).padStart(2, '0');
-    return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}${p(now.getMinutes())}`;
-  }
 
   /**
    * The context every sheet reads from — the registers, read once, and the two
@@ -17548,7 +17549,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
 
     return {
       bytes,
-      name: `CX master export ${stamp(now)}.xlsx`,
+      name: EXPORT_NAME,
       sheets: sheets.map((s) => ({ name: s.name, rows: s.rows.length })),
       failed,
       companion,
@@ -17774,6 +17775,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "EXPORT_DIR", { get: () => EXPORT_DIR, enumerable: true });
+  Object.defineProperty(__x, "EXPORT_NAME", { get: () => EXPORT_NAME, enumerable: true });
   Object.defineProperty(__x, "SHEETS", { get: () => SHEETS, enumerable: true });
   Object.defineProperty(__x, "RANGES", { get: () => RANGES, enumerable: true });
   Object.defineProperty(__x, "loadSettings", { get: () => loadSettings, enumerable: true });

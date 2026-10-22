@@ -46,6 +46,12 @@ import { lookaheadFileNow } from './rc_la_editor.js';
 
 /** The folder, inside the shared one, the workbooks are filed in. */
 export const EXPORT_DIR = 'exports';
+/**
+ * One name, replaced by every export: a workbook somebody links to — a
+ * Power BI source, a SharePoint page, a pivot in another file — keeps working
+ * and is always the newest. When it was made is on its About sheet.
+ */
+export const EXPORT_NAME = 'LookAhead_Latest.xlsx';
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const STORE_KEY = 'cx.rc.masterExport';
 /** How long a scheduled export that failed waits before it is tried again. */
@@ -144,11 +150,6 @@ function daysBetween(from, to) {
   return out;
 }
 
-/** Local "2026-09-23 1405", for a file name that sorts and does not collide. */
-function stamp(now = new Date()) {
-  const p = (n) => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}${p(now.getMinutes())}`;
-}
 
 /**
  * The context every sheet reads from — the registers, read once, and the two
@@ -609,7 +610,7 @@ export async function buildMasterExport(settings = loadSettings(), { now = new D
 
   return {
     bytes,
-    name: `CX master export ${stamp(now)}.xlsx`,
+    name: EXPORT_NAME,
     sheets: sheets.map((s) => ({ name: s.name, rows: s.rows.length })),
     failed,
     companion,

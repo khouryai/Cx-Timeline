@@ -45,12 +45,12 @@ export async function masterExport(page, { check }) {
   await page.waitForFunction((n) => Object.keys(window.__files || {}).filter((k) => k.startsWith('exports/')).length > n, before, { timeout: 20000 }).catch(() => {});
   const filed = await page.evaluate(() => Object.keys(window.__files || {}).filter((k) => k.startsWith('exports/')));
   check('"Export now" files the workbook into exports/ in the shared folder',
-    filed.some((k) => /^exports\/CX master export \d{4}-\d{2}-\d{2} \d{4}\.xlsx$/.test(k)), filed.join(' | '));
+    filed.includes('exports/LookAhead_Latest.xlsx'), filed.join(' | '));
   check('with the 4WLA beside it, in its own layout', filed.some((k) => /4WLA/.test(k) && !/master/.test(k)), filed.join(' | '));
   const said = page.locator('.cx-toast', { hasText: 'Saved to the shared folder' }).first();
   await said.waitFor({ timeout: 8000 }).catch(() => {});
   check('and says where it went, and how much it holds',
-    /rows on \d+ sheets[\s\S]*Saved to the shared folder — exports\/CX master export/.test(await said.innerText().catch(() => '')),
+    /rows on \d+ sheets[\s\S]*Saved to the shared folder — exports\/LookAhead_Latest\.xlsx/.test(await said.innerText().catch(() => '')),
     await said.innerText().catch(() => ''));
 
   const book = await workbookIn(page);
@@ -85,7 +85,7 @@ export async function masterExport(page, { check }) {
     await dialog.locator('.rc-mx-status').innerText());
   await dialog.locator('button', { hasText: /^Save$/ }).click();
   const tick = (offsetMs) => page.evaluate((ms) => window.__CX_MODULES.req('ui/rc_master_export.js').scheduledTick(Date.now() + ms), offsetMs);
-  const count = () => page.evaluate(() => Object.keys(window.__files || {}).filter((k) => /^exports\/CX master export/.test(k)).length);
+  const count = () => page.evaluate(() => Object.keys(window.__files || {}).filter((k) => k === 'exports/LookAhead_Latest.xlsx').length);
   const n0 = await count();
   check('a schedule just saved does not export straight away', (await tick(0)) === false && (await count()) === n0);
   const lastAt = () => page.evaluate(() => JSON.parse(localStorage.getItem('cx.rc.masterExport') || '{}').last?.at || 0);
@@ -94,6 +94,8 @@ export async function masterExport(page, { check }) {
   check('once its time has passed, it exports by itself', ran === true && (await count()) >= Math.max(1, n0) && (await lastAt()) > at0,
     `${n0} → ${await count()} file(s)`);
   check('and only once for that slot', (await tick(86400000 + 60000)) === false);
+  check('into the same file, replaced rather than added beside — always LookAhead_Latest.xlsx',
+    (await count()) === 1 && !(await page.evaluate(() => Object.keys(window.__files || {}).some((k) => /^exports\/.*master export/i.test(k)))));
   check('the time it ran is remembered on this computer',
     await page.evaluate(() => Boolean(JSON.parse(localStorage.getItem('cx.rc.masterExport') || '{}').lastRun)));
   // Back off, so nothing else in the suite meets a schedule.

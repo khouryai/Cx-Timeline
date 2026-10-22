@@ -1747,7 +1747,10 @@ and a schedule just switched on waits for its first slot
 it starts, so a second tab finds it done; one that fails is reported
 (`master-export:scheduled`) and tried again half an hour later. The file goes
 into `exports/` in the shared folder through the intake door the look-ahead
-and the SARs already use (`filestore.intakeWrite()`), with the 4WLA in its own
+and the SARs already use (`filestore.intakeWrite()`), always as
+`LookAhead_Latest.xlsx`, replacing the last one — one name, so a report or a
+page that links to it keeps working and is always the newest; when it was made
+is on its About sheet — with the 4WLA in its own
 layout beside it once the look-ahead is written here; with no folder
 connected it is downloaded. The settings are this computer's
 (`localStorage`), because the folder and the clock are.

@@ -374,8 +374,9 @@ whom, every cancellation with the party responsible and the reason, the
 changes between readings and why, the huddle's outcomes, blockers, leave, P6,
 TAWRs, SARs and the registers, under an *About* sheet. Choose the sheets and
 the dates, then *Export now* or a schedule — every day, every week or every
-few hours. It is filed into `exports/` in the shared folder (with the 4WLA in
-its own layout beside it), or downloaded where no folder is connected. A
+few hours. It is filed into `exports/` in the shared folder as
+`LookAhead_Latest.xlsx`, replacing the last one so anything linked to it is
+always current (with the 4WLA in its own layout beside it), or downloaded where no folder is connected. A
 schedule runs on the computer the calendar is open on, and a time missed while
 it was closed is exported once, the next time it opens.
 
