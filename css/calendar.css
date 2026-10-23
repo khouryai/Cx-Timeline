@@ -424,7 +424,7 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   padding: 0 6px;
   white-space: nowrap;
 }
-.la-written-note { margin: 0 0 8px; }
+.la-written-note, .la-reading-note, .lae-before-note { margin: 0 0 8px; }
 /* A reason given instead of a P6 activity reads as a word, not an ID. */
 .la-grid td.la-p6-flag { font-style: italic; color: var(--text-muted); }
 /* The row under the pointer, marked without repainting anything: a bar down

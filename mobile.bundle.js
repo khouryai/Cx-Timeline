@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 20   Built: 2026-10-22T22:12:16.684Z
+ * Modules: 20   Built: 2026-10-23T17:18:46.227Z
  */
 (function () {
   'use strict';
@@ -1759,7 +1759,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 14;
+  const SCHEMA_VERSION = 15;
 
   /**
    * Whether the database is the one this build was written against.
@@ -1955,6 +1955,15 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   function listSnapshots({ limit = 1 } = {}) {
     return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(limit));
+  }
+
+  /**
+   * Each week the workbook's readings hold, and the newest of them that has it
+   * (`week_start`, `snapshot_id`, `taken_at`) — where the calendar draws a week
+   * from that the editor never held. No grid is opened to answer it.
+   */
+  function workbookWeeks() {
+    return select('rc_lookahead_workbook_weeks', (q) => q.order('week_start'));
   }
 
   /** One snapshot with its grid, by id — for re-deriving what a past read said. */
@@ -2658,6 +2667,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "latestSnapshot", { get: () => latestSnapshot, enumerable: true });
   Object.defineProperty(__x, "newestSnapshotId", { get: () => newestSnapshotId, enumerable: true });
   Object.defineProperty(__x, "listSnapshots", { get: () => listSnapshots, enumerable: true });
+  Object.defineProperty(__x, "workbookWeeks", { get: () => workbookWeeks, enumerable: true });
   Object.defineProperty(__x, "snapshotById", { get: () => snapshotById, enumerable: true });
   Object.defineProperty(__x, "listSnapshotRows", { get: () => listSnapshotRows, enumerable: true });
   Object.defineProperty(__x, "listChangeEvents", { get: () => listChangeEvents, enumerable: true });
@@ -7622,17 +7632,29 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   let parsed = null;
 
   function parsedView(snapshot, legendRows) {
-    const legend = (legendRows || []).map((r) => ({
-      argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
-    }));
-    const key = `${snapshot.id}|${snapshot.taken_at}|${JSON.stringify(legend)}`;
+    const key = `${snapshot.id}|${snapshot.taken_at}|${JSON.stringify(legendOf(legendRows))}`;
     if (parsed?.key === key) return parsed.view;
-    const grid = applyLegend(snapshot.grid, legend);
-    // The colours the legend could not place ride along: they are a fact about
-    // this grid under this legend, which is exactly what the key says.
-    const view = { ...readGrid(grid, { anchorISO: snapshot.taken_at }), unknown: grid.unknown || [] };
+    const view = viewOfSnapshot(snapshot, legendRows);
     parsed = { key, view };
     return view;
+  }
+
+  function legendOf(legendRows) {
+    return (legendRows || []).map((r) => ({
+      argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
+    }));
+  }
+
+  /**
+   * A reading's grid as a view, parsed every time and remembered nowhere — for an
+   * older reading the calendar pages back to, which must not push the newest one
+   * out of `parsedView()`'s single slot that every other tab shares.
+   */
+  function viewOfSnapshot(snapshot, legendRows) {
+    const grid = applyLegend(snapshot.grid, legendOf(legendRows));
+    // The colours the legend could not place ride along: they are a fact about
+    // this grid under this legend, which is exactly what the key says.
+    return { ...readGrid(grid, { anchorISO: snapshot.taken_at }), unknown: grid.unknown || [] };
   }
 
   /**
@@ -8232,6 +8254,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "ambiguousFirstNames", { get: () => ambiguousFirstNames, enumerable: true });
   Object.defineProperty(__x, "newestPerKey", { get: () => newestPerKey, enumerable: true });
   Object.defineProperty(__x, "parsedView", { get: () => parsedView, enumerable: true });
+  Object.defineProperty(__x, "viewOfSnapshot", { get: () => viewOfSnapshot, enumerable: true });
   Object.defineProperty(__x, "lookaheadWithResources", { get: () => lookaheadWithResources, enumerable: true });
   Object.defineProperty(__x, "cancelledOn", { get: () => cancelledOn, enumerable: true });
   Object.defineProperty(__x, "graftLocations", { get: () => graftLocations, enumerable: true });

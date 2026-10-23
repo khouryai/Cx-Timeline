@@ -77,6 +77,7 @@ const E = {
   title: '',
   start: null, // the Monday the window starts on
   weeks: 4,
+  firstWritten: null, // the first day anything is written here — the editor holds nothing before its week
   filter: '',
   showArchived: false,
   collapsed: new Set(),
@@ -236,6 +237,7 @@ async function load() {
   for (const r of E.model.rows) E.server.set(`row:${r.id}`, r.version || 0);
   for (const c of ed.cellList(E.model)) E.server.set(`cell:${c.row_id}|${c.day}`, c.version || 0);
   E.revision = await rc.lookaheadRevision().catch(() => E.revision);
+  E.firstWritten = (await rc.laCellSpan().catch(() => ({ first: null }))).first;
   await loadLeave();
 }
 
@@ -495,7 +497,19 @@ function draw() {
   const refocus = !active || active === document.body || (host.contains(active) && !active.classList.contains('lae-search'));
   clear(host);
 
-  host.append(toolbar(days), grid(rows, days));
+  host.append(toolbar(days));
+  /* Before the first week written here the editor holds nothing: it was
+     started from the workbook from the week it was adopted. Said, rather than
+     shown as empty rows, with where those days are. */
+  if (E.firstWritten && days[0] < ed.mondayOf(E.firstWritten)) {
+    host.appendChild(el('p', {
+      class: 'rc-hint lae-before-note',
+      text: `Nothing is written here before ${fmtLong(ed.mondayOf(E.firstWritten))}: the look-ahead was brought across `
+        + 'from the workbook from that week on. What the workbook said for the days before it is in the calendar — '
+        + 'switch Edit off and page back.',
+    }));
+  }
+  host.appendChild(grid(rows, days));
   const scroller = host.querySelector('.lae-scroll');
   scroller.scrollLeft = E.scroll.left;
   scroller.scrollTop = E.scroll.top;

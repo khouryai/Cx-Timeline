@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 60   Built: 2026-10-22T22:12:16.543Z
+ * Modules: 60   Built: 2026-10-23T17:18:46.068Z
  */
 (function () {
   'use strict';
@@ -16976,7 +16976,7 @@ __mods["core/rc.js"] = function (__x, __req) {
    * "could not update the legend", on one screen, weeks after the deploy that
    * needed it; this turns it into one sentence at sign-in naming the two files.
    */
-  const SCHEMA_VERSION = 14;
+  const SCHEMA_VERSION = 15;
 
   /**
    * Whether the database is the one this build was written against.
@@ -17172,6 +17172,15 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   function listSnapshots({ limit = 1 } = {}) {
     return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(limit));
+  }
+
+  /**
+   * Each week the workbook's readings hold, and the newest of them that has it
+   * (`week_start`, `snapshot_id`, `taken_at`) — where the calendar draws a week
+   * from that the editor never held. No grid is opened to answer it.
+   */
+  function workbookWeeks() {
+    return select('rc_lookahead_workbook_weeks', (q) => q.order('week_start'));
   }
 
   /** One snapshot with its grid, by id — for re-deriving what a past read said. */
@@ -17875,6 +17884,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "latestSnapshot", { get: () => latestSnapshot, enumerable: true });
   Object.defineProperty(__x, "newestSnapshotId", { get: () => newestSnapshotId, enumerable: true });
   Object.defineProperty(__x, "listSnapshots", { get: () => listSnapshots, enumerable: true });
+  Object.defineProperty(__x, "workbookWeeks", { get: () => workbookWeeks, enumerable: true });
   Object.defineProperty(__x, "snapshotById", { get: () => snapshotById, enumerable: true });
   Object.defineProperty(__x, "listSnapshotRows", { get: () => listSnapshotRows, enumerable: true });
   Object.defineProperty(__x, "listChangeEvents", { get: () => listChangeEvents, enumerable: true });

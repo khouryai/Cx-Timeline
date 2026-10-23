@@ -493,6 +493,21 @@ export function fakeSdk() {
       }
       return [...out.values()].filter((row) => row._current).map(({ _snaps, _marksAt, _current, ...row }) => row);
     },
+    /* `rc_lookahead_workbook_weeks`: each week, and the newest workbook reading
+       that has it — never an editor's, whose grid is compacted. */
+    get rc_lookahead_workbook_weeks() {
+      const snaps = new Map(this.rc_lookahead_snapshots.map((x) => [x.id, x]));
+      const newest = new Map();
+      for (const r of this.rc_lookahead_rows) {
+        const snap = snaps.get(r.snapshot_id);
+        if (!snap || String(snap.file_hash || '').startsWith('editor:')) continue;
+        const held = newest.get(r.week_start);
+        if (!held || String(snap.taken_at) > String(held.taken_at)) {
+          newest.set(r.week_start, { week_start: r.week_start, snapshot_id: snap.id, taken_at: snap.taken_at });
+        }
+      }
+      return [...newest.values()];
+    },
     /* `rc_lookahead_days`: every activity and day, each week from the newest
        read of it — the week plan's rule (`newestPerKey()`). Ordered by day, as
        the export asks. */

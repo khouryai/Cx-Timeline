@@ -1696,6 +1696,25 @@ create or replace view public.rc_lookahead_days with (security_invoker = true) a
     join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
     cross join lateral jsonb_object_keys(r.cells || r.bart_marks || r.resources) d(key);
 
+/*
+ * Each week of the look-ahead, and the newest reading *of the workbook* that
+ * has it — what the calendar draws a week from when the editor never held it.
+ *
+ * The editor was started from the workbook from that week on, so every week
+ * before it is in the readings and nowhere else; and an editor reading's grid
+ * is compacted away, while a workbook reading's is kept. So the calendar pages
+ * back past the editor by drawing each of those weeks from the newest workbook
+ * reading of it — the rule `rc_lookahead_days` and the week plan read by — and
+ * this says which reading that is without opening any grid: a sort of the rows,
+ * a seventh of a second on the live project.
+ */
+create or replace view public.rc_lookahead_workbook_weeks with (security_invoker = true) as
+  select distinct on (r.week_start) r.week_start, r.snapshot_id, s.taken_at
+    from public.rc_lookahead_rows r
+    join public.rc_lookahead_snapshots s on s.id = r.snapshot_id
+   where s.file_hash not like 'editor:%'
+   order by r.week_start, s.taken_at desc, r.snapshot_id desc;
+
 -- ══════════════════════════════════════════════════════════════════════════
 -- Deleting a reference row, where deleting it is honest
 --
@@ -2272,12 +2291,12 @@ revoke all on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
               public.rc_rows_without_sar, public.rc_sars_without_rows,
               public.rc_lookahead_snapshot_meta, public.rc_actuals_current,
               public.rc_cancelled_days, public.rc_cancelled_support_days, public.rc_lookahead_cover,
-              public.rc_lookahead_days from public, anon;
+              public.rc_lookahead_days, public.rc_lookahead_workbook_weeks from public, anon;
 grant select on public.rc_plan_current, public.rc_carry_chains, public.rc_effort,
                 public.rc_rows_without_sar, public.rc_sars_without_rows,
                 public.rc_lookahead_snapshot_meta, public.rc_actuals_current,
                 public.rc_cancelled_days, public.rc_cancelled_support_days, public.rc_lookahead_cover,
-                public.rc_lookahead_days to authenticated;
+                public.rc_lookahead_days, public.rc_lookahead_workbook_weeks to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════
 -- Storage: the two things that are files
@@ -3343,5 +3362,5 @@ update public.rc_cancellation_notes n
    and m.raw_label = n.raw_label
    and m.raw_location = coalesce(n.raw_location, '');
 
-insert into public.rc_settings (key, value) values ('schema_version', '14')
+insert into public.rc_settings (key, value) values ('schema_version', '15')
 on conflict (key) do update set value = excluded.value, updated_at = now();

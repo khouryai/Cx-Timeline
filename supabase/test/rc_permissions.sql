@@ -781,6 +781,23 @@ select assert((select count(*) from public.rc_lookahead_days
 delete from public.rc_lookahead_rows where snapshot_id = :'dold';
 delete from public.rc_lookahead_snapshots where id = :'dold';
 
+-- Which workbook reading holds each week, for the calendar paging back past
+-- the editor: the newest *workbook* reading of it, never an editor's, whose
+-- grid is compacted away.
+select assert((select snapshot_id from public.rc_lookahead_workbook_weeks
+                where week_start = date '2026-09-07') = :'cx2',
+  'a week is drawn from the newest workbook reading of it');
+insert into public.rc_lookahead_snapshots (file_hash, sheet_name, grid, taken_at)
+values ('editor:hash-ww#1', '4WLA', '{"rows":[]}'::jsonb, timestamptz '2026-09-09 08:00+00');
+select id as dww from public.rc_lookahead_snapshots where file_hash = 'editor:hash-ww#1' \gset
+insert into public.rc_lookahead_rows (snapshot_id, week_start, row_key, raw_location, raw_label, cells) values
+  (:'dww', date '2026-09-07', 'ww|a', 'TPSS 12', 'Cable pull', '{"2026-09-08":"Day Shift"}'::jsonb);
+select assert((select snapshot_id from public.rc_lookahead_workbook_weeks
+                where week_start = date '2026-09-07') = :'cx2',
+  'and never from a newer editor reading of the same week');
+delete from public.rc_lookahead_rows where snapshot_id = :'dww';
+delete from public.rc_lookahead_snapshots where id = :'dww';
+
 -- What BART had been asked for goes with a red day: the newest read's marks.
 update public.rc_lookahead_rows set bart_marks = '{"2026-09-07":"X.WIT"}'::jsonb where row_key = 'cx|a';
 update public.rc_lookahead_rows set bart_marks = '{"2026-09-07":"X.X.WIT"}'::jsonb where row_key = 'cx|b';

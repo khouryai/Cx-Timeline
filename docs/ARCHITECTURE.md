@@ -2592,12 +2592,30 @@ drawn that way and the same week drawn from a reading are one picture, archived
 rows off both. Nothing is stored — the reading is still what every other screen
 reads — and the screen says so: those weeks are what the look-ahead says now,
 not a reading taken at the time, which stays the record of what it said then.
-Weeks from before the calendar became the source were never written here, and
-are only in the workbook's old readings. It is the one place a
-screen reads `rc_la_*` to draw the look-ahead, and it does so through the
-publish path rather than beside it. Paging stops at the first and last week
-anything was written; a workbook's reading is the whole sheet, so that is as
-far as it pages. The PDF export takes its weeks from the Monday on screen.
+It is the one place a screen reads `rc_la_*` to draw the look-ahead, and it
+does so through the publish path rather than beside it.
+
+**And past the editor, from the workbook's readings.** The editor was started
+from the workbook from the week it was adopted (`modelFromView({ fromISO })`),
+so every week before that — on the live project, June to the end of September,
+all of it in the first import of 10 September and the readings after — is in
+the readings and nowhere else. Paging stopped at the editor's first week, and
+Edit drew those weeks as empty rows, so they read as never painted. Now a
+window is cut where the editor starts: from there on it is the look-ahead as
+written, as above; before it each week is drawn from the newest workbook
+reading that has it (`rc_lookahead_workbook_weeks`, schema 15 — the rule the
+week plan and the master export read the history by, answered without opening
+a grid), and weeks sharing a reading are one stretch. Each stretch is its own
+grid, stacked in date order and labelled with the reading it came from:
+two sources' rows are not the same rows, and laying one over the other would
+put every activity on screen twice. An older reading's grid is parsed for the
+stretch alone (`viewOfSnapshot()`), never into `parsedView()`'s one slot,
+which every other tab shares with the newest reading. Paging reaches from the
+oldest week a workbook reading holds to the last day written. In Edit, a window
+before the first week written says that nothing is written there and where
+those days are, rather than showing empty rows. The PDF export takes its weeks
+from the Monday on screen, from the source the window starts in; "Everything"
+on one page is the look-ahead as written.
 
 ### Hovering the look-ahead repaints nothing
 

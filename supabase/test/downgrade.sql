@@ -32,6 +32,9 @@ drop table if exists public.rc_invitations cascade;
 -- Before the master export: no look-ahead day by day. Dropped first — it reads
 -- the row id below, and a column a view reads cannot be dropped under it.
 drop view if exists public.rc_lookahead_days;
+-- Before the calendar paged back past the editor: no list of which workbook
+-- reading holds each week.
+drop view if exists public.rc_lookahead_workbook_weeks;
 -- Before a reason followed its row: notes found by their words alone, and
 -- cancellation views that never named the row (they read the column below).
 drop view if exists public.rc_cancelled_days;

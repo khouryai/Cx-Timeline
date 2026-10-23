@@ -1048,6 +1048,93 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await page.waitForTimeout(300);
   check('"This week" brings it back, drawn from the reading again',
     (await firstDayShown()) === String(Number(monday.slice(8, 10))) && (await noteShown()) === 0);
+  /* The weeks before the editor. It was started from the workbook from the
+     week it was adopted, so the weeks before that are in the workbook's
+     readings and nowhere else — and paging stopped at the editor's first week,
+     with Edit showing them empty. A reading of the workbook from eight weeks
+     ago: the calendar pages back to it and draws its week as it was read. */
+  const oldMonday = day(-56);
+  await page.evaluate(({ from }) => {
+    const { req } = window.__CX_MODULES;
+    const ed = req('core/la_edit.js');
+    const S = window.__rc.rows;
+    const row = ed.blankRow('activity', { sort: 1024, description: 'Signal survey from the workbook', location: 'W40' });
+    const days = ed.windowDays(from, 2);
+    const grid = ed.gridFromModel(ed.makeModel([row], [{ row_id: row.id, day: days[1], color: 'FFFF00', text: 'X', version: 0 }]),
+      days, { title: 'The old workbook' });
+    S.rc_lookahead_snapshots.push({
+      id: 'wb-old', taken_at: `${days[0]}T08:00:00Z`, file_mtime: `${days[0]}T08:00:00Z`, file_hash: 'wb-old-hash',
+      sheet_name: '4WLA', grid,
+    });
+    S.rc_lookahead_rows.push({
+      id: 'wb-old-row', snapshot_id: 'wb-old', week_start: days[0], row_key: 'wb|old', sheet_row: 7, raw_location: 'W40',
+      raw_label: 'Signal survey from the workbook · W40', cells: { [days[1]]: 'Day Shift' }, bart_marks: {}, resources: {},
+    });
+    req('core/rc.js').forgetReads();
+    req('core/events.js').emit('rc:changed', { what: 'test' });
+  }, { from: oldMonday });
+  await page.waitForSelector('#rc-frame .la-pager', { timeout: 10000 });
+  await page.waitForTimeout(400);
+  let pressed = 0;
+  while (pressed < 12 && !(await previousWeek.isDisabled()) && (await firstDayShown()) !== String(Number(oldMonday.slice(8, 10)))) {
+    await previousWeek.click();
+    await page.waitForTimeout(200);
+    pressed++;
+  }
+  await page.waitForFunction(() => /Signal survey from the workbook/.test(document.querySelector('#rc-frame .la-grid')?.innerText || ''), null, { timeout: 8000 }).catch(() => {});
+  const oldDay = await page.evaluate((iso) => {
+    const row = [...document.querySelectorAll('#rc-frame .la-grid tbody tr')].find((tr) => /Signal survey from the workbook/.test(tr.textContent));
+    const td = [...(row?.querySelectorAll('td.la-day') || [])].find((c) => (c.title || '').includes(iso));
+    return td ? { title: td.title, painted: td.classList.contains('la-painted') } : null;
+  }, ed.addDaysISO(oldMonday, 1));
+  check('it pages back past the editor\'s first week, to the weeks only the workbook\'s readings hold',
+    (await firstDayShown()) === String(Number(oldMonday.slice(8, 10))), `${pressed} presses, ${await page.locator('#rc-frame .la-pager-range').innerText()}`);
+  check('and draws those weeks painted, as the workbook was read', oldDay?.painted && /Day Shift/.test(oldDay.title), JSON.stringify(oldDay));
+  check('saying which reading of the workbook they come from',
+    /from the workbook as it was read on/.test(await page.locator('#rc-frame .la-reading-note').first().innerText().catch(() => '')));
+  check('and no further back than the first week a reading holds', await previousWeek.isDisabled());
+  await page.locator('#rc-frame .rc-tab', { hasText: /^Everything$/ }).click();
+  await page.waitForFunction(() => document.querySelectorAll('#rc-frame .la-grid').length > 1, null, { timeout: 8000 }).catch(() => {});
+  const everything = await page.evaluate(() => ({
+    grids: document.querySelectorAll('#rc-frame .la-grid').length,
+    text: [...document.querySelectorAll('#rc-frame .la-grid')].map((g) => g.innerText).join(' '),
+    reading: document.querySelectorAll('#rc-frame .la-reading-note').length,
+    written: document.querySelectorAll('#rc-frame .la-written-note').length,
+  }));
+  check('"Everything" reaches from the oldest reading to the last week written, a grid for each source',
+    everything.grids >= 2 && /Signal survey from the workbook/.test(everything.text) && /X\.EARLIER/.test(everything.text)
+      && everything.reading >= 1 && everything.written >= 1,
+    JSON.stringify({ ...everything, text: everything.text.length }));
+  await page.locator('#rc-frame .rc-tab', { hasText: /^4 weeks$/ }).click();
+  await page.waitForTimeout(300);
+  // In Edit, a window before the first week written says why it is empty, and where those days are.
+  await page.locator('#rc-frame .la-edit-switch').click();
+  await page.waitForSelector('#rc-frame .lae-grid', { timeout: 10000 });
+  const editorBack = page.locator('#rc-frame .lae-toolbar button[aria-label="Previous week"]');
+  for (let i = 0; i < 6; i++) {
+    await editorBack.click();
+    await page.waitForTimeout(150);
+  }
+  check('Edit says nothing is written before its first week, and that the calendar has those days',
+    /Nothing is written here before[\s\S]*switch Edit off and page back/.test(await page.locator('#rc-frame .lae-before-note').innerText().catch(() => '')));
+  await page.locator('#rc-frame .lae-toolbar button', { hasText: 'This week' }).click();
+  await page.waitForTimeout(200);
+  check('and not on the weeks it holds', (await page.locator('#rc-frame .lae-before-note').count()) === 0);
+  await page.locator('#rc-frame .la-edit-switch').click();
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 15000 });
+  await page.evaluate(() => {
+    const S = window.__rc.rows;
+    S.rc_lookahead_rows = S.rc_lookahead_rows.filter((r) => r.snapshot_id !== 'wb-old');
+    S.rc_lookahead_snapshots = S.rc_lookahead_snapshots.filter((x) => x.id !== 'wb-old');
+    const { req } = window.__CX_MODULES;
+    req('core/rc.js').forgetReads();
+    req('core/events.js').emit('rc:changed', { what: 'test' });
+  });
+  await page.waitForTimeout(300);
+  if (await page.locator('#rc-frame .la-pager button', { hasText: 'This week' }).isEnabled()) {
+    await page.locator('#rc-frame .la-pager button', { hasText: 'This week' }).click();
+    await page.waitForTimeout(300);
+  }
   check('and it no longer offers to read the workbook',
     (await page.locator('#rc-frame button', { hasText: 'Check now' }).count()) === 0
       && (await page.locator('#rc-frame .la-edit-switch[aria-pressed="false"]').count()) === 1);

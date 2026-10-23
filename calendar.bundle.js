@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 33   Built: 2026-10-22T22:12:16.657Z
+ * Modules: 33   Built: 2026-10-23T17:18:46.194Z
  */
 (function () {
   'use strict';
@@ -788,17 +788,29 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   let parsed = null;
 
   function parsedView(snapshot, legendRows) {
-    const legend = (legendRows || []).map((r) => ({
-      argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
-    }));
-    const key = `${snapshot.id}|${snapshot.taken_at}|${JSON.stringify(legend)}`;
+    const key = `${snapshot.id}|${snapshot.taken_at}|${JSON.stringify(legendOf(legendRows))}`;
     if (parsed?.key === key) return parsed.view;
-    const grid = applyLegend(snapshot.grid, legend);
-    // The colours the legend could not place ride along: they are a fact about
-    // this grid under this legend, which is exactly what the key says.
-    const view = { ...readGrid(grid, { anchorISO: snapshot.taken_at }), unknown: grid.unknown || [] };
+    const view = viewOfSnapshot(snapshot, legendRows);
     parsed = { key, view };
     return view;
+  }
+
+  function legendOf(legendRows) {
+    return (legendRows || []).map((r) => ({
+      argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
+    }));
+  }
+
+  /**
+   * A reading's grid as a view, parsed every time and remembered nowhere — for an
+   * older reading the calendar pages back to, which must not push the newest one
+   * out of `parsedView()`'s single slot that every other tab shares.
+   */
+  function viewOfSnapshot(snapshot, legendRows) {
+    const grid = applyLegend(snapshot.grid, legendOf(legendRows));
+    // The colours the legend could not place ride along: they are a fact about
+    // this grid under this legend, which is exactly what the key says.
+    return { ...readGrid(grid, { anchorISO: snapshot.taken_at }), unknown: grid.unknown || [] };
   }
 
   /**
@@ -1398,6 +1410,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "ambiguousFirstNames", { get: () => ambiguousFirstNames, enumerable: true });
   Object.defineProperty(__x, "newestPerKey", { get: () => newestPerKey, enumerable: true });
   Object.defineProperty(__x, "parsedView", { get: () => parsedView, enumerable: true });
+  Object.defineProperty(__x, "viewOfSnapshot", { get: () => viewOfSnapshot, enumerable: true });
   Object.defineProperty(__x, "lookaheadWithResources", { get: () => lookaheadWithResources, enumerable: true });
   Object.defineProperty(__x, "cancelledOn", { get: () => cancelledOn, enumerable: true });
   Object.defineProperty(__x, "graftLocations", { get: () => graftLocations, enumerable: true });
@@ -11042,6 +11055,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     title: '',
     start: null, // the Monday the window starts on
     weeks: 4,
+    firstWritten: null, // the first day anything is written here — the editor holds nothing before its week
     filter: '',
     showArchived: false,
     collapsed: new Set(),
@@ -11201,6 +11215,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     for (const r of E.model.rows) E.server.set(`row:${r.id}`, r.version || 0);
     for (const c of ed.cellList(E.model)) E.server.set(`cell:${c.row_id}|${c.day}`, c.version || 0);
     E.revision = await rc.lookaheadRevision().catch(() => E.revision);
+    E.firstWritten = (await rc.laCellSpan().catch(() => ({ first: null }))).first;
     await loadLeave();
   }
 
@@ -11460,7 +11475,19 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     const refocus = !active || active === document.body || (host.contains(active) && !active.classList.contains('lae-search'));
     clear(host);
 
-    host.append(toolbar(days), grid(rows, days));
+    host.append(toolbar(days));
+    /* Before the first week written here the editor holds nothing: it was
+       started from the workbook from the week it was adopted. Said, rather than
+       shown as empty rows, with where those days are. */
+    if (E.firstWritten && days[0] < ed.mondayOf(E.firstWritten)) {
+      host.appendChild(el('p', {
+        class: 'rc-hint lae-before-note',
+        text: `Nothing is written here before ${fmtLong(ed.mondayOf(E.firstWritten))}: the look-ahead was brought across `
+          + 'from the workbook from that week on. What the workbook said for the days before it is in the calendar — '
+          + 'switch Edit off and page back.',
+      }));
+    }
+    host.appendChild(grid(rows, days));
     const scroller = host.querySelector('.lae-scroll');
     scroller.scrollLeft = E.scroll.left;
     scroller.scrollTop = E.scroll.top;
@@ -17947,7 +17974,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { p6Index, p6Status } = __req("core/la_p6.js");
   const { icon } = __req("ui/icons.js");
   const { selectInput, textInput, toast, emptyState, field, checkbox } = __req("ui/components.js");
-  const { notifyChanged, dayLabel, todayISO, formModal, parsedView, foldName, meMatcher, codeNodes, watchForNewReading } = __req("ui/rc_util.js");
+  const { notifyChanged, dayLabel, todayISO, formModal, parsedView, viewOfSnapshot, foldName, meMatcher, codeNodes, watchForNewReading } = __req("ui/rc_util.js");
 
 
 
@@ -18198,12 +18225,15 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     drawRange();
 
     /* Which weeks can be shown: the reading's, and — once the look-ahead is
-       written here — every week anything was ever written in. A reading covers
-       only the week just gone and the five ahead, so "Everything" used to stop a
-       week back; the weeks before it are drawn from what the editor holds. */
+       written here — every week anything was ever written in, and every week the
+       workbook's readings hold from before then. A reading covers only the week
+       just gone and the five ahead, so "Everything" used to stop a week back;
+       the weeks before it are drawn from what the editor holds, and the weeks
+       before the editor from the workbook readings that had them. */
     const reading = readingSpan(view);
-    const reach = await reachOf(reading, written);
-    const viewFor = viewChooser({ view, reading, reach, written, legendRows, today });
+    const history = await historyOf(written);
+    const reach = reachOf(reading, history);
+    const viewFor = viewChooser({ view, reading, reach, written, legendRows, today, history });
     const p6Of = p6Chooser();
 
     /* Back and forward a week at a time, as Edit does, and back to this week. */
@@ -18237,31 +18267,36 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     let drawing = 0;
     const draw = async () => {
       const turnNo = ++drawing;
-      let source = view;
+      /** @type {{ view: any, from: string | null, to: string | null, kind: string, snapshotId?: string | null, takenAt?: string | null }[]} */
+      let parts = [{ view, from: null, to: null, kind: 'latest' }];
       try {
-        source = await viewFor(la.calendarWeeks, la.calendarStart);
+        parts = await viewFor.parts(la.calendarWeeks, la.calendarStart);
       } catch (err) {
         rc.reportError('lookahead:past-weeks', err);
         toast({ tone: 'bad', message: `The weeks before the reading could not be read — ${err.message}`, timeout: 10000 });
       }
-      const p6 = await p6Of(source);
+      const p6s = await Promise.all(parts.map((part) => p6Of(part.view)));
       if (turnNo !== drawing) return;
       clear(body);
-      /* Said whenever the weeks on screen were drawn from the editor rather than
-         from a reading: a reading is evidence of what the look-ahead said that
-         day, and this is what it says now. */
-      if (source !== view) {
-        body.appendChild(el('p', {
-          class: 'rc-hint la-written-note',
-          text: 'These weeks are drawn from the look-ahead as it is written now, not from a reading taken at the time.',
-        }));
-      }
       const onlyMine = Boolean(isMe && la.onlyMine);
-      const shown = drawn(windowed(source, today), la.calendarFilter, la.showQuietRows, la.showResources,
-        onlyMine ? isMe : null, p6?.names);
+      /* One grid per source, in date order — the weeks before the editor from
+         the workbook reading that had them, the rest from the editor or the
+         reading — because two sources' rows are not the same rows, and laying
+         one over the other would put every activity on screen twice. */
+      const drawnParts = parts.map((part, i) => ({
+        ...part,
+        p6: p6s[i],
+        shown: drawn(windowed(part.view, today, la.calendarWeeks, la.calendarStart, part), la.calendarFilter,
+          la.showQuietRows, la.showResources, onlyMine ? isMe : null, p6s[i]?.names),
+      }));
+      const shown = {
+        days: drawnParts.flatMap((part) => part.shown.days),
+        activities: drawnParts.flatMap((part) => part.shown.activities),
+      };
       drawPager(shown.days);
       clear(strip);
-      strip.appendChild(legendStrip(legend, source.unknown, paintOn(shown)));
+      const painted = new Set(drawnParts.flatMap((part) => [...paintOn(part.shown)]));
+      strip.appendChild(legendStrip(legend, [...new Set(parts.flatMap((part) => part.view.unknown || []))], painted));
       if (onlyMine && !shown.activities.length) {
         body.appendChild(emptyState({
           iconName: 'calendar',
@@ -18280,7 +18315,16 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         }));
         return;
       }
-      body.appendChild(grid_(shown, today, isMe, source === view ? snapshot.id : null, notes, p6));
+      for (const part of drawnParts) {
+        if (!part.shown.days.length) continue;
+        /* Said whenever the weeks on screen were not drawn from the newest
+           reading: a reading is evidence of what the look-ahead said that day;
+           the editor is what it says now; an older reading is what it said then. */
+        const note = partNote(part, parts.length);
+        if (note) body.appendChild(el('p', { class: `rc-hint ${part.kind === 'reading' ? 'la-reading-note' : 'la-written-note'}`, text: note }));
+        body.appendChild(grid_(part.shown, today, isMe, part.kind === 'written' ? null : part.view === view ? snapshot.id : part.snapshotId,
+          notes, part.p6));
+      }
     };
     // Redraw the rows only, never the input: rebuilding the field under the
     // caret is the trap this project has already been bitten by three times.
@@ -18330,50 +18374,140 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   }
 
   /**
-   * How far the calendar can page: the reading's own days, and — once the
-   * look-ahead is written here — from the first day anything was written to the
-   * last. A workbook's reading is the whole sheet, so that is as far as it goes.
+   * What the calendar can page back through besides the newest reading: the days
+   * written here (`laCellSpan()`), and each week the workbook's readings hold
+   * with the newest reading that has it (`rc.workbookWeeks()`). Nothing for a
+   * look-ahead still read from the workbook, whose reading is the whole sheet;
+   * and an older database, without the list of workbook weeks, simply pages no
+   * further back than the editor.
    */
-  async function reachOf(reading, written) {
+  async function historyOf(written) {
+    if (!written) return { span: { first: null, last: null }, weeks: [] };
+    const [span, weeks] = await Promise.all([
+      rc.laCellSpan().catch(() => ({ first: null, last: null })),
+      rc.workbookWeeks().catch(() => []),
+    ]);
+    return {
+      span,
+      weeks: weeks.map((w) => ({ ...w, week_start: String(w.week_start).slice(0, 10) }))
+        .sort((a, b) => a.week_start.localeCompare(b.week_start)),
+    };
+  }
+
+  /**
+   * How far the calendar can page: the reading's own days, and — once the
+   * look-ahead is written here — from the first week a workbook reading or the
+   * editor holds to the last day written.
+   */
+  function reachOf(reading, history) {
     let { first, last } = reading;
-    if (written) {
-      const span = await rc.laCellSpan().catch(() => ({ first: null, last: null }));
-      if (span.first && (!first || span.first < first)) first = span.first;
-      if (span.last && (!last || span.last > last)) last = span.last;
-    }
+    const earliest = [history.weeks[0]?.week_start, history.span.first].filter(Boolean).sort()[0];
+    if (earliest && (!first || earliest < first)) first = earliest;
+    if (history.span.last && (!last || history.span.last > last)) last = history.span.last;
     return { first, last };
   }
 
   /**
-   * The view to draw a window from: the reading, wherever it covers every day of
-   * the window — which is the four weeks from today, nearly always — and
-   * otherwise the look-ahead as written (`writtenView()`), for the whole window
-   * so one grid never mixes the two. Each window is read once per drawing of the
-   * tab; a newer reading redraws the tab and starts afresh.
+   * Where each stretch of a window is drawn from.
+   *
+   * The newest reading, wherever it covers every day of the window — the four
+   * weeks from today, nearly always. Otherwise the window is cut where the
+   * editor starts (the Monday of the first day written here): from there on it
+   * is the look-ahead as written (`writtenView()`), as one stretch so one grid
+   * never mixes the two; before it, each week comes from the newest workbook
+   * reading that has it (`rc.workbookWeeks()`), the rule the week plan and the
+   * master export read the history by, and weeks that share a reading are one
+   * stretch. Those weeks were never in the editor: it was started from the
+   * workbook from the week it was adopted, and calendar paging used to stop
+   * there, with Edit showing the weeks before it empty.
+   *
+   * `parts(weeks, start)` answers `[{ view, from, to, kind, snapshotId, takenAt }]`
+   * in date order, `kind` one of 'latest', 'written' or 'reading'. Called as a
+   * function it answers the one view an export draws: the source a window starts
+   * in, and for "Everything" the look-ahead as written. Each view is
+   * read once per drawing of the tab; a newer reading redraws the tab afresh.
    */
-  function viewChooser({ view, reading, reach, written, legendRows, today }) {
+  function viewChooser({ view, reading, reach, written, legendRows, today, history = { span: {}, weeks: [] } }) {
     const made = new Map();
-    return async (weeks, start) => {
-      if (!written || !reading.first) return view;
-      let from;
-      let to;
-      if (!weeks) {
-        if (!reach.first) return view;
-        const firstMonday = mondayOf(reach.first);
-        const lastSunday = addDaysISO(mondayOf(reach.last), 6);
-        from = firstMonday < reading.first ? firstMonday : reading.first;
-        to = lastSunday > reading.last ? lastSunday : reading.last;
-      } else {
-        from = start || mondayOf(today);
-        to = addDaysISO(from, weeks * 7 - 1);
-      }
-      if (from >= reading.first && to <= reading.last) return view;
-      const key = `${from}|${to}`;
-      if (!made.has(key)) {
-        made.set(key, writtenView(from, to, legendRows).catch((err) => { made.delete(key); throw err; }));
-      }
+    const once = (key, fn) => {
+      if (!made.has(key)) made.set(key, fn().catch((err) => { made.delete(key); throw err; }));
       return made.get(key);
     };
+    const writtenFor = (from, to) => once(`w|${from}|${to}`, () => writtenView(from, to, legendRows));
+    const readingFor = (id) => once(`r|${id}`, async () => {
+      const snap = await rc.snapshotById(id);
+      if (!snap?.grid?.rows?.length) throw new Error('that reading has no grid to draw');
+      return viewOfSnapshot(snap, legendRows);
+    });
+    const editorStart = history.span?.first ? mondayOf(history.span.first) : null;
+    const byWeek = new Map((history.weeks || []).map((w) => [w.week_start, w]));
+
+    const bounds = (weeks, start) => {
+      if (!weeks) {
+        if (!reach.first) return null;
+        const firstMonday = mondayOf(reach.first);
+        const lastSunday = addDaysISO(mondayOf(reach.last), 6);
+        return {
+          from: reading.first && reading.first < firstMonday ? reading.first : firstMonday,
+          to: reading.last && reading.last > lastSunday ? reading.last : lastSunday,
+        };
+      }
+      const from = start || mondayOf(today);
+      return { from, to: addDaysISO(from, weeks * 7 - 1) };
+    };
+
+    const parts = async (weeks, start) => {
+      if (!written || !reading.first) return [{ view, from: null, to: null, kind: 'latest' }];
+      const span = bounds(weeks, start);
+      if (!span) return [{ view, from: null, to: null, kind: 'latest' }];
+      const { from, to } = span;
+      if (from >= reading.first && to <= reading.last) return [{ view, from: null, to: null, kind: 'latest' }];
+      const out = [];
+      const cut = editorStart && from < editorStart && byWeek.size ? editorStart : null;
+      if (cut) {
+        const before = to < cut ? to : addDaysISO(cut, -1);
+        const runs = [];
+        for (let w = mondayOf(from); w <= before; w = addDaysISO(w, 7)) {
+          const hit = byWeek.get(w);
+          const lo = w < from ? from : w;
+          const hi = addDaysISO(w, 6) > before ? before : addDaysISO(w, 6);
+          const last = runs[runs.length - 1];
+          if (last && last.snapshotId === (hit?.snapshot_id || null)) last.to = hi;
+          else runs.push({ snapshotId: hit?.snapshot_id || null, takenAt: hit?.taken_at || null, from: lo, to: hi });
+        }
+        for (const run of runs) {
+          out.push(run.snapshotId
+            ? { ...run, kind: 'reading', view: await readingFor(run.snapshotId) }
+            // A week no reading of the workbook has: the editor's answer, which is that nothing was written.
+            : { ...run, kind: 'written', view: await writtenFor(run.from, run.to) });
+        }
+      }
+      const after = cut ? cut : from;
+      if (after <= to) out.push({ kind: 'written', from: after, to, view: await writtenFor(after, to) });
+      return out;
+    };
+
+    const choose = async (weeks, start) => {
+      const all = await parts(weeks, start);
+      if (all.length === 1 && all[0].kind === 'latest') return view;
+      // "Everything" on one page is the look-ahead as written; a window, the source it starts in.
+      return (weeks ? all[0] : all[all.length - 1]).view;
+    };
+    choose.parts = parts;
+    return choose;
+  }
+
+  /** What a stretch of the calendar says about where it came from, or nothing for the newest reading on its own. */
+  function partNote(part, count) {
+    const span = part.from && part.to ? `${dayLabel(part.from, 'medium')} – ${dayLabel(part.to, 'medium')}: ` : '';
+    if (part.kind === 'reading') {
+      const when = part.takenAt ? new Date(part.takenAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : 'an earlier date';
+      return `${span}from the workbook as it was read on ${when} — these weeks come from before the look-ahead was written here.`;
+    }
+    if (part.kind === 'written') {
+      return `${count > 1 ? span : ''}These weeks are drawn from the look-ahead as it is written now, not from a reading taken at the time.`;
+    }
+    return '';
   }
 
   /** Which of a view's activity columns is the Activity ID: by its heading, as the sheet writes it. */
@@ -18423,8 +18557,10 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
    * shown as it is, empty or not — falling back to the whole sheet there would
    * look like the buttons doing something else.
    */
-  function windowed(view, today, weeks = la.calendarWeeks, start = la.calendarStart) {
+  function windowed(view, today, weeks = la.calendarWeeks, start = la.calendarStart, part = null) {
     const narrowed = (() => {
+      // A stretch of a window drawn from one source: exactly its own days.
+      if (part?.from && part?.to) return view.days.filter((d) => d.date && d.date >= part.from && d.date <= part.to);
       if (!weeks || !view.days.some((d) => d.date)) return view.days;
       const from = start || mondayOf(today);
       const to = addDaysISO(from, weeks * 7 - 1);

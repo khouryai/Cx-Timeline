@@ -873,7 +873,7 @@ export function listSettings() {
  * "could not update the legend", on one screen, weeks after the deploy that
  * needed it; this turns it into one sentence at sign-in naming the two files.
  */
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 /**
  * Whether the database is the one this build was written against.
@@ -1069,6 +1069,15 @@ export async function newestSnapshotId() {
  */
 export function listSnapshots({ limit = 1 } = {}) {
   return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(limit));
+}
+
+/**
+ * Each week the workbook's readings hold, and the newest of them that has it
+ * (`week_start`, `snapshot_id`, `taken_at`) — where the calendar draws a week
+ * from that the editor never held. No grid is opened to answer it.
+ */
+export function workbookWeeks() {
+  return select('rc_lookahead_workbook_weeks', (q) => q.order('week_start'));
 }
 
 /** One snapshot with its grid, by id — for re-deriving what a past read said. */

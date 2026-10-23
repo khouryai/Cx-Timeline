@@ -614,17 +614,29 @@ export function newestPerKey(rows, rank) {
 let parsed = null;
 
 export function parsedView(snapshot, legendRows) {
-  const legend = (legendRows || []).map((r) => ({
-    argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
-  }));
-  const key = `${snapshot.id}|${snapshot.taken_at}|${JSON.stringify(legend)}`;
+  const key = `${snapshot.id}|${snapshot.taken_at}|${JSON.stringify(legendOf(legendRows))}`;
   if (parsed?.key === key) return parsed.view;
-  const grid = applyLegend(snapshot.grid, legend);
-  // The colours the legend could not place ride along: they are a fact about
-  // this grid under this legend, which is exactly what the key says.
-  const view = { ...readGrid(grid, { anchorISO: snapshot.taken_at }), unknown: grid.unknown || [] };
+  const view = viewOfSnapshot(snapshot, legendRows);
   parsed = { key, view };
   return view;
+}
+
+function legendOf(legendRows) {
+  return (legendRows || []).map((r) => ({
+    argb: r.argb, meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from,
+  }));
+}
+
+/**
+ * A reading's grid as a view, parsed every time and remembered nowhere — for an
+ * older reading the calendar pages back to, which must not push the newest one
+ * out of `parsedView()`'s single slot that every other tab shares.
+ */
+export function viewOfSnapshot(snapshot, legendRows) {
+  const grid = applyLegend(snapshot.grid, legendOf(legendRows));
+  // The colours the legend could not place ride along: they are a fact about
+  // this grid under this legend, which is exactly what the key says.
+  return { ...readGrid(grid, { anchorISO: snapshot.taken_at }), unknown: grid.unknown || [] };
 }
 
 /**
