@@ -164,8 +164,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      # A package mirror that stops answering held this step for over half an
+      # hour once, and with it the deploy: each attempt gets five minutes, and
+      # a stuck one is tried again rather than waited on for six hours.
       - name: Install LibreOffice Calc
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-calc
+        timeout-minutes: 20
+        run: |
+          for attempt in 1 2 3; do
+            sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+              && sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends libreoffice-calc \
+              && exit 0
+            echo "Attempt $attempt to install LibreOffice Calc did not finish; trying again."
+          done
+          exit 1
       - run: node tools/test_xlsx_compat.js
 
   rust:
