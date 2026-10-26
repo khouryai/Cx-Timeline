@@ -18,6 +18,13 @@ export const la = {
   /** Free text filter on the calendar, kept across a redraw of the section. */
   calendarFilter: '',
   /**
+   * One row the calendar is narrowed to — "Show cells" in the cancellation log:
+   * the editor's row id where the reading carries one, and the row's words
+   * (`raw_label`) where it does not. Null is every row.
+   * @type {{ id: string | null, label: string } | null}
+   */
+  calendarRow: null,
+  /**
    * Whether rows nobody highlighted are drawn. Off by default: most of the sheet
    * is activities carried for reference with nothing scheduled against them.
    */

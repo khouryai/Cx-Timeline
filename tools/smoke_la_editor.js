@@ -1367,8 +1367,40 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   check('and exported to Excel as that calendar, reasons in the cells',
     /^cancellations .*\.xlsx$/.test(cancelFile.name)
       && cancelSheet.rows.some((r) => r.cells.some((c) => /Witness not required for testing/.test(c.value))), cancelFile.name);
+  check('each cancelled run is coloured by whose it was, and the key says which colour is whose',
+    (await page.locator('#rc-frame .la-cancel-grid td.la-cancel-run[data-party="BART"]').count()) >= 1
+      && (await page.locator('#rc-frame .la-cancel-grid td.la-cancel-run[data-party="BART"]:not(.la-cancel-by-bart)').count()) === 0
+      && /Hitachi/.test(await page.locator('#rc-frame .la-cancel-key').innerText()));
   await page.locator('#rc-frame .la-cancel-views .rc-tab', { hasText: 'As a list' }).click();
   await page.waitForTimeout(200);
+
+  /* "Show cells" opens the calendar on the one row, in the week it was
+     cancelled — it used to type the log's label into the filter, which no
+     row's words matched, over the whole of the newest reading. */
+  const showRow = page.locator('#rc-frame .rc-cancel-row[data-kind="activity"]:not(.rc-cancel-removed)', { hasText: 'IXL Regression Testing' }).first();
+  const showStart = await showRow.getAttribute('data-start');
+  await showRow.locator('button', { hasText: 'Show cells' }).click();
+  await page.waitForSelector('#rc-frame .la-pinned', { timeout: 10000 });
+  await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
+  await page.waitForTimeout(300);
+  const pinnedRows = await page.locator('#rc-frame .la-grid tbody tr:not(.la-resource-row):not(.la-head-row)').allInnerTexts();
+  const pinnedFirst = (await page.locator('#rc-frame .la-grid thead th.la-num').first().innerText()).trim().split(/\s+/)[0];
+  const showMonday = await page.evaluate((iso) => window.__CX_MODULES.req('core/la_edit.js').mondayOf(iso), showStart);
+  check('"Show cells" opens the calendar on that one row, from the Monday of the week it was cancelled',
+    pinnedRows.length === 1 && /IXL Regression Testing/.test(pinnedRows[0])
+      && pinnedFirst === String(Number(showMonday.slice(8, 10)))
+      && (await page.locator('#rc-frame .la-grid tbody td.la-cancel').count()) >= 1,
+    `${pinnedRows.length} row(s), first day ${pinnedFirst}, wanted ${showMonday}`);
+  await page.locator('#rc-frame .la-pinned button', { hasText: 'Show every row' }).click();
+  await page.waitForTimeout(400);
+  check('and "Show every row" puts the rest back',
+    (await page.locator('#rc-frame .la-pinned').count()) === 0
+      && (await page.locator('#rc-frame .la-grid tbody tr:not(.la-resource-row):not(.la-head-row)').count()) > 1);
+  await page.evaluate(() => {
+    const { la } = window.__CX_MODULES.req('ui/rc_la_state.js');
+    la.calendarStart = null;
+    la.calendarWeeks = 4;
+  });
   await page.locator('#rc-frame .rc-tab', { hasText: /^Calendar$/ }).click();
   await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
   await page.locator('#rc-frame .la-edit-switch').click();

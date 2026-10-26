@@ -340,17 +340,29 @@ async function renderCalendar(host) {
        the workbook reading that had them, the rest from the editor or the
        reading — because two sources' rows are not the same rows, and laying
        one over the other would put every activity on screen twice. */
+    /* One row pinned from the cancellation log is drawn whether or not it
+       has anything scheduled — red is a cancellation, not a shift. */
+    const pin = la.calendarRow;
     const drawnParts = parts.map((part, i) => ({
       ...part,
       p6: p6s[i],
-      shown: drawn(windowed(part.view, today, la.calendarWeeks, la.calendarStart, part), la.calendarFilter,
-        la.showQuietRows, la.showResources, onlyMine ? isMe : null, p6s[i]?.names),
+      shown: pinnedTo(drawn(windowed(part.view, today, la.calendarWeeks, la.calendarStart, part), la.calendarFilter,
+        la.showQuietRows || Boolean(pin), la.showResources, onlyMine ? isMe : null, p6s[i]?.names), pin),
     }));
     const shown = {
       days: drawnParts.flatMap((part) => part.shown.days),
       activities: drawnParts.flatMap((part) => part.shown.activities),
     };
     drawPager(shown.days);
+    if (pin) {
+      body.appendChild(el('div', { class: 'la-pinned', role: 'status' }, [
+        el('span', { text: `Showing one row, from the cancellation log: ${pin.label}` }),
+        el('button', {
+          class: 'cx-btn mini ghost', type: 'button', text: 'Show every row',
+          onClick: () => { la.calendarRow = null; draw(); },
+        }),
+      ]));
+    }
     clear(strip);
     const painted = new Set(drawnParts.flatMap((part) => [...paintOn(part.shown)]));
     strip.appendChild(legendStrip(legend, [...new Set(parts.flatMap((part) => part.view.unknown || []))], painted));
@@ -363,12 +375,26 @@ async function renderCalendar(host) {
       }));
       return;
     }
+    if (pin && shown.days.length && !shown.activities.length) {
+      body.appendChild(emptyState({
+        iconName: 'calendar',
+        title: 'That row is not on the look-ahead for these weeks',
+        message: 'Nothing the calendar holds for the weeks on screen has the row this cancellation was '
+          + 'logged against — it may have been taken off the sheet since. Page a week either way, or '
+          + 'show every row.',
+        action: { label: 'Show every row', onClick: () => { la.calendarRow = null; draw(); } },
+      }));
+      return;
+    }
     if (!shown.days.length) {
       body.appendChild(emptyState({
         iconName: 'calendar',
         title: 'Nothing on the look-ahead in these weeks',
-        message: 'The look-ahead says nothing for the weeks on screen.',
-        action: { label: 'Back to this week', onClick: () => { la.calendarStart = null; draw(); } },
+        message: pin
+          ? 'The look-ahead holds nothing for the weeks this cancellation was logged in — no reading '
+            + 'or edit kept them.'
+          : 'The look-ahead says nothing for the weeks on screen.',
+        action: { label: 'Back to this week', onClick: () => { la.calendarStart = null; la.calendarRow = null; draw(); } },
       }));
       return;
     }
@@ -385,7 +411,8 @@ async function renderCalendar(host) {
   };
   // Redraw the rows only, never the input: rebuilding the field under the
   // caret is the trap this project has already been bitten by three times.
-  search.addEventListener('input', () => { la.calendarFilter = search.value; draw(); });
+  // Typing a filter is a different question from the one row "Show cells" pinned.
+  search.addEventListener('input', () => { la.calendarFilter = search.value; la.calendarRow = null; draw(); });
 
   host.appendChild(strip);
   host.appendChild(el('div', {
@@ -732,6 +759,21 @@ function drawn(view, filter, showQuiet, withResources = la.showResources, isMe =
   }
 
   return { ...view, activities: rows };
+}
+
+/**
+ * Only the row "Show cells" pinned (`la.calendarRow`): by the editor's id where
+ * this part of the window carries ids, else by the words the log stored for it
+ * — the row's cells joined with " · ", exactly as `rowsFrom()` wrote them.
+ */
+function pinnedTo(view, row) {
+  if (!row) return view;
+  const byId = row.id && view.activities.some((a) => a.id === row.id);
+  const words = (a) => a.meta.filter(Boolean).join(' · ');
+  return {
+    ...view,
+    activities: view.activities.filter((a) => !a.absence && (byId ? a.id === row.id : words(a) === row.label)),
+  };
 }
 
 /** Every colour actually painted on the days being drawn, as a set of hexes. */

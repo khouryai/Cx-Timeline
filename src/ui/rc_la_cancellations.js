@@ -12,7 +12,7 @@ import { saveFile } from '../io/exporters.js';
 import { readGrid, describeCodeCounts, isCancelMeaning } from '../core/lookahead.js';
 import { rowsFrom } from '../core/la_register.js';
 import { cancellationWorkbook } from '../io/la_xlsx.js';
-import { monthLabel, weekdayLetter, isWeekend } from '../core/la_edit.js';
+import { monthLabel, weekdayLetter, isWeekend, mondayOf } from '../core/la_edit.js';
 import { icon } from './icons.js';
 import {
   selectInput, toast, badge, emptyState, checkbox, confirmDialog, chipStat,
@@ -31,7 +31,19 @@ import { checkNowButton } from './rc_ingest.js';
 
 /** Whose cancellation it can be. The contract's three answers, as the schema checks them. */
 const CANCEL_PARTIES = ['BART', 'Hitachi', 'Other'];
-const PARTY_TONE = { BART: 'warn', Hitachi: 'bad', Other: 'neutral' };
+/**
+ * One colour per answer, the same in the list, the calendar and its Excel:
+ * BART red, Hitachi blue, another party amber — and purple while nobody has
+ * said, so an unanswered cancellation never reads as anybody's.
+ */
+const PARTY_TONE = { BART: 'bad', Hitachi: 'info', Other: 'warn' };
+const OPEN_TONE = 'pending';
+
+/** Whose an event is, as the class its colour hangs on: `by-bart`, `by-hitachi`, `by-other` or `open`. */
+function whose(e) {
+  if (!e.note) return 'open';
+  return `by-${CANCEL_PARTIES.includes(e.note.party) ? e.note.party.toLowerCase() : 'other'}`;
+}
 
 /** The span the log covers, when somebody has changed it on screen. A blank end is no end. */
 let cancellationsFrom = null;
@@ -151,7 +163,7 @@ export async function renderCancellations(host) {
     chipStat('BART support', resourceEvents, resourceEvents ? 'warn' : 'muted'),
     chipStat('Days', dayCount, 'muted'),
     ...CANCEL_PARTIES.map((p) => chipStat(p, tally[p], tally[p] ? PARTY_TONE[p] : 'muted')),
-    chipStat('No reason yet', open, open ? 'bad' : 'muted'),
+    chipStat('No reason yet', open, open ? OPEN_TONE : 'muted'),
   ]));
 
   host.appendChild(el('div', { style: 'display:flex;gap:18px;flex-wrap:wrap' }, [
@@ -213,7 +225,9 @@ export async function renderCancellations(host) {
   }, [
     el('td', {}, [
       el('div', { class: 'rc-cancel-cells', 'aria-hidden': 'true' },
-        [...Array(Math.min(e.days, 14))].map(() => el('span', { class: `rc-cancel-cell${e.kind === 'support' ? ' rc-cancel-cell-support' : ''}` }))),
+        [...Array(Math.min(e.days, 14))].map(() => el('span', {
+          class: `rc-cancel-cell rc-cancel-${whose(e)}${e.kind === 'support' ? ' rc-cancel-cell-support' : ''}`,
+        }))),
     ]),
     el('td', {}, [
       el('div', { text: e.label || '—' }),
@@ -241,7 +255,7 @@ export async function renderCancellations(host) {
       title: 'How many reads of the sheet showed any of these days red, and when it was first seen',
       text: `${e.reads} read${e.reads === 1 ? '' : 's'}${e.firstSeen ? ` · first ${dayLabel(String(e.firstSeen).slice(0, 10))}` : ''}`,
     }),
-    el('td', {}, [e.note ? badge(e.note.party, PARTY_TONE[e.note.party] || 'neutral') : el('span', { class: 'rc-hint', text: '—' })]),
+    el('td', {}, [e.note ? badge(e.note.party, PARTY_TONE[e.note.party] || 'neutral') : badge('No reason yet', OPEN_TONE)]),
     el('td', {}, [
       e.note?.reason ? el('div', { text: e.note.reason }) : null,
       e.history.length > 1
@@ -273,20 +287,36 @@ export async function renderCancellations(host) {
         el('button', {
           class: 'cx-btn mini ghost',
           text: 'Show cells',
-          title: 'Open the calendar on this activity, over the whole sheet',
-          onClick: () => {
-            la.calendarFilter = e.label;
-            la.calendarWeeks = 0;
-            la.showQuietRows = true;
-            la.section = 'calendar';
-            notifyChanged('cancellations');
-          },
+          title: 'Open the calendar on this row alone, in the weeks it was cancelled',
+          onClick: () => showCells(e),
         }),
       ].filter(Boolean)),
     ]),
   ]));
 
   host.appendChild(table(['', 'Activity', 'What', 'BART resources', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
+}
+
+/**
+ * Open the calendar on the one row a cancellation was logged against, in the
+ * weeks it ran — not a filter typed for it. The log's label is the row's cells
+ * joined with " · ", which no filter term ever matched (the box searches the
+ * cells joined by spaces, and splits on commas), and "the whole sheet" was the
+ * newest reading's, which a row cancelled weeks ago is often no longer on. The
+ * row is found by the editor's id where the reading carries one, else by its
+ * words; the window is the Mondays the event spans, paged from there.
+ */
+function showCells(e) {
+  const today = todayISO();
+  const first = mondayOf(e.start);
+  la.calendarRow = { id: e.laRowId || null, label: e.label };
+  la.calendarFilter = '';
+  la.calendarStart = first === mondayOf(today) ? null : first;
+  la.calendarWeeks = Math.max(1, Math.round((isoToMs(mondayOf(e.end)) - isoToMs(first)) / (7 * 86400000)) + 1);
+  la.onlyMine = false;
+  la.section = 'calendar';
+  la.sectionChosen = true;
+  notifyChanged('cancellations');
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -349,7 +379,10 @@ async function cancellationCalendar(events, from, to) {
           red,
           title: 'Cancellation log',
           subtitle: `${span} · ${events.length} cancellation(s)`,
-          rows: rows.map((r) => ({ ...r, events: r.events.map((e) => ({ start: e.start, end: e.end, kind: e.kind, text: runText(e) })) })),
+          rows: rows.map((r) => ({
+            ...r,
+            events: r.events.map((e) => ({ start: e.start, end: e.end, kind: e.kind, party: e.note?.party || null, text: runText(e) })),
+          })),
         });
         saveFile(`cancellations ${from} to ${last}.xlsx`, bytes,
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Cancellation calendar');
@@ -362,6 +395,19 @@ async function cancellationCalendar(events, from, to) {
     wrap.appendChild(emptyState({ iconName: 'calendar', title: 'Nothing cancelled in this period', message: 'Widen the dates above, or show every kind.' }));
     return wrap;
   }
+
+  /* What each colour says, in words beside it — the cell says the party too,
+     so the colour is never the only way to read it. */
+  const swatch = (klass, text, style = '') => el('span', { class: 'la-cancel-key-item' }, [
+    el('span', { class: `la-cancel-swatch ${klass}`, style, 'aria-hidden': 'true' }), el('span', { text }),
+  ]);
+  wrap.appendChild(el('div', { class: 'la-cancel-key', role: 'note', 'aria-label': 'What the colours mean' }, [
+    swatch('la-cancel-by-bart', 'BART', `background-color:#${red}`),
+    swatch('la-cancel-by-hitachi', 'Hitachi'),
+    swatch('la-cancel-by-other', 'Other'),
+    swatch('la-cancel-open', 'No reason yet'),
+    swatch('la-cancel-support', 'Outlined: a BART resource struck out, the activity went ahead'),
+  ]));
 
   const head = el('thead', {}, [
     el('tr', {}, [
@@ -401,14 +447,16 @@ async function cancellationCalendar(events, from, to) {
         continue;
       }
       const { e, b } = hit;
-      const activity = e.kind === 'activity';
+      /* BART's day is the legend's own red, painted inline like any legend
+         colour; every other answer's fill is a class (see `--la-cancel-*`). */
+      const bart = e.kind === 'activity' && whose(e) === 'by-bart';
       tr.appendChild(el('td', {
-        class: `la-day la-cancel-run la-cancel-run-${e.kind}${activity ? ` la-painted${isDark(red) ? ' la-dark' : ''}` : ''}${e.note ? '' : ' la-cancel-open'}`,
+        class: `la-day la-cancel-run la-cancel-run-${e.kind} la-cancel-${whose(e)}${bart ? ` la-painted${isDark(red) ? ' la-dark' : ''}` : ''}`,
         colSpan: String(b - i + 1),
-        style: activity ? `background-color:#${red}` : '',
+        style: bart ? `background-color:#${red}` : '',
         title: `${e.label}${e.location ? ` at ${e.location}` : ''} — ${e.start === e.end ? dayLabel(e.start) : `${dayLabel(e.start)} – ${dayLabel(e.end)}`}\n${runText(e)}`
           + (rc.isAdmin() ? '\nClick to give or correct the reason.' : ''),
-        dataset: { kind: e.kind, start: e.start },
+        dataset: { kind: e.kind, start: e.start, party: e.note?.party || '' },
         onClick: rc.isAdmin() ? () => recordCancellation(e) : null,
       }, runNodes(e)));
       i = b;

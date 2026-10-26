@@ -30,6 +30,11 @@ import { isDark } from './lookahead.js';
 import { cellTokens } from '../core/lookahead.js';
 
 const WEEKEND = '7F7F7F';
+/* The cancellation log's colours, as `--la-cancel-*` draws them on screen:
+   a fill per answer for a day cancelled outright (BART's is the legend's red,
+   passed in), and writing a white sheet can carry for a resource struck out. */
+const CANCEL_FILL = { Hitachi: '0070C0', Other: 'FFC000', open: 'E4D7F5' };
+const CANCEL_INK = { BART: 'FF0000', Hitachi: '0070C0', Other: 'C55A11', open: '7030A0' };
 const DAY_WIDTH = 12.7109375;
 const LINE = 12.75;
 
@@ -314,11 +319,13 @@ function safeSheetName(sheetName) {
  * the period across, and each cancelled run one merged cell carrying what was
  * cancelled, who was responsible and why.
  *
- * `rows` is `[{ label, location, events: [{ start, end, kind, text }] }]` —
- * `kind` 'activity' for a day cancelled outright (filled red, as on the sheet)
- * or 'support' for a BART resource struck out of an activity that went ahead
- * (red writing, no fill, because the work itself went ahead). `text` is what
- * the cell says. Weekends are the sheet's grey, like the look-ahead export.
+ * `rows` is `[{ label, location, events: [{ start, end, kind, party, text }] }]` —
+ * `kind` 'activity' for a day cancelled outright (filled) or 'support' for a
+ * BART resource struck out of an activity that went ahead (coloured writing,
+ * no fill, because the work itself went ahead). The colour is whose it was:
+ * `party` 'BART' red, 'Hitachi' blue, 'Other' amber, and null — nobody has
+ * said — lavender with purple writing. `text` is what the cell says. Weekends
+ * are the sheet's grey, like the look-ahead export.
  *
  * @param {object} o
  * @param {string[]} o.days     ISO dates, both ends inclusive
@@ -339,10 +346,17 @@ export function cancellationWorkbook({ days, rows, title = 'Cancellations', subt
     meta: styles.id({ border: all, h: 'left', v: 'top', wrap: true }),
     day: styles.id({ border: all }),
     weekend: styles.id({ border: all, fill: WEEKEND }),
-    cancelled: styles.id({ border: all, fill: red, bold: true, color: isDark(red) ? 'FFFFFF' : '000000', h: 'center', v: 'center', wrap: true }),
-    support: styles.id({ border: all, bold: true, color: 'FF0000', h: 'center', v: 'center', wrap: true }),
     keyText: styles.id({ h: 'left', v: 'center' }),
   };
+  const who = (party) => (party == null ? 'open' : party in CANCEL_INK ? party : 'Other');
+  const fill = (party) => (who(party) === 'BART' ? red : CANCEL_FILL[who(party)]);
+  const cancelled = (party) => styles.id({
+    border: all, fill: fill(party), bold: true, italic: who(party) === 'open',
+    color: isDark(fill(party)) ? 'FFFFFF' : '000000', h: 'center', v: 'center', wrap: true,
+  });
+  const support = (party) => styles.id({
+    border: all, bold: true, italic: who(party) === 'open', color: CANCEL_INK[who(party)], h: 'center', v: 'center', wrap: true,
+  });
   const META = [{ heading: 'Activity', width: 44 }, { heading: 'Location', width: 14 }];
   const first = META.length + 1;
   const str = (col, row, text, s) => (text === '' || text == null
@@ -392,7 +406,7 @@ export function cancellationWorkbook({ days, rows, title = 'Cancellations', subt
     days.forEach((d, i) => {
       const hit = covered.get(i);
       if (hit) {
-        const s = hit.e.kind === 'support' ? S.support : S.cancelled;
+        const s = hit.e.kind === 'support' ? support(hit.e.party) : cancelled(hit.e.party);
         cells.push(i === hit.a ? str(first + i, r, hit.e.text, s) : str(first + i, r, '', s));
       } else cells.push(str(first + i, r, '', isWeekend(d) ? S.weekend : S.day));
     });
@@ -400,10 +414,18 @@ export function cancellationWorkbook({ days, rows, title = 'Cancellations', subt
     r++;
   }
 
+  for (const [party, said] of [
+    ['BART', 'Day cancelled, BART responsible — the activity did not go ahead'],
+    ['Hitachi', 'Day cancelled, Hitachi responsible'],
+    ['Other', 'Day cancelled, another party responsible'],
+    [null, 'Day cancelled, no reason recorded yet'],
+  ]) {
+    r++;
+    addRow(r, [str(first, r, '', cancelled(party)), str(first + 1, r, said, S.keyText)]);
+  }
   r++;
-  addRow(r, [str(first, r, '', S.cancelled), str(first + 1, r, 'Day cancelled — the activity did not go ahead', S.keyText)]);
-  r++;
-  addRow(r, [str(first, r, 'WIT', S.support), str(first + 1, r, 'BART resource cancelled — the activity went ahead without it', S.keyText)]);
+  addRow(r, [str(first, r, 'WIT', support('BART')),
+    str(first + 1, r, 'BART resource cancelled — the activity went ahead without it; written in the responsible party\'s colour', S.keyText)]);
 
   const lastCol = first + Math.max(days.length, 2) - 1;
   const colsXml = [

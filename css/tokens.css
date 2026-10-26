@@ -44,6 +44,17 @@
   --la-band: #d9d9d9;
   --la-band-ink: #111111;
 
+  /* The cancellation log's fills, one per answer to "whose was it" — BART is
+     the legend's own cancellation red, painted inline like any legend colour.
+     Fixed in every theme for the same reason as the greys: the Excel export
+     writes these exact fills, and the calendar on screen is that sheet. */
+  --la-cancel-hitachi: #0070c0;
+  --la-cancel-hitachi-ink: #ffffff;
+  --la-cancel-other: #ffc000;
+  --la-cancel-other-ink: #111111;
+  --la-cancel-open: #e4d7f5;
+  --la-cancel-open-ink: #111111;
+
   /* Brand — Hitachi red (shared with cx-portal) */
   --hitachi-red: #e60012;
   --hitachi-red-hover: #b80010;

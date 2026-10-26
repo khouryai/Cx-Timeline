@@ -149,6 +149,7 @@ export async function openActivity({ row = null, task = '' } = {}) {
         label: 'Show on the look-ahead',
         onClick: () => {
           la.calendarFilter = title;
+          la.calendarRow = null;
           la.onlyMine = false;
           la.section = 'calendar';
           la.sectionChosen = true;

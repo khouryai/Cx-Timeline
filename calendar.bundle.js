@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 33   Built: 2026-10-23T17:18:46.194Z
+ * Modules: 33   Built: 2026-10-26T21:32:54.166Z
  */
 (function () {
   'use strict';
@@ -3703,6 +3703,13 @@ __mods["ui/rc_la_state.js"] = function (__x, __req) {
     /** Free text filter on the calendar, kept across a redraw of the section. */
     calendarFilter: '',
     /**
+     * One row the calendar is narrowed to — "Show cells" in the cancellation log:
+     * the editor's row id where the reading carries one, and the row's words
+     * (`raw_label`) where it does not. Null is every row.
+     * @type {{ id: string | null, label: string } | null}
+     */
+    calendarRow: null,
+    /**
      * Whether rows nobody highlighted are drawn. Off by default: most of the sheet
      * is activities carried for reference with nothing scheduled against them.
      */
@@ -7296,6 +7303,7 @@ __mods["ui/rc_activity.js"] = function (__x, __req) {
           label: 'Show on the look-ahead',
           onClick: () => {
             la.calendarFilter = title;
+            la.calendarRow = null;
             la.onlyMine = false;
             la.section = 'calendar';
             la.sectionChosen = true;
@@ -9969,6 +9977,11 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
   const { cellTokens } = __req("core/lookahead.js");
 
   const WEEKEND = '7F7F7F';
+  /* The cancellation log's colours, as `--la-cancel-*` draws them on screen:
+     a fill per answer for a day cancelled outright (BART's is the legend's red,
+     passed in), and writing a white sheet can carry for a resource struck out. */
+  const CANCEL_FILL = { Hitachi: '0070C0', Other: 'FFC000', open: 'E4D7F5' };
+  const CANCEL_INK = { BART: 'FF0000', Hitachi: '0070C0', Other: 'C55A11', open: '7030A0' };
   const DAY_WIDTH = 12.7109375;
   const LINE = 12.75;
 
@@ -10253,11 +10266,13 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
    * the period across, and each cancelled run one merged cell carrying what was
    * cancelled, who was responsible and why.
    *
-   * `rows` is `[{ label, location, events: [{ start, end, kind, text }] }]` —
-   * `kind` 'activity' for a day cancelled outright (filled red, as on the sheet)
-   * or 'support' for a BART resource struck out of an activity that went ahead
-   * (red writing, no fill, because the work itself went ahead). `text` is what
-   * the cell says. Weekends are the sheet's grey, like the look-ahead export.
+   * `rows` is `[{ label, location, events: [{ start, end, kind, party, text }] }]` —
+   * `kind` 'activity' for a day cancelled outright (filled) or 'support' for a
+   * BART resource struck out of an activity that went ahead (coloured writing,
+   * no fill, because the work itself went ahead). The colour is whose it was:
+   * `party` 'BART' red, 'Hitachi' blue, 'Other' amber, and null — nobody has
+   * said — lavender with purple writing. `text` is what the cell says. Weekends
+   * are the sheet's grey, like the look-ahead export.
    *
    * @param {object} o
    * @param {string[]} o.days     ISO dates, both ends inclusive
@@ -10278,10 +10293,17 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
       meta: styles.id({ border: all, h: 'left', v: 'top', wrap: true }),
       day: styles.id({ border: all }),
       weekend: styles.id({ border: all, fill: WEEKEND }),
-      cancelled: styles.id({ border: all, fill: red, bold: true, color: isDark(red) ? 'FFFFFF' : '000000', h: 'center', v: 'center', wrap: true }),
-      support: styles.id({ border: all, bold: true, color: 'FF0000', h: 'center', v: 'center', wrap: true }),
       keyText: styles.id({ h: 'left', v: 'center' }),
     };
+    const who = (party) => (party == null ? 'open' : party in CANCEL_INK ? party : 'Other');
+    const fill = (party) => (who(party) === 'BART' ? red : CANCEL_FILL[who(party)]);
+    const cancelled = (party) => styles.id({
+      border: all, fill: fill(party), bold: true, italic: who(party) === 'open',
+      color: isDark(fill(party)) ? 'FFFFFF' : '000000', h: 'center', v: 'center', wrap: true,
+    });
+    const support = (party) => styles.id({
+      border: all, bold: true, italic: who(party) === 'open', color: CANCEL_INK[who(party)], h: 'center', v: 'center', wrap: true,
+    });
     const META = [{ heading: 'Activity', width: 44 }, { heading: 'Location', width: 14 }];
     const first = META.length + 1;
     const str = (col, row, text, s) => (text === '' || text == null
@@ -10331,7 +10353,7 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
       days.forEach((d, i) => {
         const hit = covered.get(i);
         if (hit) {
-          const s = hit.e.kind === 'support' ? S.support : S.cancelled;
+          const s = hit.e.kind === 'support' ? support(hit.e.party) : cancelled(hit.e.party);
           cells.push(i === hit.a ? str(first + i, r, hit.e.text, s) : str(first + i, r, '', s));
         } else cells.push(str(first + i, r, '', isWeekend(d) ? S.weekend : S.day));
       });
@@ -10339,10 +10361,18 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
       r++;
     }
 
+    for (const [party, said] of [
+      ['BART', 'Day cancelled, BART responsible — the activity did not go ahead'],
+      ['Hitachi', 'Day cancelled, Hitachi responsible'],
+      ['Other', 'Day cancelled, another party responsible'],
+      [null, 'Day cancelled, no reason recorded yet'],
+    ]) {
+      r++;
+      addRow(r, [str(first, r, '', cancelled(party)), str(first + 1, r, said, S.keyText)]);
+    }
     r++;
-    addRow(r, [str(first, r, '', S.cancelled), str(first + 1, r, 'Day cancelled — the activity did not go ahead', S.keyText)]);
-    r++;
-    addRow(r, [str(first, r, 'WIT', S.support), str(first + 1, r, 'BART resource cancelled — the activity went ahead without it', S.keyText)]);
+    addRow(r, [str(first, r, 'WIT', support('BART')),
+      str(first + 1, r, 'BART resource cancelled — the activity went ahead without it; written in the responsible party\'s colour', S.keyText)]);
 
     const lastCol = first + Math.max(days.length, 2) - 1;
     const colsXml = [
@@ -16044,7 +16074,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
   const { readGrid, describeCodeCounts, isCancelMeaning } = __req("core/lookahead.js");
   const { rowsFrom } = __req("core/la_register.js");
   const { cancellationWorkbook } = __req("io/la_xlsx.js");
-  const { monthLabel, weekdayLetter, isWeekend } = __req("core/la_edit.js");
+  const { monthLabel, weekdayLetter, isWeekend, mondayOf } = __req("core/la_edit.js");
   const { icon } = __req("ui/icons.js");
   const { selectInput, toast, badge, emptyState, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
 
@@ -16063,7 +16093,19 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
 
   /** Whose cancellation it can be. The contract's three answers, as the schema checks them. */
   const CANCEL_PARTIES = ['BART', 'Hitachi', 'Other'];
-  const PARTY_TONE = { BART: 'warn', Hitachi: 'bad', Other: 'neutral' };
+  /**
+   * One colour per answer, the same in the list, the calendar and its Excel:
+   * BART red, Hitachi blue, another party amber — and purple while nobody has
+   * said, so an unanswered cancellation never reads as anybody's.
+   */
+  const PARTY_TONE = { BART: 'bad', Hitachi: 'info', Other: 'warn' };
+  const OPEN_TONE = 'pending';
+
+  /** Whose an event is, as the class its colour hangs on: `by-bart`, `by-hitachi`, `by-other` or `open`. */
+  function whose(e) {
+    if (!e.note) return 'open';
+    return `by-${CANCEL_PARTIES.includes(e.note.party) ? e.note.party.toLowerCase() : 'other'}`;
+  }
 
   /** The span the log covers, when somebody has changed it on screen. A blank end is no end. */
   let cancellationsFrom = null;
@@ -16183,7 +16225,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
       chipStat('BART support', resourceEvents, resourceEvents ? 'warn' : 'muted'),
       chipStat('Days', dayCount, 'muted'),
       ...CANCEL_PARTIES.map((p) => chipStat(p, tally[p], tally[p] ? PARTY_TONE[p] : 'muted')),
-      chipStat('No reason yet', open, open ? 'bad' : 'muted'),
+      chipStat('No reason yet', open, open ? OPEN_TONE : 'muted'),
     ]));
 
     host.appendChild(el('div', { style: 'display:flex;gap:18px;flex-wrap:wrap' }, [
@@ -16245,7 +16287,9 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
     }, [
       el('td', {}, [
         el('div', { class: 'rc-cancel-cells', 'aria-hidden': 'true' },
-          [...Array(Math.min(e.days, 14))].map(() => el('span', { class: `rc-cancel-cell${e.kind === 'support' ? ' rc-cancel-cell-support' : ''}` }))),
+          [...Array(Math.min(e.days, 14))].map(() => el('span', {
+            class: `rc-cancel-cell rc-cancel-${whose(e)}${e.kind === 'support' ? ' rc-cancel-cell-support' : ''}`,
+          }))),
       ]),
       el('td', {}, [
         el('div', { text: e.label || '—' }),
@@ -16273,7 +16317,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
         title: 'How many reads of the sheet showed any of these days red, and when it was first seen',
         text: `${e.reads} read${e.reads === 1 ? '' : 's'}${e.firstSeen ? ` · first ${dayLabel(String(e.firstSeen).slice(0, 10))}` : ''}`,
       }),
-      el('td', {}, [e.note ? badge(e.note.party, PARTY_TONE[e.note.party] || 'neutral') : el('span', { class: 'rc-hint', text: '—' })]),
+      el('td', {}, [e.note ? badge(e.note.party, PARTY_TONE[e.note.party] || 'neutral') : badge('No reason yet', OPEN_TONE)]),
       el('td', {}, [
         e.note?.reason ? el('div', { text: e.note.reason }) : null,
         e.history.length > 1
@@ -16305,20 +16349,36 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
           el('button', {
             class: 'cx-btn mini ghost',
             text: 'Show cells',
-            title: 'Open the calendar on this activity, over the whole sheet',
-            onClick: () => {
-              la.calendarFilter = e.label;
-              la.calendarWeeks = 0;
-              la.showQuietRows = true;
-              la.section = 'calendar';
-              notifyChanged('cancellations');
-            },
+            title: 'Open the calendar on this row alone, in the weeks it was cancelled',
+            onClick: () => showCells(e),
           }),
         ].filter(Boolean)),
       ]),
     ]));
 
     host.appendChild(table(['', 'Activity', 'What', 'BART resources', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
+  }
+
+  /**
+   * Open the calendar on the one row a cancellation was logged against, in the
+   * weeks it ran — not a filter typed for it. The log's label is the row's cells
+   * joined with " · ", which no filter term ever matched (the box searches the
+   * cells joined by spaces, and splits on commas), and "the whole sheet" was the
+   * newest reading's, which a row cancelled weeks ago is often no longer on. The
+   * row is found by the editor's id where the reading carries one, else by its
+   * words; the window is the Mondays the event spans, paged from there.
+   */
+  function showCells(e) {
+    const today = todayISO();
+    const first = mondayOf(e.start);
+    la.calendarRow = { id: e.laRowId || null, label: e.label };
+    la.calendarFilter = '';
+    la.calendarStart = first === mondayOf(today) ? null : first;
+    la.calendarWeeks = Math.max(1, Math.round((isoToMs(mondayOf(e.end)) - isoToMs(first)) / (7 * 86400000)) + 1);
+    la.onlyMine = false;
+    la.section = 'calendar';
+    la.sectionChosen = true;
+    notifyChanged('cancellations');
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -16381,7 +16441,10 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
             red,
             title: 'Cancellation log',
             subtitle: `${span} · ${events.length} cancellation(s)`,
-            rows: rows.map((r) => ({ ...r, events: r.events.map((e) => ({ start: e.start, end: e.end, kind: e.kind, text: runText(e) })) })),
+            rows: rows.map((r) => ({
+              ...r,
+              events: r.events.map((e) => ({ start: e.start, end: e.end, kind: e.kind, party: e.note?.party || null, text: runText(e) })),
+            })),
           });
           saveFile(`cancellations ${from} to ${last}.xlsx`, bytes,
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Cancellation calendar');
@@ -16394,6 +16457,19 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
       wrap.appendChild(emptyState({ iconName: 'calendar', title: 'Nothing cancelled in this period', message: 'Widen the dates above, or show every kind.' }));
       return wrap;
     }
+
+    /* What each colour says, in words beside it — the cell says the party too,
+       so the colour is never the only way to read it. */
+    const swatch = (klass, text, style = '') => el('span', { class: 'la-cancel-key-item' }, [
+      el('span', { class: `la-cancel-swatch ${klass}`, style, 'aria-hidden': 'true' }), el('span', { text }),
+    ]);
+    wrap.appendChild(el('div', { class: 'la-cancel-key', role: 'note', 'aria-label': 'What the colours mean' }, [
+      swatch('la-cancel-by-bart', 'BART', `background-color:#${red}`),
+      swatch('la-cancel-by-hitachi', 'Hitachi'),
+      swatch('la-cancel-by-other', 'Other'),
+      swatch('la-cancel-open', 'No reason yet'),
+      swatch('la-cancel-support', 'Outlined: a BART resource struck out, the activity went ahead'),
+    ]));
 
     const head = el('thead', {}, [
       el('tr', {}, [
@@ -16433,14 +16509,16 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
           continue;
         }
         const { e, b } = hit;
-        const activity = e.kind === 'activity';
+        /* BART's day is the legend's own red, painted inline like any legend
+           colour; every other answer's fill is a class (see `--la-cancel-*`). */
+        const bart = e.kind === 'activity' && whose(e) === 'by-bart';
         tr.appendChild(el('td', {
-          class: `la-day la-cancel-run la-cancel-run-${e.kind}${activity ? ` la-painted${isDark(red) ? ' la-dark' : ''}` : ''}${e.note ? '' : ' la-cancel-open'}`,
+          class: `la-day la-cancel-run la-cancel-run-${e.kind} la-cancel-${whose(e)}${bart ? ` la-painted${isDark(red) ? ' la-dark' : ''}` : ''}`,
           colSpan: String(b - i + 1),
-          style: activity ? `background-color:#${red}` : '',
+          style: bart ? `background-color:#${red}` : '',
           title: `${e.label}${e.location ? ` at ${e.location}` : ''} — ${e.start === e.end ? dayLabel(e.start) : `${dayLabel(e.start)} – ${dayLabel(e.end)}`}\n${runText(e)}`
             + (rc.isAdmin() ? '\nClick to give or correct the reason.' : ''),
-          dataset: { kind: e.kind, start: e.start },
+          dataset: { kind: e.kind, start: e.start, party: e.note?.party || '' },
           onClick: rc.isAdmin() ? () => recordCancellation(e) : null,
         }, runNodes(e)));
         i = b;
@@ -18283,17 +18361,29 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
          the workbook reading that had them, the rest from the editor or the
          reading — because two sources' rows are not the same rows, and laying
          one over the other would put every activity on screen twice. */
+      /* One row pinned from the cancellation log is drawn whether or not it
+         has anything scheduled — red is a cancellation, not a shift. */
+      const pin = la.calendarRow;
       const drawnParts = parts.map((part, i) => ({
         ...part,
         p6: p6s[i],
-        shown: drawn(windowed(part.view, today, la.calendarWeeks, la.calendarStart, part), la.calendarFilter,
-          la.showQuietRows, la.showResources, onlyMine ? isMe : null, p6s[i]?.names),
+        shown: pinnedTo(drawn(windowed(part.view, today, la.calendarWeeks, la.calendarStart, part), la.calendarFilter,
+          la.showQuietRows || Boolean(pin), la.showResources, onlyMine ? isMe : null, p6s[i]?.names), pin),
       }));
       const shown = {
         days: drawnParts.flatMap((part) => part.shown.days),
         activities: drawnParts.flatMap((part) => part.shown.activities),
       };
       drawPager(shown.days);
+      if (pin) {
+        body.appendChild(el('div', { class: 'la-pinned', role: 'status' }, [
+          el('span', { text: `Showing one row, from the cancellation log: ${pin.label}` }),
+          el('button', {
+            class: 'cx-btn mini ghost', type: 'button', text: 'Show every row',
+            onClick: () => { la.calendarRow = null; draw(); },
+          }),
+        ]));
+      }
       clear(strip);
       const painted = new Set(drawnParts.flatMap((part) => [...paintOn(part.shown)]));
       strip.appendChild(legendStrip(legend, [...new Set(parts.flatMap((part) => part.view.unknown || []))], painted));
@@ -18306,12 +18396,26 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         }));
         return;
       }
+      if (pin && shown.days.length && !shown.activities.length) {
+        body.appendChild(emptyState({
+          iconName: 'calendar',
+          title: 'That row is not on the look-ahead for these weeks',
+          message: 'Nothing the calendar holds for the weeks on screen has the row this cancellation was '
+            + 'logged against — it may have been taken off the sheet since. Page a week either way, or '
+            + 'show every row.',
+          action: { label: 'Show every row', onClick: () => { la.calendarRow = null; draw(); } },
+        }));
+        return;
+      }
       if (!shown.days.length) {
         body.appendChild(emptyState({
           iconName: 'calendar',
           title: 'Nothing on the look-ahead in these weeks',
-          message: 'The look-ahead says nothing for the weeks on screen.',
-          action: { label: 'Back to this week', onClick: () => { la.calendarStart = null; draw(); } },
+          message: pin
+            ? 'The look-ahead holds nothing for the weeks this cancellation was logged in — no reading '
+              + 'or edit kept them.'
+            : 'The look-ahead says nothing for the weeks on screen.',
+          action: { label: 'Back to this week', onClick: () => { la.calendarStart = null; la.calendarRow = null; draw(); } },
         }));
         return;
       }
@@ -18328,7 +18432,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     };
     // Redraw the rows only, never the input: rebuilding the field under the
     // caret is the trap this project has already been bitten by three times.
-    search.addEventListener('input', () => { la.calendarFilter = search.value; draw(); });
+    // Typing a filter is a different question from the one row "Show cells" pinned.
+    search.addEventListener('input', () => { la.calendarFilter = search.value; la.calendarRow = null; draw(); });
 
     host.appendChild(strip);
     host.appendChild(el('div', {
@@ -18675,6 +18780,21 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     }
 
     return { ...view, activities: rows };
+  }
+
+  /**
+   * Only the row "Show cells" pinned (`la.calendarRow`): by the editor's id where
+   * this part of the window carries ids, else by the words the log stored for it
+   * — the row's cells joined with " · ", exactly as `rowsFrom()` wrote them.
+   */
+  function pinnedTo(view, row) {
+    if (!row) return view;
+    const byId = row.id && view.activities.some((a) => a.id === row.id);
+    const words = (a) => a.meta.filter(Boolean).join(' · ');
+    return {
+      ...view,
+      activities: view.activities.filter((a) => !a.absence && (byId ? a.id === row.id : words(a) === row.label)),
+    };
   }
 
   /** Every colour actually painted on the days being drawn, as a set of hexes. */

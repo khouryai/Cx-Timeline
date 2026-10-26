@@ -1051,6 +1051,28 @@ each run one cell across its days with the party and reason in it, clickable to
 give or correct the reason — exported by `cancellationWorkbook()` as merged
 cells in the 4WLA's greys.
 
+**The colour is whose it was**, the same in the list, the calendar and the
+Excel: BART red (the legend's own cancellation red), Hitachi blue, another
+party amber, and lavender in a dashed purple outline while nobody has said —
+so an unanswered cancellation never reads as BART's. A day cancelled outright
+is filled with it; a resource struck out of work that went ahead takes it as
+the outline and the writing. The fills are fixed tokens (`--la-cancel-*`),
+the same in every theme like the 4WLA's greys, because the export writes the
+same hexes (`CANCEL_FILL` in `io/la_xlsx.js`); the badges use the theme's
+`bad` / `info` / `warn` / `pending`. The cell says the party in words too, and
+a key above the calendar and under the sheet names every colour.
+
+**"Show cells" pins the calendar to the row and its weeks** (`la.calendarRow`,
+`pinnedTo()`), never a filter typed for it. It used to put the log's label in
+the filter box over "Everything" — but the label is the row's cells joined
+with " · ", the box matches the cells joined by spaces and splits on commas,
+so nothing ever matched; and "Everything" was the newest reading, which a row
+cancelled weeks ago is often no longer on. The row is found by the editor's id
+where that part of the window carries ids, else by the words the log stored,
+whether or not it has a shift scheduled; the window starts on the Monday of
+the event's first day and spans its weeks. A banner says which row is pinned,
+with "Show every row"; typing in the filter lets the pin go.
+
 ### A cancellation can be removed from the log, and put back
 
 The log is derived, so a wrong entry — a names row an old reading stored as an

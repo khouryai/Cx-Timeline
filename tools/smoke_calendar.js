@@ -1521,17 +1521,45 @@ async function main() {
   check('the saved snapshots can be re-read under today\'s rules',
     /Saved snapshots re-read/.test(await page.locator('.cx-toast, .cx-toasts').allInnerTexts().then((t) => t.join(' '))));
 
+  check('the responsible party is coloured — Hitachi blue, and one with no reason yet purple',
+    await cancelRows().first().locator('.cx-badge.info', { hasText: 'Hitachi' }).count() === 1
+      && await cancelRows().first().locator('.rc-cancel-cell.rc-cancel-by-hitachi').count() === 5
+      && await cancelRows().nth(1).locator('.cx-badge.pending', { hasText: 'No reason yet' }).count() === 1);
+
+  const cableStart = await cancelRows().first().getAttribute('data-start');
+  const laState = () => page.evaluate((iso) => {
+    const { req } = window.__CX_MODULES;
+    const { mondayOf } = req('core/la_edit.js');
+    const { la } = req('ui/rc_la_state.js');
+    return {
+      start: la.calendarStart || mondayOf(req('ui/rc_util.js').todayISO()),
+      want: mondayOf(iso), weeks: la.calendarWeeks, filter: la.calendarFilter,
+    };
+  }, cableStart);
+  const weeksBefore = (await laState()).weeks;
   await cancelRows().first().locator('button', { hasText: 'Show cells' }).click();
-  // No grid to wait for: this fixture's latest read has no "Cable pull" row,
-  // so the filtered calendar is honestly empty.
-  await page.waitForTimeout(900);
-  check('and a cancellation opens the calendar on its own activity',
-    await page.locator('#rc-frame input').evaluateAll((els) => els.some((e) => e.value === 'Cable pull')));
+  // This fixture's readings have no "Cable pull" row, so the pinned calendar
+  // says so rather than drawing an empty grid.
+  await page.waitForSelector('#rc-frame .la-pinned', { timeout: 10000 });
+  await page.waitForTimeout(300);
+  const pinned = await laState();
+  check('and a cancellation opens the calendar on its own row, in the week it was cancelled',
+    /from the cancellation log: Cable pull/.test(await page.locator('#rc-frame .la-pinned').innerText())
+      && pinned.start === pinned.want && pinned.weeks >= 1 && pinned.filter === '',
+    JSON.stringify(pinned));
+  check('and says so when that row is not on the look-ahead for those weeks',
+    /That row is not on the look-ahead|holds nothing for the weeks this cancellation was logged in/
+      .test(await page.locator('#rc-frame').innerText()));
   // Back to the plain calendar for the checks that follow.
-  await page.locator('#rc-frame input').evaluateAll((els) => {
-    const box = els.find((e) => e.value === 'Cable pull');
-    if (box) { box.value = ''; box.dispatchEvent(new Event('input')); }
-  });
+  await page.locator('#rc-frame .la-pinned button', { hasText: 'Show every row' }).click();
+  await page.waitForTimeout(400);
+  check('and "Show every row" lets the pinned row go',
+    (await page.locator('#rc-frame .la-pinned').count()) === 0);
+  await page.evaluate((weeks) => {
+    const { la } = window.__CX_MODULES.req('ui/rc_la_state.js');
+    la.calendarStart = null;
+    la.calendarWeeks = weeks;
+  }, weeksBefore);
 
   /* ── The other half of the week plan ──────────────────────────────────
      Who is where, and whether that agrees with what the 4WLA asked for. This

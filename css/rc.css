@@ -701,22 +701,27 @@
 }
 
 /* The cancellation log: one square per red day, so a cancelled week reads as
-   a week at a glance. The cancellation colour is `--bad` in every theme. */
+   a week at a glance, coloured by whose it was — BART red, Hitachi blue,
+   another party amber, purple while nobody has said — as the calendar is. */
 .rc-cancel-cells {
   display: flex;
   gap: 2px;
 }
 .rc-cancel-cell {
+  --cancel-ink: var(--bad);
   width: 9px;
   height: 12px;
   border-radius: 2px;
-  background: var(--bad);
+  background: var(--cancel-ink);
 }
+.rc-cancel-cell.rc-cancel-by-hitachi { --cancel-ink: var(--info); }
+.rc-cancel-cell.rc-cancel-by-other { --cancel-ink: var(--warn); }
+.rc-cancel-cell.rc-cancel-open { --cancel-ink: var(--pending); }
 /* A resource struck out of a day that went ahead: an outline, not a fill —
    the day was not cancelled, part of what it asked for was. */
 .rc-cancel-cell.rc-cancel-cell-support {
   background: transparent;
-  box-shadow: inset 0 0 0 2px var(--bad);
+  box-shadow: inset 0 0 0 2px var(--cancel-ink);
 }
 
 /* What somebody did that day, and the kind of work it was: a line of its own

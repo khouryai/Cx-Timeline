@@ -257,6 +257,11 @@
   border-color: var(--info-border);
   color: var(--info);
 }
+.cx-chipstat.pending {
+  background: var(--pending-light);
+  border-color: var(--pending-border);
+  color: var(--pending);
+}
 .cx-chipstat.muted {
   color: var(--text-muted);
 }

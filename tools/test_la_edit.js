@@ -561,8 +561,13 @@ console.log('\nThe Excel export');
   const cw = xl.cancellationWorkbook({
     days: ['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04'],
     rows: [{ label: 'IXL night mode testing', location: 'W34', events: [
-      { start: '2026-10-01', end: '2026-10-02', kind: 'activity', text: '1 X\nBART: possession withdrawn' },
-      { start: '2026-10-04', end: '2026-10-04', kind: 'support', text: '1 WIT cancelled\nBART: witness not required' },
+      { start: '2026-10-01', end: '2026-10-02', kind: 'activity', party: 'BART', text: '1 X\nBART: possession withdrawn' },
+      { start: '2026-10-04', end: '2026-10-04', kind: 'support', party: 'BART', text: '1 WIT cancelled\nBART: witness not required' },
+    ] }, { label: 'ATS site test', location: 'W40', events: [
+      { start: '2026-10-01', end: '2026-10-01', kind: 'activity', party: 'Hitachi', text: '1 X\nHitachi: crew reallocated' },
+      { start: '2026-10-02', end: '2026-10-02', kind: 'activity', party: 'Other', text: '1 X\nOther: weather' },
+      { start: '2026-10-03', end: '2026-10-03', kind: 'activity', party: null, text: '1 X\nNo reason yet' },
+      { start: '2026-10-04', end: '2026-10-04', kind: 'support', party: 'Hitachi', text: '1 WIT cancelled\nHitachi: not ready' },
     ] }],
     title: 'Cancellation log',
   });
@@ -573,6 +578,13 @@ console.log('\nThe Excel export');
     cwBack.merges.join(' '));
   check('with who and why written in the cell, and a resource cancelled in red writing, not a fill',
     cwCells.some((c) => c.ref === 'F7' && /WIT cancelled/.test(c.value) && /witness not required/.test(c.value) && !c.hex));
+  check('and the fill says whose it was — Hitachi blue, another party amber, no reason yet lavender, BART red',
+    cwCells.some((c) => c.ref === 'C8' && c.hex === '0070C0') && cwCells.some((c) => c.ref === 'D8' && c.hex === 'FFC000')
+      && cwCells.some((c) => c.ref === 'E8' && c.hex === 'E4D7F5') && cwCells.some((c) => c.ref === 'F8' && !c.hex),
+    cwCells.filter((c) => /^[C-F]8$/.test(c.ref)).map((c) => `${c.ref}:${c.hex}`).join(' '));
+  check('and the key under the calendar names every colour',
+    ['BART responsible', 'Hitachi responsible', 'another party', 'no reason recorded yet', 'BART resource cancelled']
+      .every((said) => cwCells.some((c) => c.value.includes(said))));
   check('and the weekend grey on the days nothing was cancelled',
     !cwCells.some((c) => c.ref === 'E7' && c.hex && c.hex !== '7F7F7F'));
 
