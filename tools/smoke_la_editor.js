@@ -1094,17 +1094,30 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     /from the workbook as it was read on/.test(await page.locator('#rc-frame .la-reading-note').first().innerText().catch(() => '')));
   check('and no further back than the first week a reading holds', await previousWeek.isDisabled());
   await page.locator('#rc-frame .rc-tab', { hasText: /^Everything$/ }).click();
-  await page.waitForFunction(() => document.querySelectorAll('#rc-frame .la-grid').length > 1, null, { timeout: 8000 }).catch(() => {});
+  await page.waitForFunction(() => /Signal survey from the workbook/.test(document.querySelector('#rc-frame .la-grid')?.innerText || '')
+    && /X\.EARLIER/.test(document.querySelector('#rc-frame .la-grid')?.innerText || ''), null, { timeout: 8000 }).catch(() => {});
+  await snap('everything');
   const everything = await page.evaluate(() => ({
     grids: document.querySelectorAll('#rc-frame .la-grid').length,
     text: [...document.querySelectorAll('#rc-frame .la-grid')].map((g) => g.innerText).join(' '),
     reading: document.querySelectorAll('#rc-frame .la-reading-note').length,
     written: document.querySelectorAll('#rc-frame .la-written-note').length,
+    handovers: document.querySelectorAll('#rc-frame .la-grid thead th.la-num.la-source-start').length,
+    repeated: (() => {
+      const seen = new Map();
+      for (const tr of document.querySelectorAll('#rc-frame .la-grid tbody tr:not(.la-resource-row)')) {
+        const words = [...tr.querySelectorAll('td.la-meta')].map((td) => td.textContent.trim()).join(' · ');
+        seen.set(words, (seen.get(words) || 0) + 1);
+      }
+      return [...seen].filter(([w, n]) => n > 1 && /ATS Site Test|IXL Regression/.test(w)).map(([w, n]) => `${w} ×${n}`);
+    })(),
   }));
-  check('"Everything" reaches from the oldest reading to the last week written, a grid for each source',
-    everything.grids >= 2 && /Signal survey from the workbook/.test(everything.text) && /X\.EARLIER/.test(everything.text)
-      && everything.reading >= 1 && everything.written >= 1,
+  check('"Everything" reaches from the oldest reading to the last week written, as one calendar',
+    everything.grids === 1 && /Signal survey from the workbook/.test(everything.text) && /X\.EARLIER/.test(everything.text)
+      && everything.reading >= 1 && everything.written >= 1 && everything.handovers >= 1,
     JSON.stringify({ ...everything, text: everything.text.length }));
+  check('with each activity on one row across every source',
+    everything.repeated.length === 0, everything.repeated.join(' | '));
   await page.locator('#rc-frame .rc-tab', { hasText: /^4 weeks$/ }).click();
   await page.waitForTimeout(300);
   // In Edit, a window before the first week written says why it is empty, and where those days are.

@@ -1608,6 +1608,55 @@ console.log('\nWhat changed for me');
   check('…and not on another row worded as it once was', hover('IXL · Night mode SAT', 'row-b') === '');
 }
 
+console.log('\n"Everything" is one calendar, however many sources it is drawn from');
+{
+  const mark = (col, value = 'X', hex = 'FFFF00') => ({ col, value, hex, meaning: 'Day Shift', role: 'shift' });
+  const day = (col, date) => ({ col, date, month: 'SEP 2026', day: date.slice(8), weekday: 'M', weekend: false });
+  // An old workbook reading: no headings, its own column numbers, the Activity ID not yet typed.
+  const old = {
+    meta: [1, 2, 3], headings: ['', '', ''], days: [day(10, '2026-09-07'), day(11, '2026-09-08')],
+    activities: [
+      { row: 5, id: null, meta: ['IXL (W40)', '', ''], marks: [], heading: true, highlighted: false, named: true, resource: null, absence: null },
+      { row: 6, id: null, meta: ['', 'Adjacent Location Testing', 'W40'], marks: [mark(10)], heading: false, highlighted: true, named: true,
+        resource: { row: 7, meta: ['', 'Resource', 'W40'], marks: [mark(10, 'Jimmy')], names: [{ col: 10, names: ['Jimmy'] }] }, absence: null },
+      { row: 8, id: null, meta: ['', 'Signal survey', 'W40'], marks: [mark(11)], heading: false, highlighted: true, named: true, resource: null, absence: null },
+      { row: 9, id: null, meta: ['', 'Adjacent Location Testing', 'W40'], marks: [mark(11, 'Y')], heading: false, highlighted: true, named: true, resource: null, absence: null },
+    ],
+  };
+  // The editor: headings, ids, the Activity ID filled in since.
+  const now = {
+    meta: [0, 1, 2], headings: ['Activity ID', 'Description', 'Location'], days: [day(7, '2026-09-14'), day(8, '2026-09-15')],
+    activities: [
+      { row: 1, id: 'h1', meta: ['IXL (W40)', '', ''], marks: [], heading: true, highlighted: false, named: true, resource: null, absence: null },
+      { row: 2, id: 'r1', meta: ['C-123', 'Adjacent Location Testing', 'W40'], marks: [mark(7)], heading: false, highlighted: true, named: true,
+        resource: { row: 3, meta: ['', 'Resource', 'W40'], marks: [mark(8, 'Adam')], names: [{ col: 8, names: ['Adam'] }] }, absence: null },
+    ],
+  };
+  const one = cls.mergeViews([{ view: old, snapshotId: 'wb' }, { view: now }]);
+  const testing = one.activities.filter((a) => a.meta[1] === 'Adjacent Location Testing');
+  check('one set of days, in date order, from both sources',
+    one.days.map((d) => d.date).join() === '2026-09-07,2026-09-08,2026-09-14,2026-09-15'
+      && new Set(one.days.map((d) => d.col)).size === 4 && one.days[2].sourceStart && !one.days[0].sourceStart);
+  check('the newest source\'s columns and headings', one.headings.join() === 'Activity ID,Description,Location');
+  check('the same activity is one row, though its Activity ID was typed in later',
+    testing.length === 2 && testing[0].id === 'r1' && testing[0].meta[0] === 'C-123',
+    JSON.stringify(one.activities.map((a) => a.meta)));
+  const cols = new Map(one.days.map((d) => [d.date, d.col]));
+  check('and carries its days from both',
+    testing[0].marks.map((m) => m.col).sort().join() === [cols.get('2026-09-07'), cols.get('2026-09-14')].sort().join());
+  check('its names from both, on the right days',
+    testing[0].resource.marks.map((m) => `${m.value}@${m.col}`).sort().join()
+      === [`Adam@${cols.get('2026-09-15')}`, `Jimmy@${cols.get('2026-09-07')}`].sort().join());
+  check('two lines worded alike on one sheet stay two lines', testing[1].id === null && testing[1].marks[0].col === cols.get('2026-09-08'));
+  check('the section heading is one row, not one per source',
+    one.activities.filter((a) => a.heading && a.meta[0] === 'IXL (W40)').length === 1);
+  const order = one.activities.map((a) => a.meta[1] || a.meta[0]);
+  check('a row only the old reading has goes in after the row it followed there',
+    order.indexOf('Signal survey') === order.indexOf('Adjacent Location Testing') + 1
+      && one.activities.find((a) => a.meta[1] === 'Signal survey').snapshotId === 'wb', order.join(' / '));
+  check('and one source is drawn as it is', cls.mergeViews([{ view: now }]) === now);
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

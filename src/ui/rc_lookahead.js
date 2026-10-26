@@ -25,7 +25,7 @@ import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
 import { saveFile } from '../io/exporters.js';
 import {
   marksOf, ABSENCE_LABELS, isCancelMeaning, rowsNaming, resourceNames, cancellationNoteFor,
-  cancellationReasonText,
+  cancellationReasonText, mergeViews,
 } from '../core/lookahead.js';
 import { mondayOf, addDaysISO } from '../core/la_edit.js';
 import { p6Index, p6Status } from '../core/la_p6.js';
@@ -332,27 +332,21 @@ async function renderCalendar(host) {
       rc.reportError('lookahead:past-weeks', err);
       toast({ tone: 'bad', message: `The weeks before the reading could not be read — ${err.message}`, timeout: 10000 });
     }
-    const p6s = await Promise.all(parts.map((part) => p6Of(part.view)));
+    /* One calendar, however many sources the window is drawn from — the
+       weeks before the editor from the workbook reading that had them, the
+       rest from the editor or the reading — laid side by side on one set of
+       rows (`mergeViews()`). It used to be a grid per source, one under the
+       other, and "Everything" was a stack of calendars. */
+    const merged = oneView(parts, today, la.calendarWeeks, la.calendarStart);
+    const p6 = await p6Of(parts.length === 1 ? parts[0].view : merged);
     if (turnNo !== drawing) return;
     clear(body);
     const onlyMine = Boolean(isMe && la.onlyMine);
-    /* One grid per source, in date order — the weeks before the editor from
-       the workbook reading that had them, the rest from the editor or the
-       reading — because two sources' rows are not the same rows, and laying
-       one over the other would put every activity on screen twice. */
     /* One row pinned from the cancellation log is drawn whether or not it
        has anything scheduled — red is a cancellation, not a shift. */
     const pin = la.calendarRow;
-    const drawnParts = parts.map((part, i) => ({
-      ...part,
-      p6: p6s[i],
-      shown: pinnedTo(drawn(windowed(part.view, today, la.calendarWeeks, la.calendarStart, part), la.calendarFilter,
-        la.showQuietRows || Boolean(pin), la.showResources, onlyMine ? isMe : null, p6s[i]?.names), pin),
-    }));
-    const shown = {
-      days: drawnParts.flatMap((part) => part.shown.days),
-      activities: drawnParts.flatMap((part) => part.shown.activities),
-    };
+    const shown = pinnedTo(drawn(merged, la.calendarFilter, la.showQuietRows || Boolean(pin), la.showResources,
+      onlyMine ? isMe : null, p6?.names), pin);
     drawPager(shown.days);
     if (pin) {
       body.appendChild(el('div', { class: 'la-pinned', role: 'status' }, [
@@ -364,8 +358,7 @@ async function renderCalendar(host) {
       ]));
     }
     clear(strip);
-    const painted = new Set(drawnParts.flatMap((part) => [...paintOn(part.shown)]));
-    strip.appendChild(legendStrip(legend, [...new Set(parts.flatMap((part) => part.view.unknown || []))], painted));
+    strip.appendChild(legendStrip(legend, [...new Set(parts.flatMap((part) => part.view.unknown || []))], paintOn(shown)));
     if (onlyMine && !shown.activities.length) {
       body.appendChild(emptyState({
         iconName: 'calendar',
@@ -398,16 +391,25 @@ async function renderCalendar(host) {
       }));
       return;
     }
-    for (const part of drawnParts) {
-      if (!part.shown.days.length) continue;
-      /* Said whenever the weeks on screen were not drawn from the newest
-         reading: a reading is evidence of what the look-ahead said that day;
-         the editor is what it says now; an older reading is what it said then. */
+    /* Said whenever the weeks on screen were not drawn from the newest
+       reading: a reading is evidence of what the look-ahead said that day;
+       the editor is what it says now; an older reading is what it said then.
+       A line per source, above the one grid, where the grid marks the day
+       each hands over to the next. */
+    /* Neighbouring stretches of the look-ahead as written are one source, and one line. */
+    const sources = parts.reduce((out, part) => {
+      const last = out[out.length - 1];
+      if (last && last.kind === 'written' && part.kind === 'written') out[out.length - 1] = { ...last, to: part.to };
+      else out.push(part);
+      return out;
+    }, []);
+    for (const part of sources) {
       const note = partNote(part, parts.length);
       if (note) body.appendChild(el('p', { class: `rc-hint ${part.kind === 'reading' ? 'la-reading-note' : 'la-written-note'}`, text: note }));
-      body.appendChild(grid_(part.shown, today, isMe, part.kind === 'written' ? null : part.view === view ? snapshot.id : part.snapshotId,
-        notes, part.p6));
     }
+    const only = parts.length === 1 ? parts[0] : null;
+    body.appendChild(grid_(shown, today, isMe,
+      only ? (only.kind === 'written' ? null : only.view === view ? snapshot.id : only.snapshotId ?? null) : null, notes, p6));
   };
   // Redraw the rows only, never the input: rebuilding the field under the
   // caret is the trap this project has already been bitten by three times.
@@ -507,8 +509,8 @@ function reachOf(reading, history) {
  *
  * `parts(weeks, start)` answers `[{ view, from, to, kind, snapshotId, takenAt }]`
  * in date order, `kind` one of 'latest', 'written' or 'reading'. Called as a
- * function it answers the one view an export draws: the source a window starts
- * in, and for "Everything" the look-ahead as written. Each view is
+ * function it answers the one view an export draws — every source of the
+ * window as one calendar (`oneView()`), as the screen draws it. Each view is
  * read once per drawing of the tab; a newer reading redraws the tab afresh.
  */
 function viewChooser({ view, reading, reach, written, legendRows, today, history = { span: {}, weeks: [] } }) {
@@ -574,11 +576,23 @@ function viewChooser({ view, reading, reach, written, legendRows, today, history
   const choose = async (weeks, start) => {
     const all = await parts(weeks, start);
     if (all.length === 1 && all[0].kind === 'latest') return view;
-    // "Everything" on one page is the look-ahead as written; a window, the source it starts in.
-    return (weeks ? all[0] : all[all.length - 1]).view;
+    // The one calendar the screen draws for that window, never one of its sources.
+    return oneView(all, today, weeks, start);
   };
   choose.parts = parts;
   return choose;
+}
+
+/**
+ * A window's stretches as the one calendar they are drawn as: each narrowed to
+ * its own days, then laid side by side on one set of rows (`mergeViews()`).
+ * A window the newest reading covers alone is that reading, narrowed.
+ */
+function oneView(parts, today, weeks, start) {
+  return mergeViews(parts.map((part) => ({
+    view: windowed(part.view, today, weeks, start, part),
+    snapshotId: part.kind === 'reading' ? part.snapshotId ?? null : null,
+  })));
 }
 
 /** What a stretch of the calendar says about where it came from, or nothing for the newest reading on its own. */
@@ -841,6 +855,8 @@ function grid_(view, today, isMe = null, snapshotId = null, notes = [], p6 = nul
     extra,
     d.weekend ? 'la-weekend' : '',
     d.date && d.date === today ? 'la-today' : '',
+    // The first day drawn from another source than the day before it (`mergeViews()`).
+    d.sourceStart ? 'la-source-start' : '',
   ].filter(Boolean).join(' ');
 
   /* What the workbook calls each of the frozen columns.
@@ -928,6 +944,7 @@ function grid_(view, today, isMe = null, snapshotId = null, notes = [], p6 = nul
       if (resource) classes.push('la-resource');
       if (d.weekend) classes.push('la-weekend');
       if (d.date && d.date === today) classes.push('la-today');
+      if (d.sourceStart) classes.push('la-source-start');
       // Your own name, wherever it is written — the day you are on.
       const yours = resource && isMe && mark?.value && resourceNames(mark.value).some(isMe);
       if (yours) classes.push('la-mine');
@@ -966,7 +983,9 @@ function grid_(view, today, isMe = null, snapshotId = null, notes = [], p6 = nul
       resource: Boolean(a.absence),
       rowId: a.id || null,
       open: a.heading || a.absence ? null
-        : () => openActivity({ row: { raw_label: a.meta.filter(Boolean).join(' · '), snapshot_id: snapshotId, sheet_row: a.row } }),
+        : () => openActivity({
+          row: { raw_label: a.meta.filter(Boolean).join(' · '), snapshot_id: a.snapshotId !== undefined ? a.snapshotId : snapshotId, sheet_row: a.row },
+        }),
     }));
     /* The Resource row, drawn under the activity it belongs to and never on its
        own — it has no location or hours of its own, only the ones it inherited,

@@ -2627,17 +2627,30 @@ window is cut where the editor starts: from there on it is the look-ahead as
 written, as above; before it each week is drawn from the newest workbook
 reading that has it (`rc_lookahead_workbook_weeks`, schema 15 — the rule the
 week plan and the master export read the history by, answered without opening
-a grid), and weeks sharing a reading are one stretch. Each stretch is its own
-grid, stacked in date order and labelled with the reading it came from:
-two sources' rows are not the same rows, and laying one over the other would
-put every activity on screen twice. An older reading's grid is parsed for the
+a grid), and weeks sharing a reading are one stretch.
+
+**However many stretches, it is one calendar — never split.** Each stretch
+used to be its own grid, stacked in date order, because two sources' rows are
+not the same rows and laying one *over* the other would put every activity on
+screen twice; "Everything" became a stack of calendars with the same activity
+in each. They are laid side by side instead (`mergeViews()` in
+`core/lookahead.js`, `oneView()` on screen): the days of every stretch across,
+in date order, renumbered past every sheet's own columns; the newest stretch's
+columns, headings, rows and words, an older stretch's columns matched to them
+by heading and by position where a sheet left one blank; and an older
+stretch's row joined to the row that is the same activity — the editor's id
+where both carry one, else the same words, else the same words but the
+Activity ID, which is often typed in after the workbook was read. Two lines
+worded alike on one sheet stay two lines; a row only an older reading has goes
+in after the row it followed on that sheet. A line per source is said above
+the grid (neighbouring stretches of the editor are one), and the day one
+source hands over to the next is ruled (`la-source-start`). An older reading's grid is parsed for the
 stretch alone (`viewOfSnapshot()`), never into `parsedView()`'s one slot,
 which every other tab shares with the newest reading. Paging reaches from the
 oldest week a workbook reading holds to the last day written. In Edit, a window
 before the first week written says that nothing is written there and where
 those days are, rather than showing empty rows. The PDF export takes its weeks
-from the Monday on screen, from the source the window starts in; "Everything"
-on one page is the look-ahead as written.
+from the Monday on screen and draws the same one calendar the screen does.
 
 ### Hovering the look-ahead repaints nothing
 

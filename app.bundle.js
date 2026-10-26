@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 60   Built: 2026-10-26T21:32:54.079Z
+ * Modules: 60   Built: 2026-10-26T21:58:22.808Z
  */
 (function () {
   'use strict';
@@ -6930,6 +6930,136 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   }
 
   /**
+   * Several stretches of the look-ahead as one calendar.
+   *
+   * A window that reaches past the newest reading is drawn from more than one
+   * source — the weeks before the editor from the workbook reading that had
+   * each, the rest from the editor — and those used to be a grid each, one under
+   * the other, so "Everything" was a stack of calendars with the same activity
+   * in every one. This lays them side by side instead: one set of rows, the days
+   * of every stretch across, in date order.
+   *
+   * `parts` is `[{ view, snapshotId? }]` in date order, each view already
+   * narrowed to its own days (they never overlap). The newest is the authority:
+   * its columns, headings and rows, in its order, with its words. Another
+   * stretch's columns are matched to them by heading, and by position where a
+   * sheet left a heading blank. Its rows join the row that is the same activity —
+   * the editor's id where both carry one, else the same words, else the same
+   * words but the Activity ID, which is often typed in later — and a row no newer
+   * stretch has is put in after the row it followed on its own sheet, so a
+   * section keeps its rows. Day columns are renumbered past every sheet's own,
+   * since each stretch numbers its columns from its own sheet. Each merged row
+   * keeps the reading it was first found in (`snapshotId`), and the first day of
+   * a stretch from another source than the one before it says so (`sourceStart`,
+   * by `snapshotId` — the editor's stretches are all null, one source), so the
+   * grid can draw where one source hands over to the next.
+   */
+  function mergeViews(parts) {
+    const list = (parts || []).filter((p) => p?.view);
+    if (!list.length) return { days: [], meta: [], headings: [], activities: [], header: null };
+    if (list.length === 1) return list[0].view;
+    const base = list[list.length - 1].view;
+    const norm = (v) => String(v ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const width = base.meta.length;
+    const baseHeads = base.meta.map((_, i) => norm(base.headings?.[i]));
+    const idCol = baseHeads.findIndex((h) => /activity\s*id/.test(h));
+
+    /** For each of the newest stretch's columns, the column of `view` that says the same thing, or -1. */
+    const columnsOf = (view) => {
+      if (view === base) return base.meta.map((_, i) => i);
+      const heads = view.meta.map((_, i) => norm(view.headings?.[i]));
+      const out = baseHeads.map((h) => (h ? heads.indexOf(h) : -1));
+      const taken = new Set(out.filter((j) => j >= 0));
+      return out.map((j, i) => (j >= 0 ? j : i < heads.length && !taken.has(i) ? i : -1));
+    };
+
+    let next = 1 + Math.max(0, ...list.flatMap(({ view }) => [...view.meta, ...view.days.map((d) => d.col)]));
+    const days = [];
+    const colMaps = list.map(({ view }, k) => {
+      const map = new Map();
+      view.days.forEach((d, i) => {
+        map.set(d.col, next);
+        days.push({ ...d, col: next++, sourceStart: k > 0 && i === 0 && (list[k].snapshotId ?? null) !== (list[k - 1].snapshotId ?? null) });
+      });
+      return map;
+    });
+
+    const kindOf = (a) => (a.heading ? 'h' : a.absence ? `a:${a.absence}` : 'r');
+    const keysOf = (a) => {
+      const words = a.meta.map(norm);
+      const keys = [];
+      if (a.id) keys.push(`id:${a.id}`);
+      if (words.some(Boolean)) keys.push(`w:${kindOf(a)}:${words.join('|')}`);
+      if (idCol >= 0 && words.some((w, i) => w && i !== idCol)) {
+        keys.push(`d:${kindOf(a)}:${words.map((w, i) => (i === idCol ? '' : w)).join('|')}`);
+      }
+      return keys;
+    };
+
+    /* A row joins one row of another stretch, never one of its own sheet's —
+       two lines worded alike on one sheet are two lines — and each row of a
+       newer stretch is joined by one row of an older one at most. */
+    const rows = [];
+    const index = new Map();
+    const partOf = new Map();
+    const remember = (key, row) => {
+      if (!index.has(key)) index.set(key, []);
+      index.get(key).push(row);
+    };
+
+    for (let k = list.length - 1; k >= 0; k--) {
+      const { view, snapshotId = null } = list[k];
+      const cols = columnsOf(view);
+      const align = (meta) => Array.from({ length: width }, (_, i) => (cols[i] >= 0 ? meta[cols[i]] ?? '' : ''));
+      const remap = (marks) => (marks || []).filter((m) => colMaps[k].has(m.col)).map((m) => ({ ...m, col: colMaps[k].get(m.col) }));
+      const resourceOf = (r) => (r ? {
+        ...r,
+        meta: align(r.meta),
+        marks: remap(r.marks),
+        names: (r.names || []).filter((n) => colMaps[k].has(n.col)).map((n) => ({ ...n, col: colMaps[k].get(n.col) })),
+      } : null);
+
+      let anchor = -1;
+      const claimed = new Set();
+      for (const a of view.activities) {
+        const own = { ...a, meta: align(a.meta), marks: remap(a.marks), resource: resourceOf(a.resource) };
+        const keys = keysOf(own);
+        const found = keys.map((key) => (index.get(key) || []).find((r) => partOf.get(r) !== k && !claimed.has(r)))
+          .find(Boolean);
+        if (found) {
+          claimed.add(found);
+          found.marks.push(...own.marks);
+          if (own.resource) {
+            if (!found.resource) found.resource = own.resource;
+            else {
+              found.resource.marks.push(...own.resource.marks);
+              found.resource.names = [...(found.resource.names || []), ...(own.resource.names || [])];
+            }
+          }
+          found.highlighted = found.highlighted || own.highlighted;
+          found.named = found.named || own.named;
+          if (!found.id && own.id) found.id = own.id;
+          for (const key of keys) remember(key, found);
+          anchor = rows.indexOf(found);
+          continue;
+        }
+        const row = { ...own, snapshotId };
+        partOf.set(row, k);
+        rows.splice(anchor + 1, 0, row);
+        anchor += 1;
+        for (const key of keys) remember(key, row);
+      }
+    }
+
+    return {
+      ...base,
+      days,
+      activities: rows,
+      unknown: [...new Set(list.flatMap(({ view }) => view.unknown || []))],
+    };
+  }
+
+  /**
    * Who the sheet says is away, and on which day.
    *
    * One entry per day cell written on a "PTO" or "Other Group / Project" row:
@@ -7902,6 +8032,7 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "resourceNames", { get: () => resourceNames, enumerable: true });
   Object.defineProperty(__x, "marksOf", { get: () => marksOf, enumerable: true });
   Object.defineProperty(__x, "readGrid", { get: () => readGrid, enumerable: true });
+  Object.defineProperty(__x, "mergeViews", { get: () => mergeViews, enumerable: true });
   Object.defineProperty(__x, "absencesFrom", { get: () => absencesFrom, enumerable: true });
   Object.defineProperty(__x, "locationColumnOf", { get: () => locationColumnOf, enumerable: true });
   Object.defineProperty(__x, "cellTokens", { get: () => cellTokens, enumerable: true });

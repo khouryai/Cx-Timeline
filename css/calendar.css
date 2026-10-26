@@ -424,7 +424,11 @@ body[data-workspace='calendar'] .ws-switch { margin-bottom: auto; }
   padding: 0 6px;
   white-space: nowrap;
 }
-.la-written-note, .la-reading-note, .lae-before-note { margin: 0 0 8px; }
+.la-written-note, .la-reading-note, .lae-before-note { margin: 0 0 4px; }
+/* Where one source of the calendar hands over to the next — a workbook
+   reading to the next, or to the look-ahead as written — on the one grid. */
+.la-grid th.la-source-start,
+.la-grid td.la-source-start { box-shadow: inset 2px 0 0 var(--info); }
 /* The calendar narrowed to the one row "Show cells" opened, and the way back. */
 .la-pinned {
   display: flex;
