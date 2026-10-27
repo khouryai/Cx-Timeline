@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 20   Built: 2026-10-26T21:58:22.913Z
+ * Modules: 20   Built: 2026-10-27T17:36:33.447Z
  */
 (function () {
   'use strict';
@@ -1383,16 +1383,24 @@ __mods["core/rc.js"] = function (__x, __req) {
    */
   async function exportEverything() {
     requireClient();
-    const tables = [
-      'rc_people', 'rc_locations', 'rc_location_alias', 'rc_person_alias',
-      'rc_categories', 'rc_parties',
-      'rc_leave_kinds', 'rc_legend', 'rc_settings', 'rc_leave', 'rc_plan_entries', 'rc_client_errors',
-      'rc_la_rows', 'rc_la_cells', 'rc_la_edits', 'rc_support_codes', 'rc_la_seen',
-      'rc_p6_activities', 'rc_p6_flags',
-      'rc_actuals', 'rc_ingest_runs', 'rc_lookahead_snapshots', 'rc_lookahead_rows',
-      'rc_change_events', 'rc_change_annotations', 'rc_sars', 'rc_sar_links',
-      'rc_tawrs', 'rc_tawr_descriptions', 'rc_tawr_settings', 'rc_tawr_profiles',
-    ];
+    /* Every table, with the unique key its pages are ordered on. Every page of
+       each, too: a plain select stops at PostgREST's thousand-row limit, so a
+       backup of a project with more readings than that held the first thousand
+       rows and said nothing — and this file is what the move to the folder is
+       imported from. `rc_cancellation_notes` was missing altogether, which would
+       have lost every reason given for a cancellation. */
+    const tables = {
+      rc_people: ['id'], rc_locations: ['id'], rc_location_alias: ['id'], rc_person_alias: ['id'],
+      rc_categories: ['id'], rc_parties: ['id'],
+      rc_leave_kinds: ['id'], rc_legend: ['id'], rc_settings: ['key'], rc_leave: ['id'],
+      rc_plan_entries: ['id'], rc_client_errors: ['id'],
+      rc_la_rows: ['id'], rc_la_cells: ['row_id', 'day'], rc_la_edits: ['id'], rc_support_codes: ['id'],
+      rc_la_seen: ['id'], rc_p6_activities: ['activity_id'], rc_p6_flags: ['id'],
+      rc_actuals: ['id'], rc_ingest_runs: ['id'], rc_lookahead_snapshots: ['id'], rc_lookahead_rows: ['id'],
+      rc_change_events: ['id'], rc_change_annotations: ['id'], rc_cancellation_notes: ['id'],
+      rc_blockers: ['id'], rc_blocker_updates: ['id'], rc_sars: ['id'], rc_sar_links: ['id'],
+      rc_tawrs: ['id'], rc_tawr_descriptions: ['id'], rc_tawr_settings: ['key'], rc_tawr_profiles: ['person_id'],
+    };
 
     const out = {
       exported_at: new Date().toISOString(),
@@ -1401,15 +1409,28 @@ __mods["core/rc.js"] = function (__x, __req) {
         + 'included; their storage_path is.',
       tables: {},
     };
-    for (const table of tables) {
+    for (const [table, keys] of Object.entries(tables)) {
       // One at a time, and a table that refuses is recorded as refused rather
       // than silently absent — "empty" and "not allowed" must not look alike in
       // something somebody may restore from.
       try {
-        out.tables[table] = await select(table);
+        out.tables[table] = await selectAll(table, (q) => keys.reduce((built, key) => built.order(key), q));
       } catch (err) {
         out.tables[table] = { error: err.message };
       }
+    }
+    /* BART's blank TAWR form is the one file the calendar cannot work without
+       that is not a table, and it is small — so it travels in the backup, and the
+       move to the folder needs nothing but this one file. */
+    try {
+      const form = await downloadTawrTemplate();
+      if (form) {
+        let binary = '';
+        for (let i = 0; i < form.length; i += 0x8000) binary += String.fromCharCode(...form.subarray(i, i + 0x8000));
+        out.files = { 'tawr/template.pdf': btoa(binary) };
+      }
+    } catch (err) {
+      out.files = { 'tawr/template.pdf': { error: err.message } };
     }
     return out;
   }

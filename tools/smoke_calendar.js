@@ -2241,6 +2241,8 @@ async function main() {
   check('and it carries the tables rather than a summary of them',
     Boolean(backup) && backup.tables.includes('rc_actuals') && backup.tables.includes('rc_plan_entries'),
     (backup?.tables || []).slice(0, 4).join(', '));
+  check('including every reason given for a cancellation',
+    Boolean(backup) && backup.tables.includes('rc_cancellation_notes'), (backup?.tables || []).join(', '));
 
   check('and it says why they are never averaged together',
     /flatter or damn the wrong party/.test(repText));
