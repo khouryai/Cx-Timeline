@@ -2,16 +2,12 @@
  * Application entry point.
  *
  * Boot order matters and is deliberate:
- *   0. the backend, if this build has one, restores its session and — when
- *      nobody is signed in — puts the gate up before anything else renders,
- *   1. storage opens and hands back the document to load,
+ *   1. storage opens and hands back the document to load — the plan in the
+ *      shared folder when it can be reached, a local copy otherwise,
  *   2. the store adopts it (nothing renders against an empty document),
  *   3. the theme is applied before the first paint, so there is no flash,
  *   4. the shell and canvas mount,
  *   5. interaction, shortcuts and menus attach last, once their targets exist.
- *
- * Step 0 does nothing at all when `config.js` is blank, which is what keeps
- * the local-first, double-click-index.html build exactly as it was.
  *
  * Imports: everything — this is the only module allowed to.
  */
@@ -21,7 +17,6 @@ import { on, emit, EV } from './core/events.js';
 import { projectExtent, effectiveToday } from './core/model.js';
 import * as store from './core/store.js';
 import { init as initStorage, takeRecovery, saveNow } from './core/storage.js';
-import * as cloud from './core/cloud.js';
 import * as filestore from './core/filestore.js';
 import * as desktop from './core/desktop.js';
 import { criticalPath, linkViolations } from './core/analysis.js';
@@ -35,16 +30,14 @@ import { buildInspector } from './ui/inspector.js';
 import { buildMinimap } from './ui/minimap.js';
 import { buildLegend } from './ui/legend.js';
 import { installMenus } from './ui/menus.js';
-import { requireSignIn, installAccessMode } from './ui/auth.js';
 import { installP6Drops } from './ui/p6.js';
 import { installLookaheadDrops } from './ui/lookahead.js';
 import { installShortcuts } from './ui/shortcuts.js';
+import { installAccessMode } from './ui/access_mode.js';
 import { installCommandMenu } from './ui/command_menu.js';
 import { installCanvasHint } from './ui/canvas_hint.js';
 import * as workspace from './ui/workspace.js';
 import { loadCalendar } from './ui/calendar_loader.js';
-import * as rcClient from './core/rc.js';
-import { lockPlan, setAccount } from './core/access.js';
 import * as exporters from './io/exporters.js';
 import * as cmd from './ui/commands.js';
 import { toast, showTooltip, hideTooltip, confirmDialog } from './ui/components.js';
@@ -64,21 +57,6 @@ async function boot() {
   // browser this resolves to null immediately and nothing below it happens.
   const startupPen = filestore.startupPen();
 
-  /* ── 0. Account ──────────────────────────────────────────────────────── */
-  if (cloud.isConfigured()) {
-    try {
-      await cloud.init();
-      if (!cloud.isSignedIn()) {
-        // The splash covers the whole viewport and would sit on top of the
-        // sign-in card, swallowing its clicks. Loading is over: say so.
-        dismissSplash();
-        await requireSignIn();
-      }
-    } catch (err) {
-      console.error('[cx-timeline] sign-in failed:', err);
-    }
-  }
-
   /* ── 1. Storage & document ───────────────────────────────────────────── */
   let loaded;
   try {
@@ -91,9 +69,7 @@ async function boot() {
   if (loaded) {
     store.replaceDoc(loaded.doc, 'load');
     // Offer to recover work the unload handler saved after an unclean exit.
-    // A read-only project has nothing to recover — the user cannot have
-    // changed it — so the prompt would be nonsense.
-    const recovery = cloud.isReadOnly() ? null : takeRecovery(loaded.doc);
+    const recovery = takeRecovery(loaded.doc);
     if (recovery) {
       setTimeout(() => offerRecovery(recovery), 900);
     }
@@ -161,37 +137,18 @@ async function boot() {
   // cannot leave anybody unable to open the application. Absent in a browser.
   window.CX_SHELL?.confirmHealthy?.();
 
-  // The timeline kept for when there is no network (sw.js). After the gate
-  // above, like everything that is not needed to open the plan.
-  installOfflineShell();
-
   // The resource calendar is registered here and built on first use — after
-  // the line above, deliberately. It needs a network and an account, and the
-  // trial gate must not be waiting on either: a calendar that could not reach
-  // its backend would otherwise look exactly like a broken update and get
-  // rolled back.
-  // Its code is a second bundle, fetched the first time it is opened — see
-  // ui/calendar_loader.js — so nobody who only uses the timeline downloads it.
+  // the line above, deliberately: a calendar that could not read its folder
+  // must never look like a broken update and get rolled back. Its code is the
+  // calendar bundle, which the desktop payload carries with the main one (see
+  // ui/calendar_loader.js).
   workspace.registerCalendar(() => loadCalendar().then((calendar) => calendar.build()));
 
-  // Resolve the calendar account, if there is a backend for one. This is the
-  // only thing here that touches a network, and it deliberately sits after the
-  // gate above so an unreachable backend can never look like a broken update.
-  //
-  // It is not awaited: the timeline is already usable, and whether somebody is
-  // a read-only viewer only changes what chrome to draw. When it settles it
-  // emits, the shell rebuilds, and a viewer lands on the calendar — which is
-  // the one case that cannot wait for a switch, because a viewer has no switch.
-  if (rcClient.isConfigured()) {
-    rcClient.init().catch((err) => {
-      console.warn('[cx-timeline] the resource calendar could not be reached:', err.message);
-    });
-    installPenIdentity();
-  }
-  // Whether this account may edit the plan at all. Outside the filestore branch
-  // above: it is about the account, not about the folder, and it decides the
-  // store's gate whichever backend the plan is on.
-  installPlanAccess();
+  // A different plan is a different view. Restored on replacement rather than
+  // carried over: the last filter applied to somebody else's bars is not a
+  // filter anybody asked for.
+  on(EV.DOC_REPLACED, () => store.restoreAccountView());
+  store.restoreAccountView();
 
   console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
 
@@ -199,22 +156,6 @@ async function boot() {
   // it, and last, so booting is never held up by a question.
   const pen = await startupPen;
   if (pen) await cmd.announceStartupPen(pen);
-}
-
-/**
- * Register the site's service worker, which keeps the timeline (never the plan)
- * so it opens with no network — the plan in file mode is already on this
- * machine. Not in the desktop app, whose page is on disk already and whose
- * updates are its own (tools/shell/loader.js), and not from a file:// page,
- * which cannot have one.
- */
-function installOfflineShell() {
-  if (window.CX_SHELL || desktop.isAvailable()) return;
-  if (!('serviceWorker' in navigator) || !/^https?:$/.test(location.protocol)) return;
-  navigator.serviceWorker.register('sw.js', { scope: './' }).catch((err) => {
-    // Not fatal: the timeline runs without it, it only cannot open offline.
-    console.warn('[cx-timeline] the service worker did not register:', err.message);
-  });
 }
 
 /** Fade out the boot splash. Safe to call more than once. */
@@ -284,92 +225,6 @@ function installConflictHandling() {
     if (refusedNotice) refusedNotice.dismiss();
     refusedNotice = null;
   });
-}
-
-/**
- * Let the pen borrow the name the calendar already knows.
- *
- * The lock has always carried a *self-declared* name, typed into a field in
- * the Shared folder pane, and `getDisplayName()` falls back to "Someone" when
- * nobody has. So the most common reading of the read-only banner was "Someone
- * has this plan open" — the least useful answer available, on the one screen
- * where knowing who matters.
- *
- * In a calendar deployment that person is already signed in, with a real name
- * on their roster row. Borrowing it costs nothing and moves no data: the name
- * goes into a lock file in the same folder the plan is in, and the plan still
- * has no backend of any kind.
- *
- * Only when nothing has been set. A name somebody typed is a deliberate
- * choice — "Alex" rather than "Alexander Khoury" — and overwriting it every
- * time the session refreshes would be the application arguing with them.
- */
-function installPenIdentity() {
-  const adopt = () => {
-    if (!filestore.isSupported()) return;
-    const known = filestore.getDisplayName();
-    if (known && known !== 'Someone') return;
-    // Never the name of somebody an administrator is only previewing as.
-    if (rcClient.previewing()) return;
-    const name = rcClient.me()?.name;
-    if (name) filestore.setDisplayName(name);
-  };
-  on(EV.RC_AUTH_CHANGED, adopt);
-  adopt();
-}
-
-/**
- * A calendar member reads the plan and never writes it.
- *
- * The plan is the P6 narrative: it carries the contract schedule, the baselines
- * and the dependencies, and it is maintained by whoever runs the project. The
- * calendar's members are the field team — they record their own days and read
- * what they have been asked to do. They were read-only in practice, because the
- * plan lives in a folder and somebody else usually held the pen, and that is not
- * the same thing at all: the pen is a *turn*, so "Take over editing" was on
- * screen and a member who pressed it got the plan.
- *
- * So it is stated rather than left to the folder. The role comes from the
- * calendar, which `core/store.js` and `core/filestore.js` must never import, so
- * it is pushed down into `core/access.js` from here — the one module that may
- * see both. After that the store refuses every edit and the pen refuses to be
- * taken, and the interface stops offering either, in that order of importance.
- *
- * **Only when the calendar has an opinion.** No backend, local mode, and every
- * test suite leave the lock alone, and a signed-out session is not a member of
- * anything: the timeline is exactly as editable as it has always been until an
- * account that is a member of a configured calendar signs in.
- */
-function installPlanAccess() {
-  const apply = () => {
-    /* Whose view this is. The calendar's account where there is one, the
-       timeline's own where there is not, and '' for a local build with neither —
-       which is one shared view per browser profile, exactly as it has always
-       been. It is a key and never a name: it goes into a localStorage key. */
-    setAccount(rcClient.currentUser()?.id || cloud.currentUser()?.id || '');
-    store.restoreAccountView();
-
-    const member = rcClient.isConfigured() && rcClient.isSignedIn()
-      && Boolean(rcClient.me()) && !rcClient.isAdmin();
-    const previewing = rcClient.previewing();
-    lockPlan(member
-      ? (previewing
-        ? `You are seeing the calendar as ${previewing.name}, who reads the plan and never writes it. `
-          + 'Go back to your own view in the calendar to edit.'
-        : 'Your calendar account is not an administrator, so the plan opens read-only. '
-          + 'Everything you filter, hide or compare here is yours alone and stays with your '
-          + 'account.')
-      : '');
-    emit(EV.ACCESS_CHANGED, { readOnly: store.isDocReadOnly() });
-    emit(EV.FILE_STATE, filestore.state());
-  };
-  on(EV.RC_AUTH_CHANGED, apply);
-  on(EV.AUTH_CHANGED, apply);
-  // A different plan is a different view. Restored on replacement rather than
-  // carried over: the last filter applied to somebody else's bars is not a
-  // filter anybody asked for.
-  on(EV.DOC_REPLACED, () => store.restoreAccountView());
-  apply();
 }
 
 /* ── The shared folder ─────────────────────────────────────────────────── */
@@ -546,6 +401,16 @@ function installFolderHandling() {
 function installDesktopShell() {
   window.addEventListener('cx-shell-update', (/** @type {CustomEvent} */ event) => {
     const version = event.detail?.version || '';
+    if (event.detail?.installer) {
+      toast({
+        tone: 'info',
+        title: version ? `Version ${version} needs a new installer` : 'A new installer is needed',
+        message: 'This copy keeps working as it is. Install the newest CX Timeline from the repository\'s '
+          + 'GitHub Releases page to take the update.',
+        sticky: true,
+      });
+      return;
+    }
     toast({
       tone: 'info',
       title: version ? `Version ${version} is ready` : 'An update is ready',

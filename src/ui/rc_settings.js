@@ -1,25 +1,18 @@
 /**
- * Organisation → Settings: the calendar's settings, changed on screen.
+ * Lists → Settings: the calendar's settings, changed on screen.
  *
- * They were always rows in `rc_settings`, and some could only be changed in the
- * SQL editor — which meant they were not changed. Each is one field and a Save,
- * written through `rc.setSetting()`, and the policy on `rc_settings` is what
- * lets only an administrator write them; this screen is only shown to one.
+ * Each is one row in `rc_settings`, one field and a Save, written through
+ * `rc.setSetting()`. The calendar is in the shared folder, so a setting
+ * changed here is changed for everybody who opens it.
  *
- * Switching the look-ahead's source is the one setting with consequences, so
- * it is not a field: going back to the workbook asks first, exactly as the
- * editor's own menu does, and adopting the editor goes to the editor, which
- * has to import something before there is anything to write in.
- *
- * Imports: util, rc, components, rc_util, rc_la_state, rc_huddle.
+ * Imports: util, rc, components, rc_util, io/exporters.
  */
 
 import { el } from '../core/util.js';
 import * as rc from '../core/rc.js';
-import { textInput, selectInput, toast, confirmDialog, badge } from './components.js';
-import { notifyChanged, goToTab, dayLabel } from './rc_util.js';
-import { la } from './rc_la_state.js';
-import { HUDDLE_REVIEWS, DEFAULT_HUDDLE_REVIEWS } from './rc_huddle.js';
+import { textInput, toast } from './components.js';
+import { notifyChanged, dayLabel, todayISO } from './rc_util.js';
+import { saveFile } from '../io/exporters.js';
 
 /** How long an editor-published reading is kept whole, unless somebody says otherwise. */
 export const DEFAULT_KEEP_DAYS = 60;
@@ -28,12 +21,11 @@ const value = (settings, key) => settings.find((r) => r.key === key)?.value ?? n
 
 export async function renderSettings(host) {
   const settings = await rc.listSettings().catch(() => []);
-  const source = value(settings, 'lookahead_source') || 'workbook';
 
   host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Settings' })]));
   host.appendChild(el('p', {
     class: 'rc-hint',
-    text: 'What the calendar is set to. Only an administrator can change these — the database refuses anybody else.',
+    text: 'What the calendar is set to. They are kept in the shared folder, so they are the same for everybody who opens it.',
   }));
 
   const list = el('div', { class: 'rc-settings' });
@@ -42,43 +34,6 @@ export async function renderSettings(host) {
   /* ── The look-ahead ─────────────────────────────────────────────────── */
   list.appendChild(group('The look-ahead'));
 
-  list.appendChild(row({
-    label: 'Where it is written',
-    hint: source === 'editor'
-      ? 'In the calendar\'s own editor. "Check now" does not read the workbook while this is set.'
-      : 'In the Excel workbook, read on "Check now". Start writing it in the calendar from Look-ahead → Calendar → Edit.',
-    control: el('div', { class: 'rc-settings-inline' }, [
-      badge(source === 'editor' ? 'The editor' : 'The workbook', source === 'editor' ? 'good' : 'neutral'),
-      source === 'editor'
-        ? el('button', {
-          class: 'cx-btn mini ghost danger', type: 'button', text: 'Go back to the workbook…',
-          onClick: async () => {
-            const ok = await confirmDialog({
-              title: 'Go back to reading the workbook?',
-              message: 'The calendar will read the .xlsx again the next time somebody presses Check now. '
-                + 'Nothing written in the editor is deleted — it stays for the record, and you can come back to it.',
-              confirmLabel: 'Go back to the workbook',
-              danger: true,
-            });
-            if (!ok) return;
-            await save('lookahead_source', 'workbook', 'The look-ahead is read from the workbook again.');
-            la.source = 'workbook';
-            la.section = 'calendar';
-            la.editing = false;
-          },
-        })
-        : el('button', {
-          class: 'cx-btn mini', type: 'button', text: 'Open the editor',
-          onClick: () => {
-            la.section = 'calendar';
-            la.editing = true;
-            la.sectionChosen = true;
-            goToTab('lookahead');
-          },
-        }),
-    ]),
-  }));
-
   list.appendChild(textRow({
     key: 'lookahead_title',
     label: 'Title on the export',
@@ -86,16 +41,6 @@ export async function renderSettings(host) {
     current: value(settings, 'lookahead_title') || '',
     placeholder: 'Four Week Look-Ahead',
     said: (v) => (v ? `The export is titled "${v}".` : 'The export has no title.'),
-  }));
-
-  list.appendChild(textRow({
-    key: 'lookahead_sheet',
-    label: 'Sheet in the workbook',
-    hint: 'The tab the grid is on, when the look-ahead is read from the workbook. Never guessed.',
-    current: value(settings, 'lookahead_sheet') || '4WLA',
-    placeholder: '4WLA',
-    required: true,
-    said: (v) => `The workbook is read from the "${v}" sheet.`,
   }));
 
   list.appendChild(textRow({
@@ -108,33 +53,13 @@ export async function renderSettings(host) {
     said: (v) => `The cancellation log starts on ${dayLabel(v)}.`,
   }));
 
-  /* ── The daily huddle ───────────────────────────────────────────────── */
-  list.appendChild(group('The daily huddle'));
-  const reviews = HUDDLE_REVIEWS[value(settings, 'huddle_reviews')] ? value(settings, 'huddle_reviews') : DEFAULT_HUDDLE_REVIEWS;
-  const reviewsPick = selectInput({
-    value: reviews,
-    options: Object.entries(HUDDLE_REVIEWS).map(([v, label]) => ({ value: v, label })),
-    onChange: (v) => save('huddle_reviews', v, v === 'today'
-      ? 'The huddle now goes over today\u2019s work and plans the next working day.'
-      : 'The huddle now goes over the previous working day and plans the next working day.'),
-  });
-  reviewsPick.setAttribute('aria-label', 'What the huddle goes over');
-  reviewsPick.dataset.setting = 'huddle_reviews';
-  list.appendChild(row({
-    label: 'What the huddle goes over',
-    hint: 'A meeting late in the shift goes over how today is going and plans the next working day. '
-      + 'One at the start of the day goes over the previous working day instead. Either way, a day nobody '
-      + 'on the roster works is skipped.',
-    control: reviewsPick,
-  }));
-
   /* ── Keeping the record tidy ────────────────────────────────────────── */
   list.appendChild(group('Housekeeping'));
   list.appendChild(textRow({
     key: 'snapshot_keep_days',
     label: 'Keep every editor reading for',
-    hint: 'The editor publishes a reading whenever it goes quiet. Older than this, only the last reading of each day is kept; '
-      + 'every workbook read, every reading a SAR or a cancellation points at, and the change register are kept regardless.',
+    hint: 'The editor takes a reading when you finish editing, and when it has been quiet a while. Older than this, only the last reading of each day keeps its grid; '
+      + 'every workbook read, every reading\'s rows and the change register are kept regardless.',
     current: value(settings, 'snapshot_keep_days') || String(DEFAULT_KEEP_DAYS),
     type: 'number',
     suffix: 'days',
@@ -167,18 +92,30 @@ export async function renderSettings(host) {
     ]),
   }));
 
-  /* ── What this is ───────────────────────────────────────────────────── */
-  list.appendChild(group('About'));
-  const status = await rc.schemaStatus().catch(() => ({ state: 'unknown', expected: rc.SCHEMA_VERSION, found: null }));
+  /* ── Where it is ─────────────────────────────────────────────────────── */
+  list.appendChild(group('Where it is'));
   list.appendChild(row({
-    label: 'Database version',
-    hint: status.state === 'behind'
-      ? 'Behind this application. Run supabase/migrate.sql and then supabase/rc_schema.sql in the Supabase SQL editor.'
-      : 'Set by rc_schema.sql when it is run.',
-    control: el('div', { class: 'rc-settings-inline' }, [
-      el('span', { class: 'rc-settings-mono', text: String(status.found ?? value(settings, 'schema_version') ?? '—') }),
-      status.state === 'behind' ? badge('Needs updating', 'bad') : null,
-    ].filter(Boolean)),
+    label: 'Folder',
+    hint: 'The calendar is the calendar/ folder inside the shared folder the plan is in. '
+      + 'OneDrive keeps every version of every file in it, under Version history.',
+    control: el('span', { class: 'rc-settings-mono', text: `${rc.status().folder || '—'}/calendar` }),
+  }));
+  list.appendChild(row({
+    label: 'A copy of everything',
+    hint: 'Every table as one file, with BART\'s blank TAWR form. It opens in an empty folder through the same import the old calendar came in by.',
+    control: el('button', {
+      class: 'cx-btn mini', type: 'button', text: 'Back it up',
+      onClick: async () => {
+        try {
+          const data = await rc.exportEverything();
+          const rows = Object.values(data.tables).reduce((n, t) => n + (Array.isArray(t) ? t.length : 0), 0);
+          saveFile(`resource-calendar-${todayISO()}.json`, JSON.stringify(data), 'application/json',
+            `${rows} rows across ${Object.keys(data.tables).length} tables`);
+        } catch (err) {
+          toast({ tone: 'bad', message: err?.message || String(err) });
+        }
+      },
+    }),
   }));
 }
 

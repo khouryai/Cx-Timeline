@@ -246,6 +246,24 @@ export function intakeHash(folder, path) {
   return call('intake_hash', { folder, path });
 }
 
+/* ── The calendar's files, as text ─────────────────────────────────────── */
+
+/** `{ text, stamp }`, or null when the file does not exist. */
+export async function dataRead(folder, path) {
+  const read = await call('data_read', { folder, path });
+  return read || null;
+}
+
+export async function dataStat(folder, path) {
+  const stamp = await call('data_stat', { folder, path });
+  return stamp || null;
+}
+
+/** Atomic, and refused with `kind: 'conflict'` when the file is not `expected`. */
+export function dataWrite(folder, path, text, expected) {
+  return call('data_write', { folder, path, text, expected: expected || null });
+}
+
 /* ── Window ────────────────────────────────────────────────────────────── */
 
 /**

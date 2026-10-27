@@ -11,11 +11,14 @@
 # `windows-latest` already has the WebView2 runtime and the MSVC toolchain, so
 # nothing here installs a webview.
 #
-# **This is not how a change reaches the application.** Editing `src/` and
-# deploying the site is — the installed copy checks the deployment on every
-# launch and picks up a newer build on the next one (see `tools/shell/loader.js`).
-# Rebuild the installer only when the Rust side changes, or for someone who has
-# never installed it.
+# **This is not how a change reaches the application.** A push to the default
+# branch is — once Checks passes, `.github/workflows/kit.yml` writes the
+# `desktop-kit` branch, and every installed copy picks the new build up on its
+# next launch (see `tools/shell/loader.js`). Rebuild the installer only when the
+# Rust side changes (and raise `SHELL` in `tools/desktop.js` if the application
+# now calls a new command), or for someone who has never installed it. Push a
+# tag like `v1.0.1` and the installers are attached to that GitHub release,
+# which is where an older copy tells its user to get the new one.
 
 name: Desktop app
 
@@ -57,17 +60,9 @@ jobs:
 
       # No `npm install`: the build and the shell assembler use nothing but
       # Node's own modules, and the only dependency in package.json is Playwright
-      # for the test suites, which do not run here.
-      # The calendar's keys, when the repository has them. Without them the
-      # installer is exactly what it has always been — the plan in a folder,
-      # no backend — so this is not a required secret and the build does not
-      # fail for want of it; `tools/desktop.js` says which shape it made.
-      # The plan's own SUPABASE_URL is deliberately never passed: it has no
-      # backend in this shape and must not be able to acquire one here.
+      # for the test suites, which do not run here. There is no backend and no
+      # secret: the plan and the calendar both live in the folder.
       - name: Build the bundle and the shell
-        env:
-          RC_SUPABASE_URL: ${{ secrets.RC_SUPABASE_URL }}
-          RC_SUPABASE_ANON_KEY: ${{ secrets.RC_SUPABASE_ANON_KEY }}
         run: |
           node tools/build.js
           node tools/desktop.js
@@ -80,7 +75,7 @@ jobs:
             Write-Error 'loader.js still has an unsubstituted channel placeholder.'
             exit 1
           }
-          if ($loader -notmatch "var CHANNEL = 'https://") {
+          if ($loader -notmatch "var CHANNEL = 'https://raw.githubusercontent.com/") {
             Write-Error 'loader.js has no update channel, so an installed copy would never update.'
             exit 1
           }

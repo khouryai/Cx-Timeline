@@ -19,13 +19,13 @@
  * (`workOnlyLegend()`). That is deliberately stricter than the calendar, which
  * *draws* an unexplained colour as possible work so somebody notices it.
  *
- * The legend is the calendar's own (Calendar → Legend) whenever the calendar is
- * signed in: one answer to "is orange work", read and never written from here.
- * Only the colours are fetched — nothing about the plan goes the other way.
- * Where there is no calendar legend (local mode, a folder deployment, a desktop
- * build without calendar keys, or a calendar that has never mapped a colour)
- * the workbook's own key starts as Work and the dialog lets somebody categorise
- * the rest, kept with the plan in `doc.lookahead.colors`.
+ * The legend is the calendar's own (Calendar → Legend) whenever the folder holds
+ * a calendar: one answer to "is orange work", read and never written from here.
+ * Only the colours are read — nothing about the plan goes the other way. Where
+ * there is no calendar legend (local mode, a folder with no calendar in it, or
+ * a calendar that has never mapped a colour) the workbook's own key starts as
+ * Work and the dialog lets somebody categorise the rest, kept with the plan in
+ * `doc.lookahead.colors`.
  *
  * Imports: util, events, dates, model, store, renderer, core/lookahead,
  *          io/lookahead, core/rc (the legend only), commands, icons,
@@ -34,7 +34,7 @@
 
 import { el, clear, debounce, fold } from '../core/util.js';
 import { on, emit, EV } from '../core/events.js';
-import { fmtDate, fmtTimestamp, MS_DAY, toISO, toMs } from '../core/dates.js';
+import { fmtDate, fmtTimestamp, MS_DAY } from '../core/dates.js';
 import {
   TYPES,
   lookaheadRegister,
@@ -46,11 +46,12 @@ import {
 } from '../core/model.js';
 import * as store from '../core/store.js';
 import * as renderer from '../timeline/renderer.js';
-import { readGrid, marksOf, suggestionsFrom, outcomeProgress } from '../core/lookahead.js';
+import { readGrid, marksOf, suggestionsFrom } from '../core/lookahead.js';
 import {
   applyLegend, inForce, workOnlyLegend,
 } from '../io/lookahead.js';
 import * as rc from '../core/rc.js';
+import * as filestore from '../core/filestore.js';
 import * as cmd from './commands.js';
 import { icon } from './icons.js';
 import {
@@ -61,7 +62,6 @@ import {
   selectInput,
   segmented,
   checkbox,
-  toggle,
   emptyState,
   badge,
   chipStat,
@@ -144,14 +144,6 @@ function importBar(register) {
             onClick: () => updateFromCalendar(),
           })
         : null,
-      calendar && laPlacedIds(store.getDoc()).size
-        ? el('button', {
-            class: 'cx-btn mini',
-            html: icon('check', { size: 12 }) + '<span>Progress from the calendar</span>',
-            title: 'Offer actual start and finish dates from what the huddle recorded',
-            onClick: () => progressFromCalendar(),
-          })
-        : null,
       Object.keys(register.activities).length
         ? el('button', {
             class: 'cx-btn mini ghost',
@@ -186,10 +178,20 @@ function importBar(register) {
 
 /* ── From the calendar ─────────────────────────────────────────────────── */
 
-/** Whether the resource calendar is here to be read: configured, and signed in. */
+/**
+ * Whether the resource calendar is here to be read: a folder is open and holds
+ * one. Asking opens it, for reading — the timeline never takes the calendar's
+ * pen — and the pane is drawn again once it has answered.
+ */
 function calendarAvailable() {
-  return rc.isConfigured() && rc.isSignedIn();
+  if (rc.isSignedIn()) return true;
+  if (rc.isConfigured() && filestore.hasFolder() && !calendarAsked) {
+    calendarAsked = true;
+    rc.init().then(() => { if (rc.isSignedIn()) refresh(); }).catch(() => {});
+  }
+  return false;
 }
+let calendarAsked = false;
 
 /**
  * The look-ahead, as the resource calendar holds it now — in one step.
@@ -245,233 +247,6 @@ export async function updateFromCalendar() {
   const follow = report.moved.filter((m) => placed.has(m.id));
   if (follow.length) setTimeout(() => openFollowDialog(follow), 350);
   return report;
-}
-
-/**
- * Actual dates, from what the daily huddle recorded.
- *
- * The outcomes are traced to the look-ahead rows they were recorded against
- * and from there to the bars linked to those rows (`outcomeProgress()`); each
- * bar is offered the first day anybody worked on it as its actual start, and —
- * only once the look-ahead has nothing more for it and the last word was
- * "completed" — the day after the last as its actual finish. Nothing is written
- * until somebody ticks it: a date nobody has set yet starts ticked, a date that
- * would replace one somebody typed does not. Reads only; nothing about the plan
- * goes to the calendar.
- */
-export async function progressFromCalendar() {
-  const doc = store.getDoc();
-  const register = lookaheadRegister(doc);
-  const objects = doc.objects.filter((o) => laLinkedIds(o).length);
-  if (!objects.length) {
-    toast({ tone: 'warn', title: 'No linked bars', message: 'Place or link a look-ahead suggestion first — progress is read for bars that stand for one.' });
-    return null;
-  }
-  let from = Infinity;
-  for (const o of objects) {
-    for (const id of laLinkedIds(o)) {
-      const entry = register.activities[id];
-      if (entry?.start != null) from = Math.min(from, entry.start, entry.previous?.start ?? Infinity);
-    }
-    from = Math.min(from, o.start);
-  }
-  const todayMs = toMs(toISO(Date.now()));
-  // A fortnight's slack before the earliest date: work often starts early.
-  const fromISO = toISO(Math.min(Number.isFinite(from) ? from : todayMs, todayMs) - 14 * MS_DAY);
-  const toISOday = toISO(todayMs);
-
-  let proposals;
-  try {
-    // Asked for now, so read now: an outcome recorded in the last thirty
-    // seconds is exactly the one somebody pressed this to see.
-    rc.forgetReads();
-    const [actuals, plan] = await Promise.all([rc.listActuals(fromISO, toISOday), rc.listPlan(fromISO, toISOday)]);
-    const rowIds = [
-      ...actuals.map((a) => a.lookahead_row_id),
-      ...plan.map((p) => p.lookahead_row_id),
-    ];
-    const rows = await rc.lookaheadRowsByIds(rowIds);
-    proposals = outcomeProgress({ objects, activities: register.activities, actuals, rows, plan, todayMs: todayMs + MS_DAY });
-  } catch (err) {
-    toast({ tone: 'bad', title: 'Could not read the calendar', message: err.message });
-    return null;
-  }
-
-  const offers = [];
-  for (const p of proposals) {
-    const obj = doc.objects.find((o) => o.id === p.objectId);
-    const hasDuration = !!TYPES[obj.type]?.duration;
-    const haveStart = toMs(obj.data?.actualStart);
-    const haveEnd = toMs(obj.data?.actualEnd);
-    const start = haveStart === p.start ? null : { value: p.start, replaces: Number.isFinite(haveStart) ? haveStart : null };
-    const end = !hasDuration || p.end == null || haveEnd === p.end
-      ? null
-      : { value: p.end, replaces: Number.isFinite(haveEnd) ? haveEnd : null };
-    if (start || end) offers.push({ obj, p, start, end });
-  }
-  const held = proposals.filter((p) => p.end == null && p.holding.length
-    && TYPES[doc.objects.find((o) => o.id === p.objectId)?.type]?.duration).length;
-  if (!offers.length) {
-    toast({
-      tone: 'info',
-      title: 'Nothing new',
-      message: proposals.length
-        ? `The actual dates already agree with what the huddle recorded.${
-          held ? ` ${held} bar${held === 1 ? ' is' : 's are'} still waiting on an activity to finish.` : ''}`
-        : 'No outcomes recorded yet against the look-ahead rows your bars stand for.',
-    });
-    return [];
-  }
-  openProgressDialog(offers);
-  return offers;
-}
-
-/* Whether the dialog opens with each bar's activities shown — a preference of
-   this browser's, and nothing worse than the default if storage is refused. */
-const PROGRESS_DETAIL_KEY = 'cx.lookahead.progressDetail';
-function progressDetailPref() {
-  try {
-    return localStorage.getItem(PROGRESS_DETAIL_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-function setProgressDetailPref(on) {
-  try {
-    localStorage.setItem(PROGRESS_DETAIL_KEY, on ? '1' : '0');
-  } catch {
-    // Remembering is a convenience; the switch still works for this dialog.
-  }
-}
-
-/** One activity's line in a bar's breakdown. */
-function activityLine(a) {
-  const on = (iso) => fmtDate(Date.parse(`${iso}T00:00:00Z`), 'numeric');
-  const state = a.done
-    ? badge('Done', 'good')
-    : a.ahead
-      ? badge('Still planned', 'info')
-      : a.recorded
-        ? badge('Not completed', 'warn')
-        : badge('Nothing recorded', 'neutral');
-  const facts = a.recorded
-    ? [
-        `${a.days} day${a.days === 1 ? '' : 's'}`,
-        `${on(a.first)} → ${on(a.last)}`,
-        `last ${a.lastStatus}`,
-      ].join(' · ')
-    : 'no outcomes against it yet';
-  return el('li', { class: 'la-progress-act' }, [
-    el('span', { class: 'la-progress-act-title', text: a.title || 'Untitled activity' }),
-    el('span', { class: 'la-progress-act-facts', text: facts }),
-    state,
-  ]);
-}
-
-function openProgressDialog(offers) {
-  const chosen = new Map(); // `${id}|start` / `${id}|end` → ms
-  const rows = el('div', { class: 'cx-list la-progress' });
-  const details = []; // [{ list, button }] — every bar's breakdown
-  const setOpen = ({ list, button }, open) => {
-    list.hidden = !open;
-    button.setAttribute('aria-expanded', String(open));
-    button.innerHTML = icon(open ? 'chevron-down' : 'chevron-right', { size: 11 })
-      + `<span>${open ? 'Hide' : 'Show'} ${list.childElementCount} activities</span>`;
-  };
-  const showAll = progressDetailPref();
-  const choice = (obj, which, offer, label) => {
-    const key = `${obj.id}|${which}`;
-    if (offer.replaces == null) chosen.set(key, offer.value);
-    const shown = which === 'end' ? offer.value - MS_DAY : offer.value;
-    const text = `${label} ${fmtDate(shown, 'numeric')}`
-      + (offer.replaces != null ? ` (was ${fmtDate(which === 'end' ? offer.replaces - MS_DAY : offer.replaces, 'numeric')})` : '');
-    return checkbox({
-      label: text,
-      checked: offer.replaces == null,
-      onChange: (v) => (v ? chosen.set(key, offer.value) : chosen.delete(key)),
-    });
-  };
-  for (const { obj, p, start, end } of offers) {
-    const several = p.activities.length > 1;
-    const meta = [
-      several ? `${p.activities.length} activities` : null,
-      `${p.days} day${p.days === 1 ? '' : 's'} worked`,
-      `${p.people} ${p.people === 1 ? 'person' : 'people'}`,
-      `last ${p.lastStatus} ${fmtDate(Date.parse(`${p.last}T00:00:00Z`), 'numeric')}`,
-      p.byTask && !p.byRow ? 'matched on the task wording' : null,
-    ].filter(Boolean).join(' · ');
-    // Why there is no finish, said whether or not the breakdown is open.
-    const waiting = !end && p.end == null && p.holding.length && TYPES[obj.type]?.duration
-      ? el('div', { class: 'la-progress-wait', text: `Finish waits on ${p.holding.join(', ')}` })
-      : null;
-    let detail = null;
-    if (several) {
-      const list = el('ul', { class: 'la-progress-acts' }, p.activities.map(activityLine));
-      const button = el('button', { type: 'button', class: 'cx-btn mini ghost la-progress-toggle' });
-      const entry = { list, button };
-      button.addEventListener('click', () => setOpen(entry, list.hidden));
-      setOpen(entry, showAll);
-      details.push(entry);
-      detail = el('div', {}, [button, list]);
-    }
-    rows.appendChild(
-      el('div', { class: 'cx-listrow la-progress-row', style: { cursor: 'default', alignItems: 'flex-start' } }, [
-        el('div', { class: 'lr-main' }, [
-          el('div', { class: 'lr-title', text: obj.title || TYPES[obj.type]?.label || 'Untitled' }),
-          el('div', { class: 'lr-meta', text: meta }),
-          waiting,
-          el('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', marginTop: '6px' } }, [
-            start ? choice(obj, 'start', start, 'Actual start') : null,
-            end ? choice(obj, 'end', end, 'Actual finish') : null,
-          ].filter(Boolean)),
-          detail,
-        ].filter(Boolean)),
-      ])
-    );
-  }
-
-  const body = el('div', {}, [
-    details.length
-      ? el('div', { class: 'la-progress-head' }, [
-          toggle({
-            label: 'Show each activity',
-            checked: showAll,
-            onChange: (on) => {
-              setProgressDetailPref(on);
-              for (const d of details) setOpen(d, on);
-            },
-          }),
-        ])
-      : null,
-    rows,
-  ].filter(Boolean));
-
-  openModal({
-    title: 'Progress from the calendar',
-    subtitle: 'Actual dates from the outcomes recorded in the daily huddle. Nothing changes on the timeline until you apply it.',
-    size: 'wide',
-    body,
-    actions: [
-      { label: 'Not now' },
-      {
-        label: 'Apply selected',
-        kind: 'primary',
-        onClick: () => {
-          if (!chosen.size) return;
-          const patches = new Map();
-          for (const [key, ms] of chosen) {
-            const [id, which] = key.split('|');
-            if (!patches.has(id)) patches.set(id, {});
-            patches.get(id)[which === 'start' ? 'actualStart' : 'actualEnd'] = toISO(ms);
-          }
-          store.updateObjects([...patches.keys()], (o) => ({ data: patches.get(o.id) }), 'Actual dates from the calendar');
-          renderer.requestRender();
-          refresh();
-          toast({ tone: 'good', title: 'Actual dates recorded', message: `${patches.size} bar${patches.size === 1 ? '' : 's'} updated. Undo puts them back.` });
-        },
-      },
-    ],
-  });
 }
 
 /**

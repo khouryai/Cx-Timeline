@@ -15,9 +15,8 @@ import { on, emit, EV } from '../core/events.js';
 import { fmtDate, fmtTimestamp } from '../core/dates.js';
 import { typeGroups, effectiveToday, projectExtent } from '../core/model.js';
 import * as store from '../core/store.js';
-import { isFallback, isHosted, isFileMode } from '../core/storage.js';
+import { isFallback, isFileMode } from '../core/storage.js';
 import * as filestore from '../core/filestore.js';
-import * as cloud from '../core/cloud.js';
 import * as rcClient from '../core/rc.js';
 import * as desktop from '../core/desktop.js';
 import { linkViolations } from '../core/analysis.js';
@@ -28,7 +27,6 @@ import { contextMenu, promptDialog, toast, segmented, keyHint } from './componen
 import { THEMES, applyTheme, getTheme } from './theme.js';
 import { showPane, currentPane } from './panels.js';
 import * as workspace from './workspace.js';
-import { accountBlock } from './auth.js';
 import * as cmd from './commands.js';
 import { openCommandMenu } from './command_menu.js';
 
@@ -37,7 +35,6 @@ const NAV = [
   {
     section: 'Workspace',
     items: [
-      { pane: 'projects', label: 'Projects', icon: 'folder', hosted: true },
       { pane: 'lanes', label: 'Lanes', icon: 'layers' },
       { pane: 'palette', label: 'Add Objects', icon: 'plus' },
       { pane: 'outline', label: 'Outline', icon: 'list' },
@@ -70,7 +67,6 @@ const NAV = [
       { pane: 'io', label: 'Import / Export', icon: 'download' },
       { pane: 'backups', label: 'Backups', icon: 'save' },
       { pane: 'lists', label: 'Dropdown Lists', icon: 'list' },
-      { pane: 'team', label: 'Team & Access', icon: 'users', hosted: true, admin: true },
       { pane: 'settings', label: 'Settings', icon: 'gear' },
     ],
   },
@@ -122,15 +118,9 @@ function buildSidenav() {
 
   // The workspace switch. Two whole interfaces over two different stores, so
   // it sits above the pane list rather than in it: choosing "Calendar" is not
-  // choosing a pane, it is leaving the timeline.
-  //
-  // Hidden from a read-only account, and for a reason that is presentation
-  // rather than protection: the plan lives in a folder only its owner has
-  // granted, so a viewer could never load it. What they *would* see is
-  // `makeStarterProject()` — the built-in sample, with plausible-looking
-  // releases and campaigns — and mistaking fabricated demo content for a real
-  // project is its own small problem.
-  if (rcClient.isConfigured() && !rcClient.isViewer()) {
+  // choosing a pane, it is leaving the timeline. Wherever a folder can be
+  // opened — the desktop application, Edge, Chrome — the calendar can be.
+  if (rcClient.isConfigured()) {
     dom.sidenav.appendChild(workspaceSwitch());
   }
 
@@ -178,11 +168,6 @@ function buildSidenav() {
     box.appendChild(head);
     dom.navLinks.appendChild(box);
     for (const item of group.items) {
-      // Some panes only mean anything with a backend behind them, and one is
-      // for administrators. Both are re-evaluated on auth:changed, which
-      // rebuilds the sidebar.
-      if (item.hosted && !cloud.isConfigured()) continue;
-      if (item.admin && !cloud.isAdmin()) continue;
       const link = el('a', {
         class: 'nav-link',
         href: '#',
@@ -203,7 +188,6 @@ function buildSidenav() {
 
   dom.sidenav.appendChild(
     el('div', { class: 'sidenav-footer' }, [
-      cloud.isConfigured() ? accountBlock() : null,
       el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.project || doc.client || fallbackTag() }),
       el('button', {
         class: 'cx-btn mini',
@@ -219,9 +203,8 @@ function buildSidenav() {
 /**
  * Timeline or calendar.
  *
- * Only rendered when a calendar backend is configured. A build with no
- * `rcSupabaseUrl` — which is every build until one is set up — shows nothing
- * here and behaves exactly as it always has.
+ * Only rendered where a folder can be opened, because that is where the
+ * calendar is kept.
  */
 function workspaceSwitch() {
   const button = (id, label, iconName) => el('button', {
@@ -240,8 +223,7 @@ function workspaceSwitch() {
 
 /** What to call a project that has not been given a client or project. */
 function fallbackTag() {
-  if (!cloud.isConfigured()) return 'Local project';
-  return { owner: 'You own this', editor: 'Shared with you', viewer: 'View only' }[cloud.getRole()] || 'Untitled';
+  return isFileMode() ? 'Shared folder' : 'Local project';
 }
 
 function updateNav() {
@@ -718,7 +700,7 @@ function refreshStatus() {
       : `${st.folder}/${st.plan}`;
   } else {
     dom.storageText.classList.remove('behind');
-    dom.storageText.textContent = isHosted() ? 'Supabase' : isFallback() ? 'localStorage' : 'IndexedDB';
+    dom.storageText.textContent = isFallback() ? 'localStorage' : 'IndexedDB';
     dom.storageText.title = '';
   }
 }
@@ -755,19 +737,6 @@ function wireEvents() {
   on(EV.DOC_REPLACED, refresh);
   on(EV.HISTORY_CHANGED, refresh);
 
-  // Which panes exist depends on the account — the Team pane is for
-  // administrators — so the sidebar is rebuilt, not just refreshed, when the
-  // signed-in user changes.
-  on(EV.AUTH_CHANGED, () => {
-    buildSidenav();
-    refreshStatus();
-  });
-  // Whether the switch is drawn at all depends on the calendar's account, which
-  // is signed in long after the sidebar was first built.
-  on(EV.RC_AUTH_CHANGED, () => {
-    buildSidenav();
-    if (rcClient.isViewer()) workspace.show('calendar');
-  });
   on(EV.ACCESS_CHANGED, refresh);
   // The switch is two buttons; repainting the sidebar to move a highlight
   // would throw away the pane list and its scroll position for nothing.

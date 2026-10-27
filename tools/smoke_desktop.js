@@ -183,6 +183,39 @@ function fakeShell() {
       return removed;
     },
     startup_lock_check: () => ({ ...shell.startupPen }),
+    // The calendar's files under calendar/, as text — plan::read_text and friends.
+    data_read: ({ path: rel }) => {
+      const record = shell.files[rel];
+      return record ? { text: record.text, stamp: stampOf(record) } : null;
+    },
+    data_stat: ({ path: rel }) => (shell.files[rel] ? stampOf(shell.files[rel]) : null),
+    data_write: ({ path: rel, text, expected }) => {
+      const record = shell.files[rel];
+      if (expected && (!record || stampOf(record).size !== expected.size || stampOf(record).modified !== expected.modified)) {
+        throw { kind: 'conflict', message: `${rel} changed on disk, so the save was refused`, current: record ? stampOf(record) : null, expected };
+      }
+      shell.files[rel] = { text, modified: Date.now() + (shell.writes++) };
+      return stampOf(shell.files[rel]);
+    },
+    intake_list: ({ path: dir }) => {
+      const prefix = dir ? `${dir.replace(/\/+$/, '')}/` : '';
+      return Object.entries(shell.files)
+        .filter(([name]) => name.startsWith(prefix) && !name.slice(prefix.length).includes('/'))
+        .map(([name, record]) => ({ name: name.slice(prefix.length), ...stampOf(record) }));
+    },
+    intake_delete: ({ path: rel }) => {
+      const had = !!shell.files[rel];
+      delete shell.files[rel];
+      return had;
+    },
+    intake_read: ({ path: rel }) => {
+      if (!shell.files[rel]) throw { kind: 'not-found', message: `${rel} is not in that folder.` };
+      return Array.from(new TextEncoder().encode(shell.files[rel].text));
+    },
+    intake_write: ({ path: rel, bytes: data }) => {
+      shell.files[rel] = { text: `${data.length} bytes`, modified: Date.now() };
+      return stampOf(shell.files[rel]);
+    },
     attachment_write: ({ id, bytes: data }) => {
       shell.files[`attachments/${id}`] = { text: String(data.length), modified: Date.now() };
       return data.length;
@@ -341,7 +374,7 @@ async function main() {
   /* ── The loader ───────────────────────────────────────────────────────── */
   console.log('\nThe shell');
   await launch({ files: {}, settings: { folder: '', plan: '' } });
-  // Nothing to update against: the deployment is unreachable from here unless a
+  // Nothing to update against: the channel is unreachable from here unless a
   // test says otherwise, which is also the "no network" case.
   await page.route(`${CHANNEL}/**`, (route) => route.abort());
   await boot();
@@ -555,8 +588,8 @@ async function main() {
     (await page.locator('.cx-modal').count()) === 0 &&
       (await page.locator('.cx-toast', { hasText: /pen/i }).count()) === 0);
 
-  /* ── Updates from the deployment ─────────────────────────────────────── */
-  console.log('\nUpdating from the deployment');
+  /* ── Updates from GitHub ─────────────────────────────────────────────── */
+  console.log('\nUpdating from the desktop-kit branch');
   const shipped = JSON.parse(fs.readFileSync(path.join(SHELL, 'shipped.json'), 'utf8'));
   const newer = {
     version: '9.9.9',
@@ -576,10 +609,13 @@ async function main() {
     files: { 'bart-cbtc.json': { text: samplePlan(), modified: Date.now() } },
   });
   const answer = { version: {}, payload: {} };
-  await page.route(`${CHANNEL}/desktop/version.json`, (route) =>
+  let payloadAsked = 0;
+  await page.route(`${CHANNEL}/version.json`, (route) =>
     route.fulfill({ contentType: 'application/json', body: JSON.stringify(answer.version) }));
-  await page.route(`${CHANNEL}/desktop/payload.json`, (route) =>
-    route.fulfill({ contentType: 'application/json', body: JSON.stringify(answer.payload) }));
+  await page.route(`${CHANNEL}/payload.json`, (route) => {
+    payloadAsked++;
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(answer.payload) });
+  });
 
   // A payload that is not a release — a captive portal's page, a truncated
   // download — must be rejected, because storing it breaks the *next* launch,
@@ -590,6 +626,21 @@ async function main() {
   await page.waitForTimeout(3500);
   check('a payload that is not a release is refused',
     await page.evaluate(() => window.CX_SHELL?.update === null));
+
+  // A kit that needs Rust commands this installer lacks is never downloaded:
+  // the application says a new installer is needed, and keeps running.
+  answer.version = { version: '10.0.0', builtAt: newer.builtAt, requiresShell: shipped.shell + 1 };
+  const askedBefore = payloadAsked;
+  await page.evaluate(() => window.CX_SHELL.checkNow());
+  await page.waitForTimeout(800);
+  check('a kit that needs a newer installer is not downloaded',
+    payloadAsked === askedBefore && (await page.evaluate(() => window.CX_SHELL?.update?.installer === true)),
+    `${payloadAsked - askedBefore} payload request(s)`);
+  const installerSaid = await page.locator('.cx-toast', { hasText: /10\.0\.0/ }).innerText().catch(() => '');
+  check('and the application says a new installer is needed, from GitHub Releases',
+    /new installer/i.test(installerSaid) && /GitHub Releases/.test(installerSaid), installerSaid.replace(/\n/g, ' ').slice(0, 100));
+  await page.locator('.cx-toast', { hasText: /10\.0\.0/ }).locator('button').first().click().catch(() => {});
+  answer.version = { version: '9.9.9', builtAt: newer.builtAt, requiresShell: shipped.shell };
 
   // Now a real one.
   answer.payload = newer;
@@ -669,81 +720,40 @@ async function main() {
     await page.evaluate(() => window.CX_SHELL?.source === 'shipped') && (await page.locator('.tl-obj').count()) > 0,
     await page.evaluate(() => window.CX_SHELL?.source));
 
-  /* ── The resource calendar, in the installer ──────────────────────────
-     The desktop build had no calendar at all, and not by accident: the config
-     was written blank and the vendored client was stripped, so the workspace
-     switch was never even drawn. The plan still has no backend here — that is
-     the property the whole split exists to protect — but the calendar has its
-     own, exactly as the published site does. */
-  console.log('\nThe resource calendar, in the installer');
-
-  // Rebuilt in place with the keys present, which is the only difference
-  // between the two shapes. Everything else about the shell is identical.
-  execFileSync('node', [path.join(ROOT, 'tools', 'desktop.js')], {
-    cwd: ROOT,
-    stdio: 'pipe',
-    env: { ...process.env, RC_SUPABASE_URL: 'https://rc-stub.supabase.co', RC_SUPABASE_ANON_KEY: 'stub-anon-key' },
+  /* ── The resource calendar, in the folder ─────────────────────────────
+     Every installer carries the calendar now, with no backend of any kind: it
+     is a set of files under calendar/ in the folder the plan is in, written
+     through the shell's own commands. */
+  console.log('\nThe resource calendar, in the folder');
+  check('the installer carries no configuration and no database client',
+    !fs.existsSync(path.join(SHELL, 'config.js')) && !fs.existsSync(path.join(SHELL, 'vendor'))
+      && !/supabase/i.test(fs.readFileSync(path.join(SHELL, 'app.bundle.js'), 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')));
+  await launch({
+    settings: { folder: 'C:\\OneDrive\\BART', plan: 'bart-cbtc.json', display_name: 'Alex' },
+    files: { 'bart-cbtc.json': { text: samplePlan(), modified: Date.now() } },
   });
-
-  check('the vendored client is in the installer, not fetched from anywhere',
-    fs.existsSync(path.join(SHELL, 'vendor', 'supabase.js')));
-
-  /* A stand-in for the client, so the calendar can start without a network.
-     Only what booting needs: how it behaves once signed in is 172 checks in
-     tools/smoke_calendar.js and is the same bundle either way. */
-  const stubSupabase = () => {
-    window.supabase = {
-      createClient: () => ({
-        auth: {
-          getSession: () => Promise.resolve({ data: { session: null } }),
-          onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
-          signOut: () => Promise.resolve({ error: null }),
-        },
-        from: () => ({
-          select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }) }),
-        }),
-      }),
-    };
-  };
-
-  await launch({ files: {}, settings: { folder: '', plan: '' } }, stubSupabase);
   await page.route(`${CHANNEL}/**`, (route) => route.abort());
   await boot();
-
-  check('the plan still has no backend, which is the whole point of the split',
-    await page.evaluate(() => window.CX_CONFIG.supabaseUrl === '' && window.CX_CONFIG.supabaseAnonKey === ''));
-  check('while the calendar has one of its own',
-    await page.evaluate(() => window.CX_CONFIG.rcSupabaseUrl === 'https://rc-stub.supabase.co'));
-  check('so the workspace switch is drawn at last',
-    (await page.locator('.ws-switch').count()) === 1);
-
-  await page.locator('.ws-switch button', { hasText: /calendar/i }).click();
-  await page.waitForTimeout(900);
-  const rcText = await page.locator('#rc-frame').innerText();
-  check('and the calendar opens on its own sign-in rather than an empty state',
-    !/No resource calendar in this build/i.test(rcText), rcText.split('\n').slice(0, 2).join(' / '));
+  check('the workspace switch is drawn', (await page.locator('.ws-switch').count()) === 1);
+  await page.locator('.ws-btn', { hasText: 'Calendar' }).click();
+  await page.waitForSelector('#rc-frame [data-action="start-empty"]', { timeout: 15000 }).catch(() => {});
+  check('a folder with no calendar offers to bring the old one in or start one',
+    (await page.locator('#rc-frame [data-action="import"]').count()) === 1
+      && (await page.locator('#rc-frame [data-action="start-empty"]').count()) === 1);
+  await page.locator('#rc-frame [data-action="start-empty"]').click();
+  await page.waitForSelector('#rc-frame .rc-tabs', { timeout: 15000 }).catch(() => {});
+  const written = await files();
+  check('starting one writes calendar/ through the shell, beside the plan',
+    written.includes('calendar/db.json') && written.includes('calendar/registers.json')
+      && (await calls()).includes('data_write'), written.filter((f) => f.startsWith('calendar/')).join(' | '));
+  await page.waitForFunction(() => Object.keys(window.__desktop.files).some((f) => f.startsWith('calendar/pen/')), null, { timeout: 8000 }).catch(() => {});
+  check('and the calendar opens on it, with the pen', (await page.locator('#rc-frame .rc-tabs').count()) > 0
+    && (await files()).some((f) => f.startsWith('calendar/pen/')), (await files()).filter((f) => f.startsWith('calendar/pen/')).join(' '));
   check('the timeline is hidden rather than torn down',
     await page.evaluate(() => document.querySelectorAll('.tl-obj').length > 0));
+  await page.locator('.ws-btn', { hasText: 'Timeline' }).click();
+  await page.waitForTimeout(400);
 
-  /* And back. The default shape is what ships to anyone without the keys, and
-     it has to stay exactly what it was — no calendar, no client, no switch. */
-  execFileSync('node', [path.join(ROOT, 'tools', 'desktop.js')], { cwd: ROOT, stdio: 'pipe' });
-  check('without the keys the client is not shipped at all',
-    !fs.existsSync(path.join(SHELL, 'vendor', 'supabase.js')));
-  await launch({ files: {}, settings: { folder: '', plan: '' } });
-  await page.route(`${CHANNEL}/**`, (route) => route.abort());
-  await boot();
-  check('and that build has no calendar switch, as before',
-    (await page.locator('.ws-switch').count()) === 0);
-  check('but the timeline is untouched by any of it',
-    (await page.locator('.tl-obj').count()) > 0);
-
-  /* An invitation link has to point at the site, not at the window ──────
-     `location.origin` inside the shell is `tauri.localhost`. An invitation
-     generated from the installed application therefore copied
-     `tauri.localhost/#join=…` to the clipboard — an address that means nothing
-     in anybody else's browser, and whose only symptom is a colleague saying
-     the link does not work. */
   /* Page zoom, as a browser has it ─────────────────────────────────────── */
   console.log('\nPage zoom');
   const zoomOf = () => page.evaluate(() => window.__desktop.zoom?.value ?? null);
@@ -765,27 +775,6 @@ async function main() {
   await zoomControl.locator('.sb-zoom-reset').click();
   await page.waitForTimeout(150);
   check('the percentage puts it back to 100%', (await zoomOf()) === 1);
-
-  console.log('\nAn invitation link points at the site, not at this window');
-
-  const joinFrom = (host) => page.evaluate((h) => {
-    // The function as `ui/rc_roster.js` computes it, against the page it is
-    // actually running in.
-    const channel = String(window.CX_SHELL?.channel || '').replace(/\/+$/, '');
-    const base = channel ? `${channel}/` : window.location.origin + window.location.pathname;
-    return `${base}#join=${encodeURIComponent(h)}`;
-  }, host);
-
-  check('the window really is on tauri.localhost or a local origin',
-    !/^https:\/\/cx-timeline/.test(await page.evaluate(() => window.location.origin)),
-    await page.evaluate(() => window.location.origin));
-  const link = await joinFrom('them@example.com');
-  check('yet the link it hands out is the deployment',
-    link.startsWith(`${CHANNEL}/#join=`), link);
-  check('and it carries the address it was invited for',
-    link.endsWith('#join=them%40example.com'), link);
-  check('never the window\'s own internal address',
-    !/tauri\.localhost|localhost:\d+/.test(link), link);
 
   /* ── Console ─────────────────────────────────────────────────────────── */
   console.log('\nConsole');

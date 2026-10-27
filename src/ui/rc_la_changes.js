@@ -12,7 +12,7 @@ import {
   selectInput, textInput, badge, emptyState, checkbox, segmented, openModal,
 } from './components.js';
 import {
-  notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs,
+  notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, authorNames,
 } from './rc_util.js';
 import { toISO, addDays } from '../core/dates.js';
 
@@ -316,10 +316,10 @@ function meaningLookup(legendRows) {
   return (hex) => byHex.get(String(hex || '').toUpperCase()) || '';
 }
 
-/** A person's name for an account id, from the roster (including people who have left). */
+/** A person's name for the id an edit was stamped with, from the roster (including people who have left). */
 function nameLookup(people) {
-  const names = new Map((people || []).filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
-  return (id) => (id ? names.get(id) || 'An account no longer on the roster' : 'Unknown');
+  const names = authorNames(people);
+  return (id) => (id ? names(id) || 'An account no longer on the roster' : 'Unknown');
 }
 
 /**

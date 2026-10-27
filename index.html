@@ -64,26 +64,6 @@
     </noscript>
 
     <!--
-      Where the backend lives, if there is one. Blank means local-only: no
-      account, browser storage, works by double-clicking this file. See
-      config.js.
-    -->
-    <script src="config.js"></script>
-
-    <!--
-      A phone is sent to the phone app (m/) before the bundle is fetched, so
-      "Add to Home Screen" installs the app rather than bookmarking this page.
-      Only where the phone app is published; see phone.js.
-    -->
-    <script src="phone.js"></script>
-
-    <!--
-      The Supabase client is vendored rather than fetched from a CDN, and is
-      not loaded here: src/core/sdk.js fetches it the first time a client is
-      made, so a page that never signs in never downloads it.
-    -->
-
-    <!--
       The application is authored as ES modules in src/ and linked into this
       single bundle by tools/build.js. Browsers refuse `type="module"` over
       file://, so the bundle is what makes "double-click index.html" work with

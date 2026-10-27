@@ -22,11 +22,9 @@ import url from 'node:url';
 pinNodeClock();
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
-/* The site the browser opens: the repository by default, or a published copy
-   (`CX_SITE=dist`), so the minified, renamed files are driven exactly as the
-   source is. Its config.js is the repository's either way — this suite is the
-   local mode, whatever shape the copy was published in. */
-const SITE = path.resolve(ROOT, process.env.CX_SITE || '.');
+/* The page the browser opens: the repository's own index.html and bundles —
+   what the desktop shell runs, without the shell. */
+const SITE = ROOT;
 const PORT = 8231;
 
 const MIME = {
@@ -42,7 +40,7 @@ function serve() {
     const server = http.createServer((req, res) => {
       const requested = decodeURIComponent(new URL(req.url, 'http://x').pathname);
       const rel = requested === '/' ? 'index.html' : requested.replace(/^\/+/, '');
-      const file = path.join(rel === 'config.js' ? ROOT : SITE, rel);
+      const file = path.join(SITE, rel);
       fs.readFile(file, (err, data) => {
         if (err) {
           res.writeHead(404).end('nf');
@@ -78,7 +76,7 @@ async function main() {
   page.on('pageerror', (err) => consoleErrors.push(`pageerror: ${err.message}`));
 
   const requested = [];
-  page.on('request', (req) => requested.push(new URL(req.url()).pathname));
+  page.on('request', (req) => requested.push(req.url()));
 
   console.log('\nBoot');
   await page.goto(`http://localhost:${PORT}/index.html`, { waitUntil: 'load' });
@@ -92,13 +90,13 @@ async function main() {
   });
   await page.waitForTimeout(1400);
 
-  /* The timeline is most of what anybody opens, and it needs neither the
-     Supabase client (no backend here, and none for the plan in any shape) nor
-     the calendar's own styling — both are fetched when something asks. */
-  check('the Supabase client is not downloaded by a page with no backend',
-    !requested.some((p) => p.endsWith('/vendor/supabase.js')), requested.filter((p) => p.includes('vendor')).join(', '));
+  /* The timeline is most of what anybody opens, and it does not need the
+     calendar — its bundle and its styling are fetched when it is opened. */
+  check('nothing is asked of any server but the page\u2019s own',
+    requested.every((p) => p.startsWith(`http://localhost:${PORT}/`) || p.startsWith('data:') || p.startsWith('blob:')),
+    requested.filter((p) => !p.startsWith(`http://localhost:${PORT}/`)).slice(0, 3).join(', '));
   check('nor the calendar\u2019s stylesheet, nor its bundle, before the calendar is opened',
-    !requested.some((p) => /\/css\/rc\.|\/calendar\.(bundle|[0-9a-f]{10})\.js$/.test(p)));
+    !requested.some((p) => /\/css\/rc\.css|\/calendar\.bundle\.js/.test(p)));
 
   check('splash cleared', (await page.locator('#boot').count()) === 0);
   check('sidebar rendered', (await page.locator('#sidenav .nav-link').count()) > 8);
@@ -2210,28 +2208,6 @@ async function main() {
     check('and a PDF\u2019s creation time, which says UTC, is UTC',
       dates.created.slice(8, 10) === String(dates.utcHour).padStart(2, '0'), `${dates.created} at ${dates.utcHour}:00 UTC`);
   }
-
-  /* With no network the timeline still opens: the site's service worker keeps
-     the page and what it loads (sw.js), and the plan is this browser's own. */
-  console.log('\nOffline');
-  const workerReady = await page.evaluate(() => Promise.race([
-    navigator.serviceWorker.ready.then(() => true),
-    new Promise((r) => setTimeout(() => r(false), 8000)),
-  ]));
-  check('the site registers its service worker', workerReady);
-  await page.reload({ waitUntil: 'load' });
-  await page.waitForSelector('.tl-root', { timeout: 15000 });
-  await context.setOffline(true);
-  let offlineBoot = false;
-  try {
-    await page.reload({ waitUntil: 'load' });
-    await page.waitForSelector('.tl-obj', { timeout: 15000 });
-    offlineBoot = (await page.locator('.tl-obj').count()) > 0;
-  } catch { /* reported below */ }
-  await context.setOffline(false);
-  check('and with the network off, the timeline opens with its plan', offlineBoot);
-  await page.reload({ waitUntil: 'load' });
-  await page.waitForSelector('.tl-root', { timeout: 15000 });
 
   /* Less motion, when the system asks for it: CSS cuts every transition, and
      the scrolls the application makes from script stop gliding too. */

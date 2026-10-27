@@ -14,22 +14,20 @@
  * On a hosted deployment a project can be open read-only. Because every write
  * funnels through the three entry points below, one guard covers the whole
  * application — there is no path to a mutation that does not pass through
- * here. The guard is a courtesy to the user, not the security boundary: that
- * is row-level security in Postgres, which refuses the same writes even if
- * this check were removed.
+ * here. The write guard in `core/filestore.js` is what keeps a colleague's
+ * save from being overwritten; this keeps a read-only session from editing at
+ * all.
  *
- * Imports: util, events, cloud, filestore, access, model, history, lookahead.
+ * Imports: util, events, filestore, access, model, history, lookahead.
  */
 
 import { deepClone, clamp, uid } from './util.js';
 import { emit, EV } from './events.js';
-import { isReadOnly } from './cloud.js';
-/* The other way a session can be read-only. `cloud.js` answers for a hosted
-   project; this answers for a plan in a shared folder that a colleague is
-   holding the pen on. Both had to be asked here: the interface hid the buttons
-   for a folder reader but the store still accepted the edit, so a keystroke
-   went through, autosave was refused by the folder, and the work was marked
-   saved without ever having been written anywhere. */
+/* A plan in a shared folder that a colleague is holding the pen on is
+   read-only, and it has to be asked here: the interface hid the buttons for a
+   folder reader but the store still accepted the edit, so a keystroke went
+   through, autosave was refused by the folder, and the work was marked saved
+   without ever having been written anywhere. */
 import { isViewer as folderViewer } from './filestore.js';
 import { planLocked, readView, writeView } from './access.js';
 import {
@@ -103,16 +101,14 @@ function refuseWrite(label) {
 }
 
 /**
- * True when the open project is read-only for the signed-in user.
+ * True when the open plan is read-only in this session.
  *
- * Three different facts, and any one of them is enough. The cloud project may
- * be shared with them as a viewer; a colleague may hold the pen on the folder;
- * or the account may not be allowed to edit the plan at all, which is what
- * `planLocked()` says — a resource-calendar member reads the plan and never
- * writes it, and unlike the pen that is not a turn they can take.
+ * Two different facts, and either is enough: a colleague may hold the pen on
+ * the folder, or this session may not edit the plan at all, which is what
+ * `planLocked()` says — unlike the pen, that is not a turn somebody can take.
  */
 export function isDocReadOnly() {
-  return isReadOnly() || folderViewer() || planLocked();
+  return folderViewer() || planLocked();
 }
 
 /* ── Indexing ──────────────────────────────────────────────────────────── */

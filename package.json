@@ -1,7 +1,7 @@
 {
   "name": "cx-timeline",
   "version": "1.0.0",
-  "description": "CX Timeline — hosted interactive timeline & commissioning planner",
+  "description": "CX Timeline — a timeline and commissioning planner, with its resource calendar, kept in a OneDrive folder",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,33 +11,27 @@
     "watch": "node tools/build.js --watch",
     "test": "node tools/run_tests.js",
     "serve": "node tools/serve.js",
-    "test:sql": "node tools/test_sql.js",
     "test:smoke": "node tools/smoke.js",
     "test:folder": "node tools/smoke_folder.js",
     "test:desktop": "node tools/smoke_desktop.js",
-    "test:hosted": "node tools/smoke_hosted.js",
     "test:rust": "cd src-tauri && cargo test --lib --no-default-features",
-    "build:dist": "node tools/build.js && node tools/dist.js",
-    "build:folder": "node tools/build.js && node tools/dist.js --no-backend",
     "build:desktop": "node tools/build.js && node tools/desktop.js",
     "desktop": "npm run build:desktop && cd src-tauri && cargo tauri dev",
     "desktop:installer": "npm run build:desktop && cd src-tauri && cargo tauri build",
     "test:calendar": "node tools/smoke_calendar.js",
-    "test:mobile": "node tools/smoke_mobile.js",
-    "icons:mobile": "node tools/pwa_icons.js",
     "test:lookahead": "node tools/test_lookahead.js",
-    "build:calendar": "node tools/build.js && node tools/dist.js --calendar",
-    "test:dist": "node tools/test_dist.js",
     "test:serial": "CX_TEST_JOBS=1 node tools/run_tests.js",
     "test:folder-rules": "node tools/test_folder_rules.js",
     "test:la-edit": "node tools/test_la_edit.js",
     "test:tawr": "node tools/test_tawr.js",
-    "test:xlsx": "node tools/test_xlsx_compat.js"
+    "test:xlsx": "node tools/test_xlsx_compat.js",
+    "build:kit": "node tools/build.js && node tools/desktop.js --kit dist-kit",
+    "test:kit": "node tools/test_kit.js",
+    "test:rc-db": "node tools/test_rc_db.js"
   },
   "cxTimeline": {
-    "_comment": "deployment: 'hosted' saves the plan to Supabase and requires a backend at build time; 'folder' publishes with no backend at all and keeps the plan in a folder the user picks; 'calendar' is 'folder' plus the resource calendar — the plan still has no backend and still lives in a folder, while the calendar has its own separate Supabase project so the team can read it in a browser. tools/dist.js reads this, so the shape of a deployment is decided here, in the repository, rather than in a CI setting nobody can see. The calendar shape needs RC_SUPABASE_URL and RC_SUPABASE_ANON_KEY as build variables and refuses to publish without them. updateChannel: the deployment an installed desktop copy follows for updates — blank means an installed copy never updates itself.",
-    "deployment": "calendar",
-    "updateChannel": "https://cx-timeline.aik-khoury.workers.dev"
+    "_comment": "updateChannel: where an installed desktop copy looks for updates — the desktop-kit branch, which .github/workflows/kit.yml writes once Checks passes on the default branch. It must be on raw.githubusercontent.com, the one host src-tauri/tauri.conf.json lets the window fetch from. Blank means an installed copy never updates itself.",
+    "updateChannel": "https://raw.githubusercontent.com/khouryai/Cx-Timeline/desktop-kit"
   },
   "engines": {
     "node": ">=18"

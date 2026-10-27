@@ -13,7 +13,7 @@
  * its tail, so it is on screen when the run ends.
  *
  *   node tools/run_tests.js                 every suite
- *   node tools/run_tests.js smoke test_sql  just these
+ *   node tools/run_tests.js smoke test_kit  just these
  *   CX_TEST_JOBS=1 node tools/run_tests.js  one at a time
  */
 
@@ -27,14 +27,11 @@ const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..'
 /* A lane runs in order. Put two suites in one lane when they share state on
    disk or a fixed port. */
 const LANES = [
-  ['test_dist', 'smoke_desktop'], // both assemble dist-desktop/
-  ['test_lookahead', 'test_folder_rules', 'test_la_edit', 'test_tawr'],
+  ['test_kit', 'smoke_desktop'], // both assemble dist-desktop/
+  ['test_lookahead', 'test_folder_rules', 'test_la_edit', 'test_tawr', 'test_rc_db'],
   ['smoke'],
   ['smoke_folder'],
-  ['smoke_hosted'],
   ['smoke_calendar'],
-  ['smoke_mobile'], // its own server on a free port; writes nothing to disk
-  ['test_sql'],
   ['test_xlsx_compat'], // skips itself where LibreOffice Calc is not installed
 ];
 

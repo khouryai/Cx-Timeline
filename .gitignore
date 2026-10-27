@@ -3,6 +3,7 @@ node_modules/
 .DS_Store
 /tmp/
 dist/
+dist-kit/
 
 # `package-lock.json` is deliberately NOT ignored. Ignoring it made every
 # browser suite silently skip in CI for the life of the workflow: `npm ci`

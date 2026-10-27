@@ -339,6 +339,26 @@ fn intake_hash(folder: String, path: String) -> Reply<String> {
     plan::hash_file(Path::new(&folder), &path).map_err(Failure::from)
 }
 
+/* ── The calendar's files ──────────────────────────────────────────────── */
+
+/// The resource calendar's tables, as text, under `calendar/` in the folder —
+/// guarded and atomic like the plan. A missing file is `null`, not an error.
+
+#[tauri::command]
+fn data_read(folder: String, path: String) -> Reply<Option<plan::PlanRead>> {
+    plan::read_text(Path::new(&folder), &path).map_err(Failure::from)
+}
+
+#[tauri::command]
+fn data_stat(folder: String, path: String) -> Reply<Option<plan::Stamp>> {
+    plan::stat_text(Path::new(&folder), &path).map_err(Failure::from)
+}
+
+#[tauri::command]
+fn data_write(folder: String, path: String, text: String, expected: Option<plan::Stamp>) -> Reply<plan::Stamp> {
+    plan::write_text(Path::new(&folder), &path, &text, expected).map_err(Failure::from)
+}
+
 /// Put the plan and the pen in the window title, so the state is legible from
 /// the taskbar without bringing the window forward.
 #[tauri::command]
@@ -376,6 +396,9 @@ fn main() {
             intake_move,
             intake_delete,
             intake_hash,
+            data_read,
+            data_stat,
+            data_write,
             set_window_title,
         ])
         .run(tauri::generate_context!())

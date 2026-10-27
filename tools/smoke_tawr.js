@@ -4,7 +4,7 @@
  *
  * The whole flow an administrator walks: a week of the look-ahead becomes one
  * draft per location and shift; BART's form is checked and uploaded into the
- * private bucket; a name, a phone and a signature are saved once; the wording
+ * folder, under calendar/tawr/; a name, a phone and a signature are saved once; the wording
  * for an activity is mapped; drafts follow the look-ahead without losing an
  * edit; a request is approved, downloaded as a filled PDF that reads back field
  * for field, revised, and a draft discarded.
@@ -124,12 +124,12 @@ export async function tawrRequests(page, { check, shot = null }) {
   await settle();
   check('a form missing fields is refused, naming them',
     /missing 2 fields.*work_description/.test(await toasts())
-      && !(await page.evaluate(() => (window.__rc.uploads || []).some((u) => u.startsWith('tawr/')))));
+      && !(await page.evaluate(() => window.__folder.list('calendar/tawr/').some((k) => k.endsWith('.pdf')))));
   const blank = buildFormPdf(FIELD_SPECS);
   await fileInput.setInputFiles({ name: 'BART_TAWR.pdf', mimeType: 'application/pdf', buffer: Buffer.from(blank) });
   await settle();
-  check('BART\'s form goes into the private bucket, never the site',
-    await page.evaluate(() => (window.__rc.uploads || []).includes('tawr/template/tawr.pdf')));
+  check('BART\'s form goes into the shared folder beside the calendar, never the application',
+    await page.evaluate(() => window.__folder.files['calendar/tawr/template.pdf']?.data?.length > 1000));
   check('and what was uploaded is recorded', await page.evaluate(() => {
     const info = window.__rc.rows.rc_tawr_settings.find((r) => r.key === 'template_info');
     return info && JSON.parse(info.value).fields === 141;

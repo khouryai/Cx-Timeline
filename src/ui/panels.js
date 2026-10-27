@@ -15,7 +15,6 @@ import { el, clear, debounce } from '../core/util.js';
 import { on, emit, EV } from '../core/events.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
-import { paneTeam } from './auth.js';
 import { paneP6 } from './p6.js';
 import { paneLookahead } from './lookahead.js';
 import * as exporters from '../io/exporters.js';
@@ -24,10 +23,10 @@ import { paneLanes, panePalette, paneOutline, paneReleases, paneCampaigns, paneR
   paneBaselines, paneLegendSettings, paneHistory } from './pane_plan.js';
 import { paneSearch, paneFilters } from './pane_filters.js';
 import { paneIo, exportMenu } from './pane_io.js';
-import { paneProjects, paneBackups } from './pane_projects.js';
+import { paneBackups } from './pane_backups.js';
 import { paneSettings, paneLists } from './pane_settings.js';
 export const PANES = [
-  'projects', 'team', 'p6', 'lookahead', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
+  'p6', 'lookahead', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
   'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
   'settings',
 ];
@@ -146,8 +145,6 @@ export function toggleDock() {
 /* ── Router ────────────────────────────────────────────────────────────── */
 
 const RENDERERS = {
-  projects: paneProjects,
-  team: paneTeam,
   p6: paneP6,
   lookahead: paneLookahead,
   lanes: paneLanes,
@@ -169,7 +166,7 @@ const RENDERERS = {
 };
 
 export const TITLES = {
-  projects: 'Projects', team: 'Team & access', p6: 'P6 schedule', lookahead: 'Look-ahead',
+  p6: 'P6 schedule', lookahead: 'Look-ahead',
   lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
   campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
   baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',

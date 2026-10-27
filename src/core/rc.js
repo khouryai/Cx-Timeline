@@ -1,438 +1,347 @@
 /**
- * The Resource Calendar backend.
+ * The Resource Calendar's data.
  *
- * A second, entirely separate Supabase client from `core/cloud.js`, and the
- * separation is the feature rather than duplication.
+ * The calendar used to live in Postgres, behind Supabase, with accounts, roles
+ * and row-level security. It lives in the shared folder now, beside the plan:
+ * `core/rc_db.js` keeps its tables as JSON files under `calendar/` and answers
+ * the same questions the Supabase client did, so every function here asks
+ * exactly what it asked before and the screens did not change. Nothing leaves
+ * this computer but the files OneDrive syncs.
  *
- * The timeline's plan is proprietary: it holds the P6 project and it never
- * leaves its OneDrive folder. The resource calendar holds none of that, so it
- * lives in Postgres where the deputy and the team can reach it from a browser.
- * Until now that boundary was guaranteed by the *build* — `tools/desktop.js`
- * writes a blank config and `tools/dist.js --no-backend` strips the Supabase
- * client outright, so the desktop application had no backend at all and could
- * not have reached one. Putting a client back in the page reverses that, and a
- * promise that used to be structural would become a convention.
+ * There are no accounts. Whoever has the application and the folder is an
+ * editor; the folder's sharing is who may. One person writes the calendar at a
+ * time — the **pen**, `core/rc_folder.js`, the plan's rules — and anybody else
+ * opens it read-only and is told who has it. Who you are is the name set in the
+ * application (the name the plan's pen already shows), matched to the roster.
  *
- * So it is made structural again, three ways:
- *
- *   1. A different configuration key. `CX_CONFIG.supabaseUrl` stays blank
- *      forever and is the *plan's* backend; this module reads
- *      `CX_CONFIG.rcSupabaseUrl` and nothing else. Neither can be mistaken for
- *      the other.
- *   2. A different module. Nothing on the plan's storage path imports this
- *      file, and this file imports nothing that reads the plan — no store, no
- *      storage, no filestore. The build fails on import cycles, and the layer
- *      check in `tools/build.js` fails on a plan module reaching in here.
- *   3. A test that proves it. `tools/smoke_isolation.js` boots with this
- *      backend stubbed, edits the plan, and asserts that nothing carrying plan
- *      content ever left.
- *
- * There is no document here and no autosave. The plan is one JSON object saved
- * whole; this is rows, written one at a time, because the reports have to
- * answer arbitrary date ranges and two people have to edit at once.
- *
- * Imports: util, events, sdk.
+ * Imports: events, filestore, rc_db, rc_folder.
  */
 
-import { emit, EV } from './events.js';
-import { loadSupabase } from './sdk.js';
+import { emit, on, EV } from './events.js';
+import * as filestore from './filestore.js';
+import { createDb, TABLE_NAMES, FORMAT } from './rc_db.js';
+import * as folder from './rc_folder.js';
+
+/* ── State ─────────────────────────────────────────────────────────────── */
+
+/** The database over the connected folder, or null. */
+let db = null;
+/** Which folder `db` is over, so connecting another starts again. */
+let openFolder = '';
+/** 'no-folder' | 'empty' | 'open' | 'failed' */
+let state = 'no-folder';
+let problem = null;
+/** The roster row the name in the application matches, or a stand-in for it. */
+let person = null;
+let pollTimer = null;
+let starting = null;
+
+const POLL_MS = 15000;
 
 /* ── Configuration ─────────────────────────────────────────────────────── */
 
-function config() {
-  return (typeof window !== 'undefined' && window.CX_CONFIG) || {};
-}
-
 /**
- * True when this build points at a resource-calendar backend.
- *
- * Deliberately *not* `cloud.isConfigured()`. A build can have this and not
- * that — which is exactly the shape the deployment wants: the plan in a
- * folder, the calendar in Postgres.
+ * True when this build can hold a calendar at all: it needs a folder, which
+ * the desktop application always can and a browser can only in Edge or Chrome.
  */
 export function isConfigured() {
-  const { rcSupabaseUrl, rcSupabaseAnonKey } = config();
-  return Boolean(rcSupabaseUrl && rcSupabaseAnonKey);
+  return filestore.isSupported();
 }
 
-/* ── Private state ─────────────────────────────────────────────────────── */
+/** Where the calendar stands: no folder, a folder with none in it, open, or failed. */
+export function status() {
+  return { state, problem: problem ? String(problem.message || problem) : null, folder: openFolder };
+}
 
-let client = null;
-let user = null;
-let person = null;   // the caller's rc_people row, or null
-let ready = false;
+/* ── Who is working ────────────────────────────────────────────────────── */
 
-/* ── Lifecycle ─────────────────────────────────────────────────────────── */
+/** The name set in the application, or '' while nobody has set one. */
+export function displayName() {
+  const name = filestore.getDisplayName();
+  return name === 'Someone' ? '' : name;
+}
+
+const fold = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 /**
- * Create the client and restore any session.
+ * Match the name in the application to somebody on the roster.
  *
- * Never throws, and never blocks. The timeline has to open with no network at
- * all, so a backend that is unreachable degrades to "not signed in" and the
- * Resource Calendar simply says so when you switch to it.
+ * Exactly, folded — the rule every name in this calendar is matched by. A name
+ * nobody on the roster has is still somebody: they are drawn as themselves,
+ * and what they write is stamped with their name.
+ */
+async function refreshPerson() {
+  const name = displayName();
+  let people = [];
+  try {
+    people = state === 'open' ? (await select('rc_people', (q) => q.eq('active', true))) : [];
+  } catch {
+    people = [];
+  }
+  const key = fold(name);
+  const hit = key ? people.find((p) => fold(p.name) === key) : null;
+  person = hit
+    ? { ...hit, role: 'admin' }
+    : { id: name ? `name:${name}` : 'name:', name: name || 'You', user_id: null, role: 'admin', active: true, title: null, subsystem: null };
+  return person;
+}
+
+/**
+ * The author id a write is stamped with. A roster person keeps the account id
+ * they had in the old calendar, so their history stays theirs; anybody else
+ * is `local:<their roster id>`, or `name:<the name typed>` when they are not
+ * on it. `authorName()` in `ui/rc_util.js` reads all three back.
+ */
+function authorId() {
+  const p = person;
+  if (!p) return null;
+  if (p.user_id) return p.user_id;
+  if (String(p.id).startsWith('name:')) return p.id;
+  return `local:${p.id}`;
+}
+
+export function currentUser() {
+  return state === 'open' ? { id: authorId(), email: null } : null;
+}
+
+/** True once a calendar is open — the old "signed in". */
+export function isSignedIn() {
+  return state === 'open';
+}
+
+/** The caller's own person row, or the stand-in for somebody not on the roster. */
+export function me() {
+  return state === 'open' ? person : null;
+}
+
+/**
+ * Everybody with the application is an editor: there are no members or
+ * viewers any more, only whoever holds the pen and whoever is waiting.
+ */
+export function isAdmin() {
+  return state === 'open';
+}
+
+export function role() {
+  return state === 'open' ? 'admin' : null;
+}
+
+/** True while this window holds the pen and may write. */
+export function canWrite() {
+  return state === 'open' && folder.holdsPen();
+}
+
+export function isViewer() {
+  return state === 'open' && !folder.holdsPen();
+}
+
+export function accountLabel() {
+  return person?.name || displayName() || '';
+}
+
+/** Who has the pen, for the header. */
+export function penState() {
+  return folder.penState();
+}
+
+export const takePen = () => folder.takePen();
+export const releasePen = () => folder.releasePen();
+
+/** Why a write cannot be made here, or true. */
+function writable() {
+  // 'empty' is the one moment a calendar is being written into a folder that has none.
+  if (state !== 'open' && state !== 'empty') return 'No calendar is open.';
+  if (folder.holdsPen()) return true;
+  const { holder } = folder.penState();
+  return `Read only — ${holder || 'somebody else'} is editing the calendar. `
+    + 'Take over at the top of the calendar if they have finished.';
+}
+
+/** The name given to the database for stamping its files. */
+function who() {
+  return { userId: authorId(), personId: person?.id || null, name: person?.name || displayName() };
+}
+
+/* ── Opening ───────────────────────────────────────────────────────────── */
+
+/**
+ * Open the calendar in the connected folder, if it has one.
+ *
+ * Never throws: a folder with no calendar yet, or none connected, is a state
+ * the calendar's front door explains (`ui/rc_gate.js`), not an error.
  */
 export function init() {
-  if (ready) return Promise.resolve(user);
-  // One client, however many callers ask while the SDK is still on its way.
+  asked = true;
   if (!starting) starting = start().finally(() => { starting = null; });
   return starting;
 }
 
-let starting = null;
+/** Whether anything has asked for the calendar yet. */
+let asked = false;
 
 async function start() {
-  if (ready) return user;
-  if (!isConfigured()) return null;
-
-  // Fetched here, not by a script tag: a page that never makes a client
-  // never downloads one (see core/sdk.js).
-  const sdk = await loadSupabase();
-  if (!sdk) {
-    console.warn('[cx-timeline] the Supabase client did not load; the resource calendar is unavailable');
+  if (!isConfigured()) {
+    state = 'no-folder';
     return null;
   }
-
-  const { rcSupabaseUrl, rcSupabaseAnonKey } = config();
-  client = sdk.createClient(rcSupabaseUrl, rcSupabaseAnonKey, {
-    // A storage key of its own. The plan's client, in a build that has one,
-    // would otherwise share a session slot with this and the two would evict
-    // each other on every reload.
-    auth: {
-      persistSession: true,
-      autoRefreshToken: true,
-      detectSessionInUrl: false,
-      storageKey: 'cx-rc-auth',
-    },
-  });
-
+  const where = filestore.state().folder;
+  if (!filestore.hasFolder()) {
+    reset('no-folder');
+    return null;
+  }
+  if (db && where === openFolder && state === 'open') return currentUser();
+  if (where !== openFolder) reset('no-folder');
+  openFolder = where;
+  if (!db) {
+    db = createDb({
+      storage: folder.storage(),
+      who,
+      canWrite: writable,
+      now: () => new Date(),
+      record: typeof window !== 'undefined' && Boolean(window.__rcRecord),
+    });
+    db.onChange(() => {
+      refreshPerson().catch(() => {});
+      ring();
+    });
+  }
   try {
-    const { data } = await client.auth.getSession();
-    user = data?.session?.user || null;
-    if (user) await refreshPerson();
+    const manifest = await db.manifest();
+    if (!manifest) {
+      state = 'empty';
+      problem = null;
+      emit(EV.RC_AUTH_CHANGED, { user: null, event: 'EMPTY' });
+      return null;
+    }
+    state = 'open';
+    problem = null;
   } catch (err) {
-    console.warn('[cx-timeline] could not restore the resource-calendar session:', err.message);
-    user = null;
-  }
-
-  client.auth.onAuthStateChange((event, session) => {
-    const next = session?.user || null;
-    const changed = (next?.id || null) !== (user?.id || null);
-    user = next;
-    if (!next) { person = null; preview = null; }
-    // The bell follows the session: closed when it ends (a lapsed token too,
-    // not only signOut()), and opened again for whoever signs in next if a
-    // screen is still listening — an editor left open across the sign-in
-    // registered once and would otherwise poll slowly for the rest of the day.
-    if (!next) closeBell();
-    else if (changed && bellListeners.size) { closeBell(); openBell(); }
-    if (changed) emit(EV.RC_AUTH_CHANGED, { user, event });
-  });
-
-  ready = true;
-
-  // Restoring a session is a change of identity as much as signing in is, and
-  // the shell has already drawn itself by now — what it shows depends on the
-  // role, which only exists after this point. Without the event a returning
-  // viewer would keep whichever chrome the anonymous boot decided on.
-  if (user) emit(EV.RC_AUTH_CHANGED, { user, event: 'RESTORED' });
-  return user;
-}
-
-export function raw() {
-  return client;
-}
-
-export function currentUser() {
-  return user;
-}
-
-export function isSignedIn() {
-  return Boolean(user);
-}
-
-/**
- * The caller's own person row.
- *
- * Null is a real answer and not an error: an account with no `rc_people` row
- * is somebody who can sign in but is not on the team, and the database will
- * refuse their writes accordingly.
- */
-export function me() {
-  return preview || person;
-}
-
-/* ── Seeing it as somebody else ─────────────────────────────────────────
-   An administrator can look at the calendar the way a member or a viewer
-   sees it, before telling the team to use it. Everything that decides what
-   to draw — `me()`, `role()`, `isAdmin()`, `canWrite()` — answers as that
-   person; every write is refused here, before it leaves the page, with an
-   error saying why (`err.preview`). The database is not asked to pretend:
-   it still answers as the administrator, so a preview shows the screens a
-   member gets, not a guarantee of the rows their account could read. */
-
-let preview = null; // the rc_people row being looked through, or null
-
-/** Look at the calendar as this person (a member or a viewer), or stop with null. */
-export function previewAs(who) {
-  if (who && person?.role !== 'admin') throw new Error('Only an administrator can see the calendar as somebody else.');
-  if (who && who.role === 'admin') throw new Error('Choose a member or a viewer — an administrator sees what you see.');
-  preview = who ? { id: who.id, name: who.name, email: who.email || null, title: who.title || null, subsystem: who.subsystem || null, role: who.role || 'member', active: true } : null;
-  forgetReads();
-  emit(EV.RC_AUTH_CHANGED, { user, event: who ? 'PREVIEW' : 'PREVIEW_ENDED' });
-}
-
-/** The person being looked through, or null. */
-export function previewing() {
-  return preview;
-}
-
-/** Whether the account actually signed in is an administrator, whoever it is previewing. */
-export function isRealAdmin() {
-  return person?.role === 'admin';
-}
-
-/** Refuse a write while previewing — before it reaches the network or a queue. */
-function guardPreview() {
-  if (!preview) return;
-  const err = new Error(`Preview only — nothing is saved while you are seeing the calendar as ${preview.name}.`);
-  err.preview = true;
-  throw err;
-}
-
-/**
- * True when the caller may see the KPI history and write the plan.
- *
- * This drives what the interface shows. It is *not* the control — every rule
- * is a row-level security policy, so a member who bypasses the interface
- * still gets nothing back from `rc_effort`. This exists to explain why
- * something is missing, not to decide it.
- */
-export function isAdmin() {
-  return me()?.role === 'admin';
-}
-
-/** 'admin' | 'member' | 'viewer', or null for somebody not on the team. */
-export function role() {
-  return me()?.role || null;
-}
-
-/**
- * True when this account may write anything at all.
- *
- * A viewer has a person row and `me()` finds it, so an id comparison alone
- * would let them record their own outcomes — which is the whole difference
- * between read-only and not. `rc_can_act_for()` makes the same distinction in
- * the database, and that is the control; this decides what to draw.
- */
-export function canWrite() {
-  return me()?.role === 'admin' || me()?.role === 'member';
-}
-
-export function isViewer() {
-  return me()?.role === 'viewer';
-}
-
-export function accountLabel() {
-  if (person?.name) return person.name;
-  if (!user) return '';
-  return user.user_metadata?.full_name || user.email || 'Signed in';
-}
-
-async function refreshPerson() {
-  // Runs on every sign-in and account change: same rule as sign-out.
-  forgetReads();
-  person = null;
-  preview = null;
-  if (!client || !user) return null;
-  const { data, error } = await client
-    .from('rc_people')
-    .select('id, name, email, title, subsystem, role, active')
-    .eq('user_id', user.id)
-    .eq('active', true)
-    .maybeSingle();
-  if (error) {
-    console.warn('[cx-timeline] could not read your team record:', error.message);
+    state = 'failed';
+    problem = err;
+    emit(EV.RC_AUTH_CHANGED, { user: null, event: 'FAILED' });
     return null;
   }
-  person = data || null;
+  await refreshPerson();
+  startPolling();
+  emit(EV.RC_AUTH_CHANGED, { user: currentUser(), event: 'OPENED' });
+  return currentUser();
+}
+
+/**
+ * Join the queue for the pen — called when somebody opens the calendar, not
+ * when the timeline reads the look-ahead. Reading the calendar never needs
+ * it; only writing does, so somebody who only ever uses the timeline is never
+ * shown to a colleague as editing the calendar.
+ */
+export async function enterCalendar() {
+  await init();
+  if (state !== 'open') return null;
+  await folder.startPen();
+  return folder.penState();
+}
+
+function reset(next) {
+  folder.stopPen();
+  clearInterval(pollTimer);
+  pollTimer = null;
+  db = null;
+  person = null;
+  state = next;
+  openFolder = '';
+}
+
+/** Look for another computer's saves while the calendar is open and on screen. */
+function startPolling() {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(() => {
+    if (!db || state !== 'open') return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    db.refresh().catch(() => {});
+    if (db.unsaved()) db.retry().catch(() => {});
+  }, POLL_MS);
+}
+
+// Another folder is another calendar; and the name set later is who we are.
+if (typeof window !== 'undefined') {
+  on(EV.FILE_STATE, (st) => {
+    // Nothing has asked for the calendar yet: nothing to follow.
+    if (!db && state === 'no-folder' && !asked) return;
+    if ((st?.folder || '') !== openFolder) {
+      const hadPen = folder.penState().role !== null;
+      reset('no-folder');
+      init()
+        .then(() => (hadPen ? enterCalendar() : null))
+        .then(() => emit(EV.RC_AUTH_CHANGED, { user: currentUser(), event: 'FOLDER' }));
+    }
+  });
+  window.addEventListener('beforeunload', () => folder.stopPen());
+}
+
+/** Read the name in the application again — after somebody sets it. */
+export async function refreshMe() {
+  await refreshPerson();
+  emit(EV.RC_AUTH_CHANGED, { user: currentUser(), event: 'ROLE_CHANGED' });
   return person;
 }
 
-/* ── Account ───────────────────────────────────────────────────────────── */
-
-export async function signIn(email, password) {
-  requireClient();
-  const { data, error } = await client.auth.signInWithPassword({
-    email: String(email || '').trim(),
-    password,
-  });
-  if (error) throw friendlier(error);
-  user = data.user;
-  await refreshPerson();
-  emit(EV.RC_AUTH_CHANGED, { user, event: 'SIGNED_IN' });
-  return user;
-}
-
 /**
- * Create an account.
+ * Start a calendar in this folder: an empty one, or everything from a backup
+ * of the old calendar (`core/rc_import.js` turns the backup into rows).
  *
- * The gate is `rc_enforce_invitation()` on `auth.users`, not this function:
- * sign-up goes through GoTrue rather than PostgREST, so anybody holding the
- * public key can POST to /auth/v1/signup and the interface has no say in it.
- * An address nobody invited is refused by the database, and what comes back
- * here is that refusal.
- *
- * Whether they are signed in afterwards depends on the project's "Confirm
- * email" setting, so the caller is told which happened rather than guessing.
+ * @param {Record<string, any[]>} [tables]
+ * @param {{ source?: string, replace?: boolean }} [options]
  */
-export async function signUp(email, password) {
-  requireClient();
-  const { data, error } = await client.auth.signUp({
-    email: String(email || '').trim(),
-    password,
-  });
-  if (error) throw friendlier(error);
-  user = data.user || null;
-  if (data.session) {
-    await refreshPerson();
-    emit(EV.RC_AUTH_CHANGED, { user, event: 'SIGNED_IN' });
-  }
-  return { user, live: Boolean(data.session) };
+export async function createCalendar(tables = {}, { source = 'new', replace = false } = {}) {
+  if (!filestore.hasFolder()) throw new Error('Open the shared folder first.');
+  await init();
+  if (!db) throw new Error('The folder could not be opened.');
+  // Nobody else is writing a calendar that does not exist yet.
+  await folder.startPen();
+  if (!folder.holdsPen() && !replace) await folder.takePen();
+  await db.create(tables, { source, replace });
+  state = 'open';
+  problem = null;
+  await refreshPerson();
+  startPolling();
+  emit(EV.RC_AUTH_CHANGED, { user: currentUser(), event: 'CREATED' });
 }
 
-export async function signOut() {
-  if (!client) return;
-  // Whoever signs in next must not read this account's rows out of memory.
-  // The database would refuse them; the cache must not answer first.
-  forgetReads();
-  closeBell();
-  await client.auth.signOut();
-  user = null;
-  person = null;
-  preview = null;
-  emit(EV.RC_AUTH_CHANGED, { user: null, event: 'SIGNED_OUT' });
-}
-
-function requireClient() {
-  if (!client) throw new Error('The resource calendar is not configured for this build.');
-}
-
-/** Supabase's wording is for developers; these messages are for people. */
-function friendlier(error) {
-  const message = String(error?.message || 'Something went wrong.');
-  if (/invitation only/i.test(message)) {
-    return new Error('That address has not been invited. Ask an administrator to invite you, '
-      + 'then use the link they send.');
-  }
-  if (/already registered|user already exists/i.test(message)) {
-    return new Error('That address already has an account — sign in instead.');
-  }
-  if (/password/i.test(message) && /least|short|weak/i.test(message)) {
-    return new Error('That password is too short — six characters at least.');
-  }
-  if (/invalid login credentials/i.test(message)) return new Error('That email and password do not match an account.');
-  if (/email not confirmed/i.test(message)) return new Error('Confirm your email address first — check your inbox.');
-  if (/failed to fetch|networkerror/i.test(message)) {
-    return new Error('Could not reach the server. The timeline still works offline; the resource calendar needs a connection.');
-  }
-  return new Error(message);
+/** The database itself — for the tests, which count what was asked and read the rows. */
+export function debugDb() {
+  return db;
 }
 
 /* ── Reading ───────────────────────────────────────────────────────────── */
 
-/**
- * Every read goes through here so a failure has one shape.
- *
- * A refused SELECT is not an error in PostgREST — the policy excludes the rows
- * and an empty list comes back — so callers must never read "no rows" as "no
- * permission". Where the difference matters, ask `isAdmin()`.
- */
-/* ── The read cache ──────────────────────────────────────────────────────
-   Every tab re-asks for the roster, the locations, the legend, the aliases and
-   the categories, and every section inside the look-ahead re-asks for the
-   snapshot. None of it changes between one click and the next, and the round
-   trips were most of the wait between tabs. So a read is remembered for a short
-   while, keyed on the table and everything the query asked for.
-
-   Two things keep it honest. **Any write through this module empties it**, so
-   what somebody just saved is what the next screen reads — the alternative,
-   an outcome recorded and the meeting still showing the old one, is exactly the
-   failure a huddle cannot afford. And the memory is short (`READ_TTL`), because
-   two people edit this calendar at once and a colleague's write comes through
-   nothing here; thirty seconds is a tab switch, not a shift. It is never longer
-   than one page: a reload starts empty. */
-const READ_TTL = 30000;
-const reads = new Map();
-
-function remember(key, fetch) {
-  const held = reads.get(key);
-  if (held && held.until > Date.now()) return held.promise;
-  const promise = fetch().then(
-    (rows) => rows,
-    (err) => { reads.delete(key); throw err; }
-  );
-  reads.set(key, { promise, until: Date.now() + READ_TTL });
-  return promise;
-}
-
-/** Forget every remembered read. Called by every write, and by whoever knows better. */
-export function forgetReads() {
-  reads.clear();
+function requireDb() {
+  if (!db || state !== 'open') throw new Error('No calendar is open — open the shared folder first.');
 }
 
 /**
- * Send a write, and forget what was read again once it has landed.
- *
- * Forgetting only before it was not enough: a read made while the write was on
- * its way was answered from the server as it stood before, and remembered —
- * for thirty seconds the newest reading of the look-ahead was the one the
- * editor had just replaced, so its next publish compared against the wrong
- * one, decided nothing had changed, and the calendar drew an earlier state.
+ * Every read goes through here so a failure has one shape. Answers are read
+ * from memory once a file has been read, so there is nothing to remember
+ * between tabs: `forgetReads()` survives only for the callers that still say it.
  */
-async function landed(request) {
-  try {
-    return await request;
-  } finally {
-    forgetReads();
-  }
-}
-
-/**
- * The filters a query built, as text, so two identical questions share an
- * answer and two different ones never do. The builder is wrapped rather than
- * inspected: the client's own object does not describe itself, and the stub the
- * tests run against has nothing to inspect at all.
- */
-function describe(build) {
-  const parts = [];
-  const proxy = new Proxy({}, {
-    get: (_, method) => (...args) => { parts.push(`${String(method)}(${JSON.stringify(args)})`); return proxy; },
-  });
-  if (build) build(proxy);
-  return parts.join('');
-}
-
 async function select(table, build, { columns = '*' } = {}) {
-  requireClient();
-  const key = `${table}|${columns}|${describe(build)}`;
-  return remember(key, async () => {
-    let query = client.from(table).select(columns);
-    if (build) query = build(query);
-    const { data, error } = await query;
-    if (error) throw new Error(`${table}: ${error.message}`);
-    return data || [];
-  });
+  requireDb();
+  let query = db.from(table).select(columns);
+  if (build) query = build(query);
+  const { data, error } = await query;
+  if (error) throw new Error(`${table}: ${error.message}`);
+  return data || [];
 }
 
+/** The same, for a question that once had to be paged. */
+const selectAll = (table, build) => select(table, build);
+
 /**
- * The team.
- *
- * `scheduledOnly` is what the huddle and the week plan ask for: the people who
- * actually take shifts. It is a separate question from what somebody may do —
- * a manager administers the calendar and is never assigned to a location, and
- * an administrator who *does* take shifts must not disappear from the meeting
- * because of their permissions.
+ * Forget what was derived from the tables — the views, which are remembered
+ * until the next change. Nothing else is remembered between reads.
  */
+export function forgetReads() {
+  db?.invalidate();
+}
+
 export function listPeople({ includeInactive = false, scheduledOnly = false } = {}) {
   return select('rc_people', (q) => {
     let out = includeInactive ? q : q.eq('active', true);
@@ -449,14 +358,7 @@ export function listLocationAliases() {
   return select('rc_location_alias', (q) => q.order('alias'));
 }
 
-/**
- * The other spellings of a person, for matching the look-ahead's Resource row.
- *
- * A name typed into a spreadsheet cell is "R. Okafor" one week and "Okafor" the
- * next. The register is what turns those into a person; a name it does not know
- * is shown as unmatched rather than guessed at, which is the same answer the
- * location aliases give and for the same reason.
- */
+/** The other spellings of a person, for matching the look-ahead's Resource row. */
 export function listPersonAliases() {
   return select('rc_person_alias', (q) => q.order('alias'));
 }
@@ -470,11 +372,9 @@ export function listParties() {
 }
 
 /**
- * The legend the look-ahead's colours are read against.
- *
- * Versioned by `valid_from`, because a legend that changes must not silently
- * reinterpret every snapshot taken before it did. Newest first, so a caller
- * taking the first entry for a colour gets the one in force.
+ * The legend the look-ahead's colours are read against. Versioned by
+ * `valid_from`, newest first, so a caller taking the first entry for a colour
+ * gets the one in force.
  */
 export function listLegend({ includeInactive = false } = {}) {
   return select('rc_legend', (q) =>
@@ -482,120 +382,29 @@ export function listLegend({ includeInactive = false } = {}) {
 }
 
 /**
- * Everything, as one object.
- *
- * The calendar's whole value is being the record a year from now, and until
- * this existed there was no way to get it out — a bad migration or a project
- * deleted by accident left the provider's point-in-time recovery and nothing
- * else. Read straight through the policies rather than around them, so what
- * comes back is what the person asking is allowed to see: an administrator
- * gets the evidence tables, a member gets the schedule.
- *
- * Tables only. The SAR PDFs are in Storage and are not folded in — they are
- * the one thing here that is already a file, and a hundred megabytes of base64
- * in a JSON document is not a backup anybody would successfully restore.
+ * Everything, as one file, in the shape the old calendar's backup had — so a
+ * copy taken here can be put back into an empty folder by the same importer.
  */
 export async function exportEverything() {
-  requireClient();
-  /* Every table, with the unique key its pages are ordered on. Every page of
-     each, too: a plain select stops at PostgREST's thousand-row limit, so a
-     backup of a project with more readings than that held the first thousand
-     rows and said nothing — and this file is what the move to the folder is
-     imported from. `rc_cancellation_notes` was missing altogether, which would
-     have lost every reason given for a cancellation. */
-  const tables = {
-    rc_people: ['id'], rc_locations: ['id'], rc_location_alias: ['id'], rc_person_alias: ['id'],
-    rc_categories: ['id'], rc_parties: ['id'],
-    rc_leave_kinds: ['id'], rc_legend: ['id'], rc_settings: ['key'], rc_leave: ['id'],
-    rc_plan_entries: ['id'], rc_client_errors: ['id'],
-    rc_la_rows: ['id'], rc_la_cells: ['row_id', 'day'], rc_la_edits: ['id'], rc_support_codes: ['id'],
-    rc_la_seen: ['id'], rc_p6_activities: ['activity_id'], rc_p6_flags: ['id'],
-    rc_actuals: ['id'], rc_ingest_runs: ['id'], rc_lookahead_snapshots: ['id'], rc_lookahead_rows: ['id'],
-    rc_change_events: ['id'], rc_change_annotations: ['id'], rc_cancellation_notes: ['id'],
-    rc_blockers: ['id'], rc_blocker_updates: ['id'], rc_sars: ['id'], rc_sar_links: ['id'],
-    rc_tawrs: ['id'], rc_tawr_descriptions: ['id'], rc_tawr_settings: ['key'], rc_tawr_profiles: ['person_id'],
-  };
-
+  requireDb();
   const out = {
+    format: FORMAT,
     exported_at: new Date().toISOString(),
-    exported_by: person?.name || user?.email || null,
-    note: 'Every rc_* table this account may read. SAR PDFs live in Storage and are not '
-      + 'included; their storage_path is.',
+    exported_by: accountLabel() || null,
+    note: 'Every table of the resource calendar. BART\'s blank TAWR form is under files, as base64.',
     tables: {},
   };
-  for (const [table, keys] of Object.entries(tables)) {
-    // One at a time, and a table that refuses is recorded as refused rather
-    // than silently absent — "empty" and "not allowed" must not look alike in
-    // something somebody may restore from.
-    try {
-      out.tables[table] = await selectAll(table, (q) => keys.reduce((built, key) => built.order(key), q));
-    } catch (err) {
-      out.tables[table] = { error: err.message };
-    }
-  }
-  /* BART's blank TAWR form is the one file the calendar cannot work without
-     that is not a table, and it is small — so it travels in the backup, and the
-     move to the folder needs nothing but this one file. */
-  try {
-    const form = await downloadTawrTemplate();
-    if (form) {
-      let binary = '';
-      for (let i = 0; i < form.length; i += 0x8000) binary += String.fromCharCode(...form.subarray(i, i + 0x8000));
-      out.files = { 'tawr/template.pdf': btoa(binary) };
-    }
-  } catch (err) {
-    out.files = { 'tawr/template.pdf': { error: err.message } };
+  for (const table of TABLE_NAMES) out.tables[table] = await select(table);
+  const form = await folder.readBytes('tawr/template.pdf');
+  if (form) {
+    let binary = '';
+    for (let i = 0; i < form.length; i += 0x8000) binary += String.fromCharCode(...form.subarray(i, i + 0x8000));
+    out.files = { 'tawr/template.pdf': btoa(binary) };
   }
   return out;
 }
 
 /* ── The look-ahead, edited here ───────────────────────────────────────── */
-
-/**
- * Every page of a read the server would otherwise cut off at its row limit.
- *
- * PostgREST answers a thousand rows at most, and a five-week look-ahead can
- * hold more cells than that: a read that stopped at the limit would draw a
- * sheet with its bottom rows blank and no sign anything was missing.
- *
- * The first page asks how many rows there are, and the rest are asked for
- * together rather than one after another — a sheet of four pages was four
- * round trips end to end. A page that comes back full after them (rows written
- * between the count and the read) is followed one at a time, as before, so
- * nothing is lost to a count that went stale. Every caller orders by a unique
- * key, which is what makes the pages line up.
- */
-async function selectAll(table, build, pageSize = 1000) {
-  requireClient();
-  const key = `${table}|all|${describe(build)}`;
-  return remember(key, async () => {
-    const page = async (from, counted = false) => {
-      let query = client.from(table).select('*', counted ? { count: 'exact' } : undefined);
-      if (build) query = build(query);
-      const answer = await query.range(from, from + pageSize - 1);
-      if (answer.error) throw new Error(`${table}: ${answer.error.message}`);
-      return answer;
-    };
-    const first = await page(0, true);
-    const out = [...(first.data || [])];
-    let last = first.data || [];
-    let from = pageSize;
-    if (last.length === pageSize && Number.isFinite(first.count) && first.count > pageSize) {
-      const starts = [];
-      for (let at = pageSize; at < first.count; at += pageSize) starts.push(at);
-      const pages = await Promise.all(starts.map((at) => page(at)));
-      for (const p of pages) out.push(...(p.data || []));
-      last = pages[pages.length - 1].data || [];
-      from = starts[starts.length - 1] + pageSize;
-    }
-    while (last.length === pageSize) {
-      last = (await page(from)).data || [];
-      out.push(...last);
-      from += pageSize;
-    }
-    return out;
-  });
-}
 
 export function listLaRows() {
   return selectAll('rc_la_rows', (q) => q.order('sort').order('id'));
@@ -606,12 +415,7 @@ export function listLaCells(fromISO, toISO) {
   return selectAll('rc_la_cells', (q) => q.gte('day', fromISO).lte('day', toISO).order('day').order('row_id'));
 }
 
-/**
- * The first and last day anything is written on the look-ahead: how far the
- * calendar's read view pages back, and what "Everything" covers once the
- * look-ahead is written here. Two one-row reads along the day index; null
- * days when nothing is written at all.
- */
+/** The first and last day anything is written on the look-ahead, or null days. */
 export async function laCellSpan() {
   const edge = (ascending) => select('rc_la_cells', (q) => q.order('day', { ascending }).limit(1), { columns: 'day' })
     .then((rows) => (rows[0]?.day ? String(rows[0].day).slice(0, 10) : null));
@@ -627,36 +431,28 @@ export async function laCellSpan() {
 export const applyLookaheadOps = (ops) => rpc('rc_la_apply', { p_ops: ops });
 
 /**
- * The newest change anybody has made, as a number — asked every few seconds by
- * an open editor. A read, so it does not empty the read cache the way every
- * other call to a function does.
+ * Look in the folder for another computer's saves now, rather than at the next
+ * poll — when the window gets the focus back, say. Answers whether anything
+ * changed; the bell rings if it did.
  */
+export function checkFolder() {
+  return db && state === 'open' ? db.refresh().catch(() => false) : Promise.resolve(false);
+}
+
+/** The newest change anybody has made, as a number. */
 export async function lookaheadRevision() {
-  requireClient();
-  const { data, error } = await client.rpc('rc_la_revision', {});
+  requireDb();
+  const { data, error } = await db.rpc('rc_la_revision', {});
   if (error) throw new Error(`rc_la_revision: ${error.message}`);
   return Number(data) || 0;
 }
 
-/* ── The bell: told when the look-ahead changes, rather than asking ───────── */
+/* ── The bell: told when the look-ahead changes ───────────────────────────
+   Rung by the database when an edit is logged or a reading taken here, and
+   when the folder brings down another computer's save. A listener asks what
+   changed, exactly as its poll does. */
 
-/**
- * `rc_la_beacon` is one row a trigger touches whenever an edit is logged or a
- * reading is taken (see rc_schema.sql). Realtime tells every open page the
- * moment it moves, so the editor and the calendar's view hear about somebody
- * else's change at once instead of on their next poll. It says only *that*
- * something changed: a listener asks what, exactly as its poll does.
- *
- * One channel for the page, opened by the first listener and closed by the
- * last. A client without Realtime (an SDK stub, an old vendored copy) never
- * opens one, and `lookaheadLive()` stays false, which is the polls' cue to
- * carry on as they always have. When the socket comes back after a drop,
- * every listener is called once — whatever rang meanwhile was missed.
- */
 const bellListeners = new Set();
-let bell = null;
-let bellLive = false;
-let bellDropped = false;
 
 function ring() {
   for (const fn of [...bellListeners]) {
@@ -664,73 +460,24 @@ function ring() {
   }
 }
 
-function openBell() {
-  if (bell || !client || typeof client.channel !== 'function') return;
-  bell = client.channel('rc-la-beacon')
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rc_la_beacon' }, () => {
-      // A change of this page's own lands here too. Nothing is forgotten on
-      // it — a write already empties the read memory when it lands, and every
-      // listener asks with a read that is never remembered — so it costs one
-      // small question and reads nothing new.
-      ring();
-    })
-    .subscribe((status) => {
-      const live = status === 'SUBSCRIBED';
-      // Back after a drop: whatever rang while it was down was missed.
-      if (live && bellDropped) ring();
-      if (!live && bellLive) bellDropped = true;
-      if (live) bellDropped = false;
-      bellLive = live;
-    });
-}
-
-function closeBell() {
-  if (!bell) return;
-  try { client?.removeChannel?.(bell); } catch { /* already gone */ }
-  bell = null;
-  bellLive = false;
-  bellDropped = false;
-}
-
-/**
- * Call `fn` whenever anybody changes the look-ahead — an edit, a published
- * reading, a workbook read. Answers with the function that stops it.
- */
+/** Call `fn` whenever the look-ahead changes. Answers with the function that stops it. */
 export function onLookaheadChange(fn) {
   bellListeners.add(fn);
-  openBell();
-  return () => {
-    bellListeners.delete(fn);
-    if (!bellListeners.size) closeBell();
-  };
+  return () => bellListeners.delete(fn);
 }
 
-/**
- * True while the bell is connected, so a poll can slow down: anything it
- * would find, the bell has normally said already. False whenever it is not —
- * no Realtime, a socket that dropped, a project that never ran the SQL that
- * added the table. Live is not proof, though: a table missing from the
- * publication subscribes and never rings. So the polls slow down rather
- * than stop (`POLL_LIVE_MS`).
- */
+/** True while the calendar is open: the folder is watched, so the polls may slow down. */
 export function lookaheadLive() {
-  return bellLive;
+  return state === 'open';
 }
 
-/**
- * The edit log, newest first: the last `limit` changes, or every change from
- * `sinceId` on. An administrator's read — the log is the evidence base.
- */
+/** The edit log, newest first: the last `limit` changes, or every change from `sinceId` on. */
 export function listLaEdits({ sinceId = null, limit = 2000 } = {}) {
   if (sinceId != null) return selectAll('rc_la_edits', (q) => q.gte('id', sinceId).order('id', { ascending: false }));
   return select('rc_la_edits', (q) => q.order('id', { ascending: false }).limit(limit));
 }
 
-/**
- * Every edit made in a span of time, oldest first — what Changes reads to say
- * who made each change between two readings, and the edit log itself. Paged,
- * because a busy afternoon in the editor is more than one page of it.
- */
+/** Every edit made in a span of time, oldest first. */
 export function listLaEditsBetween(fromISO, toISO) {
   return selectAll('rc_la_edits', (q) => q.gte('at', fromISO).lte('at', toISO).order('id'));
 }
@@ -740,35 +487,10 @@ export function listLaEditsForRow(rowId) {
   return select('rc_la_edits', (q) => q.eq('row_id', rowId).order('id', { ascending: false }).limit(1000));
 }
 
-/**
- * Slim the grids of superseded editor readings past the keep period, and say
- * how many — see `rc_compact_snapshots()` for what is kept and why.
- */
+/** Slim the grids of superseded editor readings past the keep period, and say how many. */
 export const compactSnapshots = () => rpc('rc_compact_snapshots', {});
 
-/* ── Who has seen the changes to their days ─────────────────────────────── */
-
-/** The newest "Got it" a person has given, or null — see `rc_la_seen`. */
-export function lastSeen(personId) {
-  return select('rc_la_seen', (q) => q.eq('person_id', personId).order('seen_at', { ascending: false }).limit(1))
-    .then((rows) => rows[0] || null);
-}
-
-/** Every "Got it", newest first — an administrator reads everybody's, anybody else their own. */
-export function listSeen() {
-  return select('rc_la_seen', (q) => q.order('seen_at', { ascending: false }).limit(2000));
-}
-
-/** Record that the person looking has seen the look-ahead as of this reading. */
-export function markSeen({ snapshotId, takenAt, changes = 0 }) {
-  const who = me();
-  if (!who) return Promise.reject(new Error('Only somebody on the team can say they have seen their days.'));
-  return insert('rc_la_seen', [{
-    person_id: who.id, snapshot_id: snapshotId, snapshot_taken_at: takenAt, changes,
-  }]).then((rows) => rows[0] || null);
-}
-
-/** One reading's stored rows — what "what changed for me" compares. */
+/** One reading's stored rows. */
 export function snapshotRows(snapshotId) {
   return selectAll('rc_lookahead_rows', (q) => q.eq('snapshot_id', snapshotId).order('id'));
 }
@@ -781,24 +503,15 @@ export const updateSupportCode = (id, patch) => update('rc_support_codes', id, p
 
 /* ── P6 activities, for the look-ahead's rows to name ─────────────────── */
 
-/** Every activity imported from P6 — thousands of them, so every page. */
 export function listP6Activities() {
   return selectAll('rc_p6_activities', (q) => q.order('activity_id'));
 }
 
-/**
- * The activities a reading names, by ID — what the calendar's read view draws
- * beside them. In slices, because the IDs travel in the URL.
- */
+/** The activities a reading names, by ID. */
 export async function p6ActivitiesByIds(ids) {
   const want = [...new Set((ids || []).filter(Boolean))];
-  const out = [];
-  for (let i = 0; i < want.length; i += 200) {
-    const slice = want.slice(i, i + 200);
-    out.push(...await select('rc_p6_activities', (q) => q.in('activity_id', slice),
-      { columns: 'activity_id,name,wbs,missing' }));
-  }
-  return out;
+  if (!want.length) return [];
+  return select('rc_p6_activities', (q) => q.in('activity_id', want), { columns: 'activity_id,name,wbs,missing' });
 }
 
 /** Why a row has no P6 activity: the list a row is flagged from. */
@@ -809,10 +522,9 @@ export const addP6Flag = (row) => insert('rc_p6_flags', [row]).then((r) => r[0])
 export const updateP6Flag = (id, patch) => update('rc_p6_flags', id, patch);
 
 /**
- * Import an extract's activities, `{ activity_id, name, wbs }`, through
- * `rc_p6_import()`: in batches that share one import id, the last of which
- * marks every activity the extract left out as missing. Answers how many were
- * written and how many went missing.
+ * Import an extract's activities through `rc_p6_import()`, in batches that
+ * share one import id, the last of which marks every activity the extract
+ * left out as missing.
  *
  * @param {Array<{ activity_id: string, name?: string, wbs?: string }>} activities
  * @param {{ importId: string, batch?: number }} options
@@ -833,92 +545,28 @@ export async function importP6Activities(activities, { importId, batch = 1000 })
   return { written, missing };
 }
 
-/* ── Problems the calendar ran into ──────────────────────────────────── */
+/* ── Problems ──────────────────────────────────────────────────────────── */
 
-const REPORT_LIMIT = 20;
 const reported = new Set();
 
 /**
- * Write one row to `rc_client_errors`, and never throw.
- *
- * Called from named places in the calendar's own code — a tab that failed to
- * load, an offline outcome the server refused, a look-ahead read that went
- * wrong — and never from a global handler: an error thrown anywhere in the page
- * can carry plan text, and plan data must never reach this project. The same
- * message is reported once per page, and at most twenty per page, so a screen
- * failing on every re-render cannot fill the table. Reporting a failure must
- * never be a second failure, so everything here is swallowed.
+ * Say a failure in the console, once per message. There is nowhere else to
+ * send it: the calendar has no server, and nothing leaves this computer.
  */
 export function reportError(area, err) {
   try {
-    if (!client || !user || preview) return;
-    const message = String(err?.message || err || 'unknown').slice(0, 500) || 'unknown';
+    const message = String(err?.message || err || 'unknown').slice(0, 500);
     const key = `${area}\u0000${message}`;
-    if (reported.has(key) || reported.size >= REPORT_LIMIT) return;
+    if (reported.has(key)) return;
     reported.add(key);
-    const shell = typeof window !== 'undefined' ? window.CX_SHELL : null;
-    const row = {
-      area: String(area).slice(0, 60),
-      message,
-      created_by: user.id,
-      app_version: String(shell?.version || (typeof window !== 'undefined' && window.CX_CONFIG?.version) || '').slice(0, 40) || null,
-      user_agent: typeof navigator !== 'undefined' ? String(navigator.userAgent).slice(0, 300) : null,
-    };
-    Promise.resolve(client.from('rc_client_errors').insert([row]))
-      .then(() => forgetReads(), () => {})
-      .catch(() => {});
+    console.warn(`[cx-timeline] calendar (${area}):`, message);
   } catch {
     /* reporting a failure must never be a second one */
   }
 }
 
-/** The newest problems reported, for an administrator. */
-export function listClientErrors(limit = 100) {
-  return select('rc_client_errors', (q) => q.order('created_at', { ascending: false }).limit(limit));
-}
-
-/** Clear what was reported before a moment; answers how many rows went. */
-export const clearClientErrors = (before) => rpc('rc_clear_client_errors', { p_before: before });
-
 export function listSettings() {
   return select('rc_settings');
-}
-
-/**
- * The database version this build of the calendar expects.
- *
- * `rc_schema.sql` stamps its own number into `rc_settings.schema_version` as
- * its very last statement, so a run that stopped half way does not claim to
- * have finished. Raise both together — `tools/test_sql.js` fails when they
- * differ. A column the database has never heard of used to surface as
- * "could not update the legend", on one screen, weeks after the deploy that
- * needed it; this turns it into one sentence at sign-in naming the two files.
- */
-export const SCHEMA_VERSION = 15;
-
-/**
- * Whether the database is the one this build was written against.
- *
- * `behind` is the common case — the site deployed and nobody ran the SQL —
- * and a project from before the stamp existed reads as version 0. `ahead`
- * means the page is older than the database, which is a stale tab or a
- * desktop copy that has not fetched its update yet. A read that fails answers
- * `unknown` rather than guessing: the calendar has its own ways of saying the
- * database is unreachable, and a second one here would only compete.
- *
- * @returns {Promise<{ state: string, expected: number, found?: number | null }>}
- */
-export async function schemaStatus() {
-  let rows;
-  try {
-    rows = await listSettings();
-  } catch {
-    return { state: 'unknown', expected: SCHEMA_VERSION, found: null };
-  }
-  const row = (rows || []).find((r) => r.key === 'schema_version');
-  const found = row ? Number.parseInt(row.value, 10) || 0 : 0;
-  const state = found === SCHEMA_VERSION ? 'current' : found < SCHEMA_VERSION ? 'behind' : 'ahead';
-  return { state, expected: SCHEMA_VERSION, found };
 }
 
 export function listLeaveKinds() {
@@ -926,182 +574,56 @@ export function listLeaveKinds() {
 }
 
 /** Leave overlapping a window. Both ends are inclusive, as a calendar is. */
-/**
- * Leave awaiting an answer, whoever it belongs to.
- *
- * Its own read rather than a filter over `listLeave()`, because the question is
- * about the whole register and not about a window: a request for October made
- * today is a thing an administrator has to answer today, and a window that only
- * covers the weeks on screen would hide it until it was too late to matter.
- */
-export function pendingLeave() {
-  return select('rc_leave', (q) => q.eq('status', 'requested').order('start_date'));
-}
-
-/**
- * One person's leave from a date on, whatever its answer — the phone's "your
- * time off". Declined rows stay in, because "they said no" is the answer
- * somebody opened this to find; withdrawn ones do not, because the person who
- * withdrew it already knows.
- */
-export function leaveFor(personId, fromISO) {
-  return select('rc_leave', (q) =>
-    q.eq('person_id', personId).gte('end_date', fromISO).neq('status', 'cancelled').order('start_date'));
-}
-
 export function listLeave(fromISO, toISO) {
   return select('rc_leave', (q) =>
     q.lte('start_date', toISO).gte('end_date', fromISO).neq('status', 'cancelled'));
 }
 
-/**
- * The current plan across a date range.
- *
- * Reads the view, never the table: the table keeps every revision, and asking
- * it directly would return the superseded rows alongside the live ones.
- */
-export function listPlan(fromISO, toISO) {
-  return select('rc_plan_current', (q) =>
-    q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
-}
-
-/** Every revision of one day, oldest first — the audit trail for a claim. */
-export function planHistory(personId, dateISO) {
-  return select('rc_plan_entries', (q) =>
-    q.eq('person_id', personId).eq('work_date', dateISO).order('created_at'));
-}
-
-/**
- * Outcomes, as they stand.
- *
- * The view, never the table: a corrected outcome is a new row pointing at the
- * old one, and the table keeps both. Reading it directly would put two answers
- * against one person for one day and let whichever came last win.
- */
-export function listActuals(fromISO, toISO) {
-  return select('rc_actuals_current', (q) =>
-    q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
-}
-
-/**
- * Look-ahead rows by id — for tracing an outcome to the row it was recorded
- * against. Asked in slices so a long list of ids never makes an overlong URL.
- */
+/** Look-ahead rows by id. */
 export async function lookaheadRowsByIds(ids) {
   const unique = [...new Set((ids || []).filter(Boolean))];
-  const out = [];
-  for (let i = 0; i < unique.length; i += 200) {
-    const slice = unique.slice(i, i + 200);
-    out.push(...(await select('rc_lookahead_rows', (q) => q.in('id', slice), { columns: 'id,raw_label,raw_location,snapshot_id,sheet_row' })));
-  }
-  return out;
-}
-
-/** Carried tasks, oldest first — a chain on its fifth day is the headline. */
-/**
- * Blockers, as they stand.
- *
- * The view, never the tables: the tables keep every step of the chase and the
- * view is what is true now. Readable by everybody signed in, because a blocker
- * nobody can see is one nobody chases.
- */
-export function listBlockers({ openOnly = true } = {}) {
-  return select('rc_blockers_current', (q) =>
-    (openOnly ? q.eq('state', 'open') : q).order('raised_on'));
-}
-
-/** Every step of one blocker's history, oldest first. */
-export function blockerHistory(blockerId) {
-  return select('rc_blocker_updates', (q) =>
-    q.eq('blocker_id', blockerId).order('created_at'));
-}
-
-export const raiseBlocker = (row) => insert('rc_blockers', [row]).then((r) => r[0]);
-/* Append, never edit. Taking it on, moving the date, chasing it and closing it
-   are each a row — the history is the evidence a claim is built from. */
-export const updateBlocker = (row) => insert('rc_blocker_updates', [row]).then((r) => r[0]);
-
-export function listCarryChains() {
-  return select('rc_carry_chains', (q) => q.order('age_days', { ascending: false }));
-}
-
-/** The KPI base. Empty for a member, by policy rather than by omission. */
-export function listEffort(fromISO, toISO) {
-  return select('rc_effort', (q) =>
-    q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
+  if (!unique.length) return [];
+  return select('rc_lookahead_rows', (q) => q.in('id', unique), { columns: 'id,raw_label,raw_location,snapshot_id,sheet_row' });
 }
 
 export function listIngestRuns({ limit = 100 } = {}) {
   return select('rc_ingest_runs', (q) => q.order('ran_at', { ascending: false }).limit(limit));
 }
 
-/**
- * The snapshots, newest first, **without their grids**.
- *
- * A grid is the whole parsed workbook and it is the one large column in the
- * schema. Every screen that reads the sheet used to ask for twenty of them and
- * use one; the history list asked for forty to print two numbers off each.
- * That was most of the wait between tabs. This reads the metadata view, which
- * carries those two numbers computed in the database, and the one grid
- * anybody actually draws comes from `latestSnapshot()`.
- */
+/** The readings, newest first, **without their grids**. */
 export function listSnapshotMeta({ limit = 50 } = {}) {
   return select('rc_lookahead_snapshot_meta', (q) => q.order('taken_at', { ascending: false }).limit(limit));
 }
 
-/**
- * Those readings' metadata, by id — when each was taken, which is the edge of
- * "between these two readings" when Changes asks the edit log who did it.
- * A hundred at a time, because the ids travel in the URL.
- */
+/** Those readings' metadata, by id. */
 export async function snapshotMetaByIds(ids) {
   const want = [...new Set((ids || []).filter(Boolean))];
-  const out = [];
-  for (let i = 0; i < want.length; i += 100) {
-    const chunk = want.slice(i, i + 100);
-    out.push(...await select('rc_lookahead_snapshot_meta', (q) => q.in('id', chunk)));
-  }
-  return out;
+  if (!want.length) return [];
+  return select('rc_lookahead_snapshot_meta', (q) => q.in('id', want));
 }
 
-/** The newest snapshot with its grid, or null. The only full-grid read there is. */
+/** The newest reading with its grid, or null. The only full-grid read there is. */
 export function latestSnapshot() {
   return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(1))
     .then((rows) => rows[0] || null);
 }
 
-/**
- * The newest reading's id, asked afresh every time — an open calendar asks it
- * every few seconds, to notice that the editor published, and a remembered
- * answer would hide exactly that. A read, so it leaves the cache alone.
- */
+/** The newest reading's id, asked afresh. */
 export async function newestSnapshotId() {
-  requireClient();
-  const { data, error } = await client.from('rc_lookahead_snapshot_meta')
-    .select('id').order('taken_at', { ascending: false }).limit(1);
-  if (error) throw new Error(`rc_lookahead_snapshot_meta: ${error.message}`);
-  return data?.[0]?.id ?? null;
+  const rows = await select('rc_lookahead_snapshot_meta', (q) => q.order('taken_at', { ascending: false }).limit(1), { columns: 'id' });
+  return rows[0]?.id ?? null;
 }
 
-/**
- * Snapshots with their grids. Kept for anything that genuinely needs several
- * — nothing in the interface does any more, and a caller reaching for this
- * with a limit above one should read `listSnapshotMeta()` instead.
- */
 export function listSnapshots({ limit = 1 } = {}) {
   return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(limit));
 }
 
-/**
- * Each week the workbook's readings hold, and the newest of them that has it
- * (`week_start`, `snapshot_id`, `taken_at`) — where the calendar draws a week
- * from that the editor never held. No grid is opened to answer it.
- */
+/** Each week the workbook's readings hold, and the newest of them that has it. */
 export function workbookWeeks() {
   return select('rc_lookahead_workbook_weeks', (q) => q.order('week_start'));
 }
 
-/** One snapshot with its grid, by id — for re-deriving what a past read said. */
+/** One reading with its grid, by id. */
 export function snapshotById(id) {
   return select('rc_lookahead_snapshots', (q) => q.eq('id', id).limit(1)).then((rows) => rows[0] || null);
 }
@@ -1119,19 +641,12 @@ export function listAnnotations(eventIds) {
   return select('rc_change_annotations', (q) => q.in('change_event_id', eventIds).order('created_at'));
 }
 
-/**
- * Every day any read showed painted as a cancellation, from `fromISO` on.
- * One row per activity, location and day — `cancellationEvents()` in
- * `core/lookahead.js` joins side-by-side days into one event.
- */
+/** Every day the look-ahead currently shows cancelled, from `fromISO` on. */
 export function listCancelledDays(fromISO) {
   return select('rc_cancelled_days', (q) => q.gte('day', fromISO).order('day'));
 }
 
-/**
- * Every day a read showed a BART resource struck out ("X.~WIT") on an activity
- * that was not itself cancelled — `supportCancellationEvents()` joins them.
- */
+/** Every day a BART resource is struck out on an activity still going ahead. */
 export function listCancelledSupportDays(fromISO) {
   return select('rc_cancelled_support_days', (q) => q.gte('day', fromISO).order('day'));
 }
@@ -1141,82 +656,75 @@ export function listCancellationNotes() {
   return select('rc_cancellation_notes', (q) => q.order('created_at'));
 }
 
-export function listSars() {
-  return select('rc_sars', (q) => q.is('superseded_by', null).order('week_start', { ascending: false }));
+/**
+ * Look-ahead rows across a span of weeks, from every reading — the caller
+ * keeps the newest per week.
+ */
+export function lookaheadBetween(fromISO, toISO) {
+  return select('rc_lookahead_rows', (q) =>
+    q.gte('week_start', fromISO).lte('week_start', toISO).order('sheet_row'));
 }
 
-export function listSarLinks() {
-  return select('rc_sar_links', (q) => q.order('confirmed_at'));
+/** The look-ahead day by day, each week from the newest reading of it. */
+export function lookaheadDays(fromISO = null, toISO = null) {
+  return selectAll('rc_lookahead_days', (q) => {
+    let out = q;
+    if (fromISO) out = out.gte('day', fromISO);
+    if (toISO) out = out.lte('day', toISO);
+    return out.order('day').order('row_id');
+  });
 }
 
-/** Work planned into a week with no SAR — access that was never confirmed. */
-export function listRowsWithoutSar() {
-  return select('rc_rows_without_sar', (q) => q.order('week_start'));
-}
-
-/** The mirror: access booked for work that has since gone. */
-export function listSarsWithoutRows() {
-  return select('rc_sars_without_rows', (q) => q.order('week_start'));
+/** Every row of a table or view, optionally where `column` falls between two dates. */
+export function readAll(table, { column = null, from = null, to = null } = {}) {
+  const key = { rc_settings: 'key', rc_tawr_settings: 'key', rc_tawr_profiles: 'person_id', rc_p6_activities: 'activity_id' }[table] || 'id';
+  return selectAll(table, (q) => {
+    let out = q;
+    if (column && from) out = out.gte(column, from);
+    if (column && to) out = out.lte(column, to);
+    if (column) out = out.order(column);
+    return out.order(key);
+  });
 }
 
 /* ── Writing ───────────────────────────────────────────────────────────── */
 
-/**
- * Insert rows and return them.
- *
- * A refused INSERT does raise — the WITH CHECK clause fails — so unlike an
- * UPDATE this one can be trusted to report its own failure. The append-only
- * tables have no UPDATE or DELETE privilege at all, so there is deliberately
- * no `update()` here for them to be reached through.
- */
 async function insert(table, rows) {
-  requireClient();
-  guardPreview();
-  forgetReads();
-  const { data, error } = await landed(client.from(table).insert(rows).select());
+  requireDb();
+  const { data, error } = await db.from(table).insert(rows).select();
   if (error) throw new Error(`${table}: ${error.message}`);
+  folder.noteWrite();
   return data || [];
 }
 
-/* Functions that only read, and so are allowed while previewing. */
-const READ_ONLY_RPC = new Set(['rc_list_invitations', 'rc_resolve_location']);
-
 async function rpc(name, args) {
-  requireClient();
-  /* Every function here that is not a pure read writes something, so it
-     forgets what was read. A pure read must not: the administrator's inbox
-     lists invitations every time it refreshes, and forgetting there emptied
-     the read memory on every tab switch — the calendar re-read the roster, the
-     plan and the sheet each time, which is the wait the memory exists to
-     remove. */
-  const read = READ_ONLY_RPC.has(name);
-  if (!read) {
-    guardPreview();
-    forgetReads();
-  }
-  const { data, error } = await (read ? client.rpc(name, args) : landed(client.rpc(name, args)));
+  requireDb();
+  const { data, error } = await db.rpc(name, args);
   if (error) throw new Error(`${name}: ${error.message}`);
+  if (name !== 'rc_resolve_location' && name !== 'rc_la_revision') folder.noteWrite();
   return data;
 }
 
 /**
- * Update reference data.
- *
- * Only ever used on the vocabularies, never on a plan entry or an outcome. A
- * refused UPDATE matches nothing and reports success, so this checks the
- * returned row count and raises instead — the same reason every plan save goes
- * through `save_project()` on the other side of the application.
+ * Update reference data. An update that matched nothing reports success in
+ * the builder, so this checks the rows that came back and raises instead.
  */
 async function update(table, id, patch) {
-  requireClient();
-  guardPreview();
-  forgetReads();
-  const { data, error } = await landed(client.from(table).update(patch).eq('id', id).select());
+  requireDb();
+  const key = { rc_settings: 'key', rc_tawr_settings: 'key', rc_tawr_profiles: 'person_id' }[table] || 'id';
+  const { data, error } = await db.from(table).update(patch).eq(key, id).select();
   if (error) throw new Error(`${table}: ${error.message}`);
-  if (!data || !data.length) {
-    throw new Error(`${table}: that change was refused — you may not have permission.`);
-  }
+  if (!data || !data.length) throw new Error(`${table}: that change was not made — it may have been removed.`);
+  folder.noteWrite();
   return data[0];
+}
+
+async function upsert(table, rows, onConflict) {
+  requireDb();
+  const { data, error } = await db.from(table).upsert(rows, { onConflict }).select();
+  if (error) throw new Error(`${table}: ${error.message}`);
+  folder.noteWrite();
+  return data || [];
 }
 
 export const addPerson = (row) => insert('rc_people', [row]).then((r) => r[0]);
@@ -1230,229 +738,32 @@ export const addPersonAlias = (personId, alias) =>
 export const addCategory = (row) => insert('rc_categories', [row]).then((r) => r[0]);
 export const updateCategory = (id, patch) => update('rc_categories', id, patch);
 export const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r[0]);
-/**
- * Map colours, or re-map them.
- *
- * An upsert on `(valid_from, argb)` rather than a plain insert, because that is
- * the table's unique key and mapping the same colour twice in one day is the
- * commonest thing anybody does here — press "Just shading" on a grey, look at
- * the calendar, decide it was actually a shift. As an insert the second attempt
- * violated the constraint and came back as a duplicate-key error, which reads as
- * a broken button rather than as "you already said something about that today".
- *
- * A colour mapped again on a *later* day still gets a row of its own: the
- * register is versioned on purpose, and `applyLegend()` reads the newest.
- */
-export async function addLegend(rows) {
-  requireClient();
-  guardPreview();
-  forgetReads();
-  const { data, error } = await landed(client
-    .from('rc_legend')
-    .upsert(rows, { onConflict: 'valid_from,argb' })
-    .select());
-  if (error) throw new Error(`rc_legend: ${error.message}`);
-  return data || [];
-}
-export const updateLegend = (id, patch) => update('rc_legend', id, patch);
+export const addLeaveKind = (row) => insert('rc_leave_kinds', [row]).then((r) => r[0]);
+export const updateLeaveKind = (id, patch) => update('rc_leave_kinds', id, patch);
 
 /**
- * Delete a reference row outright, where nothing has been recorded against it.
- *
- * Retiring is still the right answer for anything that has been used, and the
- * refusal says so by name. These exist for the row that was never meant: a
- * person added twice, a location typed wrong, a colour mapped by mistake —
- * which retiring only ever turns into a permanent entry in a list of things
- * that used to be true.
- *
- * Functions rather than `.delete()`, for the reason every other write here is a
- * function: a DELETE the policies refuse matches no rows and comes back as
- * success, so the interface would report a deletion that never happened. These
- * raise — over permission, over the last administrator, and over anything
- * pointing at the row — and `rpc()` turns that into a message somebody can act
- * on.
+ * Map colours, or re-map them — an upsert on `(valid_from, argb)`, because
+ * mapping the same colour twice in one day is the commonest thing anybody
+ * does here. A colour mapped again on a later day gets a row of its own.
  */
+export const addLegend = (rows) => upsert('rc_legend', rows, 'valid_from,argb');
+export const updateLegend = (id, patch) => update('rc_legend', id, patch);
+
+/** Delete a reference row where nothing has been recorded against it; retire it otherwise. */
 export const deletePerson = (id) => rpc('rc_delete_person', { p_person: id });
 export const deleteLocation = (id) => rpc('rc_delete_location', { p_location: id });
 export const deleteCategory = (id) => rpc('rc_delete_category', { p_category: id });
 export const deleteLegend = (id) => rpc('rc_delete_legend', { p_entry: id });
 
-/**
- * Write a setting.
- *
- * An upsert rather than an update, because the first time anybody names the
- * sheet there is no row to update — and an UPDATE matching nothing would
- * report success and change nothing, which is the failure this whole schema is
- * arranged to avoid.
- */
+/** Write a setting — an upsert, because the first time there is no row to update. */
 export async function setSetting(key, value) {
-  requireClient();
-  guardPreview();
-  forgetReads();
-  const { data, error } = await landed(client
-    .from('rc_settings')
-    .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
-    .select());
-  if (error) throw new Error(`rc_settings: ${error.message}`);
-  if (!data || !data.length) {
-    throw new Error('rc_settings: that change was refused — only an administrator may set this.');
-  }
-  return data[0];
+  const rows = await upsert('rc_settings', { key, value, updated_at: new Date().toISOString() }, 'key');
+  return rows[0];
 }
 
-/**
- * Book leave, or ask for it.
- *
- * The status is the permission, and the policies are written on exactly that:
- * an administrator may insert any status and the default is `approved`, while a
- * member may insert `requested` for themselves and nothing else. So the caller
- * says which it is — `requestLeave()` below is the member's door, and it exists
- * so no screen has to remember to pass the right string.
- */
-export const addLeave = (row) => insert('rc_leave', [row]).then((r) => r[0]);
-
-/**
- * Ask for leave. The same single `rc_leave` row, as a question.
- *
- * A second table for requests would be a second answer to "is Dana off on
- * Tuesday", which is the thing this module is most careful about — so a request
- * is the row it will become, with `status` saying it has not been answered yet.
- * Approving it is an update an administrator makes; there is nothing to copy
- * across and nothing that can go missing in between.
- */
-export const requestLeave = (row) =>
-  insert('rc_leave', [{ ...row, status: 'requested' }]).then((r) => r[0]);
+/** Book leave. Everybody with the application books it; nobody asks. */
+export const addLeave = (row) => insert('rc_leave', [{ status: 'approved', ...row }]).then((r) => r[0]);
 export const updateLeave = (id, patch) => update('rc_leave', id, patch);
-
-export const addPlanEntries = (rows) => insert('rc_plan_entries', rows);
-
-/** Every look-ahead row for a week, so the plan can be proposed from it. */
-export function lookaheadForWeek(weekStartISO) {
-  return select('rc_lookahead_rows', (q) => q.eq('week_start', weekStartISO).order('sheet_row'));
-}
-
-/**
- * Look-ahead rows across a span of weeks.
- *
- * The Resources view answers "where is everybody, for the weeks that matter",
- * which is several weeks at once — asking week by week would be one round trip
- * per column. Rows from every snapshot come back, so the caller keeps the newest
- * per `row_key`: an older snapshot's copy of a week is history, not a second
- * assignment.
- */
-export function lookaheadBetween(fromISO, toISO) {
-  return select('rc_lookahead_rows', (q) =>
-    q.gte('week_start', fromISO).lte('week_start', toISO).order('sheet_row'));
-}
-
-/**
- * The look-ahead day by day — one row per activity and day, each week from
- * the newest reading of it (`rc_lookahead_days`), for every day any reading
- * covered or only those between two dates. Every page of it: a year is tens
- * of thousands of rows. What the master export writes.
- */
-export function lookaheadDays(fromISO = null, toISO = null) {
-  return selectAll('rc_lookahead_days', (q) => {
-    let out = q;
-    if (fromISO) out = out.gte('day', fromISO);
-    if (toISO) out = out.lte('day', toISO);
-    return out.order('day').order('row_id');
-  });
-}
-
-/**
- * Every row of a table or view this account may read, every page of it,
- * optionally only where `column` falls between two dates — for the master
- * export, which wants the whole record rather than a screen's worth. Ordered
- * by that column and then the id, the unique key the pages line up on.
- */
-export function readAll(table, { column = null, from = null, to = null } = {}) {
-  return selectAll(table, (q) => {
-    let out = q;
-    if (column && from) out = out.gte(column, from);
-    if (column && to) out = out.lte(column, to);
-    if (column) out = out.order(column);
-    return out.order('id');
-  });
-}
-
-/**
- * Revise a day. Returns the id of the new entry.
- *
- * Not an update: the outgoing row stays, and the new one points at it. A plan
- * that changed the evening before a shift is itself delay evidence, and there
- * is no way to spend it twice — revising an already-revised entry raises.
- */
-export const supersedePlan = (entryId, { locationId = null, task = null, categoryId = null, shift = 'day' } = {}) =>
-  rpc('rc_supersede_plan', {
-    p_entry: entryId,
-    p_location: locationId,
-    p_task: task,
-    p_category: categoryId,
-    p_shift: shift,
-  });
-
-/**
- * Withdraw a day. Returns the id of the tombstone.
- *
- * "Delete my task" with the record kept, which is the only shape a delete takes
- * here: there is no DELETE grant on `rc_plan_entries`, so this writes a row
- * superseding the original and marked withdrawn, and `rc_plan_current` drops the
- * pair. The schedule stops showing the day; the table still says it was planned
- * and then withdrawn, by whom and when.
- *
- * Whoever may plan a day may withdraw it — a member their own, an administrator
- * anybody's — which is the same question the insert policy asks.
- */
-export const withdrawPlan = (entryId) => rpc('rc_withdraw_plan', { p_entry: entryId });
-
-/**
- * Move a day to the person the look-ahead now names. Returns the new entry's id.
- *
- * An administrator's: it writes a day against somebody else, which is the whole
- * point. Refuses a move onto the person who already has it, so a re-read that
- * changed nothing writes nothing — otherwise every ingest would supersede every
- * linked entry with a revision saying the same thing.
- */
-export const reassignPlan = (entryId, personId) =>
-  rpc('rc_reassign_plan', { p_entry: entryId, p_person: personId });
-
-/**
- * Record one huddle outcome. Idempotent on `clientUuid`.
- *
- * That uuid is generated before the row is sent, which is what lets the huddle
- * screen queue entries locally and replay them when the connection returns.
- * The meeting is at a fixed time whether or not the network is up.
- */
-export const recordActual = ({
-  clientUuid, personId, date, status,
-  categoryId = null, locationId = null, note = null,
-  blockedReason = null, blockedPartyId = null,
-  carryChainId = null, planEntryId = null, shift = 'day',
-  lookaheadRowId = null, evidencePath = null, supersedesId = null, task = null,
-}) =>
-  rpc('rc_record_actual', {
-    p_client_uuid: clientUuid,
-    p_person: personId,
-    p_date: date,
-    p_status: status,
-    p_category: categoryId,
-    p_location: locationId,
-    p_note: note,
-    p_blocked_reason: blockedReason,
-    p_blocked_party: blockedPartyId,
-    p_carry_chain: carryChainId,
-    p_plan_entry: planEntryId,
-    p_shift: shift,
-    p_lookahead_row: lookaheadRowId,
-    p_evidence: evidencePath,
-    // The outcome this one corrects. The function refuses a row that has
-    // already been corrected, so two edits of one outcome cannot both land.
-    p_supersedes: supersedesId,
-    // What they actually did, in words — the one statement of the work on a day
-    // with nothing planned.
-    p_task: task,
-  });
 
 export const resolveLocation = (raw) => rpc('rc_resolve_location', { p_raw: raw });
 
@@ -1460,168 +771,27 @@ export const addIngestRun = (row) => insert('rc_ingest_runs', [row]).then((r) =>
 export const addSnapshot = (row) => insert('rc_lookahead_snapshots', [row]).then((r) => r[0]);
 export const addSnapshotRows = (rows) => insert('rc_lookahead_rows', rows);
 export const addChangeEvents = (rows) => insert('rc_change_events', rows);
-export const addSar = (row) => insert('rc_sars', [row]).then((r) => r[0]);
-/* Only ever to attach the storage path once the PDF is up. A SAR's terms are
-   never edited — an amended one is a new revision that supersedes it, which is
-   what `superseded_by` is for. */
-export const updateSar = (id, patch) => update('rc_sars', id, patch);
-export const addSarLinks = (rows) => insert('rc_sar_links', rows);
 
 /**
- * Annotate a change event: who caused a cancellation, which removal and
- * addition were really one crew moving site.
- *
- * Insert only. Correcting one means adding another that supersedes it, because
- * this is the record a delay claim gets challenged on and a judgement that
- * could be quietly rewritten a year later would be worth nothing.
+ * Annotate a change event. Insert only: correcting one means adding another
+ * that supersedes it, because this is the record a delay claim is built on.
  */
 export const addAnnotation = (row) => insert('rc_change_annotations', [row]).then((r) => r[0]);
 
-/**
- * Record whose cancellation it was, and why. Append-only: a correction is a
- * new row carrying `supersedes_id`, never an edit.
- */
-/**
- * Replace what a stored row says each day was painted as. Only ever the
- * re-derivation of a past read under today's rules — `cells` is derived from
- * the snapshot, which is the durable record, so refining a rule means writing
- * the derivation again rather than migrating anything.
- */
+/** Replace what a stored row says each day was painted as — a re-derivation under today's rules. */
 export const updateLookaheadRowCells = (id, cells) => update('rc_lookahead_rows', id, { cells });
 
-/**
- * Log what somebody said about a cancellation. `la_row_id` is the editor's row
- * it is about (schema 14); a database from before then has no such column, and
- * the note is written without it rather than not at all — found by its words,
- * as every note was.
- */
-export const addCancellationNote = (row) => insert('rc_cancellation_notes', [row])
-  .catch((err) => {
-    if (!('la_row_id' in row) || !/la_row_id/.test(String(err?.message || ''))) throw err;
-    const rest = { ...row };
-    delete rest.la_row_id;
-    return insert('rc_cancellation_notes', [rest]);
-  })
-  .then((r) => r[0]);
+/** Log what somebody said about a cancellation. Append-only: a correction supersedes. */
+export const addCancellationNote = (row) => insert('rc_cancellation_notes', [row]).then((r) => r[0]);
 
-/* ── Accounts ──────────────────────────────────────────────────────────── */
-
-/**
- * Who may have an account, and what they may do with it.
- *
- * Supabase Auth still holds the password — `auth.uid()` is what every policy
- * in `rc_schema.sql` keys on, so the permission model *is* the authentication
- * and replacing it would mean rewriting all of it. What is managed from here
- * is the part that is genuinely ours: who is allowed to create an account at
- * all, which roster row it lands on, and what role it carries.
- *
- * Every one of these is a `security definer` function rather than a table
- * write, for the reason this whole schema is built on: a refused UPDATE
- * matches nothing and reports success, so an administrator demoting the last
- * administrator by accident would be told it worked.
- */
-export const invite = (email, role = 'viewer', personId = null, note = null) =>
-  rpc('rc_invite', {
-    p_email: email,
-    p_role: role,
-    p_person: personId || null,
-    p_note: note || null,
-  }).then((rows) => (Array.isArray(rows) ? rows[0] : rows));
-
-export const revokeInvitation = (email) => rpc('rc_revoke_invitation', { p_email: email });
-
-export const listInvitations = () => rpc('rc_list_invitations').then((rows) => rows || []);
-
-export const linkAccount = (personId, email) =>
-  rpc('rc_link_account', { p_person: personId, p_email: email });
-
-export const setRole = (personId, role) =>
-  rpc('rc_set_role', { p_person: personId, p_role: role });
-
-/**
- * Re-read your own team record.
- *
- * Changing a role changes what the interface may draw, and an administrator
- * who demotes themselves must see that immediately rather than at the next
- * sign-in — otherwise the page keeps offering actions the database has already
- * started refusing.
- */
-export async function refreshMe() {
-  await refreshPerson();
-  emit(EV.RC_AUTH_CHANGED, { user, event: 'ROLE_CHANGED' });
-  return person;
-}
-
-/* ── Storage ───────────────────────────────────────────────────────────── */
-
-/**
- * Upload a SAR PDF so it opens in the deputy's browser.
- *
- * Only SARs. The look-ahead workbook is deliberately *not* uploaded: a .xlsx
- * carries every other tab, hidden row, comment and forgotten pasted sheet
- * along with the part that was wanted, and the only thing anyone needs from it
- * is the parsed grid, which goes up as JSON. The bytes stay in the OneDrive
- * archive.
- */
-export async function uploadSar(path, blob) {
-  requireClient();
-  guardPreview();
-  const { error } = await client.storage.from('sars').upload(path, blob, {
-    upsert: false,
-    contentType: blob?.type || 'application/pdf',
-  });
-  if (error) throw new Error(`upload: ${error.message}`);
-  return path;
-}
-
-/**
- * Upload the photograph taken with an outcome.
- *
- * Before the row, never after: `rc_actuals` has no UPDATE grant, so a path
- * attached afterwards would need a second row superseding the first. The name
- * is the client uuid the outcome is about to be written with, which is
- * generated on the client precisely so it exists before the insert does.
- *
- * A failure here is not a failure of the meeting. The caller records the
- * outcome either way and says the picture did not go up — losing what somebody
- * said because a photograph did not upload would be the wrong way round.
- */
-export async function uploadEvidence(path, blob) {
-  requireClient();
-  guardPreview();
-  const { error } = await client.storage.from('evidence').upload(path, blob, {
-    upsert: false,
-    contentType: blob?.type || 'image/jpeg',
-  });
-  if (error) throw new Error(`upload: ${error.message}`);
-  return path;
-}
-
-export async function evidenceUrl(path, seconds = 3600) {
-  requireClient();
-  const { data, error } = await client.storage.from('evidence').createSignedUrl(path, seconds);
-  if (error) throw new Error(`link: ${error.message}`);
-  return data.signedUrl;
-}
-
-export async function sarUrl(path, seconds = 3600) {
-  requireClient();
-  const { data, error } = await client.storage.from('sars').createSignedUrl(path, seconds);
-  if (error) throw new Error(`link: ${error.message}`);
-  return data.signedUrl;
-}
-
-/* ── Track access work requests ────────────────────────────────────────────
-   All of it an administrator's: the requests, the contacts, the wording, the
-   signatures and BART's blank form. The policies are the control — a member
-   reads nothing here and writes nothing — and these are the doors. */
+/* ── Track access work requests ──────────────────────────────────────────── */
 
 /** The live requests (drafts and approved) for one week, by its Monday. */
 export function listTawrs(weekStartISO) {
   return select('rc_tawrs', (q) => q.eq('week_start', weekStartISO).neq('status', 'superseded').order('created_at'));
 }
 
-/** Every live request from a Monday on — what the week list counts. */
+/** Every live request from a Monday on. */
 export function listTawrsFrom(fromISO) {
   return select('rc_tawrs', (q) => q.gte('week_start', fromISO).neq('status', 'superseded').order('week_start'));
 }
@@ -1629,14 +799,13 @@ export function listTawrsFrom(fromISO) {
 export const addTawr = (row) => insert('rc_tawrs', [row]).then((r) => r[0]);
 export const updateTawr = (id, patch) => update('rc_tawrs', id, patch);
 
-/** Throw a draft away. An approved request cannot be: the policy matches nothing, and this says so. */
+/** Throw a draft away. An approved request cannot be: the delete matches nothing, and this says so. */
 export async function discardTawr(id) {
-  requireClient();
-  guardPreview();
-  forgetReads();
-  const { data, error } = await landed(client.from('rc_tawrs').delete().eq('id', id).select());
+  requireDb();
+  const { data, error } = await db.from('rc_tawrs').delete().eq('id', id).select();
   if (error) throw new Error(`rc_tawrs: ${error.message}`);
   if (!data || !data.length) throw new Error('That request was not discarded — only a draft can be.');
+  folder.noteWrite();
   return data[0];
 }
 
@@ -1647,39 +816,22 @@ export function listTawrSettings() {
   return select('rc_tawr_settings');
 }
 
-/** Write one TAWR setting — an upsert, for the reason `setSetting()` is one. */
 export async function setTawrSetting(key, value) {
-  requireClient();
-  guardPreview();
-  forgetReads();
-  const { data, error } = await landed(client
-    .from('rc_tawr_settings')
-    .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
-    .select());
-  if (error) throw new Error(`rc_tawr_settings: ${error.message}`);
-  if (!data || !data.length) throw new Error('rc_tawr_settings: that change was refused — only an administrator may set this.');
-  return data[0];
+  const rows = await upsert('rc_tawr_settings', { key, value, updated_at: new Date().toISOString() }, 'key');
+  return rows[0];
 }
 
-/** Every administrator's requestor details and signature. */
+/** Every requestor's details and signature. */
 export function listTawrProfiles() {
   return select('rc_tawr_profiles');
 }
 
-/** Save the caller's own requestor details and signature. */
+/** Save your own requestor details and signature. */
 export async function saveTawrProfile(patch) {
-  requireClient();
-  guardPreview();
-  forgetReads();
   const who = me();
-  if (!who) throw new Error('Only somebody on the team has a TAWR profile.');
-  const { data, error } = await landed(client
-    .from('rc_tawr_profiles')
-    .upsert({ ...patch, person_id: who.id, updated_at: new Date().toISOString() }, { onConflict: 'person_id' })
-    .select());
-  if (error) throw new Error(`rc_tawr_profiles: ${error.message}`);
-  if (!data || !data.length) throw new Error('rc_tawr_profiles: that change was refused — only an administrator has one.');
-  return data[0];
+  if (!who) throw new Error('No calendar is open.');
+  const rows = await upsert('rc_tawr_profiles', { ...patch, person_id: who.id, updated_at: new Date().toISOString() }, 'person_id');
+  return rows[0];
 }
 
 export function listTawrDescriptions() {
@@ -1689,39 +841,29 @@ export const addTawrDescription = (row) => insert('rc_tawr_descriptions', [row])
 export const updateTawrDescription = (id, patch) => update('rc_tawr_descriptions', id, { ...patch, updated_at: new Date().toISOString() });
 
 export async function deleteTawrDescription(id) {
-  requireClient();
-  guardPreview();
-  forgetReads();
-  const { data, error } = await landed(client.from('rc_tawr_descriptions').delete().eq('id', id).select());
+  requireDb();
+  const { data, error } = await db.from('rc_tawr_descriptions').delete().eq('id', id).select();
   if (error) throw new Error(`rc_tawr_descriptions: ${error.message}`);
-  if (!data || !data.length) throw new Error('That wording was not removed — you may not have permission.');
+  if (!data || !data.length) throw new Error('That wording was not removed.');
+  folder.noteWrite();
   return data[0];
 }
 
-const TAWR_TEMPLATE = 'template/tawr.pdf';
+const TAWR_TEMPLATE = 'tawr/template.pdf';
 
-/** Put BART's blank form in the private bucket, replacing the one there. */
+/** Put BART's blank form in the calendar's folder, replacing the one there. */
 export async function uploadTawrTemplate(blob) {
-  requireClient();
-  guardPreview();
-  const { error } = await client.storage.from('tawr').upload(TAWR_TEMPLATE, blob, {
-    upsert: true,
-    // A replaced form must be the one the next download fills, not a copy a
-    // cache kept for the default hour.
-    cacheControl: '0',
-    contentType: 'application/pdf',
-  });
-  if (error) throw new Error(`upload: ${error.message}`);
+  requireDb();
+  const allowed = writable();
+  if (allowed !== true) throw new Error(allowed);
+  const bytes = blob instanceof Uint8Array ? blob : new Uint8Array(await blob.arrayBuffer());
+  await folder.writeBytes(TAWR_TEMPLATE, bytes);
+  folder.noteWrite();
   return TAWR_TEMPLATE;
 }
 
-/** BART's blank form, as bytes; null when none has been uploaded. */
+/** BART's blank form, as bytes; null when none has been put in the folder. */
 export async function downloadTawrTemplate() {
-  requireClient();
-  const { data, error } = await client.storage.from('tawr').download(TAWR_TEMPLATE);
-  if (error) {
-    if (/not found|does not exist|404/i.test(String(error.message || error.statusCode || ''))) return null;
-    throw new Error(`download: ${error.message}`);
-  }
-  return new Uint8Array(await data.arrayBuffer());
+  requireDb();
+  return folder.readBytes(TAWR_TEMPLATE);
 }

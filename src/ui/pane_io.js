@@ -8,7 +8,7 @@ import { el, clear } from '../core/util.js';
 import { fmtDate, fmtTimestamp } from '../core/dates.js';
 import { TYPES } from '../core/model.js';
 import * as store from '../core/store.js';
-import { makeBackup, isHosted } from '../core/storage.js';
+import { makeBackup } from '../core/storage.js';
 import * as filestore from '../core/filestore.js';
 import * as access from '../core/access.js';
 import * as renderer from '../timeline/renderer.js';
@@ -33,25 +33,10 @@ import { refreshPane } from './pane_util.js';
  * This is the whole of file mode's interface: connect a folder, see which plan
  * is live and who has the pen, and open another. It sits at the top of Import /
  * export because that is where someone goes looking for "where does my data
- * live", and it is hidden entirely on a hosted deployment, where the answer is
- * the server and this would only confuse.
+ * live".
  */
 function sharedFolderSection() {
   const st = filestore.state();
-
-  // A hosted build saves to the server, so the folder controls would not work
-  // — but rendering nothing was worse: the section simply vanished, with no way
-  // to tell that from a build where the feature was missing. Say which one it is.
-  if (isHosted()) {
-    return section('Shared folder', [
-      el('div', {
-        class: 'cx-hint',
-        text:
-          'This build saves to its server, so the plan cannot also live in a folder. ' +
-          'A folder deployment is a separate build with no backend — see DEPLOY.md.',
-      }),
-    ], { id: 'shared-folder' });
-  }
 
   if (!st.supported) {
     return section('Shared folder', [

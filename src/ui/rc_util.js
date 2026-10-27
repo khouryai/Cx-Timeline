@@ -108,6 +108,29 @@ export function byId(rows) {
   return map;
 }
 
+/**
+ * Who wrote something, from the id it was stamped with.
+ *
+ * Three kinds of id are in the record: the account a person had in the old
+ * calendar (kept on their roster row as `user_id`, so their history stays
+ * theirs), `local:<roster id>` for somebody who never had one, and
+ * `name:<what they typed>` for somebody not on the roster at all. A TAWR is
+ * stamped with the roster id itself. Answers '' for nobody.
+ */
+export function authorNames(people) {
+  const names = new Map();
+  for (const p of people || []) {
+    names.set(p.id, p.name);
+    names.set(`local:${p.id}`, p.name);
+    if (p.user_id) names.set(p.user_id, p.name);
+  }
+  return (id) => {
+    if (!id) return '';
+    const key = String(id);
+    return names.get(key) || (key.startsWith('name:') ? key.slice(5) : '');
+  };
+}
+
 /** Group rows under a key, for a grid that is people down and days across. */
 export function groupBy(rows, key) {
   const map = new Map();

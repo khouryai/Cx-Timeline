@@ -757,6 +757,55 @@ pub fn delete_file(dir: &Path, rel: &str) -> Result<bool> {
     }
 }
 
+/* ── The calendar's files ───────────────────────────────────────────────── */
+
+/// Read a text file inside the folder, or `None` when it is not there.
+///
+/// The resource calendar keeps its tables as JSON under `calendar/`, and reads
+/// them as text: the byte doors above carry a file as an array of numbers,
+/// which is fine for a workbook and far too slow for a month of history.
+pub fn read_text(dir: &Path, rel: &str) -> Result<Option<PlanRead>> {
+    let path = safe_join(dir, rel)?;
+    let meta = match fs::metadata(&path) {
+        Ok(meta) if meta.is_file() => meta,
+        Ok(_) => return Err(PlanError::Refused(format!("{rel} is not a file"))),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(PlanError::Io(err)),
+    };
+    let text = fs::read_to_string(&path)?;
+    Ok(Some(PlanRead {
+        text,
+        stamp: stamp_of(&meta),
+    }))
+}
+
+/// The stamp of a file inside the folder, or `None` when it is not there.
+pub fn stat_text(dir: &Path, rel: &str) -> Result<Option<Stamp>> {
+    let path = safe_join(dir, rel)?;
+    match fs::metadata(&path) {
+        Ok(meta) => Ok(Some(stamp_of(&meta))),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(PlanError::Io(err)),
+    }
+}
+
+/// Write a text file inside the folder, atomically, refusing when the file on
+/// disk is not the one `expected` describes — the plan's guard, for the
+/// calendar's files. `None` writes whatever is there; a file that has gone is
+/// not a conflict, for the reason `write_plan` gives.
+pub fn write_text(dir: &Path, rel: &str, text: &str, expected: Option<Stamp>) -> Result<Stamp> {
+    let path = safe_join(dir, rel)?;
+    if let Some(expected) = expected {
+        if let Ok(meta) = fs::metadata(&path) {
+            let current = stamp_of(&meta);
+            if current != expected {
+                return Err(PlanError::Conflict { current, expected });
+            }
+        }
+    }
+    write_file(dir, rel, text.as_bytes())
+}
+
 /// SHA-256 of a file's bytes, as lower-case hex.
 ///
 /// Implemented here rather than pulled in, to keep the "no runtime
@@ -1224,6 +1273,38 @@ mod tests {
         assert!(!is_safe_component(".."));
         assert!(is_safe_component("SAR-12345.pdf"));
         assert!(is_safe_component("2026-W35"));
+    }
+
+    #[test]
+    fn the_calendars_files_round_trip_as_text() {
+        let s = Scratch::new("data-text");
+        assert!(read_text(s.path(), "calendar/registers.json").unwrap().is_none());
+        assert!(stat_text(s.path(), "calendar/registers.json").unwrap().is_none());
+        let stamp = write_text(s.path(), "calendar/registers.json", "{\"a\":1}", None).unwrap();
+        let read = read_text(s.path(), "calendar/registers.json").unwrap().unwrap();
+        assert_eq!(read.text, "{\"a\":1}");
+        assert_eq!(read.stamp, stamp);
+        assert_eq!(stat_text(s.path(), "calendar/registers.json").unwrap(), Some(stamp));
+    }
+
+    #[test]
+    fn a_calendar_file_another_computer_saved_is_never_written_over() {
+        let s = Scratch::new("data-guard");
+        let mine = write_text(s.path(), "calendar/editor.json", "mine", None).unwrap();
+        tick();
+        let theirs = write_text(s.path(), "calendar/editor.json", "theirs, longer", None).unwrap();
+        assert_ne!(mine, theirs);
+        let refused = write_text(s.path(), "calendar/editor.json", "mine again", Some(mine));
+        assert!(matches!(refused, Err(PlanError::Conflict { .. })));
+        assert_eq!(read_text(s.path(), "calendar/editor.json").unwrap().unwrap().text, "theirs, longer");
+        assert!(write_text(s.path(), "calendar/editor.json", "mine again", Some(theirs)).is_ok());
+    }
+
+    #[test]
+    fn a_calendar_path_that_escapes_the_folder_is_refused() {
+        let s = Scratch::new("data-escape");
+        assert!(matches!(write_text(s.path(), "calendar/../../x.json", "x", None), Err(PlanError::Refused(_))));
+        assert!(matches!(read_text(s.path(), "../x.json"), Err(PlanError::Refused(_))));
     }
 
     #[test]

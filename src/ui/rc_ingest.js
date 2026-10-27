@@ -13,11 +13,10 @@ import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
 import { parseSheet, applyLegend, readLegend } from '../io/lookahead.js';
 import { readGrid } from '../core/lookahead.js';
-import { classify, countable, rowsFrom, reassignments } from '../core/la_register.js';
+import { classify, countable, rowsFrom } from '../core/la_register.js';
 import { icon } from './icons.js';
 import { toast } from './components.js';
-import { notifyChanged, todayISO, isoToMs, nameRegister, foldName } from './rc_util.js';
-import { toISO, addDays } from '../core/dates.js';
+import { notifyChanged, todayISO } from './rc_util.js';
 
 import { la } from './rc_la_state.js';
 import {
@@ -335,42 +334,7 @@ async function publishGrid({ grid, legend, declared = [], hash, run, previous, s
       const rows = await lookaheadRows(snapshot.id, grid);
       if (rows.length) written = await rc.addSnapshotRows(rows);
     } catch (err) {
-      /* A column this project has and that project has not.
-         `create table if not exists` does nothing to a table that already
-         exists, so a database built before the Resource row went in has no
-         `resources` column — and PostgREST refuses the whole insert over it.
-         The rest of the row is still worth having, so it goes without that one
-         field and the gap is *said*, rather than costing the read. */
-      let missing = missingColumns(err, ['resources', 'la_row_id']);
-      if (missing.length) {
-        try {
-          const all = await lookaheadRows(snapshot.id, grid);
-          /* PostgREST names one missing column at a time, so a project behind on
-             both is asked twice rather than losing the rows on the second. */
-          for (;;) {
-            try {
-              if (all.length) written = await rc.addSnapshotRows(all.map((row) => withoutKeys(row, missing)));
-              break;
-            } catch (again) {
-              const more = missingColumns(again, ['resources', 'la_row_id']).filter((c) => !missing.includes(c));
-              if (!more.length) throw again;
-              missing = [...missing, ...more];
-            }
-          }
-          rowTrouble = missing.includes('resources')
-            ? 'This database has no rc_lookahead_rows.resources column, so who the '
-              + 'Resource row names was not stored. Run supabase/migrate.sql and then '
-              + 'supabase/rc_schema.sql. The calendar still shows the names — it re-reads the '
-              + 'snapshot — but the Resources tab and the week plan read the stored column.'
-            : 'This database has no rc_lookahead_rows.la_row_id column, so this reading was '
-              + 'compared by position and Changes cannot say who made it. Run '
-              + 'supabase/migrate.sql and then supabase/rc_schema.sql.';
-        } catch (second) {
-          rowTrouble = second.message;
-        }
-      } else {
-        rowTrouble = err.message;
-      }
+      rowTrouble = err.message;
       /* The snapshot is the record; the rows are a convenience over it and can
          be rebuilt from it. Losing them must not lose the read — but it must
          not be silent either, which it was: a `console.warn` is a message to
@@ -394,39 +358,13 @@ async function publishGrid({ grid, legend, declared = [], hash, run, previous, s
       rc.reportError('lookahead:changes', err);
     }
 
-    /* And move the days the sheet has handed to somebody else.
-       A stored entry pointing at a look-ahead row is somebody confirming or
-       overriding what that row said; when this read names a different person on
-       it, the task has moved. Done here rather than at paint time because it is
-       a *write*, and because this is the one moment somebody deliberately asked
-       the sheet what it says now. */
-    let moved = [];
-    try {
-      moved = await applyReassignments(written);
-    } catch (err) {
-      // Same reasoning as the rows and the events: the snapshot is stored, so a
-      // failure here costs a re-derivation on the next read rather than a read.
-      console.warn('[cx-timeline] reassignments not applied:', err.message);
-      rc.reportError('lookahead:reassign', err);
-    }
-
     run.outcome = 'snapshot';
     run.note = [
       grid.unknown.length ? `${grid.unknown.length} colour(s) not in the legend` : null,
       events.length ? `${countable(events).length} change(s) that count` : null,
-      moved.length ? `${moved.length} task(s) moved to somebody else` : null,
       rowTrouble ? `rows: ${rowTrouble}` : null,
     ].filter(Boolean).join('; ') || null;
     await rc.addIngestRun(run);
-
-    if (!silent && moved.length) {
-      toast({
-        tone: 'warn',
-        message: `${moved.length} planned task(s) moved to the person this read names on the row `
-          + '— flagged "Reassigned" in the week plan, with who had it before.',
-        timeout: 12000,
-      });
-    }
 
     /* Said out loud, and at length. Something downstream of this read is now
        empty, and "empty" and "it could not be written" must not look alike — a
@@ -508,64 +446,6 @@ async function lookaheadRows(snapshotId, grid) {
  *
  * Returns the events, so the caller can say how many of them count.
  */
-/**
- * Move every planned day the sheet has just handed to somebody else.
- *
- * `reassignments()` decides *which*, and refuses to decide unless it is certain
- * — the row has to name exactly one person the roster knows on that day, and
- * somebody other than whoever has it. This does the writing:
- * `rc_reassign_plan()` supersedes the entry with one against the new person and
- * records where it came from, so the outgoing row stays and the week plan can
- * badge the new one "Reassigned from Dana".
- *
- * Each move is attempted on its own and a refusal is logged rather than thrown.
- * The function refuses an entry somebody has already revised, and one refusal
- * must not stop the other nine: they are independent facts about independent
- * days, and the next read will offer the failed one again.
- *
- * Returns what actually moved, which is what the toast and the ingest note say.
- */
-async function applyReassignments(rows) {
-  if (!rows || !rows.length) return [];
-
-  const weeks = [...new Set(rows.map((r) => r.week_start).filter(Boolean))].sort();
-  if (!weeks.length) return [];
-  const from = weeks[0];
-  const to = toISO(addDays(isoToMs(weeks[weeks.length - 1]), 6));
-
-  const [planRows, people, aliases] = await Promise.all([
-    rc.listPlan(from, to),
-    rc.listPeople(),
-    rc.listPersonAliases().catch(() => []),
-  ]);
-
-  const register = nameRegister(people, aliases);
-  const moves = reassignments({
-    planRows,
-    laRows: rows,
-    // The register, as the lookup the derivation takes. Exact, like everywhere
-    // else: a near miss is reported on the week plan and answered with an
-    // alias, never used to move somebody's shift.
-    resolve: (name) => register.get(foldName(name)) || null,
-  });
-  if (!moves.length) return [];
-
-  const done = [];
-  for (const move of moves) {
-    try {
-      await rc.reassignPlan(move.entry.id, move.to);
-      done.push(move);
-    } catch (err) {
-      /* Already revised, already withdrawn, or already theirs. None of them is
-         a fault and none of them should stop the rest — the next read offers
-         this one again. */
-      console.warn('[cx-timeline] a task could not be moved:', err.message);
-    }
-  }
-  if (done.length) notifyChanged('plan');
-  return done;
-}
-
 async function recordChanges(previous, snapshot, rows, legend) {
   if (!previous || !rows.length) return [];
 
@@ -611,57 +491,8 @@ async function recordChanges(previous, snapshot, rows, legend) {
     after: sideOf(e, 'after'),
   }));
 
-  /* A database that has not been brought up to date: no column for the id, or
-     a kind its check constraint does not know yet. Every change it *can* hold
-     is still written — losing the cancellations over a details edit would be
-     the wrong way round — and what it could not is reported. */
-  let dropId = false;
-  let dropNewer = false;
-  let first = null;
-  for (;;) {
-    const sending = records
-      .filter((r) => !dropNewer || !NEWER_KINDS.includes(r.kind))
-      .map((r) => (dropId ? withoutKeys(r, ['la_row_id']) : r));
-    try {
-      if (sending.length) await rc.addChangeEvents(sending);
-      break;
-    } catch (err) {
-      const idRefused = !dropId && missingColumns(err, ['la_row_id']).length > 0;
-      const kindRefused = !dropNewer && /check constraint|violates check/i.test(err.message);
-      if (!idRefused && !kindRefused) throw err;
-      dropId = dropId || idRefused;
-      dropNewer = dropNewer || kindRefused;
-      first = first || err;
-    }
-  }
-  if (first) {
-    rc.reportError('lookahead:changes', new Error(
-      `rc_change_events is behind the application (${first.message}); run supabase/migrate.sql `
-      + 'and then supabase/rc_schema.sql so Changes can say who made each change.'));
-  }
-  return events.filter((e) => !dropNewer || !NEWER_KINDS.includes(e.kind));
-}
-
-/** Kinds a schema older than version 10 refuses. */
-const NEWER_KINDS = ['details_changed'];
-
-/**
- * Which of `names` a PostgREST error says the table has no column for.
- *
- * `create table if not exists` does nothing to a table that already exists, so
- * a project that has not run `migrate.sql` lacks every column added since — and
- * PostgREST refuses the whole insert over one of them.
- */
-function missingColumns(err, names) {
-  const message = String(err?.message || '');
-  if (!/(column|schema cache)/i.test(message)) return [];
-  return names.filter((name) => new RegExp(`\\b${name}\\b`).test(message));
-}
-
-function withoutKeys(row, keys) {
-  const out = { ...row };
-  for (const k of keys) delete out[k];
-  return out;
+  if (records.length) await rc.addChangeEvents(records);
+  return events;
 }
 
 /**

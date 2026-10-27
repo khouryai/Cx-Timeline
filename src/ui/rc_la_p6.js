@@ -21,7 +21,7 @@ import { newId } from '../core/la_edit.js';
 import { readZip, readSheets, parseSheet } from '../io/lookahead.js';
 import { icon } from './icons.js';
 import { textInput, toast, emptyState, openModal, checkbox, badge, field } from './components.js';
-import { notifyChanged, formModal } from './rc_util.js';
+import { notifyChanged, formModal, authorNames } from './rc_util.js';
 import { la, table } from './rc_la_state.js';
 import { EDITOR_SOURCE } from './rc_ingest.js';
 
@@ -46,8 +46,7 @@ export async function loadP6() {
   }
 }
 
-const SCHEMA_BEHIND = 'This database has no P6 tables yet. Run supabase/rc_schema.sql — Organisation → Settings says '
-  + 'which version the database is at.';
+const UNREADABLE = 'The P6 list in calendar/p6.json could not be read. Try again once OneDrive has finished syncing the folder.';
 
 /** A row's Activity ID in words, for the hover — the same wording in the editor and the read view. */
 export function p6Words(value, status) {
@@ -381,7 +380,7 @@ export async function renderP6(host) {
   ].filter(Boolean)));
 
   if (!ctx.available) {
-    host.appendChild(emptyState({ iconName: 'warning', title: 'Not set up in this database yet', message: SCHEMA_BEHIND }));
+    host.appendChild(emptyState({ iconName: 'warning', title: 'The P6 list could not be read', message: ctx.error?.message || UNREADABLE }));
     return;
   }
 
@@ -403,7 +402,7 @@ export async function renderP6(host) {
     }));
   } else {
     const newest = ctx.entries.reduce((a, b) => (String(a.imported_at || '') > String(b.imported_at || '') ? a : b));
-    const who = people.find((p) => p.user_id && p.user_id === newest.imported_by)?.name;
+    const who = authorNames(people)(newest.imported_by);
     const missing = ctx.entries.filter((e) => e.missing).length;
     host.appendChild(el('div', { class: 'p6-summary' }, [
       el('span', { class: 'p6-summary-count', text: count(ctx.entries.length, 'activity', 'activities') }),

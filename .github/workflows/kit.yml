@@ -1,0 +1,73 @@
+# Publish the desktop update kit.
+#
+# Every installed copy of CX Timeline checks the `desktop-kit` branch of this
+# repository on launch (through raw.githubusercontent.com — see
+# `tools/shell/loader.js`) and downloads a newer application in the background,
+# used from the next launch. This workflow is what writes that branch, so a
+# push to the default branch reaches every desktop once Checks has passed on it
+# — and not before: a red push never becomes an update.
+#
+# The branch holds two files and one commit, replaced each time:
+#
+#   version.json   a few hundred bytes, read on every launch
+#   payload.json   the application — both bundles and every stylesheet
+#
+# Nothing here builds an installer; `.github/workflows/desktop.yml` does, and
+# only a change to `src-tauri/` needs one. A kit that needs a newer installer
+# says so (`requiresShell`, raised in `tools/desktop.js`) and an older shell
+# tells the user to install the new one instead of running it.
+
+name: Desktop update
+
+on:
+  workflow_run:
+    workflows: ['Checks']
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-kit
+  cancel-in-progress: false
+
+jobs:
+  kit:
+    name: Publish the kit to desktop-kit
+    # The default branch only, and only once Checks is green on that commit.
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/claude/timeline-planner-app-y1t1nm'
+      || github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.head_branch == 'claude/timeline-planner-app-y1t1nm'
+      && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The commit Checks passed on, not whatever the branch has moved to since.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The bundles are committed and Checks has already proved they are the
+      # source built, so they are packed as they are.
+      - name: Write the kit
+        run: node tools/desktop.js --kit dist-kit
+
+      - name: Replace the desktop-kit branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          cd dist-kit
+          git init -q
+          git checkout -q -b desktop-kit
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add version.json payload.json
+          git commit -q -m "Desktop kit from ${SOURCE_SHA}"
+          git push -q --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" desktop-kit
+          echo "Published $(cat version.json | tr -d '\n ')"

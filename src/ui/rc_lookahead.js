@@ -1,18 +1,10 @@
 /**
- * The four-week look-ahead, and the SARs against it.
+ * The four-week look-ahead, and everything read against it.
  *
- * The look-ahead is the contractual source of truth; the resource calendar is
- * the execution record. This tab is where the two meet: it reads the workbook
- * out of the OneDrive folder, snapshots it, works out what changed since last
- * time, and lets somebody annotate the judgements the system cannot make.
- *
- * Ingestion is desktop-only in practice, and the reason is worth stating: a
- * browser cannot watch a file in a synced folder. It can be granted one, but it
- * cannot poll for changes in the background. So coverage has gaps whenever
- * nobody has the application open — and a gap that is not recorded looks
- * exactly like a week in which nothing changed. Every attempt therefore writes
- * an `rc_ingest_runs` row, and the change log renders the gaps rather than
- * showing a smooth history that is not true.
+ * The look-ahead is written here, in the editor, and every reading of it is
+ * kept: the calendar draws the newest, the cancellation log and the Changes
+ * list compare them, and the legend and the P6 list are what they are read
+ * against. All of it is in the shared folder (`core/rc.js`).
  *
  * Imports: util, events, dates, rc, filestore, io/lookahead, core/lookahead,
  *          core/la_edit, core/la_p6, icons, components, rc_util.
@@ -42,12 +34,11 @@ import { renderEditor, flushEditor, openExcelExport } from './rc_la_editor.js';
 import { renderLegend } from './rc_la_legend.js';
 import { renderChanges, renderSnapshots } from './rc_la_changes.js';
 import { renderCancellations } from './rc_la_cancellations.js';
-import { renderSars } from './rc_la_sars.js';
 import { renderP6, p6Words } from './rc_la_p6.js';
 import { openActivity } from './rc_activity.js';
 import { masterExportButton } from './rc_master_export.js';
 
-const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6', 'sars'];
+const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6'];
 
 export async function render(root) {
   /* The calendar is the team's; the register around it is not.
@@ -77,7 +68,7 @@ export async function render(root) {
       type: 'button',
       text: {
         calendar: 'Calendar', cancellations: 'Cancellations', changes: 'Changes',
-        snapshots: 'Snapshots', legend: 'Legend', p6: 'P6 activities', sars: 'Site access',
+        snapshots: 'Snapshots', legend: 'Legend', p6: 'P6 activities',
       }[id],
       'aria-pressed': String(id === la.section),
       onClick: async () => {
@@ -101,8 +92,7 @@ export async function render(root) {
   else if (la.section === 'changes') await renderChanges(host);
   else if (la.section === 'snapshots') await renderSnapshots(host);
   else if (la.section === 'legend') await renderLegend(host);
-  else if (la.section === 'p6') await renderP6(host);
-  else await renderSars(host);
+  else await renderP6(host);
 }
 
 /**
@@ -122,6 +112,16 @@ function editSwitch() {
     html: icon(on ? 'check' : 'edit', { size: 12 }) + `<span>${on ? 'Done editing' : 'Edit'}</span>`,
     onClick: async (e) => {
       const btn = e.currentTarget;
+      /* Writing the look-ahead needs the pen. Somebody else holding it is
+         said here, where it is wanted, with the way to take it at the top. */
+      if (!on && !rc.canWrite()) {
+        toast({
+          tone: 'warn',
+          message: `${rc.penState().holder || 'Somebody else'} is editing the calendar. Take over at the top of the calendar to edit it here.`,
+          timeout: 8000,
+        });
+        return;
+      }
       btn.disabled = true;
       try {
         if (on) await flushEditor();

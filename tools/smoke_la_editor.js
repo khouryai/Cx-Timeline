@@ -22,7 +22,21 @@ const META = ed.FIELDS.length;
 
 export async function lookaheadEditor(page, { check, shot = null }) {
   // Tidying already run elsewhere in the suite, so this one counts only the editor's own.
-  const tidyAtStart = await page.evaluate(() => window.__rc.compactCalls || 0);
+  const compactCalls = () => page.evaluate(() => window.__rc.calls
+    .filter((c) => c.kind === 'rpc' && c.table === 'rc_compact_snapshots').length);
+  const tidyAtStart = await compactCalls();
+  /* Another computer's save of the editor's file, as OneDrive brings it down:
+     `change(body)` edits the file as the other application would have written
+     it, and the edit log's number moves on with it. */
+  const theirSave = (change, args) => page.evaluate(({ src, args: a }) => {
+    const body = JSON.parse(window.__folder.read('calendar/editor.json'));
+    // eslint-disable-next-line no-new-func
+    new Function('body', 'args', src)(body, a);
+    body.meta = body.meta || {};
+    body.meta.sequences = body.meta.sequences || {};
+    body.meta.sequences.rc_la_edits = (Number(body.meta.sequences.rc_la_edits) || 0) + 1;
+    window.__folder.write('calendar/editor.json', JSON.stringify(body));
+  }, { src: change, args });
   console.log('\nLook-ahead editor');
   const snap = async (name) => { if (shot) await page.screenshot({ path: shot.replace(/\.png$/, `-${name}.png`) }); };
   const monday = ed.mondayOf(new Date().toISOString().slice(0, 10));
@@ -587,12 +601,10 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   /* ── The other editor ─────────────────────────────────────────────── */
   // Somebody else changes a day this page has not seen — and then this page
   // changes the same day, from its stale copy.
-  await page.evaluate(({ id, iso }) => {
-    const c = window.__rc.rows.rc_la_cells.find((x) => x.row_id === id && x.day === iso);
+  await theirSave(`
+    const c = body.tables.rc_la_cells.find((x) => x.row_id === args.id && x.day === args.iso);
     c.text = 'X.TCE';
-    c.version += 1;
-    window.__rc.laRevision += 1;
-  }, { id: ixlId, iso: day(4) });
+    c.version += 1;`, { id: ixlId, iso: day(4) });
   await cell('IXL Regression Testing', day(4)).click();
   await page.keyboard.type('X.X');
   await page.keyboard.press('Enter');
@@ -604,22 +616,18 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     (await cell('IXL Regression Testing', day(4)).innerText()).trim() === 'X.TCE'
       && (await serverCell('IXL Regression Testing', day(4)))?.text === 'X.TCE');
 
-  // A change made elsewhere arrives the moment it is made: the bell rings
-  // (Realtime, on rc_la_beacon) — no focus, and long before the next poll.
-  await page.evaluate(({ id, iso }) => {
-    window.__rc.rows.rc_la_cells.push({ row_id: id, day: iso, color: 'FFFF00', text: 'X.WIT', version: 1 });
-    window.__rc.laRevision += 1;
-    window.__rc.ring();
-  }, { id: ixlId, iso: day(16) });
+  // A change made elsewhere arrives the moment the folder brings it down: the
+  // database reads it in and rings the bell — no focus, and before the next poll.
+  await theirSave(`body.tables.rc_la_cells.push({ row_id: args.id, day: args.iso, color: 'FFFF00', text: 'X.WIT', version: 1 });`,
+    { id: ixlId, iso: day(16) });
+  await page.evaluate(() => window.__rc.refresh());
   await page.waitForTimeout(800);
   check('the other editor\'s change arrives as it is made — the bell, not the poll',
     (await cell('IXL Regression Testing', day(16)).innerText()).trim() === 'X.WIT');
 
   // A change made elsewhere while this page is idle arrives on its own.
-  await page.evaluate(({ id, iso }) => {
-    window.__rc.rows.rc_la_cells.push({ row_id: id, day: iso, color: 'FF0000', text: 'X', version: 1 });
-    window.__rc.laRevision += 1;
-  }, { id: ixlId, iso: day(15) });
+  await theirSave(`body.tables.rc_la_cells.push({ row_id: args.id, day: args.iso, color: 'FF0000', text: 'X', version: 1 });`,
+    { id: ixlId, iso: day(15) });
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.waitForTimeout(800);
   check('the other editor\'s changes appear without a reload',
@@ -730,7 +738,7 @@ export async function lookaheadEditor(page, { check, shot = null }) {
      its note over the network, and the whole grid used to be drawn again when
      it landed — taking away the cell somebody had started typing in by then. */
   const notesBeforeLanding = await notesAt();
-  await page.evaluate(() => { window.__rc.writeLatency = 800; });
+  await page.evaluate(() => { window.__folder.latency = 800; });
   await cell('IXL Regression Testing', bulkDay).dblclick();
   await page.waitForSelector('#rc-frame .lae-editor');
   await page.locator('#rc-frame .lae-editor').fill('X');
@@ -752,7 +760,7 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     typing?.value === 'X.T' && typing.focused, JSON.stringify(typing));
   await page.keyboard.press('Escape');
   await page.evaluate(() => {
-    window.__rc.writeLatency = 0;
+    window.__folder.latency = 0;
     const list = window.__rc.rows.rc_cancellation_notes;
     const at = list.findIndex((n) => n.reason === 'Not needed after all');
     if (at >= 0) list.splice(at, 1);
@@ -763,14 +771,14 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await grid().focus();
 
   /* ── A read made while a write is on its way ──────────────────────────
-     Reads are remembered for thirty seconds and forgotten on every write — but
-     forgotten when the write was *sent*, so a read made while it was on its way
-     got the server as it stood before, and was remembered as current. That is
-     how the calendar drew an older reading than the editor had just published:
-     the inbox re-read the newest reading while the next one was being written. */
+     Reads used to be remembered for thirty seconds, and a read made while a
+     write was on its way was remembered as current — how the calendar once drew
+     an older reading than the editor had just published. Reads are answered
+     from the database in memory now, so whatever is read during a slow write,
+     the read after it has landed is the truth. */
   const cacheRule = await page.evaluate(async () => {
     const rc = window.__CX_MODULES.req('core/rc.js');
-    window.__rc.writeLatency = 300;
+    window.__folder.latency = 300;
     const count = async () => (await rc.listCancellationNotes()).filter((n) => n.raw_label === 'Cache check').length;
     const before = await count();
     const writing = rc.addCancellationNote({
@@ -780,14 +788,14 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     const during = await count();
     await writing;
     const after = await count();
-    window.__rc.writeLatency = 0;
+    window.__folder.latency = 0;
     const list = window.__rc.rows.rc_cancellation_notes;
     list.splice(list.findIndex((n) => n.raw_label === 'Cache check'), 1);
     rc.forgetReads();
     return { before, during, after };
   });
-  check('a read made while a write is on its way is not remembered once it lands',
-    cacheRule.during === cacheRule.before && cacheRule.after === cacheRule.before + 1, JSON.stringify(cacheRule));
+  check('a read made while a write is on its way is never stale once it lands',
+    [cacheRule.before, cacheRule.before + 1].includes(cacheRule.during) && cacheRule.after === cacheRule.before + 1, JSON.stringify(cacheRule));
 
   /* ── Many quick edits to one day, then Done editing at once ──────────
      A day's resources added, cancelled, put back and taken off in quick
@@ -812,7 +820,7 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     await modal.locator('button', { hasText: button }).click();
     await page.waitForSelector('.cx-modal', { state: 'detached', timeout: 4000 }).catch(() => {});
   };
-  await page.evaluate(() => { window.__rc.writeLatency = 400; });
+  await page.evaluate(() => { window.__folder.latency = 400; });
   await typeInto('X.TCE.WIT');
   await typeInto('X.TCE');
   await answer('Cancel and log');
@@ -840,7 +848,7 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     return td ? td.title : null;
   }, busyDay);
   const serverBusy = (await serverCell('IXL Regression Testing', busyDay))?.text;
-  await page.evaluate(() => { window.__rc.writeLatency = 0; });
+  await page.evaluate(() => { window.__folder.latency = 0; });
   check('after many quick edits to one day, the server holds what the editor last showed',
     serverBusy === 'X.~WIT', `${serverBusy} — editor: ${editorSays}`);
   check('and Done editing draws it: the calendar shows the day as the editor last did',
@@ -905,7 +913,7 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await page.waitForTimeout(300);
   const renamedCell = await readCell();
   check('the Activity ID typed after the reason was logged reaches the calendar',
-    await page.evaluate(({ id }) => window.__rc.rows.rc_cancelled_days
+    await page.evaluate(async ({ id }) => (await window.__CX_MODULES.req('core/rc.js').listCancelledDays('2000-01-01'))
       .some((d) => d.la_row_id === id && /ZZ-9001/.test(d.raw_label)), { id: toggleId }));
   check('and the day still gives the reason logged before the Activity ID changed',
     renamedCell?.cancelled && /Signal shutdown overran/.test(renamedCell.title), JSON.stringify(renamedCell));
@@ -1196,59 +1204,22 @@ export async function lookaheadEditor(page, { check, shot = null }) {
     /^4WLA .*\.xlsx$/.test(fromCalendarFile.name)
       && backFromCalendar.rows.some((r) => r.cells.some((c) => c.value === 'ATS Site Test')), fromCalendarFile.name);
 
-  /* A database that has not had migrate.sql run: no column for the row id.
-     The reading is still written, without it, and the changes with it — a
-     project behind the application loses who, never what. */
-  const readingsBefore = await page.evaluate(() => window.__rc.rows.rc_lookahead_snapshots.length);
-  await page.evaluate(() => { window.__rc.missingColumns = ['la_row_id']; });
-  await page.locator('#rc-frame .la-edit-switch').click();
-  await page.waitForSelector('#rc-frame .lae-grid', { timeout: 10000 });
-  await rowLoc('ATS Site Test').locator('td.lae-meta-location').dblclick();
-  await page.locator('#rc-frame .lae-editor').fill('Q77');
-  await page.keyboard.press('Tab');
-  await saved();
-  await page.locator('#rc-frame .la-edit-switch').click();
-  await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
-  await page.waitForTimeout(400);
-  const older = await page.evaluate((n) => {
-    const S = window.__rc.rows;
-    const last = S.rc_lookahead_snapshots.slice(n).at(-1);
-    const rows = S.rc_lookahead_rows.filter((r) => r.snapshot_id === last?.id);
-    const events = S.rc_change_events.filter((e) => e.to_snapshot === last?.id);
-    return {
-      published: Boolean(last), rows: rows.length, withId: rows.filter((r) => 'la_row_id' in r).length,
-      events: events.length, eventsWithId: events.filter((e) => 'la_row_id' in e).length,
-      moved: events.some((e) => /Q77/.test(JSON.stringify(e.after || {}))),
-      reported: (S.rc_client_errors || []).some((x) => x.area === 'lookahead:changes' && /migrate\.sql/.test(x.message)),
-    };
-  }, readingsBefore);
-  check('on a database without the new column the reading is still published, its rows without the id',
-    older.published && older.rows > 0 && older.withId === 0, JSON.stringify(older));
-  check('and what changed is still recorded — the move to Q77 — just not who',
-    older.events > 0 && older.eventsWithId === 0 && older.moved, JSON.stringify(older));
-  check('and the database being behind is reported, with what to run', older.reported);
-  await page.evaluate(() => { window.__rc.missingColumns = []; });
-  await page.locator('#rc-frame .la-edit-switch').click();
-  await page.waitForSelector('#rc-frame .lae-grid', { timeout: 10000 });
-  await rowLoc('ATS Site Test').locator('td.lae-meta-location').dblclick();
-  await page.locator('#rc-frame .lae-editor').fill('W40');
-  await page.keyboard.press('Tab');
-  await saved();
-  await page.locator('#rc-frame .la-edit-switch').click();
-  await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
-
   // Another window publishing is picked up without leaving the tab — and so
   // is the reading after it, which puts the sheet back as it was.
   const publishElsewhere = (label) => page.evaluate((to) => {
-    const snaps = window.__rc.rows.rc_lookahead_snapshots;
+    // The other computer's reading lands: its grid, then the index naming it.
+    const index = JSON.parse(window.__folder.read('calendar/readings/index.json'));
+    const snaps = index.tables.rc_lookahead_snapshots;
     const last = snaps.reduce((a, b) => (String(a.taken_at) > String(b.taken_at) ? a : b));
-    const grid = JSON.parse(JSON.stringify(last.grid));
+    const grid = JSON.parse(window.__folder.read(`calendar/readings/grids/${last.id}.json`)).value;
     const row = grid.rows.find((r) => r.cells.some((c) => /^ATS Site Test/.test(c.value)));
     row.cells.find((c) => /^ATS Site Test/.test(c.value)).value = to;
     const later = new Date(Math.max(Date.now(), ...snaps.map((x) => Date.parse(x.taken_at) || 0)) + 1000).toISOString();
-    snaps.push({ ...last, id: `${last.id}-${snaps.length}`, taken_at: later, file_hash: `editor:elsewhere-${snaps.length}`, grid });
-    // A reading inserted anywhere rings the bell — the trigger does it in Postgres.
-    window.__rc.ring();
+    const id = `elsewhere-${snaps.length}`;
+    window.__folder.write(`calendar/readings/grids/${id}.json`, JSON.stringify({ format: 'cx-calendar', formatVersion: 1, value: grid }));
+    snaps.push({ ...last, id, taken_at: later, file_hash: `editor:elsewhere-${snaps.length}`, grid: undefined });
+    window.__folder.write('calendar/readings/index.json', JSON.stringify(index));
+    return window.__rc.refresh();
   }, label);
   const calendarSays = (re) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector('#rc-frame .la-grid')?.innerText || ''), re.source, { timeout: 15000 }).then(() => true, () => false);
   await publishElsewhere('ATS Site Test, from elsewhere');
@@ -1445,9 +1416,9 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   await snap('end');
 
   check('after publishing, the editor tidies old readings — once a day from this browser',
-    await page.evaluate((n) => (window.__rc.compactCalls || 0) === n + 1
-      && (() => { try { return !!localStorage.getItem('cx.rc.compactedOn'); } catch { return true; } })(), tidyAtStart),
-    await page.evaluate(() => String(window.__rc.compactCalls)));
+    (await compactCalls()) === tidyAtStart + 1
+      && await page.evaluate(() => { try { return !!localStorage.getItem('cx.rc.compactedOn'); } catch { return true; } }),
+    String(await compactCalls()));
 
   /* ── The timeline reads the look-ahead from the calendar ─────────────── */
   await page.keyboard.press('Escape');
@@ -1473,128 +1444,6 @@ export async function lookaheadEditor(page, { check, shot = null }) {
   check('reading it sends nothing — the plan still never reaches the calendar',
     (await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select' && c.table !== 'rc_la_revision').length)) === sentBefore);
 
-  // Progress: place the suggestion, record a day's work against its row, and
-  // the bar is offered that day as its actual start.
-  await page.locator('#dock button[aria-label^="Add "][aria-label*="ATS Site Test"]').first().click();
-  await page.waitForTimeout(300);
-  await page.locator('.cx-modal button', { hasText: /^Add$/ }).click();
-  await page.waitForTimeout(400);
-  await page.locator('#sidenav .nav-link[data-pane="lookahead"]').click();
-  await page.waitForTimeout(400);
-  const progressBtn = page.locator('#dock button', { hasText: 'Progress from the calendar' });
-  const openProgress = async () => {
-    await progressBtn.click();
-    await page.locator('.cx-modal .la-progress').waitFor({ timeout: 5000 }).catch(() => {});
-  };
-  check('a placed bar can take its progress from the calendar', (await progressBtn.count()) === 1);
-  const today = await page.evaluate(() => new Date().toISOString().slice(0, 10));
-  // Against every read's copy of the row: the stub ignores order(), so which
-  // snapshot counts as the latest is not something this test should depend on.
-  await page.evaluate((iso) => {
-    const S = window.__rc.rows;
-    S.rc_lookahead_rows.filter((r) => /ATS Site Test/.test(r.raw_label || '')).forEach((row, i) => {
-      S.rc_actuals.push({
-        id: `act-progress-${i}`, client_uuid: `act-progress-${i}`, person_id: S.rc_people[0].id, work_date: iso,
-        status: 'completed', task: row.raw_label, lookahead_row_id: row.id, shift: 'day',
-        created_at: new Date().toISOString(),
-      });
-    });
-  }, today);
-  const sentBeforeProgress = await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select' && c.table !== 'rc_la_revision').length);
-  await openProgress();
-  const offer = await page.evaluate(() => document.querySelector('.cx-modal')?.innerText || [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | '));
-  check('the huddle\'s outcome is offered as the actual start, ticked because none was set',
-    /Progress from the calendar/.test(offer) && /Actual start/.test(offer)
-      && (await page.locator('.cx-modal .la-progress input[type="checkbox"]:checked').count()) >= 1, offer.replace(/\s+/g, ' ').slice(0, 200));
-  await page.locator('.cx-modal button', { hasText: 'Apply selected' }).click();
-  await page.waitForTimeout(400);
-  check('applying it records the date on the bar',
-    /Actual dates recorded/.test(await page.evaluate(() => [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | '))));
-  await progressBtn.click();
-  await page.waitForFunction(() => [...document.querySelectorAll('.cx-toast')].some((t) => /already agree|Could not/.test(t.textContent)),
-    null, { timeout: 5000 }).catch(() => {});
-  check('and asking again finds nothing new to offer',
-    /already agree/.test(await page.evaluate(() => [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' | ')))
-      && !(await page.locator('.cx-modal .la-progress').count()));
-  check('reading progress sends nothing to the calendar',
-    (await page.evaluate(() => window.__rc.calls.filter((c) => c.kind !== 'select' && c.table !== 'rc_la_revision').length)) === sentBeforeProgress);
-
-  // A second activity under the same bar: linked, worked the day before, never
-  // completed — so the start moves earlier and the finish waits on it.
-  // One whose words the calendar's rows carry, so an outcome can be recorded
-  // against it.
-  const labels = await page.evaluate(() => window.__rc.rows.rc_lookahead_rows.map((r) => r.raw_label || ''));
-  const linkable = await page.locator('#dock button[aria-label^="Link "][aria-label$=" to an object"]').evaluateAll((bs) =>
-    bs.map((b) => b.getAttribute('aria-label').replace(/^Link /, '').replace(/ to an object$/, '')));
-  const second = linkable.find((t) => !/ATS Site Test/.test(t) && labels.some((l) => l.includes(t)));
-  check('there is a second suggestion to link', !!second, linkable.join(' | ').slice(0, 160));
-  await page.locator(`#dock button[aria-label="Link ${second} to an object"]`).first().click();
-  // The picker focuses its search box on a timer; typing before then goes nowhere.
-  await page.waitForFunction(() => document.activeElement?.matches('.cx-modal input[type="text"]'), null, { timeout: 3000 }).catch(() => {});
-  await page.keyboard.type('ATS Site Test');
-  await page.keyboard.press('Enter');
-  await page.waitForTimeout(400);
-  check('the second activity is linked to the same bar',
-    (await page.locator(`#dock button[aria-label="Unlink ${second}"]`).count()) >= 1
-      || /Linked/.test(await page.evaluate(() => [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).join(' '))));
-  const yesterday = await page.evaluate(() => new Date(Date.now() - 86400000).toISOString().slice(0, 10));
-  await page.evaluate(({ iso, title }) => {
-    const S = window.__rc.rows;
-    S.rc_lookahead_rows.filter((r) => (r.raw_label || '').includes(title)).forEach((row, i) => {
-      S.rc_actuals.push({
-        id: `act-second-${i}`, client_uuid: `act-second-${i}`, person_id: S.rc_people[1].id, work_date: iso,
-        status: 'partial', task: row.raw_label, lookahead_row_id: row.id, shift: 'day',
-        created_at: new Date().toISOString(),
-      });
-    });
-  }, { iso: yesterday, title: second });
-  await page.evaluate(() => { try { localStorage.removeItem('cx.lookahead.progressDetail'); } catch {} });
-  await openProgress();
-  const two = await page.evaluate(() => {
-    const m = document.querySelector('.cx-modal');
-    const list = m?.querySelector('.la-progress-acts');
-    return {
-      text: m?.innerText || '',
-      items: list ? list.children.length : 0,
-      hidden: list ? list.hidden : null,
-      toggle: m?.querySelector('.la-progress-toggle')?.textContent || '',
-      toasts: [...document.querySelectorAll('.cx-toast')].map((t) => t.textContent).slice(-4),
-    };
-  });
-  check('a bar standing for two activities says so, with the breakdown hidden to start',
-    /2 activities/.test(two.text) && two.items === 2 && two.hidden === true && /Show 2 activities/.test(two.toggle),
-    JSON.stringify({ ...two, text: two.text.replace(/\s+/g, ' ').slice(0, 220) }));
-  check('the finish waits on the activity that has not completed, and says which',
-    (two.text.split('Finish waits on ')[1] || '').split('\n')[0].includes(second)
-      && !/Actual finish/.test(two.text), two.text.replace(/\s+/g, ' ').slice(0, 260));
-  check('the earlier day on the other activity moves the start, unticked because it replaces one',
-    /Actual start [^\n]*\(was/.test(two.text)
-      && !(await page.locator('.cx-modal .la-progress input[type="checkbox"]:checked').count()));
-  await page.locator('.cx-modal .la-progress-toggle').click();
-  const shown = await page.evaluate(() => {
-    const list = document.querySelector('.cx-modal .la-progress-acts');
-    return { hidden: list.hidden, text: list.innerText, expanded: document.querySelector('.cx-modal .la-progress-toggle').getAttribute('aria-expanded') };
-  });
-  check('one bar\'s activities can be shown on their own',
-    shown.hidden === false && shown.expanded === 'true' && /Still planned|Not completed/.test(shown.text) && /ATS Site Test/.test(shown.text),
-    shown.text.replace(/\s+/g, ' ').slice(0, 200));
-  await page.locator('.cx-modal .la-progress-toggle').click();
-  check('and hidden again', await page.evaluate(() => document.querySelector('.cx-modal .la-progress-acts').hidden));
-  await page.locator('.cx-modal .la-progress-head label').click();
-  check('"Show each activity" opens every bar\'s breakdown',
-    await page.evaluate(() => [...document.querySelectorAll('.cx-modal .la-progress-acts')].every((l) => !l.hidden)));
-  await page.locator('.cx-modal button', { hasText: 'Not now' }).click();
-  await page.waitForTimeout(300);
-  await openProgress();
-  check('and the choice is remembered the next time the dialog opens',
-    await page.evaluate(() => {
-      const lists = [...document.querySelectorAll('.cx-modal .la-progress-acts')];
-      return lists.length > 0 && lists.every((l) => !l.hidden)
-        && document.querySelector('.cx-modal .la-progress-head input').checked;
-    }));
-  await page.locator('.cx-modal .la-progress-head label').click();
-  await page.locator('.cx-modal button', { hasText: 'Not now' }).click();
-  await page.waitForTimeout(300);
   await page.locator('.ws-btn', { hasText: 'Calendar' }).click();
   await page.waitForTimeout(300);
 }

@@ -3,18 +3,8 @@
  * only; nothing here is loaded at runtime.
  */
 interface Window {
-  /** config.js — where the backends are, if any. */
-  CX_CONFIG?: {
-    supabaseUrl?: string;
-    supabaseAnonKey?: string;
-    requireAuth?: boolean;
-    rcSupabaseUrl?: string;
-    rcSupabaseAnonKey?: string;
-    /** Stamped by a build, for the problem reports. */
-    version?: string;
-  };
-  /** vendor/supabase.js, once core/sdk.js has fetched it. */
-  supabase?: any;
+  /** Set by a test before the calendar opens: count what its database is asked (core/rc.js). */
+  __rcRecord?: boolean;
   /** The module table tools/build.js writes into every bundle. */
   __CX_MODULES?: { mods: Record<string, Function>; req: (id: string) => any };
   /** The desktop shell (tools/shell/loader.js), when running inside it. */
@@ -25,17 +15,16 @@ interface Window {
   showDirectoryPicker?: (options?: any) => Promise<any>;
 }
 
-interface Navigator {
-  /** iOS Safari's "added to the home screen". */
-  standalone?: boolean;
-}
-
 /** The application attaches what went wrong to the error it throws. */
 interface Error {
   code?: string;
   kind?: string;
   expected?: any;
   current?: any;
-  preview?: boolean;
   status?: number;
+  /** core/rc_db.js: a write refused because somebody else holds the calendar's pen. */
+  readOnly?: boolean;
+  /** core/rc_db.js: a file another computer saved, refused rather than written over. */
+  conflict?: boolean;
+  theirs?: any;
 }

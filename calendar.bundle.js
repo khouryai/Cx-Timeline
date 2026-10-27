@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 33   Built: 2026-10-27T17:36:33.416Z
+ * Modules: 28   Built: 2026-10-27T19:11:13.507Z
  */
 (function () {
   'use strict';
@@ -9,165 +9,376 @@
   if (!registry) throw new Error('CX Timeline: calendar.bundle.js has to load after app.bundle.js');
   var __mods = registry.mods;
 
+// core/rc_import.js
+__mods["core/rc_import.js"] = function (__x, __req) {
+  /**
+   * The old calendar, brought into the folder.
+   *
+   * The calendar lived in Supabase until it moved to the shared folder. Its
+   * "Back it up" file — `exportEverything()`, every table as rows, BART's blank
+   * TAWR form as base64 — is what is read here, once, into an empty folder.
+   * Every id is kept, so a cell still points at its row, an edit at what it
+   * changed, a reading's rows at the reading, a reason at its cancellation and a
+   * TAWR at the request it revised; an account id in `by` or `author` is still
+   * named, because a person's roster row still carries the account it had.
+   *
+   * Only the tables the calendar still keeps come across. The daily huddle, the
+   * week plan, the SARs and "Got it" are not carried, and the summary says so,
+   * so nobody wonders where they went.
+   *
+   * Pure — no folder, no DOM — so `tools/test_rc_import.js` holds it in Node.
+   *
+   * Imports: rc_db.
+   */
+
+  const { TABLE_NAMES } = __req("core/rc_db.js");
+
+  /** What the old calendar kept that this one does not, and why it is not needed. */
+  const DROPPED = {
+    rc_plan_entries: 'the week plan',
+    rc_actuals: 'the daily huddle\'s outcomes',
+    rc_blockers: 'the huddle\'s blockers',
+    rc_blocker_updates: 'the huddle\'s blockers',
+    rc_sars: 'SARs',
+    rc_sar_links: 'SARs',
+    rc_la_seen: 'My day\'s "Got it"',
+    rc_client_errors: 'problems reported to the server',
+  };
+
+  const INSTANT = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?([+-]\d{2}(:?\d{2})?|Z)$/;
+
+  /**
+   * One instant in the one spelling this calendar writes. Postgres answered
+   * `2026-10-15T14:02:11.123456+00:00`; this calendar writes `…11.123Z`, and the
+   * log is ordered by comparing them as text, so they have to agree.
+   */
+  function normaliseInstant(value) {
+    if (typeof value !== 'string' || !INSTANT.test(value)) return value;
+    const ms = Date.parse(value.replace(' ', 'T'));
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : value;
+  }
+
+  function normaliseRow(row) {
+    if (!row || typeof row !== 'object') return row;
+    const out = {};
+    for (const [k, v] of Object.entries(row)) out[k] = normaliseInstant(v);
+    return out;
+  }
+
+  /**
+   * Read a backup of the old calendar into rows for `createCalendar()`.
+   *
+   * Answers `{ tables, files, summary, warnings }`. Throws when the file is not
+   * a backup of the calendar at all; warns — and does not refuse — when it is one
+   * that may be incomplete, because what it holds is still worth having.
+   *
+   * @param {any} backup  the parsed JSON
+   */
+  function readBackup(backup) {
+    if (!backup || typeof backup !== 'object' || !backup.tables || typeof backup.tables !== 'object') {
+      throw new Error('That file is not a backup of the resource calendar — it has no tables in it.');
+    }
+    const known = Object.keys(backup.tables).filter((t) => TABLE_NAMES.includes(t) || DROPPED[t]);
+    if (!known.length) throw new Error('That file holds no table the calendar knows.');
+
+    const tables = {};
+    const summary = [];
+    const warnings = [];
+    for (const name of TABLE_NAMES) {
+      const held = backup.tables[name];
+      if (held === undefined) continue;
+      if (!Array.isArray(held)) {
+        warnings.push(`${name} could not be read when the backup was taken (${held?.error || 'no rows'}).`);
+        continue;
+      }
+      tables[name] = held.map(normaliseRow);
+      summary.push({ table: name, rows: held.length });
+      // PostgREST answered a thousand rows at most, and the backup read each table
+      // once until the fix that pages through them.
+      if (held.length === 1000) {
+        warnings.push(`${name} has exactly 1,000 rows, which is where the old backup stopped. `
+          + 'Take a new backup from the old calendar and import that instead.');
+      }
+    }
+    if (!('rc_cancellation_notes' in backup.tables)) {
+      warnings.push('This backup has no cancellation reasons in it — it was taken before they were included. '
+        + 'Take a new one from the old calendar to keep them.');
+    }
+    for (const name of Object.keys(backup.tables)) {
+      if (!DROPPED[name] || !Array.isArray(backup.tables[name]) || !backup.tables[name].length) continue;
+      summary.push({ table: name, rows: backup.tables[name].length, dropped: DROPPED[name] });
+    }
+
+    /* A reading's grid can say it was compacted; anything else that is not an
+       object is a reading this calendar cannot draw, and is said rather than
+       dropped. */
+    for (const s of tables.rc_lookahead_snapshots || []) {
+      if (s.grid !== null && typeof s.grid !== 'object') {
+        warnings.push(`Reading ${s.id} has no grid that can be read.`);
+        s.grid = { rows: [], merges: [], hiddenColumns: [], unknown: [], missing: true };
+      }
+    }
+
+    const files = {};
+    const form = backup.files?.['tawr/template.pdf'];
+    if (typeof form === 'string' && form) {
+      const binary = atob(form);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      files['tawr/template.pdf'] = bytes;
+    } else if ((tables.rc_tawrs || []).length) {
+      warnings.push('BART\'s blank TAWR form is not in this backup. Put it in under TAWR → Settings before downloading a form.');
+    }
+
+    return { tables, files, summary, warnings, exportedAt: backup.exported_at || null, exportedBy: backup.exported_by || null };
+  }
+
+  Object.defineProperty(__x, "DROPPED", { get: () => DROPPED, enumerable: true });
+  Object.defineProperty(__x, "readBackup", { get: () => readBackup, enumerable: true });
+};
+
 // ui/rc_gate.js
 __mods["ui/rc_gate.js"] = function (__x, __req) {
   /**
    * The resource calendar's front door: the states that are not the calendar.
    *
-   * No backend in this build, the sign-in and sign-up form, and an account that is
-   * not on the team. They lived in `ui/rc.js`, and they moved out when the phone
-   * app arrived — that module imports every tab, and through them the folder and
-   * the exporters, none of which a phone may carry. Two copies of a sign-in form
-   * would be two answers to "how does somebody join", so there is one, and each
-   * interface hands it the sentence that is true of where it is drawn.
+   * The calendar lives in the shared folder the plan is in, under `calendar/`.
+   * Before it can be drawn there has to be a folder, and the folder has to hold
+   * a calendar — so the door is those two questions, and the one-time answer to
+   * the second: bring the old calendar in from its backup, or start an empty one.
    *
-   * Nothing here is the control. Who may create an account is
-   * `rc_enforce_invitation()` on `auth.users`, and who may see what is the
-   * policies; this explains the state to the person looking at it.
+   * Nothing here is a permission. Whoever can open the folder can open the
+   * calendar; the folder's sharing is who may.
    *
-   * Imports: util, rc, icons, components.
+   * Imports: util, events, rc, rc_import, filestore, icons, components, commands.
    */
 
   const { el } = __req("core/util.js");
   const rc = __req("core/rc.js");
+  const filestore = __req("core/filestore.js");
+  const { readBackup } = __req("core/rc_import.js");
+  const { writeBytes } = __req("core/rc_folder.js");
   const { icon } = __req("ui/icons.js");
-  const { textInput } = __req("ui/components.js");
+  const { textInput, toast, openModal } = __req("ui/components.js");
+  const { connectFolder, reconnectFolder } = __req("ui/commands.js");
 
-  /**
-   * No backend in this build.
-   *
-   * Not an error. A build can legitimately have the timeline and not the calendar
-   * — that is what every build had until the calendar existed — so it says what is
-   * missing and where it is configured rather than pretending something broke.
-   */
-  function notConfigured({
-    message = 'The timeline works as it always has. The resource calendar needs a '
-      + 'Supabase project, named in config.js as rcSupabaseUrl and '
-      + 'rcSupabaseAnonKey — separate from the timeline, which stays in your folder.',
-  } = {}) {
+  /** The registers a new calendar starts with — what `rc_schema.sql` seeded. */
+  function starterTables(today) {
+    return {
+      rc_parties: ['Hitachi', 'BART', 'Other team', 'Vendor'].map((name) => ({ name })),
+      rc_leave_kinds: [
+        ['Annual leave', '#3a76e8', true], ['Sick', '#e0803a', false], ['TOIL', '#16a571', true],
+        ['Training', '#9333d9', false], ['Parental', '#0d9488', false], ['Unpaid', '#6b7280', false],
+      ].map(([name, color, counts]) => ({ name, color, counts_against_entitlement: counts })),
+      rc_support_codes: [['X', 'EIC', 10], ['WIT', 'BART witness', 20], ['TCE', 'TCE', 30]]
+        .map(([code, name, sort]) => ({ code, name, party: 'BART', sort })),
+      rc_p6_flags: [['Troubleshooting', 10], ['Regression', 20], ['Support', 30]].map(([label, sort]) => ({ label, sort })),
+      rc_settings: [
+        { key: 'lookahead_sheet', value: '4WLA' },
+        { key: 'lookahead_source', value: 'editor' },
+        { key: 'cancellation_log_from', value: today },
+      ],
+    };
+  }
+
+  /** This build cannot open a folder at all: a browser without the File System Access API. */
+  function notConfigured() {
     return el('div', { class: 'rc-state' }, [
       el('div', { class: 'rc-state-icon', html: icon('database', { size: 32 }) }),
-      el('h2', { text: 'No resource calendar in this build' }),
-      el('p', { text: message }),
+      el('h2', { text: 'The calendar needs a folder' }),
+      el('p', {
+        text: 'The resource calendar is kept in the shared folder beside the plan. Opening a folder '
+          + 'needs the CX Timeline desktop application, or Edge or Chrome.',
+      }),
+    ]);
+  }
+
+  /** Who you are: the name the pen shows and the calendar stamps what you write with. */
+  function nameField() {
+    const input = textInput({ value: rc.displayName(), placeholder: 'Your name, as the roster has it' });
+    input.setAttribute('aria-label', 'Your name');
+    input.dataset.field = 'your-name';
+    return input;
+  }
+
+  function saveName(input) {
+    const name = input.value.trim();
+    if (!name) throw new Error('Say who you are first — your name, as the roster has it.');
+    if (name !== rc.displayName()) filestore.setDisplayName(name);
+  }
+
+  /** No folder connected yet. */
+  function noFolder({ onDone = () => {} } = {}) {
+    const remembered = el('div');
+    filestore.storedFolder().then((last) => {
+      if (!last?.folder || filestore.state().desktop) return;
+      remembered.appendChild(el('button', {
+        class: 'cx-btn ghost', type: 'button', text: `Reconnect to ${last.folder}`,
+        onClick: async () => { if (await reconnectFolder()) onDone(); },
+      }));
+    }).catch(() => {});
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('folder', { size: 32 }) }),
+      el('h2', { text: 'Open the shared folder' }),
+      el('p', {
+        text: 'The calendar is kept in the same OneDrive folder as the plan, under calendar/. '
+          + 'Open that folder and the calendar opens with it — nothing is kept anywhere else.',
+      }),
+      el('div', { class: 'rc-signin' }, [
+        el('button', {
+          class: 'cx-btn primary', type: 'button', text: 'Open the folder…',
+          onClick: async () => { if (await connectFolder()) onDone(); },
+        }),
+        remembered,
+      ]),
     ]);
   }
 
   /**
-   * Signed in to nothing yet.
+   * A folder with no calendar in it: bring the old one in, or start empty.
    *
-   * The form writes to the calendar's own client, which keeps its own session
-   * under its own storage key. `onDone` runs once a session exists; `blurb` is
-   * the line under the title when signing in, because what is true about the
-   * rest of the application depends on which application this is.
+   * The import is offered first because it is the one that matters: the old
+   * calendar's backup carries every reading, edit, reason and TAWR, and an
+   * empty calendar started by mistake would have to be cleared before it could
+   * be brought in.
    */
-  function signInForm({
-    onDone = () => {},
-    blurb = 'The timeline needs no account and is already open behind this. Only the calendar does.',
-  } = {}) {
-    /* An invitation link carries the address it was sent to, so somebody
-       following one does not have to remember which of their addresses was
-       invited — and lands on the right half of the form. */
-    const invited = joiningAs();
-    let joining = Boolean(invited);
-
-    const email = textInput({ placeholder: 'you@example.com', type: 'email', value: invited || '' });
-    const password = textInput({ placeholder: 'Password', type: 'password' });
-    email.autocomplete = 'username';
+  function emptyFolder({ onDone = () => {} } = {}) {
+    const name = nameField();
     const error = el('div', { class: 'rc-error', hidden: true });
-    const note = el('div', { class: 'rc-hint', hidden: true });
-    const button = el('button', { class: 'cx-btn primary' });
-    const swap = el('button', { class: 'cx-btn ghost mini' });
-    const title = el('h2');
-    const lead = el('p');
+    const fileInput = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
+    fileInput.dataset.field = 'backup';
 
-    const paint = () => {
-      title.textContent = joining ? 'Create your account' : 'Sign in to the resource calendar';
-      lead.textContent = joining
-        ? 'Only an address an administrator has invited can create an account — the database '
-          + 'refuses the rest, so there is nothing to guess at here.'
-        : blurb;
-      button.textContent = joining ? 'Create account' : 'Sign in';
-      password.placeholder = joining ? 'Choose a password' : 'Password';
-      password.autocomplete = joining ? 'new-password' : 'current-password';
-      swap.textContent = joining ? 'I already have an account' : 'I was invited — create my account';
+    const say = (err) => {
+      error.textContent = err?.message || String(err);
+      error.hidden = false;
     };
 
-    const submit = async () => {
-      error.hidden = true;
-      note.hidden = true;
-      button.disabled = true;
-      button.textContent = joining ? 'Creating…' : 'Signing in…';
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files?.[0];
+      fileInput.value = '';
+      if (!file) return;
       try {
-        if (joining) {
-          const { live } = await rc.signUp(email.value, password.value);
-          if (!live) {
-            // The project has email confirmation on, so the account exists but
-            // the session does not. Saying so beats a form that looks stuck.
-            note.textContent = 'Account created. Confirm your address from the email just sent, '
-              + 'then sign in.';
-            note.hidden = false;
-            joining = false;
-            paint();
-            button.disabled = false;
-            return;
-          }
-        } else {
-          await rc.signIn(email.value, password.value);
-        }
-        onDone();
+        saveName(name);
+        const parsed = readBackup(JSON.parse(await file.text()));
+        await confirmImport(parsed, file.name, onDone);
       } catch (err) {
-        error.textContent = err.message;
-        error.hidden = false;
-        button.disabled = false;
-        paint();
+        say(err);
       }
-    };
-
-    button.addEventListener('click', submit);
-    swap.addEventListener('click', () => { joining = !joining; error.hidden = true; paint(); });
-    for (const field of [email, password]) {
-      field.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') submit();
-      });
-    }
-    paint();
+    });
 
     return el('div', { class: 'rc-state' }, [
-      el('div', { class: 'rc-state-icon', html: icon('users', { size: 32 }) }),
-      title,
-      lead,
-      el('div', { class: 'rc-signin' }, [email, password, error, note, button, swap]),
-    ]);
-  }
-
-  /** The address an invitation link was sent to, from `#join=…`. */
-  function joiningAs() {
-    const match = /[#&?]join=([^&]+)/.exec(window.location.hash + window.location.search);
-    if (!match) return '';
-    try {
-      return decodeURIComponent(match[1]).trim();
-    } catch {
-      return '';
-    }
-  }
-
-  /** An account that is not on the team. A real answer, not a failure. */
-  function notOnTheTeam() {
-    return el('div', { class: 'rc-state' }, [
-      el('div', { class: 'rc-state-icon', html: icon('user', { size: 32 }) }),
-      el('h2', { text: 'You are signed in, but not on this team' }),
+      el('div', { class: 'rc-state-icon', html: icon('database', { size: 32 }) }),
+      el('h2', { text: 'This folder has no calendar yet' }),
       el('p', {
-        text: 'An administrator adds people in Organisation. Until your account is '
-          + 'linked to a team record, the database will not show you anything.',
+        text: `${filestore.state().folder || 'The folder'} is open, and there is no calendar/ in it. `
+          + 'Bring the old calendar in from its backup — taken in the old calendar under Reports → Back it up — '
+          + 'or start an empty one.',
       }),
-      el('button', { class: 'cx-btn ghost', text: 'Sign out', onClick: () => rc.signOut() }),
+      el('div', { class: 'rc-signin' }, [
+        name,
+        error,
+        el('button', {
+          class: 'cx-btn primary', type: 'button', text: 'Import the old calendar…',
+          dataset: { action: 'import' },
+          onClick: () => {
+            try {
+              saveName(name);
+              fileInput.click();
+            } catch (err) {
+              say(err);
+            }
+          },
+        }),
+        el('button', {
+          class: 'cx-btn ghost', type: 'button', text: 'Start an empty calendar',
+          dataset: { action: 'start-empty' },
+          onClick: async () => {
+            try {
+              saveName(name);
+              await rc.createCalendar(starterTables(new Date().toISOString().slice(0, 10)), { source: 'new' });
+              toast({ tone: 'good', message: 'An empty calendar is ready in calendar/.' });
+              onDone();
+            } catch (err) {
+              say(err);
+            }
+          },
+        }),
+        fileInput,
+      ]),
     ]);
   }
 
+  /** What is in the backup, and what is not coming, before anything is written. */
+  function confirmImport(parsed, fileName, onDone) {
+    return new Promise((resolve) => {
+      const kept = parsed.summary.filter((s) => !s.dropped);
+      const dropped = parsed.summary.filter((s) => s.dropped);
+      const total = kept.reduce((n, s) => n + s.rows, 0);
+      const list = (items, render) => el('ul', { class: 'rc-import-list' }, items.map((s) => el('li', { text: render(s) })));
+      const body = el('div', { class: 'cx-form' }, [
+        el('p', {
+          text: `${fileName}${parsed.exportedAt ? `, taken ${new Date(parsed.exportedAt).toLocaleString()}` : ''}`
+            + `${parsed.exportedBy ? ` by ${parsed.exportedBy}` : ''}: ${total} rows in ${kept.length} tables.`,
+        }),
+        parsed.warnings.length
+          ? el('div', { class: 'rc-error', role: 'alert' }, [list(parsed.warnings.map((w) => ({ w })), (x) => x.w)])
+          : null,
+        list(kept, (s) => `${s.table.replace(/^rc_/, '').replace(/_/g, ' ')} — ${s.rows}`),
+        dropped.length
+          ? el('p', {
+            class: 'rc-hint',
+            text: `Not brought across, because the calendar no longer has them: ${[...new Set(dropped.map((d) => d.dropped))].join(', ')}.`,
+          })
+          : null,
+      ].filter(Boolean));
+      let settled = false;
+      const done = (value) => { if (!settled) { settled = true; resolve(value); } };
+      openModal({
+        title: 'Bring the old calendar in?',
+        body,
+        onClose: () => done(false),
+        actions: [
+          { label: 'Cancel', onClick: () => done(false) },
+          {
+            label: 'Import',
+            kind: 'primary',
+            keepOpen: true,
+            onClick: async (handle) => {
+              try {
+                await rc.createCalendar(parsed.tables, { source: 'import' });
+                for (const [path, bytes] of Object.entries(parsed.files)) await writeBytes(path, bytes);
+                done(true);
+                handle.close();
+                toast({ tone: 'good', title: 'The old calendar is in the folder', message: `${total} rows, every id kept.` });
+                onDone();
+              } catch (err) {
+                toast({ tone: 'bad', title: 'The import did not finish', message: err?.message || String(err) });
+              }
+            },
+          },
+        ],
+      });
+    });
+  }
+
+  /** The folder could not be read — half-synced, or written by a newer version. */
+  function readFailed(message, { onDone = () => {} } = {}) {
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('warning', { size: 32 }) }),
+      el('h2', { text: 'The calendar could not be read' }),
+      el('p', { text: message || 'Something in calendar/ could not be read.' }),
+      el('button', {
+        class: 'cx-btn', type: 'button', text: 'Try again',
+        onClick: async () => { await rc.init(); onDone(); },
+      }),
+    ]);
+  }
+
+  Object.defineProperty(__x, "starterTables", { get: () => starterTables, enumerable: true });
   Object.defineProperty(__x, "notConfigured", { get: () => notConfigured, enumerable: true });
-  Object.defineProperty(__x, "signInForm", { get: () => signInForm, enumerable: true });
-  Object.defineProperty(__x, "joiningAs", { get: () => joiningAs, enumerable: true });
-  Object.defineProperty(__x, "notOnTheTeam", { get: () => notOnTheTeam, enumerable: true });
+  Object.defineProperty(__x, "noFolder", { get: () => noFolder, enumerable: true });
+  Object.defineProperty(__x, "emptyFolder", { get: () => emptyFolder, enumerable: true });
+  Object.defineProperty(__x, "readFailed", { get: () => readFailed, enumerable: true });
 };
 
 // ui/rc_util.js
@@ -280,6 +491,29 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
     const map = new Map();
     for (const row of rows || []) map.set(row.id, row);
     return map;
+  }
+
+  /**
+   * Who wrote something, from the id it was stamped with.
+   *
+   * Three kinds of id are in the record: the account a person had in the old
+   * calendar (kept on their roster row as `user_id`, so their history stays
+   * theirs), `local:<roster id>` for somebody who never had one, and
+   * `name:<what they typed>` for somebody not on the roster at all. A TAWR is
+   * stamped with the roster id itself. Answers '' for nobody.
+   */
+  function authorNames(people) {
+    const names = new Map();
+    for (const p of people || []) {
+      names.set(p.id, p.name);
+      names.set(`local:${p.id}`, p.name);
+      if (p.user_id) names.set(p.user_id, p.name);
+    }
+    return (id) => {
+      if (!id) return '';
+      const key = String(id);
+      return names.get(key) || (key.startsWith('name:') ? key.slice(5) : '');
+    };
   }
 
   /** Group rows under a key, for a grid that is people down and days across. */
@@ -1387,6 +1621,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "isoToMs", { get: () => isoToMs, enumerable: true });
   Object.defineProperty(__x, "dayLabel", { get: () => dayLabel, enumerable: true });
   Object.defineProperty(__x, "byId", { get: () => byId, enumerable: true });
+  Object.defineProperty(__x, "authorNames", { get: () => authorNames, enumerable: true });
   Object.defineProperty(__x, "groupBy", { get: () => groupBy, enumerable: true });
   Object.defineProperty(__x, "codeNodes", { get: () => codeNodes, enumerable: true });
   Object.defineProperty(__x, "cancellationLog", { get: () => cancellationLog, enumerable: true });
@@ -1424,690 +1659,1210 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "availability", { get: () => availability, enumerable: true });
 };
 
-// core/la_register.js
-__mods["core/la_register.js"] = function (__x, __req) {
+// ui/rc_settings.js
+__mods["ui/rc_settings.js"] = function (__x, __req) {
   /**
-   * The register: the rows a reading of the look-ahead is stored as, and the
-   * changes between two readings.
+   * Lists → Settings: the calendar's settings, changed on screen.
    *
-   * The look-ahead is the contractual source of truth and the resource calendar
-   * is the execution record; the difference between two snapshots is what a
-   * delay claim is eventually built from. So the rules here are about being
-   * *honest* rather than clever — the system logs what it can see and asks a
-   * person about what it cannot.
+   * Each is one row in `rc_settings`, one field and a Save, written through
+   * `rc.setSetting()`. The calendar is in the shared folder, so a setting
+   * changed here is changed for everybody who opens it.
    *
-   * Two rules do most of the work, and both exist because the obvious version
-   * produces numbers that flatter or damn the wrong party.
-   *
-   * **Only weeks in both snapshots are compared.** A four-week window rolls
-   * forward, so a week appearing at the far edge is not scope being added and a
-   * week dropping off the back is not scope being removed. Counting them as such
-   * would book a batch of phantom additions every single week, and would count
-   * finished work as deleted scope — inflating exactly the number you would most
-   * want to defend.
-   *
-   * **A crew moving site is not inferred.** When work finishes early and a team
-   * moves, one row disappears and another appears with the same resources. The
-   * activity text is not reliable enough to match on — the spec says so and it is
-   * right — so it is logged honestly as a removal and an addition, and a person
-   * can relink the pair afterwards. Guessing would be the one failure mode
-   * nobody could audit.
-   *
-   * Reading a sheet — its grid, its marks, who it names, what it offers the
-   * timeline — is `core/lookahead.js`, which all three bundles carry. This is the
-   * part only the calendar does, so it lives in calendar.bundle.js and the
-   * timeline's and the phone's pages never download it.
-   *
-   * Imports: core/lookahead.
+   * Imports: util, rc, components, rc_util, io/exporters.
    */
-  const { resourceNames, locationColumnOf, isCancelMeaning } = __req("core/lookahead.js");
 
-  /** The Monday of an ISO date's week, in UTC. A calendar date must not shift. */
-  function mondayOf(iso) {
-    const ms = Date.parse(`${iso}T00:00:00Z`);
-    const back = (new Date(ms).getUTCDay() + 6) % 7;
-    return new Date(ms - back * 86400000).toISOString().slice(0, 10);
+  const { el } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const { textInput, toast } = __req("ui/components.js");
+  const { notifyChanged, dayLabel, todayISO } = __req("ui/rc_util.js");
+  const { saveFile } = __req("io/exporters.js");
+
+  /** How long an editor-published reading is kept whole, unless somebody says otherwise. */
+  const DEFAULT_KEEP_DAYS = 60;
+
+  const value = (settings, key) => settings.find((r) => r.key === key)?.value ?? null;
+
+  async function renderSettings(host) {
+    const settings = await rc.listSettings().catch(() => []);
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Settings' })]));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'What the calendar is set to. They are kept in the shared folder, so they are the same for everybody who opens it.',
+    }));
+
+    const list = el('div', { class: 'rc-settings' });
+    host.appendChild(list);
+
+    /* ── The look-ahead ─────────────────────────────────────────────────── */
+    list.appendChild(group('The look-ahead'));
+
+    list.appendChild(textRow({
+      key: 'lookahead_title',
+      label: 'Title on the export',
+      hint: 'Printed across the top of the Excel export.',
+      current: value(settings, 'lookahead_title') || '',
+      placeholder: 'Four Week Look-Ahead',
+      said: (v) => (v ? `The export is titled "${v}".` : 'The export has no title.'),
+    }));
+
+    list.appendChild(textRow({
+      key: 'cancellation_log_from',
+      label: 'Cancellation log starts on',
+      hint: 'The first day the cancellation log counts — a date from the contract, not from the code.',
+      current: value(settings, 'cancellation_log_from') || '',
+      type: 'date',
+      required: true,
+      said: (v) => `The cancellation log starts on ${dayLabel(v)}.`,
+    }));
+
+    /* ── Keeping the record tidy ────────────────────────────────────────── */
+    list.appendChild(group('Housekeeping'));
+    list.appendChild(textRow({
+      key: 'snapshot_keep_days',
+      label: 'Keep every editor reading for',
+      hint: 'The editor takes a reading when you finish editing, and when it has been quiet a while. Older than this, only the last reading of each day keeps its grid; '
+        + 'every workbook read, every reading\'s rows and the change register are kept regardless.',
+      current: value(settings, 'snapshot_keep_days') || String(DEFAULT_KEEP_DAYS),
+      type: 'number',
+      suffix: 'days',
+      required: true,
+      check: (v) => (Number.isInteger(Number(v)) && Number(v) >= 14 ? null : 'At least 14 days, in whole days.'),
+      said: (v) => `Editor readings are kept whole for ${v} days.`,
+    }));
+
+    list.appendChild(row({
+      label: 'Tidy the readings now',
+      hint: 'The editor does this once a day on its own. Only the grids of superseded editor readings go — the readings, their rows and every link to them stay.',
+      control: el('div', { class: 'rc-settings-inline' }, [
+        el('button', {
+          class: 'cx-btn mini', type: 'button', text: 'Tidy now',
+          onClick: async (e) => {
+            e.currentTarget.disabled = true;
+            try {
+              const n = await rc.compactSnapshots();
+              toast({
+                tone: 'good',
+                message: n ? `${n} older reading${n === 1 ? '' : 's'} compacted.` : 'Nothing to tidy — every reading is within the keep period or the last of its day.',
+              });
+            } catch (err) {
+              toast({ tone: 'bad', message: err?.message || String(err) });
+            } finally {
+              e.currentTarget.disabled = false;
+            }
+          },
+        }),
+      ]),
+    }));
+
+    /* ── Where it is ─────────────────────────────────────────────────────── */
+    list.appendChild(group('Where it is'));
+    list.appendChild(row({
+      label: 'Folder',
+      hint: 'The calendar is the calendar/ folder inside the shared folder the plan is in. '
+        + 'OneDrive keeps every version of every file in it, under Version history.',
+      control: el('span', { class: 'rc-settings-mono', text: `${rc.status().folder || '—'}/calendar` }),
+    }));
+    list.appendChild(row({
+      label: 'A copy of everything',
+      hint: 'Every table as one file, with BART\'s blank TAWR form. It opens in an empty folder through the same import the old calendar came in by.',
+      control: el('button', {
+        class: 'cx-btn mini', type: 'button', text: 'Back it up',
+        onClick: async () => {
+          try {
+            const data = await rc.exportEverything();
+            const rows = Object.values(data.tables).reduce((n, t) => n + (Array.isArray(t) ? t.length : 0), 0);
+            saveFile(`resource-calendar-${todayISO()}.json`, JSON.stringify(data), 'application/json',
+              `${rows} rows across ${Object.keys(data.tables).length} tables`);
+          } catch (err) {
+            toast({ tone: 'bad', message: err?.message || String(err) });
+          }
+        },
+      }),
+    }));
+  }
+
+  function group(title) {
+    return el('div', { class: 'rc-settings-group', text: title });
+  }
+
+  function row({ label, hint, control }) {
+    return el('div', { class: 'rc-settings-row' }, [
+      el('div', { class: 'rc-settings-label' }, [
+        el('div', { class: 'rc-settings-name', text: label }),
+        hint ? el('div', { class: 'rc-hint', text: hint }) : null,
+      ].filter(Boolean)),
+      el('div', { class: 'rc-settings-control' }, [control]),
+    ]);
   }
 
   /**
-   * Stored days whose look-ahead row now names somebody else.
-   *
-   * The 4WLA's Resource row is the plan for the days it names, so a stored
-   * `rc_plan_entries` row carrying a `lookahead_row_id` is somebody having
-   * confirmed or overridden what that row said. When a later read of the sheet
-   * puts a different name on the same row for the same day, the work has moved —
-   * and until this existed the entry stayed against whoever it was first written
-   * for. The visible cost is somebody turning up for a shift that is not theirs
-   * any more while the person who now has it has a blank against their name.
-   *
-   * `resolve` is the name lookup, **injected** for the reason `rowsFrom()` takes
-   * `locate`: the register lives two layers up, this module is a leaf, and the
-   * whole pipeline has to be testable with no browser and no network. It answers
-   * a person id for a written name, or null.
-   *
-   * Returns `[{ entry, from, to }]`, and returns nothing at all unless it is
-   * certain:
-   *
-   * **The row has to say something about that day.** A day the sheet no longer
-   * names anybody on is not a reassignment — it is the sheet going quiet, which
-   * happens whenever an activity is rescheduled, and moving a task to nobody is
-   * not a thing that can be written.
-   *
-   * **It has to name exactly one person the roster knows.** Two names on a day is
-   * a crew, and a crew is not "this task moved to Victor" — it is several entries,
-   * which is a decision somebody takes rather than one this can derive. An
-   * unmatched spelling stops it too: those are reported and answered with an
-   * alias, and guessing here would be the near-miss matching the register refuses.
-   *
-   * **It has to be somebody else.** A re-read that changed nothing must produce
-   * nothing, or every ingest would supersede every linked entry with a revision
-   * saying the same thing. `rc_reassign_plan()` refuses that case as well, so it
-   * is checked on both sides on purpose.
+   * A setting that is a piece of text, a date or a number: the field, and a Save
+   * that stays greyed until something changed. Enter saves too.
    */
-  function reassignments({ planRows, laRows, resolve }) {
-    const byRow = new Map();
-    for (const row of laRows || []) {
-      if (row?.id) byRow.set(row.id, row);
-    }
-
-    const out = [];
-    for (const entry of planRows || []) {
-      if (!entry?.id || !entry.lookahead_row_id) continue;
-      const row = byRow.get(entry.lookahead_row_id);
-      if (!row) continue;
-      const written = resourceNames(row.resources?.[entry.work_date] || '');
-      if (!written.length) continue;
-
-      const ids = new Set();
-      let unknown = false;
-      for (const name of written) {
-        const id = resolve ? resolve(name) : null;
-        if (id) ids.add(id);
-        else unknown = true;
+  function textRow({ key, label, hint, current, placeholder = '', type = 'text', suffix = '', required = false, check = null, said }) {
+    const input = textInput({ value: current, placeholder });
+    input.type = type;
+    input.setAttribute('aria-label', label);
+    input.dataset.setting = key;
+    if (type === 'number') { input.min = '14'; input.step = '1'; input.style.width = '90px'; }
+    const button = el('button', { class: 'cx-btn mini', type: 'button', text: 'Save', disabled: true });
+    const sync = () => { button.disabled = input.value.trim() === String(current).trim(); };
+    input.addEventListener('input', sync);
+    const commit = async () => {
+      const v = input.value.trim();
+      if (v === String(current).trim()) return;
+      if (required && !v) {
+        toast({ tone: 'warn', message: `${label} cannot be empty.` });
+        return;
       }
-      // One person, and every name on the day accounted for. Anything else is a
-      // crew or a spelling nobody has mapped, and neither is a move.
-      if (unknown || ids.size !== 1) continue;
-      const [to] = [...ids];
-      if (to === entry.person_id) continue;
-      out.push({ entry, from: entry.person_id, to });
-    }
-    return out;
-  }
-
-  /* ── Row identity ──────────────────────────────────────────────────────── */
-
-  /**
-   * A key for a row that survives the file being edited.
-   *
-   * The look-ahead has no activity IDs — no P6 numbers, nothing stable — and its
-   * descriptions are not matchable. Location, week and subsystem are what remain,
-   * plus an ordinal to separate two rows that share all three.
-   *
-   * The ordinal is the weak part, and knowingly so: inserting a row in the middle
-   * of a group shifts everything below it and produces a false removed/added
-   * pair. That is tolerable only because the manual relink exists to fix it, and
-   * because the alternative — matching on text — would produce *wrong* answers
-   * rather than noisy ones.
-   */
-  function rowKey({ weekStart, location, subsystem = '', ordinal = 0 }) {
-    return [weekStart, String(location || '').trim(), String(subsystem || '').trim(), ordinal].join('|');
-  }
-
-  /** Assign ordinals within each (week, location, subsystem) group. */
-  function keyRows(rows) {
-    const seen = new Map();
-    return rows.map((row) => {
-      const group = [row.weekStart, row.location, row.subsystem || ''].join('|');
-      const ordinal = seen.get(group) || 0;
-      seen.set(group, ordinal + 1);
-      return { ...row, rowKey: rowKey({ ...row, ordinal }) };
+      const problem = check?.(v);
+      if (problem) {
+        toast({ tone: 'warn', message: problem });
+        return;
+      }
+      if (await save(key, v, said(v))) {
+        current = v;
+        sync();
+      }
+    };
+    button.addEventListener('click', commit);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(); });
+    return row({
+      label,
+      hint,
+      control: el('div', { class: 'rc-settings-inline' }, [
+        input,
+        suffix ? el('span', { class: 'rc-hint', style: 'margin:0', text: suffix }) : null,
+        button,
+      ].filter(Boolean)),
     });
   }
 
+  async function save(key, v, message) {
+    try {
+      await rc.setSetting(key, v);
+      toast({ tone: 'good', message });
+      notifyChanged('settings');
+      return true;
+    } catch (err) {
+      toast({ tone: 'bad', message: err?.message || String(err) });
+      return false;
+    }
+  }
+
+  Object.defineProperty(__x, "DEFAULT_KEEP_DAYS", { get: () => DEFAULT_KEEP_DAYS, enumerable: true });
+  Object.defineProperty(__x, "renderSettings", { get: () => renderSettings, enumerable: true });
+};
+
+// ui/rc_roster.js
+__mods["ui/rc_roster.js"] = function (__x, __req) {
   /**
-   * A read grid, as rows something else can point at.
+   * Lists — the roster, locations, parties, leave and the calendar's settings.
    *
-   * One row per activity per *week*, because that is the grain the look-ahead is
-   * maintained at and the grain a plan is made at. Two rules, both of which hold
-   * everywhere else in this module:
+   * Reference data before transactional data: nothing else in the calendar means
+   * anything until there are people to schedule and places to send them.
    *
-   * **The location is read from the column the sheet keeps it in, and kept
-   * whether or not it resolves.** `locationColumnOf()` finds that column by its
-   * heading; `locate` — the alias register, injected so this stays testable
-   * without a network — turns the spelling into an id where it knows it. Nothing
-   * is matched on the description: the wording differs on the two sides and is
-   * not reliable enough to carry evidence, which is what the alias list is for.
+   * Two decisions run through it. **Nothing anybody has used is ever deleted** —
+   * a leaver's history has to stay while they drop out of every picker, which is
+   * what Retire does and why it is the first answer offered. Delete is the
+   * second, and it is for the row that was never meant: somebody added twice, a
+   * location typed wrong. The database decides which is which —
+   * `rc_delete_location()` counts what points at the row and refuses with the
+   * number. And **every vocabulary is a table**, because "T12" one week and
+   * "TPSS 12" the next are two places to a computer and one to a person.
    *
-   * The text surviving an unresolved spelling is the part that was missing. The
-   * location used to be recorded *only* where the register already knew it, so a
-   * column full of "W30" and "Y10" was discarded on every deployment that had not
-   * registered them — and with nothing kept there was nothing for anybody to map,
-   * which is the one state this module is built to make impossible. An unresolved
-   * spelling is exactly like an unmapped colour or an unmatched name: shown, and
-   * one click from being answered.
-   *
-   * **A row with nothing scheduled that week is not a row.** The sheet carries
-   * activities for reference with no shift against them, and writing those would
-   * make the register mostly noise — and, worse, make every one of them look
-   * like scope the first time it *did* get a shift.
-   *
-   * @param {object} view
-   * @param {{ snapshotId?: string | null, locate?: (raw: string) => Promise<string | null>, locationColumn?: number | null }} [options]
+   * Imports: util, rc, icons, components, rc_util, rc_settings.
    */
-  async function rowsFrom(view, {
-    snapshotId = null, locate = async () => null, locationColumn = null,
-  } = {}) {
-    if (!view?.days?.length) return [];
 
-    // Told which column, or read off the sheet's own heading. `null` is "work it
-    // out"; `-1` is "there is no heading", which is the register scan below.
-    const locCol = Number.isInteger(locationColumn) ? locationColumn : locationColumnOf(view);
+  const { el, clear } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const { icon } = __req("ui/icons.js");
+  const { textInput, selectInput, toast, confirmDialog, promptDialog, field, badge, checkbox } = __req("ui/components.js");
 
-    const dayByCol = new Map(view.days.map((d) => [d.col, d]));
-    const out = [];
-    const ordinals = new Map();
 
-    for (const activity of view.activities) {
-      if (activity.heading) continue;
-      /* Not work, so not a row. Emitting one would put "PTO" in the register as an
-         activity at no location, and `classify()` would then book it as scope
-         added the first week it appeared and scope removed the week it did not. */
-      if (activity.absence) continue;
+  const { notifyChanged, byId, dayLabel, todayISO, formModal, orgNav } = __req("ui/rc_util.js");
+  const { renderSettings } = __req("ui/rc_settings.js");
 
-      // Group this activity's marks by the week they fall in.
-      const weeks = new Map();
-      const bucketFor = (date) => {
-        const week = mondayOf(date);
-        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
-        return weeks.get(week);
-      };
-      for (const mark of activity.marks) {
-        if (!mark.hex || mark.role === 'ignore') continue;
-        const day = dayByCol.get(mark.col);
-        if (!day?.date) continue;
-        const bucket = bucketFor(day.date);
-        bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
-        if (mark.value) bucket.marks[day.date] = mark.value;
-      }
-      /* The Resource row's own paint, which the workbook sometimes uses for the
-         shift instead of the activity line. It fills a day the activity line left
-         unpainted and never overrides one — the activity line is what the day *is*.
-         And it never says a day was cancelled: red on a Resource row is somebody
-         marking the names, not the work, so a cancellation colour there — or a
-         colour nobody has named, which might turn out to be one — is left out of
-         `cells` entirely, and with it out of `rc_cancelled_days`. */
-      for (const mark of activity.resource?.marks || []) {
-        if (!mark.hex || mark.role === 'ignore' || !mark.meaning || isCancelMeaning(mark.meaning)) continue;
-        const day = dayByCol.get(mark.col);
-        if (!day?.date) continue;
-        const bucket = bucketFor(day.date);
-        if (!(day.date in bucket.cells)) bucket.cells[day.date] = mark.meaning;
-      }
-      if (!weeks.size) continue;
+  const SECTIONS = ['people', 'locations', 'parties', 'leave', 'settings'];
+  let section = null;
 
-      /* Who the Resource row names, per day, in the words the workbook used.
-         Only into weeks that already have a shift in them: a name typed against a
-         day nobody is scheduled on is the same kind of stray as a colour on an
-         empty row, and writing it would invent a week of scope. Nothing is
-         matched to a person here — that happens against the roster, where an
-         unmatched name can be shown to somebody rather than guessed at. */
-      for (const mark of activity.resource?.marks || []) {
-        if (!mark.value) continue;
-        const day = dayByCol.get(mark.col);
-        const week = day?.date ? mondayOf(day.date) : null;
-        if (!week || !weeks.has(week)) continue;
-        weeks.get(week).resources[day.date] = mark.value;
-      }
-
-      /* Where the work is, from the column the sheet keeps it in.
-         **The text is kept whether or not it resolves.** It used to be recorded
-         only when the alias register already knew it, so a location column full of
-         "W30" and "Y10" was *discarded* on a deployment that had not registered
-         them yet — and with nothing kept there was nothing for anybody to map,
-         which is the one state this design is supposed to make impossible. An
-         unresolved spelling is exactly like an unmapped colour or an unmatched
-         name: shown, and one click from being answered. */
-      let locationId = null;
-      let rawLocation = null;
-      if (locCol >= 0) {
-        rawLocation = activity.meta[locCol] || null;
-        locationId = rawLocation ? await locate(rawLocation) : null;
-      } else {
-        // Nobody has said which column it is, so the register decides: the first
-        // cell it recognises is the location. Still never the *description* —
-        // that is matched on nothing, here or anywhere else in this module.
-        for (const value of activity.meta) {
-          const hit = await locate(value);
-          if (hit) { locationId = hit; rawLocation = value; break; }
+  /**
+   * The Delete button that sits beside Retire.
+   *
+   * It asks first, and then it lets the database answer. Nothing here works out
+   * whether a row is safe to remove: the interface cannot see every table that
+   * might point at it, and a check written twice is a check that will one day
+   * disagree with itself. The refusal Postgres raises already names the number of
+   * records in the way and says to retire instead, so it is shown as it comes.
+   */
+  function deleteButton({ label, message, run, after }) {
+    return el('button', {
+      class: 'cx-btn mini ghost danger',
+      text: 'Delete',
+      title: 'Removes it for good. Refused, with a count, if anything has been recorded against it '
+        + '— retire it in that case, which keeps the history.',
+      onClick: safely(async () => {
+        const ok = await confirmDialog({
+          title: label,
+          message,
+          confirmLabel: 'Delete',
+          danger: true,
+        });
+        if (!ok) return;
+        try {
+          await run();
+          toast({ tone: 'good', message: 'Deleted.' });
+          notifyChanged(after);
+        } catch (err) {
+          toast({ tone: 'bad', message: err?.message || String(err) });
         }
-      }
-      const label = activity.meta.filter(Boolean).join(' · ');
-
-      for (const [week, bucket] of weeks) {
-        const groupKey = [week, rawLocation || '', ''].join('|');
-        const ordinal = ordinals.get(groupKey) || 0;
-        ordinals.set(groupKey, ordinal + 1);
-        out.push({
-          snapshot_id: snapshotId,
-          week_start: week,
-          sheet_row: activity.row,
-          row_key: rowKey({ weekStart: week, location: rawLocation || '', subsystem: '', ordinal }),
-          /* The editor's id for the activity, when the reading was published from
-             the editor; null for a workbook read. `row_key` is still written —
-             links made before ids existed point at it — but two readings that
-             both carry ids are compared on the id, so a row inserted mid-group
-             no longer shifts the ones under it into a removal and an addition. */
-          la_row_id: activity.id || null,
-          location_id: locationId,
-          raw_location: rawLocation,
-          raw_label: label,
-          cells: bucket.cells,
-          bart_marks: bucket.marks,
-          resources: bucket.resources,
-        });
-      }
-    }
-
-    return out;
+      }),
+    });
   }
 
-  /* ── The window ────────────────────────────────────────────────────────── */
+  async function render(root) {
+    const visible = SECTIONS;
+    if (orgNav.section) {
+      section = orgNav.section;
+      orgNav.section = null;
+    }
+    if (!visible.includes(section)) section = visible[0];
 
-  /**
-   * The weeks a snapshot actually covers, read from the snapshot itself.
-   *
-   * Deliberately not a constant. The spec calls it a four-week look-ahead and
-   * says it is maintained four to six weeks out, so a hard-coded 4 would
-   * misclassify the sixth week every time it appeared.
-   */
-  function windowOf(rows) {
-    const weeks = [...new Set(rows.map((r) => r.weekStart))].sort();
-    return { weeks, first: weeks[0] || null, last: weeks[weeks.length - 1] || null };
+    const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
+    for (const id of visible) {
+      nav.appendChild(el('button', {
+        class: 'rc-tab',
+        type: 'button',
+        text: id[0].toUpperCase() + id.slice(1),
+        'aria-pressed': String(id === section),
+        onClick: () => {
+          section = id;
+          clear(root);
+          render(root);
+        },
+      }));
+    }
+    root.appendChild(nav);
+
+    const host = el('div');
+    root.appendChild(host);
+
+    if (section === 'settings') await renderSettings(host);
+    else if (section === 'people') await renderPeople(host);
+    else if (section === 'locations') await renderLocations(host);
+    else if (section === 'parties') await renderParties(host);
+    else await renderLeave(host);
   }
 
-  /* ── Comparing ─────────────────────────────────────────────────────────── */
+  /* ── People ────────────────────────────────────────────────────────────── */
 
-  /**
-   * Classify the difference between two keyed snapshots.
-   *
-   * `before` and `after` are arrays of `{ rowKey, weekStart, location, subsystem,
-   * label, cells, marks }`, where `cells` maps a date to a shift meaning and
-   * `marks` holds BART's own resource requests.
-   *
-   * Returns a list of `{ kind, weekStart, rowKey, before, after }`.
-   *
-   * **A read that started recording the location is not a read where everything
-   * moved.** The row key is built from the week and the location, so the first read
-   * after the location began coming off the sheet's own column — rather than only
-   * where the alias register already knew the spelling — keys every row
-   * differently. Compared naively that is every row removed and every row added:
-   * a batch of phantom scope on the one screen somebody reads a year later, booked
-   * into the KPIs, over a change that is about the *keying* and not the work. It is
-   * the same judgement the window rule makes, and drawn as narrowly as it can be —
-   * one side recording no location at all, the other recording one, and not a
-   * single key in common. A crew genuinely moving site is still a removal and an
-   * addition, which is what `relinkCandidates()` is for.
-   */
-  function classify(before, after, { cancelledMeaning = 'cancelled' } = {}) {
-    const beforeWindow = windowOf(before);
-    const afterWindow = windowOf(after);
-
-    /* **Two readings that both carry the editor's ids are compared on them.**
-       A row is then the same row wherever it sits and whatever it says, so
-       inserting one mid-group no longer turns every row under it into a removal
-       and an addition, and an activity moved to another site is one event rather
-       than two. Only when *every* row on both sides has an id: the first reading
-       published after ids began is compared with one that had none, and mixing
-       the two keyings would book every row as moved. That one comparison goes by
-       position, as every comparison did before. */
-    const byId = before.length > 0 && after.length > 0
-      && before.every((r) => r.rowId) && after.every((r) => r.rowId);
-    const keyOf = byId ? (r) => `${r.weekStart}|id:${r.rowId}` : (r) => r.rowKey;
-
-    if (!byId && before.length && after.length) {
-      const keys = new Set(after.map((r) => r.rowKey));
-      const located = (rows) => rows.filter((r) => String(r.location || '').trim()).length;
-      const sided = located(before) === 0 !== (located(after) === 0);
-      if (sided && !before.some((r) => keys.has(r.rowKey))) return [];
+  async function renderPeople(host) {
+    const [people, aliases] = await Promise.all([
+      rc.listPeople({ includeInactive: true }),
+      rc.listPersonAliases().catch(() => []),
+    ]);
+    const admin = rc.isAdmin();
+    const spellings = new Map();
+    for (const a of aliases) {
+      if (!spellings.has(a.person_id)) spellings.set(a.person_id, []);
+      spellings.get(a.person_id).push(a.alias);
     }
 
-    // Only weeks present on both sides can be compared at all. Everything else
-    // is the window moving, which is recorded and kept out of the KPIs.
-    const shared = new Set(beforeWindow.weeks.filter((w) => afterWindow.weeks.includes(w)));
+    host.appendChild(sectionHead('Team', admin ? {
+      label: 'Add person',
+      onClick: () => editPerson(null),
+    } : null));
 
-    const events = [];
-    const beforeByKey = new Map(before.map((r) => [keyOf(r), r]));
-    const afterByKey = new Map(after.map((r) => [keyOf(r), r]));
-    const idOf = (r) => r.rowId || null;
-
-    /* Weeks entering and leaving the window. Not scope, and named so. */
-    for (const week of afterWindow.weeks) {
-      if (!beforeWindow.weeks.includes(week)) {
-        events.push({ kind: 'window_advanced', weekStart: week, rowKey: null, before: null, after: null });
-      }
-    }
-    for (const week of beforeWindow.weeks) {
-      if (!afterWindow.weeks.includes(week)) {
-        events.push({ kind: 'window_retired', weekStart: week, rowKey: null, before: null, after: null });
-      }
+    if (!people.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text: 'Nobody on the team yet.' }));
+      return;
     }
 
-    /* Rows added to, and removed from, a week that was already in view. */
-    for (const row of after) {
-      if (!shared.has(row.weekStart)) continue;
-      if (!beforeByKey.has(keyOf(row))) {
-        events.push({ kind: 'scope_added', weekStart: row.weekStart, rowKey: row.rowKey, rowId: idOf(row), before: null, after: row });
-      }
-    }
-    for (const row of before) {
-      if (!shared.has(row.weekStart)) continue;
-      if (!afterByKey.has(keyOf(row))) {
-        events.push({ kind: 'scope_removed', weekStart: row.weekStart, rowKey: row.rowKey, rowId: idOf(row), before: row, after: null });
-      }
-    }
+    const rows = people.map((p) => el('tr', { class: p.active ? '' : 'rc-inactive' }, [
+      el('td', {}, [
+        el('div', { text: p.name }),
+        p.email ? el('div', { class: 'rc-hint', text: p.email }) : null,
+      ].filter(Boolean)),
+      el('td', { text: p.title || '—' }),
+      el('td', { text: p.subsystem || '—' }),
+      el('td', {}, [el('div', { class: 'rc-hint', text: (spellings.get(p.id) || []).join(', ') || 'no other spellings' })]),
+      el('td', {}, [p.scheduled === false ? badge('Not scheduled', 'neutral') : badge('Scheduled', 'good')]),
+      // A four-day contract is a fact the scheduler needs, and showing it here is
+      // what stops somebody being planned onto a Friday they never work.
+      el('td', { class: 'rc-num', text: (p.working_days || []).length + '/wk' }),
+      el('td', {}, admin ? [
+        el('button', {
+          class: 'cx-btn mini ghost', text: 'Edit', onClick: () => editPerson(p),
+        }),
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: 'Add spelling',
+          title: 'Another way their name is written on the look-ahead — "R. Okafor" for Rosa Okafor.',
+          onClick: safely(async () => {
+            const alias = await promptDialog({
+              title: `Another spelling for ${p.name}`,
+              label: 'As it appears on the look-ahead',
+              confirmLabel: 'Add',
+            });
+            if (!alias || !alias.trim()) return;
+            try {
+              await rc.addPersonAlias(p.id, alias.trim());
+              notifyChanged('people');
+            } catch (err) {
+              toast({ tone: 'bad', message: err?.message || String(err) });
+            }
+          }),
+        }),
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: p.active ? 'Retire' : 'Restore',
+          title: p.active
+            ? 'Removes them from every picker. Their history stays — the reports still need it.'
+            : 'Puts them back in the pickers.',
+          onClick: safely(async () => {
+            await rc.updatePerson(p.id, { active: !p.active });
+            notifyChanged('people');
+          }),
+        }),
+        deleteButton({
+          label: `Delete ${p.name}?`,
+          message: 'Their aliases, any leave booked for them and their TAWR details go too. '
+            + 'Retiring them instead keeps all of it and takes them out of the pickers just the same.',
+          run: () => rc.deletePerson(p.id),
+          after: 'people',
+        }),
+      ] : []),
+    ]));
 
-    /* What an activity says about itself, once per activity rather than once per
-       week it spans. Only visible when rows are matched on their ids: matched by
-       position, a row whose location changed was a different row, and a changed
-       description was never compared at all. */
-    const described = new Set();
-
-    /* Rows present on both sides: what changed inside them. */
-    for (const row of after) {
-      const prior = beforeByKey.get(keyOf(row));
-      if (!prior || !shared.has(row.weekStart)) continue;
-      const rowId = idOf(row);
-
-      if (byId && !described.has(rowId)) {
-        described.add(rowId);
-        const where = (r) => String(r.location || '').trim();
-        if (where(prior) !== where(row)) {
-          events.push({ kind: 'location_shift', weekStart: row.weekStart, rowKey: row.rowKey, rowId, before: prior, after: row });
-        } else if (String(prior.label || '') !== String(row.label || '')) {
-          events.push({ kind: 'details_changed', weekStart: row.weekStart, rowKey: row.rowKey, rowId, before: prior, after: row });
-        }
-      }
-
-      const dates = [...new Set([...Object.keys(prior.cells || {}), ...Object.keys(row.cells || {})])].sort();
-      for (const date of dates) {
-        const was = (prior.cells || {})[date] || null;
-        const now = (row.cells || {})[date] || null;
-        if (was === now) continue;
-
-        // A shift turning red is a cancellation, and the colour alone cannot say
-        // whose. Whoever reviews it is asked; nothing is assumed.
-        const kind = now === cancelledMeaning && was && was !== cancelledMeaning
-          ? 'cancellation'
-          : 'shift_changed';
-
-        events.push({
-          kind,
-          weekStart: row.weekStart,
-          rowKey: row.rowKey,
-          rowId,
-          date,
-          before: was,
-          after: now,
-          needsResponsibility: kind === 'cancellation',
-        });
-      }
-
-      // BART's own resource marks — an EIC added to an otherwise unchanged
-      // shift. The shift did not move, and the request still changed, so it is
-      // logged rather than folded into the row above.
-      const marksBefore = JSON.stringify(prior.marks || {});
-      const marksAfter = JSON.stringify(row.marks || {});
-      if (marksBefore !== marksAfter) {
-        events.push({
-          kind: 'resource_changed',
-          field: 'marks',
-          weekStart: row.weekStart,
-          rowKey: row.rowKey,
-          rowId,
-          before: prior.marks || {},
-          after: row.marks || {},
-        });
-      }
-
-      /* And the Resource row underneath: who is on it.
-         The same kind as a mark changing rather than a kind of its own, because
-         it is the same fact — the request against this activity moved without the
-         shift moving — and a new kind would need the `rc_change_events` check
-         constraint widened in every project that already has one. `field` is what
-         tells the two apart when somebody reads the row back. */
-      const whoBefore = JSON.stringify(prior.resources || {});
-      const whoAfter = JSON.stringify(row.resources || {});
-      if (whoBefore !== whoAfter) {
-        events.push({
-          kind: 'resource_changed',
-          field: 'resources',
-          weekStart: row.weekStart,
-          rowKey: row.rowKey,
-          rowId,
-          before: prior.resources || {},
-          after: row.resources || {},
-        });
-      }
-    }
-
-    return events;
+    host.appendChild(table(['Name', 'Title', 'Subsystem', 'Also written as', 'Takes shifts', 'Days', ''], rows));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Retiring somebody takes them out of every picker and keeps everything that names them, '
+        + 'which is why it is the first answer for anybody who has been here. Delete is for a row that '
+        + 'was never meant — the same person added twice — and takes their aliases, leave and TAWR '
+        + 'details with them. Who you are in the calendar is the name set in the application, matched '
+        + 'to this list.',
+    }));
   }
 
-  /**
-   * Removals and additions in the same week that could be one crew moving site.
-   *
-   * Only ever a *suggestion*, surfaced for somebody to confirm. Work finishing
-   * early at one location and starting at another is not a cancellation, but the
-   * only evidence is that the same BART resources appear on both — and the
-   * activity text, which cannot be trusted. So the pairing is a human judgement
-   * by design, and the system's job is to make it easy rather than to guess.
-   */
-  function relinkCandidates(events) {
-    const removed = events.filter((e) => e.kind === 'scope_removed');
-    const added = events.filter((e) => e.kind === 'scope_added');
-    const out = [];
+  function editPerson(person) {
+    const name = textInput({ value: person?.name || '', placeholder: 'Full name' });
+    const email = textInput({ value: person?.email || '', placeholder: 'you@example.com', type: 'email' });
+    const title = textInput({ value: person?.title || '', placeholder: 'Test Engineer' });
+    const subsystem = textInput({ value: person?.subsystem || '', placeholder: 'ATS / IXL / SCADA' });
+    /* Whether they are scheduled, kept apart from what they may do. A manager
+       administers the calendar and is never assigned to a location; an
+       administrator who does take shifts must not drop out of the meeting
+       because of their permissions. */
+    const scheduled = checkbox({
+      label: 'Takes shifts — appears in the PTO calendar and the staffing checks',
+      checked: person ? person.scheduled !== false : true,
+    });
 
-    for (const gone of removed) {
-      for (const arrived of added) {
-        if (gone.weekStart !== arrived.weekStart) continue;
-        const a = JSON.stringify(gone.before?.marks || {});
-        const b = JSON.stringify(arrived.after?.marks || {});
-        if (a !== '{}' && a === b) {
-          out.push({ removed: gone, added: arrived, because: 'the same resources were requested' });
-        }
-      }
-    }
-    return out;
-  }
+    // Which days they work at all. Scheduling somebody onto a day they do not
+    // work is the same class of mistake as scheduling them while on leave, and
+    // both are caught from this one field.
+    const days = [1, 2, 3, 4, 5, 6, 7].map((n) => {
+      const set = new Set(person?.working_days || [1, 2, 3, 4, 5]);
+      const box = el('input', { type: 'checkbox', checked: set.has(n) });
+      box.dataset.day = String(n);
+      return el('label', { class: 'cx-check', style: 'margin-right:10px' }, [
+        box, el('span', { text: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][n - 1] }),
+      ]);
+    });
+    const daysWrap = el('div', {}, days);
 
-  /**
-   * Which events count toward the change KPIs.
-   *
-   * The window moving is real and recorded, and it is not a change of scope.
-   * Keeping the two apart is what stops the scope-added figure being meaningless
-   * within a month.
-   */
-  const KPI_KINDS = ['scope_added', 'scope_removed', 'cancellation', 'resource_changed', 'shift_changed'];
-
-  function countable(events) {
-    return events.filter((e) => KPI_KINDS.includes(e.kind));
-  }
-
-  /** A short, plain description of an event, for the change log. */
-  /**
-   * One line saying what an event was.
-   *
-   * Reads the *stored* shape: `before` and `after` are jsonb, because the table
-   * has no column for a date and a row-level change needs one. `sideOf()` in
-   * `ui/rc_lookahead.js` is what writes them, and the two have to agree — a
-   * mismatch here shows up as "undefined → undefined" on the one screen somebody
-   * reads a year later.
-   */
-  function describe(event) {
-    const day = event.date || event.after?.date || event.before?.date || 'a day';
-    switch (event.kind) {
-      case 'scope_added': return `Added: ${event.after?.label || event.rowKey}`;
-      case 'scope_removed': return `Removed: ${event.before?.label || event.rowKey}`;
-      case 'cancellation': return `Cancelled on ${day}: was ${event.before?.value ?? event.before}`;
-      case 'shift_changed':
-        return `${day}: ${event.before?.value || 'nothing'} → ${event.after?.value || 'nothing'}`;
-      case 'resource_changed': {
-        /* The *stored* shape decides which of the two this was: `sideOf()` writes
-           `{ resources }` for the Resource row and `{ marks }` for a mark on the
-           activity line. A row written before Resource rows existed carries only
-           the latter, and it still prints the sentence it always did rather than
-           "undefined → undefined" on the one screen somebody reads a year later. */
-        const who = (side) => {
-          const map = side?.resources;
-          if (!map || typeof map !== 'object') return null;
-          return [...new Set(Object.values(map).flatMap((v) => resourceNames(v)))].join(', ');
+    formModal({
+      title: person ? 'Edit person' : 'Add person',
+      body: el('div', { class: 'cx-form' }, [
+        field('Name', name),
+        field('Email', email, 'For reference only — nobody signs in to the calendar.'),
+        field('Title', title),
+        field('Subsystem', subsystem),
+        field('Scheduling', scheduled, 'Turn this off for somebody who manages rather than '
+          + 'taking shifts.'),
+        field('Working days', daysWrap),
+      ]),
+      confirmLabel: person ? 'Save' : 'Add',
+      onConfirm: async () => {
+        const working = [...daysWrap.querySelectorAll('input:checked')].map((b) => Number(b.dataset.day));
+        const patch = {
+          name: name.value.trim(),
+          email: email.value.trim() || null,
+          title: title.value.trim() || null,
+          subsystem: subsystem.value.trim() || null,
+          scheduled: scheduled.querySelector('input').checked,
+          working_days: working,
         };
-        const was = who(event.before);
-        const now = who(event.after);
-        if (was === null && now === null) return 'BART resource request changed';
-        return `Resource: ${was || 'nobody'} → ${now || 'nobody'}`;
-      }
-      case 'window_advanced': return `Week ${event.weekStart} came into the window`;
-      case 'window_retired': return `Week ${event.weekStart} left the window`;
-      case 'location_shift':
-        // Matched on the editor's id, the row itself says where it went. Linked
-        // by hand from a removal and an addition, it does not.
-        if (event.before?.location !== undefined || event.after?.location !== undefined) {
-          return `${event.after?.label || event.before?.label || 'Activity'}: moved from `
-            + `${event.before?.location || 'no location'} to ${event.after?.location || 'no location'}`;
+        if (!patch.name) throw new Error('A name is needed.');
+        if (person) {
+          await rc.updatePerson(person.id, patch);
+        } else {
+          await rc.addPerson(patch);
         }
-        return 'Relinked as one crew moving site';
-      case 'details_changed':
-        return `Details: ${event.before?.label || 'nothing'} → ${event.after?.label || 'nothing'}`;
-      default: return event.kind;
-    }
+        notifyChanged('people');
+        toast({ message: person ? `${patch.name} updated.` : `${patch.name} added.` });
+      },
+    });
   }
 
-  /* ══════════════════════════════════════════════════════════════════════════
-     What changed for me
+  /* ── Locations ─────────────────────────────────────────────────────────── */
 
-     Somebody on the team opens the calendar and wants to know one thing before
-     anything else: has my week moved since I last looked? This compares two
-     readings of the look-ahead — the one they last said "got it" to, and the
-     latest — for the days that name them, and says what happened in the words a
-     person would use: a day added, a day taken away, a day moved, a day given
-     to somebody else, a day cancelled, a shift changed.
+  async function renderLocations(host) {
+    const [locations, aliases] = await Promise.all([
+      rc.listLocations({ includeInactive: true }),
+      rc.listLocationAliases(),
+    ]);
+    const admin = rc.isAdmin();
+    const byLocation = new Map();
+    for (const a of aliases) {
+      if (!byLocation.has(a.location_id)) byLocation.set(a.location_id, []);
+      byLocation.get(a.location_id).push(a.alias);
+    }
 
-     Both sides come from the stored rows (`rc_lookahead_rows`), which are never
-     compacted, so an old reading can always be compared. A reading is a complete
-     statement of the weeks it covers, so each side is one reading, whole.
-     ═══════════════════════════════════════════════════════════════════════ */
+    host.appendChild(sectionHead('Locations', admin ? {
+      label: 'Add location',
+      onClick: safely(async () => {
+        const name = await promptDialog({ title: 'Add location', label: 'Name', confirmLabel: 'Add' });
+        if (!name) return;
+        await rc.addLocation({ name: name.trim() });
+        notifyChanged('locations');
+      }),
+    } : null));
+
+    const rows = locations.map((l) => el('tr', { class: l.active ? '' : 'rc-inactive' }, [
+      el('td', { text: l.name }),
+      el('td', { text: l.code || '—' }),
+      el('td', {}, [
+        el('div', { class: 'rc-hint', text: (byLocation.get(l.id) || []).join(', ') || 'no other spellings' }),
+      ]),
+      el('td', {}, [
+        el('div', { class: 'rc-hint', text: l.tawr_area || 'its name' }),
+      ]),
+      el('td', {}, admin ? [
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: 'Rename',
+          title: 'Every alias, TAWR and look-ahead row stays pointed at it — only the name changes.',
+          onClick: safely(async () => {
+            const name = await promptDialog({
+              title: `Rename ${l.name}`,
+              label: 'Name',
+              value: l.name,
+              confirmLabel: 'Rename',
+            });
+            if (!name || name.trim() === l.name) return;
+            await rc.updateLocation(l.id, { name: name.trim() });
+            notifyChanged('locations');
+          }),
+        }),
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: l.active ? 'Retire' : 'Restore',
+          title: l.active
+            ? 'Drops it from every picker. Everything already recorded against it stays.'
+            : 'Puts it back in the pickers.',
+          onClick: safely(async () => {
+            await rc.updateLocation(l.id, { active: !l.active });
+            notifyChanged('locations');
+          }),
+        }),
+        deleteButton({
+          label: `Delete ${l.name}?`,
+          message: 'Its other spellings go with it. If a look-ahead reading, a change or an approved '
+            + 'TAWR names this place the delete is refused — retire it instead, which drops it from the '
+            + 'pickers and keeps everything already recorded there.',
+          run: () => rc.deleteLocation(l.id),
+          after: 'locations',
+        }),
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: 'TAWR area',
+          title: 'What a track access work request\'s Area column says for this place. Blank uses its name.',
+          dataset: { action: 'tawr-area' },
+          onClick: safely(async () => {
+            const area = await promptDialog({
+              title: `Area for ${l.name} on a TAWR`,
+              label: 'Tracks, mileposts, gates or stations, as the form should say it',
+              value: l.tawr_area || '',
+              confirmLabel: 'Save',
+            });
+            if (area == null || area.trim() === (l.tawr_area || '')) return;
+            try {
+              await rc.updateLocation(l.id, { tawr_area: area.trim() || null });
+              notifyChanged('locations');
+            } catch (err) {
+              toast({ tone: 'bad', message: err?.message || String(err) });
+            }
+          }),
+        }),
+        el('button', {
+          class: 'cx-btn mini ghost',
+          text: 'Add spelling',
+          title: 'Another way this place is written in the look-ahead.',
+          onClick: safely(async () => {
+            const alias = await promptDialog({
+              title: `Another spelling for ${l.name}`,
+              label: 'As it appears in the look-ahead',
+              confirmLabel: 'Add',
+            });
+            if (!alias) return;
+            await rc.addLocationAlias(l.id, alias.trim());
+            notifyChanged('locations');
+          }),
+        }),
+      ] : []),
+    ]));
+
+    host.appendChild(table(['Location', 'Code', 'Also written as', 'TAWR area', ''], rows));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Every match against the look-ahead keys on location, never on activity text — the '
+        + 'descriptions are not reliable enough to carry evidence. So a place written "TPSS 12" one '
+        + 'week and "Traction Power 12" the next needs both spellings here. Case and punctuation are '
+        + 'folded automatically; wording is not.',
+    }));
+  }
+
+  /* ── Parties ───────────────────────────────────────────────────────────── */
+
+  async function renderParties(host) {
+    const parties = await rc.listParties();
+    const admin = rc.isAdmin();
+
+    host.appendChild(sectionHead('Responsible parties', admin ? {
+      label: 'Add party',
+      onClick: safely(async () => {
+        const name = await promptDialog({ title: 'Add party', label: 'Name', confirmLabel: 'Add' });
+        if (!name) return;
+        await rc.addParty(name.trim());
+        notifyChanged('parties');
+      }),
+    } : null));
+
+    host.appendChild(table(['Party'], parties.map((p) => el('tr', {}, [el('td', { text: p.name })]))));
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Who a change on the look-ahead is down to. A table rather than free text, because '
+        + '"down to BART" is a number somebody may eventually have to defend.',
+    }));
+  }
+
+  /* ── Leave ─────────────────────────────────────────────────────────────── */
+
+  async function renderLeave(host) {
+    const today = todayISO();
+    const [people, kinds, leave] = await Promise.all([
+      rc.listPeople(),
+      rc.listLeaveKinds(),
+      // A year either side: enough to see the balance and what is booked ahead.
+      rc.listLeave(`${today.slice(0, 4)}-01-01`, `${Number(today.slice(0, 4)) + 1}-12-31`),
+    ]);
+    const admin = rc.isAdmin();
+    const peopleById = byId(people);
+    const kindsById = byId(kinds);
+
+    host.appendChild(sectionHead('Leave', admin ? {
+      label: 'Book leave',
+      onClick: () => bookLeave(people, kinds),
+    } : null));
+
+    if (!leave.length) {
+      host.appendChild(el('p', { class: 'rc-hint', text: 'Nothing booked.' }));
+    } else {
+      const sorted = [...leave].sort((a, b) => a.start_date.localeCompare(b.start_date));
+      host.appendChild(table(
+        ['Person', 'From', 'To', 'Kind', 'Status', ''],
+        sorted.map((l) => el('tr', {}, [
+          el('td', { text: peopleById.get(l.person_id)?.name || '—' }),
+          el('td', { text: dayLabel(l.start_date) }),
+          el('td', { text: dayLabel(l.end_date) }),
+          el('td', { text: kindsById.get(l.kind_id)?.name || '—' }),
+          el('td', {}, [badge(l.status, l.status === 'approved' ? 'good' : 'muted')]),
+          el('td', {}, admin && l.status !== 'cancelled' ? [
+            el('button', {
+              class: 'cx-btn mini ghost',
+              text: 'Cancel',
+              onClick: safely(async () => {
+                const ok = await confirmDialog({
+                  title: 'Cancel this leave?',
+                  message: 'It stays on the record as cancelled rather than disappearing.',
+                  confirmLabel: 'Cancel leave',
+                });
+                if (!ok) return;
+                await rc.updateLeave(l.id, { status: 'cancelled' });
+                notifyChanged('leave');
+              }),
+            }),
+          ] : []),
+        ]))
+      ));
+    }
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Leave booked here is the same leave the PTO calendar books, and the editor\'s staffing '
+        + 'check reads it: somebody named on a day they are off is flagged before the week arrives.',
+    }));
+  }
+
+  function bookLeave(people, kinds) {
+    const person = selectInput({
+      value: people[0]?.id,
+      options: people.map((p) => ({ value: p.id, label: p.name })),
+    });
+    const from = el('input', { type: 'date', class: 'cx-input' });
+    const to = el('input', { type: 'date', class: 'cx-input' });
+    const kind = selectInput({
+      value: kinds[0]?.id,
+      options: kinds.map((k) => ({ value: k.id, label: k.name })),
+    });
+    const note = textInput({ placeholder: 'Optional' });
+
+    formModal({
+      title: 'Book leave',
+      body: el('div', { class: 'cx-form' }, [
+        field('Person', person),
+        field('From', from),
+        field('To', to, 'Inclusive, as a calendar is.'),
+        field('Kind', kind),
+        field('Note', note),
+      ]),
+      confirmLabel: 'Book',
+      onConfirm: async () => {
+        if (!from.value || !to.value) throw new Error('Both dates are needed.');
+        if (to.value < from.value) throw new Error('The end is before the start.');
+        await rc.addLeave({
+          person_id: person.value,
+          start_date: from.value,
+          end_date: to.value,
+          kind_id: kind.value,
+          note: note.value.trim() || null,
+        });
+        notifyChanged('leave');
+        toast({ message: 'Leave booked.' });
+      },
+    });
+  }
+
+  /* ── Shared bits ───────────────────────────────────────────────────────── */
 
   /**
-   * The days a set of stored rows names somebody on, between `from` and `to`
-   * (ISO, inclusive): a map of `date|label` → `{ date, label, location, meaning,
-   * cancelled }`.
+   * A button's work, with its failure said. Every write here can be refused —
+   * somebody else holding the pen, a file another computer saved — and a refusal
+   * nobody is told about reads as a button that does nothing.
    */
-  function myLookaheadDays(rows, isMe, { from = null, to = null } = {}) {
-    const out = new Map();
-    for (const row of rows || []) {
-      for (const [date, text] of Object.entries(row.resources || {})) {
-        const day = String(date).slice(0, 10);
-        if ((from && day < from) || (to && day > to)) continue;
-        if (!resourceNames(text).some((n) => isMe(n))) continue;
-        const meaning = row.cells?.[day] || row.cells?.[date] || '';
-        out.set(`${day}|${row.raw_label || ''}`, {
-          date: day,
-          label: row.raw_label || '',
-          location: row.raw_location || '',
-          meaning,
-          cancelled: isCancelMeaning(meaning),
-        });
+  function safely(fn) {
+    return async (...args) => {
+      try {
+        await fn(...args);
+      } catch (err) {
+        toast({ tone: 'bad', message: err?.message || String(err), timeout: 8000 });
+      }
+    };
+  }
+
+  function sectionHead(title, action) {
+    return el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: title }),
+      action
+        ? el('button', {
+          class: 'cx-btn mini primary',
+          html: icon('plus', { size: 12 }) + `<span>${action.label}</span>`,
+          onClick: action.onClick,
+        })
+        : null,
+    ].filter(Boolean));
+  }
+
+  function table(headers, rows) {
+    return el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [el('tr', {}, headers.map((h) => el('th', { text: h })))]),
+        el('tbody', {}, rows),
+      ]),
+    ]);
+  }
+
+  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+};
+
+// io/rc_pdf.js
+__mods["io/rc_pdf.js"] = function (__x, __req) {
+  /**
+   * The look-ahead calendar, drawn for print.
+   *
+   * A screenshot of the grid is what people were doing instead, and it is a poor
+   * document: the frozen columns come out twice, the scroll clips the weeks
+   * nobody happened to be looking at, and the colours are whatever the monitor
+   * did to them. This draws the same calendar as vector geometry, at whatever
+   * scale puts it on **one sheet**, because a four-week look-ahead reassembled
+   * from four pages on a meeting-room table is not a four-week look-ahead.
+   *
+   * Two rules shape the whole module.
+   *
+   * **It draws the window it is given, not the one on screen.** Every choice the
+   * dialog offers — how many weeks, whether the resource names come, whether the
+   * rows with nothing scheduled come — is an argument here. The screen's own
+   * switches are only the *defaults* the dialog opens with, so exporting cannot
+   * quietly depend on what somebody last clicked.
+   *
+   * **Nothing is truncated to make it fit.** A description too long for its
+   * column wraps and the row grows, the same answer the timeline gives. What
+   * gives instead is the scale, and `fitScale()` says what that came to before
+   * anything is written — a print at 40% is a decision somebody should make
+   * knowingly, by choosing a bigger sheet or fewer weeks, not a surprise in a
+   * downloads folder.
+   *
+   * No DOM and no network: it takes a parsed view and returns bytes, which is
+   * what lets `tools/test_lookahead.js` check the geometry without a browser.
+   *
+   * Imports: io/pdf, io/lookahead, core/lookahead.
+   */
+
+  const { fitToPdf, fitScale, pageBox, textWidth, PAGE_SIZES } = __req("io/pdf.js");
+  const { isDark } = __req("io/lookahead.js");
+  const { ABSENCE_LABELS } = __req("core/lookahead.js");
+
+  /* ── Metrics, in points at scale 1 ─────────────────────────────────────── */
+
+  const META_FONT = 7.2;
+  const DAY_FONT = 6.2;
+  const HEAD_FONT = 6.4;
+  const LINE_H = 8.6;
+  const ROW_PAD = 3.4;
+  const MIN_ROW_H = 12;
+  const MONTH_H = 11;
+  const NUM_H = 10;
+  const WEEKDAY_H = 11;
+  const LEGEND_H = 13;
+
+  /** The whole activity block, however many columns the sheet keeps it in. */
+  const META_W = 208;
+  const MIN_COL_W = 24;
+
+  const INK = {
+    text: '#1a1a1a',
+    subtle: '#6b6b6b',
+    rule: '#d8d8d8',
+    weekRule: '#9a9a9a',
+    band: '#eeeeee',
+    heading: '#e4e4e4',
+    weekend: '#f5f5f5',
+    today: '#e60012',
+    onDark: '#ffffff',
+  };
+
+  /** Greedy word wrap. Returns the lines a string needs at this width. */
+  function wrap(text, width, size) {
+    const words = String(text || '').split(/\s+/).filter(Boolean);
+    if (!words.length) return [];
+    const lines = [];
+    let line = '';
+    for (const word of words) {
+      const next = line ? `${line} ${word}` : word;
+      if (textWidth(next, size) <= width || !line) {
+        line = next;
+      } else {
+        lines.push(line);
+        line = word;
+      }
+      /* A single word wider than the column — a part number, a path — is broken
+         on characters rather than left to run over its neighbour. Nothing is
+         dropped; the row grows instead. */
+      while (textWidth(line, size) > width && line.length > 1) {
+        let cut = line.length;
+        while (cut > 1 && textWidth(line.slice(0, cut), size) > width) cut--;
+        lines.push(line.slice(0, cut));
+        line = line.slice(cut);
+      }
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  /**
+   * How wide each activity column gets.
+   *
+   * Proportional to what is actually in it, so the description — the column
+   * anybody reads — is not given the same strip as a four-character CDRL code.
+   * A floor per column, because a column squeezed to nothing still costs a
+   * vertical rule and looks like a mistake.
+   */
+  function metaWidths(rows, meta) {
+    if (!meta.length) return [];
+    const longest = meta.map((_, i) =>
+      Math.max(12, ...rows.map((r) => textWidth(String(r.meta[i] || ''), META_FONT))));
+    const total = longest.reduce((a, b) => a + b, 0) || 1;
+    const spare = Math.max(0, META_W - MIN_COL_W * meta.length);
+    return longest.map((w) => MIN_COL_W + (w / total) * spare);
+  }
+
+  /**
+   * Which rows the export draws, and in what shape.
+   *
+   * Deliberately a separate pass from `readGrid()`: the same activity is one row
+   * on screen and one or two here depending on whether the names were asked for,
+   * and working that out while drawing is how the two get out of step.
+   */
+  function linesOf(view, { showResources, showAway }) {
+    const out = [];
+    for (const a of view.activities) {
+      if (a.absence && !showAway) continue;
+      out.push({
+        meta: a.meta,
+        marks: a.marks,
+        heading: Boolean(a.heading),
+        muted: Boolean(a.absence),
+        label: a.absence ? ABSENCE_LABELS[a.absence] : null,
+      });
+      if (a.resource && showResources) {
+        out.push({ meta: a.resource.meta, marks: a.resource.marks, heading: false, muted: true });
       }
     }
     return out;
   }
 
-  /** How far apart a removed and an added day of one activity may be and still be one day moved. */
-  const MOVED_WITHIN_DAYS = 14;
-
   /**
-   * What changed between two readings for the days that name this person:
-   * `[{ kind, date, label, location, from?, was?, now?, names? }]`, by date.
+   * The calendar as scene items: `{ width, height, items, meta }`.
    *
-   *   added      named on a day they were not before
-   *   removed    no longer named on a day they were, and nobody else took it
-   *   given      no longer named, and the row names somebody else that day
-   *   moved      removed from one day and added to another of the same activity
-   *   cancelled  still named, and the day is now painted as a cancellation
-   *   reinstated a day that was cancelled is back on
-   *   shift      still named, and the day is painted as a different shift
+   * The same shape `io/scene.js` produces for the timeline, so it goes through
+   * the same writer and gets the same true-vector output — selectable text and
+   * no raster anywhere.
    */
-  function changesForMe(beforeRows, afterRows, isMe, { from = null, to = null } = {}) {
-    const before = myLookaheadDays(beforeRows, isMe, { from, to });
-    const after = myLookaheadDays(afterRows, isMe, { from, to });
-    const afterRow = new Map();
-    for (const row of afterRows || []) {
-      for (const date of new Set([...Object.keys(row.resources || {}), ...Object.keys(row.cells || {})])) {
-        afterRow.set(`${String(date).slice(0, 10)}|${row.raw_label || ''}`, row);
+  function calendarScene(view, {
+    showResources = true,
+    showAway = true,
+    legend = [],
+    showLegend = true,
+    today = null,
+    rowPad = 0,
+    dayPad = 0,
+  } = {}) {
+    const items = [];
+    const days = view.days || [];
+    const rows = linesOf(view, { showResources, showAway });
+    const meta = view.meta || [];
+    const headings = view.headings || [];
+    const widths = metaWidths(rows, meta);
+    const metaW = widths.reduce((a, b) => a + b, 0);
+
+    /* A day column is as wide as the widest *word* anybody writes in one, not the
+       widest cell. The marks are "X", "X.WIT", "X.TCE"; the Resource row's cells
+       are "Priya, Dan", which is three times as wide and would either set the
+       whole grid's column width or run over its neighbours. Sizing on the word
+       and wrapping the rest is what lets a name sit in a day column at all. */
+    const widestWord = Math.max(0, ...rows.flatMap((r) =>
+      String(r.marks.map((m) => m.value || '').join(' '))
+        .split(/[\s,;/&+]+/).filter(Boolean)
+        .map((w) => textWidth(w, DAY_FONT))));
+    const dayW = Math.max(12, Math.min(30, widestWord + 5)) + dayPad;
+
+    const headH = MONTH_H + NUM_H + WEEKDAY_H;
+    const width = metaW + days.length * dayW;
+
+    const colX = new Map();
+    days.forEach((d, i) => colX.set(d.col, metaW + i * dayW));
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+
+    // The month band, one label per run of days, which is what the merged cell in
+    // the workbook meant.
+    let runStart = 0;
+    for (let i = 0; i <= days.length; i++) {
+      if (i < days.length && days[i].month === days[runStart].month) continue;
+      const x = metaW + runStart * dayW;
+      const w = (i - runStart) * dayW;
+      items.push({ type: 'rect', x, y: 0, w, h: MONTH_H, fill: INK.band });
+      const label = days[runStart].month || '';
+      if (label && textWidth(label, HEAD_FONT) < w - 4) {
+        items.push({
+          type: 'text', x: x + w / 2, y: MONTH_H - 3, text: label,
+          size: HEAD_FONT, fill: INK.subtle, anchor: 'middle', weight: 700,
+        });
       }
+      runStart = i;
     }
 
-    const added = [...after.entries()].filter(([k]) => !before.has(k)).map(([, v]) => v);
-    const removed = [...before.entries()].filter(([k]) => !after.has(k)).map(([, v]) => v);
-    const out = [];
-
-    /* A day taken off and another of the same activity put on, close together,
-       is one day moved — nearest first, each day used once. */
-    const usedAdded = new Set();
-    const stillRemoved = [];
-    for (const r of removed.sort((a, b) => a.date.localeCompare(b.date))) {
-      /** @type {number | null} */
-      let best = null;
-      let bestGap = Infinity;
-      added.forEach((a, i) => {
-        if (usedAdded.has(i) || a.label !== r.label) return;
-        const gap = Math.abs(Date.parse(`${a.date}T00:00:00Z`) - Date.parse(`${r.date}T00:00:00Z`)) / 86400000;
-        if (gap <= MOVED_WITHIN_DAYS && gap < bestGap) { best = i; bestGap = gap; }
+    /* What the workbook calls its own columns. `readGrid()` already reads these
+       to find the Location column, so printing "Activity" over all of them would
+       be throwing away a heading the sheet supplies. */
+    widths.forEach((w, i) => {
+      const x = widths.slice(0, i).reduce((a, b) => a + b, 0);
+      const label = String(headings[i] || (i === 0 ? 'Activity' : ''));
+      if (!label) return;
+      const lines = wrap(label, w - 4, HEAD_FONT - 0.4);
+      lines.slice(0, 2).forEach((line, n) => {
+        items.push({
+          type: 'text', x: x + 2, y: MONTH_H + NUM_H - 2 + n * (HEAD_FONT + 0.8),
+          text: line, size: HEAD_FONT - 0.4, fill: INK.subtle, weight: 700,
+        });
       });
-      if (best == null) { stillRemoved.push(r); continue; }
-      usedAdded.add(best);
-      const a = added[best];
-      out.push({ kind: 'moved', date: a.date, from: r.date, label: a.label, location: a.location, now: a.meaning, was: r.meaning });
-    }
-
-    added.forEach((a, i) => {
-      if (!usedAdded.has(i)) out.push({ kind: 'added', date: a.date, label: a.label, location: a.location, now: a.meaning });
     });
-    for (const r of stillRemoved) {
-      const row = afterRow.get(`${r.date}|${r.label}`);
-      const names = resourceNames(row?.resources?.[r.date] || '').filter((n) => !isMe(n));
-      if (names.length) out.push({ kind: 'given', date: r.date, label: r.label, location: r.location, names });
-      else out.push({ kind: 'removed', date: r.date, label: r.label, location: r.location, was: r.meaning });
-    }
-    for (const [k, now] of after) {
-      const was = before.get(k);
-      if (!was) continue;
-      if (now.cancelled && !was.cancelled) {
-        out.push({ kind: 'cancelled', date: now.date, label: now.label, location: now.location, was: was.meaning });
-      } else if (was.cancelled && !now.cancelled) {
-        out.push({ kind: 'reinstated', date: now.date, label: now.label, location: now.location, now: now.meaning });
-      } else if (!now.cancelled && now.meaning !== was.meaning && now.meaning && was.meaning) {
-        out.push({ kind: 'shift', date: now.date, label: now.label, location: now.location, was: was.meaning, now: now.meaning });
+
+    for (const d of days) {
+      const x = colX.get(d.col);
+      if (d.weekend) {
+        items.push({ type: 'rect', x, y: MONTH_H, w: dayW, h: headH - MONTH_H, fill: INK.weekend });
       }
+      const isToday = Boolean(d.date) && d.date === today;
+      items.push({
+        type: 'text', x: x + dayW / 2, y: MONTH_H + NUM_H - 2.5, text: String(d.day || ''),
+        size: HEAD_FONT, fill: isToday ? INK.today : INK.text, anchor: 'middle', weight: 700,
+      });
+      items.push({
+        type: 'text', x: x + dayW / 2, y: headH - 3, text: String(d.weekday || ''),
+        size: HEAD_FONT - 0.6, fill: isToday ? INK.today : INK.subtle, anchor: 'middle',
+      });
     }
 
-    return out.sort((a, b) => a.date.localeCompare(b.date) || a.label.localeCompare(b.label));
+    /* ── Rows ───────────────────────────────────────────────────────────── */
+
+    const dayLineH = DAY_FONT + 1.6;
+    const laid = rows.map((row) => {
+      const cells = widths.map((w, i) => wrap(row.meta[i], w - 4, META_FONT));
+      const inDay = new Map();
+      for (const m of row.marks) {
+        if (!m.value) continue;
+        inDay.set(m.col, wrap(String(m.value), dayW - 2.5, DAY_FONT));
+      }
+      /* The row is as tall as its tallest cell, wherever that cell is. Measuring
+         only the description is what let a Resource row's names run across three
+         days of somebody else's work. */
+      const metaLines = Math.max(1, ...cells.map((c) => c.length));
+      const dayLines = Math.max(1, ...[...inDay.values()].map((l) => l.length), 1);
+      return {
+        ...row,
+        cells,
+        inDay,
+        h: Math.max(MIN_ROW_H, metaLines * LINE_H + ROW_PAD, dayLines * dayLineH + ROW_PAD) + rowPad,
+      };
+    });
+
+    let y = headH;
+    const bodyTop = y;
+
+    for (const row of laid) {
+      // Weekend tint first, so a painted cell sits on top of it rather than
+      // under it.
+      for (const d of days) {
+        if (d.weekend) {
+          items.push({ type: 'rect', x: colX.get(d.col), y, w: dayW, h: row.h, fill: INK.weekend });
+        }
+      }
+      if (row.heading) {
+        items.push({ type: 'rect', x: 0, y, w: width, h: row.h, fill: INK.heading });
+      }
+
+      row.cells.forEach((lines, i) => {
+        const x = widths.slice(0, i).reduce((a, b) => a + b, 0);
+        lines.forEach((line, n) => {
+          items.push({
+            type: 'text', x: x + 2, y: y + ROW_PAD + (n + 1) * LINE_H - 2.4, text: line,
+            size: META_FONT, fill: row.muted ? INK.subtle : INK.text,
+            weight: row.heading ? 700 : 400,
+          });
+        });
+      });
+
+      for (const mark of row.marks) {
+        const x = colX.get(mark.col);
+        if (x == null) continue;                       // a day outside the window
+        if (!mark.hex && !mark.value) continue;        // an empty cell draws nothing
+        if (mark.hex) {
+          items.push({ type: 'rect', x, y, w: dayW, h: row.h, fill: `#${mark.hex}` });
+        }
+        const lines = row.inDay.get(mark.col);
+        if (lines?.length) {
+          const fill = mark.hex && isDark(mark.hex) ? INK.onDark : INK.text;
+          const block = lines.length * dayLineH;
+          lines.forEach((line, n) => {
+            items.push({
+              type: 'text', x: x + dayW / 2,
+              y: y + (row.h - block) / 2 + (n + 1) * dayLineH - 1.8,
+              text: line, size: DAY_FONT, fill, anchor: 'middle',
+            });
+          });
+        }
+      }
+
+      y += row.h;
+      items.push({ type: 'line', x1: 0, y1: y, x2: width, y2: y, stroke: INK.rule, strokeWidth: 0.3 });
+    }
+
+    const bodyBottom = y;
+
+    /* ── Rules ──────────────────────────────────────────────────────────── */
+
+    // A hairline per day makes it a calendar rather than a block of colour; the
+    // Monday rules are what let somebody count weeks across a hundred columns.
+    for (const d of days) {
+      const x = colX.get(d.col);
+      const monday = String(d.weekday || '').toUpperCase() === 'M';
+      items.push({
+        type: 'line', x1: x, y1: MONTH_H, x2: x, y2: bodyBottom,
+        stroke: monday ? INK.weekRule : INK.rule, strokeWidth: monday ? 0.5 : 0.25,
+      });
+    }
+    items.push({
+      type: 'line', x1: metaW, y1: 0, x2: metaW, y2: bodyBottom,
+      stroke: INK.weekRule, strokeWidth: 0.7,
+    });
+    items.push({
+      type: 'line', x1: 0, y1: bodyTop, x2: width, y2: bodyTop,
+      stroke: INK.weekRule, strokeWidth: 0.7,
+    });
+    items.push({
+      type: 'line', x1: width, y1: 0, x2: width, y2: bodyBottom,
+      stroke: INK.rule, strokeWidth: 0.25,
+    });
+
+    // Today, where the window carries it. Drawn last so nothing paints over it.
+    const todayCol = days.find((d) => d.date && d.date === today);
+    if (todayCol) {
+      const x = colX.get(todayCol.col) + dayW / 2;
+      /* Through the body only. Run up into the header it strikes out the very
+         date it is marking, so the column head says "today" by going red and the
+         rule says where it falls. */
+      items.push({
+        type: 'line', x1: x, y1: bodyTop, x2: x, y2: bodyBottom,
+        stroke: INK.today, strokeWidth: 0.9,
+      });
+    }
+
+    /* ── The key ────────────────────────────────────────────────────────── */
+
+    let height = bodyBottom;
+    if (showLegend && legend.length) {
+      const top = bodyBottom + 7;
+      let x = 0;
+      let line = 0;
+      for (const entry of legend) {
+        const label = String(entry.meaning || '');
+        const w = 11 + textWidth(label, HEAD_FONT) + 12;
+        if (x + w > width && x > 0) { x = 0; line++; }
+        const ly = top + line * LEGEND_H;
+        items.push({
+          type: 'rect', x, y: ly, w: 7, h: 7, fill: `#${entry.argb}`,
+          stroke: INK.rule, strokeWidth: 0.3,
+        });
+        items.push({
+          type: 'text', x: x + 10, y: ly + 6, text: label,
+          size: HEAD_FONT, fill: INK.text,
+        });
+        x += w;
+      }
+      height = top + (line + 1) * LEGEND_H;
+    }
+
+    return {
+      width,
+      height,
+      items,
+      meta: { palette: { bg: '#ffffff', text: INK.text, textSubtle: INK.subtle, brand: INK.today } },
+      // What the caller needs to describe what it just made, without counting the
+      // items itself.
+      // `bodyH` is what the rows came to naturally, which is what lets the
+      // filling pass cap its padding at "twice as tall" rather than at a
+      // number that means nothing on a sheet of two-line descriptions.
+      counts: { rows: rows.length, days: days.length, bodyH: bodyBottom - bodyTop },
+    };
   }
 
-  Object.defineProperty(__x, "reassignments", { get: () => reassignments, enumerable: true });
-  Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
-  Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
-  Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
-  Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
-  Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
-  Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
-  Object.defineProperty(__x, "KPI_KINDS", { get: () => KPI_KINDS, enumerable: true });
-  Object.defineProperty(__x, "countable", { get: () => countable, enumerable: true });
-  Object.defineProperty(__x, "describe", { get: () => describe, enumerable: true });
-  Object.defineProperty(__x, "myLookaheadDays", { get: () => myLookaheadDays, enumerable: true });
-  Object.defineProperty(__x, "changesForMe", { get: () => changesForMe, enumerable: true });
+  /**
+   * The calendar laid out to *fill* the page it is going on.
+   *
+   * Fitting alone is not enough. A four-week window is much wider than it is
+   * tall, so the scale is set by the width and the drawing stops less than half
+   * way down the sheet — a page that is two-thirds white, which reads as
+   * something that went wrong rather than as a document. What is left over is
+   * spent on the axis that is not binding: taller rows when the width binds,
+   * wider day columns when the height does.
+   *
+   * Two passes, because the answer depends on the layout and the layout depends
+   * on the answer. The first measures; the second is built knowing what there is
+   * to fill. It cannot overshoot: the padding is worked out from the scale the
+   * first pass already proved fits, and the type never changes size — the rows
+   * simply get more air, which is the difference between a cramped print and a
+   * comfortable one.
+   */
+  function calendarLayout(view, opts = {}) {
+    const first = calendarScene(view, opts);
+    const scale = fitScale(first, opts);
+    const box = pageBox(opts);
+    const margin = opts.margin ?? 26;
+    const contentW = box.w - margin * 2;
+    const contentH = box.h - margin * 2 - ((opts.title || opts.subtitle) ? 34 : 12) - 18;
+
+    const rows = Math.max(1, first.counts.rows);
+    const days = Math.max(1, first.counts.days);
+
+    /* How much scene there is room for at this scale, against how much there is.
+       A row is given at most twice its natural height: past that the grid stops
+       being a calendar and becomes a list with coloured gaps in it. */
+    const spareH = Math.max(0, contentH / scale - first.height);
+    const spareW = Math.max(0, contentW / scale - first.width);
+    const rowPad = Math.min(spareH / rows, (first.counts.bodyH || MIN_ROW_H * rows) / rows);
+    const dayPad = Math.min(spareW / days, 14);
+
+    if (rowPad < 0.4 && dayPad < 0.4) return { scene: first, scale };
+
+    const scene = calendarScene(view, { ...opts, rowPad, dayPad });
+    // Re-measured rather than assumed: wrapping can change with a wider column.
+    return { scene, scale: fitScale(scene, opts) };
+  }
+
+  /**
+   * The calendar as a PDF, on one page. Returns a Blob.
+   *
+   * The caller hands it to `saveFile()`, which is what announces it — a download
+   * is the one action with no visible result, and a second quiet path is exactly
+   * the bug that rule exists to prevent.
+   */
+  function calendarPdf(view, opts = {}) {
+    const { scene } = calendarLayout(view, opts);
+    return fitToPdf(scene, {
+      pageSize: opts.pageSize || 'a3',
+      orientation: opts.orientation || 'landscape',
+      margin: opts.margin,
+      title: opts.title || 'Four-week look-ahead',
+      subtitle: opts.subtitle || '',
+      author: opts.author || 'CX Timeline',
+      footer: opts.footer,
+    });
+  }
+
+  /**
+   * What the export would come out at, before anything is written.
+   *
+   * `{ scale, pt, width, height, rows, days }` — `pt` being the size the marks in
+   * the cells actually print at, which is the number the dialog puts on screen.
+   * "It fits on one page" is true of anything if you shrink it far enough; what
+   * somebody needs to know is whether they will be able to read it.
+   */
+  function calendarFit(view, opts = {}) {
+    const { scene, scale } = calendarLayout(view, opts);
+    return {
+      scale,
+      pt: DAY_FONT * scale,
+      width: scene.width,
+      height: scene.height,
+      rows: scene.counts.rows,
+      days: scene.counts.days,
+      page: pageBox(opts).label,
+    };
+  }
+
+  /** The page sizes the dialog offers, landscape or portrait. */
+  const PAGE_CHOICES = Object.entries(PAGE_SIZES)
+    .map(([id, size]) => ({ id, label: size.label.replace(' landscape', '') }));
+
+  Object.defineProperty(__x, "calendarScene", { get: () => calendarScene, enumerable: true });
+  Object.defineProperty(__x, "calendarLayout", { get: () => calendarLayout, enumerable: true });
+  Object.defineProperty(__x, "calendarPdf", { get: () => calendarPdf, enumerable: true });
+  Object.defineProperty(__x, "calendarFit", { get: () => calendarFit, enumerable: true });
+  Object.defineProperty(__x, "PAGE_CHOICES", { get: () => PAGE_CHOICES, enumerable: true });
 };
 
 // core/la_edit.js
@@ -3681,4569 +4436,6 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   Object.defineProperty(__x, "staffingIssues", { get: () => staffingIssues, enumerable: true });
 };
 
-// ui/rc_la_state.js
-__mods["ui/rc_la_state.js"] = function (__x, __req) {
-  /**
-   * What the look-ahead tab is showing, shared by its sections.
-   *
-   * The tab was one 2,400-line module, and its sections reached into each other's
-   * `let`s — "Show cells" in the cancellation log set the calendar's filter and
-   * section directly. Split into a module per section, that state lives here as
-   * one object, because an ES module cannot reassign another's binding and the
-   * linker forbids `export let` anyway. Also the one table helper they share.
-   *
-   * Imports: util.
-   */
-
-  const { el } = __req("core/util.js");
-
-  const la = {
-    /** Which section is on screen. */
-    section: 'calendar',
-    /** Free text filter on the calendar, kept across a redraw of the section. */
-    calendarFilter: '',
-    /**
-     * One row the calendar is narrowed to — "Show cells" in the cancellation log:
-     * the editor's row id where the reading carries one, and the row's words
-     * (`raw_label`) where it does not. Null is every row.
-     * @type {{ id: string | null, label: string } | null}
-     */
-    calendarRow: null,
-    /**
-     * Whether rows nobody highlighted are drawn. Off by default: most of the sheet
-     * is activities carried for reference with nothing scheduled against them.
-     */
-    showQuietRows: false,
-    /** Whether the names on each activity's Resource row are drawn. */
-    showResources: true,
-    /** How much of the calendar to show, in weeks from `calendarStart`; 0 is everything. */
-    calendarWeeks: 4,
-    /** The Monday the calendar's window starts on, paged a week at a time; null is this week's. */
-    calendarStart: null,
-    /** 'workbook' until the look-ahead is written in the calendar, then 'editor'. */
-    source: 'workbook',
-    /**
-     * Whether the calendar is switched to editing. The editor used to be a
-     * section of its own, drawing the same four weeks as the calendar beside it;
-     * it is the calendar's Edit switch now, an administrator's, off by default.
-     */
-    editing: false,
-    /** Whether somebody picked a section, so the tab stops choosing one for them. */
-    sectionChosen: false,
-    /** How many weeks the editor shows: four, or five to see one more ahead. */
-    editorWeeks: 4,
-    /** Whether the Excel export carries the names rows and the PTO / Office / Other rows. */
-    exportResources: true,
-    /**
-     * Only the rows that name the person looking. Null until somebody chooses:
-     * then it is on for the team and off for an administrator, who is usually
-     * reading the whole sheet.
-     */
-    onlyMine: null,
-    /** Whose choice `onlyMine` is. */
-    onlyMineFor: null,
-  };
-
-  const WEEK_CHOICES = [
-    { weeks: 2, label: '2 weeks' },
-    { weeks: 3, label: '3 weeks' },
-    { weeks: 4, label: '4 weeks' },
-    { weeks: 5, label: '5 weeks' },
-    { weeks: 0, label: 'Everything' },
-  ];
-
-  /* ── Shared ────────────────────────────────────────────────────────────── */
-
-  function table(headers, rows) {
-    return el('div', { class: 'rc-scroll' }, [
-      el('table', { class: 'rc-table' }, [
-        el('thead', {}, [el('tr', {}, headers.map((h) => el('th', { text: h })))]),
-        el('tbody', {}, rows),
-      ]),
-    ]);
-  }
-
-  Object.defineProperty(__x, "la", { get: () => la, enumerable: true });
-  Object.defineProperty(__x, "WEEK_CHOICES", { get: () => WEEK_CHOICES, enumerable: true });
-  Object.defineProperty(__x, "table", { get: () => table, enumerable: true });
-};
-
-// ui/rc_inbox.js
-__mods["ui/rc_inbox.js"] = function (__x, __req) {
-  /**
-   * The administrator's inbox — everything waiting on an administrator, in one
-   * list.
-   *
-   * None of it is new information. Leave requests are in PTO, names the roster
-   * cannot place are in the week plan, unmapped colours in Legend, cancellations
-   * without a reason in the log, unowned blockers in the huddle, unanswered
-   * invitations in Accounts. Five screens, each of which somebody had to think to
-   * open. This reads the same sources and lists what is outstanding, each item a
-   * press from the screen that answers it — and a leave request is answered
-   * right here, because that is one button either way.
-   *
-   * Every source is read on its own and a failed read is reported as a line of
-   * its own, never as an empty inbox: "nothing is waiting" and "I could not
-   * look" are different answers, and only one of them lets somebody stop
-   * worrying.
-   *
-   * Reads only, apart from answering leave. What an administrator may do is
-   * still decided in Postgres; this is where they are told there is something
-   * to do.
-   *
-   * Imports: util, rc, core/lookahead, core/la_edit, icons, components, rc_util,
-   *          rc_la_state.
-   */
-
-  const { el, clear } = __req("core/util.js");
-  const rc = __req("core/rc.js");
-  const { changesForMe } = __req("core/la_register.js");
-  const ed = __req("core/la_edit.js");
-  const { icon } = __req("ui/icons.js");
-  const { toast, badge, emptyState } = __req("ui/components.js");
-  const { notifyChanged, goToTab, dayLabel, todayISO, orgNav, nameRegister, resourceAssignments, absenceAssignments, lookaheadWithResources, locationRegister, unmatchedLocations, personMatcher, cancellationLog } = __req("ui/rc_util.js");
-
-
-
-
-  const { la } = __req("ui/rc_la_state.js");
-
-  /* ── Where each item is answered ───────────────────────────────────────── */
-
-  function openOrg(section) {
-    orgNav.section = section;
-    goToTab('org');
-  }
-
-  function openLookahead(section) {
-    la.section = section;
-    la.sectionChosen = true;
-    goToTab('lookahead');
-  }
-
-  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-
-  /* ── Reading ───────────────────────────────────────────────────────────── */
-
-  /**
-   * What is waiting, as `[{ id, area, tone, title, detail, actions }]` — each
-   * action `{ label, run, primary? }`. Grouped where one answer settles many
-   * (every unplaceable name is one visit to the week plan), itemised where each
-   * is its own decision (every leave request).
-   */
-  async function inboxItems() {
-    const today = todayISO();
-    const monday = ed.mondayOf(today);
-    const horizon = ed.addDaysISO(monday, 5 * 7 - 1);
-    const items = [];
-    const failed = [];
-    const attempt = async (area, fn) => {
-      try {
-        await fn();
-      } catch (err) {
-        failed.push({ area, message: err?.message || String(err) });
-      }
-    };
-
-    const [people, kinds] = await Promise.all([
-      rc.listPeople({ includeInactive: true }).catch(() => []),
-      rc.listLeaveKinds().catch(() => []),
-    ]);
-    const personName = (id) => people.find((p) => p.id === id)?.name || 'Somebody';
-    const kindName = (id) => kinds.find((k) => k.id === id)?.name || 'leave';
-
-    await Promise.all([
-      /* Leave asked for. Each one is a decision, so each one is an item. */
-      attempt('Leave requests', async () => {
-        for (const l of await rc.pendingLeave()) {
-          const span = l.start_date === l.end_date
-            ? dayLabel(l.start_date)
-            : `${dayLabel(l.start_date)} – ${dayLabel(l.end_date)}`;
-          items.push({
-            id: `leave:${l.id}`,
-            area: 'Leave',
-            tone: 'warn',
-            title: `${personName(l.person_id)} asked for ${kindName(l.kind_id)}`,
-            detail: [span, l.note].filter(Boolean).join(' · '),
-            actions: [
-              { label: 'Approve', primary: true, run: () => answerLeave(l, 'approved') },
-              { label: 'Decline', run: () => answerLeave(l, 'declined') },
-            ],
-          });
-        }
-      }),
-
-      /* Names and places on the look-ahead the registers cannot place. */
-      attempt('Names and locations', async () => {
-        const [aliases, locations, locAliases, sheet] = await Promise.all([
-          rc.listPersonAliases().catch(() => []),
-          rc.listLocations({ includeInactive: true }).catch(() => []),
-          rc.listLocationAliases().catch(() => []),
-          lookaheadWithResources(monday, horizon),
-        ]);
-        const register = nameRegister(people, aliases);
-        const names = [
-          ...resourceAssignments(sheet.rows, register).unmatched,
-          ...absenceAssignments(sheet.absences, register).unmatched,
-        ];
-        const unique = [...new Map(names.map((n) => [n.name.toLowerCase(), n])).values()];
-        if (unique.length) {
-          items.push({
-            id: 'names',
-            area: 'Look-ahead',
-            tone: 'warn',
-            title: `${plural(unique.length, 'name')} on the look-ahead ${unique.length === 1 ? 'matches' : 'match'} nobody on the roster`,
-            detail: unique.slice(0, 8).map((n) => `"${n.name}"`).join(', ') + (unique.length > 8 ? ` and ${unique.length - 8} more` : '')
-              + ' — say who each one is once, and it is settled.',
-            actions: [{ label: 'Answer in Week plan', primary: true, run: () => goToTab('week') }],
-          });
-        }
-        const places = unmatchedLocations(sheet.rows, locationRegister(locations, locAliases));
-        if (places.length) {
-          items.push({
-            id: 'locations',
-            area: 'Look-ahead',
-            tone: 'info',
-            title: `${plural(places.length, 'location')} on the look-ahead ${places.length === 1 ? 'is' : 'are'} not on the register`,
-            detail: places.slice(0, 8).map((p) => `"${p.name}"`).join(', ') + ' — add each as a location, or as another spelling of one.',
-            actions: [{ label: 'Open Locations', primary: true, run: () => openOrg('locations') }],
-          });
-        }
-      }),
-
-      /* Colours on the sheet the legend does not explain. */
-      attempt('Legend', async () => {
-        const [meta] = await rc.listSnapshotMeta({ limit: 1 });
-        const n = Number(meta?.unmapped_count || 0);
-        if (n) {
-          items.push({
-            id: 'colours',
-            area: 'Look-ahead',
-            tone: 'warn',
-            title: `${plural(n, 'colour')} on the look-ahead ${n === 1 ? 'means' : 'mean'} nothing yet`,
-            detail: 'Until the legend says what it is, a painted day in that colour is drawn as possible work and counted as nothing.',
-            actions: [{ label: 'Open Legend', primary: true, run: () => openLookahead('legend') }],
-          });
-        }
-      }),
-
-      /* Support codes typed that nobody registered — the editor's own sheet. */
-      attempt('Support codes', async () => {
-        const settings = await rc.listSettings().catch(() => []);
-        if (settings.find((r) => r.key === 'lookahead_source')?.value !== 'editor') return;
-        const [rows, cells, codes] = await Promise.all([
-          rc.listLaRows(),
-          rc.listLaCells(monday, horizon),
-          rc.listSupportCodes({ includeRetired: true }),
-        ]);
-        const activities = new Set(rows.filter((r) => r.kind === 'activity' && !r.archived).map((r) => r.id));
-        const unknown = new Set();
-        for (const c of cells) {
-          if (!activities.has(c.row_id) || !c.text) continue;
-          if (!/^[A-Za-z0-9]{1,8}(\.[A-Za-z0-9]{1,8})*$/.test(String(c.text).trim())) continue;
-          for (const u of ed.parseSupport(c.text, codes).unknown) unknown.add(u);
-        }
-        if (unknown.size) {
-          items.push({
-            id: 'codes',
-            area: 'Look-ahead',
-            tone: 'info',
-            title: `${plural(unknown.size, 'support code')} on the look-ahead ${unknown.size === 1 ? 'is' : 'are'} not registered`,
-            detail: `${[...unknown].join(', ')} — kept exactly as typed, and marked in the editor until somebody says what ${unknown.size === 1 ? 'it asks' : 'they ask'} for.`,
-            actions: [{ label: 'Open Legend', primary: true, run: () => openLookahead('legend') }],
-          });
-        }
-      }),
-
-      /* Cancellations nobody has said anything about. */
-      attempt('Cancellations', async () => {
-        const settings = await rc.listSettings().catch(() => []);
-        const from = settings.find((x) => x.key === 'cancellation_log_from')?.value || `${today.slice(0, 4)}-09-01`;
-        const open = (await cancellationLog(from)).filter((e) => !e.note);
-        if (open.length) {
-          items.push({
-            id: 'cancellations',
-            area: 'Look-ahead',
-            tone: 'bad',
-            title: `${plural(open.length, 'cancellation')} with no reason yet`,
-            detail: open.slice(0, 4).map((e) => `${e.kind === 'support' ? `${e.codes} off ` : ''}${e.label || 'An activity'} (${dayLabel(e.start)})`).join('; ')
-              + (open.length > 4 ? `; and ${open.length - 4} more` : '')
-              + ' — the log is the claim, and a cancellation with no party is one nobody can argue.',
-            actions: [{ label: 'Open the log', primary: true, run: () => openLookahead('cancellations') }],
-          });
-        }
-      }),
-
-      /* Blocked days nobody has taken on. */
-      attempt('Blockers', async () => {
-        const blockers = (await rc.listBlockers()).filter((b) => !b.owner_id);
-        for (const b of blockers.slice(0, 10)) {
-          items.push({
-            id: `blocker:${b.id}`,
-            area: 'Huddle',
-            tone: 'bad',
-            title: `Blocked, and nobody owns it: ${b.summary || 'no summary'}`,
-            detail: `Raised by ${personName(b.person_id)} ${b.age_days != null ? `${plural(Number(b.age_days), 'day')} ago` : ''}`.trim(),
-            actions: [{ label: 'Open the huddle', primary: true, run: () => goToTab('huddle') }],
-          });
-        }
-      }),
-
-      /* Invitations sent and not yet taken up. */
-      attempt('Invitations', async () => {
-        const pending = await rc.listInvitations();
-        const expired = pending.filter((i) => i.pending_expired);
-        const waiting = pending.filter((i) => !i.pending_expired);
-        if (expired.length) {
-          items.push({
-            id: 'invites:expired',
-            area: 'Accounts',
-            tone: 'warn',
-            title: `${plural(expired.length, 'invitation')} expired before ${expired.length === 1 ? 'it was' : 'they were'} used`,
-            detail: expired.map((i) => i.pending_email).join(', '),
-            actions: [{ label: 'Open Accounts', primary: true, run: () => openOrg('accounts') }],
-          });
-        }
-        if (waiting.length) {
-          items.push({
-            id: 'invites:waiting',
-            area: 'Accounts',
-            tone: 'info',
-            title: `${plural(waiting.length, 'invitation')} not accepted yet`,
-            detail: waiting.map((i) => i.pending_email).join(', '),
-            actions: [{ label: 'Open Accounts', run: () => openOrg('accounts') }],
-          });
-        }
-      }),
-
-      /* Changes to somebody's days they have not seen yet. My day shows each
-         person what changed for them since their last "Got it"; this is the
-         other side of it — who has not looked. Only people with an account can
-         look, and an administrator is the one making the changes. */
-      attempt('Changes to people\'s days', async () => {
-        const [latest] = await rc.listSnapshotMeta({ limit: 1 });
-        if (!latest) return;
-        const [seenRows, aliases] = await Promise.all([rc.listSeen(), rc.listPersonAliases().catch(() => [])]);
-        const team = people.filter((p) => p.active && p.user_id && p.role !== 'admin');
-        if (!team.length) return;
-        const newest = new Map();
-        for (const row of seenRows) {
-          const held = newest.get(row.person_id);
-          if (!held || String(row.seen_at) > String(held.seen_at)) newest.set(row.person_id, row);
-        }
-        const register = nameRegister(people, aliases);
-        const rowsOf = new Map();
-        const rowsFor = async (id) => {
-          if (!rowsOf.has(id)) rowsOf.set(id, await rc.snapshotRows(id));
-          return rowsOf.get(id);
-        };
-        const after = await rowsFor(latest.id);
-        const to = ed.addDaysISO(today, 27);
-        const behind = [];
-        const never = [];
-        for (const p of team) {
-          const seen = newest.get(p.id);
-          if (!seen) { never.push(p.name); continue; }
-          if (!seen.snapshot_id || seen.snapshot_id === latest.id) continue;
-          const before = await rowsFor(seen.snapshot_id);
-          if (!before.length) continue;
-          const n = changesForMe(before, after, personMatcher(register, p.id), { from: today, to }).length;
-          if (n) behind.push({ name: p.name, n });
-        }
-        if (behind.length) {
-          items.push({
-            id: 'unseen',
-            area: 'Team',
-            tone: 'warn',
-            title: `${plural(behind.length, 'person has', 'people have')} changes to their days they have not seen`,
-            detail: behind.map((b) => `${b.name} (${b.n})`).join(', ')
-              + ' — they see them at the top of My day, with Got it.',
-            actions: [],
-          });
-        }
-        if (never.length) {
-          items.push({
-            id: 'unseen:never',
-            area: 'Team',
-            tone: 'info',
-            title: `${plural(never.length, 'person has', 'people have')} not opened My day yet`,
-            detail: never.join(', '),
-            actions: [],
-          });
-        }
-      }),
-
-      /* Something broke on somebody's screen in the last week. */
-      attempt('Problems', async () => {
-        const since = Date.now() - 7 * 86400000;
-        const recent = (await rc.listClientErrors(50)).filter((e) => Date.parse(e.created_at) >= since);
-        if (recent.length) {
-          items.push({
-            id: 'problems',
-            area: 'Problems',
-            tone: 'info',
-            title: `${plural(recent.length, 'problem')} reported this week`,
-            detail: [...new Set(recent.map((e) => e.area))].slice(0, 5).join(', '),
-            actions: [{ label: 'Open Problems', run: () => openOrg('problems') }],
-          });
-        }
-      }),
-
-      /* The database older than the application. */
-      attempt('Database', async () => {
-        const { state, expected, found } = await rc.schemaStatus();
-        if (state === 'behind') {
-          items.push({
-            id: 'schema',
-            area: 'Database',
-            tone: 'bad',
-            title: 'The calendar\'s database needs updating',
-            detail: `Database ${found || 'unversioned'}, application ${expected}. In the Supabase SQL editor, run supabase/migrate.sql and then supabase/rc_schema.sql.`,
-            actions: [],
-          });
-        }
-      }),
-    ]);
-
-    const order = { bad: 0, warn: 1, info: 2 };
-    items.sort((a, b) => order[a.tone] - order[b.tone]);
-    return { items, failed };
-  }
-
-  async function answerLeave(row, status) {
-    try {
-      await rc.updateLeave(row.id, { status });
-      toast({ tone: 'good', message: status === 'approved' ? 'Approved.' : 'Declined, and on the record as declined.' });
-      notifyChanged('leave');
-    } catch (err) {
-      toast({ tone: 'bad', message: err?.message || String(err) });
-    }
-  }
-
-  /**
-   * How many things are waiting — for the badge on the Organisation tab.
-   *
-   * The header is redrawn on every write, and the inbox reads a dozen sources;
-   * so the count is remembered for a minute. Opening the inbox itself always
-   * reads afresh, and refreshes this.
-   */
-  let counted = null; // { at, n }
-  async function inboxCount() {
-    if (counted && Date.now() - counted.at < 60000) return counted.n;
-    const { items } = await inboxItems();
-    counted = { at: Date.now(), n: items.length };
-    return counted.n;
-  }
-
-  /* ── Drawing ───────────────────────────────────────────────────────────── */
-
-  async function renderInbox(host) {
-    host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Waiting on you' })]));
-    const body = el('div', { class: 'rc-inbox', 'aria-busy': 'true' }, [
-      el('p', { class: 'rc-hint', text: 'Looking through leave, the look-ahead, blockers and accounts…' }),
-    ]);
-    host.appendChild(body);
-
-    const { items, failed } = await inboxItems();
-    counted = { at: Date.now(), n: items.length };
-    clear(body);
-    body.removeAttribute('aria-busy');
-
-    if (!items.length && !failed.length) {
-      body.appendChild(emptyState({
-        iconName: 'check',
-        title: 'Nothing is waiting on you',
-        message: 'No leave to answer, nothing on the look-ahead the registers cannot place, no cancellation without a reason and no blocker without an owner.',
-      }));
-      return;
-    }
-
-    const list = el('ul', { class: 'rc-inbox-list', 'aria-label': 'Waiting on you' });
-    for (const item of items) {
-      list.appendChild(el('li', { class: `rc-inbox-item rc-inbox-${item.tone}`, dataset: { id: item.id } }, [
-        el('span', { class: 'rc-inbox-area' }, [badge(item.area, item.tone)]),
-        el('div', { class: 'rc-inbox-text' }, [
-          el('div', { class: 'rc-inbox-title', text: item.title }),
-          item.detail ? el('div', { class: 'rc-inbox-detail', text: item.detail }) : null,
-        ].filter(Boolean)),
-        el('div', { class: 'rc-inbox-actions' }, item.actions.map((a) => el('button', {
-          class: `cx-btn mini${a.primary ? ' primary' : ' ghost'}`,
-          type: 'button',
-          text: a.label,
-          onClick: () => a.run(),
-        }))),
-      ]));
-    }
-    body.appendChild(list);
-
-    for (const f of failed) {
-      body.appendChild(el('p', { class: 'rc-hint rc-inbox-failed' }, [
-        el('span', { html: icon('alert', { size: 12 }), 'aria-hidden': 'true' }),
-        el('span', { text: ` Could not check ${f.area.toLowerCase()}: ${f.message}` }),
-      ]));
-    }
-  }
-
-  Object.defineProperty(__x, "inboxItems", { get: () => inboxItems, enumerable: true });
-  Object.defineProperty(__x, "inboxCount", { get: () => inboxCount, enumerable: true });
-  Object.defineProperty(__x, "renderInbox", { get: () => renderInbox, enumerable: true });
-};
-
-// ui/rc_huddle.js
-__mods["ui/rc_huddle.js"] = function (__x, __req) {
-  /**
-   * The daily huddle.
-   *
-   * **An administrator's screen.** It is the meeting: it asks a whole team, one
-   * after another, how yesterday went, and it is where an outcome is entered. A
-   * member has nothing to run and nothing to enter here but their own day, and
-   * what they need from it — the status and the note recorded against their work —
-   * is in the week plan, where they can also see the rest of their week. So the
-   * tab is not offered to them, for the reason Reports and Organisation are not:
-   * a section somebody cannot use is a door onto a wall.
-   *
-   * The week plan used to live in this file, behind the meeting, and it is now
-   * `ui/rc_week.js` — one tab rather than the two that drew the same table twice.
-   *
-   * One screen, everyone side by side, all subsystems in one meeting: the day
-   * under review — today, or the previous working day (`huddle_reviews`) — its
-   * plan and its outcome, and the next working day's plan. It is used live, at a fixed time,
-   * in front of the whole team — which sets every constraint here.
-   *
-   * **It must not rebuild while somebody is typing into it.** Panes elsewhere in
-   * this application write to the store on every keystroke and rebuild on the
-   * resulting change event, which replaces the input under the caret; CLAUDE.md
-   * records that shipping three times. This screen is nothing *but* dense live
-   * text entry, so it takes the opposite approach: nothing is written until a
-   * field is left or Enter is pressed, and a save redraws one row rather than the
-   * screen.
-   *
-   * **It must work with no network.** The meeting happens at 3pm whether or not
-   * the wifi does. Every outcome is stamped with a uuid generated here, queued in
-   * localStorage, and replayed when the connection returns — `rc_record_actual`
-   * is idempotent on that uuid, so replaying one twice is harmless.
-   *
-   * Imports: util, events, dates, rc, icons, components, rc_util.
-   */
-
-  const { el, clear } = __req("core/util.js");
-  const { emit, EV } = __req("core/events.js");
-  const { toISO, addDays } = __req("core/dates.js");
-  const rc = __req("core/rc.js");
-  const { icon } = __req("ui/icons.js");
-  const { selectInput, textInput, toast, badge, checkbox } = __req("ui/components.js");
-  /* The digest is a download like every other export in the application, so it
-     announces itself the same way — a file that lands somewhere the page cannot
-     see is the one action with no visible result. */
-  const { saveFile } = __req("io/exporters.js");
-  const { STATUSES, STATUS_BY_ID, SHIFTS, shiftLabel, weekStart, todayISO, isoToMs, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, lookaheadWithResources, assignmentIndex } = __req("ui/rc_util.js");
-
-
-
-
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The offline queue
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const QUEUE_KEY = 'cxrc.queue';
-
-  function readQueue() {
-    try {
-      return JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]');
-    } catch {
-      return [];
-    }
-  }
-
-  function writeQueue(rows) {
-    try {
-      localStorage.setItem(QUEUE_KEY, JSON.stringify(rows));
-    } catch {
-      /* A full or disabled localStorage must not lose the meeting; the entry
-         still went to the server if the server was reachable. */
-    }
-    emit(EV.RC_QUEUE_CHANGED, { pending: rows.length });
-  }
-
-  function pendingCount() {
-    return readQueue().length;
-  }
-
-  /**
-   * Send one outcome, queueing it if that fails.
-   *
-   * The uuid is generated before the attempt rather than by the database, which
-   * is the whole trick: a queued entry and the row it eventually becomes are the
-   * same row, so a flush can run twice and the second pass changes nothing.
-   */
-  async function record(entry) {
-    try {
-      await rc.recordActual(entry);
-      return { sent: true };
-    } catch (err) {
-      // Refused because an administrator is only previewing: nothing to replay.
-      if (err?.preview) return { sent: false, error: err };
-      const queue = readQueue();
-      queue.push(entry);
-      writeQueue(queue);
-      return { sent: false, error: err };
-    }
-  }
-
-  /**
-   * Push whatever is queued. Safe to call at any time, including twice at once.
-   *
-   * Entries that still fail stay queued in order. One that the server actively
-   * rejects — a category that has since been retired, say — would otherwise
-   * block everything behind it forever, so a refusal that is not a network
-   * problem is dropped with a toast rather than retried until the end of time.
-   */
-  async function flushQueue() {
-    const queue = readQueue();
-    if (!queue.length || !rc.isSignedIn()) return 0;
-
-    /* What this pass settled — sent, or refused for good — by the entry's own
-       uuid. The stored queue is read again at the end and only those come off.
-       It used to be overwritten with this pass's leftovers, so an outcome
-       recorded (and queued) while the flush was still sending, on the bad wifi
-       that is the reason there is a queue at all, was erased when it finished;
-       and of two flushes at once, the later write dropped what the other kept. */
-    const settled = new Set();
-    const keyOf = (entry) => entry.clientUuid || JSON.stringify(entry);
-    let sent = 0;
-    for (const entry of queue) {
-      try {
-        await rc.recordActual(entry);
-        settled.add(keyOf(entry));
-        sent++;
-      } catch (err) {
-        if (/fetch|network/i.test(String(err.message))) continue;
-        settled.add(keyOf(entry));
-        console.warn('[cx-timeline] a queued outcome was refused and dropped:', err.message);
-        // The one failure here that loses somebody's words: it goes on the record.
-        rc.reportError('huddle:queue-dropped', `${entry.date}: ${err.message}`);
-        toast({ tone: 'warn', message: `An entry from ${entry.date} was refused: ${err.message}` });
-      }
-    }
-    writeQueue(readQueue().filter((entry) => !settled.has(keyOf(entry))));
-    if (sent) notifyChanged('actuals');
-    return sent;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The huddle
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /** Which day the meeting is held on. Defaults to today; the arrows move it. */
-  let onDate = null;
-
-  /**
-   * Which day the meeting looks back on — `rc_settings.huddle_reviews`.
-   *
-   * `today`: the meeting is held late in the shift, so it goes over how today's
-   * work is going and plans the next working day. `previous`: it is held at the
-   * start of the day, so it goes over the previous working day — today was
-   * planned yesterday — and plans the next. Read on every render; changed in
-   * Organisation → Settings.
-   */
-  const HUDDLE_REVIEWS = {
-    today: 'Today\u2019s work, and the next working day\u2019s plan',
-    previous: 'The previous working day\u2019s work, and the next working day\u2019s plan',
-  };
-  const DEFAULT_HUDDLE_REVIEWS = 'today';
-  let reviews = DEFAULT_HUDDLE_REVIEWS;
-
-  /**
-   * A day named the way the room would say it: "Today", "Yesterday",
-   * "Tomorrow" — counted from the real today, so a meeting looked at on another
-   * day never calls a Thursday "Today" — and the weekday otherwise ("Friday"),
-   * which is what somebody says when the roster skipped a weekend.
-   */
-  function relDay(iso) {
-    const gap = Math.round((isoToMs(iso) - isoToMs(todayISO())) / 86400000);
-    if (gap === 0) return 'Today';
-    if (gap === -1) return 'Yesterday';
-    if (gap === 1) return 'Tomorrow';
-    return new Date(isoToMs(iso)).toLocaleDateString(undefined, { weekday: 'long', timeZone: 'UTC' });
-  }
-  /**
-   * Whether the meeting is being *run* rather than filled in.
-   *
-   * The table is a form for the person holding the keyboard; presenter mode is
-   * the same data drawn for the room — one person at a time, large enough to
-   * read across a table, with the question asked the way somebody would say it.
-   * Both write to exactly the same place.
-   */
-  let presenting = false;
-
-  /*
-   * Who is in front of the room. `null` means "nobody chosen yet", which is not
-   * the same as the first person: a meeting resumed after somebody stepped out
-   * should open on the first person who has *not* answered, and starting at zero
-   * makes the facilitator page past everybody already done to find them.
-   */
-  let atPerson = null;
-
-  function currentDate() {
-    return onDate || todayISO();
-  }
-
-  /**
-   * Does anybody on the team work this day at all?
-   *
-   * Not a fixed Monday-to-Friday: commissioning runs weekend possessions, and a
-   * team with somebody on a Saturday rota has a Saturday worth reviewing. The
-   * roster is the authority, so this asks it.
-   */
-  function anybodyWorks(iso, people) {
-    const weekday = new Date(isoToMs(iso)).getUTCDay() || 7;
-    return people.some((p) => (p.working_days || [1, 2, 3, 4, 5]).includes(weekday));
-  }
-
-  /**
-   * The day whose outcomes are being captured.
-   *
-   * The meeting day itself where the huddle reviews today's work and anybody
-   * works today. Otherwise the previous *working* day, not literally yesterday:
-   * on a Monday a start-of-day meeting reviews Friday — asking a team what they
-   * achieved on Sunday would produce a screen of blanks and, worse, would tempt
-   * somebody into recording "carried over" for a day nobody was there. A
-   * late-shift meeting opened on a Saturday nobody works looks back to Friday
-   * for the same reason.
-   */
-  function reviewDate(iso, people) {
-    if (reviews === 'today' && anybodyWorks(iso, people)) return iso;
-    let ms = addDays(isoToMs(iso), -1);
-    for (let i = 0; i < 7 && !anybodyWorks(toISO(ms), people); i++) ms = addDays(ms, -1);
-    return toISO(ms);
-  }
-
-  /** The next working day. On a Friday the meeting plans Monday. */
-  function planDate(iso, people) {
-    let ms = addDays(isoToMs(iso), 1);
-    for (let i = 0; i < 7 && !anybodyWorks(toISO(ms), people); i++) ms = addDays(ms, 1);
-    return toISO(ms);
-  }
-
-  async function render(root) {
-    await flushQueue();
-
-    const date = currentDate();
-
-    // The roster decides which days count, so it is read before the window that
-    // depends on it. One extra round trip, and it is what keeps a Monday meeting
-    // pointed at Friday.
-    const [people, settings] = await Promise.all([
-      rc.listPeople({ scheduledOnly: true }),
-      rc.listSettings().catch(() => []),
-    ]);
-    const chosen = settings.find((r) => r.key === 'huddle_reviews')?.value;
-    reviews = HUDDLE_REVIEWS[chosen] ? chosen : DEFAULT_HUDDLE_REVIEWS;
-    const review = reviewDate(date, people);
-    const plan = planDate(date, people);
-
-    const [categories, locations, parties, leave, planRows, actuals, chains, everybody, blockers, sheet,
-      aliases] =
-      await Promise.all([
-        rc.listCategories(),
-        rc.listLocations(),
-        rc.listParties(),
-        rc.listLeave(review, plan),
-        rc.listPlan(review, plan),
-        rc.listActuals(review, review),
-        // "This is the fourth day running" is the sentence that changes the
-        // conversation, and it was only ever in a report the field team cannot
-        // open. It is derived from outcomes everybody can already read.
-        rc.listCarryChains().catch(() => []),
-        /* Everybody, not just the people taking shifts. Whoever chases a
-           released possession is usually the manager — who is stood down from
-           the huddle precisely because they do not take work from it — so
-           filtering this list the way the roster is filtered would leave the
-           most likely owner unselectable. */
-        rc.listPeople().catch(() => []),
-        // Every blocker still open, whoever raised it and whenever. This is the
-        // standing item the meeting keeps returning to until somebody clears it.
-        rc.listBlockers().catch(() => []),
-        /* Only an administrator can read these; a member simply gets none and
-           the block dialog offers nothing to link, which is correct.
-           Both weeks, not just the reviewed one: on a Friday the day being planned
-           is in the *next* week, and a look-ahead read for one week cannot say who
-           BART wants on the other. */
-        lookaheadWithResources(
-          toISO(weekStart(isoToMs(review))),
-          toISO(addDays(weekStart(isoToMs(plan)), 6))
-        ),
-        // Which spellings in the workbook are whose. Nothing is matched without
-        // them beyond an exact fold of somebody's own name.
-        rc.listPersonAliases().catch(() => []),
-      ]);
-
-    const chainByeId = new Map();
-    for (const c of chains) chainByeId.set(c.carry_chain_id, c);
-
-    const cats = byId(categories);
-    const locs = byId(locations);
-    const actualByPerson = new Map();
-    for (const a of actuals) actualByPerson.set(a.person_id, a);
-
-    /* What somebody is doing on a day: the plan where there is one, and the 4WLA
-       where there is not. The Resource row names people, so it *is* the plan for
-       those days — derived, never written — and a stored entry is somebody
-       overriding it or planning a day the sheet says nothing about. Until this
-       existed the meeting asked half the team what they had been planned for and
-       answered "nothing", while the workbook said exactly what. */
-    const laRows = sheet.rows;
-    const index = assignmentIndex({
-      planRows,
-      laRows,
-      absences: sheet.absences,
-      // So an office day off the sheet lands in the Office category, and the
-      // outcome recorded against it files there too.
-      categories,
-      register: nameRegister(everybody.length ? everybody : people, aliases),
-    });
-    const planFor = (personId, iso) => index.at(personId, iso);
-    /* Everything planned for a day, which is what gets *shown*. `planFor` stays
-       the single entry an outcome points at — one day, one answer to "how did it
-       go" — but a shift is routinely two jobs and the meeting has to name both. */
-    const plannedOn = (personId, iso) => index.on(personId, iso);
-    /* Whether the sheet says somebody is off, which is a different question from
-       what they were planned to do. The meeting must not ask a person on holiday
-       how their day went, and most days the workbook is the only place the
-       absence is written down at all. */
-    const absentOn = (personId, iso) => index.absent(personId, iso);
-
-    /* One context, handed to the table, the meeting and the digest alike. They
-       are three readings of one day and the moment they are given different
-       data they start disagreeing on screen, in front of the room. */
-    const ctx = {
-      people, review, plan, planFor, plannedOn, absentOn, actualByPerson, cats, locs,
-      categories, locations, parties, leave, root, chainByeId, laRows, blockers, everybody,
-      // How the room names the two days: "Today" and "Tomorrow", or "Yesterday".
-      reviewWord: relDay(review), planWord: relDay(plan),
-      // What is typed in each person's "what they did" fields, read when a status
-      // is pressed — see `workFields()`.
-      drafts: new Map(),
-    };
-
-    root.appendChild(dateBar(date, review, plan, root, ctx));
-
-    if (!people.length) {
-      root.appendChild(el('p', { class: 'rc-hint', text: 'Add people in Organisation first.' }));
-      return;
-    }
-
-    const body = el('tbody');
-    for (const person of people) {
-      body.appendChild(personRow({ ...ctx, person }));
-    }
-
-    root.appendChild(openBlockers(blockers, { people: everybody, locs, parties, root }));
-
-    /* Running the meeting rather than filling it in. Same data, same writes —
-       one person at a time, big enough to read from across the table, with the
-       question asked the way somebody would ask it out loud. */
-    if (presenting) {
-      root.appendChild(presenter(ctx));
-      return;
-    }
-
-    root.appendChild(el('div', { class: 'rc-scroll' }, [
-      el('table', { class: 'rc-table rc-huddle' }, [
-        el('thead', {}, [
-          el('tr', {}, [
-            el('th', { text: 'Person' }),
-            el('th', { text: `${ctx.reviewWord} — ${dayLabel(review)}` }),
-            el('th', { text: ctx.reviewWord === 'Today' ? 'How it is going' : 'What happened' }),
-            el('th', { text: `${ctx.planWord} — ${dayLabel(plan)}` }),
-          ]),
-        ]),
-        body,
-      ]),
-    ]));
-
-    root.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Nothing is written until you leave a field or press Enter, and saving redraws '
-        + 'one row rather than the screen — otherwise the meeting would keep losing the box '
-        + 'you were typing into. Entries made with no connection queue and go up on their own.',
-    }));
-    root.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Click a row and the meeting runs from the keyboard: ↑ ↓ down the team, then '
-        + STATUSES.filter((st) => st.id !== 'absent').map((st) => `${st.key} ${st.label.toLowerCase()}`).join(', ')
-        + '. Away is answered from the leave record rather than asked for.',
-    }));
-  }
-
-  /**
-   * What is still in the way, standing above the meeting.
-   *
-   * A blocked outcome says a day was lost; it never said who was chasing it, by
-   * when, or whether it was still true this morning. So the list only ever grew,
-   * and a list that only grows is one nobody reads. These stay on screen until
-   * somebody closes them, which is the entire mechanism.
-   *
-   * Ordered by age, worst first: a blocker on its ninth day is a different
-   * conversation from one raised yesterday, and the meeting should open on it.
-   */
-  function openBlockers(blockers, ctx) {
-    const wrap = el('div', { class: 'rc-blockers' });
-    if (!blockers.length) {
-      wrap.appendChild(el('p', { class: 'rc-hint', text: 'Nothing outstanding. Nobody is waiting on anybody.' }));
-      return wrap;
-    }
-
-    const people = byId(ctx.people);
-    const sorted = [...blockers].sort((a, b) => (b.age_days || 0) - (a.age_days || 0));
-
-    wrap.appendChild(el('div', { class: 'rc-section-head' }, [
-      el('h3', { text: `${sorted.length} still in the way` }),
-    ]));
-
-    for (const b of sorted) {
-      const overdue = b.due_date && b.due_date < todayISO();
-      wrap.appendChild(el('div', { class: 'rc-blocker' + (overdue ? ' overdue' : '') }, [
-        el('div', { class: 'rc-blocker-main' }, [
-          el('div', { class: 'rc-blocker-what', text: b.summary }),
-          el('div', { class: 'rc-hint', text: [
-            people.get(b.person_id)?.name,
-            ctx.locs.get(b.location_id)?.name,
-            byId(ctx.parties).get(b.party_id)?.name ? `down to ${byId(ctx.parties).get(b.party_id).name}` : null,
-            b.last_note,
-          ].filter(Boolean).join(' · ') }),
-        ]),
-        el('div', { class: 'rc-blocker-state' }, [
-          // The two facts that turn a grievance into an obstacle.
-          b.owner_id
-            ? badge(`${people.get(b.owner_id)?.name || 'somebody'} chasing`, 'info')
-            : badge('nobody chasing', 'bad'),
-          b.due_date
-            ? badge(overdue ? `overdue since ${dayLabel(b.due_date)}` : `by ${dayLabel(b.due_date)}`,
-              overdue ? 'bad' : 'muted')
-            : null,
-          badge(`day ${Number(b.age_days || 0) + 1}`, Number(b.age_days || 0) >= 4 ? 'bad' : 'warn'),
-        ].filter(Boolean)),
-        rc.isAdmin() || rc.canWrite()
-          ? el('button', {
-            class: 'cx-btn mini',
-            text: 'Update',
-            onClick: () => updateBlocker(b, ctx),
-          })
-          : null,
-      ].filter(Boolean)));
-    }
-
-    wrap.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'These stay here until somebody closes them. Nothing is edited — taking one on, '
-        + 'moving the date and closing it are each a row, because "we told them on the 4th and '
-        + 'chased on the 9th" is the sentence a claim is built from.',
-    }));
-    return wrap;
-  }
-
-  /** Take one on, move it, chase it, or close it. Always by appending. */
-  function updateBlocker(blocker, ctx) {
-    const owner = selectInput({
-      value: blocker.owner_id || '',
-      placeholder: '— nobody yet —',
-      options: ctx.people.map((p) => ({ value: p.id, label: p.name })),
-    });
-    const due = el('input', { type: 'date', class: 'cx-input', value: blocker.due_date || '' });
-    const note = textInput({ placeholder: 'What has happened since' });
-    const done = checkbox({ label: 'Cleared — take it off the list', checked: false });
-
-    formModal({
-      title: blocker.summary,
-      body: el('div', { class: 'cx-form' }, [
-        el('div', { class: 'cx-field' }, [
-          el('label', { class: 'cx-label', text: 'Who is chasing it' }), owner,
-          el('div', { class: 'cx-hint', text: 'The field a blocked day has never carried, and the '
-            + 'one that decides whether anything happens about it.' }),
-        ]),
-        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Expected by' }), due]),
-        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Update' }), note]),
-        el('div', { class: 'cx-field' }, [done]),
-      ]),
-      confirmLabel: 'Add it',
-      onConfirm: async () => {
-        await rc.updateBlocker({
-          blocker_id: blocker.id,
-          state: done.querySelector('input').checked ? 'resolved' : 'open',
-          owner_id: owner.value || null,
-          due_date: due.value || null,
-          note: note.value.trim() || null,
-        });
-        notifyChanged('blockers');
-        clear(ctx.root);
-        render(ctx.root);
-      },
-    });
-  }
-
-  /**
-   * The meeting, run rather than filled in.
-   *
-   * One person, in focus, large enough to read from the other side of a table.
-   * The room is the second audience and it needs different things from the
-   * person answering: not the detail of the task but where it sits — which
-   * look-ahead row it feeds, how many days it has been running, whether access
-   * is confirmed. All of that is already recorded and none of it was ever in the
-   * meeting.
-   *
-   * The question is asked the way somebody would say it out loud, because the
-   * plan text is right there and using it as the question rather than as a
-   * column is what makes this an interview instead of a form.
-   *
-   * Every write goes through exactly the same path as the table. This is a view,
-   * not a second way of recording things.
-   */
-  /**
-   * The question, in the words somebody would actually use.
-   *
-   * The plan text is usually written with the place in it — "Cable pull at TPSS
-   * 12" — so appending the location unconditionally reads back as "at TPSS 12 at
-   * TPSS 12". Say it only when the sentence does not already.
-   */
-  function askFor(planned, locs, reviewWord = 'Yesterday') {
-    const today = reviewWord === 'Today';
-    if (!planned) {
-      return today ? 'Nothing was planned for you today — what are you working on?'
-        : 'Nothing was planned for you — what did you end up doing?';
-    }
-    const task = planned.task || 'this';
-    const where = locs.get(planned.location_id)?.name || '';
-    const said = where && task.toLowerCase().includes(where.toLowerCase());
-    const at = where && !said ? ` at ${where}` : '';
-    if (today) return `Today you are on ${task}${at} — how is it going?`;
-    const when = reviewWord === 'Yesterday' ? 'Yesterday' : `On ${reviewWord}`;
-    return `${when} you were on ${task}${at} — how did it go?`;
-  }
-
-  function presenter(ctx) {
-    const { people, review, plan, planFor, plannedOn, absentOn, actualByPerson, locs, cats,
-      leave, root } = ctx;
-    const wrap = el('div', { class: 'rc-present', tabindex: '0' });
-
-    const asked = people.filter((p) => availability(p, review, leave, absentOn?.(p.id, review)).state === 'available');
-    const queue = asked.length ? asked : people;
-    if (atPerson === null) {
-      const waiting = queue.findIndex((p) => !actualByPerson.get(p.id));
-      atPerson = waiting < 0 ? 0 : waiting;
-    }
-    atPerson = Math.max(0, Math.min(atPerson, queue.length - 1));
-    const person = queue[atPerson];
-
-    const move = (by) => {
-      atPerson = Math.max(0, Math.min(atPerson + by, queue.length - 1));
-      clear(root);
-      render(root);
-    };
-    const leaveMode = () => {
-      presenting = false;
-      clear(root);
-      render(root);
-    };
-
-    /* Space and the arrows walk the room; Escape puts the table back. The keys
-       are the ones a hand already on the table would reach for, and the status
-       letters stay exactly what they are in the table. */
-    wrap.addEventListener('keydown', (event) => {
-      if (/^(input|textarea|select)$/i.test(event.target?.tagName || '')) return;
-      if (event.key === ' ' || event.key === 'ArrowRight' || event.key === 'Enter') {
-        event.preventDefault();
-        move(1);
-      } else if (event.key === 'ArrowLeft') {
-        event.preventDefault();
-        move(-1);
-      } else if (event.key === 'Escape') {
-        event.preventDefault();
-        leaveMode();
-      } else {
-        const status = STATUSES.find((st) => st.key === event.key.toLowerCase() && st.id !== 'absent');
-        const button = status && [...wrap.querySelectorAll('button')].find((b) => b.textContent === status.label);
-        if (button) {
-          event.preventDefault();
-          button.click();
-        }
-      }
-    });
-    setTimeout(() => wrap.focus(), 0);
-
-    if (!person) {
-      wrap.appendChild(el('p', { class: 'rc-hint', text: 'Nobody is working that day.' }));
-      return wrap;
-    }
-
-    const wasPlanned = planFor(person.id, review);
-    const actual = actualByPerson.get(person.id) || null;
-    const tomorrow = planFor(person.id, plan);
-    const chain = wasPlanned ? ctx.chainByeId?.get(carryChainFor(wasPlanned)) : null;
-    const laRow = wasPlanned?.lookahead_row_id
-      ? (ctx.laRows || []).find((r) => r.id === wasPlanned.lookahead_row_id)
-      : null;
-    const theirs = (ctx.blockers || []).filter((b) => b.person_id === person.id);
-
-    wrap.appendChild(el('div', { class: 'rc-present-top' }, [
-      el('span', { class: 'rc-eyebrow', text: `${atPerson + 1} of ${queue.length}` }),
-      el('button', { class: 'cx-btn mini ghost', text: 'Back to the table', onClick: leaveMode }),
-    ]));
-
-    wrap.appendChild(el('h2', { class: 'rc-present-who', text: person.name }));
-    wrap.appendChild(el('div', { class: 'rc-hint', text: [person.title, person.subsystem].filter(Boolean).join(' · ') }));
-
-    /* The question, in the words somebody would use. */
-    wrap.appendChild(el('p', { class: 'rc-present-ask', text: askFor(wasPlanned, locs, ctx.reviewWord) }));
-
-    /* What the room needs, which is not what the person needs. */
-    const context = el('div', { class: 'rc-present-context' });
-    if (laRow) {
-      context.appendChild(badge(`BART: ${(laRow.raw_label || '').slice(0, 40)}`, 'info'));
-    }
-    if (chain && chain.carries >= 1) {
-      context.appendChild(badge(`${ordinal(chain.carries + 1)} day on it`,
-        chain.carries >= 4 ? 'bad' : 'warn'));
-    }
-    if (wasPlanned && !laRow) {
-      context.appendChild(badge('not against a look-ahead row', 'muted'));
-    }
-    /* The rest of the day. The question above names the first task; a shift with
-       three jobs on it and only one of them said out loud is how the other two
-       stop being asked about. */
-    for (const also of (plannedOn ? plannedOn(person.id, review) : []).slice(1)) {
-      context.appendChild(badge(`also: ${(also.task || '—').slice(0, 36)}`, 'info'));
-    }
-    // Flagged only where a person typed the day in. The workbook is the default
-    // and needs no announcing.
-    const byHand = manualEntry(wasPlanned);
-    if (byHand) context.appendChild(byHand);
-    for (const b of theirs) {
-      context.appendChild(badge(`blocked: ${b.summary.slice(0, 36)}`, 'bad'));
-    }
-    if (cats.get(wasPlanned?.category_id)?.name) {
-      context.appendChild(badge(cats.get(wasPlanned.category_id).name, 'muted'));
-    }
-    if (context.children.length) wrap.appendChild(context);
-
-    /* The answer. */
-    const answer = el('div', { class: 'rc-present-answer' });
-    const away = availability(person, review, leave, absentOn?.(person.id, review));
-    if (away.state === 'leave') {
-      // "On leave" whether somebody booked it or the workbook says it. The
-      // distinction belongs in PTO, where it can be acted on; in the middle of a
-      // meeting it is the same fact.
-      answer.appendChild(badge('On leave', 'muted'));
-    } else if (actual) {
-      const status = STATUS_BY_ID.get(actual.status);
-      answer.appendChild(badge(status?.label || actual.status, status?.tone || 'muted'));
-      for (const node of outcomeDetail(actual, ctx, person)) answer.appendChild(node);
-      /* Recorded is not final, and in the room least of all: the pick just made
-         stays pressable, and there is a box for a note whatever the status. Both
-         write a correction — a new row pointing at this one — through the same
-         path the table uses, so nothing can be said here that the table would
-         read differently. */
-      if (rc.isAdmin() || (person.id === rc.me()?.id && rc.canWrite())) {
-        const redrawRoom = () => { clear(root); render(root); };
-        answer.appendChild(workFields({
-          ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw: redrawRoom,
-        }));
-        answer.appendChild(statusButtons(ctx, person, review, wasPlanned, redrawRoom, actual));
-        answer.appendChild(notesBox({
-          ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw: redrawRoom,
-        }));
-      }
-    } else if (rc.isAdmin() || (person.id === rc.me()?.id && rc.canWrite())) {
-      const redrawRoom = () => { clear(root); render(root); };
-      /* What they did and what kind of work it was, typed as they say it — and on
-         a day with nothing planned, the only statement of the work there is. The
-         status pressed next records it with the outcome. */
-      answer.appendChild(workFields({ ctx, person, date: review, plannedEntry: wasPlanned, redraw: redrawRoom }));
-      answer.appendChild(statusButtons(ctx, person, review, wasPlanned, redrawRoom));
-    }
-    wrap.appendChild(answer);
-
-    wrap.appendChild(el('div', { class: 'rc-present-next' }, [
-      el('span', { class: 'rc-eyebrow', text: `${ctx.planWord} — ${dayLabel(plan)}` }),
-      tomorrow
-        ? el('div', { text: tomorrow.task || '—' })
-        : el('div', { class: 'rc-hint', text: 'nothing set yet' }),
-      manualEntry(tomorrow),
-    ].filter(Boolean)));
-
-    wrap.appendChild(el('div', { class: 'rc-present-move' }, [
-      el('button', { class: 'cx-btn ghost', text: '← Back', onClick: () => move(-1), disabled: atPerson === 0 }),
-      el('button', {
-        class: 'cx-btn primary',
-        text: atPerson === queue.length - 1 ? 'Done' : 'Next →',
-        onClick: () => (atPerson === queue.length - 1 ? leaveMode() : move(1)),
-      }),
-    ]));
-
-    wrap.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Space or → for the next person, ← to go back, Escape for the table. The status '
-        + 'letters work here too.',
-    }));
-
-    return wrap;
-  }
-
-  /**
-   * The meeting, written down.
-   *
-   * A huddle answers three questions and then evaporates: what happened, what is
-   * next, and what is still in the way. The answers are all in the database
-   * afterwards, which is not the same as anybody having read them — the people
-   * who most need them are the ones who were not in the room.
-   *
-   * So the same three questions, as text somebody can paste into whatever their
-   * project actually talks in. Plain text on purpose: a PDF nobody opens is
-   * worse than four lines in a message, and this has to survive being forwarded.
-   *
-   * It carries no KPI and no rate. Those are a different audience and a
-   * different permission, and the moment a digest carries a percentage against
-   * somebody's name it stops being a summary and starts being a review.
-   */
-  function digestText(ctx) {
-    const { people, review, plan, planFor, plannedOn, absentOn, actualByPerson, locs, leave,
-      blockers, chainByeId } = ctx;
-    const lines = [];
-    const bullet = { completed: '✓', partial: '~', carried: '→', blocked: '!', reassigned: '↔' };
-
-    lines.push(`Huddle — ${dayLabel(plan, 'medium')}`);
-    lines.push('');
-    lines.push(`${ctx.reviewWord === 'Today' ? 'How today went' : 'What happened'} — ${dayLabel(review, 'medium')}`);
-
-    const silent = [];
-    for (const person of people) {
-      const away = availability(person, review, leave, absentOn?.(person.id, review));
-      if (away.state === 'leave') {
-        lines.push(`  · ${person.name} — on leave`);
-        continue;
-      }
-      if (away.state === 'non-working') continue;
-
-      const actual = actualByPerson.get(person.id);
-      if (!actual) {
-        silent.push(person.name);
-        continue;
-      }
-      const status = STATUS_BY_ID.get(actual.status);
-      const said = [actual.task, actual.blocked_reason, actual.note].filter(Boolean).join(' — ');
-      const where = locs.get(actual.location_id)?.name;
-      lines.push(`  ${bullet[actual.status] || '·'} ${person.name} — ${status?.label || actual.status}`
-        + `${where ? ` at ${where}` : ''}${said ? `: ${said}` : ''}`);
-    }
-    // Named rather than silently missing. "Nobody said" is a fact about the
-    // meeting, and leaving it out is how a gap becomes a claim that everything
-    // went fine.
-    if (silent.length) lines.push(`  · nothing recorded for ${silent.join(', ')}`);
-
-    lines.push('');
-    lines.push(`What is next — ${dayLabel(plan, 'medium')}`);
-    const unset = [];
-    for (const person of people) {
-      if (availability(person, plan, leave, absentOn?.(person.id, plan)).state !== 'available') continue;
-      const tasks = plannedOn ? plannedOn(person.id, plan) : [planFor(person.id, plan)].filter(Boolean);
-      if (!tasks.length) {
-        unset.push(person.name);
-        continue;
-      }
-      // Every task, one line each, with the name only on the first — a digest is
-      // read aloud, and "Priya — X. Priya — Y" is somebody reading a table out.
-      tasks.forEach((next, i) => {
-        const chain = next.carry_chain_id ? chainByeId?.get(next.carry_chain_id) : null;
-        const where = locs.get(next.location_id)?.name;
-        const who = i === 0 ? `${person.name} — ` : `${' '.repeat(person.name.length)}   `;
-        lines.push(`  ${who}${next.task || '—'}${where ? ` at ${where}` : ''}`
-          + `${chain && chain.carries >= 1 ? ` (${ordinal(chain.carries + 1)} day on it)` : ''}`);
-      });
-    }
-    if (unset.length) lines.push(`  · nothing set yet for ${unset.join(', ')}`);
-
-    const open = (blockers || []).filter((b) => b.state !== 'resolved');
-    lines.push('');
-    lines.push(open.length ? `What is in the way — ${open.length}` : 'What is in the way — nothing');
-    for (const b of open) {
-      const who = (ctx.everybody || people).find((p) => p.id === b.owner_id)?.name;
-      lines.push(`  ${b.summary} — ${(people.find((p) => p.id === b.person_id) || {}).name || 'the team'}`
-        + `${who ? ` · ${who} chasing` : ' · nobody chasing it'}`
-        + `${b.due_date ? ` · expected by ${dayLabel(b.due_date)}` : ''}`
-        + ` · day ${Math.max(1, Number(b.age_days) || 1)}`);
-    }
-
-    return lines.join('\n');
-  }
-
-  /**
-   * Show it before it is sent.
-   *
-   * Copy *and* save, because the two go to different places — a message to the
-   * team, and a file beside the week's evidence — and neither is a good default
-   * for the other. The text is editable in the box: somebody about to send this
-   * to a client knows something the database does not.
-   */
-  function openDigest(ctx) {
-    const text = digestText(ctx);
-    const box = el('textarea', { class: 'cx-textarea', rows: 18, spellcheck: 'false' });
-    box.value = text;
-
-    const copy = el('button', {
-      class: 'cx-btn mini',
-      text: 'Copy it',
-      onClick: async () => {
-        try {
-          await navigator.clipboard.writeText(box.value);
-          toast({ tone: 'good', message: 'Copied — paste it wherever the team talks.' });
-        } catch {
-          // A denied clipboard is not a failure to produce the digest. It is
-          // already on screen and selectable, so say that rather than nothing.
-          box.select();
-          toast({ tone: 'warn', message: 'The clipboard was refused — it is selected, copy it by hand.' });
-        }
-      },
-    });
-    const save = el('button', {
-      class: 'cx-btn mini ghost',
-      text: 'Save it',
-      onClick: () => saveFile(`huddle-${ctx.plan}.txt`, box.value, 'text/plain'),
-    });
-
-    formModal({
-      title: 'The meeting, written down',
-      body: el('div', { class: 'cx-form' }, [
-        el('p', {
-          class: 'rc-hint',
-          text: 'What happened, what is next, and what is still in the way — for the people who '
-            + 'were not in the room. No rates and no scores: those are a different audience.',
-        }),
-        box,
-        el('div', { style: 'display:flex;gap:6px' }, [copy, save]),
-      ]),
-      confirmLabel: 'Done',
-      onConfirm: () => {},
-    });
-  }
-
-  function dateBar(date, review, plan, root, ctx) {
-    const move = (days) => {
-      onDate = toISO(addDays(isoToMs(date), days));
-      clear(root);
-      render(root);
-    };
-
-    return el('div', { class: 'rc-section-head' }, [
-      el('button', {
-        class: 'cx-btn icon mini ghost',
-        'aria-label': 'Previous day',
-        html: icon('chevron-left', { size: 13 }),
-        onClick: () => move(-1),
-      }),
-      el('h3', { text: `Huddle — ${dayLabel(date, 'medium')}` }),
-      el('button', {
-        class: 'cx-btn icon mini ghost',
-        'aria-label': 'Next day',
-        html: icon('chevron-right', { size: 13 }),
-        onClick: () => move(1),
-      }),
-      el('button', {
-        class: 'cx-btn mini',
-        text: 'Run the meeting',
-        title: 'One person at a time, large enough for the room. Space or → for the next.',
-        onClick: () => {
-          presenting = true;
-          atPerson = null;
-          clear(root);
-          render(root);
-        },
-      }),
-      el('button', {
-        class: 'cx-btn mini ghost',
-        text: 'Digest',
-        title: 'What happened, what is next and what is in the way — as text to paste.',
-        onClick: () => openDigest(ctx),
-      }),
-      date === todayISO() ? null : el('button', {
-        class: 'cx-btn mini ghost',
-        text: 'Today',
-        onClick: () => {
-          onDate = null;
-          clear(root);
-          render(root);
-        },
-      }),
-    ].filter(Boolean));
-  }
-
-  /**
-   * One person's row.
-   *
-   * Rebuilt in place on save — `replaceWith` on this node only — so the rest of
-   * the table, including any field somebody else is mid-way through, is left
-   * exactly alone.
-   */
-  /**
-   * Where a day's plan came from, when it did not come from the workbook.
-   *
-   * The badge used to run the other way — "From 4WLA" against every derived day —
-   * and it was on nearly every cell on the screen, which is the definition of a
-   * badge saying nothing. The 4WLA *is* the plan: that is the assumption now, and
-   * an assumption does not need announcing a hundred times.
-   *
-   * What is worth a flag is the exception. A stored `rc_plan_entries` row is
-   * somebody typing a day in by hand — overriding the sheet, or planning a day it
-   * says nothing about — and that is the one case a reader should stop on,
-   * because it is the only thing on the screen the workbook cannot account for.
-   * `id` is what tells them apart: a derived day carries `id: null` by design.
-   */
-  function manualEntry(entry) {
-    if (!entry || entry.from_lookahead || !entry.id) return null;
-    return badge('Manual', 'warn');
-  }
-
-  function personRow(ctx) {
-    const { person, review, plan, planFor, absentOn, actualByPerson, cats, locs, leave, root, chainByeId } = ctx;
-
-    // Focusable, so the whole meeting can be run from the keyboard: down the
-    // roster with the arrows, one letter per outcome. Fifteen people at a fixed
-    // time is a lot of clicking otherwise.
-    const row = el('tr', { tabindex: '-1', class: 'rc-huddle-row' });
-
-    /* One letter per outcome, on the row that has focus. The keys are the ones
-       already published beside each button (`c`, `p`, `x`, `b`, `r`), so the
-       shortcut is the label rather than a second thing to learn. Arrows walk the
-       roster. A field that is being typed into keeps its keystrokes. */
-    row.addEventListener('keydown', (event) => {
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      const inField = /^(input|textarea|select)$/i.test(event.target?.tagName || '');
-      if (inField) return;
-
-      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        const next = event.key === 'ArrowDown' ? row.nextElementSibling : row.previousElementSibling;
-        if (next) {
-          event.preventDefault();
-          next.focus();
-        }
-        return;
-      }
-
-      const status = STATUSES.find((st) => st.key === event.key.toLowerCase() && st.id !== 'absent');
-      if (!status) return;
-      const button = [...row.querySelectorAll('button')].find((b) => b.textContent === status.label);
-      if (!button) return;
-      event.preventDefault();
-      button.click();
-    });
-    const redraw = () => {
-      const next = personRow(ctx);
-      row.replaceWith(next);
-    };
-
-    const away = availability(person, review, leave, absentOn?.(person.id, review));
-    const wasPlanned = planFor(person.id, review);
-    const actual = actualByPerson.get(person.id) || null;
-    const tomorrow = planFor(person.id, plan);
-    const admin = rc.isAdmin();
-    // A viewer has a person row, so "is this my row" is true for them too. Asking
-    // whether they may write at all is the difference between read-only and not,
-    // and it is the same question `rc_can_act_for()` answers in the database.
-    const mine = person.id === rc.me()?.id && rc.canWrite();
-
-    /* Name, and why they are not being asked for a goal.
-       `data-label` is what the header row becomes on a narrow screen, where the
-       table is stacked into a card per person — see the 620px rule. */
-    row.appendChild(el('td', {}, [
-      el('div', { text: person.name }),
-      el('div', { class: 'rc-hint', text: person.subsystem || person.title || '' }),
-    ]));
-
-    /* What they were supposed to be doing — the promise the outcome answers.
-       The chain age rides with it: a task on its fourth day is a different
-       conversation from one on its first, and that was only visible in a report
-       the field team cannot open. */
-    const chain = wasPlanned ? chainByeId?.get(carryChainFor(wasPlanned)) : null;
-    const plannedDay = ctx.plannedOn ? ctx.plannedOn(person.id, review) : [wasPlanned].filter(Boolean);
-    row.appendChild(el('td', { 'data-label': ctx.reviewWord },
-      plannedDay.length
-        ? plannedDay.map((task, i) => el('div', { class: i ? 'rc-day-next' : '' }, [
-          el('div', { text: task.task || '—' }),
-          el('div', { class: 'rc-hint' }, [
-            el('span', { text: [locs.get(task.location_id)?.name,
-              cats.get(task.category_id)?.name,
-              task.shift && task.shift !== 'day' ? shiftLabel(task.shift) : null].filter(Boolean).join(' · ') }),
-          ]),
-          // The chain belongs to the task it was carried on, which is the first.
-          i === 0 && chain && chain.carries >= 2
-            ? badge(`${ordinal(chain.carries + 1)} day`, chain.carries >= 4 ? 'bad' : 'warn')
-            : null,
-          manualEntry(task),
-        ].filter(Boolean)))
-        : [el('span', { class: 'rc-hint', text: 'nothing planned' })]));
-
-    /* What happened. Absence is answered from the leave record rather than
-       asked for — somebody on leave did not carry anything over, and letting
-       that fall into a performance status is exactly what the five-way split
-       exists to prevent. */
-    const outcome = { 'data-label': ctx.reviewWord === 'Today' ? 'How it is going' : 'What happened' };
-    if (away.state === 'leave') {
-      row.appendChild(el('td', outcome, [badge('On leave', 'muted')]));
-    } else if (away.state === 'non-working') {
-      row.appendChild(el('td', outcome, [el('span', { class: 'rc-hint', text: 'not a working day' })]));
-    } else if (actual) {
-      const status = STATUS_BY_ID.get(actual.status);
-      const cell = el('td', outcome, [
-        badge(status?.label || actual.status, status?.tone || 'muted'),
-        ...outcomeDetail(actual, ctx, person),
-      ]);
-      /* Recorded is not final. The status can be changed and a note added or
-         edited afterwards — as a correction, a new row pointing at this one —
-         by whoever could have recorded it in the first place. */
-      if (admin || mine) {
-        cell.appendChild(el('button', {
-          class: 'cx-btn mini ghost rc-edit-outcome',
-          text: 'Edit',
-          title: 'Change the status or the note. The first answer stays on the record.',
-          onClick: () => {
-            clear(cell);
-            cell.appendChild(workFields({ ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw }));
-            cell.appendChild(statusButtons(ctx, person, review, wasPlanned, redraw, actual));
-            cell.appendChild(notesBox({ ctx, person, date: review, plannedEntry: wasPlanned, current: actual, redraw }));
-          },
-        }));
-      }
-      row.appendChild(cell);
-    } else if (admin || mine) {
-      row.appendChild(el('td', outcome, [
-        workFields({ ctx, person, date: review, plannedEntry: wasPlanned, redraw }),
-        statusButtons(ctx, person, review, wasPlanned, redraw),
-      ]));
-    } else {
-      row.appendChild(el('td', outcome, [el('span', { class: 'rc-hint', text: '—' })]));
-    }
-
-    /* Tomorrow. */
-    row.appendChild(el('td', { 'data-label': ctx.planWord }, [
-      tomorrow
-        ? el('div', {}, [
-          el('div', { text: tomorrow.task || '—' }),
-          el('div', { class: 'rc-hint', text: locs.get(tomorrow.location_id)?.name || '' }),
-          tomorrow.carry_chain_id ? badge('Carried over', 'warn') : null,
-          manualEntry(tomorrow),
-        ].filter(Boolean))
-        : admin
-          ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap;align-items:center' }, [
-            el('button', {
-              class: 'cx-btn mini ghost',
-              text: 'Set goal',
-              onClick: () => setGoal(ctx, person, plan, root),
-            }),
-            /* Most days most people are on the same task at the same place. One
-               button beats four fields, and it is the difference between a
-               fifteen-minute meeting and a forty-minute one. */
-            wasPlanned ? el('button', {
-              class: 'cx-btn mini ghost',
-              text: 'Same again',
-              title: `Repeat "${wasPlanned.task || 'this task'}" on ${dayLabel(plan)}.`,
-              onClick: async () => {
-                await rollForward(wasPlanned, person, plan, null);
-                notifyChanged('plan');
-                clear(root);
-                render(root);
-              },
-            }) : null,
-          ].filter(Boolean))
-          : el('span', { class: 'rc-hint', text: '—' }),
-    ]));
-
-    return row;
-  }
-
-  /**
-   * Everything an outcome says, once it has been recorded.
-   *
-   * One function because the table and the meeting must never read differently —
-   * the room is looking at one of them while somebody types into the other.
-   *
-   * Two of these are new and both answer questions that used to be asked out
-   * loud. **Who recorded it** matters because most days somebody speaks and
-   * somebody else types, and an outcome attributed to the person who entered it
-   * is how a record stops being trusted; it is shown only when the two differ,
-   * which is the only case anybody wonders about. And **the photograph** is the
-   * whole reason evidence was worth attaching in the first place — a link that
-   * is signed when it is clicked rather than when the page is drawn, so a huddle
-   * left open all morning does not accumulate expiring URLs.
-   */
-  function outcomeDetail(actual, ctx, person) {
-    const out = [];
-    if (actual.task) out.push(el('div', { class: 'rc-outcome-task', text: actual.task }));
-    const category = ctx.cats?.get(actual.category_id)?.name;
-    if (category) out.push(el('div', { class: 'rc-hint rc-outcome-cat', text: category }));
-    if (actual.blocked_reason) out.push(el('div', { class: 'rc-hint', text: actual.blocked_reason }));
-    if (actual.note) out.push(el('div', { class: 'rc-hint', text: actual.note }));
-
-    if (actual.evidence_path) {
-      out.push(el('button', {
-        class: 'cx-btn mini ghost rc-evidence',
-        html: `${icon('paperclip', { size: 11 })}<span>Photo</span>`,
-        title: 'Open the photograph taken with this outcome',
-        onClick: async (event) => {
-          event.stopPropagation();
-          try {
-            window.open(await rc.evidenceUrl(actual.evidence_path), '_blank', 'noopener');
-          } catch (err) {
-            toast({ tone: 'bad', message: `That photograph could not be opened — ${err.message}` });
-          }
-        },
-      }));
-    }
-
-    const by = (ctx.everybody || ctx.people || []).find((p) => p.user_id && p.user_id === actual.created_by);
-    if (by && by.id !== person?.id) {
-      out.push(el('div', { class: 'rc-hint', text: `recorded by ${by.name}` }));
-    }
-    // A changed answer says so. The first one is still on the record underneath.
-    if (actual.supersedes_id) out.push(el('div', { class: 'rc-hint', text: 'corrected' }));
-    return out;
-  }
-
-  /**
-   * What somebody did that day, and what kind of work it was — typed in the room.
-   *
-   * The plan says what they were asked to do; this is what the day was actually
-   * spent on, and on a day with nothing planned it is the only statement of the
-   * work there is. It starts from the plan's own words and category, so the
-   * common case is no typing at all, and the category is what the reports group
-   * the outcome under.
-   *
-   * Before an outcome is recorded the fields are a draft: `commitOutcome()` reads
-   * them (through `ctx.drafts`) when a status is pressed, so pressing "Completed"
-   * records the words and the category with it. After, they edit what was said —
-   * Enter in the box, a new category, or Save writes a correction, the same
-   * superseding row every other change to an outcome is. Not on leaving the box:
-   * the status buttons sit beside it, and a correction written on the way to
-   * pressing one would be corrected again a moment later, which the database
-   * rightly refuses.
-   */
-  function workFields({ ctx, person, date, plannedEntry, current = null, redraw }) {
-    const selected = current ? (current.category_id || '') : (plannedEntry?.category_id || '');
-    const task = textInput({
-      value: current ? (current.task ?? plannedEntry?.task ?? '') : (plannedEntry?.task || ''),
-      placeholder: plannedEntry ? 'What they did' : 'Nothing was planned — what did they do?',
-    });
-    task.setAttribute('aria-label', `What ${person.name} did`);
-    task.classList.add('rc-work-task');
-    const category = selectInput({
-      value: selected,
-      placeholder: 'Category…',
-      options: (ctx.categories || [])
-        .filter((c) => c.active !== false || c.id === selected)
-        .map((c) => ({ value: c.id, label: c.name })),
-    });
-    category.setAttribute('aria-label', `What kind of work ${person.name} did`);
-    category.classList.add('rc-work-cat');
-
-    // Nothing once the row has been redrawn without these fields: a draft left in
-    // the map must never speak for a box that is no longer on screen.
-    const read = () => (task.isConnected
-      ? { task: task.value.trim() || null, categoryId: category.value || null }
-      : null);
-    ctx.drafts?.set(person.id, read);
-
-    const wrap = el('div', { class: 'rc-work' }, [
-      el('span', { class: 'rc-eyebrow', text: 'What they did' }),
-      task,
-      category,
-    ]);
-
-    if (current) {
-      const save = () => {
-        const next = read();
-        if (!next) return;
-        if (next.task === (current.task || null) && next.categoryId === (current.category_id || null)) return;
-        commitOutcome({
-          ctx, person, date, plannedEntry, redraw,
-          status: STATUS_BY_ID.get(current.status),
-          note: current.note || null,
-          supersedes: current,
-        });
-      };
-      task.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter') return;
-        event.preventDefault();
-        event.stopPropagation();
-        save();
-      });
-      category.addEventListener('change', save);
-      wrap.appendChild(el('button', { class: 'cx-btn mini', text: 'Save', onClick: save }));
-    } else {
-      // Enter here is not "next person" or "record": a status has not been chosen.
-      task.addEventListener('keydown', (event) => { if (event.key === 'Enter') event.preventDefault(); });
-    }
-    return wrap;
-  }
-
-  /**
-   * The words and category an outcome is recorded with: what is typed in its
-   * fields where they are on screen, and otherwise what the outcome being
-   * corrected said, then what the plan said.
-   */
-  function workOf(ctx, person, plannedEntry, supersedes) {
-    const draft = ctx.drafts?.get(person.id)?.();
-    if (draft) return draft;
-    return {
-      task: supersedes?.task ?? null,
-      categoryId: supersedes?.category_id || plannedEntry?.category_id || null,
-    };
-  }
-
-  /**
-   * One button per status, so a whole team can be gone through at speed.
-   *
-   * A dropdown would be two clicks and a read; this is one click. Blocked opens a
-   * dialog because it is the one status that cannot be recorded without more —
-   * a reason and somebody answerable — and the database refuses it otherwise.
-   */
-  function statusButtons(ctx, person, date, plannedEntry, redraw, current = null) {
-    const wrap = el('div', { style: 'display:flex;gap:3px;flex-wrap:wrap' });
-
-    for (const status of STATUSES) {
-      if (status.id === 'absent') continue;
-      const chosen = current?.status === status.id;
-      wrap.appendChild(el('button', {
-        /* The pick already made is shown pressed and stays pressable: pressing
-           a *different* one changes the answer, and pressing the same one opens
-           the line underneath to edit what was said with it. Nothing here is
-           un-pressable — an outcome that could not be changed once pressed
-           taught people to hesitate over the one button that matters. */
-        class: chosen ? 'cx-btn mini' : 'cx-btn mini ghost',
-        'aria-pressed': String(chosen),
-        text: status.label,
-        title: (status.family === 'health'
-          ? 'Project health — never counted against the individual'
-          : 'Counts toward individual efficiency')
-          + `  ·  press ${status.key} with this row selected`
-          + (chosen ? '  ·  recorded — press to edit the note' : ''),
-        onClick: () => {
-          if (status.id === 'blocked') {
-            blockedDialog(ctx, person, date, plannedEntry, redraw, current);
-            return;
-          }
-          /* A finished task has nothing left to say about it, so it stays one
-             click. Anything else does — "partial" with no note is a number
-             nobody can act on in the morning — so the buttons give way to a
-             line asking for it, pre-filled with the plan so it is an edit
-             rather than a retype. Re-pressing the pick already made is the one
-             case "completed" does open the line: that is somebody wanting to
-             say something about it after all. */
-          if (status.id === 'completed' && !chosen) {
-            commitOutcome({ ctx, person, date, plannedEntry, status, redraw, supersedes: current });
-            return;
-          }
-          clear(wrap);
-          wrap.appendChild(sayMore({
-            ctx, person, date, plannedEntry, status, redraw, host: wrap, current,
-          }));
-        },
-      }));
-    }
-    return wrap;
-  }
-
-  /**
-   * A note on an outcome, whatever its status.
-   *
-   * "Completed" stays one click because a finished task has nothing left to say
-   * about it — until it does. This is the box for that, and for every other
-   * status too: what somebody said about a day is worth writing down whether or
-   * not the status asked for it. Saving writes a correction (a new row pointing
-   * at the old one — the table has no UPDATE) with the same status and the new
-   * words, and only if the words changed: a save that changed nothing would be a
-   * row on the record saying nothing.
-   */
-  function notesBox({ ctx, person, date, plannedEntry, current, redraw }) {
-    const wrap = el('div', { class: 'rc-notes' });
-    const box = el('textarea', {
-      class: 'cx-textarea rc-notes-box',
-      rows: 2,
-      placeholder: 'Anything to add about this day',
-      'aria-label': `Notes for ${person.name}`,
-    });
-    box.value = current?.note || '';
-    const save = el('button', {
-      class: 'cx-btn mini',
-      text: 'Save note',
-      onClick: () => {
-        const note = box.value.trim() || null;
-        if (note === (current?.note || null)) { redraw(); return; }
-        commitOutcome({
-          ctx, person, date, plannedEntry, redraw, note,
-          status: STATUS_BY_ID.get(current.status),
-          supersedes: current,
-        });
-      },
-    });
-    wrap.appendChild(el('span', { class: 'rc-eyebrow', text: 'Notes' }));
-    wrap.appendChild(box);
-    wrap.appendChild(save);
-    return wrap;
-  }
-
-  /**
-   * The line between pressing a status and it being recorded.
-   *
-   * Two things go on it: what is left of the task, pre-filled with the plan
-   * text, and a photograph. Neither is required and neither can lose the
-   * outcome — pressing the status *was* the record, so every way out of here
-   * writes it, including Escape and walking away to the next person. What
-   * changes is only whether anything was said with it.
-   *
-   * That is the opposite of a dialog, deliberately. A dialog somebody dismisses
-   * loses the answer, and the one thing this meeting cannot afford is an outcome
-   * that looks recorded and is not.
-   */
-  function sayMore({ ctx, person, date, plannedEntry, status, redraw, host, current = null }) {
-    const strip = el('div', { class: 'rc-saymore' });
-    let done = false;
-
-    /* Editing what was already said starts from what was said; a fresh answer
-       starts from the plan, so it is an edit rather than a retype. */
-    const opening = current?.note
-      || (status.id === 'carried' || status.id === 'partial' ? (plannedEntry?.task || '') : '');
-    const note = textInput({
-      value: opening,
-      placeholder: status.id === 'reassigned' ? 'What they did instead' : 'What is left',
-    });
-    const photo = el('input', {
-      type: 'file',
-      accept: 'image/*',
-      // Opens the camera on a phone rather than the file browser, which is the
-      // device this meeting is actually run from.
-      capture: 'environment',
-      class: 'rc-saymore-photo',
-      'aria-label': 'Attach a photograph',
-    });
-
-    const commit = ({ cancel = false } = {}) => {
-      if (done) return;
-      done = true;
-      const said = note.value.trim() || null;
-      const file = photo.files?.[0] || null;
-      /* A correction that changes nothing is a row on the record saying nothing,
-         so editing and then walking away, or pressing Escape, writes nothing.
-         A *first* answer is different: pressing the status was the record, and
-         every way out of here has to keep it. */
-      if (current && (cancel || (said === (current.note || null) && status.id === current.status && !file))) {
-        redraw();
-        return;
-      }
-      commitOutcome({
-        ctx, person, date, plannedEntry, status, redraw,
-        note: said,
-        file,
-        supersedes: current,
-      });
-    };
-
-    strip.appendChild(el('span', { class: 'rc-eyebrow', text: status.label }));
-    strip.appendChild(note);
-    strip.appendChild(el('label', { class: 'cx-btn mini ghost rc-saymore-clip', title: 'Attach a photograph' }, [
-      el('span', { html: icon('paperclip', { size: 12 }) }),
-      photo,
-    ]));
-    strip.appendChild(el('button', { class: 'cx-btn mini primary', text: 'Record', onClick: commit }));
-
-    strip.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        if (event.key === 'Escape') {
-          if (current) { commit({ cancel: true }); return; }
-          note.value = '';
-        }
-        commit();
-      }
-    });
-    // Moving on records it. Somebody who presses "partial" and goes straight to
-    // the next person has answered the question; the note was the optional part.
-    strip.addEventListener('focusout', (event) => {
-      if (!strip.contains(event.relatedTarget)) commit();
-    });
-
-    setTimeout(() => {
-      note.focus();
-      note.setSelectionRange(note.value.length, note.value.length);
-    }, 0);
-    if (host) host.classList.add('rc-saymore-host');
-    return strip;
-  }
-
-  /**
-   * Write one outcome, and the photograph that goes with it.
-   *
-   * The picture goes up *first*, under the uuid the row is about to carry:
-   * `rc_actuals` has no UPDATE grant, so a path attached afterwards would need a
-   * second row superseding the first. An upload that fails is said out loud and
-   * the outcome is still recorded — losing what somebody said because a
-   * photograph did not upload would be the wrong way round.
-   */
-  async function commitOutcome({
-    ctx, person, date, plannedEntry, status, redraw, note = null, file = null, supersedes = null,
-  }) {
-    const clientUuid = newUuid();
-    /* A day the 4WLA planned has no stored row, so there is no id to chain on —
-       and a chain has to start somewhere. It starts at the first carry, which is
-       exactly when something first became stuck: before that nothing had been
-       carried at all. */
-    const chainId = status.id === 'carried'
-      ? (carryChainFor(plannedEntry) || (plannedEntry ? newUuid() : null))
-      : null;
-
-    let evidencePath = null;
-    if (file) {
-      const ext = (file.name.match(/\.([a-z0-9]+)$/i)?.[1] || 'jpg').toLowerCase();
-      try {
-        evidencePath = await rc.uploadEvidence(`${clientUuid}.${ext}`, file);
-      } catch (err) {
-        toast({ tone: 'warn', message: `The outcome is recorded; the photograph is not — ${err.message}` });
-      }
-    }
-
-    /* A correction keeps what the first answer knew that this one does not: the
-       look-ahead row it was recorded against, and — where the status is still
-       blocked — the reason and the party, which the database refuses a block
-       without. The photograph carries over inside the function itself, so a
-       replayed queue entry keeps it too. */
-    const keep = supersedes && supersedes.status === status.id ? supersedes : null;
-    const work = workOf(ctx, person, plannedEntry, supersedes);
-    const { sent, error } = await record({
-      clientUuid,
-      personId: person.id,
-      date,
-      status: status.id,
-      note,
-      task: work.task,
-      categoryId: work.categoryId,
-      locationId: plannedEntry?.location_id || supersedes?.location_id || null,
-      planEntryId: plannedEntry?.id || supersedes?.plan_entry_id || null,
-      carryChainId: chainId,
-      evidencePath,
-      lookaheadRowId: supersedes?.lookahead_row_id || null,
-      blockedReason: keep?.blocked_reason || null,
-      blockedPartyId: keep?.blocked_party_id || null,
-      supersedesId: supersedes?.id || null,
-    });
-    if (!sent) toast({ tone: 'warn', message: error?.preview ? error.message : `Saved locally — ${error.message}` });
-
-    /* A carried task is going to be done tomorrow, and re-typing it is both slow
-       and how the chain used to get broken. Rolling it forward here is the only
-       place that knows both the outcome and the entry it came from. */
-    if (chainId && plannedEntry && !ctx.planFor(person.id, ctx.plan)?.id) {
-      try {
-        await rollForward(plannedEntry, person, ctx.plan, chainId);
-        notifyChanged('plan');
-        clear(ctx.root);
-        render(ctx.root);
-        return;
-      } catch (err) {
-        toast({ tone: 'warn', message: `Recorded, but tomorrow was not set — ${err.message}` });
-      }
-    }
-    notifyChanged('actuals');
-    redraw();
-  }
-
-  /**
-   * The chain a carried task belongs to.
-   *
-   * Keyed on the plan entry it came from, so five days of the same stuck job are
-   * one chain rather than five separate failures charged to one person. What
-   * makes the report useful is the chain's *age*, not the count.
-   */
-  function carryChainFor(plannedEntry) {
-    if (!plannedEntry) return null;
-    // The chain the entry already belongs to, or a new one starting here. Taking
-    // the id blindly is what made a five-day stuck job read as five separate
-    // failures: rolling it forward makes a new entry, and the next carry would
-    // have started over.
-    return plannedEntry.carry_chain_id || plannedEntry.id;
-  }
-
-  /**
-   * Put a task on tomorrow.
-   *
-   * `chainId` carries a carry chain across the roll — that is the whole reason
-   * this is one function rather than two: repeating a task and carrying one over
-   * write the same row, and only the chain tells them apart afterwards.
-   */
-  async function rollForward(from, person, date, chainId) {
-    await rc.addPlanEntries([{
-      person_id: person.id,
-      work_date: date,
-      shift: from?.shift || 'day',
-      location_id: from?.location_id || null,
-      task: from?.task || null,
-      category_id: from?.category_id || null,
-      lookahead_row_id: from?.lookahead_row_id || null,
-      carry_chain_id: chainId,
-    }]);
-  }
-
-  /** 1st, 2nd, 3rd, 4th — for "the fourth day running". */
-  function ordinal(n) {
-    const rest = n % 100;
-    if (rest >= 11 && rest <= 13) return `${n}th`;
-    return `${n}${['th', 'st', 'nd', 'rd'][n % 10] || 'th'}`;
-  }
-
-  function blockedDialog(ctx, person, date, plannedEntry, redraw, current = null) {
-    const reason = textInput({ placeholder: 'What stopped it', value: current?.blocked_reason || '' });
-    const owner = selectInput({
-      value: rc.me()?.id || '',
-      placeholder: '— nobody yet —',
-      options: (ctx.everybody || ctx.people || []).map((p) => ({ value: p.id, label: p.name })),
-    });
-    const due = el('input', { type: 'date', class: 'cx-input' });
-    const party = selectInput({
-      value: ctx.parties[0]?.id,
-      options: ctx.parties.map((p) => ({ value: p.id, label: p.name })),
-    });
-
-    /* Which look-ahead row this was blocked against.
-       Optional, and offered rather than chosen: "blocked by BART" is an
-       assertion, and "blocked on the row BART themselves scheduled for that
-       location that week" is a document. The list is narrowed to the location
-       already on the plan where there is one — matching on date and location,
-       never on the activity text, which is the rule everywhere in this module. */
-    const candidates = (ctx.laRows || []).filter((r) => (
-      !plannedEntry?.location_id || !r.location_id || r.location_id === plannedEntry.location_id
-    ));
-    const laRow = candidates.length
-      ? selectInput({
-        value: plannedEntry?.lookahead_row_id || '',
-        placeholder: '— not against a look-ahead row —',
-        options: candidates.map((r) => ({
-          value: r.id,
-          label: [r.raw_location, r.raw_label].filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
-        })),
-      })
-      : null;
-
-    /* A photograph of what stopped it. The single most useful thing in the file
-       a year later, and the moment it can be taken is now — the same upload path
-       an outcome uses, so there is one bucket and one rule. */
-    const photo = el('input', {
-      type: 'file', accept: 'image/*', capture: 'environment', class: 'cx-input',
-    });
-
-    formModal({
-      title: `${person.name} — blocked`,
-      body: el('div', { class: 'cx-form' }, [
-        el('p', {
-          class: 'rc-hint',
-          text: 'A block is project health, not a mark against anyone — which is exactly '
-            + 'why it needs a reason and somebody answerable. The database refuses it without both.',
-        }),
-        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Reason' }), reason]),
-        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Down to' }), party]),
-        /* The two fields that decide whether anything happens about it. Asked
-           here because this is the only moment somebody is definitely thinking
-           about it — a blocker raised without an owner is a grievance, and the
-           list of those only ever grows. */
-        el('div', { class: 'cx-field' }, [
-          el('label', { class: 'cx-label', text: 'Who will chase it' }), owner,
-          el('div', { class: 'cx-hint', text: 'It stays on the huddle until somebody closes it.' }),
-        ]),
-        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Expected by' }), due]),
-        el('div', { class: 'cx-field' }, [
-          el('label', { class: 'cx-label', text: 'Photograph' }), photo,
-          el('div', { class: 'cx-hint', text: 'Optional. It is what the reason will rest on later.' }),
-        ]),
-        laRow
-          ? el('div', { class: 'cx-field' }, [
-            el('label', { class: 'cx-label', text: 'Against which look-ahead row' }),
-            laRow,
-            el('div', {
-              class: 'cx-hint',
-              text: 'Optional, and never guessed. Naming it is what turns a note in a meeting '
-                + 'into evidence somebody can stand behind a year later.',
-            }),
-          ])
-          : null,
-      ].filter(Boolean)),
-      confirmLabel: 'Record',
-      onConfirm: async () => {
-        if (!reason.value.trim()) throw new Error('A reason is needed.');
-        const clientUuid = newUuid();
-
-        // Before the row, under the uuid it is about to carry: the table has no
-        // UPDATE grant, so a path attached afterwards would need a second row.
-        let evidencePath = null;
-        const file = photo.files?.[0] || null;
-        if (file) {
-          const ext = (file.name.match(/\.([a-z0-9]+)$/i)?.[1] || 'jpg').toLowerCase();
-          try {
-            evidencePath = await rc.uploadEvidence(`${clientUuid}.${ext}`, file);
-          } catch (err) {
-            toast({ tone: 'warn', message: `The block is recorded; the photograph is not — ${err.message}` });
-          }
-        }
-
-        const entry = {
-          clientUuid,
-          personId: person.id,
-          date,
-          status: 'blocked',
-          ...(() => {
-            const work = workOf(ctx, person, plannedEntry, current);
-            return { task: work.task, categoryId: work.categoryId };
-          })(),
-          locationId: plannedEntry?.location_id || null,
-          planEntryId: plannedEntry?.id || null,
-          blockedReason: reason.value.trim(),
-          blockedPartyId: party.value,
-          lookaheadRowId: laRow?.value || null,
-          evidencePath,
-          supersedesId: current?.id || null,
-        };
-        const { sent, error } = await record(entry);
-        if (!sent) toast({ tone: 'warn', message: error?.preview ? error.message : `Saved locally — ${error.message}` });
-
-        /* The outcome says a day was lost; the blocker is the thing somebody has
-           to do about it. Raised separately and after, so a failure here leaves
-           the outcome standing rather than losing both — the meeting has moved
-           on by the time anything is retried. Not raised twice: a day that was
-           already blocked already has its blocker on the list. */
-        if (sent && current?.status !== 'blocked') {
-          try {
-            const raised = await rc.raiseBlocker({
-              person_id: person.id,
-              location_id: plannedEntry?.location_id || null,
-              lookahead_row_id: laRow?.value || null,
-              summary: reason.value.trim(),
-              party_id: party.value || null,
-              raised_on: date,
-            });
-            if (owner.value || due.value) {
-              await rc.updateBlocker({
-                blocker_id: raised.id,
-                state: 'open',
-                owner_id: owner.value || null,
-                due_date: due.value || null,
-              });
-            }
-          } catch (err) {
-            toast({
-              tone: 'warn',
-              message: `Recorded, but it is not on the blocker list — ${err.message}`,
-              timeout: 10000,
-            });
-          }
-        }
-
-        notifyChanged('actuals');
-        redraw();
-      },
-    });
-  }
-
-  function setGoal(ctx, person, date, root) {
-    const task = textInput({ placeholder: 'What they will do' });
-    const location = selectInput({
-      value: '',
-      placeholder: '— location —',
-      options: ctx.locations.map((l) => ({ value: l.id, label: l.name })),
-    });
-    const category = selectInput({
-      value: '',
-      placeholder: '— category —',
-      options: ctx.categories.map((c) => ({ value: c.id, label: c.name })),
-    });
-    const shift = selectInput({ value: 'day', options: SHIFTS.map((s) => ({ value: s.id, label: s.label })) });
-
-    formModal({
-      title: `${person.name} — ${dayLabel(date, 'medium')}`,
-      body: el('div', { class: 'cx-form' }, [
-        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Task' }), task]),
-        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Location' }), location]),
-        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Category' }), category]),
-        el('div', { class: 'cx-field' }, [
-          el('label', { class: 'cx-label', text: 'Shift' }), shift,
-          el('div', { class: 'cx-hint', text: 'A night shift belongs to the day it starts on.' }),
-        ]),
-      ]),
-      confirmLabel: 'Set',
-      onConfirm: async () => {
-        if (!task.value.trim()) throw new Error('A task is needed.');
-        await rc.addPlanEntries([{
-          person_id: person.id,
-          work_date: date,
-          shift: shift.value,
-          location_id: location.value || null,
-          task: task.value.trim(),
-          category_id: category.value || null,
-        }]);
-        notifyChanged('plan');
-        clear(root);
-        render(root);
-      },
-    });
-  }
-
-  /** A v4-shaped uuid. The database column is a uuid and will not take anything else. */
-  function newUuid() {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-    const hex = () => Math.floor(Math.random() * 16).toString(16);
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) =>
-      c === 'x' ? hex() : ((Math.floor(Math.random() * 4) + 8).toString(16)));
-  }
-
-  Object.defineProperty(__x, "pendingCount", { get: () => pendingCount, enumerable: true });
-  Object.defineProperty(__x, "flushQueue", { get: () => flushQueue, enumerable: true });
-  Object.defineProperty(__x, "HUDDLE_REVIEWS", { get: () => HUDDLE_REVIEWS, enumerable: true });
-  Object.defineProperty(__x, "DEFAULT_HUDDLE_REVIEWS", { get: () => DEFAULT_HUDDLE_REVIEWS, enumerable: true });
-  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
-};
-
-// ui/rc_settings.js
-__mods["ui/rc_settings.js"] = function (__x, __req) {
-  /**
-   * Organisation → Settings: the calendar's settings, changed on screen.
-   *
-   * They were always rows in `rc_settings`, and some could only be changed in the
-   * SQL editor — which meant they were not changed. Each is one field and a Save,
-   * written through `rc.setSetting()`, and the policy on `rc_settings` is what
-   * lets only an administrator write them; this screen is only shown to one.
-   *
-   * Switching the look-ahead's source is the one setting with consequences, so
-   * it is not a field: going back to the workbook asks first, exactly as the
-   * editor's own menu does, and adopting the editor goes to the editor, which
-   * has to import something before there is anything to write in.
-   *
-   * Imports: util, rc, components, rc_util, rc_la_state, rc_huddle.
-   */
-
-  const { el } = __req("core/util.js");
-  const rc = __req("core/rc.js");
-  const { textInput, selectInput, toast, confirmDialog, badge } = __req("ui/components.js");
-  const { notifyChanged, goToTab, dayLabel } = __req("ui/rc_util.js");
-  const { la } = __req("ui/rc_la_state.js");
-  const { HUDDLE_REVIEWS, DEFAULT_HUDDLE_REVIEWS } = __req("ui/rc_huddle.js");
-
-  /** How long an editor-published reading is kept whole, unless somebody says otherwise. */
-  const DEFAULT_KEEP_DAYS = 60;
-
-  const value = (settings, key) => settings.find((r) => r.key === key)?.value ?? null;
-
-  async function renderSettings(host) {
-    const settings = await rc.listSettings().catch(() => []);
-    const source = value(settings, 'lookahead_source') || 'workbook';
-
-    host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Settings' })]));
-    host.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'What the calendar is set to. Only an administrator can change these — the database refuses anybody else.',
-    }));
-
-    const list = el('div', { class: 'rc-settings' });
-    host.appendChild(list);
-
-    /* ── The look-ahead ─────────────────────────────────────────────────── */
-    list.appendChild(group('The look-ahead'));
-
-    list.appendChild(row({
-      label: 'Where it is written',
-      hint: source === 'editor'
-        ? 'In the calendar\'s own editor. "Check now" does not read the workbook while this is set.'
-        : 'In the Excel workbook, read on "Check now". Start writing it in the calendar from Look-ahead → Calendar → Edit.',
-      control: el('div', { class: 'rc-settings-inline' }, [
-        badge(source === 'editor' ? 'The editor' : 'The workbook', source === 'editor' ? 'good' : 'neutral'),
-        source === 'editor'
-          ? el('button', {
-            class: 'cx-btn mini ghost danger', type: 'button', text: 'Go back to the workbook…',
-            onClick: async () => {
-              const ok = await confirmDialog({
-                title: 'Go back to reading the workbook?',
-                message: 'The calendar will read the .xlsx again the next time somebody presses Check now. '
-                  + 'Nothing written in the editor is deleted — it stays for the record, and you can come back to it.',
-                confirmLabel: 'Go back to the workbook',
-                danger: true,
-              });
-              if (!ok) return;
-              await save('lookahead_source', 'workbook', 'The look-ahead is read from the workbook again.');
-              la.source = 'workbook';
-              la.section = 'calendar';
-              la.editing = false;
-            },
-          })
-          : el('button', {
-            class: 'cx-btn mini', type: 'button', text: 'Open the editor',
-            onClick: () => {
-              la.section = 'calendar';
-              la.editing = true;
-              la.sectionChosen = true;
-              goToTab('lookahead');
-            },
-          }),
-      ]),
-    }));
-
-    list.appendChild(textRow({
-      key: 'lookahead_title',
-      label: 'Title on the export',
-      hint: 'Printed across the top of the Excel export.',
-      current: value(settings, 'lookahead_title') || '',
-      placeholder: 'Four Week Look-Ahead',
-      said: (v) => (v ? `The export is titled "${v}".` : 'The export has no title.'),
-    }));
-
-    list.appendChild(textRow({
-      key: 'lookahead_sheet',
-      label: 'Sheet in the workbook',
-      hint: 'The tab the grid is on, when the look-ahead is read from the workbook. Never guessed.',
-      current: value(settings, 'lookahead_sheet') || '4WLA',
-      placeholder: '4WLA',
-      required: true,
-      said: (v) => `The workbook is read from the "${v}" sheet.`,
-    }));
-
-    list.appendChild(textRow({
-      key: 'cancellation_log_from',
-      label: 'Cancellation log starts on',
-      hint: 'The first day the cancellation log counts — a date from the contract, not from the code.',
-      current: value(settings, 'cancellation_log_from') || '',
-      type: 'date',
-      required: true,
-      said: (v) => `The cancellation log starts on ${dayLabel(v)}.`,
-    }));
-
-    /* ── The daily huddle ───────────────────────────────────────────────── */
-    list.appendChild(group('The daily huddle'));
-    const reviews = HUDDLE_REVIEWS[value(settings, 'huddle_reviews')] ? value(settings, 'huddle_reviews') : DEFAULT_HUDDLE_REVIEWS;
-    const reviewsPick = selectInput({
-      value: reviews,
-      options: Object.entries(HUDDLE_REVIEWS).map(([v, label]) => ({ value: v, label })),
-      onChange: (v) => save('huddle_reviews', v, v === 'today'
-        ? 'The huddle now goes over today\u2019s work and plans the next working day.'
-        : 'The huddle now goes over the previous working day and plans the next working day.'),
-    });
-    reviewsPick.setAttribute('aria-label', 'What the huddle goes over');
-    reviewsPick.dataset.setting = 'huddle_reviews';
-    list.appendChild(row({
-      label: 'What the huddle goes over',
-      hint: 'A meeting late in the shift goes over how today is going and plans the next working day. '
-        + 'One at the start of the day goes over the previous working day instead. Either way, a day nobody '
-        + 'on the roster works is skipped.',
-      control: reviewsPick,
-    }));
-
-    /* ── Keeping the record tidy ────────────────────────────────────────── */
-    list.appendChild(group('Housekeeping'));
-    list.appendChild(textRow({
-      key: 'snapshot_keep_days',
-      label: 'Keep every editor reading for',
-      hint: 'The editor publishes a reading whenever it goes quiet. Older than this, only the last reading of each day is kept; '
-        + 'every workbook read, every reading a SAR or a cancellation points at, and the change register are kept regardless.',
-      current: value(settings, 'snapshot_keep_days') || String(DEFAULT_KEEP_DAYS),
-      type: 'number',
-      suffix: 'days',
-      required: true,
-      check: (v) => (Number.isInteger(Number(v)) && Number(v) >= 14 ? null : 'At least 14 days, in whole days.'),
-      said: (v) => `Editor readings are kept whole for ${v} days.`,
-    }));
-
-    list.appendChild(row({
-      label: 'Tidy the readings now',
-      hint: 'The editor does this once a day on its own. Only the grids of superseded editor readings go — the readings, their rows and every link to them stay.',
-      control: el('div', { class: 'rc-settings-inline' }, [
-        el('button', {
-          class: 'cx-btn mini', type: 'button', text: 'Tidy now',
-          onClick: async (e) => {
-            e.currentTarget.disabled = true;
-            try {
-              const n = await rc.compactSnapshots();
-              toast({
-                tone: 'good',
-                message: n ? `${n} older reading${n === 1 ? '' : 's'} compacted.` : 'Nothing to tidy — every reading is within the keep period or the last of its day.',
-              });
-            } catch (err) {
-              toast({ tone: 'bad', message: err?.message || String(err) });
-            } finally {
-              e.currentTarget.disabled = false;
-            }
-          },
-        }),
-      ]),
-    }));
-
-    /* ── What this is ───────────────────────────────────────────────────── */
-    list.appendChild(group('About'));
-    const status = await rc.schemaStatus().catch(() => ({ state: 'unknown', expected: rc.SCHEMA_VERSION, found: null }));
-    list.appendChild(row({
-      label: 'Database version',
-      hint: status.state === 'behind'
-        ? 'Behind this application. Run supabase/migrate.sql and then supabase/rc_schema.sql in the Supabase SQL editor.'
-        : 'Set by rc_schema.sql when it is run.',
-      control: el('div', { class: 'rc-settings-inline' }, [
-        el('span', { class: 'rc-settings-mono', text: String(status.found ?? value(settings, 'schema_version') ?? '—') }),
-        status.state === 'behind' ? badge('Needs updating', 'bad') : null,
-      ].filter(Boolean)),
-    }));
-  }
-
-  function group(title) {
-    return el('div', { class: 'rc-settings-group', text: title });
-  }
-
-  function row({ label, hint, control }) {
-    return el('div', { class: 'rc-settings-row' }, [
-      el('div', { class: 'rc-settings-label' }, [
-        el('div', { class: 'rc-settings-name', text: label }),
-        hint ? el('div', { class: 'rc-hint', text: hint }) : null,
-      ].filter(Boolean)),
-      el('div', { class: 'rc-settings-control' }, [control]),
-    ]);
-  }
-
-  /**
-   * A setting that is a piece of text, a date or a number: the field, and a Save
-   * that stays greyed until something changed. Enter saves too.
-   */
-  function textRow({ key, label, hint, current, placeholder = '', type = 'text', suffix = '', required = false, check = null, said }) {
-    const input = textInput({ value: current, placeholder });
-    input.type = type;
-    input.setAttribute('aria-label', label);
-    input.dataset.setting = key;
-    if (type === 'number') { input.min = '14'; input.step = '1'; input.style.width = '90px'; }
-    const button = el('button', { class: 'cx-btn mini', type: 'button', text: 'Save', disabled: true });
-    const sync = () => { button.disabled = input.value.trim() === String(current).trim(); };
-    input.addEventListener('input', sync);
-    const commit = async () => {
-      const v = input.value.trim();
-      if (v === String(current).trim()) return;
-      if (required && !v) {
-        toast({ tone: 'warn', message: `${label} cannot be empty.` });
-        return;
-      }
-      const problem = check?.(v);
-      if (problem) {
-        toast({ tone: 'warn', message: problem });
-        return;
-      }
-      if (await save(key, v, said(v))) {
-        current = v;
-        sync();
-      }
-    };
-    button.addEventListener('click', commit);
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(); });
-    return row({
-      label,
-      hint,
-      control: el('div', { class: 'rc-settings-inline' }, [
-        input,
-        suffix ? el('span', { class: 'rc-hint', style: 'margin:0', text: suffix }) : null,
-        button,
-      ].filter(Boolean)),
-    });
-  }
-
-  async function save(key, v, message) {
-    try {
-      await rc.setSetting(key, v);
-      toast({ tone: 'good', message });
-      notifyChanged('settings');
-      return true;
-    } catch (err) {
-      toast({ tone: 'bad', message: err?.message || String(err) });
-      return false;
-    }
-  }
-
-  Object.defineProperty(__x, "DEFAULT_KEEP_DAYS", { get: () => DEFAULT_KEEP_DAYS, enumerable: true });
-  Object.defineProperty(__x, "renderSettings", { get: () => renderSettings, enumerable: true });
-};
-
-// ui/rc_roster.js
-__mods["ui/rc_roster.js"] = function (__x, __req) {
-  /**
-   * Organisation — the roster, locations, categories and leave.
-   *
-   * Reference data before transactional data: nothing else in the calendar means
-   * anything until there are people to schedule and places to send them.
-   *
-   * Two decisions run through it. **Nothing anybody has used is ever deleted** —
-   * a leaver's history has to stay for the reports while they drop out of every
-   * picker, which is what Retire does and why it is the first answer offered.
-   * Delete is the second, and it is for the row that was never meant: somebody
-   * added twice, a location typed wrong. Postgres decides which is which —
-   * `rc_delete_person()` and its siblings count what points at the row and refuse
-   * with the number — because only the database can see everything that does.
-   * And **every vocabulary is a table**, because the reports group by them and
-   * "doc" typed one week against "documentation" the next are two categories to a
-   * database and one to a person.
-   *
-   * Imports: util, events, dates, rc, icons, components, rc_util, rc_inbox,
-   *          rc_settings.
-   */
-
-  const { el, clear } = __req("core/util.js");
-  const rc = __req("core/rc.js");
-  const { icon } = __req("ui/icons.js");
-  const { textInput, selectInput, toast, confirmDialog, promptDialog, field, badge, checkbox, emptyState } = __req("ui/components.js");
-
-
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, orgNav } = __req("ui/rc_util.js");
-  const { renderInbox } = __req("ui/rc_inbox.js");
-  const { renderSettings } = __req("ui/rc_settings.js");
-
-  const SECTIONS = ['inbox', 'people', 'locations', 'categories', 'leave', 'accounts', 'problems', 'settings'];
-  // Readable by an administrator alone, in the policies as well as here.
-  const ADMIN_SECTIONS = new Set(['inbox', 'accounts', 'problems', 'settings']);
-  // An administrator opens Organisation on what is waiting for them.
-  let section = null;
-
-  /**
-   * The three roles, in one place, worded as the consequence rather than the
-   * name. Somebody choosing between them is deciding what a colleague can do,
-   * not picking a label, and "viewer" on its own does not say that a viewer
-   * cannot even record their own day.
-   */
-  const ROLES = [
-    { value: 'viewer', label: 'Viewer — reads the schedule, writes nothing' },
-    { value: 'member', label: 'Member — records their own daily outcomes' },
-    { value: 'admin', label: 'Administrator — plans, and sees the KPIs' },
-  ];
-
-  // Only the administrator badge is coloured. A member and a viewer are both
-  // ordinary states, and the word is the information — tinting one of them would
-  // read as a warning about somebody who is simply on the team.
-  const ROLE_TONE = { admin: 'info', member: 'neutral', viewer: 'neutral' };
-
-  /**
-   * The Delete button that sits beside Retire.
-   *
-   * It asks first, and then it lets the database answer. Nothing here works out
-   * whether a row is safe to remove: the interface cannot see every table that
-   * might point at it, and a check written twice is a check that will one day
-   * disagree with itself. The refusal Postgres raises already names the number of
-   * records in the way and says to retire instead, so it is shown as it comes.
-   */
-  function deleteButton({ label, message, run, after }) {
-    return el('button', {
-      class: 'cx-btn mini ghost danger',
-      text: 'Delete',
-      title: 'Removes it for good. Refused, with a count, if anything has been recorded against it '
-        + '— retire it in that case, which keeps the history.',
-      onClick: async () => {
-        const ok = await confirmDialog({
-          title: label,
-          message,
-          confirmLabel: 'Delete',
-          danger: true,
-        });
-        if (!ok) return;
-        try {
-          await run();
-          toast({ tone: 'good', message: 'Deleted.' });
-          notifyChanged(after);
-        } catch (err) {
-          toast({ tone: 'bad', message: err?.message || String(err) });
-        }
-      },
-    });
-  }
-
-  async function render(root) {
-    // Accounts is administrators-only in the database — `rc_list_invitations()`
-    // returns nothing to anybody else — so a viewer is offered a tab that opens
-    // onto a wall. It comes out of the row rather than explaining itself.
-    const visible = rc.isAdmin() ? SECTIONS : SECTIONS.filter((id) => !ADMIN_SECTIONS.has(id));
-    if (orgNav.section) {
-      section = orgNav.section;
-      orgNav.section = null;
-    }
-    if (!visible.includes(section)) section = visible[0];
-
-    const nav = el('div', { class: 'rc-tabs', style: 'margin:0 0 16px' });
-    for (const id of visible) {
-      nav.appendChild(el('button', {
-        class: 'rc-tab',
-        type: 'button',
-        text: id[0].toUpperCase() + id.slice(1),
-        'aria-pressed': String(id === section),
-        onClick: () => {
-          section = id;
-          clear(root);
-          render(root);
-        },
-      }));
-    }
-    root.appendChild(nav);
-
-    const host = el('div');
-    root.appendChild(host);
-
-    if (section === 'inbox') await renderInbox(host);
-    else if (section === 'settings') await renderSettings(host);
-    else if (section === 'people') await renderPeople(host);
-    else if (section === 'locations') await renderLocations(host);
-    else if (section === 'categories') await renderCategories(host);
-    else if (section === 'accounts') await renderAccounts(host);
-    else if (section === 'problems') await renderProblems(host);
-    else await renderLeave(host);
-  }
-
-  /* ── People ────────────────────────────────────────────────────────────── */
-
-  async function renderPeople(host) {
-    const people = await rc.listPeople({ includeInactive: true });
-    const admin = rc.isAdmin();
-
-    host.appendChild(sectionHead('Team', admin ? {
-      label: 'Add person',
-      onClick: () => editPerson(null),
-    } : null));
-
-    if (!people.length) {
-      host.appendChild(el('p', { class: 'rc-hint', text: 'Nobody on the team yet.' }));
-      return;
-    }
-
-    const rows = people.map((p) => el('tr', { class: p.active ? '' : 'rc-inactive' }, [
-      el('td', {}, [
-        el('div', { text: p.name }),
-        p.email ? el('div', { class: 'rc-hint', text: p.email }) : null,
-      ].filter(Boolean)),
-      el('td', { text: p.title || '—' }),
-      el('td', { text: p.subsystem || '—' }),
-      el('td', {}, [roleBadge(p.role)]),
-      el('td', {}, [p.scheduled === false ? badge('Not scheduled', 'neutral') : badge('Scheduled', 'good')]),
-      // A four-day contract is a fact the scheduler needs, and showing it here is
-      // what stops somebody being planned onto a Friday they never work.
-      el('td', { class: 'rc-num', text: (p.working_days || []).length + '/wk' }),
-      el('td', {}, admin ? [
-        el('button', {
-          class: 'cx-btn mini ghost', text: 'Edit', onClick: () => editPerson(p),
-        }),
-        el('button', {
-          class: 'cx-btn mini ghost',
-          text: p.active ? 'Retire' : 'Restore',
-          title: p.active
-            ? 'Removes them from every picker. Their history stays — the reports still need it.'
-            : 'Puts them back in the pickers.',
-          onClick: async () => {
-            await rc.updatePerson(p.id, { active: !p.active });
-            notifyChanged('people');
-          },
-        }),
-        deleteButton({
-          label: `Delete ${p.name}?`,
-          message: 'Their aliases and any leave booked for them go too. If anything has been '
-            + 'planned or recorded against them this is refused, and retiring them is the answer '
-            + '— that keeps every outcome and takes them out of the pickers just the same.',
-          run: () => rc.deletePerson(p.id),
-          after: 'people',
-        }),
-      ] : []),
-    ]));
-
-    host.appendChild(table(['Name', 'Title', 'Subsystem', 'Role', 'In the huddle', 'Days', ''], rows));
-    host.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Retiring somebody keeps every outcome they ever recorded, which is why it is the first '
-        + 'answer for anybody who has been here. Delete is for a row that was never meant — the same '
-        + 'person added twice — and the database refuses it, with a count, the moment anything has '
-        + 'been planned or recorded against them. "In the huddle" is a separate question '
-        + 'from what somebody may do: a manager administers the calendar without being assigned to '
-        + 'a location, and an administrator who does take shifts stays in the meeting.',
-    }));
-  }
-
-  function editPerson(person) {
-    const name = textInput({ value: person?.name || '', placeholder: 'Full name' });
-    const email = textInput({ value: person?.email || '', placeholder: 'you@example.com', type: 'email' });
-    const title = textInput({ value: person?.title || '', placeholder: 'Test Engineer' });
-    const subsystem = textInput({ value: person?.subsystem || '', placeholder: 'ATS / IXL / SCADA' });
-    const role = selectInput({ value: person?.role || 'member', options: ROLES });
-    /* Whether they are scheduled, kept apart from what they may do. A manager
-       administers the calendar and is never assigned to a location; an
-       administrator who does take shifts must not drop out of the meeting
-       because of their permissions. */
-    const scheduled = checkbox({
-      label: 'Takes shifts — appears in the daily huddle and the week plan',
-      checked: person ? person.scheduled !== false : true,
-    });
-    if (!person) {
-      /* A suggestion for somebody new, not a rule: an administrator is usually
-         the person running the meeting. It stays a switch, because the two facts
-         are separate and somebody has to be able to say so. */
-      role.addEventListener('change', () => {
-        scheduled.querySelector('input').checked = role.value !== 'admin';
-      });
-    }
-
-    // Which days they work at all. Scheduling somebody onto a day they do not
-    // work is the same class of mistake as scheduling them while on leave, and
-    // both are caught from this one field.
-    const days = [1, 2, 3, 4, 5, 6, 7].map((n) => {
-      const set = new Set(person?.working_days || [1, 2, 3, 4, 5]);
-      const box = el('input', { type: 'checkbox', checked: set.has(n) });
-      box.dataset.day = String(n);
-      return el('label', { class: 'cx-check', style: 'margin-right:10px' }, [
-        box, el('span', { text: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][n - 1] }),
-      ]);
-    });
-    const daysWrap = el('div', {}, days);
-
-    formModal({
-      title: person ? 'Edit person' : 'Add person',
-      body: el('div', { class: 'cx-form' }, [
-        field('Name', name),
-        field('Email', email, 'Only needed if they will sign in. Scheduling somebody never requires an account.'),
-        field('Title', title),
-        field('Subsystem', subsystem),
-        field('Role', role, 'What they may do once they have an account. It changes nothing '
-          + 'until one exists — scheduling somebody never requires a login.'),
-        field('Scheduling', scheduled, 'Turn this off for somebody who runs the meeting rather '
-          + 'than taking work from it. They keep every permission they had.'),
-        field('Working days', daysWrap),
-      ]),
-      confirmLabel: person ? 'Save' : 'Add',
-      onConfirm: async () => {
-        const working = [...daysWrap.querySelectorAll('input:checked')].map((b) => Number(b.dataset.day));
-        const patch = {
-          name: name.value.trim(),
-          email: email.value.trim() || null,
-          title: title.value.trim() || null,
-          subsystem: subsystem.value.trim() || null,
-          scheduled: scheduled.querySelector('input').checked,
-          working_days: working,
-        };
-        if (!patch.name) throw new Error('A name is needed.');
-        if (person) {
-          await rc.updatePerson(person.id, patch);
-          // The role goes through `rc_set_role()` rather than in the patch, so
-          // the last-administrator guard applies. A plain UPDATE that a policy
-          // refuses matches nothing and reports success — the demotion that
-          // leaves nobody able to administer anything is exactly the one that
-          // must not be reported as having worked.
-          if (role.value !== person.role) await changeRole(person, role.value);
-        } else {
-          await rc.addPerson({ ...patch, role: role.value });
-        }
-        notifyChanged('people');
-        toast({ message: person ? `${patch.name} updated.` : `${patch.name} added.` });
-      },
-    });
-  }
-
-  /* ── Locations ─────────────────────────────────────────────────────────── */
-
-  async function renderLocations(host) {
-    const [locations, aliases] = await Promise.all([
-      rc.listLocations({ includeInactive: true }),
-      rc.listLocationAliases(),
-    ]);
-    const admin = rc.isAdmin();
-    const byLocation = new Map();
-    for (const a of aliases) {
-      if (!byLocation.has(a.location_id)) byLocation.set(a.location_id, []);
-      byLocation.get(a.location_id).push(a.alias);
-    }
-
-    host.appendChild(sectionHead('Locations', admin ? {
-      label: 'Add location',
-      onClick: async () => {
-        const name = await promptDialog({ title: 'Add location', label: 'Name', confirmLabel: 'Add' });
-        if (!name) return;
-        await rc.addLocation({ name: name.trim() });
-        notifyChanged('locations');
-      },
-    } : null));
-
-    const rows = locations.map((l) => el('tr', { class: l.active ? '' : 'rc-inactive' }, [
-      el('td', { text: l.name }),
-      el('td', { text: l.code || '—' }),
-      el('td', {}, [
-        el('div', { class: 'rc-hint', text: (byLocation.get(l.id) || []).join(', ') || 'no other spellings' }),
-      ]),
-      el('td', {}, [
-        el('div', { class: 'rc-hint', text: l.tawr_area || 'its name' }),
-      ]),
-      el('td', {}, admin ? [
-        el('button', {
-          class: 'cx-btn mini ghost',
-          text: 'Rename',
-          title: 'Every alias, SAR and look-ahead row stays pointed at it — only the name changes.',
-          onClick: async () => {
-            const name = await promptDialog({
-              title: `Rename ${l.name}`,
-              label: 'Name',
-              value: l.name,
-              confirmLabel: 'Rename',
-            });
-            if (!name || name.trim() === l.name) return;
-            await rc.updateLocation(l.id, { name: name.trim() });
-            notifyChanged('locations');
-          },
-        }),
-        el('button', {
-          class: 'cx-btn mini ghost',
-          text: l.active ? 'Retire' : 'Restore',
-          title: l.active
-            ? 'Drops it from every picker. Everything already recorded against it stays.'
-            : 'Puts it back in the pickers.',
-          onClick: async () => {
-            await rc.updateLocation(l.id, { active: !l.active });
-            notifyChanged('locations');
-          },
-        }),
-        deleteButton({
-          label: `Delete ${l.name}?`,
-          message: 'Its other spellings go with it. If any plan, outcome, look-ahead row or SAR '
-            + 'names this place the delete is refused — retire it instead, which drops it from the '
-            + 'pickers and keeps everything already recorded there.',
-          run: () => rc.deleteLocation(l.id),
-          after: 'locations',
-        }),
-        el('button', {
-          class: 'cx-btn mini ghost',
-          text: 'TAWR area',
-          title: 'What a track access work request\'s Area column says for this place. Blank uses its name.',
-          dataset: { action: 'tawr-area' },
-          onClick: async () => {
-            const area = await promptDialog({
-              title: `Area for ${l.name} on a TAWR`,
-              label: 'Tracks, mileposts, gates or stations, as the form should say it',
-              value: l.tawr_area || '',
-              confirmLabel: 'Save',
-            });
-            if (area == null || area.trim() === (l.tawr_area || '')) return;
-            try {
-              await rc.updateLocation(l.id, { tawr_area: area.trim() || null });
-              notifyChanged('locations');
-            } catch (err) {
-              toast({ tone: 'bad', message: err?.message || String(err) });
-            }
-          },
-        }),
-        el('button', {
-          class: 'cx-btn mini ghost',
-          text: 'Add spelling',
-          title: 'Another way this place is written in the look-ahead or on a SAR.',
-          onClick: async () => {
-            const alias = await promptDialog({
-              title: `Another spelling for ${l.name}`,
-              label: 'As it appears in the look-ahead or the SAR',
-              confirmLabel: 'Add',
-            });
-            if (!alias) return;
-            await rc.addLocationAlias(l.id, alias.trim());
-            notifyChanged('locations');
-          },
-        }),
-      ] : []),
-    ]));
-
-    host.appendChild(table(['Location', 'Code', 'Also written as', 'TAWR area', ''], rows));
-    host.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Every match against the look-ahead and the SARs keys on location, never on '
-        + 'activity text — the descriptions are not reliable enough to carry evidence. '
-        + 'So a place written "TPSS 12" in one and "Traction Power 12" in the other needs '
-        + 'both spellings here, or the match silently fails on exactly the rows that matter. '
-        + 'Case and punctuation are folded automatically; wording is not.',
-    }));
-  }
-
-  /* ── Categories and parties ────────────────────────────────────────────── */
-
-  async function renderCategories(host) {
-    const [categories, parties] = await Promise.all([
-      rc.listCategories({ includeInactive: true }),
-      rc.listParties(),
-    ]);
-    const admin = rc.isAdmin();
-
-    host.appendChild(sectionHead('Task categories', admin ? {
-      label: 'Add category',
-      onClick: async () => {
-        const name = await promptDialog({ title: 'Add category', label: 'Name', confirmLabel: 'Add' });
-        if (!name) return;
-        await rc.addCategory({ name: name.trim(), sort: (categories.length + 1) * 10 });
-        notifyChanged('categories');
-      },
-    } : null));
-
-    host.appendChild(table(['Category', ''], categories.map((c) => el('tr', {
-      class: c.active ? '' : 'rc-inactive',
-    }, [
-      el('td', { text: c.name }),
-      el('td', {}, admin ? [
-        el('button', {
-          class: 'cx-btn mini ghost',
-          text: c.active ? 'Retire' : 'Restore',
-          onClick: async () => {
-            await rc.updateCategory(c.id, { active: !c.active });
-            notifyChanged('categories');
-          },
-        }),
-        deleteButton({
-          label: `Delete ${c.name}?`,
-          message: 'Refused if anything has been grouped under it, because the reports would lose '
-            + 'the grouping with it. Retiring takes it out of the pickers and leaves every rollup '
-            + 'reading as it does today.',
-          run: () => rc.deleteCategory(c.id),
-          after: 'categories',
-        }),
-      ] : []),
-    ]))));
-
-    host.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Categories are a table rather than free text because every rollup groups by '
-        + 'them. "Doc" one week and "Documentation" the next would be two categories to '
-        + 'the database and one to everybody reading the report.',
-    }));
-
-    host.appendChild(el('div', { style: 'height:24px' }));
-    host.appendChild(sectionHead('Responsible parties', admin ? {
-      label: 'Add party',
-      onClick: async () => {
-        const name = await promptDialog({ title: 'Add party', label: 'Name', confirmLabel: 'Add' });
-        if (!name) return;
-        await rc.addParty(name.trim());
-        notifyChanged('parties');
-      },
-    } : null));
-
-    host.appendChild(table(['Party'], parties.map((p) => el('tr', {}, [el('td', { text: p.name })]))));
-    host.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Who a block or a cancellation is down to. A table for the same reason, and a '
-        + 'sharper one: "blocked by BART" is a number somebody may eventually have to defend.',
-    }));
-  }
-
-  /* ── Leave ─────────────────────────────────────────────────────────────── */
-
-  async function renderLeave(host) {
-    const today = todayISO();
-    const [people, kinds, leave] = await Promise.all([
-      rc.listPeople(),
-      rc.listLeaveKinds(),
-      // A year either side: enough to see the balance and what is booked ahead.
-      rc.listLeave(`${today.slice(0, 4)}-01-01`, `${Number(today.slice(0, 4)) + 1}-12-31`),
-    ]);
-    const admin = rc.isAdmin();
-    const peopleById = byId(people);
-    const kindsById = byId(kinds);
-
-    host.appendChild(sectionHead('Leave', admin ? {
-      label: 'Book leave',
-      onClick: () => bookLeave(people, kinds),
-    } : null));
-
-    if (!leave.length) {
-      host.appendChild(el('p', { class: 'rc-hint', text: 'Nothing booked.' }));
-    } else {
-      const sorted = [...leave].sort((a, b) => a.start_date.localeCompare(b.start_date));
-      host.appendChild(table(
-        ['Person', 'From', 'To', 'Kind', 'Status', ''],
-        sorted.map((l) => el('tr', {}, [
-          el('td', { text: peopleById.get(l.person_id)?.name || '—' }),
-          el('td', { text: dayLabel(l.start_date) }),
-          el('td', { text: dayLabel(l.end_date) }),
-          el('td', { text: kindsById.get(l.kind_id)?.name || '—' }),
-          el('td', {}, [badge(l.status, l.status === 'approved' ? 'good' : 'muted')]),
-          el('td', {}, admin && l.status !== 'cancelled' ? [
-            el('button', {
-              class: 'cx-btn mini ghost',
-              text: 'Cancel',
-              onClick: async () => {
-                const ok = await confirmDialog({
-                  title: 'Cancel this leave?',
-                  message: 'It stays on the record as cancelled rather than disappearing.',
-                  confirmLabel: 'Cancel leave',
-                });
-                if (!ok) return;
-                await rc.updateLeave(l.id, { status: 'cancelled' });
-                notifyChanged('leave');
-              },
-            }),
-          ] : []),
-        ]))
-      ));
-    }
-
-    host.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Leave is why the huddle can tell "away" apart from "carried over". Without it, '
-        + 'somebody being off gets quietly spread across the performance statuses and their '
-        + 'numbers suffer for a week they were not even there.',
-    }));
-  }
-
-  function bookLeave(people, kinds) {
-    const person = selectInput({
-      value: people[0]?.id,
-      options: people.map((p) => ({ value: p.id, label: p.name })),
-    });
-    const from = el('input', { type: 'date', class: 'cx-input' });
-    const to = el('input', { type: 'date', class: 'cx-input' });
-    const kind = selectInput({
-      value: kinds[0]?.id,
-      options: kinds.map((k) => ({ value: k.id, label: k.name })),
-    });
-    const note = textInput({ placeholder: 'Optional' });
-
-    formModal({
-      title: 'Book leave',
-      body: el('div', { class: 'cx-form' }, [
-        field('Person', person),
-        field('From', from),
-        field('To', to, 'Inclusive, as a calendar is.'),
-        field('Kind', kind),
-        field('Note', note),
-      ]),
-      confirmLabel: 'Book',
-      onConfirm: async () => {
-        if (!from.value || !to.value) throw new Error('Both dates are needed.');
-        if (to.value < from.value) throw new Error('The end is before the start.');
-        await rc.addLeave({
-          person_id: person.value,
-          start_date: from.value,
-          end_date: to.value,
-          kind_id: kind.value,
-          note: note.value.trim() || null,
-        });
-        notifyChanged('leave');
-        toast({ message: 'Leave booked.' });
-      },
-    });
-  }
-
-  /* ── Accounts ──────────────────────────────────────────────────────────── */
-
-  /**
-   * The link to send somebody.
-   *
-   * Nothing is emailed from here, and that is a limitation rather than a choice:
-   * the application has no server of its own and a browser cannot send mail. So
-   * it produces the link and you send it however you already talk to people —
-   * which in practice beats an email that a corporate scanner opens before they
-   * do, burning the token on the way past.
-   *
-   * The address rides along so somebody following it lands on the create-account
-   * form with the right one of their addresses already in it. It is not a
-   * credential: the database still refuses anybody who was not invited, so a
-   * forwarded link gets a stranger precisely nowhere.
-   */
-  function joinLink(email) {
-    /* Where the person is being invited *to*, which is not always where this
-       window is running.
-       Inside the desktop shell `location.origin` is `tauri.localhost` — the
-       application's own internal address — so an invitation generated from the
-       installed app copied a link that means nothing in anybody else's browser,
-       and the only way to find that out was to send it to somebody. The shell
-       knows the deployment it follows for updates, and that deployment is the
-       site being joined. In a browser there is no shell and the address bar is
-       already the right answer. */
-    const channel = String(window.CX_SHELL?.channel || '').replace(/\/+$/, '');
-    const base = channel ? `${channel}/` : window.location.origin + window.location.pathname;
-    return `${base}#join=${encodeURIComponent(String(email || '').trim())}`;
-  }
-
-  /**
-   * True when the link we would produce is one nobody else can open.
-   *
-   * Only reachable in a desktop build with no update channel configured: there
-   * is no deployment to point at and `tauri.localhost` is not one. Saying so
-   * beats copying something broken to the clipboard.
-   */
-  function linkIsLocal() {
-    return !window.CX_SHELL?.channel && /^tauri\.localhost$/i.test(window.location.hostname);
-  }
-
-  async function copyJoinLink(email) {
-    if (linkIsLocal()) {
-      toast({
-        tone: 'warn',
-        title: 'This build has no site to link to',
-        message: `${email} is invited and can sign up on the deployed site — but this desktop `
-          + 'build has no update channel configured, so there is no address to send them.',
-        timeout: 12000,
-      });
-      return;
-    }
-    const link = joinLink(email);
-    try {
-      await navigator.clipboard.writeText(link);
-      toast({ tone: 'good', message: `Link for ${email} copied — send it however you like.` });
-    } catch {
-      // A denied clipboard is not a failure to produce the link. Show it so it
-      // can be copied by hand rather than reporting nothing happened.
-      await promptDialog({
-        title: `Invitation link for ${email}`,
-        label: 'Copy this and send it to them',
-        value: link,
-        confirmLabel: 'Done',
-      });
-    }
-  }
-
-  /**
-   * Who may sign in, and what they may do once they have.
-   *
-   * The whole point of this section is that adding somebody to the team never
-   * needs the SQL editor. An administrator invites an address, the person signs
-   * up, and the trigger attaches the new account to the roster row the
-   * invitation named with the role it carried — so by the time they first open
-   * the calendar they are already on the team with the right permissions.
-   *
-   * Supabase Auth still holds the password, and that is deliberate rather than a
-   * gap: `auth.uid()` is what every policy in the schema keys on, so the
-   * permission model *is* the authentication. What is managed from here is the
-   * part that is genuinely ours — who is allowed an account at all, which person
-   * it belongs to, and what that person may do.
-   */
-  async function renderAccounts(host) {
-    const [people, invitations] = await Promise.all([
-      rc.listPeople({ includeInactive: true }),
-      rc.listInvitations(),
-    ]);
-
-    host.appendChild(sectionHead('Accounts', {
-      label: 'Invite somebody',
-      onClick: () => invitePerson(people),
-    }));
-
-    const withAccount = people.filter((p) => p.user_id);
-    const without = people.filter((p) => !p.user_id && p.active);
-
-    host.appendChild(table(
-      ['Person', 'Signs in as', 'Role', ''],
-      people.filter((p) => p.active || p.user_id).map((p) => el('tr', {
-        class: p.active ? '' : 'rc-inactive',
-      }, [
-        el('td', { text: p.name }),
-        el('td', {}, p.user_id
-          ? [el('span', { text: p.email || 'account linked' })]
-          : [el('span', { class: 'rc-hint', text: 'no account — scheduled only' })]),
-        el('td', {}, [
-          // The role is live rather than behind a dialog: this is the table
-          // somebody opens *because* they want to change one.
-          selectInput({
-            value: p.role,
-            options: ROLES,
-            mini: true,
-            onChange: async (value) => {
-              try {
-                await changeRole(p, value);
-                notifyChanged('people');
-                toast({ message: `${p.name} is now ${roleWord(value)}.` });
-              } catch (err) {
-                toast({ message: err.message, tone: 'bad' });
-                notifyChanged('people');
-              }
-            },
-          }),
-        ]),
-        el('td', {}, p.user_id ? [] : [
-          el('button', {
-            class: 'cx-btn mini ghost',
-            text: 'Link account',
-            title: 'Point an address at this row. It works before they have signed up: an open '
-              + 'invitation is aimed here instead, and the account lands on this row when it exists.',
-            onClick: () => linkAccount(p, people),
-          }),
-        ]),
-      ]))
-    ));
-
-    host.appendChild(el('p', {
-      class: 'rc-hint',
-      text: `${withAccount.length} of ${withAccount.length + without.length} people can sign in. `
-        + 'The rest are scheduled without an account, which is the normal case for the '
-        + 'field team — being on the roster must never require a login.',
-    }));
-
-    /* ── Pending ─────────────────────────────────────────────────────────── */
-
-    host.appendChild(el('div', { style: 'height:24px' }));
-    host.appendChild(sectionHead('Pending invitations', null));
-
-    if (!invitations.length) {
-      host.appendChild(el('p', { class: 'rc-hint', text: 'Nobody is waiting to join.' }));
-    } else {
-      const peopleById = byId(people);
-      host.appendChild(table(
-        ['Address', 'Role', 'For', 'Sent', 'Expires', ''],
-        invitations.map((inv) => el('tr', {}, [
-          el('td', { text: inv.pending_email }),
-          el('td', {}, [roleBadge(inv.pending_role)]),
-          el('td', {
-            text: peopleById.get(inv.pending_person)?.name || 'a new team record',
-          }),
-          el('td', { text: dayLabel(inv.pending_created.slice(0, 10)) }),
-          el('td', {}, [
-            inv.pending_expired
-              ? badge('Expired', 'bad')
-              : el('span', { text: dayLabel(inv.pending_expires.slice(0, 10)) }),
-          ]),
-          el('td', {}, [
-            el('button', {
-              class: 'cx-btn mini',
-              text: 'Copy link',
-              title: 'The link that takes them to the create-account form with their address in it.',
-              onClick: () => copyJoinLink(inv.pending_email),
-            }),
-            el('button', {
-              class: 'cx-btn mini ghost',
-              text: inv.pending_expired ? 'Send again' : 'Revoke',
-              onClick: async () => {
-                if (inv.pending_expired) {
-                  await rc.invite(inv.pending_email, inv.pending_role, inv.pending_person, inv.pending_note);
-                  toast({ message: `${inv.pending_email} invited again.` });
-                } else {
-                  const ok = await confirmDialog({
-                    title: `Revoke the invitation to ${inv.pending_email}?`,
-                    message: 'They will not be able to create an account until they are invited again.',
-                    confirmLabel: 'Revoke',
-                    danger: true,
-                  });
-                  if (!ok) return;
-                  await rc.revokeInvitation(inv.pending_email);
-                  toast({ message: 'Invitation revoked.' });
-                }
-                notifyChanged('invitations');
-              },
-            }),
-          ]),
-        ]))
-      ));
-    }
-
-    host.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Sign-up is closed: an address that was never invited is refused by the database, not '
-        + 'by hiding a form — so the link is a convenience, not a key, and forwarding it gets a '
-        + 'stranger nowhere. Nothing is emailed from here; the application has no server of its '
-        + 'own. Send the link however you already talk to people, which also sidesteps the '
-        + 'corporate mail scanner that opens a confirmation link before the person does. '
-        + 'Invitations lapse after thirty days, and inviting somebody again reopens the one that '
-        + 'lapsed.',
-    }));
-  }
-
-  function invitePerson(people) {
-    const email = textInput({ placeholder: 'them@example.com', type: 'email' });
-    const role = selectInput({ value: 'viewer', options: ROLES });
-    const free = people.filter((p) => !p.user_id && p.active);
-    const person = selectInput({
-      value: '',
-      options: [
-        { value: '', label: 'Create a new team record for them' },
-        ...free.map((p) => ({ value: p.id, label: p.name })),
-      ],
-    });
-    const note = textInput({ placeholder: 'Optional — what they do' });
-
-    formModal({
-      title: 'Invite somebody',
-      body: el('div', { class: 'cx-form' }, [
-        field('Email', email, 'The address they will sign in with. Nothing is sent from here — '
-          + 'send the invitation from Supabase, or just tell them to sign up.'),
-        field('Role', role),
-        field('Team record', person, 'Attach the account to somebody already on the roster, '
-          + 'so their history and their login are the same person.'),
-        field('Note', note),
-      ]),
-      confirmLabel: 'Invite',
-      onConfirm: async () => {
-        const address = email.value.trim();
-        if (!address) throw new Error('An email address is needed.');
-        await rc.invite(address, role.value, person.value || null, note.value.trim() || null);
-        notifyChanged('invitations');
-        await copyJoinLink(address);
-      },
-    });
-  }
-
-  /**
-   * Point an address at a roster row.
-   *
-   * Three outcomes, and only one of them used to be handled. The account exists
-   * and is linked; the address is *invited* and has not signed up yet, in which
-   * case the invitation is aimed at this row and the trigger finishes the job when
-   * they arrive; or there is neither, which is the only case where there is
-   * genuinely nothing to do — so that is the only case that refuses, and it offers
-   * the invitation rather than just saying no.
-   *
-   * The middle one is why this changed. "no account exists for them@example.com —
-   * invite them first" was the commonest answer by a wide margin and it was wrong:
-   * they *had* been invited, and there was nothing the administrator could do
-   * about the rest. A refusal that names no action the reader can take reads as a
-   * broken button.
-   */
-  function linkAccount(person, people) {
-    const email = textInput({ value: person.email || '', placeholder: 'them@example.com', type: 'email' });
-    formModal({
-      title: `Link an account to ${person.name}`,
-      body: el('div', { class: 'cx-form' }, [
-        field('Email', email, 'The address they sign in with. It does not have to exist yet — if it '
-          + 'has been invited and they have not signed up, the invitation is pointed at '
-          + `${person.name} instead and the account lands on this row the moment they do.`),
-      ]),
-      confirmLabel: 'Link',
-      onConfirm: async () => {
-        const address = email.value.trim();
-        if (!address) throw new Error('An email address is needed.');
-        let linked;
-        try {
-          linked = await rc.linkAccount(person.id, address);
-        } catch (err) {
-          /* Nothing to link and nothing on its way. The next step is an
-             invitation, so offer it rather than making somebody find the button. */
-          if (/no account and no open invitation/i.test(err.message)) {
-            throw new Error(`${address} has no account and no open invitation. Close this and use `
-              + '"Invite somebody" — pick this person as the team record, and their account will '
-              + 'attach to it when they sign up.');
-          }
-          throw err;
-        }
-        notifyChanged('people');
-        toast({
-          tone: 'good',
-          message: linked
-            ? `${address} now signs in as ${person.name}.`
-            : `${address} is invited but has not signed up yet — the invitation now points at `
-              + `${person.name}, and the account will attach to this row when they do.`,
-          timeout: linked ? undefined : 10000,
-        });
-      },
-    });
-  }
-
-  /**
-   * Change somebody's role, through the function rather than the table.
-   *
-   * `rc_set_role()` refuses the demotion that would leave nobody able to
-   * administer anything — and refuses it by raising, because a plain UPDATE that
-   * a policy excludes matches no rows and reports success. Changing your own
-   * role then re-reads it, so the interface stops offering what the database has
-   * already started refusing.
-   */
-  async function changeRole(person, role) {
-    await rc.setRole(person.id, role);
-    if (person.id === rc.me()?.id) await rc.refreshMe();
-  }
-
-  function roleWord(role) {
-    return role === 'admin' ? 'an administrator' : `a ${role}`;
-  }
-
-  function roleBadge(role) {
-    const label = role ? role[0].toUpperCase() + role.slice(1) : '—';
-    return badge(label === 'Admin' ? 'Administrator' : label, ROLE_TONE[role] || 'muted');
-  }
-
-  /* ── Problems ──────────────────────────────────────────────────────────── */
-
-  /**
-   * What the calendar ran into, on whose screen, and when.
-   *
-   * Each of these used to be a toast on one person's screen and a console line
-   * nobody saw, so the first anybody heard was "the huddle didn't save on
-   * Tuesday". `rc.reportError()` writes a row from a handful of named places —
-   * a tab that failed to load, an offline outcome the server refused, a read of
-   * the look-ahead that went wrong — and this lists them. It holds no plan data
-   * by construction: nothing on the timeline's side ever reports here.
-   */
-  async function renderProblems(host) {
-    const [rows, people] = await Promise.all([
-      rc.listClientErrors(200),
-      rc.listPeople({ includeInactive: true }),
-    ]);
-    const byAccount = new Map(people.filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
-
-    host.appendChild(sectionHead('Problems reported'));
-    host.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Things the calendar could not do, as they happened on somebody\'s screen: a tab that did '
-        + 'not load, an entry made offline that the database later refused, a look-ahead read that '
-        + 'went wrong. Each is reported once per page load. Nothing from the timeline is ever sent here.',
-    }));
-
-    if (!rows.length) {
-      host.appendChild(emptyState({
-        iconName: 'check-circle',
-        title: 'Nothing reported',
-        message: 'When the calendar cannot do something on anybody\'s screen, it is listed here.',
-      }));
-      return;
-    }
-
-    const log = table(['When', 'Who', 'Where', 'What happened', 'Version'], rows.map((r) => el('tr', {}, [
-      el('td', { class: 'rc-nowrap', text: new Date(r.created_at).toLocaleString(), dataset: { sort: r.created_at, csv: r.created_at } }),
-      el('td', { text: byAccount.get(r.created_by) || (r.created_by ? 'An account not on the roster' : '—') }),
-      el('td', { class: 'rc-mono', text: r.area }),
-      el('td', { text: r.message }),
-      el('td', { class: 'rc-mono', text: r.app_version || '—', title: r.user_agent || '' }),
-    ])));
-    log.querySelector('table').dataset.csv = 'calendar-problems';
-    host.appendChild(log);
-
-    const clearOlder = async (days, label) => {
-      const before = new Date(Date.now() - days * 86400000).toISOString();
-      const ok = await confirmDialog({
-        title: label,
-        message: days
-          ? `Removes every problem reported more than ${days} days ago. They are not kept anywhere else.`
-          : 'Removes every problem in the list. They are not kept anywhere else.',
-        confirmLabel: 'Clear',
-        danger: true,
-      });
-      if (!ok) return;
-      try {
-        const n = await rc.clearClientErrors(before);
-        toast({ tone: 'good', message: `Cleared ${n} problem${n === 1 ? '' : 's'}.` });
-        notifyChanged('problems');
-      } catch (err) {
-        toast({ tone: 'bad', message: err?.message || String(err) });
-      }
-    };
-    host.appendChild(el('div', { class: 'rc-actions', style: 'margin-top:12px;display:flex;gap:8px' }, [
-      el('button', { class: 'cx-btn mini ghost', type: 'button', text: 'Clear older than 30 days',
-        onClick: () => clearOlder(30, 'Clear older problems') }),
-      el('button', { class: 'cx-btn mini ghost danger', type: 'button', text: 'Clear all',
-        onClick: () => clearOlder(0, 'Clear every problem') }),
-    ]));
-  }
-
-  /* ── Shared bits ───────────────────────────────────────────────────────── */
-
-  function sectionHead(title, action) {
-    return el('div', { class: 'rc-section-head' }, [
-      el('h3', { text: title }),
-      action
-        ? el('button', {
-          class: 'cx-btn mini primary',
-          html: icon('plus', { size: 12 }) + `<span>${action.label}</span>`,
-          onClick: action.onClick,
-        })
-        : null,
-    ].filter(Boolean));
-  }
-
-  function table(headers, rows) {
-    return el('div', { class: 'rc-scroll' }, [
-      el('table', { class: 'rc-table' }, [
-        el('thead', {}, [el('tr', {}, headers.map((h) => el('th', { text: h })))]),
-        el('tbody', {}, rows),
-      ]),
-    ]);
-  }
-
-  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
-};
-
-// ui/rc_activity.js
-__mods["ui/rc_activity.js"] = function (__x, __req) {
-  /**
-   * One activity, whole — what opens when somebody taps a task.
-   *
-   * My day says "IXL Regression Testing, W40, day shift, with Rosa". That is the
-   * day; this is the work: every column of the activity's line under the sheet's
-   * own headings (Activity ID, Location, SSWP#, Party to Action, Work Hours),
-   * and every day from this week on that it carries anything — which shift the
-   * paint means, whether it was cancelled, what is written in the cell, and who
-   * the names row puts on it, with your own days marked.
-   *
-   * Read off the latest reading of the look-ahead, the same one the calendar
-   * draws. A task is found on it by its row where it can be (the reading and
-   * the sheet row it was recorded against) and by the row's exact words where
-   * it cannot; one that is no longer on the sheet says so rather than showing
-   * something else.
-   *
-   * Why a day was cancelled is claim evidence and is only readable by an
-   * administrator (`rc_cancellation_notes`), so the team sees that it was, and
-   * an administrator sees who and why too.
-   *
-   * Imports: util, rc, core/lookahead, icons, components, rc_util, rc_la_state.
-   */
-
-  const { el } = __req("core/util.js");
-  const rc = __req("core/rc.js");
-  const { activityTitle, activityDays } = __req("core/lookahead.js");
-  const { openModal, badge, emptyState } = __req("ui/components.js");
-  const { parsedView, dayLabel, todayISO, weekStart, isoToMs, goToTab, meMatcher } = __req("ui/rc_util.js");
-  const { toISO } = __req("core/dates.js");
-  const { la } = __req("ui/rc_la_state.js");
-
-  /** The label a stored look-ahead row carries for an activity: its columns, joined. */
-  const labelOf = (activity) => (activity?.meta || []).filter(Boolean).join(' · ');
-
-  /**
-   * Open an activity.
-   *
-   * `row` is an `rc_lookahead_rows` row (or anything with `raw_label`, and
-   * `snapshot_id` / `sheet_row` where known). `task` is the fallback wording.
-   */
-  async function openActivity({ row = null, task = '' } = {}) {
-    const [snapshot, legendRows, isMe, notes] = await Promise.all([
-      rc.latestSnapshot().catch(() => null),
-      rc.listLegend().catch(() => []),
-      meMatcher().catch(() => null),
-      rc.isAdmin() ? rc.listCancellationNotes().catch(() => []) : Promise.resolve([]),
-    ]);
-    const label = row?.raw_label || task || '';
-
-    if (!snapshot?.grid?.rows?.length) {
-      return openModal({
-        title: label || 'Activity',
-        body: emptyState({ iconName: 'calendar', title: 'No look-ahead to read', message: 'The look-ahead has not been published yet.' }),
-        actions: [{ label: 'Close' }],
-      });
-    }
-
-    const view = parsedView(snapshot, legendRows);
-    /* By its row in this reading where the task was recorded against it — and
-       only when that row still says the same thing, so a row number that no
-       longer lines up can never open somebody else's activity — then by the
-       row's exact words. */
-    const byRow = row?.snapshot_id === snapshot.id && row?.sheet_row != null
-      ? view.activities.find((a) => a.row === row.sheet_row && !a.heading && !a.absence)
-      : null;
-    const activity = (byRow && (!label || labelOf(byRow) === label) ? byRow : null)
-      || view.activities.find((a) => !a.heading && !a.absence && labelOf(a) === label);
-
-    if (!activity) {
-      return openModal({
-        title: label || 'Activity',
-        body: emptyState({
-          iconName: 'calendar',
-          title: 'No longer on the look-ahead',
-          message: 'This activity is not on the latest reading of the look-ahead. It may have been reworded, finished or removed — the Look-ahead tab has the sheet as it stands.',
-        }),
-        actions: [{ label: 'Close' }],
-      });
-    }
-
-    const title = activityTitle(view, activity);
-    const from = toISO(weekStart(isoToMs(todayISO())));
-    const days = activityDays(view, activity, { fromISO: from, isMe: isMe || (() => false) });
-    const today = todayISO();
-
-    /* The columns, under the sheet's own headings. */
-    const facts = el('dl', { class: 'rc-activity-facts' });
-    activity.meta.forEach((value, i) => {
-      if (!value) return;
-      const heading = String(view.headings?.[i] || '').trim() || `Column ${i + 1}`;
-      facts.append(el('dt', { text: heading }), el('dd', { text: value }));
-    });
-
-    /* Why, for the days an administrator has explained. */
-    const current = notes.filter((n) => !notes.some((m) => m.supersedes_id === n.id));
-    const why = (iso) => current.filter((n) => n.raw_label === labelOf(activity) && iso
-      && String(n.start_date).slice(0, 10) <= iso && String(n.end_date).slice(0, 10) >= iso)
-      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
-
-    const list = el('ol', { class: 'rc-activity-days', 'aria-label': 'Days on this activity' });
-    for (const d of days) {
-      const note = d.cancelled ? why(d.date) : null;
-      list.appendChild(el('li', {
-        class: `rc-activity-day${d.mine ? ' rc-activity-mine' : ''}${d.cancelled ? ' rc-activity-cancelled' : ''}${d.date === today ? ' rc-activity-today' : ''}`,
-        'aria-current': d.date === today ? 'date' : null,
-      }, [
-        el('span', { class: 'rc-activity-when', text: d.date ? dayLabel(d.date, 'day') : d.label }),
-        el('span', { class: 'rc-activity-shift' }, [
-          d.hex ? el('span', { class: 'rc-activity-swatch', style: `background-color:#${d.hex}`, 'aria-hidden': 'true' }) : null,
-          el('span', { text: d.cancelled ? 'Cancelled' : (d.meaning || (d.hex ? 'Unexplained colour' : 'Not painted')) }),
-        ].filter(Boolean)),
-        el('span', { class: 'rc-activity-who' }, [
-          d.names.length
-            ? el('span', { text: d.names.join(', ') })
-            : el('span', { class: 'rc-hint', text: 'Nobody named' }),
-          d.mine ? badge('You', 'info') : null,
-        ].filter(Boolean)),
-        d.text ? el('span', { class: 'rc-activity-text', title: 'Written in the cell', text: d.text }) : null,
-        note
-          ? el('span', { class: 'rc-activity-why', text: `${note.party}${note.reason ? ` — ${note.reason}` : ''}` })
-          : null,
-      ].filter(Boolean)));
-    }
-
-    const mineCount = days.filter((d) => d.mine).length;
-    const body = el('div', { class: 'rc-activity' }, [
-      facts,
-      el('div', { class: 'rc-activity-sub' }, [
-        el('h4', { text: 'From this week on' }),
-        el('span', {
-          class: 'rc-hint',
-          text: days.length
-            ? `${days.length} day${days.length === 1 ? '' : 's'}${mineCount ? ` · you are on ${mineCount}` : ''}`
-            : '',
-        }),
-      ]),
-      days.length
-        ? list
-        : el('p', { class: 'rc-hint', text: 'Nothing on this activity from this week on.' }),
-    ]);
-
-    return openModal({
-      title: title || label || 'Activity',
-      subtitle: `As the look-ahead reads now — ${dayLabel(String(snapshot.taken_at).slice(0, 10), 'day')}`,
-      size: 'wide',
-      body,
-      actions: [
-        {
-          label: 'Show on the look-ahead',
-          onClick: () => {
-            la.calendarFilter = title;
-            la.calendarRow = null;
-            la.onlyMine = false;
-            la.section = 'calendar';
-            la.sectionChosen = true;
-            goToTab('lookahead');
-          },
-        },
-        { label: 'Close', kind: 'primary' },
-      ],
-    });
-  }
-
-  Object.defineProperty(__x, "openActivity", { get: () => openActivity, enumerable: true });
-};
-
-// ui/rc_myday.js
-__mods["ui/rc_myday.js"] = function (__x, __req) {
-  /**
-   * My day — the calendar for one person: today, the next working day, and the
-   * rest of the week at a glance.
-   *
-   * Everything else in the calendar is about the team: a grid of people down and
-   * days across, a meeting that goes round the room. Somebody opening it on a
-   * phone at six in the morning wants one answer — where am I today, on what,
-   * with whom, and what about tomorrow — and had to find their own row to get it.
-   *
-   * It is a reading, not a second plan. The day comes from `assignmentIndex()`,
-   * the same function the week plan and the huddle read, so the 4WLA's names rows
-   * are the plan for the days they name and a stored entry is somebody overriding
-   * it. **Outcomes are shown, not recorded:** the huddle is the one path an
-   * outcome is entered through, and a second one here would be two that could
-   * disagree on screen. What was recorded against your last day is shown, as the
-   * week plan shows it.
-   *
-   * Imports: util, dates, rc, core/lookahead, icons, components, rc_util,
-   *          rc_activity.
-   */
-
-  const { el } = __req("core/util.js");
-  const { toISO, addDays } = __req("core/dates.js");
-  const rc = __req("core/rc.js");
-  const { icon } = __req("ui/icons.js");
-  const { badge, emptyState } = __req("ui/components.js");
-  const { openActivity } = __req("ui/rc_activity.js");
-  const { byId, dayLabel, todayISO, isoToMs, weekStart, goToTab, STATUS_BY_ID, SHIFTS, nameRegister, assignmentIndex, availability, lookaheadWithResources, meMatcher, notifyChanged } = __req("ui/rc_util.js");
-
-
-
-  const { changesForMe } = __req("core/la_register.js");
-
-  const ABSENCE_WORDS = { pto: 'Off — on the PTO row', office: 'In the office', other: 'On another project' };
-
-  /** The next day this person works, after `iso`. */
-  function nextWorkingDay(person, iso) {
-    const working = Array.isArray(person?.working_days) ? person.working_days : [1, 2, 3, 4, 5];
-    let ms = addDays(isoToMs(iso), 1);
-    for (let i = 0; i < 14; i++) {
-      const weekday = new Date(ms).getUTCDay() || 7;
-      if (working.includes(weekday)) return toISO(ms);
-      ms = addDays(ms, 1);
-    }
-    return toISO(addDays(isoToMs(iso), 1));
-  }
-
-  async function render(root) {
-    const who = rc.me();
-    const today = todayISO();
-    const monday = toISO(weekStart(isoToMs(today)));
-
-    const [everybody, aliases] = await Promise.all([
-      rc.listPeople({ includeInactive: true }).catch(() => []),
-      rc.listPersonAliases().catch(() => []),
-    ]);
-    const person = everybody.find((p) => p.id === who?.id) || who;
-    const next = nextWorkingDay(person, today);
-    // The week and whatever the next working day reaches into.
-    const until = [toISO(addDays(isoToMs(monday), 6)), next].sort().pop();
-
-    const [planRows, sheet, leave, actuals, locations, categories, blockers] = await Promise.all([
-      rc.listPlan(monday, until).catch(() => []),
-      lookaheadWithResources(monday, toISO(addDays(weekStart(isoToMs(until)), 6))).catch(() => ({ rows: [], absences: [] })),
-      rc.listLeave(monday, until).catch(() => []),
-      rc.listActuals(toISO(addDays(isoToMs(today), -14)), today).catch(() => []),
-      rc.listLocations({ includeInactive: true }).catch(() => []),
-      rc.listCategories().catch(() => []),
-      rc.listBlockers().catch(() => []),
-    ]);
-
-    const index = assignmentIndex({
-      planRows,
-      laRows: sheet.rows,
-      absences: sheet.absences,
-      categories,
-      register: nameRegister(everybody, aliases),
-    });
-    const locs = byId(locations);
-    const names = byId(everybody);
-
-    const laRowById = new Map((sheet.rows || []).map((r) => [r.id, r]));
-    const ctx = { person, index, leave, locs, names, planRows, laRowById };
-
-    /* ── Greeting ─────────────────────────────────────────────────────── */
-    const first = String(person?.name || '').trim().split(/\s+/)[0] || 'there';
-    root.appendChild(el('div', { class: 'rc-myday-head' }, [
-      el('div', {}, [
-        el('div', { class: 'rc-eyebrow', text: dayLabel(today, 'dayFull') }),
-        el('h2', { class: 'rc-myday-hello', text: `${greeting()}, ${first}` }),
-      ]),
-      el('button', {
-        class: 'cx-btn mini ghost', type: 'button',
-        html: `${icon('calendar', { size: 12 })}<span>My week plan</span>`,
-        onClick: () => goToTab('week'),
-      }),
-    ]));
-
-    root.appendChild(changesPanel());
-
-    const cards = el('div', { class: 'rc-myday-cards' }, [
-      dayCard(ctx, today, 'Today'),
-      dayCard(ctx, next, next === toISO(addDays(isoToMs(today), 1)) ? 'Tomorrow' : `Next working day`),
-    ]);
-    root.appendChild(cards);
-
-    /* ── The week at a glance ─────────────────────────────────────────── */
-    root.appendChild(weekStrip(ctx, monday, today));
-
-    /* ── What was said about your last day ────────────────────────────── */
-    const mine = actuals
-      .filter((a) => a.person_id === person?.id)
-      .sort((a, b) => String(b.work_date).localeCompare(String(a.work_date)));
-    const last = mine[0];
-    const owned = blockers.filter((b) => b.owner_id === person?.id);
-    root.appendChild(el('div', { class: 'rc-myday-foot' }, [
-      el('section', { class: 'rc-myday-note', 'aria-label': 'Your last recorded day' }, [
-        el('h3', { text: 'Your last recorded day' }),
-        last
-          ? el('div', { class: 'rc-myday-outcome' }, [
-            badge(STATUS_BY_ID.get(last.status)?.label || last.status, STATUS_BY_ID.get(last.status)?.tone || 'neutral'),
-            el('span', { text: dayLabel(String(last.work_date).slice(0, 10)) }),
-            last.task ? el('span', { class: 'rc-hint', text: last.task }) : null,
-            last.note ? el('div', { class: 'rc-myday-said', text: `“${last.note}”` }) : null,
-          ].filter(Boolean))
-          : el('p', { class: 'rc-hint', text: 'Nothing recorded in the last fortnight.' }),
-        el('p', { class: 'rc-hint', text: 'Outcomes are recorded in the daily huddle.' }),
-      ]),
-      owned.length
-        ? el('section', { class: 'rc-myday-note', 'aria-label': 'Blockers you are chasing' }, [
-          el('h3', { text: 'You are chasing' }),
-          ...owned.map((b) => el('div', { class: 'rc-myday-blocker' }, [
-            badge('Blocked', 'bad'),
-            el('span', { text: b.summary || 'A blocked day' }),
-            b.due_date ? el('span', { class: 'rc-hint', text: `due ${dayLabel(String(b.due_date).slice(0, 10))}` }) : null,
-          ].filter(Boolean))),
-        ])
-        : null,
-    ].filter(Boolean)));
-  }
-
-  function greeting() {
-    const h = new Date().getHours();
-    if (h < 12) return 'Good morning';
-    if (h < 18) return 'Good afternoon';
-    return 'Good evening';
-  }
-
-  /**
-   * One day, for one person: every task on it, where, on which shift and with
-   * whom — or that they are off, and why.
-   */
-  function dayCard({ person, index, leave, locs, names, planRows, laRowById }, iso, title) {
-    const card = el('section', { class: 'rc-myday-card', 'aria-label': `${title}, ${dayLabel(iso)}`, dataset: { day: iso } });
-    card.appendChild(el('div', { class: 'rc-myday-card-head' }, [
-      el('h3', { text: title }),
-      el('span', { class: 'rc-hint', text: dayLabel(iso, 'day') }),
-    ]));
-
-    const absent = index.absent(person.id, iso);
-    const state = availability(person, iso, leave, absent);
-    if (state.state === 'leave') {
-      card.appendChild(el('div', { class: 'rc-myday-off' }, [
-        el('span', { html: icon('sun', { size: 18 }), 'aria-hidden': 'true' }),
-        el('span', { text: state.leave ? 'On leave' : 'Off — on the PTO row' }),
-      ]));
-      return card;
-    }
-    if (state.state === 'non-working') {
-      card.appendChild(el('p', { class: 'rc-hint', text: 'Not one of your working days.' }));
-      return card;
-    }
-
-    const tasks = index.on(person.id, iso);
-    if (!tasks.length) {
-      card.appendChild(emptyState({
-        iconName: 'calendar',
-        title: 'Nothing planned yet',
-        message: 'The look-ahead does not name you on this day and nobody has planned it. Ask in the huddle, or plan it in your week plan.',
-      }));
-    }
-    for (const t of tasks) {
-      if (t.absence) {
-        card.appendChild(el('div', { class: 'rc-myday-task' }, [
-          el('div', { class: 'rc-myday-task-title', text: ABSENCE_WORDS[t.absence] || t.task || 'Away from the project' }),
-        ]));
-        continue;
-      }
-      const where = locs.get(t.location_id)?.name || t.raw_location || '';
-      const shift = SHIFTS.find((s) => s.id === t.shift)?.label || '';
-      const others = withWhom({ index, names, planRows }, person.id, iso, t);
-      const content = [
-        el('div', { class: 'rc-myday-task-title', text: t.task || 'A task with no description' }),
-        el('div', { class: 'rc-myday-facts' }, [
-          where ? fact('pin', where) : null,
-          shift ? fact('clock', `${shift} shift`) : null,
-          others.length ? fact('users', `With ${others.join(', ')}`) : fact('user', 'On your own'),
-          t.from_lookahead ? null : fact('edit', 'Planned by hand'),
-        ].filter(Boolean)),
-      ];
-      /* A task on the look-ahead opens the whole activity: every column, every
-         day from this week on, and who is on each. One planned by hand has no
-         activity behind it, so it is not a button. */
-      if (t.lookahead_row_id) {
-        content.push(el('span', { class: 'rc-myday-more', text: 'Details', 'aria-hidden': 'true' }));
-        card.appendChild(el('button', {
-          class: 'rc-myday-task rc-myday-task-open',
-          type: 'button',
-          'aria-label': `${t.task || 'Task'} — open the whole activity`,
-          onClick: async () => {
-            const row = laRowById.get(t.lookahead_row_id)
-              || (await rc.lookaheadRowsByIds([t.lookahead_row_id]).catch(() => []))[0]
-              || null;
-            openActivity({ row, task: t.task });
-          },
-        }, content));
-      } else {
-        card.appendChild(el('div', { class: 'rc-myday-task' }, content));
-      }
-    }
-    if (state.asked) {
-      card.appendChild(el('p', { class: 'rc-hint', text: 'You have asked for leave on this day; nobody has answered yet.' }));
-    }
-    return card;
-  }
-
-  function weekdayOf(iso) {
-    return new Date(`${iso}T00:00:00Z`).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', timeZone: 'UTC' });
-  }
-
-  function fact(iconName, text) {
-    return el('span', { class: 'rc-myday-fact' }, [
-      el('span', { html: icon(iconName, { size: 12 }), 'aria-hidden': 'true' }),
-      el('span', { text }),
-    ]);
-  }
-
-  /**
-   * Who else is on the same piece of work that day: everybody the look-ahead's
-   * names row puts on the same row, and anybody planned against the same row by
-   * hand. Matched on the row, never on the wording of a task.
-   */
-  function withWhom({ index, names, planRows }, meId, iso, task) {
-    const rowId = task.lookahead_row_id;
-    if (!rowId) return [];
-    const ids = new Set();
-    for (const [personId, days] of index.byPerson) {
-      if (personId === meId) continue;
-      if ((days.get(iso) || []).some((r) => r.id === rowId)) ids.add(personId);
-    }
-    for (const p of planRows) {
-      if (p.person_id !== meId && p.work_date === iso && p.lookahead_row_id === rowId) ids.add(p.person_id);
-    }
-    return [...ids].map((id) => names.get(id)?.name).filter(Boolean).sort();
-  }
-
-  /** Monday to Sunday: where you are each day, in a word. */
-  function weekStrip({ person, index, leave, locs }, monday, today) {
-    const strip = el('ol', { class: 'rc-myday-week', 'aria-label': 'Your week' });
-    for (let i = 0; i < 7; i++) {
-      const iso = toISO(addDays(isoToMs(monday), i));
-      const state = availability(person, iso, leave, index.absent(person.id, iso));
-      const tasks = state.state === 'available' ? index.on(person.id, iso) : [];
-      let text = '';
-      if (state.state === 'leave') text = 'Off';
-      else if (state.state === 'non-working') text = '—';
-      else if (!tasks.length) text = 'Nothing yet';
-      else {
-        text = [...new Set(tasks.map((t) => (t.absence ? (ABSENCE_WORDS[t.absence] || 'Away').split(' ')[0]
-          : locs.get(t.location_id)?.code || locs.get(t.location_id)?.name || t.raw_location || 'Task')))].join(', ');
-      }
-      strip.appendChild(el('li', {
-        class: `rc-myday-day${iso === today ? ' rc-myday-today' : ''}${state.state !== 'available' ? ' rc-myday-quiet' : ''}`,
-        'aria-current': iso === today ? 'date' : null,
-        title: tasks.map((t) => t.task).filter(Boolean).join('\n'),
-      }, [
-        el('span', { class: 'rc-myday-wd', text: weekdayOf(iso) }),
-        el('span', { class: 'rc-myday-where', text }),
-      ]));
-    }
-    return el('section', { class: 'rc-myday-weekwrap' }, [el('h3', { text: 'This week' }), strip]);
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     What changed for you
-
-     The look-ahead as it reads now against the reading this person last said
-     "Got it" to, for the days that name them from today on — `changesForMe()`
-     in `core/lookahead.js`. "Got it" is a row in `rc_la_seen`, append-only, and
-     it is what the administrator's inbox reads to say who has changes they have
-     not seen.
-
-     The first time, there is nothing to compare with, so the reading on screen
-     is recorded quietly as the starting point. A new reading that changes none
-     of this person's days is recorded quietly too — there was nothing to see.
-     Neither is recorded while an administrator is only previewing.
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const HORIZON_DAYS = 27;
-
-  /** What changed for the person looking: `{ state, latest, seen, changes }`. */
-  async function myChanges() {
-    const who = rc.me();
-    if (!who) return { state: 'none', changes: [] };
-    const [latest] = await rc.listSnapshotMeta({ limit: 1 });
-    if (!latest) return { state: 'none', changes: [] };
-    let seen;
-    try {
-      seen = await rc.lastSeen(who.id);
-    } catch {
-      // An older database with nowhere to record it: say nothing rather than fail.
-      return { state: 'unavailable', changes: [] };
-    }
-    if (!seen) return { state: 'first', latest, changes: [] };
-    if (seen.snapshot_id === latest.id) return { state: 'current', latest, seen, changes: [] };
-    const today = todayISO();
-    const to = toISO(addDays(isoToMs(today), HORIZON_DAYS));
-    const [before, after, isMe] = await Promise.all([
-      seen.snapshot_id ? rc.snapshotRows(seen.snapshot_id) : Promise.resolve([]),
-      rc.snapshotRows(latest.id),
-      meMatcher(),
-    ]);
-    if (!before.length) return { state: 'first', latest, seen, changes: [] };
-    const changes = changesForMe(before, after, isMe || (() => false), { from: today, to });
-    return { state: changes.length ? 'changed' : 'quiet', latest, seen, changes };
-  }
-
-  let unseen = null; // { at, n } — for the count on the tab
-  /** How many changes are waiting on the person looking, remembered for a minute. */
-  async function unseenCount() {
-    if (unseen && Date.now() - unseen.at < 60000) return unseen.n;
-    const { changes } = await myChanges();
-    unseen = { at: Date.now(), n: changes.length };
-    return unseen.n;
-  }
-
-  /** Put the count on the My day tab as it now stands — the header drew it from memory. */
-  function showCount(n) {
-    unseen = { at: Date.now(), n };
-    const tab = document.querySelector('#rc-frame .rc-head .rc-tab[data-tab="myday"]');
-    if (!tab) return;
-    tab.querySelector('.rc-tab-count')?.remove();
-    if (!n) return;
-    tab.appendChild(el('span', { class: 'rc-tab-count rc-tab-count-info', text: String(n), 'aria-label': `${n} change${n === 1 ? '' : 's'} to your days` }));
-  }
-
-  function record(latest, changes) {
-    if (rc.previewing()) return Promise.resolve(null);
-    return rc.markSeen({ snapshotId: latest.id, takenAt: latest.taken_at, changes }).catch(() => null);
-  }
-
-  const KIND = {
-    added: { label: 'Added', tone: 'good' },
-    reinstated: { label: 'Back on', tone: 'good' },
-    moved: { label: 'Moved', tone: 'warn' },
-    shift: { label: 'Shift changed', tone: 'warn' },
-    cancelled: { label: 'Cancelled', tone: 'bad' },
-    removed: { label: 'Taken off', tone: 'bad' },
-    given: { label: 'Given to somebody else', tone: 'bad' },
-  };
-
-  function sentence(c) {
-    const on = (iso) => dayLabel(iso, 'day');
-    const where = c.location && !c.label.includes(c.location) ? ` (${c.location})` : '';
-    const what = `${c.label}${where}`;
-    switch (c.kind) {
-      case 'added': return `${on(c.date)} — ${what}${c.now ? `, ${c.now}` : ''}`;
-      case 'reinstated': return `${on(c.date)} — ${what} is back on${c.now ? `, ${c.now}` : ''}`;
-      case 'moved': return `${on(c.from)} → ${on(c.date)} — ${what}`;
-      case 'shift': return `${on(c.date)} — ${what}: now ${c.now} (was ${c.was})`;
-      case 'cancelled': return `${on(c.date)} — ${what}`;
-      case 'removed': return `${on(c.date)} — ${what}: you are no longer on it`;
-      case 'given': return `${on(c.date)} — ${what}: now ${c.names.join(', ')}`;
-      default: return `${on(c.date)} — ${what}`;
-    }
-  }
-
-  function changesPanel() {
-    const box = el('section', { class: 'rc-myday-changes', hidden: true, 'aria-live': 'polite', 'aria-label': 'What changed for you' });
-    const when = (iso) => new Date(iso).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-    myChanges()
-      .then(async ({ state, latest, seen, changes }) => {
-        if (state === 'none' || state === 'unavailable') return;
-        if (state === 'first' || state === 'quiet') {
-          await record(latest, 0);
-          showCount(0);
-          box.append(el('p', {
-            class: 'rc-hint rc-myday-uptodate',
-            text: state === 'first'
-              ? 'From now on, whenever the look-ahead changes one of your days, it shows here first.'
-              : `Nothing on the look-ahead has changed for you since ${when(seen.snapshot_taken_at)}.`,
-          }));
-          box.hidden = false;
-          return;
-        }
-        if (state === 'current') {
-          box.append(el('p', { class: 'rc-hint rc-myday-uptodate', text: `You are up to date with the look-ahead as of ${when(latest.taken_at)}.` }));
-          box.hidden = false;
-          return;
-        }
-        showCount(changes.length);
-        box.classList.add('rc-myday-changes-open');
-        box.append(
-          el('div', { class: 'rc-myday-changes-head' }, [
-            el('h3', { text: `${changes.length} change${changes.length === 1 ? '' : 's'} to your days` }),
-            el('span', { class: 'rc-hint', text: `since you last looked, ${when(seen.snapshot_taken_at)}` }),
-          ]),
-          el('ul', { class: 'rc-myday-change-list' }, changes.map((c) => el('li', { class: `rc-myday-change rc-myday-change-${c.kind}` }, [
-            badge(c.kind === 'given' ? `Given to ${c.names[0]}${c.names.length > 1 ? ' +' : ''}` : KIND[c.kind]?.label || c.kind, KIND[c.kind]?.tone || 'neutral'),
-            el('span', { text: sentence(c) }),
-          ]))),
-          el('div', { class: 'rc-myday-changes-foot' }, [
-            el('button', {
-              class: 'cx-btn mini primary',
-              type: 'button',
-              text: 'Got it',
-              title: 'Say you have seen these. Your administrator can see who has not.',
-              onClick: async (e) => {
-                e.currentTarget.disabled = true;
-                if (rc.previewing()) {
-                  box.replaceChildren(el('p', { class: 'rc-hint', text: 'Preview only — nothing is recorded while you are seeing the calendar as somebody else.' }));
-                  return;
-                }
-                try {
-                  await rc.markSeen({ snapshotId: latest.id, takenAt: latest.taken_at, changes: changes.length });
-                  showCount(0);
-                  notifyChanged('seen');
-                } catch (err) {
-                  e.currentTarget.disabled = false;
-                  box.append(el('p', { class: 'rc-error', text: err?.message || String(err) }));
-                }
-              },
-            }),
-            el('span', { class: 'rc-hint', text: 'Your days below already show the look-ahead as it reads now.' }),
-          ]),
-        );
-        box.hidden = false;
-      })
-      .catch(() => {});
-    return box;
-  }
-
-  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
-  Object.defineProperty(__x, "myChanges", { get: () => myChanges, enumerable: true });
-  Object.defineProperty(__x, "unseenCount", { get: () => unseenCount, enumerable: true });
-};
-
-// io/rc_pdf.js
-__mods["io/rc_pdf.js"] = function (__x, __req) {
-  /**
-   * The look-ahead calendar, drawn for print.
-   *
-   * A screenshot of the grid is what people were doing instead, and it is a poor
-   * document: the frozen columns come out twice, the scroll clips the weeks
-   * nobody happened to be looking at, and the colours are whatever the monitor
-   * did to them. This draws the same calendar as vector geometry, at whatever
-   * scale puts it on **one sheet**, because a four-week look-ahead reassembled
-   * from four pages on a meeting-room table is not a four-week look-ahead.
-   *
-   * Two rules shape the whole module.
-   *
-   * **It draws the window it is given, not the one on screen.** Every choice the
-   * dialog offers — how many weeks, whether the resource names come, whether the
-   * rows with nothing scheduled come — is an argument here. The screen's own
-   * switches are only the *defaults* the dialog opens with, so exporting cannot
-   * quietly depend on what somebody last clicked.
-   *
-   * **Nothing is truncated to make it fit.** A description too long for its
-   * column wraps and the row grows, the same answer the timeline gives. What
-   * gives instead is the scale, and `fitScale()` says what that came to before
-   * anything is written — a print at 40% is a decision somebody should make
-   * knowingly, by choosing a bigger sheet or fewer weeks, not a surprise in a
-   * downloads folder.
-   *
-   * No DOM and no network: it takes a parsed view and returns bytes, which is
-   * what lets `tools/test_lookahead.js` check the geometry without a browser.
-   *
-   * Imports: io/pdf, io/lookahead, core/lookahead.
-   */
-
-  const { fitToPdf, fitScale, pageBox, textWidth, PAGE_SIZES } = __req("io/pdf.js");
-  const { isDark } = __req("io/lookahead.js");
-  const { ABSENCE_LABELS } = __req("core/lookahead.js");
-
-  /* ── Metrics, in points at scale 1 ─────────────────────────────────────── */
-
-  const META_FONT = 7.2;
-  const DAY_FONT = 6.2;
-  const HEAD_FONT = 6.4;
-  const LINE_H = 8.6;
-  const ROW_PAD = 3.4;
-  const MIN_ROW_H = 12;
-  const MONTH_H = 11;
-  const NUM_H = 10;
-  const WEEKDAY_H = 11;
-  const LEGEND_H = 13;
-
-  /** The whole activity block, however many columns the sheet keeps it in. */
-  const META_W = 208;
-  const MIN_COL_W = 24;
-
-  const INK = {
-    text: '#1a1a1a',
-    subtle: '#6b6b6b',
-    rule: '#d8d8d8',
-    weekRule: '#9a9a9a',
-    band: '#eeeeee',
-    heading: '#e4e4e4',
-    weekend: '#f5f5f5',
-    today: '#e60012',
-    onDark: '#ffffff',
-  };
-
-  /** Greedy word wrap. Returns the lines a string needs at this width. */
-  function wrap(text, width, size) {
-    const words = String(text || '').split(/\s+/).filter(Boolean);
-    if (!words.length) return [];
-    const lines = [];
-    let line = '';
-    for (const word of words) {
-      const next = line ? `${line} ${word}` : word;
-      if (textWidth(next, size) <= width || !line) {
-        line = next;
-      } else {
-        lines.push(line);
-        line = word;
-      }
-      /* A single word wider than the column — a part number, a path — is broken
-         on characters rather than left to run over its neighbour. Nothing is
-         dropped; the row grows instead. */
-      while (textWidth(line, size) > width && line.length > 1) {
-        let cut = line.length;
-        while (cut > 1 && textWidth(line.slice(0, cut), size) > width) cut--;
-        lines.push(line.slice(0, cut));
-        line = line.slice(cut);
-      }
-    }
-    if (line) lines.push(line);
-    return lines;
-  }
-
-  /**
-   * How wide each activity column gets.
-   *
-   * Proportional to what is actually in it, so the description — the column
-   * anybody reads — is not given the same strip as a four-character CDRL code.
-   * A floor per column, because a column squeezed to nothing still costs a
-   * vertical rule and looks like a mistake.
-   */
-  function metaWidths(rows, meta) {
-    if (!meta.length) return [];
-    const longest = meta.map((_, i) =>
-      Math.max(12, ...rows.map((r) => textWidth(String(r.meta[i] || ''), META_FONT))));
-    const total = longest.reduce((a, b) => a + b, 0) || 1;
-    const spare = Math.max(0, META_W - MIN_COL_W * meta.length);
-    return longest.map((w) => MIN_COL_W + (w / total) * spare);
-  }
-
-  /**
-   * Which rows the export draws, and in what shape.
-   *
-   * Deliberately a separate pass from `readGrid()`: the same activity is one row
-   * on screen and one or two here depending on whether the names were asked for,
-   * and working that out while drawing is how the two get out of step.
-   */
-  function linesOf(view, { showResources, showAway }) {
-    const out = [];
-    for (const a of view.activities) {
-      if (a.absence && !showAway) continue;
-      out.push({
-        meta: a.meta,
-        marks: a.marks,
-        heading: Boolean(a.heading),
-        muted: Boolean(a.absence),
-        label: a.absence ? ABSENCE_LABELS[a.absence] : null,
-      });
-      if (a.resource && showResources) {
-        out.push({ meta: a.resource.meta, marks: a.resource.marks, heading: false, muted: true });
-      }
-    }
-    return out;
-  }
-
-  /**
-   * The calendar as scene items: `{ width, height, items, meta }`.
-   *
-   * The same shape `io/scene.js` produces for the timeline, so it goes through
-   * the same writer and gets the same true-vector output — selectable text and
-   * no raster anywhere.
-   */
-  function calendarScene(view, {
-    showResources = true,
-    showAway = true,
-    legend = [],
-    showLegend = true,
-    today = null,
-    rowPad = 0,
-    dayPad = 0,
-  } = {}) {
-    const items = [];
-    const days = view.days || [];
-    const rows = linesOf(view, { showResources, showAway });
-    const meta = view.meta || [];
-    const headings = view.headings || [];
-    const widths = metaWidths(rows, meta);
-    const metaW = widths.reduce((a, b) => a + b, 0);
-
-    /* A day column is as wide as the widest *word* anybody writes in one, not the
-       widest cell. The marks are "X", "X.WIT", "X.TCE"; the Resource row's cells
-       are "Priya, Dan", which is three times as wide and would either set the
-       whole grid's column width or run over its neighbours. Sizing on the word
-       and wrapping the rest is what lets a name sit in a day column at all. */
-    const widestWord = Math.max(0, ...rows.flatMap((r) =>
-      String(r.marks.map((m) => m.value || '').join(' '))
-        .split(/[\s,;/&+]+/).filter(Boolean)
-        .map((w) => textWidth(w, DAY_FONT))));
-    const dayW = Math.max(12, Math.min(30, widestWord + 5)) + dayPad;
-
-    const headH = MONTH_H + NUM_H + WEEKDAY_H;
-    const width = metaW + days.length * dayW;
-
-    const colX = new Map();
-    days.forEach((d, i) => colX.set(d.col, metaW + i * dayW));
-
-    /* ── Header ─────────────────────────────────────────────────────────── */
-
-    // The month band, one label per run of days, which is what the merged cell in
-    // the workbook meant.
-    let runStart = 0;
-    for (let i = 0; i <= days.length; i++) {
-      if (i < days.length && days[i].month === days[runStart].month) continue;
-      const x = metaW + runStart * dayW;
-      const w = (i - runStart) * dayW;
-      items.push({ type: 'rect', x, y: 0, w, h: MONTH_H, fill: INK.band });
-      const label = days[runStart].month || '';
-      if (label && textWidth(label, HEAD_FONT) < w - 4) {
-        items.push({
-          type: 'text', x: x + w / 2, y: MONTH_H - 3, text: label,
-          size: HEAD_FONT, fill: INK.subtle, anchor: 'middle', weight: 700,
-        });
-      }
-      runStart = i;
-    }
-
-    /* What the workbook calls its own columns. `readGrid()` already reads these
-       to find the Location column, so printing "Activity" over all of them would
-       be throwing away a heading the sheet supplies. */
-    widths.forEach((w, i) => {
-      const x = widths.slice(0, i).reduce((a, b) => a + b, 0);
-      const label = String(headings[i] || (i === 0 ? 'Activity' : ''));
-      if (!label) return;
-      const lines = wrap(label, w - 4, HEAD_FONT - 0.4);
-      lines.slice(0, 2).forEach((line, n) => {
-        items.push({
-          type: 'text', x: x + 2, y: MONTH_H + NUM_H - 2 + n * (HEAD_FONT + 0.8),
-          text: line, size: HEAD_FONT - 0.4, fill: INK.subtle, weight: 700,
-        });
-      });
-    });
-
-    for (const d of days) {
-      const x = colX.get(d.col);
-      if (d.weekend) {
-        items.push({ type: 'rect', x, y: MONTH_H, w: dayW, h: headH - MONTH_H, fill: INK.weekend });
-      }
-      const isToday = Boolean(d.date) && d.date === today;
-      items.push({
-        type: 'text', x: x + dayW / 2, y: MONTH_H + NUM_H - 2.5, text: String(d.day || ''),
-        size: HEAD_FONT, fill: isToday ? INK.today : INK.text, anchor: 'middle', weight: 700,
-      });
-      items.push({
-        type: 'text', x: x + dayW / 2, y: headH - 3, text: String(d.weekday || ''),
-        size: HEAD_FONT - 0.6, fill: isToday ? INK.today : INK.subtle, anchor: 'middle',
-      });
-    }
-
-    /* ── Rows ───────────────────────────────────────────────────────────── */
-
-    const dayLineH = DAY_FONT + 1.6;
-    const laid = rows.map((row) => {
-      const cells = widths.map((w, i) => wrap(row.meta[i], w - 4, META_FONT));
-      const inDay = new Map();
-      for (const m of row.marks) {
-        if (!m.value) continue;
-        inDay.set(m.col, wrap(String(m.value), dayW - 2.5, DAY_FONT));
-      }
-      /* The row is as tall as its tallest cell, wherever that cell is. Measuring
-         only the description is what let a Resource row's names run across three
-         days of somebody else's work. */
-      const metaLines = Math.max(1, ...cells.map((c) => c.length));
-      const dayLines = Math.max(1, ...[...inDay.values()].map((l) => l.length), 1);
-      return {
-        ...row,
-        cells,
-        inDay,
-        h: Math.max(MIN_ROW_H, metaLines * LINE_H + ROW_PAD, dayLines * dayLineH + ROW_PAD) + rowPad,
-      };
-    });
-
-    let y = headH;
-    const bodyTop = y;
-
-    for (const row of laid) {
-      // Weekend tint first, so a painted cell sits on top of it rather than
-      // under it.
-      for (const d of days) {
-        if (d.weekend) {
-          items.push({ type: 'rect', x: colX.get(d.col), y, w: dayW, h: row.h, fill: INK.weekend });
-        }
-      }
-      if (row.heading) {
-        items.push({ type: 'rect', x: 0, y, w: width, h: row.h, fill: INK.heading });
-      }
-
-      row.cells.forEach((lines, i) => {
-        const x = widths.slice(0, i).reduce((a, b) => a + b, 0);
-        lines.forEach((line, n) => {
-          items.push({
-            type: 'text', x: x + 2, y: y + ROW_PAD + (n + 1) * LINE_H - 2.4, text: line,
-            size: META_FONT, fill: row.muted ? INK.subtle : INK.text,
-            weight: row.heading ? 700 : 400,
-          });
-        });
-      });
-
-      for (const mark of row.marks) {
-        const x = colX.get(mark.col);
-        if (x == null) continue;                       // a day outside the window
-        if (!mark.hex && !mark.value) continue;        // an empty cell draws nothing
-        if (mark.hex) {
-          items.push({ type: 'rect', x, y, w: dayW, h: row.h, fill: `#${mark.hex}` });
-        }
-        const lines = row.inDay.get(mark.col);
-        if (lines?.length) {
-          const fill = mark.hex && isDark(mark.hex) ? INK.onDark : INK.text;
-          const block = lines.length * dayLineH;
-          lines.forEach((line, n) => {
-            items.push({
-              type: 'text', x: x + dayW / 2,
-              y: y + (row.h - block) / 2 + (n + 1) * dayLineH - 1.8,
-              text: line, size: DAY_FONT, fill, anchor: 'middle',
-            });
-          });
-        }
-      }
-
-      y += row.h;
-      items.push({ type: 'line', x1: 0, y1: y, x2: width, y2: y, stroke: INK.rule, strokeWidth: 0.3 });
-    }
-
-    const bodyBottom = y;
-
-    /* ── Rules ──────────────────────────────────────────────────────────── */
-
-    // A hairline per day makes it a calendar rather than a block of colour; the
-    // Monday rules are what let somebody count weeks across a hundred columns.
-    for (const d of days) {
-      const x = colX.get(d.col);
-      const monday = String(d.weekday || '').toUpperCase() === 'M';
-      items.push({
-        type: 'line', x1: x, y1: MONTH_H, x2: x, y2: bodyBottom,
-        stroke: monday ? INK.weekRule : INK.rule, strokeWidth: monday ? 0.5 : 0.25,
-      });
-    }
-    items.push({
-      type: 'line', x1: metaW, y1: 0, x2: metaW, y2: bodyBottom,
-      stroke: INK.weekRule, strokeWidth: 0.7,
-    });
-    items.push({
-      type: 'line', x1: 0, y1: bodyTop, x2: width, y2: bodyTop,
-      stroke: INK.weekRule, strokeWidth: 0.7,
-    });
-    items.push({
-      type: 'line', x1: width, y1: 0, x2: width, y2: bodyBottom,
-      stroke: INK.rule, strokeWidth: 0.25,
-    });
-
-    // Today, where the window carries it. Drawn last so nothing paints over it.
-    const todayCol = days.find((d) => d.date && d.date === today);
-    if (todayCol) {
-      const x = colX.get(todayCol.col) + dayW / 2;
-      /* Through the body only. Run up into the header it strikes out the very
-         date it is marking, so the column head says "today" by going red and the
-         rule says where it falls. */
-      items.push({
-        type: 'line', x1: x, y1: bodyTop, x2: x, y2: bodyBottom,
-        stroke: INK.today, strokeWidth: 0.9,
-      });
-    }
-
-    /* ── The key ────────────────────────────────────────────────────────── */
-
-    let height = bodyBottom;
-    if (showLegend && legend.length) {
-      const top = bodyBottom + 7;
-      let x = 0;
-      let line = 0;
-      for (const entry of legend) {
-        const label = String(entry.meaning || '');
-        const w = 11 + textWidth(label, HEAD_FONT) + 12;
-        if (x + w > width && x > 0) { x = 0; line++; }
-        const ly = top + line * LEGEND_H;
-        items.push({
-          type: 'rect', x, y: ly, w: 7, h: 7, fill: `#${entry.argb}`,
-          stroke: INK.rule, strokeWidth: 0.3,
-        });
-        items.push({
-          type: 'text', x: x + 10, y: ly + 6, text: label,
-          size: HEAD_FONT, fill: INK.text,
-        });
-        x += w;
-      }
-      height = top + (line + 1) * LEGEND_H;
-    }
-
-    return {
-      width,
-      height,
-      items,
-      meta: { palette: { bg: '#ffffff', text: INK.text, textSubtle: INK.subtle, brand: INK.today } },
-      // What the caller needs to describe what it just made, without counting the
-      // items itself.
-      // `bodyH` is what the rows came to naturally, which is what lets the
-      // filling pass cap its padding at "twice as tall" rather than at a
-      // number that means nothing on a sheet of two-line descriptions.
-      counts: { rows: rows.length, days: days.length, bodyH: bodyBottom - bodyTop },
-    };
-  }
-
-  /**
-   * The calendar laid out to *fill* the page it is going on.
-   *
-   * Fitting alone is not enough. A four-week window is much wider than it is
-   * tall, so the scale is set by the width and the drawing stops less than half
-   * way down the sheet — a page that is two-thirds white, which reads as
-   * something that went wrong rather than as a document. What is left over is
-   * spent on the axis that is not binding: taller rows when the width binds,
-   * wider day columns when the height does.
-   *
-   * Two passes, because the answer depends on the layout and the layout depends
-   * on the answer. The first measures; the second is built knowing what there is
-   * to fill. It cannot overshoot: the padding is worked out from the scale the
-   * first pass already proved fits, and the type never changes size — the rows
-   * simply get more air, which is the difference between a cramped print and a
-   * comfortable one.
-   */
-  function calendarLayout(view, opts = {}) {
-    const first = calendarScene(view, opts);
-    const scale = fitScale(first, opts);
-    const box = pageBox(opts);
-    const margin = opts.margin ?? 26;
-    const contentW = box.w - margin * 2;
-    const contentH = box.h - margin * 2 - ((opts.title || opts.subtitle) ? 34 : 12) - 18;
-
-    const rows = Math.max(1, first.counts.rows);
-    const days = Math.max(1, first.counts.days);
-
-    /* How much scene there is room for at this scale, against how much there is.
-       A row is given at most twice its natural height: past that the grid stops
-       being a calendar and becomes a list with coloured gaps in it. */
-    const spareH = Math.max(0, contentH / scale - first.height);
-    const spareW = Math.max(0, contentW / scale - first.width);
-    const rowPad = Math.min(spareH / rows, (first.counts.bodyH || MIN_ROW_H * rows) / rows);
-    const dayPad = Math.min(spareW / days, 14);
-
-    if (rowPad < 0.4 && dayPad < 0.4) return { scene: first, scale };
-
-    const scene = calendarScene(view, { ...opts, rowPad, dayPad });
-    // Re-measured rather than assumed: wrapping can change with a wider column.
-    return { scene, scale: fitScale(scene, opts) };
-  }
-
-  /**
-   * The calendar as a PDF, on one page. Returns a Blob.
-   *
-   * The caller hands it to `saveFile()`, which is what announces it — a download
-   * is the one action with no visible result, and a second quiet path is exactly
-   * the bug that rule exists to prevent.
-   */
-  function calendarPdf(view, opts = {}) {
-    const { scene } = calendarLayout(view, opts);
-    return fitToPdf(scene, {
-      pageSize: opts.pageSize || 'a3',
-      orientation: opts.orientation || 'landscape',
-      margin: opts.margin,
-      title: opts.title || 'Four-week look-ahead',
-      subtitle: opts.subtitle || '',
-      author: opts.author || 'CX Timeline',
-      footer: opts.footer,
-    });
-  }
-
-  /**
-   * What the export would come out at, before anything is written.
-   *
-   * `{ scale, pt, width, height, rows, days }` — `pt` being the size the marks in
-   * the cells actually print at, which is the number the dialog puts on screen.
-   * "It fits on one page" is true of anything if you shrink it far enough; what
-   * somebody needs to know is whether they will be able to read it.
-   */
-  function calendarFit(view, opts = {}) {
-    const { scene, scale } = calendarLayout(view, opts);
-    return {
-      scale,
-      pt: DAY_FONT * scale,
-      width: scene.width,
-      height: scene.height,
-      rows: scene.counts.rows,
-      days: scene.counts.days,
-      page: pageBox(opts).label,
-    };
-  }
-
-  /** The page sizes the dialog offers, landscape or portrait. */
-  const PAGE_CHOICES = Object.entries(PAGE_SIZES)
-    .map(([id, size]) => ({ id, label: size.label.replace(' landscape', '') }));
-
-  Object.defineProperty(__x, "calendarScene", { get: () => calendarScene, enumerable: true });
-  Object.defineProperty(__x, "calendarLayout", { get: () => calendarLayout, enumerable: true });
-  Object.defineProperty(__x, "calendarPdf", { get: () => calendarPdf, enumerable: true });
-  Object.defineProperty(__x, "calendarFit", { get: () => calendarFit, enumerable: true });
-  Object.defineProperty(__x, "PAGE_CHOICES", { get: () => PAGE_CHOICES, enumerable: true });
-};
-
 // core/la_p6.js
 __mods["core/la_p6.js"] = function (__x, __req) {
   /**
@@ -8677,6 +4869,779 @@ __mods["core/la_p6.js"] = function (__x, __req) {
   Object.defineProperty(__x, "p6Coverage", { get: () => p6Coverage, enumerable: true });
 };
 
+// ui/rc_la_state.js
+__mods["ui/rc_la_state.js"] = function (__x, __req) {
+  /**
+   * What the look-ahead tab is showing, shared by its sections.
+   *
+   * The tab was one 2,400-line module, and its sections reached into each other's
+   * `let`s — "Show cells" in the cancellation log set the calendar's filter and
+   * section directly. Split into a module per section, that state lives here as
+   * one object, because an ES module cannot reassign another's binding and the
+   * linker forbids `export let` anyway. Also the one table helper they share.
+   *
+   * Imports: util.
+   */
+
+  const { el } = __req("core/util.js");
+
+  const la = {
+    /** Which section is on screen. */
+    section: 'calendar',
+    /** Free text filter on the calendar, kept across a redraw of the section. */
+    calendarFilter: '',
+    /**
+     * One row the calendar is narrowed to — "Show cells" in the cancellation log:
+     * the editor's row id where the reading carries one, and the row's words
+     * (`raw_label`) where it does not. Null is every row.
+     * @type {{ id: string | null, label: string } | null}
+     */
+    calendarRow: null,
+    /**
+     * Whether rows nobody highlighted are drawn. Off by default: most of the sheet
+     * is activities carried for reference with nothing scheduled against them.
+     */
+    showQuietRows: false,
+    /** Whether the names on each activity's Resource row are drawn. */
+    showResources: true,
+    /** How much of the calendar to show, in weeks from `calendarStart`; 0 is everything. */
+    calendarWeeks: 4,
+    /** The Monday the calendar's window starts on, paged a week at a time; null is this week's. */
+    calendarStart: null,
+    /** 'workbook' until the look-ahead is written in the calendar, then 'editor'. */
+    source: 'workbook',
+    /**
+     * Whether the calendar is switched to editing. The editor used to be a
+     * section of its own, drawing the same four weeks as the calendar beside it;
+     * it is the calendar's Edit switch now, an administrator's, off by default.
+     */
+    editing: false,
+    /** Whether somebody picked a section, so the tab stops choosing one for them. */
+    sectionChosen: false,
+    /** How many weeks the editor shows: four, or five to see one more ahead. */
+    editorWeeks: 4,
+    /** Whether the Excel export carries the names rows and the PTO / Office / Other rows. */
+    exportResources: true,
+    /**
+     * Only the rows that name the person looking. Null until somebody chooses:
+     * then it is on for the team and off for an administrator, who is usually
+     * reading the whole sheet.
+     */
+    onlyMine: null,
+    /** Whose choice `onlyMine` is. */
+    onlyMineFor: null,
+  };
+
+  const WEEK_CHOICES = [
+    { weeks: 2, label: '2 weeks' },
+    { weeks: 3, label: '3 weeks' },
+    { weeks: 4, label: '4 weeks' },
+    { weeks: 5, label: '5 weeks' },
+    { weeks: 0, label: 'Everything' },
+  ];
+
+  /* ── Shared ────────────────────────────────────────────────────────────── */
+
+  function table(headers, rows) {
+    return el('div', { class: 'rc-scroll' }, [
+      el('table', { class: 'rc-table' }, [
+        el('thead', {}, [el('tr', {}, headers.map((h) => el('th', { text: h })))]),
+        el('tbody', {}, rows),
+      ]),
+    ]);
+  }
+
+  Object.defineProperty(__x, "la", { get: () => la, enumerable: true });
+  Object.defineProperty(__x, "WEEK_CHOICES", { get: () => WEEK_CHOICES, enumerable: true });
+  Object.defineProperty(__x, "table", { get: () => table, enumerable: true });
+};
+
+// core/la_register.js
+__mods["core/la_register.js"] = function (__x, __req) {
+  /**
+   * The register: the rows a reading of the look-ahead is stored as, and the
+   * changes between two readings.
+   *
+   * The look-ahead is the contractual source of truth and the resource calendar
+   * is the execution record; the difference between two snapshots is what a
+   * delay claim is eventually built from. So the rules here are about being
+   * *honest* rather than clever — the system logs what it can see and asks a
+   * person about what it cannot.
+   *
+   * Two rules do most of the work, and both exist because the obvious version
+   * produces numbers that flatter or damn the wrong party.
+   *
+   * **Only weeks in both snapshots are compared.** A four-week window rolls
+   * forward, so a week appearing at the far edge is not scope being added and a
+   * week dropping off the back is not scope being removed. Counting them as such
+   * would book a batch of phantom additions every single week, and would count
+   * finished work as deleted scope — inflating exactly the number you would most
+   * want to defend.
+   *
+   * **A crew moving site is not inferred.** When work finishes early and a team
+   * moves, one row disappears and another appears with the same resources. The
+   * activity text is not reliable enough to match on — the spec says so and it is
+   * right — so it is logged honestly as a removal and an addition, and a person
+   * can relink the pair afterwards. Guessing would be the one failure mode
+   * nobody could audit.
+   *
+   * Reading a sheet — its grid, its marks, who it names, what it offers the
+   * timeline — is `core/lookahead.js`, which all three bundles carry. This is the
+   * part only the calendar does, so it lives in calendar.bundle.js and the
+   * timeline's and the phone's pages never download it.
+   *
+   * Imports: core/lookahead.
+   */
+  const { resourceNames, locationColumnOf, isCancelMeaning } = __req("core/lookahead.js");
+
+  /** The Monday of an ISO date's week, in UTC. A calendar date must not shift. */
+  function mondayOf(iso) {
+    const ms = Date.parse(`${iso}T00:00:00Z`);
+    const back = (new Date(ms).getUTCDay() + 6) % 7;
+    return new Date(ms - back * 86400000).toISOString().slice(0, 10);
+  }
+
+  /**
+   * Stored days whose look-ahead row now names somebody else.
+   *
+   * The 4WLA's Resource row is the plan for the days it names, so a stored
+   * `rc_plan_entries` row carrying a `lookahead_row_id` is somebody having
+   * confirmed or overridden what that row said. When a later read of the sheet
+   * puts a different name on the same row for the same day, the work has moved —
+   * and until this existed the entry stayed against whoever it was first written
+   * for. The visible cost is somebody turning up for a shift that is not theirs
+   * any more while the person who now has it has a blank against their name.
+   *
+   * `resolve` is the name lookup, **injected** for the reason `rowsFrom()` takes
+   * `locate`: the register lives two layers up, this module is a leaf, and the
+   * whole pipeline has to be testable with no browser and no network. It answers
+   * a person id for a written name, or null.
+   *
+   * Returns `[{ entry, from, to }]`, and returns nothing at all unless it is
+   * certain:
+   *
+   * **The row has to say something about that day.** A day the sheet no longer
+   * names anybody on is not a reassignment — it is the sheet going quiet, which
+   * happens whenever an activity is rescheduled, and moving a task to nobody is
+   * not a thing that can be written.
+   *
+   * **It has to name exactly one person the roster knows.** Two names on a day is
+   * a crew, and a crew is not "this task moved to Victor" — it is several entries,
+   * which is a decision somebody takes rather than one this can derive. An
+   * unmatched spelling stops it too: those are reported and answered with an
+   * alias, and guessing here would be the near-miss matching the register refuses.
+   *
+   * **It has to be somebody else.** A re-read that changed nothing must produce
+   * nothing, or every ingest would supersede every linked entry with a revision
+   * saying the same thing. `rc_reassign_plan()` refuses that case as well, so it
+   * is checked on both sides on purpose.
+   */
+  function reassignments({ planRows, laRows, resolve }) {
+    const byRow = new Map();
+    for (const row of laRows || []) {
+      if (row?.id) byRow.set(row.id, row);
+    }
+
+    const out = [];
+    for (const entry of planRows || []) {
+      if (!entry?.id || !entry.lookahead_row_id) continue;
+      const row = byRow.get(entry.lookahead_row_id);
+      if (!row) continue;
+      const written = resourceNames(row.resources?.[entry.work_date] || '');
+      if (!written.length) continue;
+
+      const ids = new Set();
+      let unknown = false;
+      for (const name of written) {
+        const id = resolve ? resolve(name) : null;
+        if (id) ids.add(id);
+        else unknown = true;
+      }
+      // One person, and every name on the day accounted for. Anything else is a
+      // crew or a spelling nobody has mapped, and neither is a move.
+      if (unknown || ids.size !== 1) continue;
+      const [to] = [...ids];
+      if (to === entry.person_id) continue;
+      out.push({ entry, from: entry.person_id, to });
+    }
+    return out;
+  }
+
+  /* ── Row identity ──────────────────────────────────────────────────────── */
+
+  /**
+   * A key for a row that survives the file being edited.
+   *
+   * The look-ahead has no activity IDs — no P6 numbers, nothing stable — and its
+   * descriptions are not matchable. Location, week and subsystem are what remain,
+   * plus an ordinal to separate two rows that share all three.
+   *
+   * The ordinal is the weak part, and knowingly so: inserting a row in the middle
+   * of a group shifts everything below it and produces a false removed/added
+   * pair. That is tolerable only because the manual relink exists to fix it, and
+   * because the alternative — matching on text — would produce *wrong* answers
+   * rather than noisy ones.
+   */
+  function rowKey({ weekStart, location, subsystem = '', ordinal = 0 }) {
+    return [weekStart, String(location || '').trim(), String(subsystem || '').trim(), ordinal].join('|');
+  }
+
+  /** Assign ordinals within each (week, location, subsystem) group. */
+  function keyRows(rows) {
+    const seen = new Map();
+    return rows.map((row) => {
+      const group = [row.weekStart, row.location, row.subsystem || ''].join('|');
+      const ordinal = seen.get(group) || 0;
+      seen.set(group, ordinal + 1);
+      return { ...row, rowKey: rowKey({ ...row, ordinal }) };
+    });
+  }
+
+  /**
+   * A read grid, as rows something else can point at.
+   *
+   * One row per activity per *week*, because that is the grain the look-ahead is
+   * maintained at and the grain a plan is made at. Two rules, both of which hold
+   * everywhere else in this module:
+   *
+   * **The location is read from the column the sheet keeps it in, and kept
+   * whether or not it resolves.** `locationColumnOf()` finds that column by its
+   * heading; `locate` — the alias register, injected so this stays testable
+   * without a network — turns the spelling into an id where it knows it. Nothing
+   * is matched on the description: the wording differs on the two sides and is
+   * not reliable enough to carry evidence, which is what the alias list is for.
+   *
+   * The text surviving an unresolved spelling is the part that was missing. The
+   * location used to be recorded *only* where the register already knew it, so a
+   * column full of "W30" and "Y10" was discarded on every deployment that had not
+   * registered them — and with nothing kept there was nothing for anybody to map,
+   * which is the one state this module is built to make impossible. An unresolved
+   * spelling is exactly like an unmapped colour or an unmatched name: shown, and
+   * one click from being answered.
+   *
+   * **A row with nothing scheduled that week is not a row.** The sheet carries
+   * activities for reference with no shift against them, and writing those would
+   * make the register mostly noise — and, worse, make every one of them look
+   * like scope the first time it *did* get a shift.
+   *
+   * @param {object} view
+   * @param {{ snapshotId?: string | null, locate?: (raw: string) => Promise<string | null>, locationColumn?: number | null }} [options]
+   */
+  async function rowsFrom(view, {
+    snapshotId = null, locate = async () => null, locationColumn = null,
+  } = {}) {
+    if (!view?.days?.length) return [];
+
+    // Told which column, or read off the sheet's own heading. `null` is "work it
+    // out"; `-1` is "there is no heading", which is the register scan below.
+    const locCol = Number.isInteger(locationColumn) ? locationColumn : locationColumnOf(view);
+
+    const dayByCol = new Map(view.days.map((d) => [d.col, d]));
+    const out = [];
+    const ordinals = new Map();
+
+    for (const activity of view.activities) {
+      if (activity.heading) continue;
+      /* Not work, so not a row. Emitting one would put "PTO" in the register as an
+         activity at no location, and `classify()` would then book it as scope
+         added the first week it appeared and scope removed the week it did not. */
+      if (activity.absence) continue;
+
+      // Group this activity's marks by the week they fall in.
+      const weeks = new Map();
+      const bucketFor = (date) => {
+        const week = mondayOf(date);
+        if (!weeks.has(week)) weeks.set(week, { cells: {}, marks: {}, resources: {} });
+        return weeks.get(week);
+      };
+      for (const mark of activity.marks) {
+        if (!mark.hex || mark.role === 'ignore') continue;
+        const day = dayByCol.get(mark.col);
+        if (!day?.date) continue;
+        const bucket = bucketFor(day.date);
+        bucket.cells[day.date] = mark.meaning || `#${mark.hex}`;
+        if (mark.value) bucket.marks[day.date] = mark.value;
+      }
+      /* The Resource row's own paint, which the workbook sometimes uses for the
+         shift instead of the activity line. It fills a day the activity line left
+         unpainted and never overrides one — the activity line is what the day *is*.
+         And it never says a day was cancelled: red on a Resource row is somebody
+         marking the names, not the work, so a cancellation colour there — or a
+         colour nobody has named, which might turn out to be one — is left out of
+         `cells` entirely, and with it out of `rc_cancelled_days`. */
+      for (const mark of activity.resource?.marks || []) {
+        if (!mark.hex || mark.role === 'ignore' || !mark.meaning || isCancelMeaning(mark.meaning)) continue;
+        const day = dayByCol.get(mark.col);
+        if (!day?.date) continue;
+        const bucket = bucketFor(day.date);
+        if (!(day.date in bucket.cells)) bucket.cells[day.date] = mark.meaning;
+      }
+      if (!weeks.size) continue;
+
+      /* Who the Resource row names, per day, in the words the workbook used.
+         Only into weeks that already have a shift in them: a name typed against a
+         day nobody is scheduled on is the same kind of stray as a colour on an
+         empty row, and writing it would invent a week of scope. Nothing is
+         matched to a person here — that happens against the roster, where an
+         unmatched name can be shown to somebody rather than guessed at. */
+      for (const mark of activity.resource?.marks || []) {
+        if (!mark.value) continue;
+        const day = dayByCol.get(mark.col);
+        const week = day?.date ? mondayOf(day.date) : null;
+        if (!week || !weeks.has(week)) continue;
+        weeks.get(week).resources[day.date] = mark.value;
+      }
+
+      /* Where the work is, from the column the sheet keeps it in.
+         **The text is kept whether or not it resolves.** It used to be recorded
+         only when the alias register already knew it, so a location column full of
+         "W30" and "Y10" was *discarded* on a deployment that had not registered
+         them yet — and with nothing kept there was nothing for anybody to map,
+         which is the one state this design is supposed to make impossible. An
+         unresolved spelling is exactly like an unmapped colour or an unmatched
+         name: shown, and one click from being answered. */
+      let locationId = null;
+      let rawLocation = null;
+      if (locCol >= 0) {
+        rawLocation = activity.meta[locCol] || null;
+        locationId = rawLocation ? await locate(rawLocation) : null;
+      } else {
+        // Nobody has said which column it is, so the register decides: the first
+        // cell it recognises is the location. Still never the *description* —
+        // that is matched on nothing, here or anywhere else in this module.
+        for (const value of activity.meta) {
+          const hit = await locate(value);
+          if (hit) { locationId = hit; rawLocation = value; break; }
+        }
+      }
+      const label = activity.meta.filter(Boolean).join(' · ');
+
+      for (const [week, bucket] of weeks) {
+        const groupKey = [week, rawLocation || '', ''].join('|');
+        const ordinal = ordinals.get(groupKey) || 0;
+        ordinals.set(groupKey, ordinal + 1);
+        out.push({
+          snapshot_id: snapshotId,
+          week_start: week,
+          sheet_row: activity.row,
+          row_key: rowKey({ weekStart: week, location: rawLocation || '', subsystem: '', ordinal }),
+          /* The editor's id for the activity, when the reading was published from
+             the editor; null for a workbook read. `row_key` is still written —
+             links made before ids existed point at it — but two readings that
+             both carry ids are compared on the id, so a row inserted mid-group
+             no longer shifts the ones under it into a removal and an addition. */
+          la_row_id: activity.id || null,
+          location_id: locationId,
+          raw_location: rawLocation,
+          raw_label: label,
+          cells: bucket.cells,
+          bart_marks: bucket.marks,
+          resources: bucket.resources,
+        });
+      }
+    }
+
+    return out;
+  }
+
+  /* ── The window ────────────────────────────────────────────────────────── */
+
+  /**
+   * The weeks a snapshot actually covers, read from the snapshot itself.
+   *
+   * Deliberately not a constant. The spec calls it a four-week look-ahead and
+   * says it is maintained four to six weeks out, so a hard-coded 4 would
+   * misclassify the sixth week every time it appeared.
+   */
+  function windowOf(rows) {
+    const weeks = [...new Set(rows.map((r) => r.weekStart))].sort();
+    return { weeks, first: weeks[0] || null, last: weeks[weeks.length - 1] || null };
+  }
+
+  /* ── Comparing ─────────────────────────────────────────────────────────── */
+
+  /**
+   * Classify the difference between two keyed snapshots.
+   *
+   * `before` and `after` are arrays of `{ rowKey, weekStart, location, subsystem,
+   * label, cells, marks }`, where `cells` maps a date to a shift meaning and
+   * `marks` holds BART's own resource requests.
+   *
+   * Returns a list of `{ kind, weekStart, rowKey, before, after }`.
+   *
+   * **A read that started recording the location is not a read where everything
+   * moved.** The row key is built from the week and the location, so the first read
+   * after the location began coming off the sheet's own column — rather than only
+   * where the alias register already knew the spelling — keys every row
+   * differently. Compared naively that is every row removed and every row added:
+   * a batch of phantom scope on the one screen somebody reads a year later, booked
+   * into the KPIs, over a change that is about the *keying* and not the work. It is
+   * the same judgement the window rule makes, and drawn as narrowly as it can be —
+   * one side recording no location at all, the other recording one, and not a
+   * single key in common. A crew genuinely moving site is still a removal and an
+   * addition, which is what `relinkCandidates()` is for.
+   */
+  function classify(before, after, { cancelledMeaning = 'cancelled' } = {}) {
+    const beforeWindow = windowOf(before);
+    const afterWindow = windowOf(after);
+
+    /* **Two readings that both carry the editor's ids are compared on them.**
+       A row is then the same row wherever it sits and whatever it says, so
+       inserting one mid-group no longer turns every row under it into a removal
+       and an addition, and an activity moved to another site is one event rather
+       than two. Only when *every* row on both sides has an id: the first reading
+       published after ids began is compared with one that had none, and mixing
+       the two keyings would book every row as moved. That one comparison goes by
+       position, as every comparison did before. */
+    const byId = before.length > 0 && after.length > 0
+      && before.every((r) => r.rowId) && after.every((r) => r.rowId);
+    const keyOf = byId ? (r) => `${r.weekStart}|id:${r.rowId}` : (r) => r.rowKey;
+
+    if (!byId && before.length && after.length) {
+      const keys = new Set(after.map((r) => r.rowKey));
+      const located = (rows) => rows.filter((r) => String(r.location || '').trim()).length;
+      const sided = located(before) === 0 !== (located(after) === 0);
+      if (sided && !before.some((r) => keys.has(r.rowKey))) return [];
+    }
+
+    // Only weeks present on both sides can be compared at all. Everything else
+    // is the window moving, which is recorded and kept out of the KPIs.
+    const shared = new Set(beforeWindow.weeks.filter((w) => afterWindow.weeks.includes(w)));
+
+    const events = [];
+    const beforeByKey = new Map(before.map((r) => [keyOf(r), r]));
+    const afterByKey = new Map(after.map((r) => [keyOf(r), r]));
+    const idOf = (r) => r.rowId || null;
+
+    /* Weeks entering and leaving the window. Not scope, and named so. */
+    for (const week of afterWindow.weeks) {
+      if (!beforeWindow.weeks.includes(week)) {
+        events.push({ kind: 'window_advanced', weekStart: week, rowKey: null, before: null, after: null });
+      }
+    }
+    for (const week of beforeWindow.weeks) {
+      if (!afterWindow.weeks.includes(week)) {
+        events.push({ kind: 'window_retired', weekStart: week, rowKey: null, before: null, after: null });
+      }
+    }
+
+    /* Rows added to, and removed from, a week that was already in view. */
+    for (const row of after) {
+      if (!shared.has(row.weekStart)) continue;
+      if (!beforeByKey.has(keyOf(row))) {
+        events.push({ kind: 'scope_added', weekStart: row.weekStart, rowKey: row.rowKey, rowId: idOf(row), before: null, after: row });
+      }
+    }
+    for (const row of before) {
+      if (!shared.has(row.weekStart)) continue;
+      if (!afterByKey.has(keyOf(row))) {
+        events.push({ kind: 'scope_removed', weekStart: row.weekStart, rowKey: row.rowKey, rowId: idOf(row), before: row, after: null });
+      }
+    }
+
+    /* What an activity says about itself, once per activity rather than once per
+       week it spans. Only visible when rows are matched on their ids: matched by
+       position, a row whose location changed was a different row, and a changed
+       description was never compared at all. */
+    const described = new Set();
+
+    /* Rows present on both sides: what changed inside them. */
+    for (const row of after) {
+      const prior = beforeByKey.get(keyOf(row));
+      if (!prior || !shared.has(row.weekStart)) continue;
+      const rowId = idOf(row);
+
+      if (byId && !described.has(rowId)) {
+        described.add(rowId);
+        const where = (r) => String(r.location || '').trim();
+        if (where(prior) !== where(row)) {
+          events.push({ kind: 'location_shift', weekStart: row.weekStart, rowKey: row.rowKey, rowId, before: prior, after: row });
+        } else if (String(prior.label || '') !== String(row.label || '')) {
+          events.push({ kind: 'details_changed', weekStart: row.weekStart, rowKey: row.rowKey, rowId, before: prior, after: row });
+        }
+      }
+
+      const dates = [...new Set([...Object.keys(prior.cells || {}), ...Object.keys(row.cells || {})])].sort();
+      for (const date of dates) {
+        const was = (prior.cells || {})[date] || null;
+        const now = (row.cells || {})[date] || null;
+        if (was === now) continue;
+
+        // A shift turning red is a cancellation, and the colour alone cannot say
+        // whose. Whoever reviews it is asked; nothing is assumed.
+        const kind = now === cancelledMeaning && was && was !== cancelledMeaning
+          ? 'cancellation'
+          : 'shift_changed';
+
+        events.push({
+          kind,
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          rowId,
+          date,
+          before: was,
+          after: now,
+          needsResponsibility: kind === 'cancellation',
+        });
+      }
+
+      // BART's own resource marks — an EIC added to an otherwise unchanged
+      // shift. The shift did not move, and the request still changed, so it is
+      // logged rather than folded into the row above.
+      const marksBefore = JSON.stringify(prior.marks || {});
+      const marksAfter = JSON.stringify(row.marks || {});
+      if (marksBefore !== marksAfter) {
+        events.push({
+          kind: 'resource_changed',
+          field: 'marks',
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          rowId,
+          before: prior.marks || {},
+          after: row.marks || {},
+        });
+      }
+
+      /* And the Resource row underneath: who is on it.
+         The same kind as a mark changing rather than a kind of its own, because
+         it is the same fact — the request against this activity moved without the
+         shift moving — and a new kind would need the `rc_change_events` check
+         constraint widened in every project that already has one. `field` is what
+         tells the two apart when somebody reads the row back. */
+      const whoBefore = JSON.stringify(prior.resources || {});
+      const whoAfter = JSON.stringify(row.resources || {});
+      if (whoBefore !== whoAfter) {
+        events.push({
+          kind: 'resource_changed',
+          field: 'resources',
+          weekStart: row.weekStart,
+          rowKey: row.rowKey,
+          rowId,
+          before: prior.resources || {},
+          after: row.resources || {},
+        });
+      }
+    }
+
+    return events;
+  }
+
+  /**
+   * Removals and additions in the same week that could be one crew moving site.
+   *
+   * Only ever a *suggestion*, surfaced for somebody to confirm. Work finishing
+   * early at one location and starting at another is not a cancellation, but the
+   * only evidence is that the same BART resources appear on both — and the
+   * activity text, which cannot be trusted. So the pairing is a human judgement
+   * by design, and the system's job is to make it easy rather than to guess.
+   */
+  function relinkCandidates(events) {
+    const removed = events.filter((e) => e.kind === 'scope_removed');
+    const added = events.filter((e) => e.kind === 'scope_added');
+    const out = [];
+
+    for (const gone of removed) {
+      for (const arrived of added) {
+        if (gone.weekStart !== arrived.weekStart) continue;
+        const a = JSON.stringify(gone.before?.marks || {});
+        const b = JSON.stringify(arrived.after?.marks || {});
+        if (a !== '{}' && a === b) {
+          out.push({ removed: gone, added: arrived, because: 'the same resources were requested' });
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Which events count toward the change KPIs.
+   *
+   * The window moving is real and recorded, and it is not a change of scope.
+   * Keeping the two apart is what stops the scope-added figure being meaningless
+   * within a month.
+   */
+  const KPI_KINDS = ['scope_added', 'scope_removed', 'cancellation', 'resource_changed', 'shift_changed'];
+
+  function countable(events) {
+    return events.filter((e) => KPI_KINDS.includes(e.kind));
+  }
+
+  /** A short, plain description of an event, for the change log. */
+  /**
+   * One line saying what an event was.
+   *
+   * Reads the *stored* shape: `before` and `after` are jsonb, because the table
+   * has no column for a date and a row-level change needs one. `sideOf()` in
+   * `ui/rc_lookahead.js` is what writes them, and the two have to agree — a
+   * mismatch here shows up as "undefined → undefined" on the one screen somebody
+   * reads a year later.
+   */
+  function describe(event) {
+    const day = event.date || event.after?.date || event.before?.date || 'a day';
+    switch (event.kind) {
+      case 'scope_added': return `Added: ${event.after?.label || event.rowKey}`;
+      case 'scope_removed': return `Removed: ${event.before?.label || event.rowKey}`;
+      case 'cancellation': return `Cancelled on ${day}: was ${event.before?.value ?? event.before}`;
+      case 'shift_changed':
+        return `${day}: ${event.before?.value || 'nothing'} → ${event.after?.value || 'nothing'}`;
+      case 'resource_changed': {
+        /* The *stored* shape decides which of the two this was: `sideOf()` writes
+           `{ resources }` for the Resource row and `{ marks }` for a mark on the
+           activity line. A row written before Resource rows existed carries only
+           the latter, and it still prints the sentence it always did rather than
+           "undefined → undefined" on the one screen somebody reads a year later. */
+        const who = (side) => {
+          const map = side?.resources;
+          if (!map || typeof map !== 'object') return null;
+          return [...new Set(Object.values(map).flatMap((v) => resourceNames(v)))].join(', ');
+        };
+        const was = who(event.before);
+        const now = who(event.after);
+        if (was === null && now === null) return 'BART resource request changed';
+        return `Resource: ${was || 'nobody'} → ${now || 'nobody'}`;
+      }
+      case 'window_advanced': return `Week ${event.weekStart} came into the window`;
+      case 'window_retired': return `Week ${event.weekStart} left the window`;
+      case 'location_shift':
+        // Matched on the editor's id, the row itself says where it went. Linked
+        // by hand from a removal and an addition, it does not.
+        if (event.before?.location !== undefined || event.after?.location !== undefined) {
+          return `${event.after?.label || event.before?.label || 'Activity'}: moved from `
+            + `${event.before?.location || 'no location'} to ${event.after?.location || 'no location'}`;
+        }
+        return 'Relinked as one crew moving site';
+      case 'details_changed':
+        return `Details: ${event.before?.label || 'nothing'} → ${event.after?.label || 'nothing'}`;
+      default: return event.kind;
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     What changed for me
+
+     Somebody on the team opens the calendar and wants to know one thing before
+     anything else: has my week moved since I last looked? This compares two
+     readings of the look-ahead — the one they last said "got it" to, and the
+     latest — for the days that name them, and says what happened in the words a
+     person would use: a day added, a day taken away, a day moved, a day given
+     to somebody else, a day cancelled, a shift changed.
+
+     Both sides come from the stored rows (`rc_lookahead_rows`), which are never
+     compacted, so an old reading can always be compared. A reading is a complete
+     statement of the weeks it covers, so each side is one reading, whole.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The days a set of stored rows names somebody on, between `from` and `to`
+   * (ISO, inclusive): a map of `date|label` → `{ date, label, location, meaning,
+   * cancelled }`.
+   */
+  function myLookaheadDays(rows, isMe, { from = null, to = null } = {}) {
+    const out = new Map();
+    for (const row of rows || []) {
+      for (const [date, text] of Object.entries(row.resources || {})) {
+        const day = String(date).slice(0, 10);
+        if ((from && day < from) || (to && day > to)) continue;
+        if (!resourceNames(text).some((n) => isMe(n))) continue;
+        const meaning = row.cells?.[day] || row.cells?.[date] || '';
+        out.set(`${day}|${row.raw_label || ''}`, {
+          date: day,
+          label: row.raw_label || '',
+          location: row.raw_location || '',
+          meaning,
+          cancelled: isCancelMeaning(meaning),
+        });
+      }
+    }
+    return out;
+  }
+
+  /** How far apart a removed and an added day of one activity may be and still be one day moved. */
+  const MOVED_WITHIN_DAYS = 14;
+
+  /**
+   * What changed between two readings for the days that name this person:
+   * `[{ kind, date, label, location, from?, was?, now?, names? }]`, by date.
+   *
+   *   added      named on a day they were not before
+   *   removed    no longer named on a day they were, and nobody else took it
+   *   given      no longer named, and the row names somebody else that day
+   *   moved      removed from one day and added to another of the same activity
+   *   cancelled  still named, and the day is now painted as a cancellation
+   *   reinstated a day that was cancelled is back on
+   *   shift      still named, and the day is painted as a different shift
+   */
+  function changesForMe(beforeRows, afterRows, isMe, { from = null, to = null } = {}) {
+    const before = myLookaheadDays(beforeRows, isMe, { from, to });
+    const after = myLookaheadDays(afterRows, isMe, { from, to });
+    const afterRow = new Map();
+    for (const row of afterRows || []) {
+      for (const date of new Set([...Object.keys(row.resources || {}), ...Object.keys(row.cells || {})])) {
+        afterRow.set(`${String(date).slice(0, 10)}|${row.raw_label || ''}`, row);
+      }
+    }
+
+    const added = [...after.entries()].filter(([k]) => !before.has(k)).map(([, v]) => v);
+    const removed = [...before.entries()].filter(([k]) => !after.has(k)).map(([, v]) => v);
+    const out = [];
+
+    /* A day taken off and another of the same activity put on, close together,
+       is one day moved — nearest first, each day used once. */
+    const usedAdded = new Set();
+    const stillRemoved = [];
+    for (const r of removed.sort((a, b) => a.date.localeCompare(b.date))) {
+      /** @type {number | null} */
+      let best = null;
+      let bestGap = Infinity;
+      added.forEach((a, i) => {
+        if (usedAdded.has(i) || a.label !== r.label) return;
+        const gap = Math.abs(Date.parse(`${a.date}T00:00:00Z`) - Date.parse(`${r.date}T00:00:00Z`)) / 86400000;
+        if (gap <= MOVED_WITHIN_DAYS && gap < bestGap) { best = i; bestGap = gap; }
+      });
+      if (best == null) { stillRemoved.push(r); continue; }
+      usedAdded.add(best);
+      const a = added[best];
+      out.push({ kind: 'moved', date: a.date, from: r.date, label: a.label, location: a.location, now: a.meaning, was: r.meaning });
+    }
+
+    added.forEach((a, i) => {
+      if (!usedAdded.has(i)) out.push({ kind: 'added', date: a.date, label: a.label, location: a.location, now: a.meaning });
+    });
+    for (const r of stillRemoved) {
+      const row = afterRow.get(`${r.date}|${r.label}`);
+      const names = resourceNames(row?.resources?.[r.date] || '').filter((n) => !isMe(n));
+      if (names.length) out.push({ kind: 'given', date: r.date, label: r.label, location: r.location, names });
+      else out.push({ kind: 'removed', date: r.date, label: r.label, location: r.location, was: r.meaning });
+    }
+    for (const [k, now] of after) {
+      const was = before.get(k);
+      if (!was) continue;
+      if (now.cancelled && !was.cancelled) {
+        out.push({ kind: 'cancelled', date: now.date, label: now.label, location: now.location, was: was.meaning });
+      } else if (was.cancelled && !now.cancelled) {
+        out.push({ kind: 'reinstated', date: now.date, label: now.label, location: now.location, now: now.meaning });
+      } else if (!now.cancelled && now.meaning !== was.meaning && now.meaning && was.meaning) {
+        out.push({ kind: 'shift', date: now.date, label: now.label, location: now.location, was: was.meaning, now: now.meaning });
+      }
+    }
+
+    return out.sort((a, b) => a.date.localeCompare(b.date) || a.label.localeCompare(b.label));
+  }
+
+  Object.defineProperty(__x, "reassignments", { get: () => reassignments, enumerable: true });
+  Object.defineProperty(__x, "rowKey", { get: () => rowKey, enumerable: true });
+  Object.defineProperty(__x, "keyRows", { get: () => keyRows, enumerable: true });
+  Object.defineProperty(__x, "rowsFrom", { get: () => rowsFrom, enumerable: true });
+  Object.defineProperty(__x, "windowOf", { get: () => windowOf, enumerable: true });
+  Object.defineProperty(__x, "classify", { get: () => classify, enumerable: true });
+  Object.defineProperty(__x, "relinkCandidates", { get: () => relinkCandidates, enumerable: true });
+  Object.defineProperty(__x, "KPI_KINDS", { get: () => KPI_KINDS, enumerable: true });
+  Object.defineProperty(__x, "countable", { get: () => countable, enumerable: true });
+  Object.defineProperty(__x, "describe", { get: () => describe, enumerable: true });
+  Object.defineProperty(__x, "myLookaheadDays", { get: () => myLookaheadDays, enumerable: true });
+  Object.defineProperty(__x, "changesForMe", { get: () => changesForMe, enumerable: true });
+};
+
 // ui/rc_ingest.js
 __mods["ui/rc_ingest.js"] = function (__x, __req) {
   /**
@@ -8694,11 +5659,10 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
   const filestore = __req("core/filestore.js");
   const { parseSheet, applyLegend, readLegend } = __req("io/lookahead.js");
   const { readGrid } = __req("core/lookahead.js");
-  const { classify, countable, rowsFrom, reassignments } = __req("core/la_register.js");
+  const { classify, countable, rowsFrom } = __req("core/la_register.js");
   const { icon } = __req("ui/icons.js");
   const { toast } = __req("ui/components.js");
-  const { notifyChanged, todayISO, isoToMs, nameRegister, foldName } = __req("ui/rc_util.js");
-  const { toISO, addDays } = __req("core/dates.js");
+  const { notifyChanged, todayISO } = __req("ui/rc_util.js");
 
   const { la } = __req("ui/rc_la_state.js");
   const { gridFromModel, windowDays, addDaysISO, mondayOf, SECTION_BAND, makeModel, cleanRow, cleanCell } = __req("core/la_edit.js");
@@ -9016,42 +5980,7 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
         const rows = await lookaheadRows(snapshot.id, grid);
         if (rows.length) written = await rc.addSnapshotRows(rows);
       } catch (err) {
-        /* A column this project has and that project has not.
-           `create table if not exists` does nothing to a table that already
-           exists, so a database built before the Resource row went in has no
-           `resources` column — and PostgREST refuses the whole insert over it.
-           The rest of the row is still worth having, so it goes without that one
-           field and the gap is *said*, rather than costing the read. */
-        let missing = missingColumns(err, ['resources', 'la_row_id']);
-        if (missing.length) {
-          try {
-            const all = await lookaheadRows(snapshot.id, grid);
-            /* PostgREST names one missing column at a time, so a project behind on
-               both is asked twice rather than losing the rows on the second. */
-            for (;;) {
-              try {
-                if (all.length) written = await rc.addSnapshotRows(all.map((row) => withoutKeys(row, missing)));
-                break;
-              } catch (again) {
-                const more = missingColumns(again, ['resources', 'la_row_id']).filter((c) => !missing.includes(c));
-                if (!more.length) throw again;
-                missing = [...missing, ...more];
-              }
-            }
-            rowTrouble = missing.includes('resources')
-              ? 'This database has no rc_lookahead_rows.resources column, so who the '
-                + 'Resource row names was not stored. Run supabase/migrate.sql and then '
-                + 'supabase/rc_schema.sql. The calendar still shows the names — it re-reads the '
-                + 'snapshot — but the Resources tab and the week plan read the stored column.'
-              : 'This database has no rc_lookahead_rows.la_row_id column, so this reading was '
-                + 'compared by position and Changes cannot say who made it. Run '
-                + 'supabase/migrate.sql and then supabase/rc_schema.sql.';
-          } catch (second) {
-            rowTrouble = second.message;
-          }
-        } else {
-          rowTrouble = err.message;
-        }
+        rowTrouble = err.message;
         /* The snapshot is the record; the rows are a convenience over it and can
            be rebuilt from it. Losing them must not lose the read — but it must
            not be silent either, which it was: a `console.warn` is a message to
@@ -9075,39 +6004,13 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
         rc.reportError('lookahead:changes', err);
       }
 
-      /* And move the days the sheet has handed to somebody else.
-         A stored entry pointing at a look-ahead row is somebody confirming or
-         overriding what that row said; when this read names a different person on
-         it, the task has moved. Done here rather than at paint time because it is
-         a *write*, and because this is the one moment somebody deliberately asked
-         the sheet what it says now. */
-      let moved = [];
-      try {
-        moved = await applyReassignments(written);
-      } catch (err) {
-        // Same reasoning as the rows and the events: the snapshot is stored, so a
-        // failure here costs a re-derivation on the next read rather than a read.
-        console.warn('[cx-timeline] reassignments not applied:', err.message);
-        rc.reportError('lookahead:reassign', err);
-      }
-
       run.outcome = 'snapshot';
       run.note = [
         grid.unknown.length ? `${grid.unknown.length} colour(s) not in the legend` : null,
         events.length ? `${countable(events).length} change(s) that count` : null,
-        moved.length ? `${moved.length} task(s) moved to somebody else` : null,
         rowTrouble ? `rows: ${rowTrouble}` : null,
       ].filter(Boolean).join('; ') || null;
       await rc.addIngestRun(run);
-
-      if (!silent && moved.length) {
-        toast({
-          tone: 'warn',
-          message: `${moved.length} planned task(s) moved to the person this read names on the row `
-            + '— flagged "Reassigned" in the week plan, with who had it before.',
-          timeout: 12000,
-        });
-      }
 
       /* Said out loud, and at length. Something downstream of this read is now
          empty, and "empty" and "it could not be written" must not look alike — a
@@ -9189,64 +6092,6 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
    *
    * Returns the events, so the caller can say how many of them count.
    */
-  /**
-   * Move every planned day the sheet has just handed to somebody else.
-   *
-   * `reassignments()` decides *which*, and refuses to decide unless it is certain
-   * — the row has to name exactly one person the roster knows on that day, and
-   * somebody other than whoever has it. This does the writing:
-   * `rc_reassign_plan()` supersedes the entry with one against the new person and
-   * records where it came from, so the outgoing row stays and the week plan can
-   * badge the new one "Reassigned from Dana".
-   *
-   * Each move is attempted on its own and a refusal is logged rather than thrown.
-   * The function refuses an entry somebody has already revised, and one refusal
-   * must not stop the other nine: they are independent facts about independent
-   * days, and the next read will offer the failed one again.
-   *
-   * Returns what actually moved, which is what the toast and the ingest note say.
-   */
-  async function applyReassignments(rows) {
-    if (!rows || !rows.length) return [];
-
-    const weeks = [...new Set(rows.map((r) => r.week_start).filter(Boolean))].sort();
-    if (!weeks.length) return [];
-    const from = weeks[0];
-    const to = toISO(addDays(isoToMs(weeks[weeks.length - 1]), 6));
-
-    const [planRows, people, aliases] = await Promise.all([
-      rc.listPlan(from, to),
-      rc.listPeople(),
-      rc.listPersonAliases().catch(() => []),
-    ]);
-
-    const register = nameRegister(people, aliases);
-    const moves = reassignments({
-      planRows,
-      laRows: rows,
-      // The register, as the lookup the derivation takes. Exact, like everywhere
-      // else: a near miss is reported on the week plan and answered with an
-      // alias, never used to move somebody's shift.
-      resolve: (name) => register.get(foldName(name)) || null,
-    });
-    if (!moves.length) return [];
-
-    const done = [];
-    for (const move of moves) {
-      try {
-        await rc.reassignPlan(move.entry.id, move.to);
-        done.push(move);
-      } catch (err) {
-        /* Already revised, already withdrawn, or already theirs. None of them is
-           a fault and none of them should stop the rest — the next read offers
-           this one again. */
-        console.warn('[cx-timeline] a task could not be moved:', err.message);
-      }
-    }
-    if (done.length) notifyChanged('plan');
-    return done;
-  }
-
   async function recordChanges(previous, snapshot, rows, legend) {
     if (!previous || !rows.length) return [];
 
@@ -9292,57 +6137,8 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
       after: sideOf(e, 'after'),
     }));
 
-    /* A database that has not been brought up to date: no column for the id, or
-       a kind its check constraint does not know yet. Every change it *can* hold
-       is still written — losing the cancellations over a details edit would be
-       the wrong way round — and what it could not is reported. */
-    let dropId = false;
-    let dropNewer = false;
-    let first = null;
-    for (;;) {
-      const sending = records
-        .filter((r) => !dropNewer || !NEWER_KINDS.includes(r.kind))
-        .map((r) => (dropId ? withoutKeys(r, ['la_row_id']) : r));
-      try {
-        if (sending.length) await rc.addChangeEvents(sending);
-        break;
-      } catch (err) {
-        const idRefused = !dropId && missingColumns(err, ['la_row_id']).length > 0;
-        const kindRefused = !dropNewer && /check constraint|violates check/i.test(err.message);
-        if (!idRefused && !kindRefused) throw err;
-        dropId = dropId || idRefused;
-        dropNewer = dropNewer || kindRefused;
-        first = first || err;
-      }
-    }
-    if (first) {
-      rc.reportError('lookahead:changes', new Error(
-        `rc_change_events is behind the application (${first.message}); run supabase/migrate.sql `
-        + 'and then supabase/rc_schema.sql so Changes can say who made each change.'));
-    }
-    return events.filter((e) => !dropNewer || !NEWER_KINDS.includes(e.kind));
-  }
-
-  /** Kinds a schema older than version 10 refuses. */
-  const NEWER_KINDS = ['details_changed'];
-
-  /**
-   * Which of `names` a PostgREST error says the table has no column for.
-   *
-   * `create table if not exists` does nothing to a table that already exists, so
-   * a project that has not run `migrate.sql` lacks every column added since — and
-   * PostgREST refuses the whole insert over one of them.
-   */
-  function missingColumns(err, names) {
-    const message = String(err?.message || '');
-    if (!/(column|schema cache)/i.test(message)) return [];
-    return names.filter((name) => new RegExp(`\\b${name}\\b`).test(message));
-  }
-
-  function withoutKeys(row, keys) {
-    const out = { ...row };
-    for (const k of keys) delete out[k];
-    return out;
+    if (records.length) await rc.addChangeEvents(records);
+    return events;
   }
 
   /**
@@ -10429,7 +7225,7 @@ __mods["ui/rc_la_p6.js"] = function (__x, __req) {
   const { readZip, readSheets, parseSheet } = __req("io/lookahead.js");
   const { icon } = __req("ui/icons.js");
   const { textInput, toast, emptyState, openModal, checkbox, badge, field } = __req("ui/components.js");
-  const { notifyChanged, formModal } = __req("ui/rc_util.js");
+  const { notifyChanged, formModal, authorNames } = __req("ui/rc_util.js");
   const { la, table } = __req("ui/rc_la_state.js");
   const { EDITOR_SOURCE } = __req("ui/rc_ingest.js");
 
@@ -10454,8 +7250,7 @@ __mods["ui/rc_la_p6.js"] = function (__x, __req) {
     }
   }
 
-  const SCHEMA_BEHIND = 'This database has no P6 tables yet. Run supabase/rc_schema.sql — Organisation → Settings says '
-    + 'which version the database is at.';
+  const UNREADABLE = 'The P6 list in calendar/p6.json could not be read. Try again once OneDrive has finished syncing the folder.';
 
   /** A row's Activity ID in words, for the hover — the same wording in the editor and the read view. */
   function p6Words(value, status) {
@@ -10789,7 +7584,7 @@ __mods["ui/rc_la_p6.js"] = function (__x, __req) {
     ].filter(Boolean)));
 
     if (!ctx.available) {
-      host.appendChild(emptyState({ iconName: 'warning', title: 'Not set up in this database yet', message: SCHEMA_BEHIND }));
+      host.appendChild(emptyState({ iconName: 'warning', title: 'The P6 list could not be read', message: ctx.error?.message || UNREADABLE }));
       return;
     }
 
@@ -10811,7 +7606,7 @@ __mods["ui/rc_la_p6.js"] = function (__x, __req) {
       }));
     } else {
       const newest = ctx.entries.reduce((a, b) => (String(a.imported_at || '') > String(b.imported_at || '') ? a : b));
-      const who = people.find((p) => p.user_id && p.user_id === newest.imported_by)?.name;
+      const who = authorNames(people)(newest.imported_by);
       const missing = ctx.entries.filter((e) => e.missing).length;
       host.appendChild(el('div', { class: 'p6-summary' }, [
         el('span', { class: 'p6-summary-count', text: count(ctx.entries.length, 'activity', 'activities') }),
@@ -11055,7 +7850,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
 
 
 
-  const { notifyChanged, todayISO, nameRegister, foldName, codeNodes } = __req("ui/rc_util.js");
+  const { notifyChanged, todayISO, nameRegister, foldName, codeNodes, authorNames } = __req("ui/rc_util.js");
   const { publishFromEditor, publishDays, EDITOR_SOURCE } = __req("ui/rc_ingest.js");
   const { la } = __req("ui/rc_la_state.js");
   const { loadP6, openP6Picker, openP6Import, p6Words } = __req("ui/rc_la_p6.js");
@@ -11069,7 +7864,17 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   const POLL_MS = 20000;
   /** While the bell is connected (`rc.lookaheadLive()`), a poll is only a check on it. */
   const POLL_LIVE_MS = 120000;
-  const PUBLISH_QUIET_MS = 2500;
+  /**
+   * How long the editor waits, quiet, before it takes a reading on its own.
+   *
+   * Done editing, and leaving the editor for another section, take one at once
+   * (`flushEditor()`); this only catches an editor left open. It was two and a
+   * half seconds while other people read the database live — every pause was a
+   * reading — and each reading is now a file in the shared folder that OneDrive
+   * uploads, so a reading is taken when somebody has finished, not when they
+   * stopped to think. The edit log keeps the fine detail either way.
+   */
+  const PUBLISH_QUIET_MS = 120000;
 
   /**
    * The editor's state, kept for the life of the page so a redraw of the tab —
@@ -12994,7 +9799,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   /** Alt+K: link every selected activity to one P6 activity, or give them all one reason. */
   function linkSelection(query = '') {
     if (!E.p6.available) {
-      toast({ tone: 'warn', message: 'This database has no P6 tables yet — run supabase/rc_schema.sql.', timeout: 8000 });
+      toast({ tone: 'warn', message: 'The P6 list could not be read from the folder — try again once OneDrive has synced it.', timeout: 8000 });
       return;
     }
     const rows = activitiesIn(selectedRows());
@@ -13736,7 +10541,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       toast({ tone: 'bad', message: err.message });
       return;
     }
-    const who = new Map(people.filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
+    const nameOf = authorNames(people);
     const when = (iso) => new Date(iso).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
     const meaning = (hex) => E.legendAll.find((e) => e.argb === hex)?.meaning || '';
     const name = ed.metaValues(row).filter(Boolean)[0] || (row.kind === 'resource' ? 'Names row' : 'Row');
@@ -13746,7 +10551,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       for (const h of ed.cellHistory(edits, row.id, day)) {
         list.appendChild(el('li', { class: 'lae-history-item' }, [
           el('span', { class: 'lae-history-when', text: when(h.at) }),
-          el('span', { class: 'lae-history-who', text: who.get(h.by) || 'Somebody' }),
+          el('span', { class: 'lae-history-who', text: nameOf(h.by) || 'Somebody' }),
           el('span', { class: 'lae-history-what' }, [
             el('span', { class: 'lae-history-from', text: ed.describeCellValue(h.before, meaning) }),
             el('span', { class: 'lae-history-arrow', html: icon('chevron-right', { size: 11 }), 'aria-label': 'became' }),
@@ -13761,7 +10566,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
             : h.changes.map((c) => `${c.field}: ${c.from === '' ? 'empty' : c.from} → ${c.to === '' ? 'empty' : c.to}`).join('; ');
         list.appendChild(el('li', { class: 'lae-history-item' }, [
           el('span', { class: 'lae-history-when', text: when(h.at) }),
-          el('span', { class: 'lae-history-who', text: who.get(h.by) || 'Somebody' }),
+          el('span', { class: 'lae-history-who', text: nameOf(h.by) || 'Somebody' }),
           el('span', { class: 'lae-history-what', text: what }),
         ]));
       }
@@ -13787,7 +10592,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       toast({ tone: 'bad', message: err.message });
       return;
     }
-    const who = new Map(people.filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
+    const nameOf = authorNames(people);
     const points = ed.restorePoints(edits).slice(0, 60);
     if (!points.length) {
       toast({ message: 'Nothing has been changed here yet, so there is nowhere to go back to.' });
@@ -13806,7 +10611,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
           onClick: () => { chosen = p; drawList(); },
         }, [
           el('span', { class: 'lae-restore-when', text: when(p.at) }),
-          el('span', { text: who.get(p.by) || 'Somebody' }),
+          el('span', { text: nameOf(p.by) || 'Somebody' }),
           el('span', { class: 'rc-hint', text: `${p.count} change${p.count === 1 ? '' : 's'} on ${p.rows} row${p.rows === 1 ? '' : 's'}` }),
         ]));
       }
@@ -14201,6 +11006,9 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       if (!E.root?.isConnected || document.hidden || E.editing || E.queue.length || E.saving) return;
       asked = Date.now();
       try {
+        // The folder first: another computer's save is only in memory once it is read in.
+        await rc.checkFolder();
+        if (E.editing || E.queue.length || E.saving) return;
         const rev = await rc.lookaheadRevision();
         // Asked again after the wait: an edit made meanwhile is not the other editor's.
         if (E.editing || E.queue.length || E.saving) return;
@@ -15468,7 +12276,7 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
   const { selectInput, textInput, badge, emptyState, checkbox, segmented, openModal } = __req("ui/components.js");
 
 
-  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs } = __req("ui/rc_util.js");
+  const { notifyChanged, byId, dayLabel, todayISO, formModal, parsedView, isoToMs, authorNames } = __req("ui/rc_util.js");
 
 
   const { toISO, addDays } = __req("core/dates.js");
@@ -15773,10 +12581,10 @@ __mods["ui/rc_la_changes.js"] = function (__x, __req) {
     return (hex) => byHex.get(String(hex || '').toUpperCase()) || '';
   }
 
-  /** A person's name for an account id, from the roster (including people who have left). */
+  /** A person's name for the id an edit was stamped with, from the roster (including people who have left). */
   function nameLookup(people) {
-    const names = new Map((people || []).filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
-    return (id) => (id ? names.get(id) || 'An account no longer on the roster' : 'Unknown');
+    const names = authorNames(people);
+    return (id) => (id ? names(id) || 'An account no longer on the roster' : 'Unknown');
   }
 
   /**
@@ -16711,289 +13519,172 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
   Object.defineProperty(__x, "renderCancellations", { get: () => renderCancellations, enumerable: true });
 };
 
-// ui/rc_la_sars.js
-__mods["ui/rc_la_sars.js"] = function (__x, __req) {
+// ui/rc_activity.js
+__mods["ui/rc_activity.js"] = function (__x, __req) {
   /**
-   * Look-ahead → Site access: SARs, filed and linked to the rows they cover.
+   * One activity, whole — what opens when somebody taps a task.
    *
-   * Imports: util, dates, rc, filestore, components, rc_util, rc_la_state.
+   * My day says "IXL Regression Testing, W40, day shift, with Rosa". That is the
+   * day; this is the work: every column of the activity's line under the sheet's
+   * own headings (Activity ID, Location, SSWP#, Party to Action, Work Hours),
+   * and every day from this week on that it carries anything — which shift the
+   * paint means, whether it was cancelled, what is written in the cell, and who
+   * the names row puts on it, with your own days marked.
+   *
+   * Read off the latest reading of the look-ahead, the same one the calendar
+   * draws. A task is found on it by its row where it can be (the reading and
+   * the sheet row it was recorded against) and by the row's exact words where
+   * it cannot; one that is no longer on the sheet says so rather than showing
+   * something else.
+   *
+   * Why a day was cancelled is claim evidence and is only readable by an
+   * administrator (`rc_cancellation_notes`), so the team sees that it was, and
+   * an administrator sees who and why too.
+   *
+   * Imports: util, rc, core/lookahead, icons, components, rc_util, rc_la_state.
    */
 
   const { el } = __req("core/util.js");
-  const { toISO, localDayMs } = __req("core/dates.js");
   const rc = __req("core/rc.js");
-  const filestore = __req("core/filestore.js");
-  const { icon } = __req("ui/icons.js");
-  const { selectInput, textInput, toast, checkbox } = __req("ui/components.js");
-  const { notifyChanged, byId, formModal } = __req("ui/rc_util.js");
+  const { activityTitle, activityDays } = __req("core/lookahead.js");
+  const { openModal, badge, emptyState } = __req("ui/components.js");
+  const { parsedView, dayLabel, todayISO, weekStart, isoToMs, goToTab, meMatcher } = __req("ui/rc_util.js");
+  const { toISO } = __req("core/dates.js");
+  const { la } = __req("ui/rc_la_state.js");
 
-  const { table } = __req("ui/rc_la_state.js");
-
-  const SAR_INBOX = 'sars/inbox';
-  /** Where a recorded SAR is filed, under the week it authorised. */
-  const SAR_ARCHIVE = 'sars';
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Site access
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  async function renderSars(host) {
-    const [sars, locations, without, unlinked, waiting] = await Promise.all([
-      rc.listSars(),
-      rc.listLocations(),
-      rc.listRowsWithoutSar(),
-      rc.listSarsWithoutRows(),
-      // What is sitting in the inbox, unrecorded. The folder is the front door
-      // for these — somebody saves the PDF from an email and that is the whole
-      // filing step they should have to do.
-      filestore.hasFolder()
-        ? filestore.intakeList(SAR_INBOX).catch(() => [])
-        : Promise.resolve([]),
-    ]);
-    const locs = byId(locations);
-
-    host.appendChild(el('div', { class: 'rc-section-head' }, [
-      el('h3', { text: 'Site access requests' }),
-      el('button', {
-        class: 'cx-btn mini primary',
-        html: icon('plus', { size: 12 }) + '<span>Record a SAR</span>',
-        onClick: () => recordSar(locations, null, host),
-      }),
-    ]));
-
-    /* The inbox. Left first because it is the only thing here that is a task. */
-    const pdfs = waiting.filter((f) => /\.pdf$/i.test(f.name));
-    if (pdfs.length) {
-      host.appendChild(table(
-        [`${pdfs.length} PDF(s) waiting in ${SAR_INBOX}/`, 'Dropped', ''],
-        pdfs.map((f) => el('tr', {}, [
-          el('td', { text: f.name }),
-          el('td', { class: 'rc-hint', text: toISO(localDayMs(f.modified)) }),
-          el('td', {}, [
-            el('button', {
-              class: 'cx-btn mini primary',
-              text: 'Record it',
-              onClick: () => recordSar(locations, f, host),
-            }),
-          ]),
-        ]))
-      ));
-      host.appendChild(el('div', { style: 'height:20px' }));
-    } else if (filestore.hasFolder()) {
-      host.appendChild(el('p', { class: 'rc-hint', text: `Nothing waiting in ${SAR_INBOX}/.` }));
-    }
-
-    /* The alert the spec did not ask for and that nothing else surfaces: work
-       planned into a week with no access confirmed against it. */
-    if (without.length) {
-      host.appendChild(el('p', { class: 'rc-error' }, [
-        el('strong', { text: `${without.length} look-ahead row(s) have no SAR. ` }),
-        el('span', { text: 'That is work planned without confirmed access.' }),
-      ]));
-    }
-    if (unlinked.length) {
-      host.appendChild(el('p', { class: 'rc-hint', text:
-        `${unlinked.length} SAR(s) match no look-ahead row — access booked for work that has gone.` }));
-    }
-
-    if (!sars.length) {
-      host.appendChild(el('p', { class: 'rc-hint', text: 'No SARs recorded.' }));
-    } else {
-      const links = await rc.listSarLinks().catch(() => []);
-      const covers = new Map();
-      for (const k of links) covers.set(k.sar_id, (covers.get(k.sar_id) || 0) + 1);
-
-      host.appendChild(table(
-        ['SAR', 'Rev', 'Location', 'Week', 'Hours', 'Covers', ''],
-        sars.map((s) => el('tr', {}, [
-          el('td', { text: s.sar_number }),
-          el('td', { class: 'rc-num', text: String(s.revision) }),
-          el('td', { text: locs.get(s.location_id)?.name || s.raw_location || '—' }),
-          el('td', { text: s.week_start || '—' }),
-          el('td', { class: 'rc-num', text: s.authorized_hours ?? '—' }),
-          el('td', { class: 'rc-num', text: covers.get(s.id) ? `${covers.get(s.id)} row(s)` : '—' }),
-          el('td', {}, [
-            el('button', {
-              class: 'cx-btn mini ghost',
-              text: 'What it covers',
-              title: 'Confirm which look-ahead rows this access is for. Offered by date and '
-                + 'location; never matched on the activity text.',
-              onClick: () => linkSar(s, host),
-            }),
-            s.storage_path ? el('button', {
-              class: 'cx-btn mini ghost',
-              text: 'Open',
-              onClick: async () => {
-                try {
-                  window.open(await rc.sarUrl(s.storage_path), '_blank', 'noopener');
-                } catch (err) {
-                  toast({ tone: 'bad', message: err.message });
-                }
-              },
-            }) : null,
-          ].filter(Boolean)),
-        ]))
-      ));
-    }
-
-    host.appendChild(el('p', {
-      class: 'rc-hint',
-      text: `Drop a SAR PDF into ${SAR_INBOX}/ and record it here; it is then filed under its week. `
-        + 'Matching to look-ahead rows is by date and location only — never by activity text, which '
-        + 'is worded differently on the two sides and is not reliable enough to carry evidence. '
-        + 'One SAR covering several rows at a location is expected, not an ambiguity.',
-    }));
-  }
+  /** The label a stored look-ahead row carries for an activity: its columns, joined. */
+  const labelOf = (activity) => (activity?.meta || []).filter(Boolean).join(' · ');
 
   /**
-   * Record a SAR, and file the PDF that came with it.
+   * Open an activity.
    *
-   * Three things happen and all three can fail independently, so they are done
-   * in the order that leaves the least mess: the row first, then the upload,
-   * then the move out of the inbox. A PDF that uploaded but could not be moved
-   * is a duplicate somebody sees; a PDF moved before the row existed would be a
-   * file nobody can find.
-   *
-   * The number and week are read off the filename where it says them, because
-   * "SAR-12345 W36.pdf" is what these are actually called — but only as a
-   * *suggestion* in a field somebody confirms. Nothing here is matched on
-   * activity text, which is the rule everywhere in this module.
+   * `row` is an `rc_lookahead_rows` row (or anything with `raw_label`, and
+   * `snapshot_id` / `sheet_row` where known). `task` is the fallback wording.
    */
-  function recordSar(locations, file, root) {
-    const guess = /(?:SAR[-_ ]?)?(\d{4,})/i.exec(file?.name || '')?.[1] || '';
-    const number = textInput({ placeholder: 'SAR-12345', value: guess ? `SAR-${guess}` : '' });
-    const location = selectInput({
-      value: locations[0]?.id,
-      options: locations.map((l) => ({ value: l.id, label: l.name })),
-    });
-    const week = el('input', { type: 'date', class: 'cx-input' });
-    const hours = el('input', { type: 'number', class: 'cx-input', step: '0.5', min: '0' });
-
-    formModal({
-      title: file ? `Record ${file.name}` : 'Record a SAR',
-      body: el('div', { class: 'cx-form' }, [
-        file ? el('p', {
-          class: 'rc-hint',
-          text: 'The PDF goes up so it opens in a browser — it has to be readable by whoever is '
-            + 'asked about it later — and the file is then moved out of the inbox into its week. '
-            + 'The look-ahead workbook is deliberately not uploaded; this is.',
-        }) : null,
-        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Number' }), number]),
-        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Location' }), location]),
-        el('div', { class: 'cx-field' }, [
-          el('label', { class: 'cx-label', text: 'Week beginning' }), week,
-          el('div', { class: 'cx-hint', text: 'The Monday, matching how the look-ahead is keyed.' }),
-        ]),
-        el('div', { class: 'cx-field' }, [el('label', { class: 'cx-label', text: 'Authorised hours' }), hours]),
-      ].filter(Boolean)),
-      confirmLabel: 'Record',
-      onConfirm: async () => {
-        if (!number.value.trim()) throw new Error('A SAR number is needed.');
-        if (file && !week.value) throw new Error('A week is needed to file it under.');
-
-        const row = await rc.addSar({
-          sar_number: number.value.trim(),
-          location_id: location.value || null,
-          week_start: week.value || null,
-          authorized_hours: hours.value ? Number(hours.value) : null,
-        });
-
-        if (file) {
-          const rel = `${SAR_INBOX}/${file.name}`;
-          const filed = `${SAR_ARCHIVE}/${week.value}/${file.name}`;
-          try {
-            const bytes = await filestore.intakeRead(rel);
-            await rc.uploadSar(`${week.value}/${row.id}.pdf`, new Blob([bytes], { type: 'application/pdf' }));
-            await rc.updateSar(row.id, { storage_path: `${week.value}/${row.id}.pdf` });
-            await filestore.intakeMove(rel, filed);
-          } catch (err) {
-            // The record exists either way, which is the part that matters. Say
-            // what did not happen rather than rolling back a row somebody has
-            // already been told about.
-            toast({
-              tone: 'warn',
-              message: `${number.value.trim()} recorded, but the PDF was not filed — ${err.message}`,
-              timeout: 10000,
-            });
-          }
-        }
-
-        notifyChanged('sars');
-        if (root) {
-          // Straight on to the question the SAR exists to answer.
-          linkSar(row, root);
-        }
-      },
-    });
-  }
-
-  /**
-   * Which look-ahead rows this access covers.
-   *
-   * Offered by **date and location only**. The activity text is worded
-   * differently on the two sides and is not reliable enough to carry evidence —
-   * that rule is why the alias register exists — so the candidates are every row
-   * at that location in that week and a person confirms. One SAR covering
-   * several rows is expected rather than an ambiguity, so this is checkboxes and
-   * not a radio.
-   */
-  async function linkSar(sar, root) {
-    const [rows, links] = await Promise.all([
-      sar.week_start ? rc.lookaheadForWeek(sar.week_start).catch(() => []) : Promise.resolve([]),
-      rc.listSarLinks().catch(() => []),
+  async function openActivity({ row = null, task = '' } = {}) {
+    const [snapshot, legendRows, isMe, notes] = await Promise.all([
+      rc.latestSnapshot().catch(() => null),
+      rc.listLegend().catch(() => []),
+      meMatcher().catch(() => null),
+      rc.isAdmin() ? rc.listCancellationNotes().catch(() => []) : Promise.resolve([]),
     ]);
-    const already = new Set(links.filter((k) => k.sar_id === sar.id).map((k) => k.lookahead_row_id));
-    const candidates = rows.filter((r) => !sar.location_id || !r.location_id || r.location_id === sar.location_id);
+    const label = row?.raw_label || task || '';
 
-    if (!candidates.length) {
-      toast({
-        message: sar.week_start
-          ? 'No look-ahead rows read for that week and location yet — read the look-ahead first.'
-          : 'This SAR has no week against it, so there is nothing to match it to.',
-        timeout: 8000,
+    if (!snapshot?.grid?.rows?.length) {
+      return openModal({
+        title: label || 'Activity',
+        body: emptyState({ iconName: 'calendar', title: 'No look-ahead to read', message: 'The look-ahead has not been published yet.' }),
+        actions: [{ label: 'Close' }],
       });
-      return;
     }
 
-    const boxes = candidates.map((r) => {
-      const box = checkbox({
-        label: [r.raw_location, r.raw_label].filter(Boolean).join(' · ').slice(0, 78),
-        checked: already.has(r.id),
-      });
-      box.querySelector('input').dataset.row = r.id;
-      return box;
-    });
-    const wrap = el('div', { style: 'display:grid;gap:6px;max-height:40vh;overflow:auto' }, boxes);
+    const view = parsedView(snapshot, legendRows);
+    /* By its row in this reading where the task was recorded against it — and
+       only when that row still says the same thing, so a row number that no
+       longer lines up can never open somebody else's activity — then by the
+       row's exact words. */
+    const byRow = row?.snapshot_id === snapshot.id && row?.sheet_row != null
+      ? view.activities.find((a) => a.row === row.sheet_row && !a.heading && !a.absence)
+      : null;
+    const activity = (byRow && (!label || labelOf(byRow) === label) ? byRow : null)
+      || view.activities.find((a) => !a.heading && !a.absence && labelOf(a) === label);
 
-    formModal({
-      title: `${sar.sar_number} — what it covers`,
-      body: el('div', { class: 'cx-form' }, [
-        el('p', {
-          class: 'rc-hint',
-          text: 'Every row at this location in this week. Matched on date and location, never on '
-            + 'the activity text — the two sides word it differently, and a wrong match here would '
-            + 'be a claim that access was granted for work it was not.',
+    if (!activity) {
+      return openModal({
+        title: label || 'Activity',
+        body: emptyState({
+          iconName: 'calendar',
+          title: 'No longer on the look-ahead',
+          message: 'This activity is not on the latest reading of the look-ahead. It may have been reworded, finished or removed — the Look-ahead tab has the sheet as it stands.',
         }),
-        wrap,
+        actions: [{ label: 'Close' }],
+      });
+    }
+
+    const title = activityTitle(view, activity);
+    const from = toISO(weekStart(isoToMs(todayISO())));
+    const days = activityDays(view, activity, { fromISO: from, isMe: isMe || (() => false) });
+    const today = todayISO();
+
+    /* The columns, under the sheet's own headings. */
+    const facts = el('dl', { class: 'rc-activity-facts' });
+    activity.meta.forEach((value, i) => {
+      if (!value) return;
+      const heading = String(view.headings?.[i] || '').trim() || `Column ${i + 1}`;
+      facts.append(el('dt', { text: heading }), el('dd', { text: value }));
+    });
+
+    /* Why, for the days an administrator has explained. */
+    const current = notes.filter((n) => !notes.some((m) => m.supersedes_id === n.id));
+    const why = (iso) => current.filter((n) => n.raw_label === labelOf(activity) && iso
+      && String(n.start_date).slice(0, 10) <= iso && String(n.end_date).slice(0, 10) >= iso)
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
+
+    const list = el('ol', { class: 'rc-activity-days', 'aria-label': 'Days on this activity' });
+    for (const d of days) {
+      const note = d.cancelled ? why(d.date) : null;
+      list.appendChild(el('li', {
+        class: `rc-activity-day${d.mine ? ' rc-activity-mine' : ''}${d.cancelled ? ' rc-activity-cancelled' : ''}${d.date === today ? ' rc-activity-today' : ''}`,
+        'aria-current': d.date === today ? 'date' : null,
+      }, [
+        el('span', { class: 'rc-activity-when', text: d.date ? dayLabel(d.date, 'day') : d.label }),
+        el('span', { class: 'rc-activity-shift' }, [
+          d.hex ? el('span', { class: 'rc-activity-swatch', style: `background-color:#${d.hex}`, 'aria-hidden': 'true' }) : null,
+          el('span', { text: d.cancelled ? 'Cancelled' : (d.meaning || (d.hex ? 'Unexplained colour' : 'Not painted')) }),
+        ].filter(Boolean)),
+        el('span', { class: 'rc-activity-who' }, [
+          d.names.length
+            ? el('span', { text: d.names.join(', ') })
+            : el('span', { class: 'rc-hint', text: 'Nobody named' }),
+          d.mine ? badge('You', 'info') : null,
+        ].filter(Boolean)),
+        d.text ? el('span', { class: 'rc-activity-text', title: 'Written in the cell', text: d.text }) : null,
+        note
+          ? el('span', { class: 'rc-activity-why', text: `${note.party}${note.reason ? ` — ${note.reason}` : ''}` })
+          : null,
+      ].filter(Boolean)));
+    }
+
+    const mineCount = days.filter((d) => d.mine).length;
+    const body = el('div', { class: 'rc-activity' }, [
+      facts,
+      el('div', { class: 'rc-activity-sub' }, [
+        el('h4', { text: 'From this week on' }),
+        el('span', {
+          class: 'rc-hint',
+          text: days.length
+            ? `${days.length} day${days.length === 1 ? '' : 's'}${mineCount ? ` · you are on ${mineCount}` : ''}`
+            : '',
+        }),
       ]),
-      confirmLabel: 'Confirm',
-      onConfirm: async () => {
-        const picked = [...wrap.querySelectorAll('input:checked')].map((b) => b.dataset.row);
-        const added = picked.filter((id) => !already.has(id));
-        if (added.length) {
-          await rc.addSarLinks(added.map((id) => ({ sar_id: sar.id, lookahead_row_id: id })));
-        }
-        notifyChanged('sars');
-        toast({
-          tone: 'good',
-          message: `${sar.sar_number} covers ${picked.length} look-ahead row(s).`,
-        });
-      },
+      days.length
+        ? list
+        : el('p', { class: 'rc-hint', text: 'Nothing on this activity from this week on.' }),
+    ]);
+
+    return openModal({
+      title: title || label || 'Activity',
+      subtitle: `As the look-ahead reads now — ${dayLabel(String(snapshot.taken_at).slice(0, 10), 'day')}`,
+      size: 'wide',
+      body,
+      actions: [
+        {
+          label: 'Show on the look-ahead',
+          onClick: () => {
+            la.calendarFilter = title;
+            la.calendarRow = null;
+            la.onlyMine = false;
+            la.section = 'calendar';
+            la.sectionChosen = true;
+            goToTab('lookahead');
+          },
+        },
+        { label: 'Close', kind: 'primary' },
+      ],
     });
   }
 
-
-  Object.defineProperty(__x, "renderSars", { get: () => renderSars, enumerable: true });
+  Object.defineProperty(__x, "openActivity", { get: () => openActivity, enumerable: true });
 };
 
 // core/export_schedule.js
@@ -17099,23 +13790,25 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
    * workbook — and the same workbook on a schedule, into the shared folder.
    *
    * One sheet per question somebody takes the record away to answer: what the
-   * look-ahead said each day, who covered which shift, what was cancelled and
-   * why, what moved between readings and why, what the huddle recorded, the
-   * blockers, the leave, P6, the TAWRs and SARs, and the registers that explain
-   * the rest. Each sheet is read the way the screen that shows it reads — the
-   * same views, the same `assignmentIndex()`, the same `cancellationLog()` — so
-   * the workbook and the calendar cannot tell two stories. Every read goes
-   * through the policies, so what lands in the file is what this account may
-   * see; a sheet that cannot be read is written empty and named in About,
+   * look-ahead said each day, who it names on which shift, what was cancelled
+   * and why, what moved between readings and why, the leave, P6, the TAWRs, and
+   * the registers that explain the rest. Each sheet is read the way the screen
+   * that shows it reads — the same views, the same `assignmentIndex()`, the same
+   * `cancellationLog()` — so the workbook and the calendar cannot tell two
+   * stories. A sheet that cannot be read is written empty and named in About,
    * never left out silently.
+   *
+   * It is also how the look-ahead reaches the team: `LookAhead_Latest.xlsx` and
+   * the 4WLA beside it are what a flow on the shared folder (Power Automate, say)
+   * picks up and sends on, so nobody needs the application to read it.
    *
    * **The schedule runs here, in the page.** There is no server to run it and
    * nothing is emailed from this application (that is structural), so it runs
    * on the computer the calendar is open on — a browser tab or the desktop app —
    * and a slot missed while it was closed is run once when it next opens
    * (`core/export_schedule.js`). The file goes into `exports/` in the shared
-   * folder through the intake door the look-ahead and SARs already use
-   * (`filestore.intakeWrite()`); with no folder connected it is downloaded.
+   * folder through the folder's intake door (`filestore.intakeWrite()`); with
+   * no folder connected it is downloaded.
    * Its settings are this computer's, because the folder and the clock are.
    */
 
@@ -17133,7 +13826,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
   const { cleanSchedule, isDue, nextSlot } = __req("core/export_schedule.js");
   const { icon } = __req("ui/icons.js");
   const { openModal, toast, checkbox, selectInput, field } = __req("ui/components.js");
-  const { todayISO, nameRegister, assignmentIndex, outcomeLookup, availability, shiftLabel, shiftFor, STATUS_BY_ID, cancellationLog, parsedView } = __req("ui/rc_util.js");
+  const { todayISO, nameRegister, assignmentIndex, availability, shiftLabel, shiftFor, cancellationLog, parsedView, authorNames } = __req("ui/rc_util.js");
 
 
 
@@ -17157,15 +13850,12 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
   /** What can go in, in the order the workbook has it. `reference` is four small sheets. */
   const SHEETS = [
     { id: 'lookahead', label: 'The look-ahead, day by day', hint: 'every activity and day — shift, support asked for and cancelled, who was named, and its P6 activity' },
-    { id: 'shifts', label: 'Shifts worked', hint: 'who covered which shift, on what and where, and how the huddle said it went' },
+    { id: 'shifts', label: 'Who is on what', hint: 'who the look-ahead names on which shift, on what and where, and who is away' },
     { id: 'cancellations', label: 'Cancellations', hint: 'every day and BART resource cancelled, with the party responsible and the reason' },
     { id: 'changes', label: 'Changes', hint: 'what moved between readings, and the reason given for it' },
-    { id: 'outcomes', label: 'Huddle outcomes', hint: 'completed, partial, carried over, blocked, reassigned, away' },
-    { id: 'blockers', label: 'Blockers', hint: 'every blocker raised, who owns it and where it stands' },
-    { id: 'leave', label: 'Leave', hint: 'leave booked and asked for' },
+    { id: 'leave', label: 'Leave', hint: 'leave booked' },
     { id: 'p6', label: 'P6 activities', hint: 'the list, and how many look-ahead rows name each activity' },
     { id: 'tawrs', label: 'TAWRs', hint: 'track access work requests' },
-    { id: 'sars', label: 'SARs', hint: 'site access requests and how many rows each covers' },
     { id: 'reference', label: 'The registers', hint: 'the team, the locations, the legend and the support codes' },
   ];
 
@@ -17300,8 +13990,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
       const written = await writtenOnlyDays(ctx, read, range);
       return written.length ? [...read, ...written].sort((a, b) => a.day.localeCompare(b.day)) : read;
     });
-    ctx.actuals = once(() => rc.readAll('rc_actuals_current', { column: 'work_date', from: range.from, to: range.to }));
-    ctx.who = (userId) => (userId ? ctx.personByUser.get(userId)?.name || '' : '');
+    ctx.who = authorNames(people);
     ctx.name = (personId) => (personId ? ctx.personById.get(personId)?.name || '' : '');
     ctx.place = (locationId, raw = '') => (locationId ? ctx.locationById.get(locationId)?.name || raw || '' : raw || '');
     ctx.source = settings.find((r) => r.key === 'lookahead_source')?.value || 'workbook';
@@ -17440,9 +14129,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
     },
 
     async shifts(ctx) {
-      const [plan, actuals, leave, latest, days] = await Promise.all([
-        rc.readAll('rc_plan_current', { column: 'work_date', from: ctx.from, to: ctx.to }),
-        ctx.actuals(),
+      const [leave, latest, days] = await Promise.all([
         rc.readAll('rc_leave', { column: 'start_date' }),
         rc.latestSnapshot().catch(() => null),
         ctx.days(),
@@ -17460,12 +14147,11 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
         if (d.marks) row.bart_marks[d.day] = d.marks;
         rows.set(d.row_id, row);
       }
-      // The PTO row is read off the latest reading only, as the week plan reads it.
+      // The PTO row is read off the latest reading only, as the PTO calendar reads it.
       const absences = latest?.grid ? absencesFrom(parsedView(latest, ctx.legendRows)) : [];
-      const index = assignmentIndex({ planRows: plan, laRows: [...rows.values()], register: ctx.register, absences, categories: ctx.categories });
-      const outcomeFor = outcomeLookup(actuals);
+      const index = assignmentIndex({ planRows: [], laRows: [...rows.values()], register: ctx.register, absences, categories: ctx.categories });
 
-      const dates = [...days.map((d) => d.day), ...plan.map((p) => p.work_date), ...actuals.map((a) => a.work_date)].filter(Boolean).sort();
+      const dates = days.map((d) => d.day).filter(Boolean).sort();
       const from = ctx.from || dates[0];
       const to = ctx.to || [dates[dates.length - 1], todayISO()].filter(Boolean).sort().pop();
       const out = [];
@@ -17473,36 +14159,32 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
         for (const person of ctx.people) {
           const entries = index.on(person.id, iso);
           for (const entry of entries) {
-            const outcome = outcomeFor(entry, person.id, iso);
             out.push([
               iso, weekday(iso), person.name, person.subsystem || '',
               entry.absence ? '' : shiftLabel(entry.shift || 'day'),
               entry.task || (entry.absence ? ABSENCE_LABELS[entry.absence] : ''),
               ctx.place(entry.location_id, entry.raw_location),
-              entry.absence ? 'The look-ahead\'s PTO / Office / Other row' : entry.from_lookahead ? 'The look-ahead' : 'Planned in the calendar',
+              entry.absence ? 'The look-ahead\'s PTO / Office / Other row' : 'The look-ahead',
               Boolean(entry.cancelled),
-              outcome ? STATUS_BY_ID.get(outcome.status)?.label || outcome.status : '',
-              outcome?.note || '', outcome?.blocked_reason || '',
             ]);
           }
           if (entries.length) continue;
           const free = availability(person, iso, leave);
           if (free.state === 'leave' && free.leave) {
             out.push([iso, weekday(iso), person.name, person.subsystem || '', '',
-              `Leave — ${ctx.leaveKindById.get(free.leave.kind_id)?.name || 'leave'}`, '', 'Booked leave', false, '', free.leave.note || '', '']);
+              `Leave — ${ctx.leaveKindById.get(free.leave.kind_id)?.name || 'leave'}`, '', 'Booked leave', false]);
           }
         }
       }
       return [{
-        name: 'Shifts worked',
+        name: 'Who is on what',
         columns: [
           { heading: 'Date', kind: 'date' }, { heading: 'Day' }, { heading: 'Person' }, { heading: 'Subsystem' },
           { heading: 'Shift' }, { heading: 'Activity or task', width: 48 }, { heading: 'Location' },
-          { heading: 'From' }, { heading: 'Cancelled' }, { heading: 'Outcome' },
-          { heading: 'Outcome note', width: 40, wrap: true }, { heading: 'Blocked because', width: 32 },
+          { heading: 'From' }, { heading: 'Cancelled' },
         ],
         rows: out,
-        empty: 'Nobody is planned or named on the look-ahead in these dates.',
+        empty: 'Nobody is named on the look-ahead in these dates.',
       }];
     },
 
@@ -17554,51 +14236,6 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
       }];
     },
 
-    async outcomes(ctx) {
-      const actuals = await ctx.actuals();
-      const labels = new Map((await rc.lookaheadRowsByIds(actuals.map((a) => a.lookahead_row_id)).catch(() => []))
-        .map((r) => [r.id, r.raw_label]));
-      return [{
-        name: 'Huddle outcomes',
-        columns: [
-          { heading: 'Date', kind: 'date' }, { heading: 'Person' }, { heading: 'Shift' }, { heading: 'Outcome' },
-          { heading: 'Family' }, { heading: 'Category' }, { heading: 'Location' }, { heading: 'Activity', width: 48 },
-          { heading: 'Note', width: 48, wrap: true }, { heading: 'Blocked because', width: 32 }, { heading: 'Blocked by' },
-          { heading: 'Photo' }, { heading: 'Recorded', kind: 'datetime' }, { heading: 'Recorded by' },
-        ],
-        rows: actuals.map((a) => {
-          const status = STATUS_BY_ID.get(a.status);
-          return [
-            a.work_date, ctx.name(a.person_id), shiftLabel(a.shift || 'day'), status?.label || a.status, status?.family || '',
-            ctx.categoryById.get(a.category_id)?.name || '', ctx.place(a.location_id, ''), labels.get(a.lookahead_row_id) || '',
-            a.note || '', a.blocked_reason || '', a.blocked_party_id ? ctx.partyById.get(a.blocked_party_id)?.name || '' : '',
-            Boolean(a.evidence_path), a.created_at, ctx.who(a.created_by),
-          ];
-        }),
-        empty: 'The huddle recorded nothing in these dates.',
-      }];
-    },
-
-    async blockers(ctx) {
-      const rows = await rc.readAll('rc_blockers_current', { column: 'raised_on', from: ctx.from, to: ctx.to });
-      return [{
-        name: 'Blockers',
-        columns: [
-          { heading: 'Raised', kind: 'date' }, { heading: 'Raised for' }, { heading: 'Location' },
-          { heading: 'What is in the way', width: 48, wrap: true }, { heading: 'Party' }, { heading: 'State' },
-          { heading: 'Owner' }, { heading: 'Due', kind: 'date' }, { heading: 'Latest note', width: 48, wrap: true },
-          { heading: 'Last updated', kind: 'datetime' }, { heading: 'Age in days', kind: 'number' },
-        ],
-        rows: rows.map((b) => [
-          b.raised_on, ctx.name(b.person_id), ctx.place(b.location_id, ''), b.summary || '',
-          b.party_id ? ctx.partyById.get(b.party_id)?.name || '' : '', b.state || 'open',
-          ctx.name(b.owner_id), b.due_date || '', b.last_note || '', b.last_update || '',
-          b.age_days == null ? '' : Number(b.age_days),
-        ]),
-        empty: 'No blocker was raised in these dates.',
-      }];
-    },
-
     async leave(ctx) {
       const rows = (await rc.readAll('rc_leave', { column: 'start_date' }))
         .filter((l) => (!ctx.from || l.end_date >= ctx.from) && (!ctx.to || l.start_date <= ctx.to));
@@ -17608,7 +14245,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
         columns: [
           { heading: 'Person' }, { heading: 'Kind' }, { heading: 'From', kind: 'date' }, { heading: 'To', kind: 'date' },
           { heading: 'Calendar days', kind: 'number' }, { heading: 'Status' }, { heading: 'First day' }, { heading: 'Last day' },
-          { heading: 'Note', width: 40, wrap: true }, { heading: 'Asked', kind: 'datetime' },
+          { heading: 'Note', width: 40, wrap: true }, { heading: 'Booked', kind: 'datetime' },
         ],
         rows: rows.map((l) => [
           ctx.name(l.person_id), ctx.leaveKindById.get(l.kind_id)?.name || '', l.start_date, l.end_date, span(l),
@@ -17654,38 +14291,17 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
       }];
     },
 
-    async sars(ctx) {
-      const [sars, links] = await Promise.all([rc.listSars(), rc.listSarLinks().catch(() => [])]);
-      const linked = new Map();
-      for (const l of links) linked.set(l.sar_id, (linked.get(l.sar_id) || 0) + 1);
-      const rows = sars.filter((s) => (!ctx.from || !s.week_start || s.week_start >= addDaysISO(ctx.from, -6))
-        && (!ctx.to || !s.week_start || s.week_start <= ctx.to));
-      return [{
-        name: 'SARs',
-        columns: [
-          { heading: 'SAR number' }, { heading: 'Revision', kind: 'number' }, { heading: 'Location' },
-          { heading: 'Week starting', kind: 'date' }, { heading: 'Starts', kind: 'datetime' }, { heading: 'Ends', kind: 'datetime' },
-          { heading: 'Authorised hours', kind: 'number' }, { heading: 'Look-ahead rows covered', kind: 'number' }, { heading: 'File', width: 40 },
-        ],
-        rows: rows.map((s) => [
-          s.sar_number, s.revision ?? '', ctx.place(s.location_id, s.raw_location), s.week_start || '', s.start_at || '', s.end_at || '',
-          s.authorized_hours == null ? '' : Number(s.authorized_hours), linked.get(s.id) || 0, s.storage_path || '',
-        ]),
-        empty: 'No SAR in these dates.',
-      }];
-    },
-
     async reference(ctx) {
       const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
       return [
         {
           name: 'Team',
           columns: [
-            { heading: 'Name' }, { heading: 'Email' }, { heading: 'Title' }, { heading: 'Subsystem' }, { heading: 'Role' },
+            { heading: 'Name' }, { heading: 'Email' }, { heading: 'Title' }, { heading: 'Subsystem' },
             { heading: 'Takes shifts' }, { heading: 'Active' }, { heading: 'Working days' },
           ],
           rows: ctx.people.map((p) => [
-            p.name, p.email || '', p.title || '', p.subsystem || '', p.role || '', p.scheduled !== false, p.active !== false,
+            p.name, p.email || '', p.title || '', p.subsystem || '', p.scheduled !== false, p.active !== false,
             (Array.isArray(p.working_days) ? p.working_days : [1, 2, 3, 4, 5]).map((d) => days[d - 1]).filter(Boolean).join(' '),
           ]),
         },
@@ -17709,9 +14325,8 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
   };
 
   const NAMES = {
-    lookahead: ['Look-ahead'], shifts: ['Shifts worked'], cancellations: ['Cancellations'], changes: ['Changes'],
-    outcomes: ['Huddle outcomes'], blockers: ['Blockers'], leave: ['Leave'], p6: ['P6 activities'], tawrs: ['TAWRs'],
-    sars: ['SARs'], reference: ['Team', 'Locations', 'Legend', 'Support codes'],
+    lookahead: ['Look-ahead'], shifts: ['Who is on what'], cancellations: ['Cancellations'], changes: ['Changes'],
+    leave: ['Leave'], p6: ['P6 activities'], tawrs: ['TAWRs'], reference: ['Team', 'Locations', 'Legend', 'Support codes'],
   };
 
   /**
@@ -17726,9 +14341,8 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
     const wanted = SHEETS.filter((s) => settings.sheets.includes(s.id));
     const sheets = [];
     const failed = [];
-    /* One at a time, in order, and each on its own: a sheet the policies refuse
-       (TAWRs to anybody but an administrator) or a database without a view yet
-       is written empty and named, never allowed to lose the rest. */
+    /* One at a time, in order, and each on its own: a sheet that cannot be
+       read is written empty and named, never allowed to lose the rest. */
     for (const want of wanted) {
       try {
         sheets.push(...await BUILDERS[want.id](ctx));
@@ -17743,11 +14357,11 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
       columns: [{ heading: 'Item', width: 28 }, { heading: 'Value', width: 40 }, { heading: 'Detail', width: 90, wrap: true }],
       rows: [
         ['Exported', now.toLocaleString(), now.toISOString()],
-        ['Exported by', rc.me()?.name || rc.currentUser?.()?.email || '', ''],
+        ['Exported by', rc.me()?.name || '', ''],
         ['Dates', range.label, range.from || range.to ? `${range.from || 'the start'} to ${range.to || 'the end'}` : ''],
         ['The look-ahead is written in', ctx.source === 'editor' ? 'The calendar (Edit)' : 'The workbook', ''],
         ['How a day of the look-ahead is read', 'The newest reading of its week', 'Each week comes from the newest reading taken of it — '
-          + 'the rule the week plan reads by — so a week the window has rolled past keeps the last reading that had it, and older readings '
+          + 'so a week the window has rolled past keeps the last reading that had it, and older readings '
           + 'of the same week are still on the record in the calendar. A week written in the calendar that no reading has — '
           + 'further back than the week just gone, filled in afterwards — comes from the calendar as written, and says so in its Source column.'],
         ['', '', ''],
@@ -17821,9 +14435,9 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
 
   /**
    * Look once a minute for an export that is due, on this computer. Started
-   * when the calendar starts; it acts only for an administrator who is not
-   * seeing it as somebody else, and only while the page is open — which is the
-   * whole of what a page can promise.
+   * when the calendar starts, and acting only while it is open — which is the
+   * whole of what a page can promise. Holding the pen is not needed: the export
+   * reads the calendar and writes only into `exports/`.
    */
   function startScheduledExports() {
     if (started) return;
@@ -17833,7 +14447,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
   }
 
   async function scheduledTick(now = Date.now()) {
-    if (running || !rc.isSignedIn() || !rc.isAdmin() || rc.previewing()) return false;
+    if (running || !rc.isSignedIn()) return false;
     const s = loadSettings();
     if (!isDue(s.schedule, { lastRun: s.lastRun, since: s.since }, now)) return false;
     if (s.failedAt && now - s.failedAt < RETRY_MS) return false;
@@ -18020,20 +14634,12 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
 // ui/rc_lookahead.js
 __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   /**
-   * The four-week look-ahead, and the SARs against it.
+   * The four-week look-ahead, and everything read against it.
    *
-   * The look-ahead is the contractual source of truth; the resource calendar is
-   * the execution record. This tab is where the two meet: it reads the workbook
-   * out of the OneDrive folder, snapshots it, works out what changed since last
-   * time, and lets somebody annotate the judgements the system cannot make.
-   *
-   * Ingestion is desktop-only in practice, and the reason is worth stating: a
-   * browser cannot watch a file in a synced folder. It can be granted one, but it
-   * cannot poll for changes in the background. So coverage has gaps whenever
-   * nobody has the application open — and a gap that is not recorded looks
-   * exactly like a week in which nothing changed. Every attempt therefore writes
-   * an `rc_ingest_runs` row, and the change log renders the gaps rather than
-   * showing a smooth history that is not true.
+   * The look-ahead is written here, in the editor, and every reading of it is
+   * kept: the calendar draws the newest, the cancellation log and the Changes
+   * list compare them, and the legend and the P6 list are what they are read
+   * against. All of it is in the shared folder (`core/rc.js`).
    *
    * Imports: util, events, dates, rc, filestore, io/lookahead, core/lookahead,
    *          core/la_edit, core/la_p6, icons, components, rc_util.
@@ -18063,12 +14669,11 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { renderLegend } = __req("ui/rc_la_legend.js");
   const { renderChanges, renderSnapshots } = __req("ui/rc_la_changes.js");
   const { renderCancellations } = __req("ui/rc_la_cancellations.js");
-  const { renderSars } = __req("ui/rc_la_sars.js");
   const { renderP6, p6Words } = __req("ui/rc_la_p6.js");
   const { openActivity } = __req("ui/rc_activity.js");
   const { masterExportButton } = __req("ui/rc_master_export.js");
 
-  const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6', 'sars'];
+  const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6'];
 
   async function render(root) {
     /* The calendar is the team's; the register around it is not.
@@ -18098,7 +14703,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         type: 'button',
         text: {
           calendar: 'Calendar', cancellations: 'Cancellations', changes: 'Changes',
-          snapshots: 'Snapshots', legend: 'Legend', p6: 'P6 activities', sars: 'Site access',
+          snapshots: 'Snapshots', legend: 'Legend', p6: 'P6 activities',
         }[id],
         'aria-pressed': String(id === la.section),
         onClick: async () => {
@@ -18122,8 +14727,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     else if (la.section === 'changes') await renderChanges(host);
     else if (la.section === 'snapshots') await renderSnapshots(host);
     else if (la.section === 'legend') await renderLegend(host);
-    else if (la.section === 'p6') await renderP6(host);
-    else await renderSars(host);
+    else await renderP6(host);
   }
 
   /**
@@ -18143,6 +14747,16 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       html: icon(on ? 'check' : 'edit', { size: 12 }) + `<span>${on ? 'Done editing' : 'Edit'}</span>`,
       onClick: async (e) => {
         const btn = e.currentTarget;
+        /* Writing the look-ahead needs the pen. Somebody else holding it is
+           said here, where it is wanted, with the way to take it at the top. */
+        if (!on && !rc.canWrite()) {
+          toast({
+            tone: 'warn',
+            message: `${rc.penState().holder || 'Somebody else'} is editing the calendar. Take over at the top of the calendar to edit it here.`,
+            timeout: 8000,
+          });
+          return;
+        }
         btn.disabled = true;
         try {
           if (on) await flushEditor();
@@ -19323,1216 +15937,13 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
 };
 
-// ui/rc_week.js
-__mods["ui/rc_week.js"] = function (__x, __req) {
-  /**
-   * The week plan — who is where, what they are on, and how it went.
-   *
-   * One tab, and it used to be two. "Week plan" drew the team's week from the
-   * plan's side; "Resources" drew the same rows the other way round, per person,
-   * with what the 4WLA asked for beside them. They were people down and days
-   * across in both cases, over the same `rc_plan_entries`, through the same
-   * `assignmentIndex()` — the same table drawn twice with a different subtitle,
-   * and each one missing something the other had. Whichever you opened, the answer
-   * you wanted was on the other.
-   *
-   * So there is one. It carries every part that was load-bearing in either:
-   *
-   * **What each person is on, per day**, every task and not the first of them,
-   * because a shift is routinely two jobs.
-   *
-   * **What the 4WLA asked for**, where a stored entry disagrees with it. That is
-   * a decision somebody took against the workbook and it is the one case worth
-   * drawing twice; where they agree — the normal case, since the sheet *is* the
-   * plan — there is nothing to reconcile and one line is drawn.
-   *
-   * **How yesterday went.** The huddle records an outcome against a day, and the
-   * meeting is an administrator's screen. Without it here a member had no way to
-   * see what was said about their own work: the status, the note, the photograph,
-   * whether it was carried over. It is read-only in this view — recording is the
-   * meeting's job and there must be one recording path — but it is *shown*, and
-   * that is most of why a member needs to open this at all.
-   *
-   * **Who can actually be staffed each day**, on the bottom row. The number that
-   * stops work being promised for a day that cannot be covered.
-   *
-   * **The names and places the registers cannot resolve.** A view that is
-   * incomplete and says so is usable; one that is quietly wrong is not.
-   *
-   * **A member's own row is theirs.** They create, revise and withdraw tasks on
-   * it and on no other, which is `rc_can_act_for()` in Postgres — this only
-   * stops offering what the database would refuse. Withdrawing is a tombstone
-   * rather than a delete, because `rc_plan_entries` has no DELETE grant and a
-   * plan that changed the evening before a shift is delay evidence.
-   *
-   * Everything written here is an `rc_plan_entries` row — the same rows the huddle
-   * reads and the reports group by. There is one place a day is planned and
-   * several places it is read.
-   *
-   * Imports: util, dates, rc, icons, components, rc_util.
-   */
-
-  const { el, clear } = __req("core/util.js");
-  const { toISO, addDays, todayMs } = __req("core/dates.js");
-  const rc = __req("core/rc.js");
-  const { icon } = __req("ui/icons.js");
-  const { textInput, selectInput, toast, badge, field, emptyState, promptDialog, confirmDialog } = __req("ui/components.js");
-
-
-
-  const { SHIFTS, STATUS_BY_ID, weekStart, allWeekDays, todayISO, dayLabel, byId, availability, notifyChanged, formModal, nameRegister, foldName, goToTab, ambiguousFirstNames, lookaheadWithResources, assignmentIndex, locationRegister, unmatchedLocations, outcomeLookup, shiftLabel, cancelledOn, watchForNewReading } = __req("ui/rc_util.js");
-
-
-
-
-
-
-  /** Which week is on screen. Null means the one containing today. */
-  let weekOf = null;
-
-  const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-  /** Saturday or Sunday. */
-  const isWeekendISO = (iso) => [0, 6].includes(new Date(`${iso}T00:00:00Z`).getUTCDay());
-
-  /** "Sat Oct 3" — the day's name beside its date, so a column needs no counting. */
-  const columnLabel = (iso) => `${WEEKDAYS[new Date(`${iso}T00:00:00Z`).getUTCDay()]} ${dayLabel(iso, 'short').replace(/, \d+$/, '')}`;
-
-  async function render(root) {
-    const startMs = weekOf ?? weekStart(todayMs());
-    const days = allWeekDays(startMs);
-    const from = days[0];
-    const to = days[days.length - 1];
-    const today = todayISO();
-
-    /* The look-ahead is administrators-only in the database, so a member gets
-       nothing back and the view simply has no BART column — which is correct, and
-       is why `lookaheadWithResources()` catches rather than a permission test up
-       here. It is also the one place the three views ask, so they cannot disagree
-       about where somebody is. */
-    const [people, locations, categories, leave, planRows, actuals, aliases, locAliases, sheet, everybody] =
-      await Promise.all([
-        /* The people who take shifts, which is what this view is a reading of.
-           A manager administers the calendar and is never assigned to a location,
-           so a row of seven dots against their name is a row of noise in the middle
-           of the one screen that answers "who is where". It is `scheduled` that
-           decides and never the role — an administrator who *does* take shifts
-           stays here, which is the whole reason the column exists — and it is the
-           same filter the week plan and the huddle already make. */
-        rc.listPeople({ scheduledOnly: true }),
-        rc.listLocations(),
-        rc.listCategories(),
-        /* Three weeks past the end of this one, not one. You find out somebody is
-           off when you try to staff the day, which is a fortnight too late to do
-           anything about it — so the window for leave is wider than the window
-           for the grid, and what falls outside it is named underneath. */
-        rc.listLeave(from, toISO(addDays(startMs, 27))),
-        rc.listPlan(from, to),
-        /* How it went, from the huddle. Read-only here: recording is the
-           meeting's job and there is one recording path. Shown because the
-           meeting is an administrator's screen, so without this a member had
-           nowhere to see what was said about their own week. */
-        rc.listActuals(from, to).catch(() => []),
-        rc.listPersonAliases().catch(() => []),
-        rc.listLocationAliases().catch(() => []),
-        lookaheadWithResources(from, to),
-        /* Everybody, for the register only. A name in the workbook belongs to
-           whoever it belongs to, and matching it against the scheduled roster alone
-           would report a real person — a manager the sheet happens to name — as a
-           spelling nobody could place. */
-        rc.listPeople().catch(() => []),
-      ]);
-    const laRows = sheet.rows;
-    /* The 4WLA is the plan for the days it names, so a day called off in it — a
-       cancellation painted in the editor, a workbook read — has to reach this
-       screen without anybody reopening it. Redrawn as soon as the newer reading
-       is published. */
-    watchForNewReading(root, sheet.snapshotId);
-
-    const locs = byId(locations);
-    const cats = byId(categories);
-    const register = nameRegister(everybody.length ? everybody : people, aliases);
-    /* The 4WLA's Resource row *is* the plan for the days it names — derived, never
-       written — and a stored entry is somebody overriding it or planning a day the
-       sheet says nothing about. The same reading the week plan and the huddle
-       make, from the same function. */
-    const index = assignmentIndex({ planRows, laRows, absences: sheet.absences, categories, register });
-    const { byPerson, unmatched, near } = index;
-    /* "Nobody is called that" and "two people are, and I will not choose" are
-       different problems with different fixes, and a list that ran them together
-       would send somebody looking for a person who is already on the roster
-       twice. */
-    const shared = ambiguousFirstNames(people);
-    /* Where the sheet says the work is. The same answer as a name it cannot place:
-       the spelling is kept and shown, never discarded and never guessed at. */
-    const strangeLocations = unmatchedLocations(laRows, locationRegister(locations, locAliases));
-
-    /* How each day went — the one rule for matching an outcome to a drawn task,
-       shared with the phone's week so the two cannot disagree. */
-    const outcomeFor = outcomeLookup(actuals);
-
-    const thisWeek = leave.filter((l) => l.start_date <= to && l.end_date >= from);
-    const soon = leave.filter((l) => l.start_date > to
-      && l.status !== 'cancelled' && l.status !== 'declined');
-
-    /* All seven days, always. The weekend used to be hidden unless somebody
-       ticked a box, and commissioning runs possessions on exactly those days —
-       so they are drawn every week, shaded so they read as the weekend. */
-    const columns = days;
-
-    const redraw = () => { clear(root); render(root); };
-
-    /* Back, the week, forward — one group, held together, so the arrows sit
-       either side of the date they move instead of being pushed to the far edges
-       of the header by the rule that right-aligns its buttons. */
-    root.appendChild(el('div', { class: 'rc-section-head' }, [
-      el('div', { class: 'rc-week-nav' }, [
-        el('button', {
-          class: 'cx-btn icon mini ghost',
-          'aria-label': 'Previous week',
-          title: 'Previous week',
-          html: icon('chevron-left', { size: 14 }),
-          onClick: () => { weekOf = startMs - 7 * 86400000; redraw(); },
-        }),
-        el('h3', { text: `Week of ${dayLabel(from, 'medium')}` }),
-        el('button', {
-          class: 'cx-btn icon mini ghost',
-          'aria-label': 'Next week',
-          title: 'Next week',
-          html: icon('chevron-right', { size: 14 }),
-          onClick: () => { weekOf = startMs + 7 * 86400000; redraw(); },
-        }),
-        weekOf === null ? null : el('button', {
-          class: 'cx-btn mini ghost',
-          text: 'This week',
-          onClick: () => { weekOf = null; redraw(); },
-        }),
-      ].filter(Boolean)),
-      rc.canWrite()
-        ? el('button', {
-          class: 'cx-btn mini primary',
-          html: icon('plus', { size: 12 }) + '<span>Assign work</span>',
-          title: 'Anything, including a day that is not in the 4WLA at all — office, another '
-            + 'project, training.',
-          onClick: () => assign({
-            people, locations, categories, laRows, locs, days, redraw, person: null, iso: null,
-          }),
-        })
-        : null,
-    ].filter(Boolean)));
-
-    if (!people.length) {
-      root.appendChild(emptyState({
-        iconName: 'users',
-        title: 'Nobody on the team yet',
-        message: 'Add people in Organisation first. Being on the roster never requires an account.',
-        action: rc.isAdmin() ? { label: 'Open Organisation', onClick: () => goToTab('org') } : null,
-      }));
-      return;
-    }
-
-
-    /* ── The grid ─────────────────────────────────────────────────────────── */
-
-    const body = el('tbody');
-    for (const person of people) {
-      const wanted = byPerson.get(person.id) || new Map();
-      const cells = columns.map((iso) => {
-        const state = availability(person, iso, thisWeek, index.absent(person.id, iso));
-        const asked = wanted.get(iso) || [];
-        const classes = ['rc-res-cell'];
-        if (iso === today) classes.push('rc-res-today');
-        if (isWeekendISO(iso)) classes.push('rc-res-weekend');
-
-        if (state.state === 'leave') {
-          return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, [
-            // Booked, or only on the 4WLA's PTO row: one day off either way, and
-            // which of the two wrote it down is the PTO tab's question.
-            badge('Leave', 'muted'),
-          ]);
-        }
-        const planned = index.on(person.id, iso);
-        if (state.state === 'non-working' && !planned.length && !asked.length) {
-          return el('td', {
-            class: `${classes.join(' ')} rc-inactive`,
-            'data-label': dayLabel(iso),
-          }, [el('span', { text: '·' })]);
-        }
-
-        /* Whose day this is decides whether it can be changed. A member plans,
-           revises and withdraws their own and nobody else's; an administrator does
-           anybody's. That is `rc_can_act_for()` in Postgres — this only stops
-           offering what the database would refuse. */
-        const mayPlan = rc.canWrite() && (rc.isAdmin() || person.id === rc.me()?.id);
-
-        const parts = [];
-        // Every task on the day, not the first of them. A shift is routinely two
-        // jobs, and drawing one was how the other went missing.
-        for (const entry of planned) {
-          const outcome = outcomeFor(entry, person.id, iso);
-          const status = outcome ? STATUS_BY_ID.get(outcome.status) : null;
-          parts.push(el('div', {
-            class: ['rc-res-job', entry.absence ? 'rc-res-away' : '',
-              entry.cancelled ? 'rc-res-cancelled' : '',
-              outcome ? `rc-res-done rc-res-${outcome.status}` : ''].filter(Boolean).join(' '),
-          }, [
-            el('div', {
-              class: 'rc-res-task',
-              text: entry.task || '—',
-              title: entry.cancelled ? 'Cancelled in the 4WLA for this day.' : null,
-            }),
-            el('div', { class: 'rc-hint', text: [
-              locs.get(entry.location_id)?.name || entry.raw_location,
-              cats.get(entry.category_id)?.name,
-              entry.shift && entry.shift !== 'day' ? shiftLabel(entry.shift) : null,
-            ].filter(Boolean).join(' · ') }),
-            el('div', { class: 'rc-res-flags' }, [
-              /* Called off in the 4WLA. Said in words as well as struck through:
-                 a line through the task alone is colour and decoration, and the
-                 day is still drawn because somebody planned to be here. */
-              entry.cancelled ? badge('Cancelled', 'bad') : null,
-              /* The workbook is the assumption, so only a day somebody typed in
-                 carries a flag. A derived day has `id: null` by design, which is
-                 what tells the two apart. */
-              !entry.from_lookahead && entry.id ? badge('Manual', 'warn') : null,
-              /* Moved, because a later read of the sheet named somebody else on
-                 the row this was written against. Drawn on the person who has it
-                 now and naming the one who had it, which is the only version of
-                 this that answers "why am I on this". */
-              entry.reassigned_from
-                ? badge(`Reassigned from ${nameOf(everybody, people, entry.reassigned_from)}`, 'info')
-                : null,
-              entry.supersedes_id && !entry.reassigned_from ? badge('Revised', 'warn') : null,
-              entry.carry_chain_id ? badge('Carried over', 'warn') : null,
-            ].filter(Boolean)),
-            /* How it went, from the huddle — the whole reason a member opens this.
-               Read-only: the meeting is where an outcome is recorded and there is
-               one recording path, so this states it and offers nothing. */
-            outcome
-              ? el('div', { class: 'rc-res-outcome' }, [
-                /* An eyebrow, because this is a different *kind* of thing from
-                   the flags above it: those say what the plan is, this says what
-                   happened. Without it the status badge read as a fourth flag. */
-                el('span', { class: 'rc-eyebrow', text: 'Recorded' }),
-                badge(status?.label || outcome.status, status?.tone || 'muted'),
-                outcome.blocked_reason
-                  ? el('div', { class: 'rc-hint', text: outcome.blocked_reason })
-                  : null,
-                outcome.note ? el('div', { class: 'rc-hint', text: outcome.note }) : null,
-                outcome.evidence_path
-                  ? el('button', {
-                    class: 'cx-btn mini ghost rc-evidence',
-                    html: `${icon('paperclip', { size: 11 })}<span>Photo</span>`,
-                    title: 'Open the photograph taken with this outcome',
-                    onClick: async () => {
-                      try {
-                        window.open(await rc.evidenceUrl(outcome.evidence_path), '_blank', 'noopener');
-                      } catch (err) {
-                        toast({ tone: 'bad', message: `That photograph could not be opened — ${err.message}` });
-                      }
-                    },
-                  })
-                  : null,
-                outcome.supersedes_id ? el('div', { class: 'rc-hint', text: 'corrected' }) : null,
-              ].filter(Boolean))
-              : null,
-            /* Changing it. A derived day has no row to revise, so revising it *is*
-               writing the first one — which is what overriding the sheet means, and
-               is labelled as that. Withdrawing is only ever offered for a stored
-               row: there is nothing to withdraw from a day the sheet is asserting,
-               and the honest answer there is to override it. */
-            mayPlan
-              ? el('div', { class: 'rc-res-acts' }, [
-                /* Icons rather than words. Seven columns of "Edit" and "Delete"
-                   is more chrome than content in a cell that already carries a
-                   task, a place, its flags and how it went — and the actions are
-                   the least interesting thing in it. Labelled for a screen reader
-                   and titled for a pointer, which is what an icon-only button
-                   owes anybody. */
-                el('button', {
-                  class: 'cx-btn icon mini ghost',
-                  'aria-label': entry.from_lookahead
-                    ? `Override the sheet for ${person.name} on ${dayLabel(iso)}`
-                    : `Revise ${entry.task || 'this task'}`,
-                  html: icon(entry.from_lookahead ? 'refresh' : 'edit', { size: 11 }),
-                  title: entry.from_lookahead
-                    ? 'Override the sheet. The 4WLA plans this day, so changing it writes the first '
-                      + 'plan entry against it.'
-                    : 'Revise this — the outgoing version stays on the record.',
-                  onClick: () => (entry.from_lookahead
-                    ? overrideSheet({
-                      person, iso, laRows, locations, categories, locs, redraw,
-                      row: laRows.find((r) => r.id === entry.lookahead_row_id) || null,
-                    })
-                    : revisePlan(entry, person, { locations, categories, locs, redraw })),
-                }),
-                entry.id
-                  ? el('button', {
-                    class: 'cx-btn icon mini ghost danger',
-                    'aria-label': `Remove ${entry.task || 'this task'} from ${dayLabel(iso)}`,
-                    html: icon('trash', { size: 11 }),
-                    title: 'Takes the day off the schedule. The record keeps it — a plan that '
-                      + 'changed the evening before a shift is itself evidence — so this writes a '
-                      + 'withdrawal rather than removing anything.',
-                    onClick: () => withdraw(entry, person, redraw),
-                  })
-                  : null,
-              ].filter(Boolean))
-              : null,
-          ].filter(Boolean)));
-        }
-        const entry = planned[0] || null;
-
-        /* The one case worth drawing twice: a stored entry that overrides what the
-           sheet asks for. That is a decision somebody took against the workbook,
-           and seeing the two side by side is the whole reason this view exists.
-           Where they agree — which is now the normal case, because the sheet *is*
-           the plan — there is nothing to reconcile and only one line is drawn. */
-        if (entry && !entry.from_lookahead) {
-          const linked = new Set(planned.map((e) => e.lookahead_row_id).filter(Boolean));
-          for (const row of asked) {
-            if (linked.has(row.id)) continue;
-            parts.push(el('div', {
-              class: 'rc-res-asked',
-              title: 'The 4WLA names this person here and the plan for the day says otherwise.',
-            }, [
-              el('span', { class: 'rc-eyebrow', text: '4WLA' }),
-              el('div', { text: (row.raw_label || `row ${row.sheet_row}`).slice(0, 44) }),
-              cancelledOn(row, iso) ? badge('Cancelled', 'bad') : null,
-              el('div', {
-                class: 'rc-hint',
-                /* The place the register knows, and the sheet's own spelling only
-                   where it does not know one. It read the other way round, which
-                   put "T12" on screen for a location the application can name — the
-                   code is what the workbook types, not what anybody calls it. */
-                text: locs.get(row.location_id)?.name || row.raw_location || '',
-              }),
-            ]));
-          }
-        }
-
-        /* A day off somebody has asked for and nobody has answered.
-           Not leave — the day is still staffable and an administrator still has a
-           decision to make — but drawn, because a request nobody can see while
-           they are staffing the week is a request that gets scheduled straight
-           over. PTO is where it is answered. */
-        if (state.asked) {
-          parts.push(el('div', { class: 'rc-res-asked-off' }, [
-            badge('Leave requested', 'warn'),
-          ]));
-        }
-
-        if (!mayPlan) {
-          return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) },
-            parts.length ? parts : [el('span', { class: 'rc-hint', text: '—' })]);
-        }
-        /* The button is there whether or not the day already has something on it:
-           a shift is often more than one job, and a day that could only ever hold
-           one task is how somebody ends up with one of the three things they were
-           asked for. */
-        parts.push(el('button', {
-          class: 'cx-btn mini ghost rc-res-add',
-          text: parts.length ? '+ task' : '+',
-          'aria-label': `Assign ${person.name} on ${dayLabel(iso)}`,
-          title: parts.length ? 'Add another task to this day' : 'Plan this day',
-          onClick: () => assign({
-            people, locations, categories, laRows, locs, days, redraw, person, iso,
-          }),
-        }));
-        return el('td', { class: classes.join(' '), 'data-label': dayLabel(iso) }, parts);
-      });
-
-      body.appendChild(el('tr', {}, [
-        el('td', {}, [
-          el('div', { text: person.name }),
-          el('div', { class: 'rc-hint', text: [person.title, person.subsystem].filter(Boolean).join(' · ') }),
-          person.scheduled === false ? badge('Not scheduled', 'neutral') : null,
-        ].filter(Boolean)),
-        ...cells,
-      ]));
-    }
-
-    /* How many people can actually be staffed each day.
-       The number that stops work being promised for a day it cannot be covered,
-       and the one part of the old week-plan tab that had no counterpart here. */
-    const coverage = columns.map((iso) => people.filter((p) =>
-      availability(p, iso, thisWeek, index.absent(p.id, iso)).state === 'available').length);
-
-    body.appendChild(el('tr', { class: 'rc-res-coverage' }, [
-      el('td', {}, [el('strong', { text: 'Can be staffed' })]),
-      ...coverage.map((n, i) => el('td', {
-        class: ['rc-num', columns[i] === today ? 'rc-res-today' : '', isWeekendISO(columns[i]) ? 'rc-res-weekend' : ''].filter(Boolean).join(' '),
-        'data-label': dayLabel(columns[i]),
-      }, [el('span', { text: `${n} of ${people.length}` })])),
-    ]));
-
-    root.appendChild(el('div', { class: 'rc-scroll' }, [
-      el('table', { class: 'rc-table rc-resources' }, [
-        el('thead', {}, [
-          el('tr', {}, [
-            el('th', { text: 'Resource' }),
-            ...columns.map((iso) => el('th', {
-              /* Today, marked on the column rather than on one cell. A week grid
-                 is read by running a finger down a day, and the day somebody is
-                 nearly always looking for is this one — it used to be a two-pixel
-                 rule on the left edge of the cells, which is invisible against a
-                 table that has borders anyway. */
-              class: [iso === today ? 'rc-res-today rc-res-today-head' : '', isWeekendISO(iso) ? 'rc-res-weekend' : '']
-                .filter(Boolean).join(' '),
-              html: iso === today
-                ? `${columnLabel(iso)}<span class="rc-today-tag">Today</span>`
-                : undefined,
-              text: iso === today ? undefined : columnLabel(iso),
-            })),
-          ]),
-        ]),
-        body,
-      ]),
-    ]));
-
-    /* Leave that has not started yet. Three weeks past the end of the grid,
-       because finding out when you try to staff the day is a fortnight too late
-       to do anything about it. */
-    if (soon.length) {
-      const peopleById = byId(people);
-      root.appendChild(el('p', {
-        class: 'rc-hint',
-        text: 'Coming up: ' + soon
-          .sort((a_, b_) => a_.start_date.localeCompare(b_.start_date))
-          .slice(0, 6)
-          .map((l) => `${peopleById.get(l.person_id)?.name || 'somebody'} from ${dayLabel(l.start_date)}`
-            + `${l.status === 'requested' ? ' (requested)' : ''}`)
-          .join(', ')
-          + '. Requests are in PTO, where an administrator answers them.',
-      }));
-    }
-
-    /* ── Where everybody is ───────────────────────────────────────────────── */
-
-    const atLocation = new Map();
-    for (const entry of planRows) {
-      const name = locs.get(entry.location_id)?.name || 'no location recorded';
-      if (!atLocation.has(name)) atLocation.set(name, new Set());
-      atLocation.get(name).add(entry.person_id);
-    }
-    if (atLocation.size) {
-      const peopleById = byId(people);
-      root.appendChild(el('div', { style: 'height:20px' }));
-      root.appendChild(el('div', { class: 'rc-section-head' }, [
-        el('h3', { text: 'Where the week puts people' }),
-      ]));
-      root.appendChild(el('div', { class: 'rc-scroll' }, [
-        el('table', { class: 'rc-table' }, [
-          el('thead', {}, [el('tr', {}, [
-            el('th', { text: 'Location' }), el('th', { text: 'Who' }), el('th', { text: 'People' }),
-          ])]),
-          el('tbody', {}, [...atLocation.entries()]
-            .sort((a, b) => b[1].size - a[1].size)
-            .map(([name, ids]) => el('tr', {}, [
-              el('td', { text: name }),
-              el('td', { text: [...ids].map((id) => peopleById.get(id)?.name || '—').sort().join(', ') }),
-              el('td', { class: 'rc-num', text: String(ids.size) }),
-            ]))),
-        ]),
-      ]));
-    }
-
-    /* ── Names the roster does not know ───────────────────────────────────── */
-
-    if (unmatched.length) {
-      root.appendChild(el('div', { style: 'height:20px' }));
-      root.appendChild(el('div', { class: 'rc-section-head' }, [
-        el('h3', { text: 'Named in the 4WLA, not on the roster' }),
-      ]));
-      root.appendChild(el('div', { class: 'rc-scroll' }, [
-        el('table', { class: 'rc-table' }, [
-          el('thead', {}, [el('tr', {}, [
-            el('th', { text: 'As written' }), el('th', { text: 'Days' }),
-            el('th', { text: 'On' }), el('th', { text: '' }),
-          ])]),
-          el('tbody', {}, unmatched.map((u) => el('tr', {}, [
-            el('td', {}, [
-              el('div', { text: u.name }),
-              shared.has(foldName(u.name))
-                ? el('div', {
-                  class: 'rc-hint',
-                  text: 'more than one person is called that — say which',
-                })
-                : null,
-            ].filter(Boolean)),
-            el('td', { class: 'rc-num', text: String(u.days.size) }),
-            el('td', { class: 'rc-hint', text: u.rows.map((r) => r.raw_label || '').filter(Boolean).join(', ').slice(0, 60) }),
-            el('td', {}, rc.isAdmin() ? [
-              el('button', {
-                class: 'cx-btn mini',
-                text: 'That is somebody',
-                title: 'Record this spelling against a person. Nothing is guessed from a surname — '
-                  + 'a shift against the wrong engineer is worse than one against nobody.',
-                onClick: () => mapName(u, people, redraw),
-              }),
-              el('button', {
-                class: 'cx-btn mini ghost',
-                text: 'Add to the team',
-                title: 'Somebody on site who is not on the roster yet.',
-                onClick: () => addFromName(u, redraw),
-              }),
-            ] : []),
-          ]))),
-        ]),
-      ]));
-      root.appendChild(el('p', {
-        class: 'rc-hint',
-        text: 'These are the names the 4WLA has that the roster cannot place, so the rows above are '
-          + 'missing them. A bare first name does match, where exactly one person on the roster '
-          + 'answers to it — that is what the Resource row is filled in with. Nothing is matched on '
-          + 'a surname or a set of initials, and a first name two people share matches neither: '
-          + 'picking one would put a shift against the wrong engineer, silently, because both '
-          + 'answers look equally right on screen. Either way the answer is an alias, once.',
-      }));
-    }
-
-    /* ── Names placed by correcting a spelling ────────────────────────────── */
-
-    if (near.length) {
-      const peopleById = byId(people);
-      root.appendChild(el('div', { style: 'height:20px' }));
-      root.appendChild(el('div', { class: 'rc-section-head' }, [
-        el('h3', { text: 'Matched by correcting a spelling' }),
-      ]));
-      root.appendChild(el('div', { class: 'rc-scroll' }, [
-        el('table', { class: 'rc-table' }, [
-          el('thead', {}, [el('tr', {}, [
-            el('th', { text: 'As written' }), el('th', { text: 'Read as' }),
-            el('th', { text: 'Days' }), el('th', { text: '' }),
-          ])]),
-          el('tbody', {}, near.map((u) => el('tr', {}, [
-            el('td', { text: u.name }),
-            el('td', {}, [
-              el('span', { text: peopleById.get(u.person_id)?.name || '—' }),
-              badge('near miss', 'warn'),
-            ]),
-            el('td', { class: 'rc-num', text: String(u.days.size) }),
-            el('td', {}, rc.isAdmin() ? [
-              el('button', {
-                class: 'cx-btn mini ghost',
-                text: 'Record the spelling',
-                title: 'Keeps this spelling against that person for good, so nothing has to be '
-                  + 'corrected on the next read.',
-                onClick: () => mapName(u, people, redraw),
-              }),
-            ] : []),
-          ]))),
-        ]),
-      ]));
-      root.appendChild(el('p', {
-        class: 'rc-hint',
-        text: 'These spellings are not on the roster and are one or two characters away from exactly '
-          + 'one name that is, so they are read as that person rather than dropped — a transposed pair '
-          + 'of letters used to cost somebody a whole week of shifts. It is listed because it is a '
-          + 'correction rather than a match: a short name is still matched exactly, and a spelling '
-          + 'equally close to two people is matched to neither. Recording it as an alias turns the '
-          + 'judgement into a fact.',
-      }));
-    }
-
-    /* ── Places the register does not know ────────────────────────────────── */
-
-    if (strangeLocations.length) {
-      root.appendChild(el('div', { style: 'height:20px' }));
-      root.appendChild(el('div', { class: 'rc-section-head' }, [
-        el('h3', { text: 'Where the 4WLA says, and the register cannot place' }),
-      ]));
-      root.appendChild(el('div', { class: 'rc-scroll' }, [
-        el('table', { class: 'rc-table' }, [
-          el('thead', {}, [el('tr', {}, [
-            el('th', { text: 'As written' }), el('th', { text: 'Rows' }),
-            el('th', { text: 'On' }), el('th', { text: '' }),
-          ])]),
-          el('tbody', {}, strangeLocations.map((u) => el('tr', {}, [
-            el('td', { text: u.name }),
-            el('td', { class: 'rc-num', text: String(u.rows.length) }),
-            el('td', {
-              class: 'rc-hint',
-              text: u.rows.map((r) => r.raw_label || '').filter(Boolean).join(', ').slice(0, 60),
-            }),
-            el('td', {}, rc.isAdmin() ? [
-              el('button', {
-                class: 'cx-btn mini',
-                text: 'That is a place we have',
-                title: 'Record this spelling against a location on the register.',
-                onClick: () => mapLocation(u, locations, redraw),
-              }),
-              el('button', {
-                class: 'cx-btn mini ghost',
-                text: 'Add as a location',
-                title: 'A place the register has never carried.',
-                onClick: () => addFromLocation(u, redraw),
-              }),
-            ] : []),
-          ]))),
-        ]),
-      ]));
-      root.appendChild(el('p', {
-        class: 'rc-hint',
-        text: 'The location comes off the 4WLA\u2019s own Location column, and it is kept whether or '
-          + 'not the register knows the spelling \u2014 which is what puts these here to be answered '
-          + 'rather than dropping them. A code matches, where a location on the register carries it: '
-          + 'that column is filled in with "W30", not the full name. Until one of these is mapped the '
-          + 'days it covers still show the place as written, and the reports simply cannot group them.',
-      }));
-    }
-
-    /* ── What this view is ────────────────────────────────────────────────── */
-
-    root.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Everything here is a plan entry — the same rows the daily huddle reads and the reports '
-        + 'group by — so anybody assigned here is in tomorrow\'s meeting with their scope against '
-        + 'their name. This was two tabs, "Week plan" and "Resources", drawing the same table twice '
-        + 'with a different subtitle; whichever you opened, the part you wanted was on the other.',
-    }));
-    root.appendChild(el('p', {
-      class: 'rc-hint',
-      text: rc.isAdmin()
-        ? 'A member sees all of this and can create, change and remove tasks on their own row and '
-          + 'nowhere else — the rule `rc_plan_entries` makes in Postgres, not something this screen '
-          + 'decides. Removing one writes a withdrawal rather than deleting anything, so the record '
-          + 'still holds the day as planned.'
-        : 'Your own row is yours: add a task, change one, or take one off. Everybody else\'s is '
-          + 'read-only, and the database says so rather than this screen. What the huddle recorded '
-          + 'against a day is shown here because that meeting is where it is entered — this is where '
-          + 'you can read it back.',
-    }));
-    root.appendChild(el('p', {
-      class: 'rc-hint',
-      text: laRows.length
-        ? `The 4WLA names people on ${laRows.filter((r) => Object.keys(r.resources || {}).length).length} `
-          + 'row(s) in these weeks, and where it names somebody that is their plan for the day — '
-          + 'derived from the sheet rather than written down, so it follows the workbook instead of '
-          + 'going stale beside it. That is the assumption everywhere and it carries no badge. What '
-          + 'is flagged "Manual" is a plan entry: somebody overriding the sheet, or planning a day it '
-          + 'says nothing about. Where an override disagrees with the sheet both are drawn, because '
-          + 'that is the case worth seeing.'
-        : 'No look-ahead rows read for this week yet, so nothing here can say what BART asked for. '
-          + 'Read it in Look-ahead → Check now.',
-    }));
-    root.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Work that is not commissioning work belongs here too — a day in the office, a day on '
-        + 'another project, training. Without somewhere for those to go the huddle has a blank '
-        + 'against a name and no way to tell "nothing planned" from "nothing said".',
-    }));
-  }
-
-  /**
-   * A roster name from an id, whoever they are.
-   *
-   * Looked up in *everybody* before the scheduled roster, because the person a
-   * task was reassigned away from may be a manager or somebody who has since been
-   * stood down — and "Reassigned from —" is worse than not saying it at all.
-   */
-  function nameOf(everybody, people, id) {
-    if (!id) return 'somebody';
-    const found = (everybody || []).find((p) => p.id === id)
-      || (people || []).find((p) => p.id === id);
-    return found?.name || 'somebody';
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Changing a day that is already planned
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Revise a stored entry.
-   *
-   * Never an update. The outgoing row stays and the new one points at it, so "the
-   * plan changed the evening before the shift" is a thing the record can still say
-   * a year later — which is the whole reason the table is append-only.
-   * `rc_supersede_plan()` refuses to revise an entry that has already been
-   * revised, so two people editing the same day get a refusal rather than one of
-   * them silently winning.
-   *
-   * The history is shown because it is the point: a revision nobody can see is an
-   * edit with extra steps.
-   */
-  async function revisePlan(entry, person, { locations, categories, locs, redraw }) {
-    const history = await rc.planHistory(person.id, entry.work_date).catch(() => []);
-
-    const task = textInput({ value: entry.task || '', placeholder: 'What they will do' });
-    const location = selectInput({
-      value: entry.location_id || '',
-      placeholder: '— location —',
-      options: locations.map((l) => ({ value: l.id, label: l.name })),
-    });
-    const category = selectInput({
-      value: entry.category_id || '',
-      placeholder: '— category —',
-      options: categories.map((c) => ({ value: c.id, label: c.name })),
-    });
-    const shift = selectInput({
-      value: entry.shift || 'day',
-      options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })),
-    });
-
-    formModal({
-      title: `${person.name} — ${dayLabel(entry.work_date, 'medium')}`,
-      body: el('div', { class: 'cx-form' }, [
-        field('Task', task),
-        field('Location', location),
-        field('Category', category),
-        field('Shift', shift),
-        history.length > 1
-          ? el('div', { class: 'cx-field' }, [
-            el('label', { class: 'cx-label', text: `Already revised ${history.length - 1} time(s)` }),
-            el('div', { class: 'rc-hint' }, history.map((h) => el('div', {
-              text: `${(h.created_at || '').slice(0, 16).replace('T', ' ')} — ${h.task || '—'}`
-                + `${locs.get(h.location_id)?.name ? ` · ${locs.get(h.location_id).name}` : ''}`,
-            }))),
-          ])
-          : null,
-        el('p', {
-          class: 'rc-hint',
-          text: 'The version you are replacing stays on the record. A plan that changed the '
-            + 'evening before a shift is itself delay evidence, so nothing here overwrites '
-            + 'anything — and an entry somebody else has already revised is refused rather than '
-            + 'quietly losing one of the two changes.',
-        }),
-      ].filter(Boolean)),
-      confirmLabel: 'Revise',
-      onConfirm: async () => {
-        if (!task.value.trim()) throw new Error('A task is needed.');
-        await rc.supersedePlan(entry.id, {
-          locationId: location.value || null,
-          task: task.value.trim(),
-          categoryId: category.value || null,
-          shift: shift.value,
-        });
-        notifyChanged('plan');
-        redraw();
-      },
-    });
-  }
-
-  /**
-   * Take a day off the schedule.
-   *
-   * "Delete my task", and it is a *write*: `rc_plan_entries` has no DELETE grant,
-   * because a plan that changed the evening before the shift is what a delay claim
-   * is built from and a row that can be removed is a record that can be edited. So
-   * `rc_withdraw_plan()` writes a tombstone superseding the original and
-   * `rc_plan_current` drops the pair — the day leaves the schedule and the table
-   * still says it was planned and then withdrawn, by whom and when.
-   *
-   * Asked first, because it is the one action here with no visible result other
-   * than something disappearing, and said plainly afterwards.
-   */
-  async function withdraw(entry, person, redraw) {
-    const ok = await confirmDialog({
-      title: `Remove this from ${person.name}’s ${dayLabel(entry.work_date, 'medium')}?`,
-      message: 'It comes off the schedule. Nothing is deleted: the record keeps the day as planned '
-        + 'and then withdrawn, because a plan that changed the evening before a shift is itself '
-        + 'evidence. An outcome already recorded against it stays on the record too.',
-      confirmLabel: 'Remove it',
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      await rc.withdrawPlan(entry.id);
-      notifyChanged('plan');
-      toast({ tone: 'good', message: 'Off the schedule, and still on the record.' });
-      redraw();
-    } catch (err) {
-      toast({ tone: 'bad', message: err?.message || String(err) });
-    }
-  }
-
-  /**
-   * Write the first stored row for a day the 4WLA planned.
-   *
-   * A derived day has no row to revise, so revising it *is* writing the first one
-   * — and what that means is a decision taken against the workbook, which is why
-   * the button says "Override the sheet" rather than "Plan it". The sheet's own
-   * row is prefilled and the link is kept, which is what later lets a block be
-   * recorded against the row BART themselves scheduled.
-   */
-  function overrideSheet({ person, iso, laRows, locations, categories, locs, redraw, row = null }) {
-    const wanted = laRows.filter((r) => !r.cells || !Object.keys(r.cells).length || r.cells[iso]);
-    const rows = wanted.length ? wanted : laRows;
-
-    const pick = selectInput({
-      value: row && rows.some((r) => r.id === row.id) ? row.id : '',
-      placeholder: '— nothing from the look-ahead —',
-      options: rows.map((r) => ({
-        value: r.id,
-        label: [locs.get(r.location_id)?.name || r.raw_location, r.raw_label]
-          .filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
-      })),
-    });
-    // Prefilled from the chosen row where there is one, because `change` only
-    // fires when a person picks — a row selected for them would otherwise sit
-    // above three empty fields it already knows the answers to.
-    const task = textInput({ placeholder: 'What they will do', value: row?.raw_label || '' });
-    const location = selectInput({
-      value: row?.location_id || '',
-      placeholder: '— location —',
-      options: locations.map((l) => ({ value: l.id, label: l.name })),
-    });
-    const category = selectInput({
-      value: '',
-      placeholder: '— category —',
-      options: categories.map((c) => ({ value: c.id, label: c.name })),
-    });
-    const shiftFrom = (meaning) => {
-      const said = String(meaning || '').toLowerCase();
-      if (/night/.test(said)) return 'night';
-      if (/possession|blanket/.test(said)) return 'possession';
-      return 'day';
-    };
-    const shift = selectInput({
-      value: shiftFrom(row?.cells?.[iso]),
-      options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })),
-    });
-
-    // Choosing a row fills the rest in. It is a starting point, not a lock —
-    // what the look-ahead calls an activity and what you would tell somebody to
-    // do are rarely the same sentence.
-    pick.addEventListener('change', () => {
-      const chosen = rows.find((r) => r.id === pick.value);
-      if (!chosen) return;
-      if (!task.value.trim()) task.value = chosen.raw_label || '';
-      if (chosen.location_id) location.value = chosen.location_id;
-      shift.value = shiftFrom(chosen.cells?.[iso]);
-    });
-
-    formModal({
-      title: `${person.name} — ${dayLabel(iso, 'medium')}`,
-      body: el('div', { class: 'cx-form' }, [
-        field('From the look-ahead', pick,
-          'What BART asked for on this day. Choosing one fills the rest in and keeps the link, '
-          + 'which is what later lets a block be recorded against the row BART themselves '
-          + 'scheduled.'),
-        field('Task', task),
-        field('Location', location),
-        field('Category', category),
-        field('Shift', shift),
-      ]),
-      confirmLabel: 'Override the sheet',
-      onConfirm: async () => {
-        if (!task.value.trim()) throw new Error('A task is needed.');
-        await rc.addPlanEntries([{
-          person_id: person.id,
-          work_date: iso,
-          shift: shift.value,
-          location_id: location.value || null,
-          task: task.value.trim(),
-          category_id: category.value || null,
-          lookahead_row_id: pick.value || null,
-        }]);
-        notifyChanged('plan');
-        redraw();
-      },
-    });
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Assigning
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Plan somebody onto a span of days.
-   *
-   * A span rather than a day, because that is how the off-project days arrive:
-   * nobody is in the office for one Tuesday, they are in the office Monday to
-   * Wednesday. Every day still becomes its own `rc_plan_entries` row — the grain
-   * the huddle reads and the reports group by — so this is a convenience over the
-   * same write, never a second shape of assignment.
-   *
-   * **A day can carry more than one task**, which is the normal shape of a shift:
-   * a test to witness in the morning and a cable pull after it. It used to skip a
-   * day that already had an entry, on the grounds that two current rows would
-   * show the person twice — but the answer to that was for the views to read a
-   * day as a list, not for the plan to hold one task and lose the rest. Leave and
-   * non-working days are still skipped, because those are days somebody is not
-   * there at all.
-   *
-   * **A member assigns themselves and nobody else.** `rc_plan_entries` says the
-   * same in Postgres — `rc_can_act_for(person_id)`, the rule an outcome already
-   * follows — so this is the interface agreeing with the database rather than
-   * enforcing anything: the select simply holds the one name they could write.
-   */
-  function assign({ people, locations, categories, laRows, locs, days, redraw, person, iso, row = null }) {
-    const mine = rc.me()?.id || null;
-    const canPlan = rc.isAdmin() ? people : people.filter((p) => p.id === mine);
-    const who = selectInput({
-      value: person?.id || canPlan[0]?.id,
-      options: canPlan.map((p) => ({ value: p.id, label: p.name })),
-      disabled: canPlan.length <= 1,
-    });
-    const from = el('input', { type: 'date', class: 'cx-input' });
-    const to = el('input', { type: 'date', class: 'cx-input' });
-    from.value = iso || days[0];
-    to.value = iso || days[0];
-
-    /* What the look-ahead asks for, offered rather than assumed — it says what and
-       where and never who, because it has no idea who is on the team. */
-    const named = laRows.filter((r) => !iso || !Object.keys(r.cells || {}).length || r.cells[iso]);
-    const pick = selectInput({
-      value: row?.id || '',
-      placeholder: '— not from the look-ahead —',
-      options: named.map((r) => ({
-        value: r.id,
-        label: [locs.get(r.location_id)?.name || r.raw_location, r.raw_label]
-          .filter(Boolean).join(' · ').slice(0, 70) || `row ${r.sheet_row}`,
-      })),
-    });
-    const task = textInput({ value: row?.raw_label || '', placeholder: 'What they will do' });
-    const location = selectInput({
-      value: row?.location_id || '',
-      placeholder: '— nowhere on site —',
-      options: locations.map((l) => ({ value: l.id, label: l.name })),
-    });
-    const category = selectInput({
-      value: '',
-      placeholder: '— category —',
-      options: categories.map((c) => ({ value: c.id, label: c.name })),
-    });
-    const shift = selectInput({ value: 'day', options: SHIFTS.map((sh) => ({ value: sh.id, label: sh.label })) });
-
-    pick.addEventListener('change', () => {
-      const chosen = named.find((r) => r.id === pick.value);
-      if (!chosen) return;
-      if (!task.value.trim()) task.value = chosen.raw_label || '';
-      if (chosen.location_id) location.value = chosen.location_id;
-    });
-
-    formModal({
-      title: person ? `Assign ${person.name}` : 'Assign work',
-      body: el('div', { class: 'cx-form' }, [
-        field('Resource', who),
-        field('From', from),
-        field('To', to, 'Inclusive. Days they do not work and days they are on leave are skipped, '
-          + 'and it says how many. A day that already has a task gets this one as well — a shift '
-          + 'is often more than one job.'),
-        field('From the look-ahead', pick, 'Optional. Choosing a row fills the rest in and keeps the '
-          + 'link, which is what later lets a block be recorded against the row BART themselves '
-          + 'scheduled. Leave it alone for work the 4WLA has never heard of.'),
-        field('What', task),
-        field('Where', location, 'Optional — a day in the office or on another project is not at a '
-          + 'commissioning location, and pretending otherwise would put it in the site reports.'),
-        field('Category', category),
-        field('Shift', shift),
-      ]),
-      confirmLabel: 'Assign',
-      onConfirm: async () => {
-        if (!task.value.trim()) throw new Error('Say what they will be doing.');
-        if (!from.value || !to.value) throw new Error('Both dates are needed.');
-        if (to.value < from.value) throw new Error('The end is before the start.');
-
-        const personRow = canPlan.find((p) => p.id === who.value);
-        if (!personRow) {
-          throw new Error(rc.isAdmin()
-            ? 'Pick a person.'
-            : 'You can plan your own days. An administrator plans everybody else’s.');
-        }
-
-        /* Leave and the plan are re-read here rather than passed in: this dialog
-           can stay open while somebody else writes, and the skip has to be about
-           what is true now. */
-        const [leave, existing] = await Promise.all([
-          rc.listLeave(from.value, to.value),
-          rc.listPlan(from.value, to.value),
-        ]);
-
-        const rows = [];
-        let alsoOn = 0;
-        const skipped = { leave: 0, nonWorking: 0 };
-        for (let ms = Date.parse(`${from.value}T00:00:00Z`);
-          ms <= Date.parse(`${to.value}T00:00:00Z`); ms = addDays(ms, 1)) {
-          const day = toISO(ms);
-          const state = availability(personRow, day, leave);
-          if (state.state === 'leave') { skipped.leave++; continue; }
-          if (state.state === 'non-working') { skipped.nonWorking++; continue; }
-          /* A day already planned is *added to*, not skipped. What it used to do
-             was drop the task on the floor with a count in a toast, which is how
-             somebody ends up with one of the three things they were asked for. */
-          if (existing.some((e) => e.person_id === personRow.id && e.work_date === day)) {
-            alsoOn++;
-          }
-          rows.push({
-            person_id: personRow.id,
-            work_date: day,
-            shift: shift.value,
-            location_id: location.value || null,
-            task: task.value.trim(),
-            category_id: category.value || null,
-            lookahead_row_id: pick.value || null,
-          });
-        }
-
-        if (!rows.length) {
-          throw new Error('Every day in that span is non-working or on leave — there is no day '
-            + 'there to plan.');
-        }
-
-        await rc.addPlanEntries(rows);
-        notifyChanged('plan');
-        const notes = [
-          alsoOn ? `${alsoOn} alongside what was already there` : null,
-          skipped.leave ? `${skipped.leave} on leave` : null,
-          skipped.nonWorking ? `${skipped.nonWorking} not a working day` : null,
-        ].filter(Boolean);
-        toast({
-          tone: 'good',
-          message: `${personRow.name} assigned for ${rows.length} day(s)`
-            + `${notes.length ? ` — ${notes.join(', ')}` : ''}.`,
-          timeout: 8000,
-        });
-        redraw();
-      },
-    });
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Names
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Record which person a spelling in the workbook is.
-   *
-   * The same shape as another spelling for a location, and for the same reason:
-   * the match has to be exact, so the only way a new spelling starts matching is
-   * that somebody says it does. Once.
-   */
-  function mapName(unmatchedName, people, redraw) {
-    const who = selectInput({
-      value: people[0]?.id,
-      options: people.map((p) => ({ value: p.id, label: p.name })),
-    });
-    formModal({
-      title: `"${unmatchedName.name}" is…`,
-      body: el('div', { class: 'cx-form' }, [
-        field('Person', who),
-        el('p', {
-          class: 'rc-hint',
-          text: 'This records the spelling against them, so every week from now on matches without '
-            + 'anybody being asked again. It is not a guess and never becomes one: nothing here '
-            + 'matches on a surname, initials or a near miss.',
-        }),
-      ]),
-      confirmLabel: 'That is them',
-      onConfirm: async () => {
-        await rc.addPersonAlias(who.value, unmatchedName.name);
-        notifyChanged('people');
-        toast({ tone: 'good', message: `"${unmatchedName.name}" now matches.` });
-        redraw();
-      },
-    });
-  }
-
-  /**
-   * Somebody on site who is not on the roster at all.
-   *
-   * The spelling in the workbook becomes an alias immediately, so the row they
-   * were named on stops being unmatched. Their name is the spelling until somebody
-   * tidies it in Organisation — a person on the roster under an odd spelling is
-   * still on the roster, and an empty roster row would be worse.
-   */
-  async function addFromName(unmatchedName, redraw) {
-    const name = await promptDialog({
-      title: 'Add them to the team',
-      label: 'Name, as you would write it',
-      value: unmatchedName.name,
-      confirmLabel: 'Add',
-    });
-    if (!name || !name.trim()) return;
-    try {
-      const person = await rc.addPerson({ name: name.trim(), role: 'member', scheduled: true });
-      if (foldName(name) !== foldName(unmatchedName.name)) {
-        await rc.addPersonAlias(person.id, unmatchedName.name);
-      }
-      notifyChanged('people');
-      toast({ tone: 'good', message: `${name.trim()} is on the team, and "${unmatchedName.name}" matches them.` });
-      redraw();
-    } catch (err) {
-      toast({ tone: 'bad', message: err.message });
-    }
-  }
-
-  /**
-   * Record which place a spelling in the workbook is.
-   *
-   * The counterpart of `mapName()`, and the same rule: exact or nothing, so the
-   * only way a new spelling starts matching is that somebody says it does. Once,
-   * and every week afterwards is answered.
-   */
-  function mapLocation(unmatched, locations, redraw) {
-    const where = selectInput({
-      value: locations[0]?.id,
-      options: locations.map((l) => ({
-        value: l.id, label: l.code ? `${l.name} (${l.code})` : l.name,
-      })),
-    });
-    formModal({
-      title: `"${unmatched.name}" is…`,
-      body: el('div', { class: 'cx-form' }, [
-        field('Location', where),
-        el('p', {
-          class: 'rc-hint',
-          text: 'This records the spelling against that location, so every week from now on resolves '
-            + 'without anybody being asked again \u2014 in the reports and the activity log as well as '
-            + 'here. Nothing is matched on a near miss.',
-        }),
-      ]),
-      confirmLabel: 'That is the place',
-      onConfirm: async () => {
-        await rc.addLocationAlias(where.value, unmatched.name);
-        notifyChanged('locations');
-        toast({ tone: 'good', message: `"${unmatched.name}" now resolves.` });
-        redraw();
-      },
-    });
-  }
-
-  /**
-   * A place the register has never carried.
-   *
-   * The spelling becomes the code rather than an alias: it is what the workbook
-   * writes and what somebody will type next week, and a code is the field
-   * `rc_resolve_location()` reads it out of. The name is the spelling until
-   * somebody gives it a fuller one in Organisation — a location under a short
-   * name is still a location, and rows filed nowhere are worse.
-   */
-  async function addFromLocation(unmatched, redraw) {
-    const name = await promptDialog({
-      title: 'Add it to the register',
-      label: 'Location name, as you would write it',
-      value: unmatched.name,
-      confirmLabel: 'Add',
-    });
-    if (!name || !name.trim()) return;
-    try {
-      const created = await rc.addLocation({ name: name.trim(), code: unmatched.name, active: true });
-      if (foldName(name) !== foldName(unmatched.name) && created?.id) {
-        await rc.addLocationAlias(created.id, unmatched.name).catch(() => {});
-      }
-      notifyChanged('locations');
-      toast({ tone: 'good', message: `${name.trim()} is on the register, and "${unmatched.name}" resolves to it.` });
-      redraw();
-    } catch (err) {
-      toast({ tone: 'bad', message: err.message });
-    }
-  }
-
-  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
-};
-
 // ui/rc_pto.js
 __mods["ui/rc_pto.js"] = function (__x, __req) {
   /**
    * PTO — who is off, what is booked, and where the two disagree.
    *
-   * Leave already had a home: a list in Organisation, admin-only, sorted by start
-   * date. That is the *record* and it stays there. It is not a view anybody can
+   * Leave already had a home: a list in Lists → Leave, sorted by start date.
+   * That is the *record* and it stays there. It is not a view anybody can
    * plan around, because the question a scheduler actually asks is "who is off in
    * the weeks I am staffing", and a list of date ranges does not answer it —
    * you find out somebody is away when you try to put them somewhere.
@@ -20547,10 +15958,9 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
    * **What the 4WLA says**, from the "PTO" row at the bottom of the sheet — names
    * typed into day cells, derived at paint time and never written anywhere. On
    * this project that row is usually the *only* place an absence is written
-   * down: somebody types a name into the workbook and never opens Organisation.
-   * Reading it is what stops the huddle asking a person on holiday how their day
-   * went, and what stops the week plan drawing their week as days nobody filled
-   * in.
+   * down: somebody types a name into the 4WLA and never opens Lists. Reading it
+   * is what stops the editor's staffing check putting a person on holiday on a
+   * shift.
    *
    * **They are drawn as one colour, and that is deliberate.** Which of the two
    * wrote a day down is bookkeeping; the question this screen answers is who is
@@ -20562,8 +15972,12 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
    *
    * **Nothing here is derived from a role.** Managers take leave too, and a PTO
    * calendar that quietly dropped them would be wrong on exactly the weeks it
-   * matters. `scheduled` is what the week plan and Resources filter on because
-   * those are about work; this is about people.
+   * matters. `scheduled` is what the staffing checks filter on because those
+   * are about work; this is about people.
+   *
+   * **Leave is booked, never asked for.** Everybody with the application is an
+   * editor, so there is nothing to approve: whoever holds the calendar's pen
+   * books it, and anybody else reads it.
    *
    * Imports: util, dates, rc, icons, components, rc_util.
    */
@@ -20572,7 +15986,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
   const { toISO, addDays, todayMs } = __req("core/dates.js");
   const rc = __req("core/rc.js");
   const { icon } = __req("ui/icons.js");
-  const { textInput, selectInput, toast, badge, field, emptyState } = __req("ui/components.js");
+  const { textInput, selectInput, toast, field, emptyState } = __req("ui/components.js");
 
 
   const { ABSENCE_LABELS } = __req("core/lookahead.js");
@@ -20602,9 +16016,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
     const to = days[days.length - 1];
     const today = todayISO();
 
-    /* Everybody active, managers included — see the header comment. The
-       look-ahead is administrators-only in the database, so a member gets nothing
-       back from it and simply sees the booked side, which is correct. */
+    /* Everybody active, managers included — see the header comment. */
     const [people, kinds, leave, sheet, aliases] = await Promise.all([
       rc.listPeople(),
       rc.listLeaveKinds().catch(() => []),
@@ -20624,7 +16036,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
        people who were exactly where the look-ahead put them. */
     const away = absenceAssignments((sheet.absences || []).filter((a) => a.kind !== 'office'), register);
     const redraw = () => { clear(root); render(root); };
-    const admin = rc.isAdmin();
+    const admin = rc.canWrite();
 
     const host = el('div', { class: 'rc-pto' });
     root.appendChild(host);
@@ -20648,17 +16060,10 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
         text: 'This week',
         onClick: () => { weekOf = null; redraw(); },
       }),
-      /* Asking is a member's; answering is an administrator's.
-         It was administrators-only, which made the commonest thing anybody wants
-         from this module a thing they had to get somebody else to type — so it
-         went into the 4WLA instead, or nowhere at all, and "the sheet says they
-         are off and nothing is booked" became the normal case. A member's press
-         writes the same single `rc_leave` row with `status: 'requested'`; a second
-         table for requests would be a second answer to "is Dana off on Tuesday". */
-      rc.canWrite() ? el('button', {
+      admin ? el('button', {
         class: 'cx-btn mini primary',
-        text: admin ? 'Book leave' : 'Request leave',
-        onClick: () => bookLeave({ people, kinds, redraw, admin }),
+        text: 'Book leave',
+        onClick: () => bookLeave({ people, kinds, redraw }),
       }) : null,
     ].filter(Boolean)));
 
@@ -20667,7 +16072,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
         iconName: 'users',
         title: 'Nobody on the roster yet',
         message: 'Leave is booked against people on the roster. Being on it never requires an account.',
-        action: rc.isAdmin() ? { label: 'Add people in Organisation', onClick: () => goToTab('org') } : null,
+        action: { label: 'Add people in Lists', onClick: () => goToTab('org') },
       }));
       return;
     }
@@ -20753,22 +16158,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
             class: classes.join(' '),
             'data-label': dayLabel(iso),
             title: `The 4WLA has ${person.name} ${kinds.map((k) => ABSENCE_LABELS[k].toLowerCase())
-              .join(' and ')} that day. That is work, not leave — they are in the huddle with it `
-              + 'against their name.',
-          });
-        }
-
-        /* Asked for and not answered. Hatched rather than filled, because it is
-           not leave yet — the day is still staffable and the administrator still
-           has a decision to make. Drawn at all because a request nobody can see
-           on the calendar is a request that gets scheduled straight over. */
-        if (state.asked) {
-          classes.push('rc-pto-asked');
-          return el('td', {
-            class: classes.join(' '),
-            'data-label': dayLabel(iso),
-            title: `${person.name} has asked for this day off and nobody has answered yet. `
-              + 'It is not leave until somebody does, so the day can still be staffed.',
+              .join(' and ')} that day. That is work, not leave.`,
           });
         }
 
@@ -20794,17 +16184,15 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
        whether the day can be clicked to book it. */
     host.appendChild(el('div', { class: 'rc-pto-key' }, [
       key('rc-pto-booked', 'PTO — booked or on the 4WLA'),
-      key('rc-pto-asked', 'Asked for, not answered'),
       key('rc-pto-elsewhere', 'Other group / project — off this project, not off work'),
     ]));
 
     host.appendChild(el('p', {
       class: 'rc-hint',
       text: `${bookedDays} booked day(s) in this window, and ${sheetOnly} the 4WLA says are PTO with `
-        + 'nothing booked against them. The second number is not a fault: the workbook is where '
-        + 'most absences on this project are written down, and everything — the huddle, the week '
-        + 'plan, Resources — already reads it as leave. Booking one makes a record that survives '
-        + 'the sheet being edited, and an administrator can do it by clicking the day.',
+        + 'nothing booked against them. The second number is not a fault: the 4WLA is where '
+        + 'most absences on this project are written down, and everything already reads it as leave. '
+        + 'Booking one makes a record that survives the sheet being edited — click the day to do it.',
     }));
 
     /* ── Names the PTO row uses that the roster cannot place ──────────────── */
@@ -20817,75 +16205,29 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
       host.appendChild(el('div', { class: 'rc-scroll' }, [
         el('table', { class: 'rc-table' }, [
           el('thead', {}, [el('tr', {}, [
-            el('th', { text: 'As written' }), el('th', { text: 'Days' }), el('th', { text: 'On' }),
+            el('th', { text: 'As written' }), el('th', { text: 'Days' }), el('th', { text: 'On' }), el('th', { text: 'Who it is' }),
           ])]),
           el('tbody', {}, away.unmatched.map((u) => el('tr', {}, [
             el('td', { text: u.name }),
             el('td', { class: 'rc-num', text: String(u.days.size) }),
             el('td', { class: 'rc-hint', text: [...u.kinds].map((k) => ABSENCE_LABELS[k] || k).join(', ') }),
+            el('td', {}, admin ? [spellingPicker(u.name, people, redraw)] : []),
           ]))),
         ]),
       ]));
       host.appendChild(el('p', {
         class: 'rc-hint',
         text: 'These spellings are on the sheet’s PTO and Other Group rows and the roster cannot '
-          + 'place them, so those days are not showing against anybody. It is the same answer a name '
-          + 'on a Resource row gets and the same place to give it: Resources maps a spelling to a '
-          + 'person in one click, and it is settled for both rows at once.',
-      }));
-    }
-
-    /* ── Waiting on an answer ─────────────────────────────────────────────── */
-
-    /* The point of a member being able to ask is that somebody answers.
-       So the requests are a section of their own, above the record and not
-       buried in it, and it is the *whole* register rather than the four weeks on
-       screen: a request for October made today is a thing to answer today, and a
-       window that only covered the weeks in view would hide it until it was too
-       late to matter. An administrator answers here; the person who asked can
-       withdraw while nobody has. */
-    const pending = await rc.pendingLeave().catch(() => []);
-    if (pending.length) {
-      const peopleById = byId(people);
-      host.appendChild(el('div', { style: 'height:20px' }));
-      host.appendChild(el('div', { class: 'rc-section-head' }, [
-        el('h3', { text: `Waiting on an answer (${pending.length})` }),
-      ]));
-      host.appendChild(el('div', { class: 'rc-scroll rc-pto-asks' }, [
-        el('table', { class: 'rc-table' }, [
-          el('thead', {}, [el('tr', {}, [
-            el('th', { text: 'Person' }), el('th', { text: 'From' }), el('th', { text: 'To' }),
-            el('th', { text: 'Kind' }), el('th', { text: 'Asked' }), el('th', { text: '' }),
-          ])]),
-          el('tbody', {}, pending.map((l) => el('tr', {}, [
-            el('td', {}, [
-              el('div', { text: peopleById.get(l.person_id)?.name || '—' }),
-              l.note ? el('div', { class: 'rc-hint', text: l.note }) : null,
-            ].filter(Boolean)),
-            el('td', { text: dayLabel(l.start_date, 'medium') }),
-            el('td', { text: dayLabel(l.end_date, 'medium') }),
-            el('td', { text: kindsById.get(l.kind_id)?.name || '—' }),
-            el('td', { class: 'rc-hint', text: (l.created_at || '').slice(0, 10) }),
-            el('td', {}, answerButtons(l, redraw, admin)),
-          ]))),
-        ]),
-      ]));
-      host.appendChild(el('p', {
-        class: 'rc-hint',
-        text: admin
-          ? 'Approving one makes it leave everywhere at once — the calendar above, the week plan, '
-            + 'the huddle — because it is the same row the whole time and the status is the only '
-            + 'thing that changes. Nothing is copied into the 4WLA by this: put it on the sheet '
-            + 'when the time comes, and the PTO row will then agree with the record.'
-          : 'Yours are here until somebody answers them. Withdrawing one is the only change you '
-            + 'can make to it, which is what stops a request approving itself.',
+          + 'place them, so those days are not showing against anybody. Say who each is and the spelling '
+          + 'is kept as theirs — the same register every name on the look-ahead is read through, so it is '
+          + 'settled everywhere at once. Lists → People keeps every spelling.',
       }));
     }
 
     /* ── What is booked ───────────────────────────────────────────────────── */
 
     const booked = leave
-      .filter((l) => l.status !== 'cancelled' && l.status !== 'declined')
+      .filter((l) => l.status !== 'cancelled' && l.status !== 'declined' && l.status !== 'requested')
       .sort((a_, b_) => a_.start_date.localeCompare(b_.start_date));
 
     host.appendChild(el('div', { style: 'height:20px' }));
@@ -20905,17 +16247,29 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
         el('table', { class: 'rc-table' }, [
           el('thead', {}, [el('tr', {}, [
             el('th', { text: 'Person' }), el('th', { text: 'From' }), el('th', { text: 'To' }),
-            el('th', { text: 'Kind' }), el('th', { text: 'State' }), el('th', { text: '' }),
+            el('th', { text: 'Kind' }), el('th', { text: 'Note' }), el('th', { text: '' }),
           ])]),
           el('tbody', {}, booked.map((l) => el('tr', {}, [
             el('td', { text: peopleById.get(l.person_id)?.name || '—' }),
             el('td', { text: dayLabel(l.start_date, 'medium') }),
             el('td', { text: dayLabel(l.end_date, 'medium') }),
             el('td', { text: kindsById.get(l.kind_id)?.name || '—' }),
-            el('td', {}, [badge(l.status === 'approved' ? 'Approved'
-              : l.status === 'requested' ? 'Requested' : l.status,
-            l.status === 'approved' ? 'good' : 'warn')]),
             el('td', { class: 'rc-hint', text: l.note || '' }),
+            el('td', {}, admin ? [el('button', {
+              class: 'cx-btn mini ghost',
+              text: 'Cancel',
+              title: 'It stays on the record as cancelled rather than disappearing.',
+              onClick: async () => {
+                try {
+                  await rc.updateLeave(l.id, { status: 'cancelled' });
+                  notifyChanged('leave');
+                  toast({ message: 'Cancelled, and kept on the record as cancelled.' });
+                  redraw();
+                } catch (err) {
+                  toast({ tone: 'bad', message: err?.message || String(err) });
+                }
+              },
+            })] : []),
           ]))),
         ]),
       ]));
@@ -20923,64 +16277,35 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
 
     host.appendChild(el('p', {
       class: 'rc-hint',
-      text: 'Leave is why the huddle can tell "away" apart from "carried over", and why absence is '
-        + 'not silently distributed across the performance statuses. The full record, including '
-        + 'cancelled leave and every kind, is in Organisation → Leave; this is the four weeks '
-        + 'anybody is actually staffing.',
+      text: 'Leave is why the editor can tell somebody away from somebody free. The full record, '
+        + 'including cancelled leave, is in Lists → Leave; this is the four weeks anybody is actually staffing.',
     }));
   }
 
   /**
-   * What can be done about a request, by whoever is looking at it.
-   *
-   * An administrator answers it: approve or decline, one update either way. The
-   * person who asked can withdraw it while nobody has answered, and that is the
-   * only change they can make — the update policy pins a member to writing
-   * `cancelled`, which is what stops a request approving itself. Anybody else gets
-   * nothing, because there is nothing for them to do.
-   *
-   * Declining rather than deleting: "we said no on the 4th" is a thing the record
-   * should be able to say, and a row that disappears cannot say it.
+   * "This is Victor": map a spelling the sheet uses to somebody on the roster.
+   * Kept as an alias of theirs, so it is matched exactly from then on — never a
+   * guess, and settled for every row that writes it.
    */
-  function answerButtons(row, redraw, admin) {
-    const answer = async (status, said) => {
-      try {
-        await rc.updateLeave(row.id, { status });
-        notifyChanged('leave');
-        toast({ tone: 'good', message: said });
-        redraw();
-      } catch (err) {
-        toast({ tone: 'bad', message: err?.message || String(err) });
-      }
-    };
-
-    if (admin) {
-      return [
-        el('button', {
-          class: 'cx-btn mini primary',
-          text: 'Approve',
-          title: 'It becomes leave everywhere at once — the same row, with the status changed.',
-          onClick: () => answer('approved', 'Approved.'),
-        }),
-        el('button', {
-          class: 'cx-btn mini ghost',
-          text: 'Decline',
-          title: 'Stays on the record as declined rather than disappearing.',
-          onClick: () => answer('declined', 'Declined, and on the record as declined.'),
-        }),
-      ];
-    }
-    if (row.person_id === rc.me()?.id) {
-      return [
-        el('button', {
-          class: 'cx-btn mini ghost',
-          text: 'Withdraw',
-          title: 'Takes the question back. Possible only while nobody has answered it.',
-          onClick: () => answer('cancelled', 'Withdrawn.'),
-        }),
-      ];
-    }
-    return [];
+  function spellingPicker(spelling, people, redraw) {
+    const pick = selectInput({
+      value: '',
+      placeholder: 'Who is this?',
+      options: people.map((p) => ({ value: p.id, label: p.name })),
+      onChange: async (id) => {
+        if (!id) return;
+        try {
+          await rc.addPersonAlias(id, spelling.trim());
+          notifyChanged('people');
+          toast({ tone: 'good', message: `"${spelling}" is ${people.find((p) => p.id === id)?.name || 'them'} from now on.` });
+          redraw();
+        } catch (err) {
+          toast({ tone: 'bad', message: err?.message || String(err) });
+        }
+      },
+    });
+    pick.setAttribute('aria-label', `Who "${spelling}" is`);
+    return pick;
   }
 
   /** One swatch and its meaning. The key is four cells, so it is drawn as cells. */
@@ -20999,16 +16324,10 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
    * when it is opened from a day on the calendar, so turning what the workbook
    * says into a record is a confirmation rather than a retype.
    */
-  function bookLeave({ people, kinds, redraw, admin = rc.isAdmin(), person = null, from = '', to = '' }) {
-    /* A member asks for their own days and nobody else's, which is what the
-       insert policy checks — so the select holds the one name they could write
-       rather than offering a list the database would refuse. */
-    const mine = rc.me()?.id || null;
-    const canAsk = admin ? people : people.filter((p) => p.id === mine);
+  function bookLeave({ people, kinds, redraw, person = null, from = '', to = '' }) {
     const who = selectInput({
-      value: person?.id || canAsk[0]?.id,
-      options: canAsk.map((p) => ({ value: p.id, label: p.name })),
-      disabled: canAsk.length <= 1,
+      value: person?.id || people[0]?.id,
+      options: people.map((p) => ({ value: p.id, label: p.name })),
     });
     const start = el('input', { type: 'date', class: 'cx-input', value: from });
     const end = el('input', { type: 'date', class: 'cx-input', value: to });
@@ -21020,9 +16339,7 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
     const note = textInput({ placeholder: 'Optional', value: person && from ? 'From the 4WLA' : '' });
 
     formModal({
-      title: admin
-        ? (person ? `Book leave for ${person.name}` : 'Book leave')
-        : 'Request leave',
+      title: person ? `Book leave for ${person.name}` : 'Book leave',
       body: el('div', { class: 'cx-form' }, [
         field('Person', who),
         field('From', start),
@@ -21031,16 +16348,11 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
         field('Note', note),
         el('p', {
           class: 'rc-hint',
-          text: admin
-            ? 'Everything already reads the 4WLA’s PTO row as leave. Booking it makes a record '
-              + 'that survives somebody editing the sheet, and gives the day a kind and a status.'
-            : 'This goes up as a request and shows as one until an administrator answers it. It is '
-              + 'the same row either way — there is no separate list of requests, because that '
-              + 'would be a second answer to whether you are off. You can withdraw it while it is '
-              + 'still unanswered.',
+          text: 'Everything already reads the 4WLA’s PTO row as leave. Booking it makes a record '
+            + 'that survives somebody editing the sheet, and gives the day a kind.',
         }),
       ]),
-      confirmLabel: admin ? 'Book' : 'Request it',
+      confirmLabel: 'Book',
       onConfirm: async () => {
         if (!start.value || !end.value) throw new Error('Both dates are needed.');
         if (end.value < start.value) throw new Error('The end is before the start.');
@@ -21051,412 +16363,12 @@ __mods["ui/rc_pto.js"] = function (__x, __req) {
           kind_id: kind.value || null,
           note: note.value.trim() || null,
         };
-        if (admin) await rc.addLeave(row);
-        else await rc.requestLeave(row);
+        await rc.addLeave(row);
         notifyChanged('leave');
-        toast({
-          tone: 'good',
-          message: admin
-            ? 'Leave booked.'
-            : 'Asked for. It shows as a request until an administrator answers it.',
-        });
+        toast({ tone: 'good', message: 'Leave booked.' });
         redraw();
       },
     });
-  }
-
-  Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
-};
-
-// ui/rc_reports.js
-__mods["ui/rc_reports.js"] = function (__x, __req) {
-  /**
-   * Reports.
-   *
-   * Every record carries its own date, person, category and location, so a report
-   * is a filter and an aggregation and nothing more. Arbitrary date ranges rather
-   * than fixed monthly buckets — "back one year from today" has to be as easy as
-   * "this month", which is what the relational store bought.
-   *
-   * Two things are deliberate and neither is a detail.
-   *
-   * **Nothing here is stored.** No efficiency column, no cached rollup. Every
-   * number is computed on the way out, so refining a definition never means a
-   * migration and no figure can go stale against the rows it came from.
-   *
-   * **Performance and project health are never averaged together.** Completed,
-   * partial and carried are what somebody did; blocked and reassigned are what
-   * was done to them. A possession released late is not underperformance, and
-   * folding it in would make the number worse than useless — people would simply
-   * stop saying they were blocked.
-   *
-   * Imports: util, rc, icons, components, rc_util.
-   */
-
-  const { el, clear, csvField } = __req("core/util.js");
-  const rc = __req("core/rc.js");
-  const { icon } = __req("ui/icons.js");
-  const { toast, badge, chipStat, emptyState, selectInput } = __req("ui/components.js");
-  const { byId, dayLabel, todayISO, isoToMs, STATUS_BY_ID } = __req("ui/rc_util.js");
-  const { saveFile } = __req("io/exporters.js");
-  const { masterExportButton } = __req("ui/rc_master_export.js");
-
-  /** Ranges people actually ask for, plus the one that matters most: any. */
-  const RANGES = [
-    { id: '7', label: 'Last 7 days', days: 7 },
-    { id: '30', label: 'Last 30 days', days: 30 },
-    { id: '90', label: 'Last quarter', days: 90 },
-    { id: '365', label: 'Last year', days: 365 },
-    { id: 'custom', label: 'Custom…', days: 0 },
-  ];
-
-  let range = '30';
-  let customFrom = '';
-  let customTo = '';
-  let groupBy = 'person';
-
-  function window_() {
-    const to = customTo || todayISO();
-    if (range === 'custom' && customFrom) return { from: customFrom, to };
-    const days = RANGES.find((r) => r.id === range)?.days || 30;
-    const fromMs = isoToMs(todayISO()) - days * 86400000;
-    return { from: new Date(fromMs).toISOString().slice(0, 10), to };
-  }
-
-  async function render(root) {
-    if (!rc.isAdmin()) {
-      // Not a hidden menu item: the view itself returns nothing to a member,
-      // enforced by the policy. This only explains why.
-      root.appendChild(emptyState({
-        iconName: 'lock',
-        title: 'Administrators only',
-        message: 'Reports are restricted in the database. A member reading the view directly '
-          + 'gets nothing back, so this is an explanation rather than the control.',
-      }));
-      return;
-    }
-
-    const { from, to } = window_();
-    const [effort, people, categories, locations, chains, events] = await Promise.all([
-      rc.listEffort(from, to),
-      rc.listPeople({ includeInactive: true }),
-      rc.listCategories({ includeInactive: true }),
-      rc.listLocations({ includeInactive: true }),
-      rc.listCarryChains(),
-      rc.listChangeEvents(`${from}T00:00:00Z`, `${to}T23:59:59Z`),
-    ]);
-
-    root.appendChild(controls(root, from, to));
-
-    /* The report is about the people who take shifts.
-       A manager runs the meeting rather than taking work from it, so their own
-       handful of rows sits in the middle of a table about field delivery,
-       flattering or damning a number that was never about them. It is `scheduled`
-       that decides and never the role — an administrator who *does* take shifts
-       is in here exactly as before, which is the whole reason that column is
-       separate from permission.
-       The name lookup stays complete: filtering it as well would print "—"
-       against a row rather than removing it. And the count of what was left out is
-       said out loud, because a narrowed report that does not say it is narrowed
-       reads as a report of everything. */
-    const takesShifts = new Set(people.filter((p) => p.scheduled !== false).map((p) => p.id));
-    const shown = effort.filter((r) => takesShifts.has(r.person_id));
-    const setAside = effort.length - shown.length;
-
-    if (!shown.length) {
-      root.appendChild(el('p', {
-        class: 'rc-hint',
-        text: effort.length
-          ? 'Nothing recorded in that range by anybody who takes shifts.'
-          : 'Nothing recorded in that range.',
-      }));
-    } else {
-      root.appendChild(summary(shown));
-      root.appendChild(breakdown(shown, people, categories, locations));
-    }
-
-    if (setAside) {
-      root.appendChild(el('p', {
-        class: 'rc-hint',
-        text: `${setAside} row(s) are not counted here: they belong to people who are not `
-          + 'scheduled — the managers who run the calendar rather than take work from it. '
-          + 'Somebody who does both is counted normally; Organisation is where that is set.',
-      }));
-    }
-
-    root.appendChild(carryOver(chains.filter((c) => takesShifts.has(c.person_id)), people));
-    root.appendChild(lookaheadNumbers(events));
-
-    root.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'The two families are reported apart on purpose. Completed, partial and carried are '
-        + 'what somebody did; blocked and reassigned are what was done to them. Averaging them '
-        + 'together would flatter or damn the wrong party — and would teach people not to say '
-        + 'when they were blocked.',
-    }));
-  }
-
-  function controls(root, from, to) {
-    const picker = selectInput({
-      value: range,
-      options: RANGES.map((r) => ({ value: r.id, label: r.label })),
-      onChange: (v) => { range = v; clear(root); render(root); },
-    });
-
-    const grouping = selectInput({
-      value: groupBy,
-      options: [
-        { value: 'person', label: 'By person' },
-        { value: 'category', label: 'By category' },
-        { value: 'location', label: 'By location' },
-        { value: 'subsystem', label: 'By subsystem' },
-      ],
-      onChange: (v) => { groupBy = v; clear(root); render(root); },
-    });
-
-    const head = el('div', { class: 'rc-section-head' }, [
-      el('h3', { text: `${dayLabel(from)} – ${dayLabel(to)}` }),
-      picker,
-      grouping,
-      el('button', {
-        class: 'cx-btn mini ghost',
-        html: icon('download', { size: 12 }) + '<span>CSV</span>',
-        onClick: () => exportCsv(from, to),
-      }),
-      rc.isAdmin() ? masterExportButton() : null,
-      rc.isAdmin() ? el('button', {
-        class: 'cx-btn mini ghost',
-        text: 'Back it up',
-        title: 'Every table this account may read, as one JSON file.',
-        onClick: () => backItUp(),
-      }) : null,
-    ].filter(Boolean));
-
-    if (range === 'custom') {
-      const fromEl = el('input', { type: 'date', class: 'cx-input mini', value: customFrom || from });
-      const toEl = el('input', { type: 'date', class: 'cx-input mini', value: customTo || to });
-      const apply = () => {
-        customFrom = fromEl.value;
-        customTo = toEl.value;
-        clear(root);
-        render(root);
-      };
-      fromEl.addEventListener('change', apply);
-      toEl.addEventListener('change', apply);
-      head.append(fromEl, toEl);
-    }
-    return head;
-  }
-
-  /* ── The numbers ───────────────────────────────────────────────────────── */
-
-  function summary(effort) {
-    const performance = effort.filter((e) => e.signal === 'performance');
-    const health = effort.filter((e) => e.signal === 'health');
-    const done = performance.filter((e) => e.status === 'completed').length;
-
-    // A rate over the performance family only. Including blocked days would make
-    // a team look worse for a possession somebody else lost.
-    const rate = performance.length ? Math.round((done / performance.length) * 100) : 0;
-
-    return el('div', { class: 'rc-section', style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
-      chipStat('Completed', `${rate}%`, rate >= 70 ? 'good' : rate >= 40 ? 'warn' : 'bad'),
-      chipStat('Days recorded', performance.length, 'muted'),
-      chipStat('Blocked', health.filter((e) => e.status === 'blocked').length, 'bad'),
-      chipStat('Reassigned', health.filter((e) => e.status === 'reassigned').length, 'info'),
-    ]);
-  }
-
-  function breakdown(effort, people, categories, locations) {
-    const peopleById = byId(people);
-    const catsById = byId(categories);
-    const locsById = byId(locations);
-
-    const keyOf = (row) => {
-      if (groupBy === 'person') return peopleById.get(row.person_id)?.name || row.person_name || '—';
-      if (groupBy === 'category') return catsById.get(row.category_id)?.name || 'Uncategorised';
-      if (groupBy === 'location') return locsById.get(row.location_id)?.name || 'No location';
-      return row.subsystem || '—';
-    };
-
-    const groups = new Map();
-    for (const row of effort) {
-      const key = keyOf(row);
-      const g = groups.get(key) || { key, completed: 0, partial: 0, carried: 0, blocked: 0, reassigned: 0, total: 0 };
-      if (g[row.status] !== undefined) g[row.status]++;
-      if (row.signal === 'performance') g.total++;
-      groups.set(key, g);
-    }
-
-    const rows = [...groups.values()]
-      .sort((a, b) => b.total - a.total)
-      .map((g) => el('tr', {}, [
-        el('td', { text: g.key }),
-        el('td', { class: 'rc-num', text: String(g.completed) }),
-        el('td', { class: 'rc-num', text: String(g.partial) }),
-        el('td', { class: 'rc-num', text: String(g.carried) }),
-        el('td', { class: 'rc-num', text: g.total ? `${Math.round((g.completed / g.total) * 100)}%` : '—' }),
-        el('td', { class: 'rc-num', text: String(g.blocked) }),
-        el('td', { class: 'rc-num', text: String(g.reassigned) }),
-      ]));
-
-    return el('div', { class: 'rc-section' }, [
-      el('div', { class: 'rc-scroll' }, [
-        el('table', { class: 'rc-table rc-report', dataset: { csv: `outcomes-by-${groupBy}` } }, [
-          el('thead', {}, [
-            el('tr', {}, [
-              el('th', { text: groupBy[0].toUpperCase() + groupBy.slice(1) }),
-              el('th', { text: 'Done' }), el('th', { text: 'Partial' }), el('th', { text: 'Carried' }),
-              el('th', { text: 'Rate' }),
-              el('th', { text: 'Blocked' }), el('th', { text: 'Reassigned' }),
-            ]),
-          ]),
-          el('tbody', {}, rows),
-        ]),
-      ]),
-    ]);
-  }
-
-  /**
-   * Carried tasks, oldest first.
-   *
-   * The count is not the story — the *age* is. A chain counts once however many
-   * days it ran, so one stuck job cannot produce five marks against one person,
-   * and a task on its fifth day is the most informative line in the report.
-   */
-  function carryOver(chains, people) {
-    const peopleById = byId(people);
-    const section = el('div', { class: 'rc-section' }, [
-      el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Still carrying' })]),
-    ]);
-
-    if (!chains.length) {
-      section.appendChild(el('p', { class: 'rc-hint', text: 'Nothing carried over.' }));
-      return section;
-    }
-
-    section.appendChild(el('div', { class: 'rc-scroll' }, [
-      el('table', { class: 'rc-table rc-report', dataset: { csv: 'still-carrying' } }, [
-        el('thead', {}, [el('tr', {}, [
-          el('th', { text: 'Person' }), el('th', { text: 'First seen' }),
-          el('th', { text: 'Days old' }), el('th', { text: 'Times carried' }),
-        ])]),
-        el('tbody', {}, chains.map((c) => el('tr', {}, [
-          el('td', { text: peopleById.get(c.person_id)?.name || '—' }),
-          el('td', { text: c.first_seen ? dayLabel(c.first_seen) : '—' }),
-          el('td', {}, [badge(String(c.age_days), c.age_days >= 5 ? 'bad' : c.age_days >= 3 ? 'warn' : 'muted')]),
-          el('td', { class: 'rc-num', text: String(c.carries) }),
-        ]))),
-      ]),
-    ]));
-    section.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'One chain per stuck task, however many days it ran — five days of the same job is one '
-        + 'problem, not five failures. Ranked by age, which is the number worth acting on.',
-    }));
-    return section;
-  }
-
-  /**
-   * The look-ahead's own numbers, kept apart from the team's.
-   *
-   * One measures BART's behaviour and one measures this team's. Reporting them
-   * in one figure would attribute somebody else's cancellations to the people
-   * who turned up for them.
-   */
-  function lookaheadNumbers(events) {
-    const count = (kind) => events.filter((e) => e.kind === kind).length;
-    return el('div', { class: 'rc-section' }, [
-      el('div', { class: 'rc-section-head' }, [el('h3', { text: 'The look-ahead, same range' })]),
-      el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
-        chipStat('Scope added', count('scope_added'), 'info'),
-        chipStat('Scope removed', count('scope_removed'), 'warn'),
-        chipStat('Cancelled', count('cancellation'), 'bad'),
-        chipStat('Resources changed', count('resource_changed'), 'muted'),
-      ]),
-      el('p', {
-        class: 'rc-hint',
-        text: 'Weeks entering and leaving the four-week window are excluded — they are the window '
-          + 'rolling forward, not scope moving, and counting them would add a batch of phantom '
-          + 'changes every single week.',
-      }),
-    ]);
-  }
-
-  /* ── Export ────────────────────────────────────────────────────────────── */
-
-  /**
-   * The range, as CSV.
-   *
-   * Through `saveFile()` like every other export in the application, so the
-   * download announces itself — a file that lands somewhere the page cannot see
-   * is the one action with no visible result.
-   */
-  /**
-   * Every table this account may read, as one file.
-   *
-   * The calendar's value is being the record a year from now, and there was no
-   * way to get it out — a project deleted by accident left the provider's
-   * point-in-time recovery and nothing else. Through `saveFile()` like every
-   * other export here, so the download announces itself: a file that lands
-   * somewhere the page cannot see is the one action with no visible result.
-   */
-  async function backItUp() {
-    try {
-      const data = await rc.exportEverything();
-      const rows = Object.values(data.tables).reduce(
-        (n, t) => n + (Array.isArray(t) ? t.length : 0), 0);
-      saveFile(
-        `resource-calendar-${todayISO()}.json`,
-        JSON.stringify(data, null, 2),
-        'application/json',
-        `${rows} rows across ${Object.keys(data.tables).length} tables`
-      );
-    } catch (err) {
-      toast({ tone: 'bad', message: err.message });
-    }
-  }
-
-  async function exportCsv(from, to) {
-    try {
-      const [effort, people, categories, locations] = await Promise.all([
-        rc.listEffort(from, to),
-        rc.listPeople({ includeInactive: true }),
-        rc.listCategories({ includeInactive: true }),
-        rc.listLocations({ includeInactive: true }),
-      ]);
-      const peopleById = byId(people);
-      const catsById = byId(categories);
-      const locsById = byId(locations);
-      /* The same narrowing the screen makes. A CSV that disagreed with the table
-         it was exported from would be the worse of the two to find out about. */
-      const takesShifts = new Set(people.filter((p) => p.scheduled !== false).map((p) => p.id));
-
-      const esc = (v) => csvField(v);
-      const header = ['Date', 'Person', 'Subsystem', 'Status', 'Signal', 'Category', 'Location'];
-      const lines = [header.join(',')];
-      const rows = effort.filter((r) => takesShifts.has(r.person_id));
-      for (const row of rows) {
-        lines.push([
-          row.work_date,
-          peopleById.get(row.person_id)?.name || row.person_name || '',
-          row.subsystem || '',
-          STATUS_BY_ID.get(row.status)?.label || row.status,
-          row.signal,
-          catsById.get(row.category_id)?.name || '',
-          locsById.get(row.location_id)?.name || '',
-        ].map(esc).join(','));
-      }
-
-      saveFile(
-        `resource-calendar-${from}-to-${to}.csv`,
-        lines.join('\n'),
-        'text/csv;charset=utf-8',
-        `${rows.length} record(s)`
-      );
-    } catch (err) {
-      toast({ tone: 'error', message: err.message });
-    }
   }
 
   Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
@@ -23756,70 +18668,51 @@ __mods["ui/rc.js"] = function (__x, __req) {
    * sidebar. Nothing here runs until somebody switches to it — see
    * `ui/workspace.js` for why boot must not touch it.
    *
-   * The account gate lives here rather than in `main.js`, and that is the point.
-   * The timeline needs no account and must open with no network at all; only
-   * this module does. So signing in is something that happens when you arrive at
-   * the calendar, not something that happens before the application starts.
+   * The calendar is kept in the shared folder beside the plan (`core/rc.js`), so
+   * the door is the folder: open it, and bring the old calendar in or start one
+   * (`ui/rc_gate.js`). Once it is open, the header says who holds the pen — the
+   * one person writing it — and offers to take it over or hand it back.
    *
-   * Imports: util, events, rc, components, rc_gate, and the tab modules.
+   * Imports: util, events, rc, icons, components, rc_gate, and the tab modules.
    */
 
   const { el, clear } = __req("core/util.js");
   const { on, EV } = __req("core/events.js");
   const rc = __req("core/rc.js");
+  const filestore = __req("core/filestore.js");
   const { icon } = __req("ui/icons.js");
-  const { toast, emptyState, openPicker } = __req("ui/components.js");
-  const { notConfigured, signInForm, notOnTheTeam } = __req("ui/rc_gate.js");
+  const { toast, emptyState, confirmDialog, promptDialog } = __req("ui/components.js");
+  const { notConfigured, noFolder, emptyFolder, readFailed } = __req("ui/rc_gate.js");
   const roster = __req("ui/rc_roster.js");
-  const huddle = __req("ui/rc_huddle.js");
-  const myday = __req("ui/rc_myday.js");
   const lookahead = __req("ui/rc_lookahead.js");
-  const week = __req("ui/rc_week.js");
   const pto = __req("ui/rc_pto.js");
-  const reports = __req("ui/rc_reports.js");
   const tawr = __req("ui/rc_tawr.js");
   const { enhanceTables } = __req("ui/rc_table.js");
-  const { inboxCount } = __req("ui/rc_inbox.js");
   const { startScheduledExports } = __req("ui/rc_master_export.js");
 
   /**
-   * The tabs, in the order the work actually happens: run today's meeting, plan
-   * the week, see who is off, see what the look-ahead did to it, then the numbers.
-   *
-   * **"Resources" is gone, folded into "Week plan".** They were people down and
-   * days across in both cases, over the same `rc_plan_entries`, through the same
-   * `assignmentIndex()` — the same table drawn twice with a different subtitle,
-   * and each one missing something the other had.
+   * The tabs: the look-ahead and everything hanging off it — the calendar and
+   * its editor, cancellations, changes, the legend, P6 — then who is away, the
+   * track access requests, and the lists everything is read against.
    */
   const TABS = [
-    { id: 'myday', label: 'My day' },
-    { id: 'huddle', label: 'Daily huddle' },
-    { id: 'week', label: 'Week plan' },
-    { id: 'pto', label: 'PTO' },
     { id: 'lookahead', label: 'Look-ahead' },
+    { id: 'pto', label: 'PTO' },
     { id: 'tawr', label: 'TAWR' },
-    { id: 'reports', label: 'Reports' },
-    { id: 'org', label: 'Organisation' },
+    { id: 'org', label: 'Lists' },
   ];
 
   const RENDERERS = {
-    myday: myday.render,
-    huddle: huddle.render,
-    week: week.render,
-    pto: pto.render,
     lookahead: lookahead.render,
+    pto: pto.render,
     tawr: tawr.render,
-    reports: reports.render,
     org: roster.render,
   };
 
   let frame = null;
   let bodyEl = null;
   let headEl = null;
-  /* Chosen the first time the tabs are drawn: an administrator opens on the
-     look-ahead — the plan they write and run the team from — and everybody else
-     on My day, their own day and week. */
-  let active = null;
+  let active = 'lookahead';
   let started = false;
 
   /* ── Build ─────────────────────────────────────────────────────────────── */
@@ -23828,8 +18721,6 @@ __mods["ui/rc.js"] = function (__x, __req) {
    * Build the stage. Called once, by the workspace switch, on first use.
    *
    * Deliberately synchronous: it paints something immediately and then loads.
-   * A blank rectangle while a network call decides what to draw is worse than a
-   * message that says what is happening.
    */
   function build() {
     if (started) return;
@@ -23845,8 +18736,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
     frame.append(headEl, bodyEl);
 
     // Every table a tab draws gets the same header, sorting and export — see
-    // ui/rc_table.js. Watched rather than called, because tabs draw in stages
-    // and a table can arrive long after render() has returned.
+    // ui/rc_table.js. Watched rather than called, because tabs draw in stages.
     let pendingEnhance = false;
     new MutationObserver(() => {
       if (pendingEnhance) return;
@@ -23857,13 +18747,21 @@ __mods["ui/rc.js"] = function (__x, __req) {
       });
     }).observe(bodyEl, { childList: true, subtree: true });
 
-    // A row written anywhere reloads whatever is on screen. There is no document
-    // and no diff here, so the cheapest correct thing is to re-read — the
-    // volumes are a fortnight of one small team, not a project's worth of bars.
     on(EV.RC_CHANGED, () => render());
     on(EV.RC_AUTH_CHANGED, () => render());
-    on(EV.RC_QUEUE_CHANGED, () => renderHead());
     on(EV.RC_SHOW_TAB, ({ tab }) => showTab(tab));
+    // The pen moving changes what may be pressed; the view is drawn again for it.
+    on(EV.RC_PEN, (st) => {
+      if (st?.idle) {
+        toast({
+          tone: 'info',
+          title: 'Calendar handed back',
+          message: 'Nothing was written for an hour, so the pen went back for whoever is waiting. Take over at the top when you want it again.',
+          timeout: 12000,
+        });
+      }
+      render();
+    });
 
     render();
     init();
@@ -23871,7 +18769,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
 
   async function init() {
     try {
-      await rc.init();
+      await rc.enterCalendar();
     } catch (err) {
       console.warn('[cx-timeline] resource calendar init failed:', err.message);
     }
@@ -23893,22 +18791,32 @@ __mods["ui/rc.js"] = function (__x, __req) {
     renderHead();
     clear(bodyEl);
 
+    const after = () => { init(); };
     if (!rc.isConfigured()) {
       bodyEl.appendChild(notConfigured());
       return;
     }
-    if (!rc.isSignedIn()) {
-      bodyEl.appendChild(signInForm({ onDone: () => render() }));
+    const { state, problem } = rc.status();
+    if (state === 'no-folder') {
+      bodyEl.appendChild(noFolder({ onDone: after }));
       return;
     }
-    if (!rc.me()) {
-      bodyEl.appendChild(notOnTheTeam());
+    if (state === 'empty') {
+      bodyEl.appendChild(emptyFolder({ onDone: after }));
+      return;
+    }
+    if (state === 'failed') {
+      bodyEl.appendChild(readFailed(problem, { onDone: after }));
+      return;
+    }
+    if (!rc.isSignedIn()) {
+      bodyEl.appendChild(emptyState({ iconName: 'database', title: 'Opening the calendar…', message: 'Reading calendar/ in the shared folder.' }));
       return;
     }
 
     const view = el('div');
-    bodyEl.append(previewBanner(), schemaBanner(), view);
-    if (!RENDERERS[active]) active = rc.isAdmin() ? 'lookahead' : 'myday';
+    bodyEl.append(penBanner(), view);
+    if (!RENDERERS[active]) active = 'lookahead';
     Promise.resolve(RENDERERS[active](view)).catch((err) => {
       rc.reportError(`tab:${active}`, err);
       clear(view);
@@ -23920,272 +18828,103 @@ __mods["ui/rc.js"] = function (__x, __req) {
     if (!headEl) return;
     clear(headEl);
 
-    headEl.append(
-      el('span', { class: 'rc-eyebrow', text: 'Resource Calendar' })
-    );
+    headEl.append(el('span', { class: 'rc-eyebrow', text: 'Resource Calendar' }));
+    if (!rc.isSignedIn()) return;
 
-    if (rc.isSignedIn() && rc.me()) {
-      const tabs = el('div', { class: 'rc-tabs' });
-      // Look-ahead and Reports are administrators-only in the database and
-      // already say so. Showing them to a viewer offers a door that opens onto a
-      // wall, so they come out of the row entirely.
-      /* Reports and Organisation are an administrator's: the KPIs are a different
-         audience and a different permission, and the roster, the locations and
-         the accounts are the calendar's administration rather than its use. Both
-         are restricted in the database as well — this only stops offering a door
-         that opens onto a wall.
-         The **look-ahead stays**, for everybody. It is what the field team is
-         being asked to do, and while it was hidden the people named on it were
-         the only people who could not look at it; they asked their manager to
-         screenshot it instead. What they get is the calendar, read-only — the
-         change register, the snapshots and the SARs are still the claim evidence
-         and still administrators-only, in the policies. */
-      /* The **daily huddle** joins them. It is the meeting: it asks a whole team
-         in turn how yesterday went, and it is where an outcome is entered. A
-         member has nothing to run and nothing to enter there but their own day,
-         and what they need out of it — the status and the note recorded against
-         their work — is now in the week plan, beside the rest of their week. */
-      /* Track access work requests are raised and approved by an administrator,
-         and every table and file behind them is an administrator's alone. */
-      const ADMIN_ONLY = new Set(['huddle', 'tawr', 'reports', 'org']);
-      const visible = rc.isAdmin() ? TABS : TABS.filter((t) => !ADMIN_ONLY.has(t.id));
-      if (!active) active = rc.isAdmin() ? 'lookahead' : visible[0].id;
-      if (!visible.some((t) => t.id === active)) active = visible[0].id;
-      for (const tab of visible) {
-        const button = el('button', {
-          class: 'rc-tab',
-          type: 'button',
-          text: tab.label,
-          dataset: { tab: tab.id },
-          'aria-pressed': String(tab.id === active),
-          onClick: () => showTab(tab.id),
-        });
-        if (tab.id === 'org' && rc.isAdmin()) inboxBadge(button);
-        if (tab.id === 'myday') unseenBadge(button);
-        tabs.appendChild(button);
-      }
-      headEl.appendChild(tabs);
-
-      /* Leave waiting on an answer. The whole point of a member being able to ask
-         is that somebody answers, and a request nobody is told about is a request
-         that sits there — so it is on the chrome rather than only inside the tab,
-         and it says how many and where to go. */
-      if (rc.isAdmin()) headEl.appendChild(pendingLeaveChip());
-
-      const pending = huddle.pendingCount();
-      headEl.appendChild(el('span', {
-        class: 'rc-queue',
-        hidden: pending === 0,
-        text: `${pending} unsynced`,
-        title: 'Entered while offline. They will go up on their own when the connection returns.',
-      }));
-
-      if (rc.isViewer()) {
-        headEl.appendChild(el('span', {
-          class: 'rc-queue',
-          style: 'background:var(--info-light);border-color:var(--info-border);color:var(--info)',
-          text: 'Read only',
-          title: 'You can see the schedule and what happened. Changing it is restricted in the database, not just here.',
-        }));
-      }
-
-      if (rc.isRealAdmin() && !rc.previewing()) {
-        headEl.appendChild(el('button', {
-          class: 'cx-btn mini ghost',
-          type: 'button',
-          html: `${icon('eye', { size: 12 })}<span>View as…</span>`,
-          title: 'See the calendar as a member or a viewer sees it. Nothing is saved while you do.',
-          onClick: () => chooseViewAs(),
-        }));
-      }
-
-      headEl.appendChild(el('button', {
-        class: 'cx-btn mini ghost',
-        text: rc.accountLabel(),
-        title: 'Sign out of the resource calendar',
-        onClick: async () => {
-          await rc.signOut();
-          toast({ message: 'Signed out of the resource calendar.' });
-        },
+    const tabs = el('div', { class: 'rc-tabs' });
+    for (const tab of TABS) {
+      tabs.appendChild(el('button', {
+        class: 'rc-tab',
+        type: 'button',
+        text: tab.label,
+        dataset: { tab: tab.id },
+        'aria-pressed': String(tab.id === active),
+        onClick: () => showTab(tab.id),
       }));
     }
+    headEl.appendChild(tabs);
+
+    const pen = rc.penState();
+    if (pen.editing) {
+      headEl.appendChild(el('span', {
+        class: 'rc-queue',
+        style: 'background:var(--good-light);border-color:var(--good-border);color:var(--good)',
+        text: 'Editing',
+        title: 'You hold the calendar\'s pen: what you change is saved to the shared folder. Anybody else who opens it reads it.',
+      }));
+      headEl.appendChild(el('button', {
+        class: 'cx-btn mini ghost',
+        type: 'button',
+        text: 'Hand back',
+        title: 'Stop editing, so whoever is waiting can. You go on reading it.',
+        onClick: async () => {
+          await rc.releasePen();
+          toast({ message: 'Handed back. The calendar is read-only here until you take it again.' });
+        },
+      }));
+    } else {
+      headEl.appendChild(el('span', {
+        class: 'rc-queue',
+        style: 'background:var(--info-light);border-color:var(--info-border);color:var(--info)',
+        text: 'Read only',
+        title: `${pen.holder || 'Somebody else'} is editing the calendar.`,
+      }));
+    }
+
+    headEl.appendChild(el('button', {
+      class: 'cx-btn mini ghost',
+      type: 'button',
+      text: rc.accountLabel() || 'Set your name',
+      title: 'The name the calendar stamps what you write with, and shows a colleague while you are editing.',
+      dataset: { action: 'your-name' },
+      onClick: async () => {
+        const name = await promptDialog({
+          title: 'Your name',
+          label: 'As the roster has it — the calendar matches it to the list of people',
+          value: rc.displayName(),
+          confirmLabel: 'Save',
+        });
+        if (!name || !name.trim()) return;
+        filestore.setDisplayName(name.trim());
+        await rc.refreshMe();
+        toast({ message: `You are ${name.trim()} in the calendar.` });
+      },
+    }));
   }
 
   /**
-   * Pick somebody to see the calendar as. Members and viewers only: an
-   * administrator sees what you already see.
+   * "Dana is editing the calendar", with the way to take it — above every tab
+   * while it is true. Taking over never refuses: the folder's guard means that
+   * if they save after you take it, their save is the one refused, not yours.
    */
-  async function chooseViewAs() {
-    let people;
-    try {
-      people = await rc.listPeople();
-    } catch (err) {
-      toast({ tone: 'bad', message: err.message });
-      return;
-    }
-    const choices = people.filter((p) => p.role !== 'admin' && p.id !== rc.me()?.id);
-    if (!choices.length) {
-      toast({ message: 'Nobody on the team is a member or a viewer yet.' });
-      return;
-    }
-    openPicker({
-      title: 'View the calendar as…',
-      subtitle: 'Everything is drawn as they would see it. Nothing you press is saved.',
-      placeholder: 'Search the team…',
-      items: choices.map((p) => ({ value: p.id, label: p.name, meta: `${p.role === 'viewer' ? 'Viewer' : 'Member'}${p.title ? ` · ${p.title}` : ''}` })),
-      empty: 'Nobody matches.',
-      onPick: (id) => {
-        const who = choices.find((p) => p.id === id);
-        if (!who) return;
-        try {
-          active = 'myday';
-          rc.previewAs(who); // redraws, through RC_AUTH_CHANGED
-        } catch (err) {
-          toast({ tone: 'bad', message: err.message });
-        }
-      },
-    });
-  }
-
-  /** "You are seeing this as Priya", with the way back, above every tab while it is true. */
-  function previewBanner() {
-    const who = rc.previewing();
-    if (!who) return el('span', { hidden: true });
-    return el('div', { class: 'rc-preview-banner', role: 'status' }, [
+  function penBanner() {
+    const pen = rc.penState();
+    if (pen.editing) return el('span', { hidden: true });
+    const idle = pen.holderIdleMs != null ? ` They last saved ${Math.max(1, Math.round(pen.holderIdleMs / 60000))} min ago.` : '';
+    return el('div', { class: 'rc-preview-banner', role: 'status', dataset: { pen: 'viewer' } }, [
       el('span', { html: icon('eye', { size: 16 }), 'aria-hidden': 'true' }),
       el('div', { class: 'rc-preview-text' }, [
-        el('strong', { text: `You are seeing the calendar as ${who.name} (${who.role === 'viewer' ? 'viewer' : 'member'}).` }),
-        el('span', { text: ' Nothing you press is saved. The database still answers as you, so this shows their screens, not their permissions.' }),
+        el('strong', { text: `${pen.holder || 'Somebody else'} is editing the calendar.` }),
+        el('span', { text: ` You can read everything; changes are theirs to make until they finish or you take over.${idle}` }),
       ]),
       el('button', {
         class: 'cx-btn mini primary',
         type: 'button',
-        text: 'Back to my view',
-        onClick: () => {
-          active = 'org';
-          rc.previewAs(null); // redraws, through RC_AUTH_CHANGED
+        text: 'Take over',
+        onClick: async () => {
+          const ok = await confirmDialog({
+            title: `Take the calendar from ${pen.holder || 'them'}?`,
+            message: 'Do this when they have finished, or have left it open. Anything they had not saved yet '
+              + 'is refused when they try, rather than written over what you do.',
+            confirmLabel: 'Take over',
+          });
+          if (!ok) return;
+          await rc.takePen();
+          toast({ tone: 'good', message: 'You are editing the calendar.' });
         },
       }),
     ]);
   }
-
-  /**
-   * How much is waiting in the administrator's inbox, on the Organisation tab.
-   * Filled when the count arrives, and absent when nothing is waiting or the
-   * count could not be read — it is a prompt, and the inbox is the record.
-   */
-  function inboxBadge(button) {
-    inboxCount()
-      .then((n) => {
-        if (!n) return;
-        button.appendChild(el('span', { class: 'rc-tab-count', text: String(n), 'aria-label': `${n} waiting on you` }));
-        button.title = `${n} thing${n === 1 ? '' : 's'} waiting on you — see Organisation → Inbox`;
-      })
-      .catch(() => {});
-  }
-
-  /** How many changes to your own days you have not seen yet, on the My day tab. */
-  function unseenBadge(button) {
-    myday.unseenCount()
-      .then((n) => {
-        if (!n) return;
-        button.appendChild(el('span', { class: 'rc-tab-count rc-tab-count-info', text: String(n), 'aria-label': `${n} change${n === 1 ? '' : 's'} to your days` }));
-        button.title = `${n} change${n === 1 ? '' : 's'} to your days since you last looked`;
-      })
-      .catch(() => {});
-  }
-
-  /**
-   * "Two people are waiting on you", on the chrome.
-   *
-   * A member can ask for leave now, and asking is only worth anything if somebody
-   * answers — a request that nobody is told about is a request that sits in a tab
-   * an administrator had no reason to open. So it is counted on the header, next
-   * to the offline queue, and pressing it goes where the answer is given.
-   *
-   * Built empty and filled when the count arrives. The header is drawn
-   * synchronously on every render and this is a network read: waiting for it would
-   * hold up the tabs, and a chip that appears a moment later is exactly as useful.
-   * A read that fails leaves it hidden, which is the same as none waiting — it is
-   * a prompt, not a control, and the PTO tab is the record either way.
-   */
-  function pendingLeaveChip() {
-    const chip = el('button', {
-      class: 'rc-queue rc-queue-ask',
-      hidden: true,
-      type: 'button',
-      title: 'Leave your team has asked for and nobody has answered. Answer it in PTO.',
-      onClick: () => showTab('pto'),
-    });
-    rc.pendingLeave()
-      .then((rows) => {
-        const n = (rows || []).length;
-        if (!n) return;
-        chip.textContent = `${n} leave request${n === 1 ? '' : 's'}`;
-        chip.hidden = false;
-      })
-      .catch(() => {});
-    return chip;
-  }
-
-  /**
-   * "The database is older than the application", said once, at the top.
-   *
-   * The site deploys on a push and the SQL is run by hand, so the two drift — and
-   * the drift used to surface as a refused write on one screen weeks later,
-   * worded as whatever that screen happened to be doing. `rc.schemaStatus()`
-   * compares the stamp `rc_schema.sql` writes last with the version this build
-   * expects. An administrator is told the two files to run and in what order,
-   * because they are the one who can; everybody else is told that something may
-   * not work and who can fix it, because a member cannot act on a filename.
-   *
-   * Built empty and filled when the answer arrives, like the leave chip, and
-   * dismissible for the rest of the session — it is a notice, not a gate.
-   */
-  let schemaDismissed = false;
-  function schemaBanner() {
-    const box = el('div', { class: 'rc-schema-banner', role: 'status', hidden: true });
-    rc.schemaStatus().then(({ state, expected, found }) => {
-      if (state === 'current' || state === 'unknown') return;
-      const behind = state === 'behind';
-      // Hiding puts away "run the SQL", which somebody may reasonably defer; a
-      // page older than its database is a different problem and is said again.
-      if (behind && schemaDismissed) return;
-      const title = behind
-        ? `The calendar's database is behind this version of the application (database ${found || 'unversioned'}, application ${expected}).`
-        : `This page is older than the calendar's database (page ${expected}, database ${found}).`;
-      const detail = !behind
-        ? 'Reload to pick up the newer version. On the desktop application, close and reopen it.'
-        : rc.isAdmin()
-          ? 'In the Supabase SQL editor, run supabase/migrate.sql and then supabase/rc_schema.sql. Both are safe to run more than once. Until then, some changes may be refused.'
-          : 'Some changes may be refused until an administrator updates the database. Nothing you have entered is lost.';
-      box.append(
-        el('span', { class: 'rc-schema-icon', html: icon('warning', { size: 16 }) }),
-        el('div', { class: 'rc-schema-text' }, [el('strong', { text: title }), el('span', { text: ` ${detail}` })]),
-        el('button', {
-          class: 'cx-btn mini ghost',
-          type: 'button',
-          text: behind ? 'Hide for now' : 'Reload',
-          onClick: () => {
-            if (!behind) {
-              location.reload();
-              return;
-            }
-            schemaDismissed = true;
-            box.hidden = true;
-          },
-        })
-      );
-      box.hidden = false;
-    }).catch(() => {});
-    return box;
-  }
-
-  /* ── The states that are not the calendar ──────────────────────────────── */
-
-  /* No backend, the sign-in form and an account that is not on the team live in
-     `ui/rc_gate.js`, because the phone app draws the same three and cannot
-     import this module — it imports every tab, and through them the folder. */
 
   function loadFailed(err) {
     return emptyState({

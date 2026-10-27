@@ -3,23 +3,25 @@
  * workbook — and the same workbook on a schedule, into the shared folder.
  *
  * One sheet per question somebody takes the record away to answer: what the
- * look-ahead said each day, who covered which shift, what was cancelled and
- * why, what moved between readings and why, what the huddle recorded, the
- * blockers, the leave, P6, the TAWRs and SARs, and the registers that explain
- * the rest. Each sheet is read the way the screen that shows it reads — the
- * same views, the same `assignmentIndex()`, the same `cancellationLog()` — so
- * the workbook and the calendar cannot tell two stories. Every read goes
- * through the policies, so what lands in the file is what this account may
- * see; a sheet that cannot be read is written empty and named in About,
+ * look-ahead said each day, who it names on which shift, what was cancelled
+ * and why, what moved between readings and why, the leave, P6, the TAWRs, and
+ * the registers that explain the rest. Each sheet is read the way the screen
+ * that shows it reads — the same views, the same `assignmentIndex()`, the same
+ * `cancellationLog()` — so the workbook and the calendar cannot tell two
+ * stories. A sheet that cannot be read is written empty and named in About,
  * never left out silently.
+ *
+ * It is also how the look-ahead reaches the team: `LookAhead_Latest.xlsx` and
+ * the 4WLA beside it are what a flow on the shared folder (Power Automate, say)
+ * picks up and sends on, so nobody needs the application to read it.
  *
  * **The schedule runs here, in the page.** There is no server to run it and
  * nothing is emailed from this application (that is structural), so it runs
  * on the computer the calendar is open on — a browser tab or the desktop app —
  * and a slot missed while it was closed is run once when it next opens
  * (`core/export_schedule.js`). The file goes into `exports/` in the shared
- * folder through the intake door the look-ahead and SARs already use
- * (`filestore.intakeWrite()`); with no folder connected it is downloaded.
+ * folder through the folder's intake door (`filestore.intakeWrite()`); with
+ * no folder connected it is downloaded.
  * Its settings are this computer's, because the folder and the clock are.
  */
 
@@ -38,8 +40,8 @@ import { cleanSchedule, isDue, nextSlot } from '../core/export_schedule.js';
 import { icon } from './icons.js';
 import { openModal, toast, checkbox, selectInput, field } from './components.js';
 import {
-  todayISO, nameRegister, assignmentIndex, outcomeLookup, availability, shiftLabel, shiftFor,
-  STATUS_BY_ID, cancellationLog, parsedView,
+  todayISO, nameRegister, assignmentIndex, availability, shiftLabel, shiftFor,
+  cancellationLog, parsedView, authorNames,
 } from './rc_util.js';
 import { KIND_LABELS } from './rc_la_changes.js';
 import { lookaheadFileNow } from './rc_la_editor.js';
@@ -61,15 +63,12 @@ const RETRY_MS = 30 * 60000;
 /** What can go in, in the order the workbook has it. `reference` is four small sheets. */
 export const SHEETS = [
   { id: 'lookahead', label: 'The look-ahead, day by day', hint: 'every activity and day — shift, support asked for and cancelled, who was named, and its P6 activity' },
-  { id: 'shifts', label: 'Shifts worked', hint: 'who covered which shift, on what and where, and how the huddle said it went' },
+  { id: 'shifts', label: 'Who is on what', hint: 'who the look-ahead names on which shift, on what and where, and who is away' },
   { id: 'cancellations', label: 'Cancellations', hint: 'every day and BART resource cancelled, with the party responsible and the reason' },
   { id: 'changes', label: 'Changes', hint: 'what moved between readings, and the reason given for it' },
-  { id: 'outcomes', label: 'Huddle outcomes', hint: 'completed, partial, carried over, blocked, reassigned, away' },
-  { id: 'blockers', label: 'Blockers', hint: 'every blocker raised, who owns it and where it stands' },
-  { id: 'leave', label: 'Leave', hint: 'leave booked and asked for' },
+  { id: 'leave', label: 'Leave', hint: 'leave booked' },
   { id: 'p6', label: 'P6 activities', hint: 'the list, and how many look-ahead rows name each activity' },
   { id: 'tawrs', label: 'TAWRs', hint: 'track access work requests' },
-  { id: 'sars', label: 'SARs', hint: 'site access requests and how many rows each covers' },
   { id: 'reference', label: 'The registers', hint: 'the team, the locations, the legend and the support codes' },
 ];
 
@@ -204,8 +203,7 @@ async function context(range) {
     const written = await writtenOnlyDays(ctx, read, range);
     return written.length ? [...read, ...written].sort((a, b) => a.day.localeCompare(b.day)) : read;
   });
-  ctx.actuals = once(() => rc.readAll('rc_actuals_current', { column: 'work_date', from: range.from, to: range.to }));
-  ctx.who = (userId) => (userId ? ctx.personByUser.get(userId)?.name || '' : '');
+  ctx.who = authorNames(people);
   ctx.name = (personId) => (personId ? ctx.personById.get(personId)?.name || '' : '');
   ctx.place = (locationId, raw = '') => (locationId ? ctx.locationById.get(locationId)?.name || raw || '' : raw || '');
   ctx.source = settings.find((r) => r.key === 'lookahead_source')?.value || 'workbook';
@@ -344,9 +342,7 @@ const BUILDERS = {
   },
 
   async shifts(ctx) {
-    const [plan, actuals, leave, latest, days] = await Promise.all([
-      rc.readAll('rc_plan_current', { column: 'work_date', from: ctx.from, to: ctx.to }),
-      ctx.actuals(),
+    const [leave, latest, days] = await Promise.all([
       rc.readAll('rc_leave', { column: 'start_date' }),
       rc.latestSnapshot().catch(() => null),
       ctx.days(),
@@ -364,12 +360,11 @@ const BUILDERS = {
       if (d.marks) row.bart_marks[d.day] = d.marks;
       rows.set(d.row_id, row);
     }
-    // The PTO row is read off the latest reading only, as the week plan reads it.
+    // The PTO row is read off the latest reading only, as the PTO calendar reads it.
     const absences = latest?.grid ? absencesFrom(parsedView(latest, ctx.legendRows)) : [];
-    const index = assignmentIndex({ planRows: plan, laRows: [...rows.values()], register: ctx.register, absences, categories: ctx.categories });
-    const outcomeFor = outcomeLookup(actuals);
+    const index = assignmentIndex({ planRows: [], laRows: [...rows.values()], register: ctx.register, absences, categories: ctx.categories });
 
-    const dates = [...days.map((d) => d.day), ...plan.map((p) => p.work_date), ...actuals.map((a) => a.work_date)].filter(Boolean).sort();
+    const dates = days.map((d) => d.day).filter(Boolean).sort();
     const from = ctx.from || dates[0];
     const to = ctx.to || [dates[dates.length - 1], todayISO()].filter(Boolean).sort().pop();
     const out = [];
@@ -377,36 +372,32 @@ const BUILDERS = {
       for (const person of ctx.people) {
         const entries = index.on(person.id, iso);
         for (const entry of entries) {
-          const outcome = outcomeFor(entry, person.id, iso);
           out.push([
             iso, weekday(iso), person.name, person.subsystem || '',
             entry.absence ? '' : shiftLabel(entry.shift || 'day'),
             entry.task || (entry.absence ? ABSENCE_LABELS[entry.absence] : ''),
             ctx.place(entry.location_id, entry.raw_location),
-            entry.absence ? 'The look-ahead\'s PTO / Office / Other row' : entry.from_lookahead ? 'The look-ahead' : 'Planned in the calendar',
+            entry.absence ? 'The look-ahead\'s PTO / Office / Other row' : 'The look-ahead',
             Boolean(entry.cancelled),
-            outcome ? STATUS_BY_ID.get(outcome.status)?.label || outcome.status : '',
-            outcome?.note || '', outcome?.blocked_reason || '',
           ]);
         }
         if (entries.length) continue;
         const free = availability(person, iso, leave);
         if (free.state === 'leave' && free.leave) {
           out.push([iso, weekday(iso), person.name, person.subsystem || '', '',
-            `Leave — ${ctx.leaveKindById.get(free.leave.kind_id)?.name || 'leave'}`, '', 'Booked leave', false, '', free.leave.note || '', '']);
+            `Leave — ${ctx.leaveKindById.get(free.leave.kind_id)?.name || 'leave'}`, '', 'Booked leave', false]);
         }
       }
     }
     return [{
-      name: 'Shifts worked',
+      name: 'Who is on what',
       columns: [
         { heading: 'Date', kind: 'date' }, { heading: 'Day' }, { heading: 'Person' }, { heading: 'Subsystem' },
         { heading: 'Shift' }, { heading: 'Activity or task', width: 48 }, { heading: 'Location' },
-        { heading: 'From' }, { heading: 'Cancelled' }, { heading: 'Outcome' },
-        { heading: 'Outcome note', width: 40, wrap: true }, { heading: 'Blocked because', width: 32 },
+        { heading: 'From' }, { heading: 'Cancelled' },
       ],
       rows: out,
-      empty: 'Nobody is planned or named on the look-ahead in these dates.',
+      empty: 'Nobody is named on the look-ahead in these dates.',
     }];
   },
 
@@ -458,51 +449,6 @@ const BUILDERS = {
     }];
   },
 
-  async outcomes(ctx) {
-    const actuals = await ctx.actuals();
-    const labels = new Map((await rc.lookaheadRowsByIds(actuals.map((a) => a.lookahead_row_id)).catch(() => []))
-      .map((r) => [r.id, r.raw_label]));
-    return [{
-      name: 'Huddle outcomes',
-      columns: [
-        { heading: 'Date', kind: 'date' }, { heading: 'Person' }, { heading: 'Shift' }, { heading: 'Outcome' },
-        { heading: 'Family' }, { heading: 'Category' }, { heading: 'Location' }, { heading: 'Activity', width: 48 },
-        { heading: 'Note', width: 48, wrap: true }, { heading: 'Blocked because', width: 32 }, { heading: 'Blocked by' },
-        { heading: 'Photo' }, { heading: 'Recorded', kind: 'datetime' }, { heading: 'Recorded by' },
-      ],
-      rows: actuals.map((a) => {
-        const status = STATUS_BY_ID.get(a.status);
-        return [
-          a.work_date, ctx.name(a.person_id), shiftLabel(a.shift || 'day'), status?.label || a.status, status?.family || '',
-          ctx.categoryById.get(a.category_id)?.name || '', ctx.place(a.location_id, ''), labels.get(a.lookahead_row_id) || '',
-          a.note || '', a.blocked_reason || '', a.blocked_party_id ? ctx.partyById.get(a.blocked_party_id)?.name || '' : '',
-          Boolean(a.evidence_path), a.created_at, ctx.who(a.created_by),
-        ];
-      }),
-      empty: 'The huddle recorded nothing in these dates.',
-    }];
-  },
-
-  async blockers(ctx) {
-    const rows = await rc.readAll('rc_blockers_current', { column: 'raised_on', from: ctx.from, to: ctx.to });
-    return [{
-      name: 'Blockers',
-      columns: [
-        { heading: 'Raised', kind: 'date' }, { heading: 'Raised for' }, { heading: 'Location' },
-        { heading: 'What is in the way', width: 48, wrap: true }, { heading: 'Party' }, { heading: 'State' },
-        { heading: 'Owner' }, { heading: 'Due', kind: 'date' }, { heading: 'Latest note', width: 48, wrap: true },
-        { heading: 'Last updated', kind: 'datetime' }, { heading: 'Age in days', kind: 'number' },
-      ],
-      rows: rows.map((b) => [
-        b.raised_on, ctx.name(b.person_id), ctx.place(b.location_id, ''), b.summary || '',
-        b.party_id ? ctx.partyById.get(b.party_id)?.name || '' : '', b.state || 'open',
-        ctx.name(b.owner_id), b.due_date || '', b.last_note || '', b.last_update || '',
-        b.age_days == null ? '' : Number(b.age_days),
-      ]),
-      empty: 'No blocker was raised in these dates.',
-    }];
-  },
-
   async leave(ctx) {
     const rows = (await rc.readAll('rc_leave', { column: 'start_date' }))
       .filter((l) => (!ctx.from || l.end_date >= ctx.from) && (!ctx.to || l.start_date <= ctx.to));
@@ -512,7 +458,7 @@ const BUILDERS = {
       columns: [
         { heading: 'Person' }, { heading: 'Kind' }, { heading: 'From', kind: 'date' }, { heading: 'To', kind: 'date' },
         { heading: 'Calendar days', kind: 'number' }, { heading: 'Status' }, { heading: 'First day' }, { heading: 'Last day' },
-        { heading: 'Note', width: 40, wrap: true }, { heading: 'Asked', kind: 'datetime' },
+        { heading: 'Note', width: 40, wrap: true }, { heading: 'Booked', kind: 'datetime' },
       ],
       rows: rows.map((l) => [
         ctx.name(l.person_id), ctx.leaveKindById.get(l.kind_id)?.name || '', l.start_date, l.end_date, span(l),
@@ -558,38 +504,17 @@ const BUILDERS = {
     }];
   },
 
-  async sars(ctx) {
-    const [sars, links] = await Promise.all([rc.listSars(), rc.listSarLinks().catch(() => [])]);
-    const linked = new Map();
-    for (const l of links) linked.set(l.sar_id, (linked.get(l.sar_id) || 0) + 1);
-    const rows = sars.filter((s) => (!ctx.from || !s.week_start || s.week_start >= addDaysISO(ctx.from, -6))
-      && (!ctx.to || !s.week_start || s.week_start <= ctx.to));
-    return [{
-      name: 'SARs',
-      columns: [
-        { heading: 'SAR number' }, { heading: 'Revision', kind: 'number' }, { heading: 'Location' },
-        { heading: 'Week starting', kind: 'date' }, { heading: 'Starts', kind: 'datetime' }, { heading: 'Ends', kind: 'datetime' },
-        { heading: 'Authorised hours', kind: 'number' }, { heading: 'Look-ahead rows covered', kind: 'number' }, { heading: 'File', width: 40 },
-      ],
-      rows: rows.map((s) => [
-        s.sar_number, s.revision ?? '', ctx.place(s.location_id, s.raw_location), s.week_start || '', s.start_at || '', s.end_at || '',
-        s.authorized_hours == null ? '' : Number(s.authorized_hours), linked.get(s.id) || 0, s.storage_path || '',
-      ]),
-      empty: 'No SAR in these dates.',
-    }];
-  },
-
   async reference(ctx) {
     const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     return [
       {
         name: 'Team',
         columns: [
-          { heading: 'Name' }, { heading: 'Email' }, { heading: 'Title' }, { heading: 'Subsystem' }, { heading: 'Role' },
+          { heading: 'Name' }, { heading: 'Email' }, { heading: 'Title' }, { heading: 'Subsystem' },
           { heading: 'Takes shifts' }, { heading: 'Active' }, { heading: 'Working days' },
         ],
         rows: ctx.people.map((p) => [
-          p.name, p.email || '', p.title || '', p.subsystem || '', p.role || '', p.scheduled !== false, p.active !== false,
+          p.name, p.email || '', p.title || '', p.subsystem || '', p.scheduled !== false, p.active !== false,
           (Array.isArray(p.working_days) ? p.working_days : [1, 2, 3, 4, 5]).map((d) => days[d - 1]).filter(Boolean).join(' '),
         ]),
       },
@@ -613,9 +538,8 @@ const BUILDERS = {
 };
 
 const NAMES = {
-  lookahead: ['Look-ahead'], shifts: ['Shifts worked'], cancellations: ['Cancellations'], changes: ['Changes'],
-  outcomes: ['Huddle outcomes'], blockers: ['Blockers'], leave: ['Leave'], p6: ['P6 activities'], tawrs: ['TAWRs'],
-  sars: ['SARs'], reference: ['Team', 'Locations', 'Legend', 'Support codes'],
+  lookahead: ['Look-ahead'], shifts: ['Who is on what'], cancellations: ['Cancellations'], changes: ['Changes'],
+  leave: ['Leave'], p6: ['P6 activities'], tawrs: ['TAWRs'], reference: ['Team', 'Locations', 'Legend', 'Support codes'],
 };
 
 /**
@@ -630,9 +554,8 @@ export async function buildMasterExport(settings = loadSettings(), { now = new D
   const wanted = SHEETS.filter((s) => settings.sheets.includes(s.id));
   const sheets = [];
   const failed = [];
-  /* One at a time, in order, and each on its own: a sheet the policies refuse
-     (TAWRs to anybody but an administrator) or a database without a view yet
-     is written empty and named, never allowed to lose the rest. */
+  /* One at a time, in order, and each on its own: a sheet that cannot be
+     read is written empty and named, never allowed to lose the rest. */
   for (const want of wanted) {
     try {
       sheets.push(...await BUILDERS[want.id](ctx));
@@ -647,11 +570,11 @@ export async function buildMasterExport(settings = loadSettings(), { now = new D
     columns: [{ heading: 'Item', width: 28 }, { heading: 'Value', width: 40 }, { heading: 'Detail', width: 90, wrap: true }],
     rows: [
       ['Exported', now.toLocaleString(), now.toISOString()],
-      ['Exported by', rc.me()?.name || rc.currentUser?.()?.email || '', ''],
+      ['Exported by', rc.me()?.name || '', ''],
       ['Dates', range.label, range.from || range.to ? `${range.from || 'the start'} to ${range.to || 'the end'}` : ''],
       ['The look-ahead is written in', ctx.source === 'editor' ? 'The calendar (Edit)' : 'The workbook', ''],
       ['How a day of the look-ahead is read', 'The newest reading of its week', 'Each week comes from the newest reading taken of it — '
-        + 'the rule the week plan reads by — so a week the window has rolled past keeps the last reading that had it, and older readings '
+        + 'so a week the window has rolled past keeps the last reading that had it, and older readings '
         + 'of the same week are still on the record in the calendar. A week written in the calendar that no reading has — '
         + 'further back than the week just gone, filled in afterwards — comes from the calendar as written, and says so in its Source column.'],
       ['', '', ''],
@@ -725,9 +648,9 @@ let running = false;
 
 /**
  * Look once a minute for an export that is due, on this computer. Started
- * when the calendar starts; it acts only for an administrator who is not
- * seeing it as somebody else, and only while the page is open — which is the
- * whole of what a page can promise.
+ * when the calendar starts, and acting only while it is open — which is the
+ * whole of what a page can promise. Holding the pen is not needed: the export
+ * reads the calendar and writes only into `exports/`.
  */
 export function startScheduledExports() {
   if (started) return;
@@ -737,7 +660,7 @@ export function startScheduledExports() {
 }
 
 export async function scheduledTick(now = Date.now()) {
-  if (running || !rc.isSignedIn() || !rc.isAdmin() || rc.previewing()) return false;
+  if (running || !rc.isSignedIn()) return false;
   const s = loadSettings();
   if (!isDue(s.schedule, { lastRun: s.lastRun, since: s.since }, now)) return false;
   if (s.failedAt && now - s.failedAt < RETRY_MS) return false;

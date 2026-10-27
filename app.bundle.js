@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 60   Built: 2026-10-27T17:36:33.279Z
+ * Modules: 60   Built: 2026-10-27T19:11:13.325Z
  */
 (function () {
   'use strict';
@@ -594,7 +594,7 @@ __mods["core/events.js"] = function (__x, __req) {
        calendar must not disturb the timeline, which needs no account at all. */
     RC_AUTH_CHANGED: 'rc:auth', // { user, event }
     RC_CHANGED: 'rc:changed', // { what } — a row was written; panes reload
-    RC_QUEUE_CHANGED: 'rc:queue', // { pending } — unsynced huddle entries
+    RC_PEN: 'rc:pen', // { role, holder } — who may write the calendar changed
     RC_SHOW_TAB: 'rc:tab', // { tab } — a tab asking for another; ui/rc.js owns the router
 
     /* Which whole interface is on screen: the timeline, or the calendar. */
@@ -2985,757 +2985,6 @@ __mods["core/model.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
-// core/sdk.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["core/sdk.js"] = function (__x, __req) {
-  /**
-   * The vendored Supabase client, fetched the first time a client is made.
-   *
-   * It used to be a plain script tag ahead of the bundle, so every page paid for
-   * 200 kB of a library before the timeline could start — including the plan,
-   * which has no backend in any shape this is deployed in. Now `core/cloud.js`
-   * and `core/rc.js` ask for it in their `init()`, which is already async and
-   * already off the boot path, and a page that never makes a client never
-   * downloads it.
-   *
-   * Where a page loads it itself — the phone app's `m/index.html` does, because
-   * its first screen is the calendar — the global is already there and nothing
-   * is fetched. The file stays where it was (`vendor/`, cached forever), so the
-   * desktop shell and the published site resolve the same relative name.
-   *
-   * Imports: nothing.
-   */
-
-  const SDK_SRC = 'vendor/supabase.js';
-
-  let loading = null;
-
-  const present = () => typeof window !== 'undefined'
-    && window.supabase && typeof window.supabase.createClient === 'function';
-
-  /**
-   * Resolves to the `supabase` global, or to null when it cannot be had — no
-   * DOM, no file, no network. Never rejects: both callers degrade to "not
-   * signed in", which is what a missing client has always meant.
-   */
-  function loadSupabase() {
-    if (present()) return Promise.resolve(window.supabase);
-    if (typeof document === 'undefined') return Promise.resolve(null);
-    if (loading) return loading;
-    loading = new Promise((resolve) => {
-      const script = document.createElement('script');
-      script.src = SDK_SRC;
-      script.async = true;
-      script.onload = () => resolve(present() ? window.supabase : null);
-      script.onerror = () => resolve(null);
-      document.head.appendChild(script);
-    }).then((sdk) => {
-      // A failure is not remembered: the next sign-in tries the network again.
-      if (!sdk) loading = null;
-      return sdk;
-    });
-    return loading;
-  }
-
-  Object.defineProperty(__x, "loadSupabase", { get: () => loadSupabase, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
-// core/cloud.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["core/cloud.js"] = function (__x, __req) {
-  /**
-   * The hosted backend.
-   *
-   * This module is the *only* one that knows Supabase exists. Everything above
-   * it — storage, the panels, the sharing dialog — talks to the functions here
-   * and would keep working against a different backend if one ever replaced it.
-   *
-   * It is inert unless `config.js` names a project. With no configuration
-   * `isConfigured()` returns false, nothing here is ever called, and CX Timeline
-   * behaves exactly as it always has: local-first, no account, works by
-   * double-clicking index.html.
-   *
-   * On permissions
-   * --------------
-   * The role returned by `getRole()` drives the read-only UI, but it is not the
-   * control. Every rule is enforced by row-level security in Postgres, so a
-   * viewer who bypasses the interface entirely is still refused by the database.
-   * The role here exists to explain *why* something is disabled, not to decide
-   * it.
-   *
-   * On saving
-   * ---------
-   * Writes go through the `save_project` function rather than a plain UPDATE,
-   * for two reasons. A row hidden by row-level security is not an error — the
-   * statement simply matches nothing and reports success — so a plain UPDATE
-   * would let a viewer believe their work was saved. And the function carries an
-   * optimistic revision check, so two people editing one plan get told about the
-   * collision instead of quietly overwriting each other.
-   *
-   * Imports: util, events, sdk.
-   */
-
-  const { emit, EV } = __req("core/events.js");
-  const { loadSupabase } = __req("core/sdk.js");
-
-  /* ── Configuration ─────────────────────────────────────────────────────── */
-
-  function config() {
-    return (typeof window !== 'undefined' && window.CX_CONFIG) || {};
-  }
-
-  /** True when this build points at a backend. */
-  function isConfigured() {
-    const { supabaseUrl, supabaseAnonKey } = config();
-    return Boolean(supabaseUrl && supabaseAnonKey);
-  }
-
-  /** True when an account is required even if the backend cannot be reached. */
-  function authRequired() {
-    return Boolean(config().requireAuth);
-  }
-
-  /* ── Private state ─────────────────────────────────────────────────────── */
-
-  let client = null;
-  let user = null;
-  let projectId = null;
-  let projectRev = 0;
-  let role = null; // 'owner' | 'editor' | 'viewer' | null
-  let ready = false;
-
-  /* ── Lifecycle ─────────────────────────────────────────────────────────── */
-
-  /**
-   * Create the client and restore any existing session.
-   * Resolves to the signed-in user, or null. Never throws: a backend that is
-   * down must degrade to "not signed in", not to a blank page.
-   */
-  function init() {
-    if (ready) return Promise.resolve(user);
-    // One client, however many callers ask while the SDK is still on its way.
-    if (!starting) starting = start().finally(() => { starting = null; });
-    return starting;
-  }
-
-  let starting = null;
-
-  async function start() {
-    if (ready) return user;
-    if (!isConfigured()) return null;
-
-    // Fetched here, not by a script tag: a page that never makes a client
-    // never downloads one (see core/sdk.js).
-    const sdk = await loadSupabase();
-    if (!sdk) {
-      console.warn('[cx-timeline] the Supabase client did not load; running local-only');
-      return null;
-    }
-
-    const { supabaseUrl, supabaseAnonKey } = config();
-    client = sdk.createClient(supabaseUrl, supabaseAnonKey, {
-      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
-    });
-
-    try {
-      const { data } = await client.auth.getSession();
-      user = data?.session?.user || null;
-      if (user) await refreshAdmin();
-    } catch (err) {
-      console.warn('[cx-timeline] could not restore the session:', err.message);
-      user = null;
-    }
-
-    // A refresh token that expires while the tab is open, or a sign-out in
-    // another tab, must not leave a stale identity behind.
-    client.auth.onAuthStateChange((event, session) => {
-      const next = session?.user || null;
-      const changed = (next?.id || null) !== (user?.id || null);
-      user = next;
-      if (!next) forgetProject();
-      if (changed) emit(EV.AUTH_CHANGED, { user, event });
-    });
-
-    ready = true;
-    return user;
-  }
-
-  /** The client, for the rare caller that needs it. Null when not configured. */
-  function raw() {
-    return client;
-  }
-
-  /* ── Accounts ──────────────────────────────────────────────────────────── */
-
-  function currentUser() {
-    return user;
-  }
-
-  function isSignedIn() {
-    return Boolean(user);
-  }
-
-  /** A short label for the account menu. */
-  function accountLabel() {
-    if (!user) return '';
-    return user.user_metadata?.full_name || user.email || 'Signed in';
-  }
-
-  async function signIn(email, password) {
-    requireClient();
-    const { data, error } = await client.auth.signInWithPassword({
-      email: String(email || '').trim(),
-      password,
-    });
-    if (error) throw friendlier(error);
-    user = data.user;
-    await refreshAdmin();
-    emit(EV.AUTH_CHANGED, { user, event: 'SIGNED_IN' });
-    return user;
-  }
-
-  /**
-   * Create an account.
-   *
-   * Whether the user is signed in straight away depends on the project's email
-   * confirmation setting, so the caller is told which happened rather than
-   * having to guess from whether a session appeared.
-   */
-  async function signUp(email, password, fullName = '') {
-    requireClient();
-    const { data, error } = await client.auth.signUp({
-      email: String(email || '').trim(),
-      password,
-      options: { data: fullName ? { full_name: fullName } : {} },
-    });
-    if (error) throw friendlier(error);
-
-    if (data.session) {
-      user = data.user;
-      await refreshAdmin();
-      emit(EV.AUTH_CHANGED, { user, event: 'SIGNED_IN' });
-      return { user, confirmationRequired: false };
-    }
-    return { user: data.user, confirmationRequired: true };
-  }
-
-  async function signOut() {
-    if (!client) return;
-    await client.auth.signOut();
-    user = null;
-    admin = false;
-    forgetProject();
-    emit(EV.AUTH_CHANGED, { user: null, event: 'SIGNED_OUT' });
-  }
-
-  async function sendPasswordReset(email) {
-    requireClient();
-    const { error } = await client.auth.resetPasswordForEmail(String(email || '').trim(), {
-      redirectTo: window.location.origin + window.location.pathname,
-    });
-    if (error) throw friendlier(error);
-  }
-
-  async function updatePassword(password) {
-    requireClient();
-    const { error } = await client.auth.updateUser({ password });
-    if (error) throw friendlier(error);
-  }
-
-  /* ── The open project, and what you may do to it ───────────────────────── */
-
-  function getProjectId() {
-    return projectId;
-  }
-
-  function getRev() {
-    return projectRev;
-  }
-
-  /** 'owner' | 'editor' | 'viewer' | null (nothing open, or local-only). */
-  function getRole() {
-    return role;
-  }
-
-  function canWrite() {
-    return role === 'owner' || role === 'editor';
-  }
-
-  function isOwner() {
-    return role === 'owner';
-  }
-
-  /**
-   * True when the open project must not be modified.
-   *
-   * Deliberately false when no project is open or the app is running
-   * local-only — read-only is a property of *this* project, not a default.
-   */
-  function isReadOnly() {
-    return Boolean(projectId) && !canWrite();
-  }
-
-  function setAccess(id, nextRole, rev) {
-    const changed = id !== projectId || nextRole !== role;
-    projectId = id;
-    role = nextRole;
-    projectRev = rev ?? 0;
-    if (changed) emit(EV.ACCESS_CHANGED, { projectId, role, readOnly: isReadOnly() });
-  }
-
-  function forgetProject() {
-    if (projectId || role) setAccess(null, null, 0);
-  }
-
-  /* ── Projects ──────────────────────────────────────────────────────────── */
-
-  /** Every project the signed-in user can reach, newest first, with their role. */
-  async function listProjects() {
-    const rows = await rpc('list_my_projects');
-    return (rows || []).map((r) => ({
-      id: r.id,
-      name: r.name,
-      role: r.role,
-      objects: r.object_count,
-      rev: Number(r.rev),
-      savedAt: new Date(r.updated_at).getTime(),
-      createdAt: new Date(r.created_at).getTime(),
-      ownerEmail: r.owner_email,
-      members: r.member_count,
-    }));
-  }
-
-  /** Create a project from a document and open it. Returns its id. */
-  async function createProject(doc) {
-    requireUser();
-    const { data, error } = await client
-      .from('projects')
-      .insert({
-        owner_id: user.id,
-        name: doc?.name || 'Untitled Project',
-        doc,
-        object_count: (doc?.objects || []).length,
-      })
-      .select('id, rev')
-      .single();
-    if (error) throw friendlier(error);
-
-    setAccess(data.id, 'owner', Number(data.rev));
-    return data.id;
-  }
-
-  /** Open a project. Returns the document, or null when it is not reachable. */
-  async function openProject(id) {
-    const { data, error } = await client
-      .from('projects')
-      .select('id, doc, rev, name')
-      .eq('id', id)
-      .maybeSingle();
-    if (error) throw friendlier(error);
-    if (!data) {
-      forgetProject();
-      return null;
-    }
-
-    const theirRole = await rpc('project_role', { p_project: id });
-    setAccess(data.id, theirRole || 'viewer', Number(data.rev));
-    return data.doc;
-  }
-
-  /**
-   * Save the open project.
-   *
-   * Returns `{ ok, rev }` on success. A collision resolves to
-   * `{ ok: false, conflict: true }` rather than throwing, because the caller —
-   * autosave — has to keep running either way.
-   */
-  async function saveProject(doc, { force = false } = {}) {
-    if (!projectId) return { ok: false, reason: 'no-project' };
-    if (!canWrite()) return { ok: false, reason: 'read-only' };
-
-    const { data, error } = await client.rpc('save_project', {
-      p_project: projectId,
-      p_doc: doc,
-      p_rev: force ? 0 : projectRev,
-    });
-
-    if (error) {
-      if (isConflict(error)) {
-        emit(EV.CLOUD_CONFLICT, { projectId });
-        return { ok: false, conflict: true, reason: 'conflict' };
-      }
-      if (isDenied(error)) {
-        setAccess(projectId, 'viewer', projectRev);
-        return { ok: false, reason: 'read-only' };
-      }
-      throw friendlier(error);
-    }
-
-    projectRev = Number(data);
-    return { ok: true, rev: projectRev };
-  }
-
-  async function renameProject(id, name) {
-    const { data, error } = await client
-      .from('projects')
-      .update({ name })
-      .eq('id', id)
-      .select('id');
-    if (error) throw friendlier(error);
-    // A row excluded by row-level security is not an error — it just matches
-    // nothing — so an empty result is how a refused rename presents itself.
-    if (!data || !data.length) throw new Error('You do not have permission to rename this project.');
-  }
-
-  async function deleteProject(id) {
-    const { data, error } = await client.from('projects').delete().eq('id', id).select('id');
-    if (error) throw friendlier(error);
-    if (!data || !data.length) throw new Error('Only the owner can delete a project.');
-    if (id === projectId) forgetProject();
-  }
-
-  /* ── Accounts and invitations (administrators) ─────────────────────────── */
-
-  let admin = false;
-
-  /** True when the signed-in user administers this deployment. */
-  function isAdmin() {
-    return admin;
-  }
-
-  /**
-   * Ask the server whether this account is an administrator.
-   * Cached, because it gates UI that renders on every document change; it is
-   * refreshed on sign-in and after any change to administrators.
-   */
-  async function refreshAdmin() {
-    if (!client || !user) {
-      admin = false;
-      return false;
-    }
-    try {
-      admin = Boolean(await rpc('is_admin'));
-    } catch {
-      admin = false;
-    }
-    return admin;
-  }
-
-  /**
-   * Invite an email address to create an account.
-   *
-   * Sign-up is closed: the database refuses any account whose address has no
-   * pending invitation, so this is the only way in. No email is sent — the
-   * caller gets a link to pass on however they like, which avoids depending on
-   * a mail server that a free project does not reliably have.
-   */
-  async function inviteUser(email, role = 'editor', note = '') {
-    const rows = await rpc('invite_user', { p_email: email, p_role: role, p_note: note || null });
-    const row = Array.isArray(rows) ? rows[0] : rows;
-    return {
-      email: row?.invited_email || String(email).trim().toLowerCase(),
-      expires: row?.invitation_expires ? new Date(row.invitation_expires).getTime() : null,
-    };
-  }
-
-  async function revokeInvitation(email) {
-    await rpc('revoke_invitation', { p_email: email });
-  }
-
-  async function listInvitations() {
-    const rows = await rpc('list_invitations');
-    return (rows || []).map((r) => ({
-      email: r.email,
-      role: r.role_hint,
-      note: r.note,
-      created: new Date(r.created_at).getTime(),
-      expires: new Date(r.expires_at).getTime(),
-      expired: r.expired,
-      invitedBy: r.invited_by,
-    }));
-  }
-
-  async function listAccounts() {
-    const rows = await rpc('list_accounts');
-    return (rows || []).map((r) => ({
-      id: r.id,
-      email: r.email,
-      name: r.full_name,
-      admin: r.is_admin,
-      created: new Date(r.created_at).getTime(),
-      projects: r.projects,
-      isYou: r.id === user?.id,
-    }));
-  }
-
-  async function setAdmin(userId, value) {
-    await rpc('set_admin', { p_user: userId, p_admin: value });
-    if (userId === user?.id) await refreshAdmin();
-  }
-
-  /** The link an invited person opens to set up their account. */
-  function inviteLink(email) {
-    const base = window.location.origin + window.location.pathname;
-    return `${base}#invite=${encodeURIComponent(email)}`;
-  }
-
-  /* ── Sharing ───────────────────────────────────────────────────────────── */
-
-  async function listMembers(id = projectId) {
-    if (!id) return [];
-    const rows = await rpc('list_project_members', { p_project: id });
-    return (rows || []).map((r) => ({
-      userId: r.user_id,
-      email: r.email,
-      name: r.full_name,
-      role: r.role,
-      since: new Date(r.created_at).getTime(),
-      isYou: r.user_id === user?.id,
-    }));
-  }
-
-  /** Grant someone access by email address. Owners only. */
-  async function shareProject(id, email, memberRole) {
-    const rows = await rpc('share_project', {
-      p_project: id,
-      p_email: email,
-      p_role: memberRole,
-    });
-    const row = Array.isArray(rows) ? rows[0] : rows;
-    return { userId: row?.member_id, email: row?.member_email, role: row?.member_role };
-  }
-
-  async function unshareProject(id, userId) {
-    await rpc('unshare_project', { p_project: id, p_user: userId });
-    if (userId === user?.id && id === projectId) forgetProject();
-  }
-
-  /** Change an existing member's role. Owners only. */
-  async function setMemberRole(id, email, memberRole) {
-    return shareProject(id, email, memberRole);
-  }
-
-  /* ── Backups ───────────────────────────────────────────────────────────── */
-
-  async function listBackups(id = projectId) {
-    if (!id) return [];
-    const { data, error } = await client
-      .from('project_backups')
-      .select('id, reason, name, object_count, size_bytes, created_at')
-      .eq('project_id', id)
-      .order('created_at', { ascending: false });
-    if (error) throw friendlier(error);
-    return (data || []).map((b) => ({
-      key: b.id,
-      time: new Date(b.created_at).getTime(),
-      reason: b.reason,
-      name: b.name,
-      objects: b.object_count,
-      size: b.size_bytes,
-    }));
-  }
-
-  async function createBackup(doc, reason = 'manual') {
-    if (!projectId || !canWrite()) return false;
-    let size = 0;
-    try {
-      size = JSON.stringify(doc).length;
-    } catch {
-      /* an unserialisable document would have failed to save already */
-    }
-    const { error } = await client.from('project_backups').insert({
-      project_id: projectId,
-      doc,
-      reason,
-      name: doc?.name || null,
-      object_count: (doc?.objects || []).length,
-      size_bytes: size,
-    });
-    if (error) {
-      if (isDenied(error)) return false;
-      throw friendlier(error);
-    }
-    return true;
-  }
-
-  async function loadBackup(key) {
-    const { data, error } = await client
-      .from('project_backups')
-      .select('doc')
-      .eq('id', key)
-      .maybeSingle();
-    if (error) throw friendlier(error);
-    return data?.doc || null;
-  }
-
-  async function deleteBackup(key) {
-    const { data, error } = await client.from('project_backups').delete().eq('id', key).select('id');
-    if (error) throw friendlier(error);
-    if (!data || !data.length) throw new Error('Only the owner can delete a backup.');
-  }
-
-  async function pruneBackups(keep = 20) {
-    if (!projectId || !canWrite()) return 0;
-    try {
-      return Number(await rpc('prune_backups', { p_project: projectId, p_keep: keep })) || 0;
-    } catch {
-      return 0;
-    }
-  }
-
-  /* ── Attachments ───────────────────────────────────────────────────────── */
-
-  const BUCKET = 'attachments';
-
-  /**
-   * Attachment bytes live in object storage, keyed `<project>/<id>`, exactly as
-   * they live outside the document locally — so a plan carrying 40 MB of test
-   * logs still saves in milliseconds. The first path segment is what the storage
-   * policies read to decide access.
-   */
-  function blobPath(id) {
-    return `${projectId}/${id}`;
-  }
-
-  async function putBlob(id, file) {
-    if (!projectId) throw new Error('No project is open.');
-    if (!canWrite()) throw new Error('This project is read-only.');
-    const { error } = await client.storage.from(BUCKET).upload(blobPath(id), file, {
-      upsert: true,
-      contentType: file.type || 'application/octet-stream',
-    });
-    if (error) throw friendlier(error);
-    return { id, name: file.name, type: file.type, size: file.size };
-  }
-
-  async function getBlob(id) {
-    if (!projectId) return null;
-    const { data, error } = await client.storage.from(BUCKET).download(blobPath(id));
-    if (error) return null;
-    return data;
-  }
-
-  async function deleteBlob(id) {
-    if (!projectId || !canWrite()) return;
-    await client.storage.from(BUCKET).remove([blobPath(id)]);
-  }
-
-  /* ── Plumbing ──────────────────────────────────────────────────────────── */
-
-  function requireClient() {
-    if (!client) throw new Error('This build is not connected to a backend.');
-  }
-
-  function requireUser() {
-    requireClient();
-    if (!user) throw new Error('You need to be signed in.');
-  }
-
-  async function rpc(name, args = {}) {
-    requireClient();
-    const { data, error } = await client.rpc(name, args);
-    if (error) throw friendlier(error);
-    return data;
-  }
-
-  /** Postgres raises 40001 for a revision collision; see save_project. */
-  function isConflict(error) {
-    return error?.code === '40001' || /conflict:/i.test(error?.message || '');
-  }
-
-  /** 42501 is insufficient_privilege — the read-only refusal. */
-  function isDenied(error) {
-    return (
-      error?.code === '42501' ||
-      error?.code === 'PGRST301' ||
-      /read only|permission|policy/i.test(error?.message || '')
-    );
-  }
-
-  /**
-   * Turn a backend error into something worth showing a person.
-   *
-   * Supabase messages are written for developers; these are the handful a user
-   * can actually act on, and the rest are passed through rather than swallowed.
-   */
-  function friendlier(error) {
-    const message = error?.message || String(error);
-    const map = [
-      [/invalid login credentials/i, 'That email and password do not match an account.'],
-      [/email not confirmed/i, 'Check your inbox and confirm your email address first.'],
-      [/user already registered/i, 'There is already an account with that email — sign in instead.'],
-      [/password should be at least (\d+)/i, 'Pick a longer password — at least $1 characters.'],
-      [/rate limit|too many requests/i, 'Too many attempts. Wait a minute and try again.'],
-      [/failed to fetch|networkerror/i, 'Cannot reach the server. Check your connection.'],
-      [/only the owner/i, 'Only the project owner can do that.'],
-      [/no account for/i, message.replace(/^.*?no account for/i, 'No account for')],
-      [/must keep at least one owner/i, 'A project has to keep at least one owner.'],
-      [/read only/i, 'This project is read-only for you.'],
-      [/invitation only/i, message],
-      [/only an administrator/i, 'Only an administrator can do that.'],
-      [/already has an account/i, message],
-      [/at least one administrator/i, 'There has to be at least one administrator.'],
-    ];
-    for (const [pattern, replacement] of map) {
-      if (pattern.test(message)) {
-        const out = new Error(message.replace(pattern, replacement));
-        out.code = error?.code;
-        return out;
-      }
-    }
-    const out = new Error(message);
-    out.code = error?.code;
-    return out;
-  }
-
-  Object.defineProperty(__x, "isConfigured", { get: () => isConfigured, enumerable: true });
-  Object.defineProperty(__x, "authRequired", { get: () => authRequired, enumerable: true });
-  Object.defineProperty(__x, "init", { get: () => init, enumerable: true });
-  Object.defineProperty(__x, "raw", { get: () => raw, enumerable: true });
-  Object.defineProperty(__x, "currentUser", { get: () => currentUser, enumerable: true });
-  Object.defineProperty(__x, "isSignedIn", { get: () => isSignedIn, enumerable: true });
-  Object.defineProperty(__x, "accountLabel", { get: () => accountLabel, enumerable: true });
-  Object.defineProperty(__x, "signIn", { get: () => signIn, enumerable: true });
-  Object.defineProperty(__x, "signUp", { get: () => signUp, enumerable: true });
-  Object.defineProperty(__x, "signOut", { get: () => signOut, enumerable: true });
-  Object.defineProperty(__x, "sendPasswordReset", { get: () => sendPasswordReset, enumerable: true });
-  Object.defineProperty(__x, "updatePassword", { get: () => updatePassword, enumerable: true });
-  Object.defineProperty(__x, "getProjectId", { get: () => getProjectId, enumerable: true });
-  Object.defineProperty(__x, "getRev", { get: () => getRev, enumerable: true });
-  Object.defineProperty(__x, "getRole", { get: () => getRole, enumerable: true });
-  Object.defineProperty(__x, "canWrite", { get: () => canWrite, enumerable: true });
-  Object.defineProperty(__x, "isOwner", { get: () => isOwner, enumerable: true });
-  Object.defineProperty(__x, "isReadOnly", { get: () => isReadOnly, enumerable: true });
-  Object.defineProperty(__x, "listProjects", { get: () => listProjects, enumerable: true });
-  Object.defineProperty(__x, "createProject", { get: () => createProject, enumerable: true });
-  Object.defineProperty(__x, "openProject", { get: () => openProject, enumerable: true });
-  Object.defineProperty(__x, "saveProject", { get: () => saveProject, enumerable: true });
-  Object.defineProperty(__x, "renameProject", { get: () => renameProject, enumerable: true });
-  Object.defineProperty(__x, "deleteProject", { get: () => deleteProject, enumerable: true });
-  Object.defineProperty(__x, "isAdmin", { get: () => isAdmin, enumerable: true });
-  Object.defineProperty(__x, "refreshAdmin", { get: () => refreshAdmin, enumerable: true });
-  Object.defineProperty(__x, "inviteUser", { get: () => inviteUser, enumerable: true });
-  Object.defineProperty(__x, "revokeInvitation", { get: () => revokeInvitation, enumerable: true });
-  Object.defineProperty(__x, "listInvitations", { get: () => listInvitations, enumerable: true });
-  Object.defineProperty(__x, "listAccounts", { get: () => listAccounts, enumerable: true });
-  Object.defineProperty(__x, "setAdmin", { get: () => setAdmin, enumerable: true });
-  Object.defineProperty(__x, "inviteLink", { get: () => inviteLink, enumerable: true });
-  Object.defineProperty(__x, "listMembers", { get: () => listMembers, enumerable: true });
-  Object.defineProperty(__x, "shareProject", { get: () => shareProject, enumerable: true });
-  Object.defineProperty(__x, "unshareProject", { get: () => unshareProject, enumerable: true });
-  Object.defineProperty(__x, "setMemberRole", { get: () => setMemberRole, enumerable: true });
-  Object.defineProperty(__x, "listBackups", { get: () => listBackups, enumerable: true });
-  Object.defineProperty(__x, "createBackup", { get: () => createBackup, enumerable: true });
-  Object.defineProperty(__x, "loadBackup", { get: () => loadBackup, enumerable: true });
-  Object.defineProperty(__x, "deleteBackup", { get: () => deleteBackup, enumerable: true });
-  Object.defineProperty(__x, "pruneBackups", { get: () => pruneBackups, enumerable: true });
-  Object.defineProperty(__x, "putBlob", { get: () => putBlob, enumerable: true });
-  Object.defineProperty(__x, "getBlob", { get: () => getBlob, enumerable: true });
-  Object.defineProperty(__x, "deleteBlob", { get: () => deleteBlob, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
 // core/desktop.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["core/desktop.js"] = function (__x, __req) {
@@ -3987,6 +3236,24 @@ __mods["core/desktop.js"] = function (__x, __req) {
     return call('intake_hash', { folder, path });
   }
 
+  /* ── The calendar's files, as text ─────────────────────────────────────── */
+
+  /** `{ text, stamp }`, or null when the file does not exist. */
+  async function dataRead(folder, path) {
+    const read = await call('data_read', { folder, path });
+    return read || null;
+  }
+
+  async function dataStat(folder, path) {
+    const stamp = await call('data_stat', { folder, path });
+    return stamp || null;
+  }
+
+  /** Atomic, and refused with `kind: 'conflict'` when the file is not `expected`. */
+  function dataWrite(folder, path, text, expected) {
+    return call('data_write', { folder, path, text, expected: expected || null });
+  }
+
   /* ── Window ────────────────────────────────────────────────────────────── */
 
   /**
@@ -4026,6 +3293,9 @@ __mods["core/desktop.js"] = function (__x, __req) {
   Object.defineProperty(__x, "intakeMove", { get: () => intakeMove, enumerable: true });
   Object.defineProperty(__x, "intakeDelete", { get: () => intakeDelete, enumerable: true });
   Object.defineProperty(__x, "intakeHash", { get: () => intakeHash, enumerable: true });
+  Object.defineProperty(__x, "dataRead", { get: () => dataRead, enumerable: true });
+  Object.defineProperty(__x, "dataStat", { get: () => dataStat, enumerable: true });
+  Object.defineProperty(__x, "dataWrite", { get: () => dataWrite, enumerable: true });
   Object.defineProperty(__x, "setWindowTitle", { get: () => setWindowTitle, enumerable: true });
 };
 
@@ -6077,6 +5347,117 @@ __mods["core/filestore.js"] = function (__x, __req) {
     return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     The calendar's files
+
+     The resource calendar keeps its tables as JSON files under `calendar/` in
+     this folder (see `core/rc_db.js`). They are read and written as text — the
+     intake doors above move bytes as arrays of numbers through the desktop
+     bridge, which is fine for a workbook and far too slow for a month of
+     history — and every write is guarded: given the stamp the caller last saw,
+     it refuses when the file on disk is not that one, with `kind: 'conflict'`,
+     exactly as `savePlan()` refuses. On the desktop the compare and the write
+     are one call and the write is atomic.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** `{ text, stamp }`, or null when the file does not exist. */
+  async function dataRead(rel) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.dataRead(folderRef, rel);
+    try {
+      const parts = rel.split('/');
+      const name = parts.pop();
+      const dir = await webFolder(parts.join('/'));
+      const file = await (await dir.getFileHandle(name)).getFile();
+      return { text: await file.text(), stamp: { size: file.size, modified: file.lastModified } };
+    } catch (err) {
+      if (err && (err.name === 'NotFoundError' || err.name === 'TypeMismatchError')) return null;
+      throw err;
+    }
+  }
+
+  /** Size and modified time, or null when the file does not exist. */
+  async function dataStat(rel) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.dataStat(folderRef, rel);
+    try {
+      const parts = rel.split('/');
+      const name = parts.pop();
+      const dir = await webFolder(parts.join('/'));
+      const file = await (await dir.getFileHandle(name)).getFile();
+      return { size: file.size, modified: file.lastModified };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Write text, creating folders on the way, refusing when the file on disk is
+   * not the one `expected` describes (null: write whatever is there).
+   */
+  async function dataWrite(rel, text, expected = null) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.dataWrite(folderRef, rel, text, expected);
+    const parts = rel.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'), { create: true });
+    const handle = await dir.getFileHandle(name, { create: true });
+    if (expected) {
+      const current = await handle.getFile();
+      if (current.size !== expected.size || current.lastModified !== expected.modified) {
+        const err = new Error(`${rel} changed on disk, so the save was refused`);
+        err.kind = 'conflict';
+        throw err;
+      }
+    }
+    const writable = await handle.createWritable({ keepExistingData: false });
+    await writable.write(text);
+    await writable.close();
+    const after = await handle.getFile();
+    return { size: after.size, modified: after.lastModified };
+  }
+
+  /** The files in one folder, `[{ name, size, modified }]`; empty when it does not exist. */
+  async function dataList(rel) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeList(folderRef, rel);
+    try {
+      const dir = await webFolder(rel);
+      const out = [];
+      for await (const [name, handle] of dir.entries()) {
+        if (handle.kind !== 'file') continue;
+        const file = await handle.getFile();
+        out.push({ name, size: file.size, modified: file.lastModified, conflict: isConflictCopy(name) });
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Delete one file inside a subfolder. Answers whether there was one. */
+  async function dataRemove(rel) {
+    if (!folderRef) throw new Error('No folder is connected.');
+    if (onDesktop()) return desktop.intakeDelete(folderRef, rel);
+    try {
+      const parts = rel.split('/');
+      const name = parts.pop();
+      const dir = await webFolder(parts.join('/'));
+      await dir.removeEntry(name);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * This install's identity and the name it goes by — what the calendar's pen
+   * is claimed as, so it reads the same as the plan's.
+   */
+  function identity() {
+    return { device: deviceId(), name: getDisplayName(), session: sessionId };
+  }
+
   async function putBlob(id, file) {
     if (!folderRef) throw new Error('No folder is connected.');
     return ioPutBlob(folderRef, id, file);
@@ -6130,6 +5511,12 @@ __mods["core/filestore.js"] = function (__x, __req) {
   Object.defineProperty(__x, "intakeWrite", { get: () => intakeWrite, enumerable: true });
   Object.defineProperty(__x, "intakeMove", { get: () => intakeMove, enumerable: true });
   Object.defineProperty(__x, "intakeHash", { get: () => intakeHash, enumerable: true });
+  Object.defineProperty(__x, "dataRead", { get: () => dataRead, enumerable: true });
+  Object.defineProperty(__x, "dataStat", { get: () => dataStat, enumerable: true });
+  Object.defineProperty(__x, "dataWrite", { get: () => dataWrite, enumerable: true });
+  Object.defineProperty(__x, "dataList", { get: () => dataList, enumerable: true });
+  Object.defineProperty(__x, "dataRemove", { get: () => dataRemove, enumerable: true });
+  Object.defineProperty(__x, "identity", { get: () => identity, enumerable: true });
   Object.defineProperty(__x, "putBlob", { get: () => putBlob, enumerable: true });
   Object.defineProperty(__x, "getBlob", { get: () => getBlob, enumerable: true });
   Object.defineProperty(__x, "deleteBlob", { get: () => deleteBlob, enumerable: true });
@@ -7790,143 +7177,6 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
-     Progress from the calendar
-
-     The daily huddle records what each person actually did, and the timeline
-     has had `actualStart` / `actualEnd` fields nobody filled in. This joins the
-     two: an outcome is traced to the look-ahead row it was recorded against, the
-     row to the suggestion a bar is linked to, and the bar is offered the first
-     and last day anybody worked on it.
-
-     Offered, never written. The same rule as the rest of the register: a read of
-     the calendar proposes, and somebody says yes. A bar may stand for several
-     activities, and each is read on its own: the start is the first day any of
-     them was worked, and a finish is only offered when *every* one has nothing
-     left on the look-ahead and its own last word was "completed" — a gap in the
-     outcomes is not the end of the work, and one activity finishing is not the
-     bar finishing.
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /** Statuses that say somebody worked on the task that day. */
-  const WORKED_STATUSES = ['completed', 'partial', 'carried'];
-
-  /**
-   * What the outcomes say about each linked bar.
-   *
-   * `objects` are the plan's objects (only those with `data.laIds` count);
-   * `activities` is the register's id → entry map; `actuals` are rows of
-   * `rc_actuals_current`; `rows` are the `rc_lookahead_rows` those outcomes (or
-   * their plan entries in `plan`) point at. An outcome with a row is matched
-   * through the row's label; one without falls back to its task text, which a
-   * day read off the sheet carries verbatim. Both go through `suggestionKey()`,
-   * so a match is exact or nothing.
-   *
-   * A bar's linked runs are grouped by that key — several runs of one row are one
-   * activity — and each activity is summarised on its own in `activities`:
-   * `{ key, title, days, first, last, lastStatus, ahead, recorded, done }`.
-   *
-   * Returns one proposal per bar with at least one worked day:
-   * `{ objectId, first, last, days, people, lastStatus, start, end, byRow,
-   *    byTask, activities, holding }` with `start` / `end` as UTC-midnight ms (end
-   * half-open, like the bar). `end` is null unless every activity is `done`;
-   * `holding` names the ones that are not.
-   */
-  function outcomeProgress({ objects = [], activities = {}, actuals = [], rows = [], plan = [], todayMs = Date.now() } = {}) {
-    const rowById = new Map(rows.map((r) => [r.id, r]));
-    const planById = new Map(plan.map((p) => [p.id, p]));
-
-    // Each bar's activities, by key, and the bars each key belongs to.
-    const barKeys = new Map(); // bar id → Map(key → { title, ahead })
-    const barsByKey = new Map();
-    for (const obj of objects) {
-      const ids = Array.isArray(obj?.data?.laIds) ? obj.data.laIds : [];
-      for (const id of ids) {
-        const entry = activities[id];
-        if (!entry?.key) continue;
-        if (!barKeys.has(obj.id)) barKeys.set(obj.id, new Map());
-        const keys = barKeys.get(obj.id);
-        const known = keys.get(entry.key) || { title: entry.title || entry.label || '', ahead: false };
-        if (!entry.dismissed && Number.isFinite(entry.end) && entry.end > todayMs) known.ahead = true;
-        keys.set(entry.key, known);
-        if (!barsByKey.has(entry.key)) barsByKey.set(entry.key, new Set());
-        barsByKey.get(entry.key).add(obj.id);
-      }
-    }
-    if (!barsByKey.size) return [];
-
-    // What was recorded against each key: the day's word, who, and how it matched.
-    const byKey = new Map();
-    for (const a of actuals) {
-      if (!WORKED_STATUSES.includes(a.status) || !a.work_date) continue;
-      const rowId = a.lookahead_row_id || planById.get(a.plan_entry_id)?.lookahead_row_id || null;
-      const row = rowId ? rowById.get(rowId) : null;
-      const key = suggestionKey(row ? row.raw_label : a.task);
-      if (!key || !barsByKey.has(key)) continue;
-      if (!byKey.has(key)) byKey.set(key, { dates: new Map(), people: new Set(), byRow: 0, byTask: 0 });
-      const acc = byKey.get(key);
-      const prev = acc.dates.get(a.work_date);
-      // Several people on one day: "completed" from anybody is the day's word.
-      if (!prev || a.status === 'completed') acc.dates.set(a.work_date, a.status);
-      if (a.person_id) acc.people.add(a.person_id);
-      if (row) acc.byRow++;
-      else acc.byTask++;
-    }
-
-    const out = [];
-    for (const obj of objects) {
-      const keys = barKeys.get(obj.id);
-      if (!keys || ![...keys.keys()].some((k) => byKey.has(k))) continue;
-      const people = new Set();
-      let byRow = 0;
-      let byTask = 0;
-      const summary = [];
-      for (const [key, { title, ahead }] of keys) {
-        const acc = byKey.get(key);
-        const dates = acc ? [...acc.dates.keys()].sort() : [];
-        const last = dates[dates.length - 1] || null;
-        const lastStatus = last ? acc.dates.get(last) : null;
-        if (acc) {
-          acc.people.forEach((p) => people.add(p));
-          byRow += acc.byRow;
-          byTask += acc.byTask;
-        }
-        summary.push({
-          key,
-          title,
-          days: dates.length,
-          first: dates[0] || null,
-          last,
-          lastStatus,
-          ahead,
-          recorded: dates.length > 0,
-          done: !ahead && lastStatus === 'completed',
-        });
-      }
-      const worked = summary.filter((a) => a.recorded);
-      const first = worked.map((a) => a.first).sort()[0];
-      const last = worked.map((a) => a.last).sort().pop();
-      const allDates = new Set();
-      for (const a of worked) for (const d of byKey.get(a.key).dates.keys()) allDates.add(d);
-      const done = summary.every((a) => a.done);
-      out.push({
-        objectId: obj.id,
-        first,
-        last,
-        days: allDates.size,
-        people: people.size,
-        lastStatus: worked.find((a) => a.last === last)?.lastStatus || null,
-        start: isoMs(first),
-        end: done ? isoMs(last) + 86400000 : null,
-        byRow,
-        byTask,
-        activities: summary,
-        holding: summary.filter((a) => !a.done).map((a) => a.title),
-      });
-    }
-    return out;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
      Only my rows
 
      The look-ahead is a hundred-odd activities for the whole team, and somebody
@@ -8049,8 +7299,6 @@ __mods["core/lookahead.js"] = function (__x, __req) {
   Object.defineProperty(__x, "attachCancellationNotes", { get: () => attachCancellationNotes, enumerable: true });
   Object.defineProperty(__x, "cancellationNoteFor", { get: () => cancellationNoteFor, enumerable: true });
   Object.defineProperty(__x, "cancellationReasonText", { get: () => cancellationReasonText, enumerable: true });
-  Object.defineProperty(__x, "WORKED_STATUSES", { get: () => WORKED_STATUSES, enumerable: true });
-  Object.defineProperty(__x, "outcomeProgress", { get: () => outcomeProgress, enumerable: true });
   Object.defineProperty(__x, "rowsNaming", { get: () => rowsNaming, enumerable: true });
   Object.defineProperty(__x, "activityTitle", { get: () => activityTitle, enumerable: true });
   Object.defineProperty(__x, "activityDays", { get: () => activityDays, enumerable: true });
@@ -8076,22 +7324,20 @@ __mods["core/store.js"] = function (__x, __req) {
    * On a hosted deployment a project can be open read-only. Because every write
    * funnels through the three entry points below, one guard covers the whole
    * application — there is no path to a mutation that does not pass through
-   * here. The guard is a courtesy to the user, not the security boundary: that
-   * is row-level security in Postgres, which refuses the same writes even if
-   * this check were removed.
+   * here. The write guard in `core/filestore.js` is what keeps a colleague's
+   * save from being overwritten; this keeps a read-only session from editing at
+   * all.
    *
-   * Imports: util, events, cloud, filestore, access, model, history, lookahead.
+   * Imports: util, events, filestore, access, model, history, lookahead.
    */
 
   const { deepClone, clamp, uid } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
-  const { isReadOnly } = __req("core/cloud.js");
-  /* The other way a session can be read-only. `cloud.js` answers for a hosted
-     project; this answers for a plan in a shared folder that a colleague is
-     holding the pen on. Both had to be asked here: the interface hid the buttons
-     for a folder reader but the store still accepted the edit, so a keystroke
-     went through, autosave was refused by the folder, and the work was marked
-     saved without ever having been written anywhere. */
+  /* A plan in a shared folder that a colleague is holding the pen on is
+     read-only, and it has to be asked here: the interface hid the buttons for a
+     folder reader but the store still accepted the edit, so a keystroke went
+     through, autosave was refused by the folder, and the work was marked saved
+     without ever having been written anywhere. */
   const { isViewer: folderViewer } = __req("core/filestore.js");
   const { planLocked, readView, writeView } = __req("core/access.js");
   const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, syncDurationBasis, emptyLookahead, lookaheadRegister, lookaheadActivity, makeLookaheadEntry, laLinkedIds, laPlacedIds, laRollUp } = __req("core/model.js");
@@ -8165,16 +7411,14 @@ __mods["core/store.js"] = function (__x, __req) {
   }
 
   /**
-   * True when the open project is read-only for the signed-in user.
+   * True when the open plan is read-only in this session.
    *
-   * Three different facts, and any one of them is enough. The cloud project may
-   * be shared with them as a viewer; a colleague may hold the pen on the folder;
-   * or the account may not be allowed to edit the plan at all, which is what
-   * `planLocked()` says — a resource-calendar member reads the plan and never
-   * writes it, and unlike the pen that is not a turn they can take.
+   * Two different facts, and either is enough: a colleague may hold the pen on
+   * the folder, or this session may not edit the plan at all, which is what
+   * `planLocked()` says — unlike the pen, that is not a turn somebody can take.
    */
   function isDocReadOnly() {
-    return isReadOnly() || folderViewer() || planLocked();
+    return folderViewer() || planLocked();
   }
 
   /* ── Indexing ──────────────────────────────────────────────────────────── */
@@ -9699,12 +8943,11 @@ __mods["core/storage.js"] = function (__x, __req) {
    * hundred milliseconds, and the document survives a browser restart, a crash,
    * or the tab being closed mid-drag.
    *
-   * Where it is written depends on how the application is deployed, and every
-   * caller is deliberately unaware of which:
+   * Where it is written depends on where the plan is, and every caller is
+   * deliberately unaware of which:
    *
-   *   local mode   IndexedDB — the original behaviour, no account, no server.
-   *   hosted mode  Postgres via `core/cloud.js`, with IndexedDB demoted to an
-   *                offline cache so a dropped connection loses nothing.
+   *   local mode   IndexedDB — no account, no server: the development and test
+   *                path, and a browser with no folder open.
    *   file mode    a JSON file in a folder the user picked, via
    *                `core/filestore.js` — a shared drive or a synced OneDrive
    *                folder, with IndexedDB again demoted to a cache. No account
@@ -9712,8 +8955,8 @@ __mods["core/storage.js"] = function (__x, __req) {
    *                control, and a lock file plus a write guard keep two people
    *                from overwriting each other.
    *
-   * Storage stack (local, and the cache in hosted mode)
-   * --------------------------------------------------
+   * Storage stack (local, and the cache in file mode)
+   * ------------------------------------------------
    * IndexedDB is the primary store — it takes megabytes without complaint,
    * holds binary attachments natively, and writes off the main thread.
    * localStorage is kept as a mirror for the small stuff (preferences) and as a
@@ -9721,12 +8964,11 @@ __mods["core/storage.js"] = function (__x, __req) {
    * browsing on some engines and when a page is opened from `file://` under a
    * hardened profile. The fallback is transparent to every caller.
    *
-   * Imports: util, events, cloud, filestore, model, store.
+   * Imports: util, events, filestore, model, store.
    */
 
   const { debounce, bytes } = __req("core/util.js");
   const { emit, on, EV } = __req("core/events.js");
-  const cloud = __req("core/cloud.js");
   const filestore = __req("core/filestore.js");
   const { normalise, makeStarterProject } = __req("core/model.js");
   const { getDoc, markClean, isDirty } = __req("core/store.js");
@@ -9749,16 +8991,9 @@ __mods["core/storage.js"] = function (__x, __req) {
   let lastSaveError = null;
 
   /**
-   * True once a signed-in session has a project open on the server. Everything
-   * that has two implementations branches on this one flag, so there is a single
+   * True once a plan in a connected folder is the live document. Everything that
+   * has two implementations branches on this one flag, so there is a single
    * answer to "where does this go" rather than a scattering of checks.
-   */
-  let hosted = false;
-
-  /**
-   * True once a plan in a connected folder is the live document. Mutually
-   * exclusive with `hosted`: a deployment has a backend or it has a folder, and
-   * the folder is only reachable when there is no backend to contradict it.
    */
   let fileMode = false;
 
@@ -9842,9 +9077,9 @@ __mods["core/storage.js"] = function (__x, __req) {
   /**
    * Open the store and return the document to load.
    *
-   * Hosted: the project last open on this device, or the most recent one the
-   * account can reach, or a fresh starter project created on the server.
-   * Local: the most recently saved project, or a seeded starter on first run.
+   * The plan last open in the shared folder, when the folder can be reached
+   * without asking; otherwise the most recently saved local project, or a seeded
+   * starter on first run.
    */
   async function init() {
     try {
@@ -9860,18 +9095,8 @@ __mods["core/storage.js"] = function (__x, __req) {
 
     wireAutosave();
 
-    if (cloud.isSignedIn()) {
-      const opened = await openFromCloud();
-      if (opened) return opened;
-      // Signing in and then failing to reach the data is worth saying out loud
-      // rather than silently dropping the user into an unrelated local project.
-      console.warn('[cx-timeline] signed in but could not open a project; falling back to local storage');
-    }
-
-    if (!cloud.isConfigured()) {
-      const opened = await openFromFolder();
-      if (opened) return opened;
-    }
+    const opened = await openFromFolder();
+    if (opened) return opened;
 
     const saved = await loadLatest();
     if (saved) return { doc: normalise(saved), fresh: false };
@@ -9913,7 +9138,6 @@ __mods["core/storage.js"] = function (__x, __req) {
   async function openFolderPlan(name) {
     const { doc, role, holder } = await filestore.openPlan(name);
     fileMode = true;
-    hosted = false;
     editsSinceBackup = 0;
     return { doc: normalise(doc), role, holder };
   }
@@ -9922,7 +9146,6 @@ __mods["core/storage.js"] = function (__x, __req) {
   async function createFolderPlan(name, doc) {
     const written = await filestore.createPlan(name, normalise(doc));
     fileMode = true;
-    hosted = false;
     editsSinceBackup = 0;
     return written;
   }
@@ -9936,61 +9159,6 @@ __mods["core/storage.js"] = function (__x, __req) {
   /** True when the live document is a file in a connected folder. */
   function isFileMode() {
     return fileMode;
-  }
-
-  /**
-   * Choose and open a project on the server.
-   * Returns the same shape as `init()`, or null when nothing could be opened.
-   */
-  async function openFromCloud() {
-    try {
-      const projects = await cloud.listProjects();
-
-      // Prefer whatever this device had open, so a reload lands where you were.
-      const remembered = getPref('lastProject');
-      const wanted = projects.find((p) => p.id === remembered) || projects[0];
-
-      if (!wanted) {
-        const doc = normalise(makeStarterProject());
-        await cloud.createProject(doc);
-        hosted = true;
-        setPref('lastProject', cloud.getProjectId());
-        return { doc, fresh: true };
-      }
-
-      const doc = await cloud.openProject(wanted.id);
-      if (!doc) return null;
-      hosted = true;
-      setPref('lastProject', wanted.id);
-      return { doc: normalise(doc), fresh: false };
-    } catch (err) {
-      console.warn('[cx-timeline] could not load from the server:', err.message);
-      return null;
-    }
-  }
-
-  /** Open a different project. Used by the Projects pane. */
-  async function switchProject(id) {
-    const doc = await cloud.openProject(id);
-    if (!doc) throw new Error('That project is no longer available.');
-    hosted = true;
-    setPref('lastProject', id);
-    editsSinceBackup = 0;
-    return normalise(doc);
-  }
-
-  /** Create a project on the server from a document, and open it. */
-  async function createCloudProject(doc) {
-    const id = await cloud.createProject(normalise(doc));
-    hosted = true;
-    setPref('lastProject', id);
-    editsSinceBackup = 0;
-    return id;
-  }
-
-  /** True when the document is being kept on the server. */
-  function isHosted() {
-    return hosted;
   }
 
   /** True when running on the localStorage fallback path. */
@@ -10057,31 +9225,7 @@ __mods["core/storage.js"] = function (__x, __req) {
     try {
       const record = { id: doc.id, savedAt: Date.now(), doc };
 
-      if (hosted) {
-        const result = await cloud.saveProject(doc);
-
-        if (!result.ok) {
-          // A read-only refusal is not a failure to report as one: the user is
-          // simply browsing, and the write guard has already told them.
-          if (result.reason === 'read-only') {
-            markClean();
-            emit(EV.SAVE_DONE, { at: Date.now(), skipped: true });
-            return true;
-          }
-          if (result.conflict) {
-            // Never overwrite: keep the work in the local cache so it can be
-            // recovered, and let the UI decide what to offer.
-            await cacheLocally(record);
-            emit(EV.SAVE_ERROR, { error: new Error('conflict'), conflict: true });
-            return false;
-          }
-          throw new Error(result.reason || 'save failed');
-        }
-
-        // A local copy of every successful save is what makes a dropped
-        // connection survivable, and what the crash-recovery path reads.
-        await cacheLocally(record);
-      } else if (fileMode) {
+      if (fileMode) {
         const result = await filestore.savePlan(doc);
 
         if (!result.ok) {
@@ -10151,7 +9295,7 @@ __mods["core/storage.js"] = function (__x, __req) {
     }
   }
 
-  /** Mirror a save into IndexedDB. Best-effort: the server is the record. */
+  /** Mirror a save into IndexedDB. Best-effort: the folder is the record. */
   async function cacheLocally(record) {
     if (usingFallback) {
       try {
@@ -10164,7 +9308,7 @@ __mods["core/storage.js"] = function (__x, __req) {
     try {
       await wrap(tx(STORE_PROJECTS, 'readwrite').put(record));
     } catch {
-      /* a full local cache must never block a successful server save */
+      /* a full local cache must never block a successful save to the folder */
     }
   }
 
@@ -10248,11 +9392,7 @@ __mods["core/storage.js"] = function (__x, __req) {
       doc,
     };
     try {
-      if (hosted) {
-        const written = await cloud.createBackup(doc, reason);
-        if (!written) return false; // read-only, or the server said no
-        await cloud.pruneBackups(doc.settings.backupKeep || 20);
-      } else if (usingFallback) {
+      if (usingFallback) {
         const list = lsGetJSON(LS_BACKUPS, []);
         list.push({ ...entry, key: entry.time });
         // localStorage is tight; keep far fewer snapshots on the fallback path.
@@ -10271,14 +9411,6 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   async function listBackups() {
-    if (hosted) {
-      try {
-        return await cloud.listBackups();
-      } catch (err) {
-        console.warn('[cx-timeline] could not list backups:', err.message);
-        return [];
-      }
-    }
     if (usingFallback) {
       return lsGetJSON(LS_BACKUPS, [])
         .map((b) => ({ key: b.key, time: b.time, reason: b.reason, name: b.name, objects: b.objects, size: 0 }))
@@ -10302,7 +9434,6 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   async function loadBackup(key) {
-    if (hosted) return cloud.loadBackup(key);
     if (usingFallback) {
       const found = lsGetJSON(LS_BACKUPS, []).find((b) => b.key === key);
       return found ? found.doc : null;
@@ -10312,10 +9443,6 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   async function deleteBackup(key) {
-    if (hosted) {
-      await cloud.deleteBackup(key);
-      return;
-    }
     if (usingFallback) {
       lsSetJSON(LS_BACKUPS, lsGetJSON(LS_BACKUPS, []).filter((b) => b.key !== key));
       return;
@@ -10325,10 +9452,6 @@ __mods["core/storage.js"] = function (__x, __req) {
 
   /** Trim the backup history to the newest `keep` entries. */
   async function pruneBackups(keep = 20) {
-    if (hosted) {
-      await cloud.pruneBackups(keep);
-      return;
-    }
     if (usingFallback || keep <= 0) return;
     const all = await wrap(tx(STORE_BACKUPS).getAll());
     if (all.length <= keep) return;
@@ -10352,7 +9475,6 @@ __mods["core/storage.js"] = function (__x, __req) {
    * with 200 MB of logs still autosaves in milliseconds.
    */
   async function putBlob(id, file) {
-    if (hosted) return cloud.putBlob(id, file);
     // In a shared folder the bytes go beside the plan, so a colleague who syncs
     // the folder gets the attachments along with it.
     if (fileMode) return filestore.putBlob(id, file);
@@ -10365,10 +9487,6 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   async function getBlob(id) {
-    if (hosted) {
-      const blob = await cloud.getBlob(id);
-      return blob ? { id, blob, name: id, type: blob.type, size: blob.size } : null;
-    }
     if (fileMode) return filestore.getBlob(id);
     if (usingFallback) return null;
     const record = await wrap(tx(STORE_BLOBS).get(id));
@@ -10376,10 +9494,6 @@ __mods["core/storage.js"] = function (__x, __req) {
   }
 
   async function deleteBlob(id) {
-    if (hosted) {
-      await cloud.deleteBlob(id);
-      return;
-    }
     if (fileMode) {
       await filestore.deleteBlob(id);
       return;
@@ -10495,13 +9609,11 @@ __mods["core/storage.js"] = function (__x, __req) {
       /* not supported — the report simply omits the quota line */
     }
     return {
-      backend: hosted
-        ? 'Supabase (this device keeps an offline copy)'
-        : fileMode
-          ? `Shared folder — ${filestore.state().folder}/${filestore.state().plan}`
-          : usingFallback
-            ? 'localStorage (fallback)'
-            : 'IndexedDB',
+      backend: fileMode
+        ? `Shared folder — ${filestore.state().folder}/${filestore.state().plan}`
+        : usingFallback
+          ? 'localStorage (fallback)'
+          : 'IndexedDB',
       document: { bytes: docBytes, label: bytes(docBytes) },
       attachments: blobs,
       quota,
@@ -10513,9 +9625,6 @@ __mods["core/storage.js"] = function (__x, __req) {
   Object.defineProperty(__x, "createFolderPlan", { get: () => createFolderPlan, enumerable: true });
   Object.defineProperty(__x, "leaveFolder", { get: () => leaveFolder, enumerable: true });
   Object.defineProperty(__x, "isFileMode", { get: () => isFileMode, enumerable: true });
-  Object.defineProperty(__x, "switchProject", { get: () => switchProject, enumerable: true });
-  Object.defineProperty(__x, "createCloudProject", { get: () => createCloudProject, enumerable: true });
-  Object.defineProperty(__x, "isHosted", { get: () => isHosted, enumerable: true });
   Object.defineProperty(__x, "isFallback", { get: () => isFallback, enumerable: true });
   Object.defineProperty(__x, "listProjects", { get: () => listProjects, enumerable: true });
   Object.defineProperty(__x, "loadProject", { get: () => loadProject, enumerable: true });
@@ -16229,444 +15338,2256 @@ __mods["ui/theme.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// core/rc_db.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/rc_db.js"] = function (__x, __req) {
+  /**
+   * The calendar's database, kept as JSON files in the shared folder.
+   *
+   * The calendar lived in Postgres, behind Supabase, and every screen asked it
+   * questions through the Supabase client's builder — `from(table).select()`,
+   * `.eq()`, `.order()`, `.range()`, `.insert()`, `rpc()`. This module answers
+   * exactly those questions, in the page, over tables it reads from and writes to
+   * the folder the plan already lives in. So the screens did not have to learn a
+   * second way of asking, and the rules Postgres used to enforce — a look-ahead
+   * edit is all or nothing and refused when it is stale, an approved TAWR is
+   * final, a cancellation lives on only while the newest reading still says so —
+   * are here, as JavaScript, in one place.
+   *
+   * What lives where
+   * ----------------
+   *   calendar/db.json                  which format this folder holds, and when it was made
+   *   calendar/registers.json           the people, places, colours, codes, parties and settings
+   *   calendar/editor.json              the look-ahead as written: rows and cells
+   *   calendar/history/<yyyy-mm>.json   every edit, a file per month
+   *   calendar/p6.json                  the P6 activities a row can name
+   *   calendar/leave.json               leave booked
+   *   calendar/notes.json               why a day was cancelled; what a change was
+   *   calendar/changes/<yyyy-mm>.json   what moved between readings, and each publish
+   *   calendar/readings/index.json      every reading, without its grid
+   *   calendar/readings/rows-<yyyy-mm>.json  the rows each reading derived
+   *   calendar/readings/grids/<id>.json one reading's grid
+   *   calendar/tawr/requests.json       TAWRs; tawr/registers.json what they are filled from
+   *
+   * Why many files rather than one: OneDrive uploads a whole file whenever it
+   * changes. The cells change on every edit, the registers rarely, and history
+   * only ever grows — so they are kept apart, history by the month, and a reading
+   * once written is never rewritten.
+   *
+   * Every file is rewritten whole from memory, through a guard: a file that has
+   * changed on disk since this window read it — another computer's save that
+   * OneDrive brought down — is never written over. The write is refused with a
+   * message beginning "conflict:", the file is read again, and the change that
+   * was refused is taken back out of memory, so what is on screen is what is on
+   * disk. Writes are made one at a time, and each is all or nothing in memory.
+   *
+   * Nothing here knows the folder exists. `storage` is handed in — the folder in
+   * the application (`core/rc_folder.js`), a map in the tests — so the rules are
+   * checked in Node by `tools/test_rc_db.js`.
+   *
+   * Imports: folder_rules.
+   */
+
+  const { hash64 } = __req("core/folder_rules.js");
+
+  const FORMAT = 'cx-calendar';
+  const FORMAT_VERSION = 1;
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The tables
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const REGISTERS = 'registers.json';
+
+  /** `YYYY-MM` of a date or an instant, the month a sharded row is filed under. */
+  function monthOf(value) {
+    const text = String(value || '');
+    return /^\d{4}-\d{2}/.test(text) ? text.slice(0, 7) : 'undated';
+  }
+
+  /** Fold for a unique key Postgres compared on an expression. */
+  const upper = (v) => String(v ?? '').trim().toUpperCase();
+  const lowerTrim = (v) => String(v ?? '').trim().toLowerCase();
+
+  /**
+   * Every table the calendar keeps, with what Postgres used to say about it:
+   * the key, the unique constraints, the defaults a column was given, and which
+   * file it is kept in. A sharded table is split across files by a value of its
+   * own (`shard.of`), so a month of history is one file.
+   */
+  const TABLES = {
+    rc_people: {
+      file: REGISTERS,
+      unique: [{ cols: ['user_id'] }],
+      defaults: (ctx) => ({
+        user_id: null, email: null, title: null, subsystem: null, role: 'member', active: true,
+        scheduled: true, working_days: [1, 2, 3, 4, 5], entitlement_days: 0, leave_year_start: null,
+        created_at: ctx.now,
+      }),
+    },
+    rc_person_alias: { file: REGISTERS, unique: [{ cols: ['alias'] }] },
+    rc_locations: {
+      file: REGISTERS,
+      unique: [{ cols: ['name'] }],
+      defaults: () => ({ code: null, active: true, tawr_area: null }),
+    },
+    rc_location_alias: { file: REGISTERS, unique: [{ cols: ['alias'] }] },
+    rc_parties: { file: REGISTERS, unique: [{ cols: ['name'] }], defaults: () => ({ active: true }) },
+    rc_categories: { file: REGISTERS, unique: [{ cols: ['name'] }], defaults: () => ({ sort: 0, active: true }) },
+    rc_leave_kinds: {
+      file: REGISTERS,
+      unique: [{ cols: ['name'] }],
+      defaults: () => ({ color: null, counts_against_entitlement: true, active: true }),
+    },
+    rc_legend: {
+      file: REGISTERS,
+      unique: [{ cols: ['valid_from', 'argb'] }],
+      defaults: (ctx) => ({ valid_from: ctx.today, active: true, role: 'shift' }),
+    },
+    rc_support_codes: {
+      file: REGISTERS,
+      unique: [{ cols: ['code'], fold: upper }],
+      defaults: (ctx) => ({ name: '', party: 'BART', active: true, sort: 0, tawr_line: 'systems', created_at: ctx.now }),
+    },
+    rc_p6_flags: {
+      file: REGISTERS,
+      unique: [{ cols: ['label'], fold: lowerTrim }],
+      defaults: (ctx) => ({ active: true, sort: 0, created_at: ctx.now }),
+    },
+    rc_settings: {
+      file: REGISTERS,
+      key: ['key'],
+      defaults: (ctx) => ({ value: null, updated_at: ctx.now, updated_by: ctx.userId }),
+    },
+
+    rc_la_rows: { file: 'editor.json' },
+    rc_la_cells: { file: 'editor.json', key: ['row_id', 'day'] },
+    rc_la_edits: {
+      shard: { dir: 'history', prefix: '', of: (r) => monthOf(r.at), column: 'at' },
+      sequence: 'editor.json',
+    },
+
+    rc_p6_activities: { file: 'p6.json', key: ['activity_id'] },
+
+    rc_leave: {
+      file: 'leave.json',
+      defaults: (ctx) => ({
+        kind_id: null, status: 'approved', start_portion: 'full', end_portion: 'full', note: null,
+        created_at: ctx.now, created_by: ctx.userId,
+      }),
+    },
+
+    rc_cancellation_notes: {
+      file: 'notes.json',
+      defaults: (ctx) => ({
+        raw_location: '', reason: null, codes: null, dismissed: false, la_row_id: null,
+        author: ctx.userId, created_at: ctx.now, supersedes_id: null,
+      }),
+    },
+    rc_change_annotations: {
+      file: 'notes.json',
+      defaults: (ctx) => ({
+        party_id: null, linked_event_id: null, note: null, author: ctx.userId, created_at: ctx.now, supersedes_id: null,
+      }),
+    },
+
+    rc_change_events: {
+      shard: { dir: 'changes', prefix: '', of: (r) => monthOf(r.detected_at), column: 'detected_at' },
+      defaults: (ctx) => ({ location_id: null, la_row_id: null, before: null, after: null, detected_at: ctx.now }),
+    },
+    rc_ingest_runs: {
+      shard: { dir: 'changes', prefix: '', of: (r) => monthOf(r.ran_at), column: 'ran_at' },
+      defaults: (ctx) => ({ ran_at: ctx.now, file_hash: null, file_mtime: null, note: null }),
+    },
+
+    rc_lookahead_snapshots: {
+      file: 'readings/index.json',
+      unique: [{ cols: ['file_hash'] }],
+      defaults: (ctx) => ({ taken_at: ctx.now, file_mtime: null, legend_at: null }),
+      /* The grid is most of a reading, and only the newest is drawn: it is kept
+         in a file of its own and read when a question asks for it. A compacted
+         grid is a few fields, and stays in the index. */
+      detached: {
+        column: 'grid',
+        path: (r) => `readings/grids/${safeName(r.id)}.json`,
+        inline: (grid) => Boolean(grid && grid.compacted),
+        summary: (grid) => ({
+          row_count: Number.isFinite(Number(grid?.row_count)) && grid?.row_count != null
+            ? Number(grid.row_count) : (Array.isArray(grid?.rows) ? grid.rows.length : 0),
+          unmapped_count: Array.isArray(grid?.unknown) ? grid.unknown.length : 0,
+          compacted: Boolean(grid?.compacted),
+        }),
+      },
+    },
+    rc_lookahead_rows: {
+      shard: { dir: 'readings', prefix: 'rows-', of: (r, db) => monthOf(db.takenAt(r.snapshot_id)) },
+      needs: ['rc_lookahead_snapshots'],
+      defaults: () => ({
+        sheet_row: null, location_id: null, raw_location: null, raw_label: null, subsystem: null,
+        cells: {}, bart_marks: {}, resources: {}, la_row_id: null,
+      }),
+    },
+
+    rc_tawrs: {
+      file: 'tawr/requests.json',
+      defaults: (ctx) => ({
+        location_id: null, location_name: '', status: 'draft', fields: {}, generated: {}, source: {},
+        snapshot_id: null, first_day: null, supersedes: null, created_by: null, created_at: ctx.now,
+        updated_by: null, updated_at: ctx.now, approved_by: null, approved_at: null,
+      }),
+    },
+    rc_tawr_descriptions: {
+      file: 'tawr/registers.json',
+      defaults: (ctx) => ({ description: '', created_at: ctx.now, updated_at: ctx.now }),
+    },
+    rc_tawr_settings: {
+      file: 'tawr/registers.json',
+      key: ['key'],
+      defaults: (ctx) => ({ value: null, updated_at: ctx.now, updated_by: ctx.userId }),
+    },
+    rc_tawr_profiles: {
+      file: 'tawr/registers.json',
+      key: ['person_id'],
+      defaults: (ctx) => ({ requestor_name: '', cell_phone: '', signature: null, updated_at: ctx.now }),
+    },
+  };
+
+  /** The tables the calendar keeps, by name — for the importer and the tests. */
+  const TABLE_NAMES = Object.keys(TABLES);
+
+  /** True when `path` is a file of this table: its own file, or one of its shards. */
+  function owns(name, path) {
+    const def = TABLES[name];
+    if (def.file) return def.file === path;
+    const stem = `${def.shard.dir}/${def.shard.prefix}`;
+    return path.startsWith(stem) && /^(\d{4}-\d{2}|undated)\.json$/.test(path.slice(stem.length));
+  }
+
+  /** The tables a file holds — several share a file, and two share each month of changes. */
+  function tablesOwning(path) {
+    return TABLE_NAMES.filter((name) => owns(name, path));
+  }
+
+  const keyOf = (name) => TABLES[name]?.key || ['id'];
+
+  /** A name safe to use as one path component on every platform. */
+  function safeName(id) {
+    return String(id || '').replace(/[^A-Za-z0-9_-]/g, '_') || 'unnamed';
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Small helpers
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const clone = typeof structuredClone === 'function'
+    ? (v) => (v === undefined ? undefined : structuredClone(v))
+    : (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
+
+  /** A random id in the shape Postgres gave them. */
+  function newUuid() {
+    const c = typeof crypto !== 'undefined' ? crypto : null;
+    if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+    const bytes = new Uint8Array(16);
+    if (c && typeof c.getRandomValues === 'function') c.getRandomValues(bytes);
+    else for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  /** An error the way PostgREST worded its own, so callers' message checks still hold. */
+  function fail(message, extra = {}) {
+    return Object.assign(new Error(message), extra);
+  }
+
+  /** Postgres's comparison: numbers as numbers, everything else as text. */
+  function compare(a, b) {
+    if (typeof a === 'number' && typeof b === 'number') return a - b;
+    if (typeof a === 'boolean' && typeof b === 'boolean') return Number(a) - Number(b);
+    const x = String(a);
+    const y = String(b);
+    return x < y ? -1 : x > y ? 1 : 0;
+  }
+
+  const isNil = (v) => v === null || v === undefined;
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The database
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Open the calendar's database over `storage`.
+   *
+   *   storage   `{ read(path) → { text, stamp } | null, write(path, text, expected) → stamp,
+   *              stat(path) → stamp | null, list(dir) → [{ name }], remove(path) }` —
+   *             every path relative to the calendar's own folder.
+   *   who()     `{ userId, name }` of whoever is working — what `by` and
+   *             `author` are stamped with.
+   *   canWrite()  true, or the sentence saying why not (somebody else has the pen).
+   *   now()     the clock, so the tests can pin it.
+   *
+   * @param {{ storage: any, who?: () => { userId: string|null, personId?: string|null, name?: string },
+   *           canWrite?: () => true|string, now?: () => Date, record?: boolean }} options
+   */
+  function createDb({ storage, who = () => ({ userId: null, personId: null, name: '' }), canWrite = () => true, now = () => new Date(), record = false }) {
+    /** Rows, by table — every row of every shard read so far, in insertion order. */
+    const tables = Object.fromEntries(TABLE_NAMES.map((n) => [n, []]));
+    /** What each file was when this window last read or wrote it: `{ stamp, hash }`, or `{ absent: true }`. */
+    const files = new Map();
+    /** Files read (or being read), by path. */
+    const loading = new Map();
+    /** Sharded tables whose every shard is loaded. */
+    const complete = new Set();
+    /** Files whose contents in memory differ from what is on disk. */
+    let dirty = new Set();
+    /** Detached values waiting to be written, by path (null removes the file). */
+    let detachedOut = new Map();
+    /** File-level extras: the sequences kept beside a table. */
+    const meta = new Map();
+    /** Rises on every change in memory, so a view computed once can be reused. */
+    let version = 0;
+    const views = new Map();
+    const listeners = new Set();
+    /** Every question asked, when asked to — what the tests count. */
+    const calls = [];
+    let queue = Promise.resolve();
+
+    const ctx = () => {
+      const at = now();
+      return { now: at.toISOString(), today: at.toISOString().slice(0, 10), userId: who()?.userId ?? null };
+    };
+
+    /* ── Reading files ───────────────────────────────────────────────────── */
+
+    function parseFile(path, text) {
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch (err) {
+        throw fail(`${path} could not be read — it may be half-way through syncing (${err.message})`);
+      }
+      if (!body || typeof body !== 'object') throw fail(`${path} is not a calendar file`);
+      if (body.format && body.format !== FORMAT) throw fail(`${path} is not a calendar file (${body.format})`);
+      if (Number(body.formatVersion) > FORMAT_VERSION) {
+        throw fail(`${path} was written by a newer version of CX Timeline (format ${body.formatVersion}). Update the application.`);
+      }
+      return body;
+    }
+
+    /** What a file's contents hash to, leaving out when and by whom it was saved. */
+    function contentHash(body) {
+      return hash64(JSON.stringify({ meta: body.meta || null, tables: body.tables || null, value: body.value ?? null }));
+    }
+
+    function loadFile(path) {
+      if (loading.has(path)) return loading.get(path);
+      const promise = (async () => {
+        const read = await storage.read(path);
+        if (!read) {
+          files.set(path, { absent: true });
+          return;
+        }
+        const body = parseFile(path, read.text);
+        files.set(path, { stamp: read.stamp, hash: contentHash(body) });
+        adopt(path, body);
+      })();
+      loading.set(path, promise);
+      promise.catch(() => loading.delete(path));
+      return promise;
+    }
+
+    /** Put a file's rows in memory, replacing whatever that file held before. */
+    function adopt(path, body) {
+      const held = body.tables || {};
+      for (const name of tablesOwning(path)) {
+        const incoming = Array.isArray(held[name]) ? held[name] : [];
+        tables[name] = TABLES[name].file
+          ? incoming.slice()
+          : tables[name].filter((r) => filePathOf(name, r) !== path).concat(incoming);
+      }
+      if (body.meta) meta.set(path, { ...(meta.get(path) || {}), ...body.meta });
+      else meta.delete(path);
+      version++;
+    }
+
+    /** The file a row of a table lives in. */
+    function filePathOf(name, row) {
+      const def = TABLES[name];
+      if (def.file) return def.file;
+      return `${def.shard.dir}/${def.shard.prefix}${def.shard.of(row, api)}.json`;
+    }
+
+    /** Every shard of a table that is on disk, as paths. */
+    async function shardPaths(name) {
+      const { dir, prefix } = TABLES[name].shard;
+      const pattern = new RegExp(`^${prefix.replace(/[-]/g, '\\-')}(\\d{4}-\\d{2}|undated)\\.json$`);
+      const listed = await storage.list(dir).catch(() => []);
+      return listed.map((f) => f.name).filter((n) => pattern.test(n)).map((n) => `${dir}/${n}`);
+    }
+
+    /**
+     * Make sure a table's rows are in memory — every shard, or only those a
+     * question can be answered from (`months`, `YYYY-MM` from and to).
+     */
+    async function ensure(name, months = null) {
+      const def = TABLES[name];
+      if (!def) return;
+      for (const dep of def.needs || []) await ensure(dep);
+      if (def.sequence) await loadFile(def.sequence);
+      if (def.file) {
+        await loadFile(def.file);
+        return;
+      }
+      if (complete.has(name)) return;
+      const paths = await shardPaths(name);
+      const wanted = months
+        ? paths.filter((p) => {
+          const m = p.slice(p.lastIndexOf('/') + 1 + def.shard.prefix.length, -5);
+          return m === 'undated' || ((!months.from || m >= months.from) && (!months.to || m <= months.to));
+        })
+        : paths;
+      await Promise.all(wanted.map((p) => loadFile(p)));
+      if (!months) complete.add(name);
+    }
+
+    /** The months a question about a sharded table is limited to, if its filters say. */
+    function monthsFor(name, filters) {
+      const def = TABLES[name];
+      if (!def?.shard) return null;
+      if (def.shard.column) {
+        let from = null;
+        let to = null;
+        for (const f of filters) {
+          if (f.col !== def.shard.column) continue;
+          if (f.op === 'gte' || f.op === 'gt') from = monthOf(f.value);
+          if (f.op === 'lte' || f.op === 'lt') to = monthOf(f.value);
+          if (f.op === 'eq') from = to = monthOf(f.value);
+        }
+        return from || to ? { from, to } : null;
+      }
+      if (name === 'rc_lookahead_rows') {
+        const by = filters.find((f) => f.col === 'snapshot_id' && f.op === 'eq');
+        if (!by) return null;
+        const m = monthOf(takenAt(by.value));
+        return { from: m, to: m };
+      }
+      return null;
+    }
+
+    /** When a reading was taken — what its rows are filed under. */
+    function takenAt(snapshotId) {
+      return tables.rc_lookahead_snapshots.find((s) => s.id === snapshotId)?.taken_at || null;
+    }
+
+    /** A reading's grid, read from its own file the first time it is wanted. */
+    async function hydrate(name, rows) {
+      const det = TABLES[name]?.detached;
+      if (!det) return;
+      await Promise.all(rows.map(async (row) => {
+        if (row[det.column] !== undefined) return;
+        const path = det.path(row);
+        const read = await storage.read(path).catch(() => null);
+        if (!read) {
+          row[det.column] = { rows: [], merges: [], hiddenColumns: [], unknown: [], missing: true };
+          return;
+        }
+        const body = parseFile(path, read.text);
+        row[det.column] = body.value ?? null;
+      }));
+    }
+
+    /* ── Writing files ───────────────────────────────────────────────────── */
+
+    function serialise(path) {
+      const body = {
+        format: FORMAT,
+        formatVersion: FORMAT_VERSION,
+        savedAt: now().toISOString(),
+        savedBy: who()?.name || '',
+      };
+      const m = meta.get(path);
+      if (m && Object.keys(m).length) body.meta = m;
+      const out = {};
+      for (const name of tablesOwning(path)) {
+        const rows = TABLES[name].file ? tables[name] : tables[name].filter((r) => filePathOf(name, r) === path);
+        out[name] = rows.map((r) => strip(name, r));
+      }
+      body.tables = out;
+      // Laid out for reading when it is small — somebody may open it in Notepad
+      // to see what the calendar holds — and packed when it is not.
+      const packed = JSON.stringify(body);
+      const text = packed.length < 200000 ? JSON.stringify(body, null, 1) : packed;
+      return { text, hash: contentHash(body) };
+    }
+
+    /** A row as it is written to its file: without the detached column, with its summary. */
+    function strip(name, row) {
+      const det = TABLES[name]?.detached;
+      if (!det) return row;
+      const { [det.column]: value, ...rest } = row;
+      if (value === undefined) return rest;
+      if (det.inline(value)) return { ...rest, [det.column]: value, [`${det.column}_summary`]: det.summary(value) };
+      return { ...rest, [`${det.column}_summary`]: det.summary(value) };
+    }
+
+    /**
+     * Write one file, never over somebody else's.
+     *
+     * The file is compared before it is written: if it moved since this window
+     * last saw it and its contents are not the ones this window wrote, the write
+     * is refused and the file is read again, so memory follows the disk.
+     */
+    async function writeGuarded(path, text, hash) {
+      const known = files.get(path);
+      const current = await storage.stat(path).catch(() => null);
+      const moved = current
+        ? !known || known.absent || current.size !== known.stamp?.size || current.modified !== known.stamp?.modified
+        : Boolean(known && !known.absent);
+      if (moved && current) {
+        const read = await storage.read(path).catch(() => null);
+        const body = read ? parseFile(path, read.text) : null;
+        const theirs = body ? contentHash(body) : null;
+        if (theirs && theirs !== known?.hash) {
+          throw fail(`conflict: ${path} was saved on another computer since this one read it. `
+            + 'It has been read again — make the change again if it still needs making.',
+          { conflict: true, theirs: { path, body, stamp: read.stamp, hash: theirs } });
+        }
+        // The same contents, re-stamped by the sync client: ours to write over.
+        if (read) files.set(path, { stamp: read.stamp, hash: theirs });
+      }
+      let stamp;
+      try {
+        stamp = await storage.write(path, text, current);
+      } catch (err) {
+        if (err && err.kind === 'conflict') {
+          throw fail(`conflict: ${path} changed on disk while it was being saved — reload the calendar.`, { conflict: true });
+        }
+        throw err;
+      }
+      files.set(path, { stamp, hash });
+    }
+
+    /**
+     * Write every changed file. Answers the paths it wrote, so a write that
+     * fails half way can say which files are now ahead of memory.
+     */
+    async function flush(written = new Set()) {
+      const paths = [...dirty];
+      // The data before its history: an edit whose log did not land is a gap in
+      // the record, a log of an edit that did not land is a false one.
+      paths.sort((a, b) => Number(a.startsWith('history/')) - Number(b.startsWith('history/')));
+      // A reading's grid before the index that points at it.
+      for (const [path, value] of [...detachedOut]) {
+        if (value === null) await storage.remove(path).catch(() => false);
+        else await storage.write(path, JSON.stringify({ format: FORMAT, formatVersion: FORMAT_VERSION, value }), null);
+        detachedOut.delete(path);
+      }
+      for (const path of paths) {
+        const { text, hash } = serialise(path);
+        await writeGuarded(path, text, hash);
+        dirty.delete(path);
+        written.add(path);
+      }
+      return written;
+    }
+
+    /**
+     * Make a change, all or nothing: in memory, then on disk. Anything that
+     * throws — a broken rule, a refused write — puts memory back as it was.
+     * One at a time, so a write never interleaves with another.
+     */
+    function tx(fn) {
+      const run = queue.then(async () => {
+        const allowed = canWrite();
+        if (allowed !== true) throw fail(String(allowed || 'The calendar is read-only here.'), { readOnly: true });
+        const before = new Map();
+        const beforeMeta = new Map([...meta].map(([k, v]) => [k, clone(v)]));
+        const dirtyBefore = new Set(dirty);
+        const written = new Set();
+        const touch = (name) => {
+          if (!before.has(name)) before.set(name, tables[name].map((r) => clone(r)));
+        };
+        const mark = (name, row) => dirty.add(filePathOf(name, row));
+        try {
+          const result = await fn({ touch, mark });
+          await flush(written);
+          version++;
+          return result;
+        } catch (err) {
+          for (const [name, rows] of before) tables[name] = rows;
+          meta.clear();
+          for (const [k, v] of beforeMeta) meta.set(k, v);
+          detachedOut = new Map();
+          /* A file this change already wrote is now ahead of memory: it is
+             written again, from memory as it was, with the next change — and
+             until then it is unsaved, which the status bar says. */
+          dirty = new Set([...dirtyBefore, ...written]);
+          if (err?.theirs) {
+            // Theirs is the file now: read it in, so what is drawn is what is there.
+            const { path, body, stamp, hash } = err.theirs;
+            files.set(path, { stamp, hash });
+            adopt(path, body);
+            dirty.delete(path);
+            delete err.theirs;
+          }
+          version++;
+          throw err;
+        }
+      });
+      queue = run.catch(() => {});
+      return run;
+    }
+
+    /** Write what is unsaved, if anything is — after a write that failed half way. */
+    function retry() {
+      if (!dirty.size) return Promise.resolve(false);
+      return tx(async () => true);
+    }
+
+    /* ── Rules Postgres used to keep ─────────────────────────────────────── */
+
+    function uniqueViolation(name, row, except = null) {
+      for (const u of TABLES[name].unique || []) {
+        const fold = u.fold || ((v) => v);
+        if (u.cols.some((c) => isNil(row[c]))) continue;
+        const clash = tables[name].find((r) => r !== except && u.cols.every((c) => fold(r[c]) === fold(row[c])));
+        if (clash) {
+          return fail(`duplicate key value violates unique constraint "${name}_${u.cols.join('_')}_key"`, { code: '23505' });
+        }
+      }
+      const key = keyOf(name);
+      if (key.every((c) => !isNil(row[c]))) {
+        const clash = tables[name].find((r) => r !== except && key.every((c) => r[c] === row[c]));
+        if (clash) return fail(`duplicate key value violates unique constraint "${name}_pkey"`, { code: '23505' });
+      }
+      return null;
+    }
+
+    /** Defaults, an id, and whatever the table's trigger did on insert. */
+    function prepareInsert(name, input, c) {
+      const def = TABLES[name];
+      const row = { ...(def.defaults ? def.defaults(c) : {}), ...clone(input) };
+      for (const k of Object.keys(row)) if (row[k] === undefined) delete row[k];
+      const key = keyOf(name);
+      if (key.length === 1 && key[0] === 'id' && isNil(row.id)) {
+        row.id = def.sequence ? nextSequence(name) : newUuid();
+      }
+      if (name === 'rc_tawrs') {
+        // rc_tawr_guard(): a request starts as a draft, raised by whoever made it.
+        row.created_by = row.created_by ?? who()?.personId ?? null;
+        row.status = 'draft';
+        row.approved_by = null;
+        row.approved_at = null;
+      }
+      if (name === 'rc_legend' && row.argb) row.argb = String(row.argb).toUpperCase();
+      return row;
+    }
+
+    function nextSequence(name) {
+      const path = TABLES[name].sequence;
+      const m = meta.get(path) || {};
+      const seq = { ...(m.sequences || {}) };
+      seq[name] = (Number(seq[name]) || 0) + 1;
+      meta.set(path, { ...m, sequences: seq });
+      dirty.add(path);
+      return seq[name];
+    }
+
+    function sequenceOf(name) {
+      return Number(meta.get(TABLES[name].sequence)?.sequences?.[name]) || 0;
+    }
+
+    /** rc_tawr_guard() on update: approved is final, superseded is history. */
+    function guardTawrUpdate(old, next, c) {
+      if (old.status === 'superseded') throw fail('that request has been revised; change the revision instead');
+      if (old.status === 'approved') {
+        const same = (k) => JSON.stringify(next[k] ?? null) === JSON.stringify(old[k] ?? null);
+        if (next.status !== 'superseded' || !same('fields') || !same('generated') || !same('week_start') || !same('group_key')) {
+          throw fail('an approved request is final — revise it to change it');
+        }
+      }
+      if (old.status === 'draft' && next.status === 'superseded') throw fail('a draft is discarded, not superseded');
+      if (next.status === 'approved' && old.status === 'draft') {
+        next.approved_by = who()?.personId ?? null;
+        next.approved_at = c.now;
+      }
+      next.created_by = old.created_by;
+      next.created_at = old.created_at;
+      next.updated_by = who()?.personId ?? null;
+      next.updated_at = c.now;
+    }
+
+    function ring() {
+      for (const fn of [...listeners]) {
+        try { fn(); } catch (err) { console.warn('[cx-timeline] a calendar listener failed:', err); }
+      }
+    }
+
+    /* ── Writes ──────────────────────────────────────────────────────────── */
+
+    /**
+     * Read in what a write needs: the whole table, except for a table kept by
+     * the month, where only the months the new rows go into are read — a new
+     * reading does not need last year's.
+     */
+    async function ensureForWrite(name) {
+      const def = TABLES[name];
+      if (!def.shard) return ensure(name);
+      for (const dep of def.needs || []) await ensure(dep);
+      if (def.sequence) await loadFile(def.sequence);
+      return undefined;
+    }
+
+    async function insertRows(name, rows) {
+      if (!TABLES[name]) throw fail(`relation "${name}" does not exist`);
+      await ensureForWrite(name);
+      const made = await tx(async ({ touch, mark }) => {
+        touch(name);
+        const c = ctx();
+        const out = [];
+        for (const input of [].concat(rows)) {
+          const row = prepareInsert(name, input, c);
+          if (TABLES[name].shard) await loadFile(filePathOf(name, row));
+          const clash = uniqueViolation(name, row);
+          if (clash) throw clash;
+          tables[name].push(row);
+          mark(name, row);
+          out.push(row);
+          writeDetached(name, row);
+        }
+        return out.map((r) => clone(r));
+      });
+      // rc_lookahead_snapshots_ring: a reading taken rings the bell.
+      if (name === 'rc_lookahead_snapshots') ring();
+      return made;
+    }
+
+    function writeDetached(name, row) {
+      const det = TABLES[name]?.detached;
+      if (!det || row[det.column] === undefined) return;
+      const value = row[det.column];
+      detachedOut.set(det.path(row), det.inline(value) ? null : value);
+    }
+
+    async function upsertRows(name, rows, onConflict) {
+      if (!TABLES[name]) throw fail(`relation "${name}" does not exist`);
+      await ensure(name);
+      const keys = String(onConflict || keyOf(name).join(',')).split(',').map((k) => k.trim());
+      return tx(async ({ touch, mark }) => {
+        touch(name);
+        const c = ctx();
+        const written = [];
+        for (const input of [].concat(rows)) {
+          const probe = prepareInsert(name, input, c);
+          const hit = tables[name].find((r) => keys.every((k) => r[k] === probe[k]));
+          if (hit) {
+            Object.assign(hit, clone(input));
+            if ('updated_at' in hit && !('updated_at' in input)) hit.updated_at = c.now;
+            if ('updated_by' in hit && !('updated_by' in input)) hit.updated_by = c.userId;
+            mark(name, hit);
+            written.push(hit);
+          } else {
+            const clash = uniqueViolation(name, probe);
+            if (clash) throw clash;
+            tables[name].push(probe);
+            mark(name, probe);
+            written.push(probe);
+          }
+        }
+        return written.map((r) => clone(r));
+      });
+    }
+
+    async function updateRows(name, patch, filters) {
+      if (!TABLES[name]) throw fail(`relation "${name}" does not exist`);
+      await ensure(name, monthsFor(name, filters));
+      return tx(async ({ touch, mark }) => {
+        touch(name);
+        const c = ctx();
+        const hit = tables[name].filter((r) => filters.every((f) => test(f, r)));
+        for (const row of hit) {
+          const next = { ...row, ...clone(patch) };
+          if (name === 'rc_tawrs') guardTawrUpdate(row, next, c);
+          const clash = uniqueViolation(name, next, row);
+          if (clash) throw clash;
+          const before = filePathOf(name, row);
+          Object.assign(row, next);
+          dirty.add(before);
+          mark(name, row);
+          writeDetached(name, row);
+        }
+        return hit.map((r) => clone(r));
+      });
+    }
+
+    async function deleteRows(name, filters) {
+      if (!TABLES[name]) throw fail(`relation "${name}" does not exist`);
+      await ensure(name, monthsFor(name, filters));
+      return tx(async ({ touch, mark }) => {
+        touch(name);
+        let gone = tables[name].filter((r) => filters.every((f) => test(f, r)));
+        // A DELETE the policy refused matched nothing: only a draft request may go.
+        if (name === 'rc_tawrs') gone = gone.filter((r) => r.status === 'draft');
+        tables[name] = tables[name].filter((r) => !gone.includes(r));
+        for (const row of gone) mark(name, row);
+        return gone.map((r) => clone(r));
+      });
+    }
+
+    /* ── Filters ─────────────────────────────────────────────────────────── */
+
+    function test(f, row) {
+      const v = row[f.col];
+      switch (f.op) {
+        case 'eq': return !isNil(v) && compare(v, f.value) === 0 && (typeof f.value !== 'boolean' || v === f.value);
+        case 'neq': return !isNil(v) && compare(v, f.value) !== 0;
+        case 'gt': return !isNil(v) && compare(v, f.value) > 0;
+        case 'gte': return !isNil(v) && compare(v, f.value) >= 0;
+        case 'lt': return !isNil(v) && compare(v, f.value) < 0;
+        case 'lte': return !isNil(v) && compare(v, f.value) <= 0;
+        case 'in': return !isNil(v) && f.value.some((x) => compare(v, x) === 0);
+        case 'is': return f.value === null ? isNil(v) : v === f.value;
+        default: throw fail(`unsupported filter ${f.op}`);
+      }
+    }
+
+    function sortRows(rows, orders) {
+      if (!orders.length) return rows;
+      return rows.sort((a, b) => {
+        for (const { col, ascending, nullsFirst } of orders) {
+          const x = a[col];
+          const y = b[col];
+          if (isNil(x) || isNil(y)) {
+            if (isNil(x) && isNil(y)) continue;
+            // Postgres: NULLS LAST ascending, NULLS FIRST descending.
+            const first = nullsFirst ?? !ascending;
+            return (isNil(x) ? -1 : 1) * (first ? 1 : -1);
+          }
+          const d = compare(x, y);
+          if (d) return ascending ? d : -d;
+        }
+        return 0;
+      });
+    }
+
+    function project(row, columns) {
+      if (!columns || columns === '*') return row;
+      const out = {};
+      for (const col of String(columns).split(',').map((c) => c.trim()).filter(Boolean)) out[col] = row[col];
+      return out;
+    }
+
+    /* ── Views ───────────────────────────────────────────────────────────── */
+
+    /**
+     * Views, as Postgres defined them — derived on every question and never
+     * stored, remembered only until the next change.
+     */
+    const VIEWS = {
+      rc_lookahead_snapshot_meta: {
+        needs: ['rc_lookahead_snapshots'],
+        rows: () => tables.rc_lookahead_snapshots.map((s) => {
+          const summary = s.grid !== undefined ? TABLES.rc_lookahead_snapshots.detached.summary(s.grid) : (s.grid_summary || {});
+          return {
+            id: s.id, taken_at: s.taken_at, file_mtime: s.file_mtime ?? null, file_hash: s.file_hash,
+            legend_at: s.legend_at ?? null, sheet_name: s.sheet_name,
+            row_count: summary.row_count ?? 0, unmapped_count: summary.unmapped_count ?? 0, compacted: Boolean(summary.compacted),
+          };
+        }),
+      },
+      rc_lookahead_cover: {
+        needs: ['rc_lookahead_rows'],
+        rows: () => cover(),
+      },
+      rc_cancelled_days: {
+        needs: ['rc_lookahead_rows', 'rc_legend'],
+        rows: () => cancelledDays(false),
+      },
+      rc_cancelled_support_days: {
+        needs: ['rc_lookahead_rows', 'rc_legend'],
+        rows: () => cancelledDays(true),
+      },
+      rc_lookahead_days: {
+        needs: ['rc_lookahead_rows'],
+        rows: () => lookaheadDays(),
+      },
+      rc_lookahead_workbook_weeks: {
+        needs: ['rc_lookahead_rows'],
+        rows: () => workbookWeeks(),
+      },
+    };
+
+    /** The reading each row came from, and when it was taken. */
+    function readingsById() {
+      return new Map(tables.rc_lookahead_snapshots.map((s) => [s.id, s]));
+    }
+
+    /** rc_lookahead_cover: the first and last day each reading's rows carry. */
+    function cover() {
+      const snaps = readingsById();
+      const out = new Map();
+      for (const r of tables.rc_lookahead_rows) {
+        const s = snaps.get(r.snapshot_id);
+        if (!s) continue;
+        const days = Object.keys({ ...(r.cells || {}), ...(r.bart_marks || {}) });
+        if (!days.length) continue;
+        const held = out.get(r.snapshot_id) || { snapshot_id: r.snapshot_id, taken_at: s.taken_at, first_day: null, last_day: null };
+        for (const d of days) {
+          const day = String(d).slice(0, 10);
+          if (!held.first_day || day < held.first_day) held.first_day = day;
+          if (!held.last_day || day > held.last_day) held.last_day = day;
+        }
+        out.set(r.snapshot_id, held);
+      }
+      return [...out.values()];
+    }
+
+    /** "taken_at desc, snapshot_id desc": which of two readings is the newer. */
+    const newer = (a, b) => (a.taken_at !== b.taken_at ? compare(a.taken_at, b.taken_at) > 0 : compare(a.snapshot_id, b.snapshot_id) > 0);
+
+    /**
+     * rc_cancelled_days and rc_cancelled_support_days — every day the look-ahead
+     * *currently* shows cancelled (or a BART resource struck out), kept only when
+     * the newest reading covering that date still shows it.
+     */
+    function cancelledDays(support) {
+      const snaps = readingsById();
+      const red = new Set(tables.rc_legend.filter((l) => /cancel/i.test(String(l.meaning || ''))).map((l) => `#${l.argb}`));
+      const isRed = (value) => /cancel/i.test(String(value ?? '')) || red.has(String(value ?? ''));
+      const hits = [];
+      for (const r of tables.rc_lookahead_rows) {
+        const s = snaps.get(r.snapshot_id);
+        if (!s) continue;
+        const source = support ? r.bart_marks : r.cells;
+        for (const [key, value] of Object.entries(source || {})) {
+          const day = String(key).slice(0, 10);
+          if (support) {
+            if (!/(^|\.)\s*~/.test(String(value ?? ''))) continue;
+            if (isRed((r.cells || {})[key] ?? '')) continue;
+          } else if (!isRed(value)) continue;
+          hits.push({
+            raw_label: r.raw_label ?? '', raw_location: r.raw_location ?? '', location_id: r.location_id ?? null,
+            snapshot_id: r.snapshot_id, taken_at: s.taken_at, day,
+            marks: support ? value : ((r.bart_marks || {})[key] ?? null), la_row_id: r.la_row_id ?? null,
+          });
+        }
+      }
+      if (!hits.length) return [];
+      const spans = cover();
+      const newestFor = new Map();
+      for (const day of new Set(hits.map((h) => h.day))) {
+        let best = null;
+        for (const c of spans) {
+          if (day < c.first_day || day > c.last_day) continue;
+          if (!best || newer(c, best)) best = c;
+        }
+        if (best) newestFor.set(day, best.snapshot_id);
+      }
+      const groups = new Map();
+      for (const h of hits) {
+        const newest = newestFor.get(h.day);
+        if (!newest) continue;
+        const key = `${h.raw_label}\u0000${h.raw_location}\u0000${h.day}`;
+        const g = groups.get(key) || {
+          raw_label: h.raw_label, raw_location: h.raw_location, location_id: null, day: h.day,
+          first_seen: null, last_seen: null, reads: 0, marks: null, la_row_id: null,
+          _snaps: new Set(), _current: false,
+        };
+        if (!g.location_id && h.location_id) g.location_id = h.location_id;
+        if (!g.first_seen || compare(h.taken_at, g.first_seen) < 0) g.first_seen = h.taken_at;
+        if (!g.last_seen || compare(h.taken_at, g.last_seen) > 0) g.last_seen = h.taken_at;
+        g._snaps.add(h.snapshot_id);
+        if (h.snapshot_id === newest) {
+          g._current = true;
+          if (g.marks == null && h.marks != null) g.marks = h.marks;
+          if (!g.la_row_id && h.la_row_id) g.la_row_id = h.la_row_id;
+        }
+        groups.set(key, g);
+      }
+      return [...groups.values()].filter((g) => g._current).map(({ _snaps, _current, ...g }) => ({ ...g, reads: _snaps.size }));
+    }
+
+    /** For each week, the newest reading that has it — `distinct on (week_start)`. */
+    /** @param {(reading: any) => boolean} [only] */
+    function newestPerWeek(only = () => true) {
+      const snaps = readingsById();
+      const best = new Map();
+      for (const r of tables.rc_lookahead_rows) {
+        const s = snaps.get(r.snapshot_id);
+        if (!s || !only(s)) continue;
+        const cand = { week_start: r.week_start, snapshot_id: r.snapshot_id, taken_at: s.taken_at };
+        const held = best.get(r.week_start);
+        if (!held || newer(cand, held)) best.set(r.week_start, cand);
+      }
+      return best;
+    }
+
+    /** rc_lookahead_days: one row per activity and day, each week from its newest reading. */
+    function lookaheadDays() {
+      const best = newestPerWeek();
+      const out = [];
+      for (const r of tables.rc_lookahead_rows) {
+        const pick = best.get(r.week_start);
+        if (!pick || pick.snapshot_id !== r.snapshot_id) continue;
+        const keys = Object.keys({ ...(r.cells || {}), ...(r.bart_marks || {}), ...(r.resources || {}) });
+        for (const k of keys) {
+          out.push({
+            row_id: r.id, snapshot_id: r.snapshot_id, taken_at: pick.taken_at, week_start: r.week_start,
+            row_key: r.row_key, sheet_row: r.sheet_row ?? null, location_id: r.location_id ?? null,
+            raw_location: r.raw_location ?? null, raw_label: r.raw_label ?? null, subsystem: r.subsystem ?? null,
+            la_row_id: r.la_row_id ?? null, day: String(k).slice(0, 10),
+            paint: r.cells?.[k] ?? null, marks: r.bart_marks?.[k] ?? null, names: r.resources?.[k] ?? null,
+          });
+        }
+      }
+      return out;
+    }
+
+    /** rc_lookahead_workbook_weeks: each week's newest *workbook* reading. */
+    function workbookWeeks() {
+      return [...newestPerWeek((s) => !String(s.file_hash || '').startsWith('editor:')).values()];
+    }
+
+    async function viewRows(name) {
+      const view = VIEWS[name];
+      for (const dep of view.needs) await ensure(dep);
+      const held = views.get(name);
+      if (held && held.version === version) return held.rows;
+      const rows = view.rows();
+      views.set(name, { version, rows });
+      return rows;
+    }
+
+    /* ── Reads ───────────────────────────────────────────────────────────── */
+
+    async function runSelect(q) {
+      let source;
+      if (VIEWS[q.table]) source = await viewRows(q.table);
+      else if (TABLES[q.table]) {
+        await ensure(q.table, monthsFor(q.table, q.filters));
+        source = tables[q.table];
+      } else {
+        throw fail(`relation "${q.table}" does not exist`);
+      }
+      if (!Array.isArray(source)) throw fail(`${q.table} could not be read`);
+      let rows = source.filter((r) => q.filters.every((f) => test(f, r)));
+      const total = rows.length;
+      rows = sortRows(rows.slice(), q.orders);
+      if (q.range) rows = rows.slice(q.range[0], q.range[1] + 1);
+      if (q.limit != null) rows = rows.slice(0, q.limit);
+      const det = TABLES[q.table]?.detached;
+      const wantsDetached = det && (q.columns === '*' || String(q.columns).split(',').map((c) => c.trim()).includes(det.column));
+      if (wantsDetached) await hydrate(q.table, rows);
+      const out = rows.map((r) => {
+        const copy = project(r, q.columns);
+        const plain = det ? Object.fromEntries(Object.entries(copy).filter(([k]) => k !== `${det.column}_summary`)) : copy;
+        if (det && !wantsDetached) delete plain[det.column];
+        return clone(plain);
+      });
+      return { rows: out, total };
+    }
+
+    /* ── The builder ─────────────────────────────────────────────────────── */
+
+    function settle(promise) {
+      return promise.then(
+        (data) => ({ data, error: null }),
+        (err) => ({ data: null, error: { message: String(err?.message || err), code: err?.code || null } }),
+      );
+    }
+
+    /** `from(table)`: the subset of PostgREST's builder the calendar uses. */
+    function from(table) {
+      const q = { table, columns: '*', filters: [], orders: [], limit: null, range: null, count: null };
+      const filtering = (target) => {
+        const add = (op) => (col, value) => { q.filters.push({ op, col, value }); return target; };
+        target.eq = add('eq');
+        target.neq = add('neq');
+        target.gt = add('gt');
+        target.gte = add('gte');
+        target.lt = add('lt');
+        target.lte = add('lte');
+        target.in = add('in');
+        target.is = add('is');
+        return target;
+      };
+      const api = filtering({
+        select(columns = '*', options) {
+          if (columns) q.columns = columns;
+          if (options?.count) q.count = options.count;
+          return api;
+        },
+        /** @param {string} col @param {{ ascending?: boolean, nullsFirst?: boolean }} [options] */
+        order(col, { ascending = true, nullsFirst } = {}) {
+          q.orders.push({ col, ascending, nullsFirst });
+          return api;
+        },
+        limit(n) { q.limit = n; return api; },
+        range(a, b) { q.range = [a, b]; return api; },
+        maybeSingle() {
+          if (record) calls.push({ kind: 'select', table, filters: q.filters.slice(), columns: q.columns });
+          return settle(runSelect(q).then((r) => r.rows[0] || null));
+        },
+        then(resolve, reject) {
+          if (record) calls.push({ kind: 'select', table, filters: q.filters.slice(), columns: q.columns, limit: q.limit });
+          return runSelect(q).then(
+            ({ rows, total }) => ({ data: rows, error: null, count: q.count ? total : null }),
+            (err) => ({ data: null, error: { message: String(err?.message || err), code: err?.code || null }, count: null }),
+          ).then(resolve, reject);
+        },
+        insert(rows) {
+          if (record) calls.push({ kind: 'insert', table, payload: clone(rows) });
+          const run = insertRows(table, rows);
+          run.catch(() => {});
+          const done = { select: () => settle(run), then: (res, rej) => settle(run).then(() => ({ data: null, error: null })).then(res, rej) };
+          return done;
+        },
+        upsert(rows, opts) {
+          if (record) calls.push({ kind: 'upsert', table, payload: clone(rows) });
+          const run = upsertRows(table, rows, opts?.onConflict);
+          run.catch(() => {});
+          return { select: () => settle(run), then: (res, rej) => settle(run).then(res, rej) };
+        },
+        update(patch) {
+          if (record) calls.push({ kind: 'update', table, payload: clone(patch) });
+          const target = filtering({ select: () => settle(updateRows(table, patch, q.filters)) });
+          return target;
+        },
+        delete() {
+          if (record) calls.push({ kind: 'delete', table });
+          const target = filtering({ select: () => settle(deleteRows(table, q.filters)) });
+          return target;
+        },
+      });
+      return api;
+    }
+
+    /* ── Functions ───────────────────────────────────────────────────────── */
+
+    const RPC = {
+      /**
+       * rc_la_apply(): a batch of look-ahead ops, all or nothing, each checked
+       * against the version it expects. A stale op refuses the whole batch with
+       * a message starting "conflict:", which is what the editor reloads on.
+       */
+      async rc_la_apply({ p_ops: ops = [] }) {
+        await ensure('rc_la_rows');
+        const c = ctx();
+        // The month's history file the log goes into, read before it is written.
+        await loadFile(`history/${monthOf(c.now)}.json`);
+        const results = await tx(async ({ touch, mark }) => {
+          touch('rc_la_rows');
+          touch('rc_la_cells');
+          touch('rc_la_edits');
+          const batch = newUuid();
+          const out = [];
+          const log = (target, rowId, day, action, before, after) => {
+            const row = {
+              id: nextSequence('rc_la_edits'), at: c.now, by: c.userId, batch, target, row_id: rowId,
+              day: day || null, action, before: before ? clone(before) : null, after: after ? clone(after) : null,
+            };
+            tables.rc_la_edits.push(row);
+            mark('rc_la_edits', row);
+          };
+          const conflict = (what) => fail(`conflict: somebody else changed that ${what} a moment ago — reload the look-ahead`);
+          for (const op of ops || []) {
+            const expect = Number(op.expect) || 0;
+            if (op.op === 'row') {
+              const set = op.set || {};
+              const hit = tables.rc_la_rows.find((r) => r.id === op.id);
+              if (!hit) {
+                if (expect !== 0) throw fail('conflict: that row was removed by somebody else — reload the look-ahead');
+                const made = {
+                  id: op.id,
+                  kind: set.kind ?? 'activity',
+                  parent_id: set.parent_id || null,
+                  sort: Number(set.sort ?? 0),
+                  level: Number(set.level ?? 0),
+                  activity_id: set.activity_id ?? '',
+                  description: set.description ?? '',
+                  location: set.location ?? '',
+                  sswp: set.sswp ?? '',
+                  party: set.party ?? '',
+                  work_hours: set.work_hours ?? '',
+                  absence_kind: set.absence_kind || null,
+                  archived: Boolean(set.archived ?? false),
+                  version: 1,
+                  updated_at: c.now,
+                  updated_by: c.userId,
+                };
+                tables.rc_la_rows.push(made);
+                mark('rc_la_rows', made);
+                log('row', op.id, null, 'insert', null, made);
+                out.push({ kind: 'row', id: op.id, version: 1 });
+              } else {
+                if ((hit.version || 0) !== expect) throw conflict('row');
+                const was = clone(hit);
+                for (const k of ['kind', 'activity_id', 'description', 'location', 'sswp', 'party', 'work_hours']) {
+                  if (k in set) hit[k] = set[k] ?? '';
+                }
+                if ('sort' in set) hit.sort = Number(set.sort);
+                if ('level' in set) hit.level = Number(set.level);
+                if ('archived' in set) hit.archived = Boolean(set.archived);
+                if ('parent_id' in set) hit.parent_id = set.parent_id || null;
+                if ('absence_kind' in set) hit.absence_kind = set.absence_kind || null;
+                hit.version = (hit.version || 0) + 1;
+                hit.updated_at = c.now;
+                hit.updated_by = c.userId;
+                mark('rc_la_rows', hit);
+                log('row', op.id, null, 'update', was, hit);
+                out.push({ kind: 'row', id: op.id, version: hit.version });
+              }
+            } else if (op.op === 'delete_row') {
+              const hit = tables.rc_la_rows.find((r) => r.id === op.id);
+              if (hit) {
+                if ((hit.version || 0) !== expect) throw conflict('row');
+                /* Its cells are logged one by one on the way out, so the record
+                   says what was on the row as well as that the row went — and
+                   the rows under it go with it, as the foreign key cascaded. */
+                for (const cell of tables.rc_la_cells.filter((x) => x.row_id === op.id)) {
+                  log('cell', cell.row_id, cell.day, 'delete', cell, null);
+                }
+                log('row', op.id, null, 'delete', hit, null);
+                const doomed = new Set([op.id]);
+                for (let grew = true; grew;) {
+                  grew = false;
+                  for (const r of tables.rc_la_rows) {
+                    if (r.parent_id && doomed.has(r.parent_id) && !doomed.has(r.id)) {
+                      doomed.add(r.id);
+                      grew = true;
+                    }
+                  }
+                }
+                tables.rc_la_rows = tables.rc_la_rows.filter((r) => !doomed.has(r.id));
+                tables.rc_la_cells = tables.rc_la_cells.filter((x) => !doomed.has(x.row_id));
+                mark('rc_la_rows', hit);
+              }
+              out.push({ kind: 'row', id: op.id, version: 0, deleted: true });
+            } else if (op.op === 'cell') {
+              const day = String(op.day).slice(0, 10);
+              const color = op.color ? String(op.color).toUpperCase() : null;
+              const text = op.text ?? '';
+              if (color && !/^[0-9A-F]{6}$/.test(color)) {
+                throw fail('new row for relation "rc_la_cells" violates check constraint "rc_la_cells_color_check"');
+              }
+              const cells = tables.rc_la_cells;
+              const at = cells.findIndex((x) => x.row_id === op.row_id && x.day === day);
+              const current = at >= 0 ? cells[at].version || 0 : 0;
+              if (current !== expect) throw conflict('day');
+              if (!color && !text) {
+                if (at >= 0) {
+                  log('cell', op.row_id, day, 'delete', cells[at], null);
+                  cells.splice(at, 1);
+                  mark('rc_la_cells', {});
+                }
+                out.push({ kind: 'cell', row_id: op.row_id, day, version: 0 });
+                continue;
+              }
+              if (!tables.rc_la_rows.some((r) => r.id === op.row_id)) {
+                throw fail('insert or update on table "rc_la_cells" violates foreign key constraint "rc_la_cells_row_id_fkey"');
+              }
+              if (at >= 0) {
+                const was = clone(cells[at]);
+                Object.assign(cells[at], { color, text, version: current + 1, updated_at: c.now, updated_by: c.userId });
+                mark('rc_la_cells', cells[at]);
+                log('cell', op.row_id, day, 'update', was, cells[at]);
+                out.push({ kind: 'cell', row_id: op.row_id, day, version: current + 1 });
+              } else {
+                const made = { row_id: op.row_id, day, color, text, version: 1, updated_at: c.now, updated_by: c.userId };
+                cells.push(made);
+                mark('rc_la_cells', made);
+                log('cell', op.row_id, day, 'insert', null, made);
+                out.push({ kind: 'cell', row_id: op.row_id, day, version: 1 });
+              }
+            } else {
+              throw fail(`unknown look-ahead op: ${op.op}`);
+            }
+          }
+          return out;
+        });
+        // rc_la_edits_ring: an edit logged rings the bell.
+        if (ops?.length) ring();
+        return results;
+      },
+
+      /** The newest change anybody has made, as a number. */
+      async rc_la_revision() {
+        await loadFile(TABLES.rc_la_edits.sequence);
+        return sequenceOf('rc_la_edits');
+      },
+
+      /** A batch of a P6 extract, upserted by ID; the last marks what it left out. */
+      async rc_p6_import({ p_import: importId, p_rows: input = [], p_finish: finish = false }) {
+        if (!importId) throw fail('an import needs an id, shared by its batches');
+        await ensure('rc_p6_activities');
+        return tx(async ({ touch, mark }) => {
+          touch('rc_p6_activities');
+          const c = ctx();
+          const list = tables.rc_p6_activities;
+          const seen = new Set();
+          let written = 0;
+          for (const r of input || []) {
+            const id = String(r?.activity_id ?? '').trim();
+            if (!id || seen.has(id)) continue;
+            seen.add(id);
+            const row = {
+              activity_id: id, name: String(r.name ?? '').trim(), wbs: String(r.wbs ?? '').trim(), missing: false,
+              import_id: importId, imported_at: c.now, imported_by: c.userId,
+            };
+            const hit = list.find((a) => a.activity_id === id);
+            if (hit) Object.assign(hit, row);
+            else list.push(row);
+            written++;
+          }
+          let missing = 0;
+          if (finish) {
+            for (const a of list) {
+              if (a.import_id !== importId && !a.missing) { a.missing = true; missing++; }
+            }
+          }
+          if (written || missing) mark('rc_p6_activities', {});
+          return { written, missing };
+        });
+      },
+
+      /** Revise an approved request: it is superseded and a draft carrying its fields takes its place. */
+      async rc_tawr_revise({ p_tawr: id }) {
+        await ensure('rc_tawrs');
+        return tx(async ({ touch, mark }) => {
+          touch('rc_tawrs');
+          const c = ctx();
+          const old = tables.rc_tawrs.find((r) => r.id === id);
+          if (!old) throw fail('no such request');
+          if (old.status !== 'approved') throw fail('only an approved request is revised; a draft is edited');
+          const next = { ...old, status: 'superseded' };
+          guardTawrUpdate(old, next, c);
+          Object.assign(old, next);
+          const draft = prepareInsert('rc_tawrs', {
+            week_start: old.week_start, group_key: old.group_key, location_id: old.location_id,
+            location_name: old.location_name, shift: old.shift, fields: clone(old.fields), generated: clone(old.generated),
+            source: clone(old.source), snapshot_id: old.snapshot_id, first_day: old.first_day, supersedes: old.id,
+          }, c);
+          tables.rc_tawrs.push(draft);
+          mark('rc_tawrs', draft);
+          return draft.id;
+        });
+      },
+
+      /** A spelling of a place, folded, against names, then aliases, then codes. */
+      async rc_resolve_location({ p_raw: raw }) {
+        await ensure('rc_locations');
+        const fold = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const key = fold(raw);
+        if (!key) return null;
+        return tables.rc_locations.find((l) => fold(l.name) === key)?.id
+          ?? tables.rc_location_alias.find((a) => fold(a.alias) === key)?.location_id
+          ?? tables.rc_locations.find((l) => fold(l.code) === key)?.id
+          ?? null;
+      },
+
+      /**
+       * Slim the grids of superseded editor readings past the keep period: every
+       * reading of a day but its last, never the newest reading of all. Rows,
+       * change events and links stay.
+       */
+      async rc_compact_snapshots() {
+        await ensure('rc_lookahead_snapshots');
+        await ensure('rc_settings');
+        const setting = tables.rc_settings.find((s) => s.key === 'snapshot_keep_days')?.value;
+        const keep = Math.max(14, /^[0-9]{1,5}$/.test(String(setting ?? '')) ? Number(setting) : 60);
+        const c = ctx();
+        const cutoff = new Date(Date.parse(c.now) - keep * 86400000).toISOString();
+        const snaps = tables.rc_lookahead_snapshots;
+        const order = (a, b) => compare(b.taken_at, a.taken_at) || compare(b.id, a.id);
+        const newest = snaps.slice().sort(order)[0];
+        const byDay = new Map();
+        for (const s of snaps.filter((x) => String(x.file_hash || '').startsWith('editor:'))) {
+          const day = String(new Date(Date.parse(s.taken_at)).toISOString()).slice(0, 10);
+          if (!byDay.has(day)) byDay.set(day, []);
+          byDay.get(day).push(s);
+        }
+        const doomed = [];
+        for (const list of byDay.values()) {
+          list.sort(order);
+          for (const s of list.slice(1)) {
+            if (s === newest) continue;
+            if (compare(s.taken_at, cutoff) >= 0) continue;
+            const summary = s.grid !== undefined ? TABLES.rc_lookahead_snapshots.detached.summary(s.grid) : s.grid_summary || {};
+            if (summary.compacted) continue;
+            doomed.push(s);
+          }
+        }
+        if (!doomed.length) return 0;
+        await hydrate('rc_lookahead_snapshots', doomed);
+        return tx(async ({ touch, mark }) => {
+          touch('rc_lookahead_snapshots');
+          for (const s of doomed) {
+            s.grid = {
+              compacted: true, compacted_at: c.now,
+              row_count: Array.isArray(s.grid?.rows) ? s.grid.rows.length : 0,
+              unknown: Array.isArray(s.grid?.unknown) ? s.grid.unknown : [],
+              rows: [],
+            };
+            mark('rc_lookahead_snapshots', s);
+            writeDetached('rc_lookahead_snapshots', s);
+          }
+          return doomed.length;
+        });
+      },
+
+      /** Somebody on the roster: their aliases, leave and TAWR details go with them. */
+      async rc_delete_person({ p_person: id }) {
+        for (const t of ['rc_people', 'rc_person_alias', 'rc_leave', 'rc_tawr_profiles']) await ensure(t);
+        return tx(async ({ touch, mark }) => {
+          if (!tables.rc_people.some((p) => p.id === id)) throw fail('no such person', { code: 'P0002' });
+          for (const t of ['rc_people', 'rc_person_alias', 'rc_leave', 'rc_tawr_profiles']) touch(t);
+          tables.rc_people = tables.rc_people.filter((p) => p.id !== id);
+          tables.rc_person_alias = tables.rc_person_alias.filter((a) => a.person_id !== id);
+          tables.rc_leave = tables.rc_leave.filter((l) => l.person_id !== id);
+          tables.rc_tawr_profiles = tables.rc_tawr_profiles.filter((p) => p.person_id !== id);
+          mark('rc_people', {});
+          mark('rc_leave', {});
+          mark('rc_tawr_profiles', {});
+          return null;
+        });
+      },
+
+      /** A place nothing has been recorded at. Its spellings go with it. */
+      async rc_delete_location({ p_location: id }) {
+        for (const t of ['rc_locations', 'rc_location_alias', 'rc_lookahead_rows', 'rc_change_events', 'rc_tawrs']) await ensure(t);
+        const held = tables.rc_lookahead_rows.filter((r) => r.location_id === id).length
+          + tables.rc_change_events.filter((r) => r.location_id === id).length
+          + tables.rc_tawrs.filter((r) => r.location_id === id && r.status !== 'draft').length;
+        if (held > 0) {
+          throw fail(`there are ${held} record(s) at this location — retire it instead, which keeps every one of them`, { code: '23503' });
+        }
+        return tx(async ({ touch, mark }) => {
+          if (!tables.rc_locations.some((l) => l.id === id)) throw fail('nothing was deleted', { code: 'P0002' });
+          touch('rc_locations');
+          touch('rc_location_alias');
+          tables.rc_locations = tables.rc_locations.filter((l) => l.id !== id);
+          tables.rc_location_alias = tables.rc_location_alias.filter((a) => a.location_id !== id);
+          mark('rc_locations', {});
+          return null;
+        });
+      },
+
+      async rc_delete_category({ p_category: id }) {
+        await ensure('rc_categories');
+        return tx(async ({ touch, mark }) => {
+          if (!tables.rc_categories.some((x) => x.id === id)) throw fail('nothing was deleted', { code: 'P0002' });
+          touch('rc_categories');
+          tables.rc_categories = tables.rc_categories.filter((x) => x.id !== id);
+          mark('rc_categories', {});
+          return null;
+        });
+      },
+
+      /** A colour mapped by mistake: nothing points at a legend row, so it just goes. */
+      async rc_delete_legend({ p_entry: id }) {
+        await ensure('rc_legend');
+        return tx(async ({ touch, mark }) => {
+          if (!tables.rc_legend.some((x) => x.id === id)) throw fail('nothing was deleted', { code: 'P0002' });
+          touch('rc_legend');
+          tables.rc_legend = tables.rc_legend.filter((x) => x.id !== id);
+          mark('rc_legend', {});
+          return null;
+        });
+      },
+    };
+
+    /** `rpc(name, args)`, answering `{ data, error }` as the client did. */
+    function rpc(name, args = {}) {
+      if (record) calls.push({ kind: 'rpc', table: name, payload: clone(args) });
+      const fn = RPC[name];
+      if (!fn) return Promise.resolve({ data: null, error: { message: `function ${name} does not exist` } });
+      return settle(Promise.resolve().then(() => fn(args || {})));
+    }
+
+    /* ── Watching the folder ─────────────────────────────────────────────── */
+
+    /**
+     * Look for files another computer saved, and read them in.
+     *
+     * Only files this window has read — a file never read is read fresh when
+     * it is first wanted. A file with a change of ours not yet on disk is left
+     * alone: the guard will refuse our write and read it then. Answers whether
+     * anything changed, and rings the bell when it did.
+     */
+    async function refresh() {
+      let changed = false;
+      await queue;
+      for (const [path, known] of [...files]) {
+        if (dirty.has(path)) continue;
+        const stat = await storage.stat(path).catch(() => null);
+        if (!stat && (!known || known.absent)) continue;
+        if (stat && known?.stamp && stat.size === known.stamp.size && stat.modified === known.stamp.modified) continue;
+        const read = stat ? await storage.read(path).catch(() => null) : null;
+        if (!read) {
+          if (known && !known.absent) {
+            files.set(path, { absent: true });
+            adopt(path, { tables: {} });
+            changed = true;
+          }
+          continue;
+        }
+        let body;
+        try {
+          body = parseFile(path, read.text);
+        } catch {
+          continue; // half-synced: ask again next time
+        }
+        const hash = contentHash(body);
+        files.set(path, { stamp: read.stamp, hash });
+        if (hash === known?.hash) continue;
+        adopt(path, body);
+        changed = true;
+      }
+      // A month nobody here has read yet, started on another computer.
+      for (const name of [...complete]) {
+        const known = new Set(await shardPaths(name));
+        for (const p of known) {
+          if (!files.has(p)) { await loadFile(p); changed = true; }
+        }
+      }
+      if (changed) {
+        version++;
+        ring();
+      }
+      return changed;
+    }
+
+    /* ── Opening, creating, replacing ────────────────────────────────────── */
+
+    /** The manifest, or null when this folder holds no calendar yet. */
+    async function manifest() {
+      const read = await storage.read('db.json').catch(() => null);
+      if (!read) return null;
+      return parseFile('db.json', read.text);
+    }
+
+    /**
+     * Write a whole calendar — a new one, or one imported — table by table.
+     * Refused over a folder that already holds one unless `replace` is said.
+     *
+     * @param {Record<string, any[]>} data  rows by table name
+     * @param {{ replace?: boolean, source?: string, sequences?: Record<string, number> }} [options]
+     */
+    async function create(data = {}, { replace = false, source = 'new', sequences = {} } = {}) {
+      if (!replace && (await manifest())) throw fail('This folder already holds a calendar.');
+      const allowed = canWrite();
+      if (allowed !== true) throw fail(String(allowed || 'The calendar is read-only here.'), { readOnly: true });
+      await queue;
+      for (const name of TABLE_NAMES) tables[name] = [];
+      const c = ctx();
+      for (const [name, rows] of Object.entries(data || {})) {
+        if (!TABLES[name]) continue;
+        // Imported rows carry every column already; a new calendar's seeds are given the rest.
+        tables[name] = (rows || []).map((r) => {
+          const row = { ...(TABLES[name].defaults ? TABLES[name].defaults(c) : {}), ...clone(r) };
+          if (keyOf(name).join() === 'id' && isNil(row.id)) row.id = newUuid();
+          return row;
+        });
+      }
+      const seqPath = TABLES.rc_la_edits.sequence;
+      const maxEdit = tables.rc_la_edits.reduce((m, r) => Math.max(m, Number(r.id) || 0), 0);
+      meta.set(seqPath, { sequences: { rc_la_edits: Math.max(maxEdit, Number(sequences.rc_la_edits) || 0) } });
+      const paths = new Set(['editor.json', REGISTERS]);
+      for (const name of TABLE_NAMES) {
+        const def = TABLES[name];
+        if (def.file) paths.add(def.file);
+        for (const row of tables[name]) paths.add(filePathOf(name, row));
+      }
+      const grids = [];
+      for (const s of tables.rc_lookahead_snapshots) {
+        if (s.grid !== undefined) grids.push(s);
+      }
+      for (const s of grids) writeDetached('rc_lookahead_snapshots', s);
+      /* Replacing: whatever the folder held that the new calendar does not —
+         a month of history, a reading's grid — goes, or it would be read in
+         beside it the first time somebody asked. */
+      if (replace) {
+        const dirs = new Set(['', 'history', 'changes', 'readings', 'readings/grids', 'tawr']);
+        const keep = new Set([...paths, ...detachedOut.keys(), 'db.json']);
+        for (const dir of dirs) {
+          for (const f of await storage.list(dir).catch(() => [])) {
+            const path = dir ? `${dir}/${f.name}` : f.name;
+            if (/\.json$/.test(path) && !keep.has(path)) await storage.remove(path).catch(() => false);
+          }
+        }
+      }
+      dirty = paths;
+      files.clear();
+      loading.clear();
+      for (const p of paths) loading.set(p, Promise.resolve());
+      for (const name of TABLE_NAMES) if (TABLES[name].shard) complete.add(name);
+      // Known now: written below, so a stat before this window's write is not a stranger's.
+      for (const p of paths) {
+        const stat = await storage.stat(p).catch(() => null);
+        if (stat) {
+          const read = await storage.read(p).catch(() => null);
+          files.set(p, { stamp: stat, hash: read ? contentHash(parseFile(p, read.text)) : null });
+        }
+      }
+      await flush();
+      const at = now().toISOString();
+      await storage.write('db.json', JSON.stringify({
+        format: FORMAT, formatVersion: FORMAT_VERSION, created: at, createdBy: who()?.name || '', source,
+      }, null, 1), null);
+      version++;
+      ring();
+    }
+
+    const api = {
+      from,
+      rpc,
+      manifest,
+      create,
+      refresh,
+      retry,
+      /** Read every table in now — what the tests and the importer's checks want. */
+      async loadAll() {
+        for (const name of TABLE_NAMES) await ensure(name);
+      },
+      onChange(fn) {
+        listeners.add(fn);
+        return () => listeners.delete(fn);
+      },
+      takenAt,
+      /** Every row in memory, by table — live, for the tests. */
+      tables,
+      calls,
+      revision: () => sequenceOf('rc_la_edits'),
+      /** Forget the views computed so far, so the next question derives them again. */
+      invalidate() {
+        version++;
+      },
+      /** True while a change of ours has not reached the disk. */
+      unsaved: () => dirty.size > 0,
+    };
+    return api;
+  }
+
+  Object.defineProperty(__x, "FORMAT", { get: () => FORMAT, enumerable: true });
+  Object.defineProperty(__x, "FORMAT_VERSION", { get: () => FORMAT_VERSION, enumerable: true });
+  Object.defineProperty(__x, "TABLE_NAMES", { get: () => TABLE_NAMES, enumerable: true });
+  Object.defineProperty(__x, "newUuid", { get: () => newUuid, enumerable: true });
+  Object.defineProperty(__x, "createDb", { get: () => createDb, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// core/rc_folder.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/rc_folder.js"] = function (__x, __req) {
+  /**
+   * Where the calendar's database lives, and whose turn it is to write it.
+   *
+   * `core/rc_db.js` keeps its tables in files and knows nothing about where they
+   * are. This hands it `calendar/` in the shared folder — the same folder the
+   * plan is in, reached through `core/filestore.js`, which is the only module
+   * that may touch it — and keeps the calendar's **pen**: one person writes the
+   * calendar at a time, and everybody else reads it.
+   *
+   * The pen is the plan's, with the plan's rules (`core/folder_rules.js`): every
+   * window states a claim in a file only it writes, the earliest claim still
+   * beating holds the pen, a takeover outranks that, and a claim that stops
+   * beating for four minutes has gone. It is a separate pen from the plan's, so
+   * one person can hold the timeline while the other holds the calendar.
+   *
+   * Two differences, both because the claim here is per window rather than per
+   * machine. A claim from this machine that has stopped beating for a minute is
+   * a window that has closed or crashed — its file is on this disk, so a stale
+   * beat means gone rather than slow — and is not waited out. And two windows on
+   * one machine settle like two people do, rather than sharing one claim.
+   *
+   * The pen is courtesy, as the plan's is. What protects the work is the guard
+   * in `core/rc_db.js`: a file another computer saved is never written over.
+   *
+   * Imports: events, filestore, folder_rules.
+   */
+
+  const { emit, EV } = __req("core/events.js");
+  const filestore = __req("core/filestore.js");
+  const { parseClaim, penHolder, isStale } = __req("core/folder_rules.js");
+
+  /** The calendar's folder, inside the shared one. */
+  const ROOT = 'calendar';
+  const PEN_DIR = `${ROOT}/pen`;
+
+  const HEARTBEAT_MS = 30000;
+  const SETTLE_MS = 15000;
+  /** This machine's own claim, not restated for this long, is a window that has gone. */
+  const OWN_GONE_MS = HEARTBEAT_MS * 2 + 5000;
+  /** A claim file this old is deleted rather than ignored. */
+  const ABANDONED_MS = 6 * 3600000;
+  /** An editor who has written nothing for this long hands the pen back. */
+  const IDLE_RELEASE_MS = 3600000;
+
+  /* ── The files ─────────────────────────────────────────────────────────── */
+
+  /**
+   * The storage `core/rc_db.js` reads and writes through: paths relative to
+   * `calendar/`, text in and out, the guard in the write.
+   */
+  function storage() {
+    const at = (path) => (path ? `${ROOT}/${path}` : ROOT);
+    return {
+      read: (path) => filestore.dataRead(at(path)),
+      stat: (path) => filestore.dataStat(at(path)),
+      write: (path, text, expected) => filestore.dataWrite(at(path), text, expected),
+      list: (dir) => filestore.dataList(at(dir)),
+      remove: (path) => filestore.dataRemove(at(path)),
+    };
+  }
+
+  /** A file kept beside the tables as bytes — BART's blank TAWR form. */
+  async function readBytes(path) {
+    try {
+      return new Uint8Array(await filestore.intakeRead(`${ROOT}/${path}`));
+    } catch {
+      return null;
+    }
+  }
+
+  function writeBytes(path, bytes) {
+    return filestore.intakeWrite(`${ROOT}/${path}`, bytes);
+  }
+
+  /* ── The pen ───────────────────────────────────────────────────────────── */
+
+  let role = null; // 'editor' | 'viewer' | null while nothing is open
+  let holder = '';
+  let holderSavedMs = null;
+  let since = 0;
+  let takeover = 0;
+  let lastWriteAt = 0;
+  let beatTimer = null;
+  let settleTimer = null;
+  let started = false;
+
+  const claimFile = () => {
+    const me = filestore.identity();
+    return `${PEN_DIR}/${me.device}-${me.session}.json`.replace(/[^A-Za-z0-9_./-]/g, '_');
+  };
+
+  /** Who holds it, and whether that is this window. */
+  function penState() {
+    return {
+      role,
+      editing: role === 'editor',
+      holder,
+      holderIdleMs: holderSavedMs,
+      since,
+    };
+  }
+
+  /** True while this window may write the calendar. */
+  function holdsPen() {
+    return role === 'editor';
+  }
+
+  /** Said whenever the calendar is written, so an idle pen can be handed back. */
+  function noteWrite() {
+    lastWriteAt = Date.now();
+  }
+
+  async function writeClaim() {
+    const me = filestore.identity();
+    const claim = {
+      id: me.session,
+      device: me.device,
+      holder: me.name,
+      since,
+      beat: Date.now(),
+      ...(lastWriteAt ? { saved: lastWriteAt } : {}),
+      ...(takeover ? { takeover } : {}),
+    };
+    try {
+      await filestore.dataWrite(claimFile(), JSON.stringify(claim, null, 1), null);
+    } catch (err) {
+      console.warn('[cx-timeline] could not write the calendar\'s claim:', err.message);
+    }
+  }
+
+  async function readClaims() {
+    const me = filestore.identity();
+    const out = [];
+    for (const f of await filestore.dataList(PEN_DIR)) {
+      if (!/\.json$/i.test(f.name)) continue;
+      const read = await filestore.dataRead(`${PEN_DIR}/${f.name}`).catch(() => null);
+      const claim = parseClaim(read?.text);
+      if (!claim) continue;
+      // Another window of this machine that has stopped beating has closed.
+      if (claim.device === me.device && claim.id !== me.session && Date.now() - (claim.beat || 0) > OWN_GONE_MS) {
+        continue;
+      }
+      out.push({ ...claim, file: f.name });
+    }
+    return out;
+  }
+
+  /** Read the claims and settle who holds the pen. Announces itself only on a change. */
+  async function settle() {
+    if (!started) return penState();
+    const me = filestore.identity();
+    const claims = await readClaims();
+    const winner = penHolder(claims);
+    const next = !winner || winner.id === me.session ? 'editor' : 'viewer';
+    const nextHolder = next === 'editor' ? '' : (winner.device === me.device ? 'another window of yours' : winner.holder || 'Someone');
+    holderSavedMs = next === 'viewer' && winner?.saved ? Date.now() - winner.saved : null;
+    if (next === role && nextHolder === holder) return penState();
+    role = next;
+    holder = nextHolder;
+    emit(EV.RC_PEN, penState());
+    return penState();
+  }
+
+  /**
+   * State this window's claim and start keeping it — called when the calendar
+   * opens. Claiming before reading, so two windows opening together both end
+   * up in the list and settle on the same holder.
+   */
+  async function startPen() {
+    if (started) return penState();
+    started = true;
+    since = Date.now();
+    takeover = 0;
+    lastWriteAt = Date.now();
+    await writeClaim();
+    await settle();
+    sweep();
+    beatTimer = setInterval(() => {
+      if (role === 'editor' && lastWriteAt && Date.now() - lastWriteAt > IDLE_RELEASE_MS) {
+        releasePen().then(() => emit(EV.RC_PEN, { ...penState(), idle: true }));
+        return;
+      }
+      writeClaim();
+    }, HEARTBEAT_MS);
+    settleTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      settle().catch(() => {});
+    }, SETTLE_MS);
+    return penState();
+  }
+
+  /** Take the pen. Never refused: the guard is what keeps the work safe. */
+  async function takePen() {
+    if (!started) await startPen();
+    takeover = Date.now();
+    lastWriteAt = Date.now();
+    await writeClaim();
+    role = 'editor';
+    holder = '';
+    holderSavedMs = null;
+    emit(EV.RC_PEN, penState());
+    return penState();
+  }
+
+  /**
+   * Hand the pen back and read on: the claim is withdrawn, so whoever has been
+   * waiting longest holds it on their next settle. A fresh claim is stated at
+   * once, at the back of the queue.
+   */
+  async function releasePen() {
+    if (!started) return penState();
+    await filestore.dataRemove(claimFile()).catch(() => false);
+    since = Date.now();
+    takeover = 0;
+    role = 'viewer';
+    holder = '';
+    await writeClaim();
+    await settle();
+    emit(EV.RC_PEN, penState());
+    return penState();
+  }
+
+  /** Withdraw the claim on the way out. Best effort: unload cannot wait. */
+  function stopPen() {
+    if (!started) return;
+    started = false;
+    clearInterval(beatTimer);
+    clearInterval(settleTimer);
+    filestore.dataRemove(claimFile()).catch(() => false);
+    role = null;
+  }
+
+  /** Claims nobody has restated for hours, from machines that are gone. */
+  async function sweep() {
+    try {
+      for (const claim of await readClaims()) {
+        if (claim.id === filestore.identity().session) continue;
+        if (isStale(claim) && Date.now() - (claim.beat || 0) > ABANDONED_MS) {
+          await filestore.dataRemove(`${PEN_DIR}/${claim.file}`);
+        }
+      }
+    } catch {
+      /* tidying is never worth failing anything over */
+    }
+  }
+
+  Object.defineProperty(__x, "ROOT", { get: () => ROOT, enumerable: true });
+  Object.defineProperty(__x, "storage", { get: () => storage, enumerable: true });
+  Object.defineProperty(__x, "readBytes", { get: () => readBytes, enumerable: true });
+  Object.defineProperty(__x, "writeBytes", { get: () => writeBytes, enumerable: true });
+  Object.defineProperty(__x, "penState", { get: () => penState, enumerable: true });
+  Object.defineProperty(__x, "holdsPen", { get: () => holdsPen, enumerable: true });
+  Object.defineProperty(__x, "noteWrite", { get: () => noteWrite, enumerable: true });
+  Object.defineProperty(__x, "settle", { get: () => settle, enumerable: true });
+  Object.defineProperty(__x, "startPen", { get: () => startPen, enumerable: true });
+  Object.defineProperty(__x, "takePen", { get: () => takePen, enumerable: true });
+  Object.defineProperty(__x, "releasePen", { get: () => releasePen, enumerable: true });
+  Object.defineProperty(__x, "stopPen", { get: () => stopPen, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // core/rc.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["core/rc.js"] = function (__x, __req) {
   /**
-   * The Resource Calendar backend.
+   * The Resource Calendar's data.
    *
-   * A second, entirely separate Supabase client from `core/cloud.js`, and the
-   * separation is the feature rather than duplication.
+   * The calendar used to live in Postgres, behind Supabase, with accounts, roles
+   * and row-level security. It lives in the shared folder now, beside the plan:
+   * `core/rc_db.js` keeps its tables as JSON files under `calendar/` and answers
+   * the same questions the Supabase client did, so every function here asks
+   * exactly what it asked before and the screens did not change. Nothing leaves
+   * this computer but the files OneDrive syncs.
    *
-   * The timeline's plan is proprietary: it holds the P6 project and it never
-   * leaves its OneDrive folder. The resource calendar holds none of that, so it
-   * lives in Postgres where the deputy and the team can reach it from a browser.
-   * Until now that boundary was guaranteed by the *build* — `tools/desktop.js`
-   * writes a blank config and `tools/dist.js --no-backend` strips the Supabase
-   * client outright, so the desktop application had no backend at all and could
-   * not have reached one. Putting a client back in the page reverses that, and a
-   * promise that used to be structural would become a convention.
+   * There are no accounts. Whoever has the application and the folder is an
+   * editor; the folder's sharing is who may. One person writes the calendar at a
+   * time — the **pen**, `core/rc_folder.js`, the plan's rules — and anybody else
+   * opens it read-only and is told who has it. Who you are is the name set in the
+   * application (the name the plan's pen already shows), matched to the roster.
    *
-   * So it is made structural again, three ways:
-   *
-   *   1. A different configuration key. `CX_CONFIG.supabaseUrl` stays blank
-   *      forever and is the *plan's* backend; this module reads
-   *      `CX_CONFIG.rcSupabaseUrl` and nothing else. Neither can be mistaken for
-   *      the other.
-   *   2. A different module. Nothing on the plan's storage path imports this
-   *      file, and this file imports nothing that reads the plan — no store, no
-   *      storage, no filestore. The build fails on import cycles, and the layer
-   *      check in `tools/build.js` fails on a plan module reaching in here.
-   *   3. A test that proves it. `tools/smoke_isolation.js` boots with this
-   *      backend stubbed, edits the plan, and asserts that nothing carrying plan
-   *      content ever left.
-   *
-   * There is no document here and no autosave. The plan is one JSON object saved
-   * whole; this is rows, written one at a time, because the reports have to
-   * answer arbitrary date ranges and two people have to edit at once.
-   *
-   * Imports: util, events, sdk.
+   * Imports: events, filestore, rc_db, rc_folder.
    */
 
-  const { emit, EV } = __req("core/events.js");
-  const { loadSupabase } = __req("core/sdk.js");
+  const { emit, on, EV } = __req("core/events.js");
+  const filestore = __req("core/filestore.js");
+  const { createDb, TABLE_NAMES, FORMAT } = __req("core/rc_db.js");
+  const folder = __req("core/rc_folder.js");
+
+  /* ── State ─────────────────────────────────────────────────────────────── */
+
+  /** The database over the connected folder, or null. */
+  let db = null;
+  /** Which folder `db` is over, so connecting another starts again. */
+  let openFolder = '';
+  /** 'no-folder' | 'empty' | 'open' | 'failed' */
+  let state = 'no-folder';
+  let problem = null;
+  /** The roster row the name in the application matches, or a stand-in for it. */
+  let person = null;
+  let pollTimer = null;
+  let starting = null;
+
+  const POLL_MS = 15000;
 
   /* ── Configuration ─────────────────────────────────────────────────────── */
 
-  function config() {
-    return (typeof window !== 'undefined' && window.CX_CONFIG) || {};
-  }
-
   /**
-   * True when this build points at a resource-calendar backend.
-   *
-   * Deliberately *not* `cloud.isConfigured()`. A build can have this and not
-   * that — which is exactly the shape the deployment wants: the plan in a
-   * folder, the calendar in Postgres.
+   * True when this build can hold a calendar at all: it needs a folder, which
+   * the desktop application always can and a browser can only in Edge or Chrome.
    */
   function isConfigured() {
-    const { rcSupabaseUrl, rcSupabaseAnonKey } = config();
-    return Boolean(rcSupabaseUrl && rcSupabaseAnonKey);
+    return filestore.isSupported();
   }
 
-  /* ── Private state ─────────────────────────────────────────────────────── */
+  /** Where the calendar stands: no folder, a folder with none in it, open, or failed. */
+  function status() {
+    return { state, problem: problem ? String(problem.message || problem) : null, folder: openFolder };
+  }
 
-  let client = null;
-  let user = null;
-  let person = null;   // the caller's rc_people row, or null
-  let ready = false;
+  /* ── Who is working ────────────────────────────────────────────────────── */
 
-  /* ── Lifecycle ─────────────────────────────────────────────────────────── */
+  /** The name set in the application, or '' while nobody has set one. */
+  function displayName() {
+    const name = filestore.getDisplayName();
+    return name === 'Someone' ? '' : name;
+  }
+
+  const fold = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
   /**
-   * Create the client and restore any session.
+   * Match the name in the application to somebody on the roster.
    *
-   * Never throws, and never blocks. The timeline has to open with no network at
-   * all, so a backend that is unreachable degrades to "not signed in" and the
-   * Resource Calendar simply says so when you switch to it.
+   * Exactly, folded — the rule every name in this calendar is matched by. A name
+   * nobody on the roster has is still somebody: they are drawn as themselves,
+   * and what they write is stamped with their name.
+   */
+  async function refreshPerson() {
+    const name = displayName();
+    let people = [];
+    try {
+      people = state === 'open' ? (await select('rc_people', (q) => q.eq('active', true))) : [];
+    } catch {
+      people = [];
+    }
+    const key = fold(name);
+    const hit = key ? people.find((p) => fold(p.name) === key) : null;
+    person = hit
+      ? { ...hit, role: 'admin' }
+      : { id: name ? `name:${name}` : 'name:', name: name || 'You', user_id: null, role: 'admin', active: true, title: null, subsystem: null };
+    return person;
+  }
+
+  /**
+   * The author id a write is stamped with. A roster person keeps the account id
+   * they had in the old calendar, so their history stays theirs; anybody else
+   * is `local:<their roster id>`, or `name:<the name typed>` when they are not
+   * on it. `authorName()` in `ui/rc_util.js` reads all three back.
+   */
+  function authorId() {
+    const p = person;
+    if (!p) return null;
+    if (p.user_id) return p.user_id;
+    if (String(p.id).startsWith('name:')) return p.id;
+    return `local:${p.id}`;
+  }
+
+  function currentUser() {
+    return state === 'open' ? { id: authorId(), email: null } : null;
+  }
+
+  /** True once a calendar is open — the old "signed in". */
+  function isSignedIn() {
+    return state === 'open';
+  }
+
+  /** The caller's own person row, or the stand-in for somebody not on the roster. */
+  function me() {
+    return state === 'open' ? person : null;
+  }
+
+  /**
+   * Everybody with the application is an editor: there are no members or
+   * viewers any more, only whoever holds the pen and whoever is waiting.
+   */
+  function isAdmin() {
+    return state === 'open';
+  }
+
+  function role() {
+    return state === 'open' ? 'admin' : null;
+  }
+
+  /** True while this window holds the pen and may write. */
+  function canWrite() {
+    return state === 'open' && folder.holdsPen();
+  }
+
+  function isViewer() {
+    return state === 'open' && !folder.holdsPen();
+  }
+
+  function accountLabel() {
+    return person?.name || displayName() || '';
+  }
+
+  /** Who has the pen, for the header. */
+  function penState() {
+    return folder.penState();
+  }
+
+  const takePen = () => folder.takePen();
+  const releasePen = () => folder.releasePen();
+
+  /** Why a write cannot be made here, or true. */
+  function writable() {
+    // 'empty' is the one moment a calendar is being written into a folder that has none.
+    if (state !== 'open' && state !== 'empty') return 'No calendar is open.';
+    if (folder.holdsPen()) return true;
+    const { holder } = folder.penState();
+    return `Read only — ${holder || 'somebody else'} is editing the calendar. `
+      + 'Take over at the top of the calendar if they have finished.';
+  }
+
+  /** The name given to the database for stamping its files. */
+  function who() {
+    return { userId: authorId(), personId: person?.id || null, name: person?.name || displayName() };
+  }
+
+  /* ── Opening ───────────────────────────────────────────────────────────── */
+
+  /**
+   * Open the calendar in the connected folder, if it has one.
+   *
+   * Never throws: a folder with no calendar yet, or none connected, is a state
+   * the calendar's front door explains (`ui/rc_gate.js`), not an error.
    */
   function init() {
-    if (ready) return Promise.resolve(user);
-    // One client, however many callers ask while the SDK is still on its way.
+    asked = true;
     if (!starting) starting = start().finally(() => { starting = null; });
     return starting;
   }
 
-  let starting = null;
+  /** Whether anything has asked for the calendar yet. */
+  let asked = false;
 
   async function start() {
-    if (ready) return user;
-    if (!isConfigured()) return null;
-
-    // Fetched here, not by a script tag: a page that never makes a client
-    // never downloads one (see core/sdk.js).
-    const sdk = await loadSupabase();
-    if (!sdk) {
-      console.warn('[cx-timeline] the Supabase client did not load; the resource calendar is unavailable');
+    if (!isConfigured()) {
+      state = 'no-folder';
       return null;
     }
-
-    const { rcSupabaseUrl, rcSupabaseAnonKey } = config();
-    client = sdk.createClient(rcSupabaseUrl, rcSupabaseAnonKey, {
-      // A storage key of its own. The plan's client, in a build that has one,
-      // would otherwise share a session slot with this and the two would evict
-      // each other on every reload.
-      auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: false,
-        storageKey: 'cx-rc-auth',
-      },
-    });
-
+    const where = filestore.state().folder;
+    if (!filestore.hasFolder()) {
+      reset('no-folder');
+      return null;
+    }
+    if (db && where === openFolder && state === 'open') return currentUser();
+    if (where !== openFolder) reset('no-folder');
+    openFolder = where;
+    if (!db) {
+      db = createDb({
+        storage: folder.storage(),
+        who,
+        canWrite: writable,
+        now: () => new Date(),
+        record: typeof window !== 'undefined' && Boolean(window.__rcRecord),
+      });
+      db.onChange(() => {
+        refreshPerson().catch(() => {});
+        ring();
+      });
+    }
     try {
-      const { data } = await client.auth.getSession();
-      user = data?.session?.user || null;
-      if (user) await refreshPerson();
+      const manifest = await db.manifest();
+      if (!manifest) {
+        state = 'empty';
+        problem = null;
+        emit(EV.RC_AUTH_CHANGED, { user: null, event: 'EMPTY' });
+        return null;
+      }
+      state = 'open';
+      problem = null;
     } catch (err) {
-      console.warn('[cx-timeline] could not restore the resource-calendar session:', err.message);
-      user = null;
-    }
-
-    client.auth.onAuthStateChange((event, session) => {
-      const next = session?.user || null;
-      const changed = (next?.id || null) !== (user?.id || null);
-      user = next;
-      if (!next) { person = null; preview = null; }
-      // The bell follows the session: closed when it ends (a lapsed token too,
-      // not only signOut()), and opened again for whoever signs in next if a
-      // screen is still listening — an editor left open across the sign-in
-      // registered once and would otherwise poll slowly for the rest of the day.
-      if (!next) closeBell();
-      else if (changed && bellListeners.size) { closeBell(); openBell(); }
-      if (changed) emit(EV.RC_AUTH_CHANGED, { user, event });
-    });
-
-    ready = true;
-
-    // Restoring a session is a change of identity as much as signing in is, and
-    // the shell has already drawn itself by now — what it shows depends on the
-    // role, which only exists after this point. Without the event a returning
-    // viewer would keep whichever chrome the anonymous boot decided on.
-    if (user) emit(EV.RC_AUTH_CHANGED, { user, event: 'RESTORED' });
-    return user;
-  }
-
-  function raw() {
-    return client;
-  }
-
-  function currentUser() {
-    return user;
-  }
-
-  function isSignedIn() {
-    return Boolean(user);
-  }
-
-  /**
-   * The caller's own person row.
-   *
-   * Null is a real answer and not an error: an account with no `rc_people` row
-   * is somebody who can sign in but is not on the team, and the database will
-   * refuse their writes accordingly.
-   */
-  function me() {
-    return preview || person;
-  }
-
-  /* ── Seeing it as somebody else ─────────────────────────────────────────
-     An administrator can look at the calendar the way a member or a viewer
-     sees it, before telling the team to use it. Everything that decides what
-     to draw — `me()`, `role()`, `isAdmin()`, `canWrite()` — answers as that
-     person; every write is refused here, before it leaves the page, with an
-     error saying why (`err.preview`). The database is not asked to pretend:
-     it still answers as the administrator, so a preview shows the screens a
-     member gets, not a guarantee of the rows their account could read. */
-
-  let preview = null; // the rc_people row being looked through, or null
-
-  /** Look at the calendar as this person (a member or a viewer), or stop with null. */
-  function previewAs(who) {
-    if (who && person?.role !== 'admin') throw new Error('Only an administrator can see the calendar as somebody else.');
-    if (who && who.role === 'admin') throw new Error('Choose a member or a viewer — an administrator sees what you see.');
-    preview = who ? { id: who.id, name: who.name, email: who.email || null, title: who.title || null, subsystem: who.subsystem || null, role: who.role || 'member', active: true } : null;
-    forgetReads();
-    emit(EV.RC_AUTH_CHANGED, { user, event: who ? 'PREVIEW' : 'PREVIEW_ENDED' });
-  }
-
-  /** The person being looked through, or null. */
-  function previewing() {
-    return preview;
-  }
-
-  /** Whether the account actually signed in is an administrator, whoever it is previewing. */
-  function isRealAdmin() {
-    return person?.role === 'admin';
-  }
-
-  /** Refuse a write while previewing — before it reaches the network or a queue. */
-  function guardPreview() {
-    if (!preview) return;
-    const err = new Error(`Preview only — nothing is saved while you are seeing the calendar as ${preview.name}.`);
-    err.preview = true;
-    throw err;
-  }
-
-  /**
-   * True when the caller may see the KPI history and write the plan.
-   *
-   * This drives what the interface shows. It is *not* the control — every rule
-   * is a row-level security policy, so a member who bypasses the interface
-   * still gets nothing back from `rc_effort`. This exists to explain why
-   * something is missing, not to decide it.
-   */
-  function isAdmin() {
-    return me()?.role === 'admin';
-  }
-
-  /** 'admin' | 'member' | 'viewer', or null for somebody not on the team. */
-  function role() {
-    return me()?.role || null;
-  }
-
-  /**
-   * True when this account may write anything at all.
-   *
-   * A viewer has a person row and `me()` finds it, so an id comparison alone
-   * would let them record their own outcomes — which is the whole difference
-   * between read-only and not. `rc_can_act_for()` makes the same distinction in
-   * the database, and that is the control; this decides what to draw.
-   */
-  function canWrite() {
-    return me()?.role === 'admin' || me()?.role === 'member';
-  }
-
-  function isViewer() {
-    return me()?.role === 'viewer';
-  }
-
-  function accountLabel() {
-    if (person?.name) return person.name;
-    if (!user) return '';
-    return user.user_metadata?.full_name || user.email || 'Signed in';
-  }
-
-  async function refreshPerson() {
-    // Runs on every sign-in and account change: same rule as sign-out.
-    forgetReads();
-    person = null;
-    preview = null;
-    if (!client || !user) return null;
-    const { data, error } = await client
-      .from('rc_people')
-      .select('id, name, email, title, subsystem, role, active')
-      .eq('user_id', user.id)
-      .eq('active', true)
-      .maybeSingle();
-    if (error) {
-      console.warn('[cx-timeline] could not read your team record:', error.message);
+      state = 'failed';
+      problem = err;
+      emit(EV.RC_AUTH_CHANGED, { user: null, event: 'FAILED' });
       return null;
     }
-    person = data || null;
+    await refreshPerson();
+    startPolling();
+    emit(EV.RC_AUTH_CHANGED, { user: currentUser(), event: 'OPENED' });
+    return currentUser();
+  }
+
+  /**
+   * Join the queue for the pen — called when somebody opens the calendar, not
+   * when the timeline reads the look-ahead. Reading the calendar never needs
+   * it; only writing does, so somebody who only ever uses the timeline is never
+   * shown to a colleague as editing the calendar.
+   */
+  async function enterCalendar() {
+    await init();
+    if (state !== 'open') return null;
+    await folder.startPen();
+    return folder.penState();
+  }
+
+  function reset(next) {
+    folder.stopPen();
+    clearInterval(pollTimer);
+    pollTimer = null;
+    db = null;
+    person = null;
+    state = next;
+    openFolder = '';
+  }
+
+  /** Look for another computer's saves while the calendar is open and on screen. */
+  function startPolling() {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(() => {
+      if (!db || state !== 'open') return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      db.refresh().catch(() => {});
+      if (db.unsaved()) db.retry().catch(() => {});
+    }, POLL_MS);
+  }
+
+  // Another folder is another calendar; and the name set later is who we are.
+  if (typeof window !== 'undefined') {
+    on(EV.FILE_STATE, (st) => {
+      // Nothing has asked for the calendar yet: nothing to follow.
+      if (!db && state === 'no-folder' && !asked) return;
+      if ((st?.folder || '') !== openFolder) {
+        const hadPen = folder.penState().role !== null;
+        reset('no-folder');
+        init()
+          .then(() => (hadPen ? enterCalendar() : null))
+          .then(() => emit(EV.RC_AUTH_CHANGED, { user: currentUser(), event: 'FOLDER' }));
+      }
+    });
+    window.addEventListener('beforeunload', () => folder.stopPen());
+  }
+
+  /** Read the name in the application again — after somebody sets it. */
+  async function refreshMe() {
+    await refreshPerson();
+    emit(EV.RC_AUTH_CHANGED, { user: currentUser(), event: 'ROLE_CHANGED' });
     return person;
   }
 
-  /* ── Account ───────────────────────────────────────────────────────────── */
-
-  async function signIn(email, password) {
-    requireClient();
-    const { data, error } = await client.auth.signInWithPassword({
-      email: String(email || '').trim(),
-      password,
-    });
-    if (error) throw friendlier(error);
-    user = data.user;
-    await refreshPerson();
-    emit(EV.RC_AUTH_CHANGED, { user, event: 'SIGNED_IN' });
-    return user;
-  }
-
   /**
-   * Create an account.
+   * Start a calendar in this folder: an empty one, or everything from a backup
+   * of the old calendar (`core/rc_import.js` turns the backup into rows).
    *
-   * The gate is `rc_enforce_invitation()` on `auth.users`, not this function:
-   * sign-up goes through GoTrue rather than PostgREST, so anybody holding the
-   * public key can POST to /auth/v1/signup and the interface has no say in it.
-   * An address nobody invited is refused by the database, and what comes back
-   * here is that refusal.
-   *
-   * Whether they are signed in afterwards depends on the project's "Confirm
-   * email" setting, so the caller is told which happened rather than guessing.
+   * @param {Record<string, any[]>} [tables]
+   * @param {{ source?: string, replace?: boolean }} [options]
    */
-  async function signUp(email, password) {
-    requireClient();
-    const { data, error } = await client.auth.signUp({
-      email: String(email || '').trim(),
-      password,
-    });
-    if (error) throw friendlier(error);
-    user = data.user || null;
-    if (data.session) {
-      await refreshPerson();
-      emit(EV.RC_AUTH_CHANGED, { user, event: 'SIGNED_IN' });
-    }
-    return { user, live: Boolean(data.session) };
+  async function createCalendar(tables = {}, { source = 'new', replace = false } = {}) {
+    if (!filestore.hasFolder()) throw new Error('Open the shared folder first.');
+    await init();
+    if (!db) throw new Error('The folder could not be opened.');
+    // Nobody else is writing a calendar that does not exist yet.
+    await folder.startPen();
+    if (!folder.holdsPen() && !replace) await folder.takePen();
+    await db.create(tables, { source, replace });
+    state = 'open';
+    problem = null;
+    await refreshPerson();
+    startPolling();
+    emit(EV.RC_AUTH_CHANGED, { user: currentUser(), event: 'CREATED' });
   }
 
-  async function signOut() {
-    if (!client) return;
-    // Whoever signs in next must not read this account's rows out of memory.
-    // The database would refuse them; the cache must not answer first.
-    forgetReads();
-    closeBell();
-    await client.auth.signOut();
-    user = null;
-    person = null;
-    preview = null;
-    emit(EV.RC_AUTH_CHANGED, { user: null, event: 'SIGNED_OUT' });
-  }
-
-  function requireClient() {
-    if (!client) throw new Error('The resource calendar is not configured for this build.');
-  }
-
-  /** Supabase's wording is for developers; these messages are for people. */
-  function friendlier(error) {
-    const message = String(error?.message || 'Something went wrong.');
-    if (/invitation only/i.test(message)) {
-      return new Error('That address has not been invited. Ask an administrator to invite you, '
-        + 'then use the link they send.');
-    }
-    if (/already registered|user already exists/i.test(message)) {
-      return new Error('That address already has an account — sign in instead.');
-    }
-    if (/password/i.test(message) && /least|short|weak/i.test(message)) {
-      return new Error('That password is too short — six characters at least.');
-    }
-    if (/invalid login credentials/i.test(message)) return new Error('That email and password do not match an account.');
-    if (/email not confirmed/i.test(message)) return new Error('Confirm your email address first — check your inbox.');
-    if (/failed to fetch|networkerror/i.test(message)) {
-      return new Error('Could not reach the server. The timeline still works offline; the resource calendar needs a connection.');
-    }
-    return new Error(message);
+  /** The database itself — for the tests, which count what was asked and read the rows. */
+  function debugDb() {
+    return db;
   }
 
   /* ── Reading ───────────────────────────────────────────────────────────── */
 
-  /**
-   * Every read goes through here so a failure has one shape.
-   *
-   * A refused SELECT is not an error in PostgREST — the policy excludes the rows
-   * and an empty list comes back — so callers must never read "no rows" as "no
-   * permission". Where the difference matters, ask `isAdmin()`.
-   */
-  /* ── The read cache ──────────────────────────────────────────────────────
-     Every tab re-asks for the roster, the locations, the legend, the aliases and
-     the categories, and every section inside the look-ahead re-asks for the
-     snapshot. None of it changes between one click and the next, and the round
-     trips were most of the wait between tabs. So a read is remembered for a short
-     while, keyed on the table and everything the query asked for.
-
-     Two things keep it honest. **Any write through this module empties it**, so
-     what somebody just saved is what the next screen reads — the alternative,
-     an outcome recorded and the meeting still showing the old one, is exactly the
-     failure a huddle cannot afford. And the memory is short (`READ_TTL`), because
-     two people edit this calendar at once and a colleague's write comes through
-     nothing here; thirty seconds is a tab switch, not a shift. It is never longer
-     than one page: a reload starts empty. */
-  const READ_TTL = 30000;
-  const reads = new Map();
-
-  function remember(key, fetch) {
-    const held = reads.get(key);
-    if (held && held.until > Date.now()) return held.promise;
-    const promise = fetch().then(
-      (rows) => rows,
-      (err) => { reads.delete(key); throw err; }
-    );
-    reads.set(key, { promise, until: Date.now() + READ_TTL });
-    return promise;
-  }
-
-  /** Forget every remembered read. Called by every write, and by whoever knows better. */
-  function forgetReads() {
-    reads.clear();
+  function requireDb() {
+    if (!db || state !== 'open') throw new Error('No calendar is open — open the shared folder first.');
   }
 
   /**
-   * Send a write, and forget what was read again once it has landed.
-   *
-   * Forgetting only before it was not enough: a read made while the write was on
-   * its way was answered from the server as it stood before, and remembered —
-   * for thirty seconds the newest reading of the look-ahead was the one the
-   * editor had just replaced, so its next publish compared against the wrong
-   * one, decided nothing had changed, and the calendar drew an earlier state.
+   * Every read goes through here so a failure has one shape. Answers are read
+   * from memory once a file has been read, so there is nothing to remember
+   * between tabs: `forgetReads()` survives only for the callers that still say it.
    */
-  async function landed(request) {
-    try {
-      return await request;
-    } finally {
-      forgetReads();
-    }
-  }
-
-  /**
-   * The filters a query built, as text, so two identical questions share an
-   * answer and two different ones never do. The builder is wrapped rather than
-   * inspected: the client's own object does not describe itself, and the stub the
-   * tests run against has nothing to inspect at all.
-   */
-  function describe(build) {
-    const parts = [];
-    const proxy = new Proxy({}, {
-      get: (_, method) => (...args) => { parts.push(`${String(method)}(${JSON.stringify(args)})`); return proxy; },
-    });
-    if (build) build(proxy);
-    return parts.join('');
-  }
-
   async function select(table, build, { columns = '*' } = {}) {
-    requireClient();
-    const key = `${table}|${columns}|${describe(build)}`;
-    return remember(key, async () => {
-      let query = client.from(table).select(columns);
-      if (build) query = build(query);
-      const { data, error } = await query;
-      if (error) throw new Error(`${table}: ${error.message}`);
-      return data || [];
-    });
+    requireDb();
+    let query = db.from(table).select(columns);
+    if (build) query = build(query);
+    const { data, error } = await query;
+    if (error) throw new Error(`${table}: ${error.message}`);
+    return data || [];
   }
 
+  /** The same, for a question that once had to be paged. */
+  const selectAll = (table, build) => select(table, build);
+
   /**
-   * The team.
-   *
-   * `scheduledOnly` is what the huddle and the week plan ask for: the people who
-   * actually take shifts. It is a separate question from what somebody may do —
-   * a manager administers the calendar and is never assigned to a location, and
-   * an administrator who *does* take shifts must not disappear from the meeting
-   * because of their permissions.
+   * Forget what was derived from the tables — the views, which are remembered
+   * until the next change. Nothing else is remembered between reads.
    */
+  function forgetReads() {
+    db?.invalidate();
+  }
+
   function listPeople({ includeInactive = false, scheduledOnly = false } = {}) {
     return select('rc_people', (q) => {
       let out = includeInactive ? q : q.eq('active', true);
@@ -16683,14 +17604,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_location_alias', (q) => q.order('alias'));
   }
 
-  /**
-   * The other spellings of a person, for matching the look-ahead's Resource row.
-   *
-   * A name typed into a spreadsheet cell is "R. Okafor" one week and "Okafor" the
-   * next. The register is what turns those into a person; a name it does not know
-   * is shown as unmatched rather than guessed at, which is the same answer the
-   * location aliases give and for the same reason.
-   */
+  /** The other spellings of a person, for matching the look-ahead's Resource row. */
   function listPersonAliases() {
     return select('rc_person_alias', (q) => q.order('alias'));
   }
@@ -16704,11 +17618,9 @@ __mods["core/rc.js"] = function (__x, __req) {
   }
 
   /**
-   * The legend the look-ahead's colours are read against.
-   *
-   * Versioned by `valid_from`, because a legend that changes must not silently
-   * reinterpret every snapshot taken before it did. Newest first, so a caller
-   * taking the first entry for a colour gets the one in force.
+   * The legend the look-ahead's colours are read against. Versioned by
+   * `valid_from`, newest first, so a caller taking the first entry for a colour
+   * gets the one in force.
    */
   function listLegend({ includeInactive = false } = {}) {
     return select('rc_legend', (q) =>
@@ -16716,120 +17628,29 @@ __mods["core/rc.js"] = function (__x, __req) {
   }
 
   /**
-   * Everything, as one object.
-   *
-   * The calendar's whole value is being the record a year from now, and until
-   * this existed there was no way to get it out — a bad migration or a project
-   * deleted by accident left the provider's point-in-time recovery and nothing
-   * else. Read straight through the policies rather than around them, so what
-   * comes back is what the person asking is allowed to see: an administrator
-   * gets the evidence tables, a member gets the schedule.
-   *
-   * Tables only. The SAR PDFs are in Storage and are not folded in — they are
-   * the one thing here that is already a file, and a hundred megabytes of base64
-   * in a JSON document is not a backup anybody would successfully restore.
+   * Everything, as one file, in the shape the old calendar's backup had — so a
+   * copy taken here can be put back into an empty folder by the same importer.
    */
   async function exportEverything() {
-    requireClient();
-    /* Every table, with the unique key its pages are ordered on. Every page of
-       each, too: a plain select stops at PostgREST's thousand-row limit, so a
-       backup of a project with more readings than that held the first thousand
-       rows and said nothing — and this file is what the move to the folder is
-       imported from. `rc_cancellation_notes` was missing altogether, which would
-       have lost every reason given for a cancellation. */
-    const tables = {
-      rc_people: ['id'], rc_locations: ['id'], rc_location_alias: ['id'], rc_person_alias: ['id'],
-      rc_categories: ['id'], rc_parties: ['id'],
-      rc_leave_kinds: ['id'], rc_legend: ['id'], rc_settings: ['key'], rc_leave: ['id'],
-      rc_plan_entries: ['id'], rc_client_errors: ['id'],
-      rc_la_rows: ['id'], rc_la_cells: ['row_id', 'day'], rc_la_edits: ['id'], rc_support_codes: ['id'],
-      rc_la_seen: ['id'], rc_p6_activities: ['activity_id'], rc_p6_flags: ['id'],
-      rc_actuals: ['id'], rc_ingest_runs: ['id'], rc_lookahead_snapshots: ['id'], rc_lookahead_rows: ['id'],
-      rc_change_events: ['id'], rc_change_annotations: ['id'], rc_cancellation_notes: ['id'],
-      rc_blockers: ['id'], rc_blocker_updates: ['id'], rc_sars: ['id'], rc_sar_links: ['id'],
-      rc_tawrs: ['id'], rc_tawr_descriptions: ['id'], rc_tawr_settings: ['key'], rc_tawr_profiles: ['person_id'],
-    };
-
+    requireDb();
     const out = {
+      format: FORMAT,
       exported_at: new Date().toISOString(),
-      exported_by: person?.name || user?.email || null,
-      note: 'Every rc_* table this account may read. SAR PDFs live in Storage and are not '
-        + 'included; their storage_path is.',
+      exported_by: accountLabel() || null,
+      note: 'Every table of the resource calendar. BART\'s blank TAWR form is under files, as base64.',
       tables: {},
     };
-    for (const [table, keys] of Object.entries(tables)) {
-      // One at a time, and a table that refuses is recorded as refused rather
-      // than silently absent — "empty" and "not allowed" must not look alike in
-      // something somebody may restore from.
-      try {
-        out.tables[table] = await selectAll(table, (q) => keys.reduce((built, key) => built.order(key), q));
-      } catch (err) {
-        out.tables[table] = { error: err.message };
-      }
-    }
-    /* BART's blank TAWR form is the one file the calendar cannot work without
-       that is not a table, and it is small — so it travels in the backup, and the
-       move to the folder needs nothing but this one file. */
-    try {
-      const form = await downloadTawrTemplate();
-      if (form) {
-        let binary = '';
-        for (let i = 0; i < form.length; i += 0x8000) binary += String.fromCharCode(...form.subarray(i, i + 0x8000));
-        out.files = { 'tawr/template.pdf': btoa(binary) };
-      }
-    } catch (err) {
-      out.files = { 'tawr/template.pdf': { error: err.message } };
+    for (const table of TABLE_NAMES) out.tables[table] = await select(table);
+    const form = await folder.readBytes('tawr/template.pdf');
+    if (form) {
+      let binary = '';
+      for (let i = 0; i < form.length; i += 0x8000) binary += String.fromCharCode(...form.subarray(i, i + 0x8000));
+      out.files = { 'tawr/template.pdf': btoa(binary) };
     }
     return out;
   }
 
   /* ── The look-ahead, edited here ───────────────────────────────────────── */
-
-  /**
-   * Every page of a read the server would otherwise cut off at its row limit.
-   *
-   * PostgREST answers a thousand rows at most, and a five-week look-ahead can
-   * hold more cells than that: a read that stopped at the limit would draw a
-   * sheet with its bottom rows blank and no sign anything was missing.
-   *
-   * The first page asks how many rows there are, and the rest are asked for
-   * together rather than one after another — a sheet of four pages was four
-   * round trips end to end. A page that comes back full after them (rows written
-   * between the count and the read) is followed one at a time, as before, so
-   * nothing is lost to a count that went stale. Every caller orders by a unique
-   * key, which is what makes the pages line up.
-   */
-  async function selectAll(table, build, pageSize = 1000) {
-    requireClient();
-    const key = `${table}|all|${describe(build)}`;
-    return remember(key, async () => {
-      const page = async (from, counted = false) => {
-        let query = client.from(table).select('*', counted ? { count: 'exact' } : undefined);
-        if (build) query = build(query);
-        const answer = await query.range(from, from + pageSize - 1);
-        if (answer.error) throw new Error(`${table}: ${answer.error.message}`);
-        return answer;
-      };
-      const first = await page(0, true);
-      const out = [...(first.data || [])];
-      let last = first.data || [];
-      let from = pageSize;
-      if (last.length === pageSize && Number.isFinite(first.count) && first.count > pageSize) {
-        const starts = [];
-        for (let at = pageSize; at < first.count; at += pageSize) starts.push(at);
-        const pages = await Promise.all(starts.map((at) => page(at)));
-        for (const p of pages) out.push(...(p.data || []));
-        last = pages[pages.length - 1].data || [];
-        from = starts[starts.length - 1] + pageSize;
-      }
-      while (last.length === pageSize) {
-        last = (await page(from)).data || [];
-        out.push(...last);
-        from += pageSize;
-      }
-      return out;
-    });
-  }
 
   function listLaRows() {
     return selectAll('rc_la_rows', (q) => q.order('sort').order('id'));
@@ -16840,12 +17661,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     return selectAll('rc_la_cells', (q) => q.gte('day', fromISO).lte('day', toISO).order('day').order('row_id'));
   }
 
-  /**
-   * The first and last day anything is written on the look-ahead: how far the
-   * calendar's read view pages back, and what "Everything" covers once the
-   * look-ahead is written here. Two one-row reads along the day index; null
-   * days when nothing is written at all.
-   */
+  /** The first and last day anything is written on the look-ahead, or null days. */
   async function laCellSpan() {
     const edge = (ascending) => select('rc_la_cells', (q) => q.order('day', { ascending }).limit(1), { columns: 'day' })
       .then((rows) => (rows[0]?.day ? String(rows[0].day).slice(0, 10) : null));
@@ -16861,36 +17677,28 @@ __mods["core/rc.js"] = function (__x, __req) {
   const applyLookaheadOps = (ops) => rpc('rc_la_apply', { p_ops: ops });
 
   /**
-   * The newest change anybody has made, as a number — asked every few seconds by
-   * an open editor. A read, so it does not empty the read cache the way every
-   * other call to a function does.
+   * Look in the folder for another computer's saves now, rather than at the next
+   * poll — when the window gets the focus back, say. Answers whether anything
+   * changed; the bell rings if it did.
    */
+  function checkFolder() {
+    return db && state === 'open' ? db.refresh().catch(() => false) : Promise.resolve(false);
+  }
+
+  /** The newest change anybody has made, as a number. */
   async function lookaheadRevision() {
-    requireClient();
-    const { data, error } = await client.rpc('rc_la_revision', {});
+    requireDb();
+    const { data, error } = await db.rpc('rc_la_revision', {});
     if (error) throw new Error(`rc_la_revision: ${error.message}`);
     return Number(data) || 0;
   }
 
-  /* ── The bell: told when the look-ahead changes, rather than asking ───────── */
+  /* ── The bell: told when the look-ahead changes ───────────────────────────
+     Rung by the database when an edit is logged or a reading taken here, and
+     when the folder brings down another computer's save. A listener asks what
+     changed, exactly as its poll does. */
 
-  /**
-   * `rc_la_beacon` is one row a trigger touches whenever an edit is logged or a
-   * reading is taken (see rc_schema.sql). Realtime tells every open page the
-   * moment it moves, so the editor and the calendar's view hear about somebody
-   * else's change at once instead of on their next poll. It says only *that*
-   * something changed: a listener asks what, exactly as its poll does.
-   *
-   * One channel for the page, opened by the first listener and closed by the
-   * last. A client without Realtime (an SDK stub, an old vendored copy) never
-   * opens one, and `lookaheadLive()` stays false, which is the polls' cue to
-   * carry on as they always have. When the socket comes back after a drop,
-   * every listener is called once — whatever rang meanwhile was missed.
-   */
   const bellListeners = new Set();
-  let bell = null;
-  let bellLive = false;
-  let bellDropped = false;
 
   function ring() {
     for (const fn of [...bellListeners]) {
@@ -16898,73 +17706,24 @@ __mods["core/rc.js"] = function (__x, __req) {
     }
   }
 
-  function openBell() {
-    if (bell || !client || typeof client.channel !== 'function') return;
-    bell = client.channel('rc-la-beacon')
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rc_la_beacon' }, () => {
-        // A change of this page's own lands here too. Nothing is forgotten on
-        // it — a write already empties the read memory when it lands, and every
-        // listener asks with a read that is never remembered — so it costs one
-        // small question and reads nothing new.
-        ring();
-      })
-      .subscribe((status) => {
-        const live = status === 'SUBSCRIBED';
-        // Back after a drop: whatever rang while it was down was missed.
-        if (live && bellDropped) ring();
-        if (!live && bellLive) bellDropped = true;
-        if (live) bellDropped = false;
-        bellLive = live;
-      });
-  }
-
-  function closeBell() {
-    if (!bell) return;
-    try { client?.removeChannel?.(bell); } catch { /* already gone */ }
-    bell = null;
-    bellLive = false;
-    bellDropped = false;
-  }
-
-  /**
-   * Call `fn` whenever anybody changes the look-ahead — an edit, a published
-   * reading, a workbook read. Answers with the function that stops it.
-   */
+  /** Call `fn` whenever the look-ahead changes. Answers with the function that stops it. */
   function onLookaheadChange(fn) {
     bellListeners.add(fn);
-    openBell();
-    return () => {
-      bellListeners.delete(fn);
-      if (!bellListeners.size) closeBell();
-    };
+    return () => bellListeners.delete(fn);
   }
 
-  /**
-   * True while the bell is connected, so a poll can slow down: anything it
-   * would find, the bell has normally said already. False whenever it is not —
-   * no Realtime, a socket that dropped, a project that never ran the SQL that
-   * added the table. Live is not proof, though: a table missing from the
-   * publication subscribes and never rings. So the polls slow down rather
-   * than stop (`POLL_LIVE_MS`).
-   */
+  /** True while the calendar is open: the folder is watched, so the polls may slow down. */
   function lookaheadLive() {
-    return bellLive;
+    return state === 'open';
   }
 
-  /**
-   * The edit log, newest first: the last `limit` changes, or every change from
-   * `sinceId` on. An administrator's read — the log is the evidence base.
-   */
+  /** The edit log, newest first: the last `limit` changes, or every change from `sinceId` on. */
   function listLaEdits({ sinceId = null, limit = 2000 } = {}) {
     if (sinceId != null) return selectAll('rc_la_edits', (q) => q.gte('id', sinceId).order('id', { ascending: false }));
     return select('rc_la_edits', (q) => q.order('id', { ascending: false }).limit(limit));
   }
 
-  /**
-   * Every edit made in a span of time, oldest first — what Changes reads to say
-   * who made each change between two readings, and the edit log itself. Paged,
-   * because a busy afternoon in the editor is more than one page of it.
-   */
+  /** Every edit made in a span of time, oldest first. */
   function listLaEditsBetween(fromISO, toISO) {
     return selectAll('rc_la_edits', (q) => q.gte('at', fromISO).lte('at', toISO).order('id'));
   }
@@ -16974,35 +17733,10 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_la_edits', (q) => q.eq('row_id', rowId).order('id', { ascending: false }).limit(1000));
   }
 
-  /**
-   * Slim the grids of superseded editor readings past the keep period, and say
-   * how many — see `rc_compact_snapshots()` for what is kept and why.
-   */
+  /** Slim the grids of superseded editor readings past the keep period, and say how many. */
   const compactSnapshots = () => rpc('rc_compact_snapshots', {});
 
-  /* ── Who has seen the changes to their days ─────────────────────────────── */
-
-  /** The newest "Got it" a person has given, or null — see `rc_la_seen`. */
-  function lastSeen(personId) {
-    return select('rc_la_seen', (q) => q.eq('person_id', personId).order('seen_at', { ascending: false }).limit(1))
-      .then((rows) => rows[0] || null);
-  }
-
-  /** Every "Got it", newest first — an administrator reads everybody's, anybody else their own. */
-  function listSeen() {
-    return select('rc_la_seen', (q) => q.order('seen_at', { ascending: false }).limit(2000));
-  }
-
-  /** Record that the person looking has seen the look-ahead as of this reading. */
-  function markSeen({ snapshotId, takenAt, changes = 0 }) {
-    const who = me();
-    if (!who) return Promise.reject(new Error('Only somebody on the team can say they have seen their days.'));
-    return insert('rc_la_seen', [{
-      person_id: who.id, snapshot_id: snapshotId, snapshot_taken_at: takenAt, changes,
-    }]).then((rows) => rows[0] || null);
-  }
-
-  /** One reading's stored rows — what "what changed for me" compares. */
+  /** One reading's stored rows. */
   function snapshotRows(snapshotId) {
     return selectAll('rc_lookahead_rows', (q) => q.eq('snapshot_id', snapshotId).order('id'));
   }
@@ -17015,24 +17749,15 @@ __mods["core/rc.js"] = function (__x, __req) {
 
   /* ── P6 activities, for the look-ahead's rows to name ─────────────────── */
 
-  /** Every activity imported from P6 — thousands of them, so every page. */
   function listP6Activities() {
     return selectAll('rc_p6_activities', (q) => q.order('activity_id'));
   }
 
-  /**
-   * The activities a reading names, by ID — what the calendar's read view draws
-   * beside them. In slices, because the IDs travel in the URL.
-   */
+  /** The activities a reading names, by ID. */
   async function p6ActivitiesByIds(ids) {
     const want = [...new Set((ids || []).filter(Boolean))];
-    const out = [];
-    for (let i = 0; i < want.length; i += 200) {
-      const slice = want.slice(i, i + 200);
-      out.push(...await select('rc_p6_activities', (q) => q.in('activity_id', slice),
-        { columns: 'activity_id,name,wbs,missing' }));
-    }
-    return out;
+    if (!want.length) return [];
+    return select('rc_p6_activities', (q) => q.in('activity_id', want), { columns: 'activity_id,name,wbs,missing' });
   }
 
   /** Why a row has no P6 activity: the list a row is flagged from. */
@@ -17043,10 +17768,9 @@ __mods["core/rc.js"] = function (__x, __req) {
   const updateP6Flag = (id, patch) => update('rc_p6_flags', id, patch);
 
   /**
-   * Import an extract's activities, `{ activity_id, name, wbs }`, through
-   * `rc_p6_import()`: in batches that share one import id, the last of which
-   * marks every activity the extract left out as missing. Answers how many were
-   * written and how many went missing.
+   * Import an extract's activities through `rc_p6_import()`, in batches that
+   * share one import id, the last of which marks every activity the extract
+   * left out as missing.
    *
    * @param {Array<{ activity_id: string, name?: string, wbs?: string }>} activities
    * @param {{ importId: string, batch?: number }} options
@@ -17067,92 +17791,28 @@ __mods["core/rc.js"] = function (__x, __req) {
     return { written, missing };
   }
 
-  /* ── Problems the calendar ran into ──────────────────────────────────── */
+  /* ── Problems ──────────────────────────────────────────────────────────── */
 
-  const REPORT_LIMIT = 20;
   const reported = new Set();
 
   /**
-   * Write one row to `rc_client_errors`, and never throw.
-   *
-   * Called from named places in the calendar's own code — a tab that failed to
-   * load, an offline outcome the server refused, a look-ahead read that went
-   * wrong — and never from a global handler: an error thrown anywhere in the page
-   * can carry plan text, and plan data must never reach this project. The same
-   * message is reported once per page, and at most twenty per page, so a screen
-   * failing on every re-render cannot fill the table. Reporting a failure must
-   * never be a second failure, so everything here is swallowed.
+   * Say a failure in the console, once per message. There is nowhere else to
+   * send it: the calendar has no server, and nothing leaves this computer.
    */
   function reportError(area, err) {
     try {
-      if (!client || !user || preview) return;
-      const message = String(err?.message || err || 'unknown').slice(0, 500) || 'unknown';
+      const message = String(err?.message || err || 'unknown').slice(0, 500);
       const key = `${area}\u0000${message}`;
-      if (reported.has(key) || reported.size >= REPORT_LIMIT) return;
+      if (reported.has(key)) return;
       reported.add(key);
-      const shell = typeof window !== 'undefined' ? window.CX_SHELL : null;
-      const row = {
-        area: String(area).slice(0, 60),
-        message,
-        created_by: user.id,
-        app_version: String(shell?.version || (typeof window !== 'undefined' && window.CX_CONFIG?.version) || '').slice(0, 40) || null,
-        user_agent: typeof navigator !== 'undefined' ? String(navigator.userAgent).slice(0, 300) : null,
-      };
-      Promise.resolve(client.from('rc_client_errors').insert([row]))
-        .then(() => forgetReads(), () => {})
-        .catch(() => {});
+      console.warn(`[cx-timeline] calendar (${area}):`, message);
     } catch {
       /* reporting a failure must never be a second one */
     }
   }
 
-  /** The newest problems reported, for an administrator. */
-  function listClientErrors(limit = 100) {
-    return select('rc_client_errors', (q) => q.order('created_at', { ascending: false }).limit(limit));
-  }
-
-  /** Clear what was reported before a moment; answers how many rows went. */
-  const clearClientErrors = (before) => rpc('rc_clear_client_errors', { p_before: before });
-
   function listSettings() {
     return select('rc_settings');
-  }
-
-  /**
-   * The database version this build of the calendar expects.
-   *
-   * `rc_schema.sql` stamps its own number into `rc_settings.schema_version` as
-   * its very last statement, so a run that stopped half way does not claim to
-   * have finished. Raise both together — `tools/test_sql.js` fails when they
-   * differ. A column the database has never heard of used to surface as
-   * "could not update the legend", on one screen, weeks after the deploy that
-   * needed it; this turns it into one sentence at sign-in naming the two files.
-   */
-  const SCHEMA_VERSION = 15;
-
-  /**
-   * Whether the database is the one this build was written against.
-   *
-   * `behind` is the common case — the site deployed and nobody ran the SQL —
-   * and a project from before the stamp existed reads as version 0. `ahead`
-   * means the page is older than the database, which is a stale tab or a
-   * desktop copy that has not fetched its update yet. A read that fails answers
-   * `unknown` rather than guessing: the calendar has its own ways of saying the
-   * database is unreachable, and a second one here would only compete.
-   *
-   * @returns {Promise<{ state: string, expected: number, found?: number | null }>}
-   */
-  async function schemaStatus() {
-    let rows;
-    try {
-      rows = await listSettings();
-    } catch {
-      return { state: 'unknown', expected: SCHEMA_VERSION, found: null };
-    }
-    const row = (rows || []).find((r) => r.key === 'schema_version');
-    const found = row ? Number.parseInt(row.value, 10) || 0 : 0;
-    const state = found === SCHEMA_VERSION ? 'current' : found < SCHEMA_VERSION ? 'behind' : 'ahead';
-    return { state, expected: SCHEMA_VERSION, found };
   }
 
   function listLeaveKinds() {
@@ -17160,182 +17820,56 @@ __mods["core/rc.js"] = function (__x, __req) {
   }
 
   /** Leave overlapping a window. Both ends are inclusive, as a calendar is. */
-  /**
-   * Leave awaiting an answer, whoever it belongs to.
-   *
-   * Its own read rather than a filter over `listLeave()`, because the question is
-   * about the whole register and not about a window: a request for October made
-   * today is a thing an administrator has to answer today, and a window that only
-   * covers the weeks on screen would hide it until it was too late to matter.
-   */
-  function pendingLeave() {
-    return select('rc_leave', (q) => q.eq('status', 'requested').order('start_date'));
-  }
-
-  /**
-   * One person's leave from a date on, whatever its answer — the phone's "your
-   * time off". Declined rows stay in, because "they said no" is the answer
-   * somebody opened this to find; withdrawn ones do not, because the person who
-   * withdrew it already knows.
-   */
-  function leaveFor(personId, fromISO) {
-    return select('rc_leave', (q) =>
-      q.eq('person_id', personId).gte('end_date', fromISO).neq('status', 'cancelled').order('start_date'));
-  }
-
   function listLeave(fromISO, toISO) {
     return select('rc_leave', (q) =>
       q.lte('start_date', toISO).gte('end_date', fromISO).neq('status', 'cancelled'));
   }
 
-  /**
-   * The current plan across a date range.
-   *
-   * Reads the view, never the table: the table keeps every revision, and asking
-   * it directly would return the superseded rows alongside the live ones.
-   */
-  function listPlan(fromISO, toISO) {
-    return select('rc_plan_current', (q) =>
-      q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
-  }
-
-  /** Every revision of one day, oldest first — the audit trail for a claim. */
-  function planHistory(personId, dateISO) {
-    return select('rc_plan_entries', (q) =>
-      q.eq('person_id', personId).eq('work_date', dateISO).order('created_at'));
-  }
-
-  /**
-   * Outcomes, as they stand.
-   *
-   * The view, never the table: a corrected outcome is a new row pointing at the
-   * old one, and the table keeps both. Reading it directly would put two answers
-   * against one person for one day and let whichever came last win.
-   */
-  function listActuals(fromISO, toISO) {
-    return select('rc_actuals_current', (q) =>
-      q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
-  }
-
-  /**
-   * Look-ahead rows by id — for tracing an outcome to the row it was recorded
-   * against. Asked in slices so a long list of ids never makes an overlong URL.
-   */
+  /** Look-ahead rows by id. */
   async function lookaheadRowsByIds(ids) {
     const unique = [...new Set((ids || []).filter(Boolean))];
-    const out = [];
-    for (let i = 0; i < unique.length; i += 200) {
-      const slice = unique.slice(i, i + 200);
-      out.push(...(await select('rc_lookahead_rows', (q) => q.in('id', slice), { columns: 'id,raw_label,raw_location,snapshot_id,sheet_row' })));
-    }
-    return out;
-  }
-
-  /** Carried tasks, oldest first — a chain on its fifth day is the headline. */
-  /**
-   * Blockers, as they stand.
-   *
-   * The view, never the tables: the tables keep every step of the chase and the
-   * view is what is true now. Readable by everybody signed in, because a blocker
-   * nobody can see is one nobody chases.
-   */
-  function listBlockers({ openOnly = true } = {}) {
-    return select('rc_blockers_current', (q) =>
-      (openOnly ? q.eq('state', 'open') : q).order('raised_on'));
-  }
-
-  /** Every step of one blocker's history, oldest first. */
-  function blockerHistory(blockerId) {
-    return select('rc_blocker_updates', (q) =>
-      q.eq('blocker_id', blockerId).order('created_at'));
-  }
-
-  const raiseBlocker = (row) => insert('rc_blockers', [row]).then((r) => r[0]);
-  /* Append, never edit. Taking it on, moving the date, chasing it and closing it
-     are each a row — the history is the evidence a claim is built from. */
-  const updateBlocker = (row) => insert('rc_blocker_updates', [row]).then((r) => r[0]);
-
-  function listCarryChains() {
-    return select('rc_carry_chains', (q) => q.order('age_days', { ascending: false }));
-  }
-
-  /** The KPI base. Empty for a member, by policy rather than by omission. */
-  function listEffort(fromISO, toISO) {
-    return select('rc_effort', (q) =>
-      q.gte('work_date', fromISO).lte('work_date', toISO).order('work_date'));
+    if (!unique.length) return [];
+    return select('rc_lookahead_rows', (q) => q.in('id', unique), { columns: 'id,raw_label,raw_location,snapshot_id,sheet_row' });
   }
 
   function listIngestRuns({ limit = 100 } = {}) {
     return select('rc_ingest_runs', (q) => q.order('ran_at', { ascending: false }).limit(limit));
   }
 
-  /**
-   * The snapshots, newest first, **without their grids**.
-   *
-   * A grid is the whole parsed workbook and it is the one large column in the
-   * schema. Every screen that reads the sheet used to ask for twenty of them and
-   * use one; the history list asked for forty to print two numbers off each.
-   * That was most of the wait between tabs. This reads the metadata view, which
-   * carries those two numbers computed in the database, and the one grid
-   * anybody actually draws comes from `latestSnapshot()`.
-   */
+  /** The readings, newest first, **without their grids**. */
   function listSnapshotMeta({ limit = 50 } = {}) {
     return select('rc_lookahead_snapshot_meta', (q) => q.order('taken_at', { ascending: false }).limit(limit));
   }
 
-  /**
-   * Those readings' metadata, by id — when each was taken, which is the edge of
-   * "between these two readings" when Changes asks the edit log who did it.
-   * A hundred at a time, because the ids travel in the URL.
-   */
+  /** Those readings' metadata, by id. */
   async function snapshotMetaByIds(ids) {
     const want = [...new Set((ids || []).filter(Boolean))];
-    const out = [];
-    for (let i = 0; i < want.length; i += 100) {
-      const chunk = want.slice(i, i + 100);
-      out.push(...await select('rc_lookahead_snapshot_meta', (q) => q.in('id', chunk)));
-    }
-    return out;
+    if (!want.length) return [];
+    return select('rc_lookahead_snapshot_meta', (q) => q.in('id', want));
   }
 
-  /** The newest snapshot with its grid, or null. The only full-grid read there is. */
+  /** The newest reading with its grid, or null. The only full-grid read there is. */
   function latestSnapshot() {
     return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(1))
       .then((rows) => rows[0] || null);
   }
 
-  /**
-   * The newest reading's id, asked afresh every time — an open calendar asks it
-   * every few seconds, to notice that the editor published, and a remembered
-   * answer would hide exactly that. A read, so it leaves the cache alone.
-   */
+  /** The newest reading's id, asked afresh. */
   async function newestSnapshotId() {
-    requireClient();
-    const { data, error } = await client.from('rc_lookahead_snapshot_meta')
-      .select('id').order('taken_at', { ascending: false }).limit(1);
-    if (error) throw new Error(`rc_lookahead_snapshot_meta: ${error.message}`);
-    return data?.[0]?.id ?? null;
+    const rows = await select('rc_lookahead_snapshot_meta', (q) => q.order('taken_at', { ascending: false }).limit(1), { columns: 'id' });
+    return rows[0]?.id ?? null;
   }
 
-  /**
-   * Snapshots with their grids. Kept for anything that genuinely needs several
-   * — nothing in the interface does any more, and a caller reaching for this
-   * with a limit above one should read `listSnapshotMeta()` instead.
-   */
   function listSnapshots({ limit = 1 } = {}) {
     return select('rc_lookahead_snapshots', (q) => q.order('taken_at', { ascending: false }).limit(limit));
   }
 
-  /**
-   * Each week the workbook's readings hold, and the newest of them that has it
-   * (`week_start`, `snapshot_id`, `taken_at`) — where the calendar draws a week
-   * from that the editor never held. No grid is opened to answer it.
-   */
+  /** Each week the workbook's readings hold, and the newest of them that has it. */
   function workbookWeeks() {
     return select('rc_lookahead_workbook_weeks', (q) => q.order('week_start'));
   }
 
-  /** One snapshot with its grid, by id — for re-deriving what a past read said. */
+  /** One reading with its grid, by id. */
   function snapshotById(id) {
     return select('rc_lookahead_snapshots', (q) => q.eq('id', id).limit(1)).then((rows) => rows[0] || null);
   }
@@ -17353,19 +17887,12 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_change_annotations', (q) => q.in('change_event_id', eventIds).order('created_at'));
   }
 
-  /**
-   * Every day any read showed painted as a cancellation, from `fromISO` on.
-   * One row per activity, location and day — `cancellationEvents()` in
-   * `core/lookahead.js` joins side-by-side days into one event.
-   */
+  /** Every day the look-ahead currently shows cancelled, from `fromISO` on. */
   function listCancelledDays(fromISO) {
     return select('rc_cancelled_days', (q) => q.gte('day', fromISO).order('day'));
   }
 
-  /**
-   * Every day a read showed a BART resource struck out ("X.~WIT") on an activity
-   * that was not itself cancelled — `supportCancellationEvents()` joins them.
-   */
+  /** Every day a BART resource is struck out on an activity still going ahead. */
   function listCancelledSupportDays(fromISO) {
     return select('rc_cancelled_support_days', (q) => q.gte('day', fromISO).order('day'));
   }
@@ -17375,82 +17902,75 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_cancellation_notes', (q) => q.order('created_at'));
   }
 
-  function listSars() {
-    return select('rc_sars', (q) => q.is('superseded_by', null).order('week_start', { ascending: false }));
+  /**
+   * Look-ahead rows across a span of weeks, from every reading — the caller
+   * keeps the newest per week.
+   */
+  function lookaheadBetween(fromISO, toISO) {
+    return select('rc_lookahead_rows', (q) =>
+      q.gte('week_start', fromISO).lte('week_start', toISO).order('sheet_row'));
   }
 
-  function listSarLinks() {
-    return select('rc_sar_links', (q) => q.order('confirmed_at'));
+  /** The look-ahead day by day, each week from the newest reading of it. */
+  function lookaheadDays(fromISO = null, toISO = null) {
+    return selectAll('rc_lookahead_days', (q) => {
+      let out = q;
+      if (fromISO) out = out.gte('day', fromISO);
+      if (toISO) out = out.lte('day', toISO);
+      return out.order('day').order('row_id');
+    });
   }
 
-  /** Work planned into a week with no SAR — access that was never confirmed. */
-  function listRowsWithoutSar() {
-    return select('rc_rows_without_sar', (q) => q.order('week_start'));
-  }
-
-  /** The mirror: access booked for work that has since gone. */
-  function listSarsWithoutRows() {
-    return select('rc_sars_without_rows', (q) => q.order('week_start'));
+  /** Every row of a table or view, optionally where `column` falls between two dates. */
+  function readAll(table, { column = null, from = null, to = null } = {}) {
+    const key = { rc_settings: 'key', rc_tawr_settings: 'key', rc_tawr_profiles: 'person_id', rc_p6_activities: 'activity_id' }[table] || 'id';
+    return selectAll(table, (q) => {
+      let out = q;
+      if (column && from) out = out.gte(column, from);
+      if (column && to) out = out.lte(column, to);
+      if (column) out = out.order(column);
+      return out.order(key);
+    });
   }
 
   /* ── Writing ───────────────────────────────────────────────────────────── */
 
-  /**
-   * Insert rows and return them.
-   *
-   * A refused INSERT does raise — the WITH CHECK clause fails — so unlike an
-   * UPDATE this one can be trusted to report its own failure. The append-only
-   * tables have no UPDATE or DELETE privilege at all, so there is deliberately
-   * no `update()` here for them to be reached through.
-   */
   async function insert(table, rows) {
-    requireClient();
-    guardPreview();
-    forgetReads();
-    const { data, error } = await landed(client.from(table).insert(rows).select());
+    requireDb();
+    const { data, error } = await db.from(table).insert(rows).select();
     if (error) throw new Error(`${table}: ${error.message}`);
+    folder.noteWrite();
     return data || [];
   }
 
-  /* Functions that only read, and so are allowed while previewing. */
-  const READ_ONLY_RPC = new Set(['rc_list_invitations', 'rc_resolve_location']);
-
   async function rpc(name, args) {
-    requireClient();
-    /* Every function here that is not a pure read writes something, so it
-       forgets what was read. A pure read must not: the administrator's inbox
-       lists invitations every time it refreshes, and forgetting there emptied
-       the read memory on every tab switch — the calendar re-read the roster, the
-       plan and the sheet each time, which is the wait the memory exists to
-       remove. */
-    const read = READ_ONLY_RPC.has(name);
-    if (!read) {
-      guardPreview();
-      forgetReads();
-    }
-    const { data, error } = await (read ? client.rpc(name, args) : landed(client.rpc(name, args)));
+    requireDb();
+    const { data, error } = await db.rpc(name, args);
     if (error) throw new Error(`${name}: ${error.message}`);
+    if (name !== 'rc_resolve_location' && name !== 'rc_la_revision') folder.noteWrite();
     return data;
   }
 
   /**
-   * Update reference data.
-   *
-   * Only ever used on the vocabularies, never on a plan entry or an outcome. A
-   * refused UPDATE matches nothing and reports success, so this checks the
-   * returned row count and raises instead — the same reason every plan save goes
-   * through `save_project()` on the other side of the application.
+   * Update reference data. An update that matched nothing reports success in
+   * the builder, so this checks the rows that came back and raises instead.
    */
   async function update(table, id, patch) {
-    requireClient();
-    guardPreview();
-    forgetReads();
-    const { data, error } = await landed(client.from(table).update(patch).eq('id', id).select());
+    requireDb();
+    const key = { rc_settings: 'key', rc_tawr_settings: 'key', rc_tawr_profiles: 'person_id' }[table] || 'id';
+    const { data, error } = await db.from(table).update(patch).eq(key, id).select();
     if (error) throw new Error(`${table}: ${error.message}`);
-    if (!data || !data.length) {
-      throw new Error(`${table}: that change was refused — you may not have permission.`);
-    }
+    if (!data || !data.length) throw new Error(`${table}: that change was not made — it may have been removed.`);
+    folder.noteWrite();
     return data[0];
+  }
+
+  async function upsert(table, rows, onConflict) {
+    requireDb();
+    const { data, error } = await db.from(table).upsert(rows, { onConflict }).select();
+    if (error) throw new Error(`${table}: ${error.message}`);
+    folder.noteWrite();
+    return data || [];
   }
 
   const addPerson = (row) => insert('rc_people', [row]).then((r) => r[0]);
@@ -17464,229 +17984,32 @@ __mods["core/rc.js"] = function (__x, __req) {
   const addCategory = (row) => insert('rc_categories', [row]).then((r) => r[0]);
   const updateCategory = (id, patch) => update('rc_categories', id, patch);
   const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r[0]);
-  /**
-   * Map colours, or re-map them.
-   *
-   * An upsert on `(valid_from, argb)` rather than a plain insert, because that is
-   * the table's unique key and mapping the same colour twice in one day is the
-   * commonest thing anybody does here — press "Just shading" on a grey, look at
-   * the calendar, decide it was actually a shift. As an insert the second attempt
-   * violated the constraint and came back as a duplicate-key error, which reads as
-   * a broken button rather than as "you already said something about that today".
-   *
-   * A colour mapped again on a *later* day still gets a row of its own: the
-   * register is versioned on purpose, and `applyLegend()` reads the newest.
-   */
-  async function addLegend(rows) {
-    requireClient();
-    guardPreview();
-    forgetReads();
-    const { data, error } = await landed(client
-      .from('rc_legend')
-      .upsert(rows, { onConflict: 'valid_from,argb' })
-      .select());
-    if (error) throw new Error(`rc_legend: ${error.message}`);
-    return data || [];
-  }
-  const updateLegend = (id, patch) => update('rc_legend', id, patch);
+  const addLeaveKind = (row) => insert('rc_leave_kinds', [row]).then((r) => r[0]);
+  const updateLeaveKind = (id, patch) => update('rc_leave_kinds', id, patch);
 
   /**
-   * Delete a reference row outright, where nothing has been recorded against it.
-   *
-   * Retiring is still the right answer for anything that has been used, and the
-   * refusal says so by name. These exist for the row that was never meant: a
-   * person added twice, a location typed wrong, a colour mapped by mistake —
-   * which retiring only ever turns into a permanent entry in a list of things
-   * that used to be true.
-   *
-   * Functions rather than `.delete()`, for the reason every other write here is a
-   * function: a DELETE the policies refuse matches no rows and comes back as
-   * success, so the interface would report a deletion that never happened. These
-   * raise — over permission, over the last administrator, and over anything
-   * pointing at the row — and `rpc()` turns that into a message somebody can act
-   * on.
+   * Map colours, or re-map them — an upsert on `(valid_from, argb)`, because
+   * mapping the same colour twice in one day is the commonest thing anybody
+   * does here. A colour mapped again on a later day gets a row of its own.
    */
+  const addLegend = (rows) => upsert('rc_legend', rows, 'valid_from,argb');
+  const updateLegend = (id, patch) => update('rc_legend', id, patch);
+
+  /** Delete a reference row where nothing has been recorded against it; retire it otherwise. */
   const deletePerson = (id) => rpc('rc_delete_person', { p_person: id });
   const deleteLocation = (id) => rpc('rc_delete_location', { p_location: id });
   const deleteCategory = (id) => rpc('rc_delete_category', { p_category: id });
   const deleteLegend = (id) => rpc('rc_delete_legend', { p_entry: id });
 
-  /**
-   * Write a setting.
-   *
-   * An upsert rather than an update, because the first time anybody names the
-   * sheet there is no row to update — and an UPDATE matching nothing would
-   * report success and change nothing, which is the failure this whole schema is
-   * arranged to avoid.
-   */
+  /** Write a setting — an upsert, because the first time there is no row to update. */
   async function setSetting(key, value) {
-    requireClient();
-    guardPreview();
-    forgetReads();
-    const { data, error } = await landed(client
-      .from('rc_settings')
-      .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
-      .select());
-    if (error) throw new Error(`rc_settings: ${error.message}`);
-    if (!data || !data.length) {
-      throw new Error('rc_settings: that change was refused — only an administrator may set this.');
-    }
-    return data[0];
+    const rows = await upsert('rc_settings', { key, value, updated_at: new Date().toISOString() }, 'key');
+    return rows[0];
   }
 
-  /**
-   * Book leave, or ask for it.
-   *
-   * The status is the permission, and the policies are written on exactly that:
-   * an administrator may insert any status and the default is `approved`, while a
-   * member may insert `requested` for themselves and nothing else. So the caller
-   * says which it is — `requestLeave()` below is the member's door, and it exists
-   * so no screen has to remember to pass the right string.
-   */
-  const addLeave = (row) => insert('rc_leave', [row]).then((r) => r[0]);
-
-  /**
-   * Ask for leave. The same single `rc_leave` row, as a question.
-   *
-   * A second table for requests would be a second answer to "is Dana off on
-   * Tuesday", which is the thing this module is most careful about — so a request
-   * is the row it will become, with `status` saying it has not been answered yet.
-   * Approving it is an update an administrator makes; there is nothing to copy
-   * across and nothing that can go missing in between.
-   */
-  const requestLeave = (row) =>
-    insert('rc_leave', [{ ...row, status: 'requested' }]).then((r) => r[0]);
+  /** Book leave. Everybody with the application books it; nobody asks. */
+  const addLeave = (row) => insert('rc_leave', [{ status: 'approved', ...row }]).then((r) => r[0]);
   const updateLeave = (id, patch) => update('rc_leave', id, patch);
-
-  const addPlanEntries = (rows) => insert('rc_plan_entries', rows);
-
-  /** Every look-ahead row for a week, so the plan can be proposed from it. */
-  function lookaheadForWeek(weekStartISO) {
-    return select('rc_lookahead_rows', (q) => q.eq('week_start', weekStartISO).order('sheet_row'));
-  }
-
-  /**
-   * Look-ahead rows across a span of weeks.
-   *
-   * The Resources view answers "where is everybody, for the weeks that matter",
-   * which is several weeks at once — asking week by week would be one round trip
-   * per column. Rows from every snapshot come back, so the caller keeps the newest
-   * per `row_key`: an older snapshot's copy of a week is history, not a second
-   * assignment.
-   */
-  function lookaheadBetween(fromISO, toISO) {
-    return select('rc_lookahead_rows', (q) =>
-      q.gte('week_start', fromISO).lte('week_start', toISO).order('sheet_row'));
-  }
-
-  /**
-   * The look-ahead day by day — one row per activity and day, each week from
-   * the newest reading of it (`rc_lookahead_days`), for every day any reading
-   * covered or only those between two dates. Every page of it: a year is tens
-   * of thousands of rows. What the master export writes.
-   */
-  function lookaheadDays(fromISO = null, toISO = null) {
-    return selectAll('rc_lookahead_days', (q) => {
-      let out = q;
-      if (fromISO) out = out.gte('day', fromISO);
-      if (toISO) out = out.lte('day', toISO);
-      return out.order('day').order('row_id');
-    });
-  }
-
-  /**
-   * Every row of a table or view this account may read, every page of it,
-   * optionally only where `column` falls between two dates — for the master
-   * export, which wants the whole record rather than a screen's worth. Ordered
-   * by that column and then the id, the unique key the pages line up on.
-   */
-  function readAll(table, { column = null, from = null, to = null } = {}) {
-    return selectAll(table, (q) => {
-      let out = q;
-      if (column && from) out = out.gte(column, from);
-      if (column && to) out = out.lte(column, to);
-      if (column) out = out.order(column);
-      return out.order('id');
-    });
-  }
-
-  /**
-   * Revise a day. Returns the id of the new entry.
-   *
-   * Not an update: the outgoing row stays, and the new one points at it. A plan
-   * that changed the evening before a shift is itself delay evidence, and there
-   * is no way to spend it twice — revising an already-revised entry raises.
-   */
-  const supersedePlan = (entryId, { locationId = null, task = null, categoryId = null, shift = 'day' } = {}) =>
-    rpc('rc_supersede_plan', {
-      p_entry: entryId,
-      p_location: locationId,
-      p_task: task,
-      p_category: categoryId,
-      p_shift: shift,
-    });
-
-  /**
-   * Withdraw a day. Returns the id of the tombstone.
-   *
-   * "Delete my task" with the record kept, which is the only shape a delete takes
-   * here: there is no DELETE grant on `rc_plan_entries`, so this writes a row
-   * superseding the original and marked withdrawn, and `rc_plan_current` drops the
-   * pair. The schedule stops showing the day; the table still says it was planned
-   * and then withdrawn, by whom and when.
-   *
-   * Whoever may plan a day may withdraw it — a member their own, an administrator
-   * anybody's — which is the same question the insert policy asks.
-   */
-  const withdrawPlan = (entryId) => rpc('rc_withdraw_plan', { p_entry: entryId });
-
-  /**
-   * Move a day to the person the look-ahead now names. Returns the new entry's id.
-   *
-   * An administrator's: it writes a day against somebody else, which is the whole
-   * point. Refuses a move onto the person who already has it, so a re-read that
-   * changed nothing writes nothing — otherwise every ingest would supersede every
-   * linked entry with a revision saying the same thing.
-   */
-  const reassignPlan = (entryId, personId) =>
-    rpc('rc_reassign_plan', { p_entry: entryId, p_person: personId });
-
-  /**
-   * Record one huddle outcome. Idempotent on `clientUuid`.
-   *
-   * That uuid is generated before the row is sent, which is what lets the huddle
-   * screen queue entries locally and replay them when the connection returns.
-   * The meeting is at a fixed time whether or not the network is up.
-   */
-  const recordActual = ({
-    clientUuid, personId, date, status,
-    categoryId = null, locationId = null, note = null,
-    blockedReason = null, blockedPartyId = null,
-    carryChainId = null, planEntryId = null, shift = 'day',
-    lookaheadRowId = null, evidencePath = null, supersedesId = null, task = null,
-  }) =>
-    rpc('rc_record_actual', {
-      p_client_uuid: clientUuid,
-      p_person: personId,
-      p_date: date,
-      p_status: status,
-      p_category: categoryId,
-      p_location: locationId,
-      p_note: note,
-      p_blocked_reason: blockedReason,
-      p_blocked_party: blockedPartyId,
-      p_carry_chain: carryChainId,
-      p_plan_entry: planEntryId,
-      p_shift: shift,
-      p_lookahead_row: lookaheadRowId,
-      p_evidence: evidencePath,
-      // The outcome this one corrects. The function refuses a row that has
-      // already been corrected, so two edits of one outcome cannot both land.
-      p_supersedes: supersedesId,
-      // What they actually did, in words — the one statement of the work on a day
-      // with nothing planned.
-      p_task: task,
-    });
 
   const resolveLocation = (raw) => rpc('rc_resolve_location', { p_raw: raw });
 
@@ -17694,168 +18017,27 @@ __mods["core/rc.js"] = function (__x, __req) {
   const addSnapshot = (row) => insert('rc_lookahead_snapshots', [row]).then((r) => r[0]);
   const addSnapshotRows = (rows) => insert('rc_lookahead_rows', rows);
   const addChangeEvents = (rows) => insert('rc_change_events', rows);
-  const addSar = (row) => insert('rc_sars', [row]).then((r) => r[0]);
-  /* Only ever to attach the storage path once the PDF is up. A SAR's terms are
-     never edited — an amended one is a new revision that supersedes it, which is
-     what `superseded_by` is for. */
-  const updateSar = (id, patch) => update('rc_sars', id, patch);
-  const addSarLinks = (rows) => insert('rc_sar_links', rows);
 
   /**
-   * Annotate a change event: who caused a cancellation, which removal and
-   * addition were really one crew moving site.
-   *
-   * Insert only. Correcting one means adding another that supersedes it, because
-   * this is the record a delay claim gets challenged on and a judgement that
-   * could be quietly rewritten a year later would be worth nothing.
+   * Annotate a change event. Insert only: correcting one means adding another
+   * that supersedes it, because this is the record a delay claim is built on.
    */
   const addAnnotation = (row) => insert('rc_change_annotations', [row]).then((r) => r[0]);
 
-  /**
-   * Record whose cancellation it was, and why. Append-only: a correction is a
-   * new row carrying `supersedes_id`, never an edit.
-   */
-  /**
-   * Replace what a stored row says each day was painted as. Only ever the
-   * re-derivation of a past read under today's rules — `cells` is derived from
-   * the snapshot, which is the durable record, so refining a rule means writing
-   * the derivation again rather than migrating anything.
-   */
+  /** Replace what a stored row says each day was painted as — a re-derivation under today's rules. */
   const updateLookaheadRowCells = (id, cells) => update('rc_lookahead_rows', id, { cells });
 
-  /**
-   * Log what somebody said about a cancellation. `la_row_id` is the editor's row
-   * it is about (schema 14); a database from before then has no such column, and
-   * the note is written without it rather than not at all — found by its words,
-   * as every note was.
-   */
-  const addCancellationNote = (row) => insert('rc_cancellation_notes', [row])
-    .catch((err) => {
-      if (!('la_row_id' in row) || !/la_row_id/.test(String(err?.message || ''))) throw err;
-      const rest = { ...row };
-      delete rest.la_row_id;
-      return insert('rc_cancellation_notes', [rest]);
-    })
-    .then((r) => r[0]);
+  /** Log what somebody said about a cancellation. Append-only: a correction supersedes. */
+  const addCancellationNote = (row) => insert('rc_cancellation_notes', [row]).then((r) => r[0]);
 
-  /* ── Accounts ──────────────────────────────────────────────────────────── */
-
-  /**
-   * Who may have an account, and what they may do with it.
-   *
-   * Supabase Auth still holds the password — `auth.uid()` is what every policy
-   * in `rc_schema.sql` keys on, so the permission model *is* the authentication
-   * and replacing it would mean rewriting all of it. What is managed from here
-   * is the part that is genuinely ours: who is allowed to create an account at
-   * all, which roster row it lands on, and what role it carries.
-   *
-   * Every one of these is a `security definer` function rather than a table
-   * write, for the reason this whole schema is built on: a refused UPDATE
-   * matches nothing and reports success, so an administrator demoting the last
-   * administrator by accident would be told it worked.
-   */
-  const invite = (email, role = 'viewer', personId = null, note = null) =>
-    rpc('rc_invite', {
-      p_email: email,
-      p_role: role,
-      p_person: personId || null,
-      p_note: note || null,
-    }).then((rows) => (Array.isArray(rows) ? rows[0] : rows));
-
-  const revokeInvitation = (email) => rpc('rc_revoke_invitation', { p_email: email });
-
-  const listInvitations = () => rpc('rc_list_invitations').then((rows) => rows || []);
-
-  const linkAccount = (personId, email) =>
-    rpc('rc_link_account', { p_person: personId, p_email: email });
-
-  const setRole = (personId, role) =>
-    rpc('rc_set_role', { p_person: personId, p_role: role });
-
-  /**
-   * Re-read your own team record.
-   *
-   * Changing a role changes what the interface may draw, and an administrator
-   * who demotes themselves must see that immediately rather than at the next
-   * sign-in — otherwise the page keeps offering actions the database has already
-   * started refusing.
-   */
-  async function refreshMe() {
-    await refreshPerson();
-    emit(EV.RC_AUTH_CHANGED, { user, event: 'ROLE_CHANGED' });
-    return person;
-  }
-
-  /* ── Storage ───────────────────────────────────────────────────────────── */
-
-  /**
-   * Upload a SAR PDF so it opens in the deputy's browser.
-   *
-   * Only SARs. The look-ahead workbook is deliberately *not* uploaded: a .xlsx
-   * carries every other tab, hidden row, comment and forgotten pasted sheet
-   * along with the part that was wanted, and the only thing anyone needs from it
-   * is the parsed grid, which goes up as JSON. The bytes stay in the OneDrive
-   * archive.
-   */
-  async function uploadSar(path, blob) {
-    requireClient();
-    guardPreview();
-    const { error } = await client.storage.from('sars').upload(path, blob, {
-      upsert: false,
-      contentType: blob?.type || 'application/pdf',
-    });
-    if (error) throw new Error(`upload: ${error.message}`);
-    return path;
-  }
-
-  /**
-   * Upload the photograph taken with an outcome.
-   *
-   * Before the row, never after: `rc_actuals` has no UPDATE grant, so a path
-   * attached afterwards would need a second row superseding the first. The name
-   * is the client uuid the outcome is about to be written with, which is
-   * generated on the client precisely so it exists before the insert does.
-   *
-   * A failure here is not a failure of the meeting. The caller records the
-   * outcome either way and says the picture did not go up — losing what somebody
-   * said because a photograph did not upload would be the wrong way round.
-   */
-  async function uploadEvidence(path, blob) {
-    requireClient();
-    guardPreview();
-    const { error } = await client.storage.from('evidence').upload(path, blob, {
-      upsert: false,
-      contentType: blob?.type || 'image/jpeg',
-    });
-    if (error) throw new Error(`upload: ${error.message}`);
-    return path;
-  }
-
-  async function evidenceUrl(path, seconds = 3600) {
-    requireClient();
-    const { data, error } = await client.storage.from('evidence').createSignedUrl(path, seconds);
-    if (error) throw new Error(`link: ${error.message}`);
-    return data.signedUrl;
-  }
-
-  async function sarUrl(path, seconds = 3600) {
-    requireClient();
-    const { data, error } = await client.storage.from('sars').createSignedUrl(path, seconds);
-    if (error) throw new Error(`link: ${error.message}`);
-    return data.signedUrl;
-  }
-
-  /* ── Track access work requests ────────────────────────────────────────────
-     All of it an administrator's: the requests, the contacts, the wording, the
-     signatures and BART's blank form. The policies are the control — a member
-     reads nothing here and writes nothing — and these are the doors. */
+  /* ── Track access work requests ──────────────────────────────────────────── */
 
   /** The live requests (drafts and approved) for one week, by its Monday. */
   function listTawrs(weekStartISO) {
     return select('rc_tawrs', (q) => q.eq('week_start', weekStartISO).neq('status', 'superseded').order('created_at'));
   }
 
-  /** Every live request from a Monday on — what the week list counts. */
+  /** Every live request from a Monday on. */
   function listTawrsFrom(fromISO) {
     return select('rc_tawrs', (q) => q.gte('week_start', fromISO).neq('status', 'superseded').order('week_start'));
   }
@@ -17863,14 +18045,13 @@ __mods["core/rc.js"] = function (__x, __req) {
   const addTawr = (row) => insert('rc_tawrs', [row]).then((r) => r[0]);
   const updateTawr = (id, patch) => update('rc_tawrs', id, patch);
 
-  /** Throw a draft away. An approved request cannot be: the policy matches nothing, and this says so. */
+  /** Throw a draft away. An approved request cannot be: the delete matches nothing, and this says so. */
   async function discardTawr(id) {
-    requireClient();
-    guardPreview();
-    forgetReads();
-    const { data, error } = await landed(client.from('rc_tawrs').delete().eq('id', id).select());
+    requireDb();
+    const { data, error } = await db.from('rc_tawrs').delete().eq('id', id).select();
     if (error) throw new Error(`rc_tawrs: ${error.message}`);
     if (!data || !data.length) throw new Error('That request was not discarded — only a draft can be.');
+    folder.noteWrite();
     return data[0];
   }
 
@@ -17881,39 +18062,22 @@ __mods["core/rc.js"] = function (__x, __req) {
     return select('rc_tawr_settings');
   }
 
-  /** Write one TAWR setting — an upsert, for the reason `setSetting()` is one. */
   async function setTawrSetting(key, value) {
-    requireClient();
-    guardPreview();
-    forgetReads();
-    const { data, error } = await landed(client
-      .from('rc_tawr_settings')
-      .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
-      .select());
-    if (error) throw new Error(`rc_tawr_settings: ${error.message}`);
-    if (!data || !data.length) throw new Error('rc_tawr_settings: that change was refused — only an administrator may set this.');
-    return data[0];
+    const rows = await upsert('rc_tawr_settings', { key, value, updated_at: new Date().toISOString() }, 'key');
+    return rows[0];
   }
 
-  /** Every administrator's requestor details and signature. */
+  /** Every requestor's details and signature. */
   function listTawrProfiles() {
     return select('rc_tawr_profiles');
   }
 
-  /** Save the caller's own requestor details and signature. */
+  /** Save your own requestor details and signature. */
   async function saveTawrProfile(patch) {
-    requireClient();
-    guardPreview();
-    forgetReads();
     const who = me();
-    if (!who) throw new Error('Only somebody on the team has a TAWR profile.');
-    const { data, error } = await landed(client
-      .from('rc_tawr_profiles')
-      .upsert({ ...patch, person_id: who.id, updated_at: new Date().toISOString() }, { onConflict: 'person_id' })
-      .select());
-    if (error) throw new Error(`rc_tawr_profiles: ${error.message}`);
-    if (!data || !data.length) throw new Error('rc_tawr_profiles: that change was refused — only an administrator has one.');
-    return data[0];
+    if (!who) throw new Error('No calendar is open.');
+    const rows = await upsert('rc_tawr_profiles', { ...patch, person_id: who.id, updated_at: new Date().toISOString() }, 'person_id');
+    return rows[0];
   }
 
   function listTawrDescriptions() {
@@ -17923,60 +18087,52 @@ __mods["core/rc.js"] = function (__x, __req) {
   const updateTawrDescription = (id, patch) => update('rc_tawr_descriptions', id, { ...patch, updated_at: new Date().toISOString() });
 
   async function deleteTawrDescription(id) {
-    requireClient();
-    guardPreview();
-    forgetReads();
-    const { data, error } = await landed(client.from('rc_tawr_descriptions').delete().eq('id', id).select());
+    requireDb();
+    const { data, error } = await db.from('rc_tawr_descriptions').delete().eq('id', id).select();
     if (error) throw new Error(`rc_tawr_descriptions: ${error.message}`);
-    if (!data || !data.length) throw new Error('That wording was not removed — you may not have permission.');
+    if (!data || !data.length) throw new Error('That wording was not removed.');
+    folder.noteWrite();
     return data[0];
   }
 
-  const TAWR_TEMPLATE = 'template/tawr.pdf';
+  const TAWR_TEMPLATE = 'tawr/template.pdf';
 
-  /** Put BART's blank form in the private bucket, replacing the one there. */
+  /** Put BART's blank form in the calendar's folder, replacing the one there. */
   async function uploadTawrTemplate(blob) {
-    requireClient();
-    guardPreview();
-    const { error } = await client.storage.from('tawr').upload(TAWR_TEMPLATE, blob, {
-      upsert: true,
-      // A replaced form must be the one the next download fills, not a copy a
-      // cache kept for the default hour.
-      cacheControl: '0',
-      contentType: 'application/pdf',
-    });
-    if (error) throw new Error(`upload: ${error.message}`);
+    requireDb();
+    const allowed = writable();
+    if (allowed !== true) throw new Error(allowed);
+    const bytes = blob instanceof Uint8Array ? blob : new Uint8Array(await blob.arrayBuffer());
+    await folder.writeBytes(TAWR_TEMPLATE, bytes);
+    folder.noteWrite();
     return TAWR_TEMPLATE;
   }
 
-  /** BART's blank form, as bytes; null when none has been uploaded. */
+  /** BART's blank form, as bytes; null when none has been put in the folder. */
   async function downloadTawrTemplate() {
-    requireClient();
-    const { data, error } = await client.storage.from('tawr').download(TAWR_TEMPLATE);
-    if (error) {
-      if (/not found|does not exist|404/i.test(String(error.message || error.statusCode || ''))) return null;
-      throw new Error(`download: ${error.message}`);
-    }
-    return new Uint8Array(await data.arrayBuffer());
+    requireDb();
+    return folder.readBytes(TAWR_TEMPLATE);
   }
 
   Object.defineProperty(__x, "isConfigured", { get: () => isConfigured, enumerable: true });
-  Object.defineProperty(__x, "init", { get: () => init, enumerable: true });
-  Object.defineProperty(__x, "raw", { get: () => raw, enumerable: true });
+  Object.defineProperty(__x, "status", { get: () => status, enumerable: true });
+  Object.defineProperty(__x, "displayName", { get: () => displayName, enumerable: true });
   Object.defineProperty(__x, "currentUser", { get: () => currentUser, enumerable: true });
   Object.defineProperty(__x, "isSignedIn", { get: () => isSignedIn, enumerable: true });
   Object.defineProperty(__x, "me", { get: () => me, enumerable: true });
-  Object.defineProperty(__x, "previewAs", { get: () => previewAs, enumerable: true });
-  Object.defineProperty(__x, "previewing", { get: () => previewing, enumerable: true });
-  Object.defineProperty(__x, "isRealAdmin", { get: () => isRealAdmin, enumerable: true });
   Object.defineProperty(__x, "isAdmin", { get: () => isAdmin, enumerable: true });
   Object.defineProperty(__x, "role", { get: () => role, enumerable: true });
   Object.defineProperty(__x, "canWrite", { get: () => canWrite, enumerable: true });
   Object.defineProperty(__x, "isViewer", { get: () => isViewer, enumerable: true });
   Object.defineProperty(__x, "accountLabel", { get: () => accountLabel, enumerable: true });
-  Object.defineProperty(__x, "signIn", { get: () => signIn, enumerable: true });
-  Object.defineProperty(__x, "signUp", { get: () => signUp, enumerable: true });
-  Object.defineProperty(__x, "signOut", { get: () => signOut, enumerable: true });
+  Object.defineProperty(__x, "penState", { get: () => penState, enumerable: true });
+  Object.defineProperty(__x, "takePen", { get: () => takePen, enumerable: true });
+  Object.defineProperty(__x, "releasePen", { get: () => releasePen, enumerable: true });
+  Object.defineProperty(__x, "init", { get: () => init, enumerable: true });
+  Object.defineProperty(__x, "enterCalendar", { get: () => enterCalendar, enumerable: true });
+  Object.defineProperty(__x, "refreshMe", { get: () => refreshMe, enumerable: true });
+  Object.defineProperty(__x, "createCalendar", { get: () => createCalendar, enumerable: true });
+  Object.defineProperty(__x, "debugDb", { get: () => debugDb, enumerable: true });
   Object.defineProperty(__x, "forgetReads", { get: () => forgetReads, enumerable: true });
   Object.defineProperty(__x, "listPeople", { get: () => listPeople, enumerable: true });
   Object.defineProperty(__x, "listLocations", { get: () => listLocations, enumerable: true });
@@ -17990,6 +18146,7 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listLaCells", { get: () => listLaCells, enumerable: true });
   Object.defineProperty(__x, "laCellSpan", { get: () => laCellSpan, enumerable: true });
   Object.defineProperty(__x, "applyLookaheadOps", { get: () => applyLookaheadOps, enumerable: true });
+  Object.defineProperty(__x, "checkFolder", { get: () => checkFolder, enumerable: true });
   Object.defineProperty(__x, "lookaheadRevision", { get: () => lookaheadRevision, enumerable: true });
   Object.defineProperty(__x, "onLookaheadChange", { get: () => onLookaheadChange, enumerable: true });
   Object.defineProperty(__x, "lookaheadLive", { get: () => lookaheadLive, enumerable: true });
@@ -17997,9 +18154,6 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listLaEditsBetween", { get: () => listLaEditsBetween, enumerable: true });
   Object.defineProperty(__x, "listLaEditsForRow", { get: () => listLaEditsForRow, enumerable: true });
   Object.defineProperty(__x, "compactSnapshots", { get: () => compactSnapshots, enumerable: true });
-  Object.defineProperty(__x, "lastSeen", { get: () => lastSeen, enumerable: true });
-  Object.defineProperty(__x, "listSeen", { get: () => listSeen, enumerable: true });
-  Object.defineProperty(__x, "markSeen", { get: () => markSeen, enumerable: true });
   Object.defineProperty(__x, "snapshotRows", { get: () => snapshotRows, enumerable: true });
   Object.defineProperty(__x, "listSupportCodes", { get: () => listSupportCodes, enumerable: true });
   Object.defineProperty(__x, "addSupportCode", { get: () => addSupportCode, enumerable: true });
@@ -18011,25 +18165,10 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "updateP6Flag", { get: () => updateP6Flag, enumerable: true });
   Object.defineProperty(__x, "importP6Activities", { get: () => importP6Activities, enumerable: true });
   Object.defineProperty(__x, "reportError", { get: () => reportError, enumerable: true });
-  Object.defineProperty(__x, "listClientErrors", { get: () => listClientErrors, enumerable: true });
-  Object.defineProperty(__x, "clearClientErrors", { get: () => clearClientErrors, enumerable: true });
   Object.defineProperty(__x, "listSettings", { get: () => listSettings, enumerable: true });
-  Object.defineProperty(__x, "SCHEMA_VERSION", { get: () => SCHEMA_VERSION, enumerable: true });
-  Object.defineProperty(__x, "schemaStatus", { get: () => schemaStatus, enumerable: true });
   Object.defineProperty(__x, "listLeaveKinds", { get: () => listLeaveKinds, enumerable: true });
-  Object.defineProperty(__x, "pendingLeave", { get: () => pendingLeave, enumerable: true });
-  Object.defineProperty(__x, "leaveFor", { get: () => leaveFor, enumerable: true });
   Object.defineProperty(__x, "listLeave", { get: () => listLeave, enumerable: true });
-  Object.defineProperty(__x, "listPlan", { get: () => listPlan, enumerable: true });
-  Object.defineProperty(__x, "planHistory", { get: () => planHistory, enumerable: true });
-  Object.defineProperty(__x, "listActuals", { get: () => listActuals, enumerable: true });
   Object.defineProperty(__x, "lookaheadRowsByIds", { get: () => lookaheadRowsByIds, enumerable: true });
-  Object.defineProperty(__x, "listBlockers", { get: () => listBlockers, enumerable: true });
-  Object.defineProperty(__x, "blockerHistory", { get: () => blockerHistory, enumerable: true });
-  Object.defineProperty(__x, "raiseBlocker", { get: () => raiseBlocker, enumerable: true });
-  Object.defineProperty(__x, "updateBlocker", { get: () => updateBlocker, enumerable: true });
-  Object.defineProperty(__x, "listCarryChains", { get: () => listCarryChains, enumerable: true });
-  Object.defineProperty(__x, "listEffort", { get: () => listEffort, enumerable: true });
   Object.defineProperty(__x, "listIngestRuns", { get: () => listIngestRuns, enumerable: true });
   Object.defineProperty(__x, "listSnapshotMeta", { get: () => listSnapshotMeta, enumerable: true });
   Object.defineProperty(__x, "snapshotMetaByIds", { get: () => snapshotMetaByIds, enumerable: true });
@@ -18044,10 +18183,9 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listCancelledDays", { get: () => listCancelledDays, enumerable: true });
   Object.defineProperty(__x, "listCancelledSupportDays", { get: () => listCancelledSupportDays, enumerable: true });
   Object.defineProperty(__x, "listCancellationNotes", { get: () => listCancellationNotes, enumerable: true });
-  Object.defineProperty(__x, "listSars", { get: () => listSars, enumerable: true });
-  Object.defineProperty(__x, "listSarLinks", { get: () => listSarLinks, enumerable: true });
-  Object.defineProperty(__x, "listRowsWithoutSar", { get: () => listRowsWithoutSar, enumerable: true });
-  Object.defineProperty(__x, "listSarsWithoutRows", { get: () => listSarsWithoutRows, enumerable: true });
+  Object.defineProperty(__x, "lookaheadBetween", { get: () => lookaheadBetween, enumerable: true });
+  Object.defineProperty(__x, "lookaheadDays", { get: () => lookaheadDays, enumerable: true });
+  Object.defineProperty(__x, "readAll", { get: () => readAll, enumerable: true });
   Object.defineProperty(__x, "addPerson", { get: () => addPerson, enumerable: true });
   Object.defineProperty(__x, "updatePerson", { get: () => updatePerson, enumerable: true });
   Object.defineProperty(__x, "addLocation", { get: () => addLocation, enumerable: true });
@@ -18057,6 +18195,8 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "addCategory", { get: () => addCategory, enumerable: true });
   Object.defineProperty(__x, "updateCategory", { get: () => updateCategory, enumerable: true });
   Object.defineProperty(__x, "addParty", { get: () => addParty, enumerable: true });
+  Object.defineProperty(__x, "addLeaveKind", { get: () => addLeaveKind, enumerable: true });
+  Object.defineProperty(__x, "updateLeaveKind", { get: () => updateLeaveKind, enumerable: true });
   Object.defineProperty(__x, "addLegend", { get: () => addLegend, enumerable: true });
   Object.defineProperty(__x, "updateLegend", { get: () => updateLegend, enumerable: true });
   Object.defineProperty(__x, "deletePerson", { get: () => deletePerson, enumerable: true });
@@ -18065,38 +18205,15 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "deleteLegend", { get: () => deleteLegend, enumerable: true });
   Object.defineProperty(__x, "setSetting", { get: () => setSetting, enumerable: true });
   Object.defineProperty(__x, "addLeave", { get: () => addLeave, enumerable: true });
-  Object.defineProperty(__x, "requestLeave", { get: () => requestLeave, enumerable: true });
   Object.defineProperty(__x, "updateLeave", { get: () => updateLeave, enumerable: true });
-  Object.defineProperty(__x, "addPlanEntries", { get: () => addPlanEntries, enumerable: true });
-  Object.defineProperty(__x, "lookaheadForWeek", { get: () => lookaheadForWeek, enumerable: true });
-  Object.defineProperty(__x, "lookaheadBetween", { get: () => lookaheadBetween, enumerable: true });
-  Object.defineProperty(__x, "lookaheadDays", { get: () => lookaheadDays, enumerable: true });
-  Object.defineProperty(__x, "readAll", { get: () => readAll, enumerable: true });
-  Object.defineProperty(__x, "supersedePlan", { get: () => supersedePlan, enumerable: true });
-  Object.defineProperty(__x, "withdrawPlan", { get: () => withdrawPlan, enumerable: true });
-  Object.defineProperty(__x, "reassignPlan", { get: () => reassignPlan, enumerable: true });
-  Object.defineProperty(__x, "recordActual", { get: () => recordActual, enumerable: true });
   Object.defineProperty(__x, "resolveLocation", { get: () => resolveLocation, enumerable: true });
   Object.defineProperty(__x, "addIngestRun", { get: () => addIngestRun, enumerable: true });
   Object.defineProperty(__x, "addSnapshot", { get: () => addSnapshot, enumerable: true });
   Object.defineProperty(__x, "addSnapshotRows", { get: () => addSnapshotRows, enumerable: true });
   Object.defineProperty(__x, "addChangeEvents", { get: () => addChangeEvents, enumerable: true });
-  Object.defineProperty(__x, "addSar", { get: () => addSar, enumerable: true });
-  Object.defineProperty(__x, "updateSar", { get: () => updateSar, enumerable: true });
-  Object.defineProperty(__x, "addSarLinks", { get: () => addSarLinks, enumerable: true });
   Object.defineProperty(__x, "addAnnotation", { get: () => addAnnotation, enumerable: true });
   Object.defineProperty(__x, "updateLookaheadRowCells", { get: () => updateLookaheadRowCells, enumerable: true });
   Object.defineProperty(__x, "addCancellationNote", { get: () => addCancellationNote, enumerable: true });
-  Object.defineProperty(__x, "invite", { get: () => invite, enumerable: true });
-  Object.defineProperty(__x, "revokeInvitation", { get: () => revokeInvitation, enumerable: true });
-  Object.defineProperty(__x, "listInvitations", { get: () => listInvitations, enumerable: true });
-  Object.defineProperty(__x, "linkAccount", { get: () => linkAccount, enumerable: true });
-  Object.defineProperty(__x, "setRole", { get: () => setRole, enumerable: true });
-  Object.defineProperty(__x, "refreshMe", { get: () => refreshMe, enumerable: true });
-  Object.defineProperty(__x, "uploadSar", { get: () => uploadSar, enumerable: true });
-  Object.defineProperty(__x, "uploadEvidence", { get: () => uploadEvidence, enumerable: true });
-  Object.defineProperty(__x, "evidenceUrl", { get: () => evidenceUrl, enumerable: true });
-  Object.defineProperty(__x, "sarUrl", { get: () => sarUrl, enumerable: true });
   Object.defineProperty(__x, "listTawrs", { get: () => listTawrs, enumerable: true });
   Object.defineProperty(__x, "listTawrsFrom", { get: () => listTawrsFrom, enumerable: true });
   Object.defineProperty(__x, "addTawr", { get: () => addTawr, enumerable: true });
@@ -19010,799 +19127,6 @@ __mods["ui/components.js"] = function (__x, __req) {
   Object.defineProperty(__x, "progressBar", { get: () => progressBar, enumerable: true });
   Object.defineProperty(__x, "tagChip", { get: () => tagChip, enumerable: true });
   Object.defineProperty(__x, "domId", { get: () => domId, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
-// ui/auth.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["ui/auth.js"] = function (__x, __req) {
-  /**
-   * Sign-in, the account menu, and sharing.
-   *
-   * Only reachable on a hosted deployment — with `config.js` blank none of this
-   * is ever shown and the application boots straight into the canvas, exactly as
-   * it does today.
-   *
-   * The gate is a full-screen overlay rather than a separate page, so a single
-   * static file still serves the whole application and there is no route to get
-   * wrong. It renders before the workspace is built, so nothing behind it can
-   * flash into view.
-   *
-   * Imports: util, events, dates, cloud, icons, components.
-   */
-
-  const { el, clear } = __req("core/util.js");
-  const { on, EV } = __req("core/events.js");
-  const cloud = __req("core/cloud.js");
-  const filestore = __req("core/filestore.js");
-  const access = __req("core/access.js");
-  const { icon } = __req("ui/icons.js");
-  const { fmtDate } = __req("core/dates.js");
-  const { openModal, field, textInput, selectInput, section, skeleton, toast, badge, confirmDialog, emptyState } = __req("ui/components.js");
-
-
-
-
-
-
-
-
-
-
-
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The gate
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Show the sign-in screen and resolve once there is a session.
-   *
-   * Resolves to the user, or to null when the visitor chooses to work locally —
-   * which stays available unless the deployment sets `requireAuth`.
-   */
-  function requireSignIn() {
-    return new Promise((resolve) => {
-      const allowLocal = !cloud.authRequired();
-
-      // Sign-up is not offered. An invited person arrives on a link carrying
-      // their address, which is the only thing that reveals the form — and even
-      // then the database refuses any address without a pending invitation, so
-      // finding this URL achieves nothing on its own.
-      const invited = invitedEmail();
-      let mode = invited ? 'signup' : 'signin'; // signin | signup | reset
-
-      const overlay = el('div', { class: 'cx-gate', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Sign in' });
-      const card = el('div', { class: 'cx-gate-card' });
-      overlay.appendChild(card);
-
-      const emailInput = textInput({ type: 'email', value: invited || '', placeholder: 'you@company.com' });
-      emailInput.setAttribute('autocomplete', 'username');
-      emailInput.setAttribute('name', 'email');
-
-      const passwordInput = textInput({ type: 'password', value: '', placeholder: '••••••••' });
-      passwordInput.setAttribute('autocomplete', 'current-password');
-      passwordInput.setAttribute('name', 'password');
-
-      const nameInput = textInput({ value: '', placeholder: 'Your name' });
-      nameInput.setAttribute('autocomplete', 'name');
-
-      const message = el('div', { class: 'cx-gate-msg', role: 'alert' });
-      const submit = el('button', { class: 'cx-btn primary', type: 'submit', text: 'Sign in' });
-
-      const say = (text, tone = 'bad') => {
-        message.className = `cx-gate-msg ${tone}`;
-        message.textContent = text || '';
-      };
-
-      let busy = false;
-      const setBusy = (state) => {
-        busy = state;
-        submit.disabled = state;
-        submit.classList.toggle('loading', state);
-      };
-
-      const form = el('form', { class: 'cx-gate-form', onSubmit: (e) => { e.preventDefault(); go(); } });
-
-      async function go() {
-        if (busy) return;
-        const email = emailInput.value.trim();
-        const password = passwordInput.value;
-
-        if (!email) return say('Enter your email address.');
-        if (mode !== 'reset' && !password) return say('Enter your password.');
-
-        setBusy(true);
-        say('');
-        try {
-          if (mode === 'signin') {
-            const user = await cloud.signIn(email, password);
-            finish(user);
-          } else if (mode === 'signup') {
-            const { user, confirmationRequired } = await cloud.signUp(email, password, nameInput.value.trim());
-            if (confirmationRequired) {
-              say(`Account created. Check ${email} for a confirmation link, then sign in.`, 'good');
-              setMode('signin');
-            } else {
-              finish(user);
-            }
-          } else {
-            await cloud.sendPasswordReset(email);
-            say(`If there is an account for ${email}, a reset link is on its way.`, 'good');
-            setMode('signin');
-          }
-        } catch (err) {
-          say(err.message);
-        } finally {
-          setBusy(false);
-        }
-      }
-
-      function finish(user) {
-        overlay.classList.add('done');
-        setTimeout(() => overlay.remove(), 260);
-        resolve(user);
-      }
-
-      function setMode(next) {
-        mode = next;
-        render();
-        setTimeout(() => (mode === 'signup' ? nameInput : emailInput).focus(), 30);
-      }
-
-      function render() {
-        clear(card);
-
-        const titles = {
-          signin: ['Sign in', 'Your projects, wherever you open them.'],
-          signup: [
-            'Set up your account',
-            invited ? `You have been invited as ${invited}. Choose a password.` : 'Accounts are created by invitation.',
-          ],
-          reset: ['Reset your password', 'We will email you a link.'],
-        };
-        const [title, subtitle] = titles[mode];
-
-        card.append(
-          el('div', { class: 'cx-gate-brand' }, [
-            el('div', { class: 'brand-mark' }),
-            el('div', {}, [
-              el('div', { class: 'cx-gate-name', text: 'CX Timeline' }),
-              el('div', { class: 'cx-gate-sub', text: 'Commissioning Planner' }),
-            ]),
-          ]),
-          el('h1', { class: 'cx-gate-title', text: title }),
-          el('div', { class: 'cx-gate-lede', text: subtitle })
-        );
-
-        clear(form);
-        form.append(
-          ...[
-            mode === 'signup' ? field('Name', nameInput) : null,
-            field('Email', emailInput),
-            mode !== 'reset' ? field('Password', passwordInput) : null,
-            message,
-            submit,
-          ].filter(Boolean)
-        );
-        submit.textContent = { signin: 'Sign in', signup: 'Create account', reset: 'Send reset link' }[mode];
-        passwordInput.setAttribute('autocomplete', mode === 'signup' ? 'new-password' : 'current-password');
-        card.appendChild(form);
-
-        const links = el('div', { class: 'cx-gate-links' });
-        if (mode === 'signin') {
-          // No "create an account": there is no self-service sign-up.
-          links.append(
-            el('span', { class: 'cx-hint', text: 'Access is by invitation.' }),
-            gateLink('Forgot password?', () => setMode('reset'))
-          );
-        } else {
-          links.appendChild(gateLink('Back to sign in', () => setMode('signin')));
-        }
-        card.appendChild(links);
-
-        if (allowLocal) {
-          card.appendChild(
-            el('div', { class: 'cx-gate-local' }, [
-              el('button', {
-                class: 'cx-btn ghost mini',
-                text: 'Continue without an account',
-                onClick: () => {
-                  overlay.classList.add('done');
-                  setTimeout(() => overlay.remove(), 260);
-                  resolve(null);
-                },
-              }),
-              el('div', { class: 'cx-hint', text: 'Work is saved in this browser only, and is not shared.' }),
-            ])
-          );
-        }
-      }
-
-      render();
-      document.body.appendChild(overlay);
-      // An invited person already has their address filled in; put them in the
-      // field they actually have to complete.
-      setTimeout(() => (invited ? nameInput : emailInput).focus(), 80);
-    });
-  }
-
-  /**
-   * The address on an invitation link, if this is one.
-   *
-   * The link is a convenience, not a credential — it reveals the form and
-   * prefills the address, nothing more. Whether an account may be created is
-   * decided by the database, which refuses any address without a pending
-   * invitation however the request arrives.
-   */
-  function invitedEmail() {
-    const match = /[#&?]invite=([^&]+)/.exec(window.location.hash || '');
-    if (!match) return '';
-    try {
-      return decodeURIComponent(match[1]).trim().toLowerCase();
-    } catch {
-      return '';
-    }
-  }
-
-  function gateLink(text, onClick) {
-    return el('button', { class: 'cx-gate-link', type: 'button', text, onClick });
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Read-only presentation
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Reflect the current role in the interface.
-   *
-   * A viewer is not shown a broken application: the editing affordances go away,
-   * a banner explains why, and a refused write says so once rather than on every
-   * keystroke. The database is what actually stops the write — this is here so
-   * the user understands the state they are in.
-   */
-  function installAccessMode() {
-    const apply = () => {
-      /* Three things can make a session read-only, and the interface says the
-         same thing for all of them — only the reason differs, and only the reason
-         decides whether there is anything the reader can do about it.
-
-         A viewer role on a hosted project: ask the owner. A colleague holding the
-         pen on a plan in a shared folder: wait, ask, or take it. And an account
-         the calendar says may not edit the plan at all, which outranks the other
-         two — there is no pen to ask for and nobody to ask, so the banner says
-         why and offers nothing. */
-      const locked = access.planLocked();
-      const viewingFolder = !locked && filestore.isViewer();
-      const readOnly = locked || cloud.isReadOnly() || viewingFolder;
-      document.body.classList.toggle('read-only', readOnly);
-      renderBanner(readOnly, viewingFolder ? filestore.state() : null);
-    };
-
-    on(EV.ACCESS_CHANGED, apply);
-    on(EV.AUTH_CHANGED, apply);
-    on(EV.FILE_STATE, apply);
-
-    // One notice per burst — a viewer holding an arrow key would otherwise
-    // stack up a notification per repeat.
-    let lastRefusal = 0;
-    on(EV.EDIT_REFUSED, () => {
-      const now = Date.now();
-      if (now - lastRefusal < 4000) return;
-      lastRefusal = now;
-      toast({
-        tone: 'warn',
-        title: 'Read-only',
-        message: access.planLocked()
-          ? access.lockReason()
-          : 'You have view access to this project. Ask the owner for edit access to make changes.',
-      });
-    });
-
-    apply();
-  }
-
-  /**
-   * How long ago, in words somebody can act on.
-   *
-   * Deliberately coarse: the difference between eleven and twelve minutes
-   * changes nobody's mind, and a ticking number in a banner reads as something
-   * that needs watching.
-   */
-  function since(ms) {
-    if (!Number.isFinite(ms)) return '';
-    const mins = Math.floor(ms / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
-    const hours = Math.round(mins / 60);
-    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
-  }
-
-  function renderBanner(readOnly, folder = null) {
-    const existing = document.getElementById('cx-readonly-bar');
-    if (!readOnly) {
-      existing?.remove();
-      return;
-    }
-    // The message can change while the bar is up — a colleague closing the plan
-    // hands the pen over — so rebuild rather than bail out on an existing bar.
-    existing?.remove();
-
-    const holder = folder?.holder || '';
-    /* What they are doing with it, not merely that they have it. "Dana has this
-       plan open" is a fact; "Dana has this plan open, last saved 40 minutes ago"
-       is a decision — wait, ask, or take it. */
-    const idle = folder && Number.isFinite(folder.holderIdleMs)
-      ? ` Last saved ${since(folder.holderIdleMs)}.`
-      : '';
-    const message = access.planLocked()
-      ? `Read-only — ${access.lockReason()}`
-      : holder
-        ? `Read-only — ${holder} has this plan open.${idle}`
-        : 'Read-only — you have view access to this project.';
-
-    const kids = [
-      el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),
-      el('span', { text: message }),
-    ];
-
-    /* The third option. Waiting had no end and taking over is destructive by
-       design, so people took over by habit; asking costs the holder one toast
-       and costs the asker nothing. Only in a folder, and only while somebody
-       else really has it — a hosted viewer has nobody to ask. */
-    if (holder && holder !== 'another window of yours') {
-      kids.push(folder.asked
-        ? el('span', { class: 'ro-asked', text: `Asked ${holder} — you will get it when they hand over.` })
-        : el('button', {
-          class: 'cx-btn mini',
-          text: 'Ask for the pen',
-          title: `Let ${holder} know you are waiting. They decide; nothing is taken.`,
-          onClick: async (event) => {
-            event.currentTarget.disabled = true;
-            await filestore.requestPen();
-          },
-        }));
-    }
-
-    const bar = el('div', { id: 'cx-readonly-bar', class: 'cx-readonly-bar', role: 'status' }, kids);
-    document.getElementById('main')?.prepend(bar);
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The account menu
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /** The signed-in-as block that sits at the foot of the sidebar. */
-  function accountBlock() {
-    const root = el('div', { class: 'cx-account' });
-
-    const render = () => {
-      clear(root);
-      if (!cloud.isSignedIn()) {
-        root.appendChild(
-          el('button', {
-            class: 'cx-btn mini',
-            html: icon('user', { size: 12 }) + '<span>Sign in</span>',
-            onClick: async () => {
-              await requireSignIn();
-              window.location.reload();
-            },
-          })
-        );
-        return;
-      }
-
-      const label = cloud.accountLabel();
-      root.append(
-        el('div', { class: 'acc-avatar', text: initials(label) }),
-        el('div', { class: 'acc-main' }, [
-          el('div', { class: 'acc-name', text: label, title: cloud.currentUser()?.email || '' }),
-          el('div', { class: 'acc-role', text: roleLabel(cloud.getRole()) }),
-        ]),
-        el('button', {
-          class: 'cx-btn icon mini ghost',
-          title: 'Sign out',
-          'aria-label': 'Sign out',
-          html: icon('logout', { size: 13 }),
-          onClick: async () => {
-            const ok = await confirmDialog({
-              title: 'Sign out?',
-              message: 'Anything saved stays on the server. Unsaved changes in this tab are written first.',
-              confirmLabel: 'Sign out',
-            });
-            if (!ok) return;
-            await cloud.signOut();
-            window.location.reload();
-          },
-        })
-      );
-    };
-
-    on(EV.AUTH_CHANGED, render);
-    on(EV.ACCESS_CHANGED, render);
-    render();
-    return root;
-  }
-
-  function initials(label) {
-    const parts = String(label).replace(/@.*$/, '').split(/[\s._-]+/).filter(Boolean);
-    return ((parts[0]?.[0] || '') + (parts[1]?.[0] || '')).toUpperCase() || '?';
-  }
-
-  function roleLabel(role) {
-    return { owner: 'Owner', editor: 'Editor', viewer: 'View only' }[role] || 'No project open';
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Team administration
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Who may have an account, and who administers the deployment.
-   *
-   * Sign-up is closed, so this pane is the only door in. Inviting writes a row
-   * the database checks when the account is created — which is why an
-   * invitation cannot be forged by anyone who finds the link, and why revoking
-   * one actually stops the sign-up rather than merely hiding a button.
-   */
-  function paneTeam(root) {
-    if (!cloud.isConfigured() || !cloud.isSignedIn()) {
-      root.appendChild(
-        emptyState({ iconName: 'users', title: 'Not available', message: 'Sign in to manage who has access.' })
-      );
-      return;
-    }
-    if (!cloud.isAdmin()) {
-      root.appendChild(
-        emptyState({
-          iconName: 'shield',
-          title: 'Administrators only',
-          message: 'Accounts are created by invitation. Ask an administrator to invite someone.',
-        })
-      );
-      return;
-    }
-
-    root.appendChild(el('div', { class: 'cx-hint', style: { marginBottom: '12px' },
-      text: 'Nobody can create an account unless their address is invited here — the database refuses the sign-up, not just the form.' }));
-
-    /* ── Invite ────────────────────────────────────────────────────────────── */
-    const emailInput = textInput({ type: 'email', value: '', placeholder: 'colleague@company.com' });
-    const noteInput = textInput({ value: '', placeholder: 'Role or team (optional)' });
-
-    const invite = async () => {
-      const email = emailInput.value.trim();
-      if (!email) return;
-      try {
-        const result = await cloud.inviteUser(email, 'editor', noteInput.value.trim());
-        emailInput.value = '';
-        noteInput.value = '';
-        showInviteLink(result.email);
-        refresh();
-      } catch (err) {
-        toast({ tone: 'bad', title: 'Could not invite', message: err.message });
-      }
-    };
-    emailInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        invite();
-      }
-    });
-
-    root.appendChild(
-      section('Invite someone', [
-        field('Email', emailInput),
-        field('Note', noteInput, 'Only you see this — a reminder of who they are.'),
-        el('button', {
-          class: 'cx-btn mini primary',
-          html: icon('plus', { size: 12 }) + '<span>Create invitation</span>',
-          onClick: invite,
-        }),
-        el('div', { class: 'cx-hint', style: { marginTop: '8px' },
-          text: 'No email is sent. You get a link to pass on however you like.' }),
-      ])
-    );
-
-    const pending = el('div', { class: 'cx-list' });
-    const accounts = el('div', { class: 'cx-list' });
-    root.append(
-      section('Pending invitations', [pending]),
-      section('Accounts', [accounts])
-    );
-
-    async function refresh() {
-      clear(pending);
-      clear(accounts);
-      pending.appendChild(skeleton(2));
-
-      try {
-        const [invites, people] = await Promise.all([cloud.listInvitations(), cloud.listAccounts()]);
-        clear(pending);
-
-        if (!invites.length) {
-          pending.appendChild(el('div', { class: 'cx-hint', text: 'None outstanding.' }));
-        } else {
-          for (const invitation of invites) pending.appendChild(invitationRow(invitation));
-        }
-        for (const person of people) accounts.appendChild(accountRow(person));
-      } catch (err) {
-        clear(pending);
-        pending.appendChild(el('div', { class: 'cx-gate-msg bad', text: err.message }));
-      }
-    }
-
-    function invitationRow(invitation) {
-      return el('div', { class: 'cx-listrow', dataset: { invite: invitation.email }, style: { cursor: 'default' } }, [
-        el('span', { class: 'cx-dot', style: { background: invitation.expired ? 'var(--bad)' : 'var(--pending)' } }),
-        el('div', { class: 'lr-main' }, [
-          el('div', { class: 'lr-title', text: invitation.email }),
-          el('div', { class: 'lr-meta', text: [
-            invitation.note,
-            invitation.expired ? 'expired' : `expires ${fmtDate(invitation.expires, 'medium')}`,
-          ].filter(Boolean).join(' · ') }),
-        ]),
-        el('div', { class: 'lr-actions', style: { opacity: '1' } }, [
-          el('button', {
-            class: 'cx-btn icon mini ghost',
-            title: 'Copy the invitation link',
-            'aria-label': `Copy the invitation link for ${invitation.email}`,
-            html: icon('copy', { size: 11 }),
-            onClick: () => showInviteLink(invitation.email),
-          }),
-          el('button', {
-            class: 'cx-btn icon mini ghost',
-            title: 'Revoke',
-            'aria-label': `Revoke the invitation for ${invitation.email}`,
-            html: icon('trash', { size: 11 }),
-            onClick: async () => {
-              const ok = await confirmDialog({
-                title: `Revoke ${invitation.email}?`,
-                message: 'They will not be able to create an account with that address.',
-                confirmLabel: 'Revoke',
-                danger: true,
-              });
-              if (!ok) return;
-              try {
-                await cloud.revokeInvitation(invitation.email);
-                refresh();
-              } catch (err) {
-                toast({ tone: 'bad', title: 'Could not revoke', message: err.message });
-              }
-            },
-          }),
-        ]),
-      ]);
-    }
-
-    function accountRow(person) {
-      return el('div', { class: 'cx-listrow', dataset: { account: person.id }, style: { cursor: 'default' } }, [
-        el('div', { class: 'acc-avatar small', text: initials(person.name || person.email) }),
-        el('div', { class: 'lr-main' }, [
-          el('div', { class: 'lr-title', text: (person.name || person.email) + (person.isYou ? '  (you)' : '') }),
-          el('div', { class: 'lr-meta', text: [
-            person.email,
-            `${person.projects} project${person.projects === 1 ? '' : 's'}`,
-          ].join(' · ') }),
-        ]),
-        person.admin ? badge('Admin', 'good') : null,
-        el('div', { class: 'lr-actions', style: { opacity: '1' } }, [
-          el('button', {
-            class: 'cx-btn mini ghost',
-            text: person.admin ? 'Remove admin' : 'Make admin',
-            onClick: async () => {
-              try {
-                await cloud.setAdmin(person.id, !person.admin);
-                refresh();
-              } catch (err) {
-                toast({ tone: 'bad', title: 'Could not change', message: err.message });
-              }
-            },
-          }),
-        ]),
-      ].filter(Boolean));
-    }
-
-    refresh();
-  }
-
-  /**
-   * Show the link an invited person opens.
-   *
-   * A dialog rather than a silent clipboard write, because the link is the
-   * whole deliverable of inviting someone — losing it silently would mean
-   * revoking and re-inviting to get it back.
-   */
-  function showInviteLink(email) {
-    const link = cloud.inviteLink(email);
-    const box = textInput({ value: link });
-    box.readOnly = true;
-    box.style.fontFamily = 'var(--f-mono)';
-    box.style.fontSize = 'var(--fs-tiny)';
-
-    openModal({
-      title: 'Invitation created',
-      subtitle: `${email} can now set up an account — and nobody else can.`,
-      body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
-        field('Send them this link', box, 'It expires in 30 days. Revoke it any time from the Team pane.'),
-        el('button', {
-          class: 'cx-btn mini',
-          html: icon('copy', { size: 12 }) + '<span>Copy link</span>',
-          onClick: async (e) => {
-            try {
-              await navigator.clipboard.writeText(link);
-            } catch {
-              // Clipboard access can be refused; selecting the text still works.
-              box.select();
-            }
-            e.currentTarget.innerHTML = icon('check', { size: 12 }) + '<span>Copied</span>';
-          },
-        }),
-      ]),
-      actions: [{ label: 'Done', kind: 'primary' }],
-    });
-
-    setTimeout(() => box.select(), 60);
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Sharing
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const ROLE_OPTIONS = [
-    { value: 'viewer', label: 'Viewer — can open and export, cannot change anything' },
-    { value: 'editor', label: 'Editor — can change the plan' },
-    { value: 'owner', label: 'Owner — full control, including sharing' },
-  ];
-
-  /**
-   * Who can see this project, and what they may do.
-   * Owners can change it; everyone else sees the list read-only, which is
-   * useful on its own — knowing who else is in a plan matters.
-   */
-  function openShareDialog(projectId = cloud.getProjectId(), projectName = '') {
-    if (!projectId) {
-      toast({ tone: 'warn', title: 'No project open', message: 'Open a project before sharing it.' });
-      return;
-    }
-
-    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } });
-    const list = el('div', { class: 'cx-list' });
-    const owner = cloud.isOwner();
-
-    const emailInput = textInput({ type: 'email', value: '', placeholder: 'colleague@company.com' });
-    let inviteRole = 'viewer';
-
-    async function refresh() {
-      clear(list);
-      let members = [];
-      try {
-        members = await cloud.listMembers(projectId);
-      } catch (err) {
-        list.appendChild(el('div', { class: 'cx-gate-msg bad', text: err.message }));
-        return;
-      }
-      if (!members.length) {
-        list.appendChild(emptyState({ iconName: 'user', title: 'Nobody else yet' }));
-        return;
-      }
-      for (const member of members) list.appendChild(memberRow(member));
-    }
-
-    function memberRow(member) {
-      const isLastOwner = member.role === 'owner';
-      return el('div', { class: 'cx-listrow', dataset: { member: member.userId }, style: { cursor: 'default' } }, [
-        el('div', { class: 'acc-avatar small', text: initials(member.name || member.email || '?') }),
-        el('div', { class: 'lr-main' }, [
-          el('div', { class: 'lr-title', text: (member.name || member.email) + (member.isYou ? '  (you)' : '') }),
-          el('div', { class: 'lr-meta', text: member.email || '' }),
-        ]),
-        owner && !member.isYou
-          ? selectInput({
-              value: member.role,
-              mini: true,
-              options: ROLE_OPTIONS.map((o) => ({ value: o.value, label: o.value })),
-              onChange: async (v) => {
-                try {
-                  await cloud.setMemberRole(projectId, member.email, v);
-                  toast({ tone: 'good', title: 'Access updated', message: `${member.email} is now ${v === 'viewer' ? 'a viewer' : `an ${v}`}.` });
-                  refresh();
-                } catch (err) {
-                  toast({ tone: 'bad', title: 'Could not change access', message: err.message });
-                  refresh();
-                }
-              },
-            })
-          : badge(roleLabel(member.role), member.role === 'viewer' ? 'muted' : 'info'),
-        owner && !(member.isYou && isLastOwner)
-          ? el('button', {
-              class: 'cx-btn icon mini ghost',
-              title: 'Remove access',
-              'aria-label': `Remove ${member.email}`,
-              html: icon('x', { size: 11 }),
-              onClick: async () => {
-                const ok = await confirmDialog({
-                  title: `Remove ${member.email}?`,
-                  message: 'They lose access to this project immediately.',
-                  confirmLabel: 'Remove',
-                  danger: true,
-                });
-                if (!ok) return;
-                try {
-                  await cloud.unshareProject(projectId, member.userId);
-                  refresh();
-                } catch (err) {
-                  toast({ tone: 'bad', title: 'Could not remove', message: err.message });
-                }
-              },
-            })
-          : null,
-      ].filter(Boolean));
-    }
-
-    async function invite() {
-      const email = emailInput.value.trim();
-      if (!email) return;
-      try {
-        await cloud.shareProject(projectId, email, inviteRole);
-        emailInput.value = '';
-        toast({
-          tone: 'good',
-          title: 'Shared',
-          message: `${email} now has ${inviteRole === 'viewer' ? 'view-only' : inviteRole} access.`,
-        });
-        refresh();
-      } catch (err) {
-        toast({ tone: 'bad', title: 'Could not share', message: err.message });
-      }
-    }
-
-    if (owner) {
-      const roleSelect = selectInput({
-        value: inviteRole,
-        options: ROLE_OPTIONS,
-        onChange: (v) => { inviteRole = v; },
-      });
-      emailInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          invite();
-        }
-      });
-
-      body.append(
-        el('div', {}, [
-          field('Invite by email', emailInput, 'They need a CX Timeline account already — sharing does not send an invitation email.'),
-          field('Access level', roleSelect),
-          el('button', {
-            class: 'cx-btn primary mini',
-            html: icon('plus', { size: 12 }) + '<span>Grant access</span>',
-            onClick: invite,
-          }),
-        ])
-      );
-    } else {
-      body.appendChild(
-        el('div', { class: 'cx-hint', text: 'Only the project owner can change who has access.' })
-      );
-    }
-
-    body.append(el('div', { class: 'cx-section-label', text: 'People with access' }), list);
-    refresh();
-
-    return openModal({
-      title: projectName ? `Share "${projectName}"` : 'Share project',
-      subtitle: 'Access is enforced by the database, not the interface.',
-      body,
-      actions: [{ label: 'Done', kind: 'primary' }],
-    });
-  }
-
-  Object.defineProperty(__x, "requireSignIn", { get: () => requireSignIn, enumerable: true });
-  Object.defineProperty(__x, "installAccessMode", { get: () => installAccessMode, enumerable: true });
-  Object.defineProperty(__x, "accountBlock", { get: () => accountBlock, enumerable: true });
-  Object.defineProperty(__x, "paneTeam", { get: () => paneTeam, enumerable: true });
-  Object.defineProperty(__x, "openShareDialog", { get: () => openShareDialog, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -23628,13 +22952,13 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
    * (`workOnlyLegend()`). That is deliberately stricter than the calendar, which
    * *draws* an unexplained colour as possible work so somebody notices it.
    *
-   * The legend is the calendar's own (Calendar → Legend) whenever the calendar is
-   * signed in: one answer to "is orange work", read and never written from here.
-   * Only the colours are fetched — nothing about the plan goes the other way.
-   * Where there is no calendar legend (local mode, a folder deployment, a desktop
-   * build without calendar keys, or a calendar that has never mapped a colour)
-   * the workbook's own key starts as Work and the dialog lets somebody categorise
-   * the rest, kept with the plan in `doc.lookahead.colors`.
+   * The legend is the calendar's own (Calendar → Legend) whenever the folder holds
+   * a calendar: one answer to "is orange work", read and never written from here.
+   * Only the colours are read — nothing about the plan goes the other way. Where
+   * there is no calendar legend (local mode, a folder with no calendar in it, or
+   * a calendar that has never mapped a colour) the workbook's own key starts as
+   * Work and the dialog lets somebody categorise the rest, kept with the plan in
+   * `doc.lookahead.colors`.
    *
    * Imports: util, events, dates, model, store, renderer, core/lookahead,
    *          io/lookahead, core/rc (the legend only), commands, icons,
@@ -23643,7 +22967,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
 
   const { el, clear, debounce, fold } = __req("core/util.js");
   const { on, emit, EV } = __req("core/events.js");
-  const { fmtDate, fmtTimestamp, MS_DAY, toISO, toMs } = __req("core/dates.js");
+  const { fmtDate, fmtTimestamp, MS_DAY } = __req("core/dates.js");
   const { TYPES, lookaheadRegister, laLinkedIds, laPlaced, laPlacedIds, laVariance, statusOf } = __req("core/model.js");
 
 
@@ -23655,15 +22979,15 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
 
   const store = __req("core/store.js");
   const renderer = __req("timeline/renderer.js");
-  const { readGrid, marksOf, suggestionsFrom, outcomeProgress } = __req("core/lookahead.js");
+  const { readGrid, marksOf, suggestionsFrom } = __req("core/lookahead.js");
   const { applyLegend, inForce, workOnlyLegend } = __req("io/lookahead.js");
 
 
   const rc = __req("core/rc.js");
+  const filestore = __req("core/filestore.js");
   const cmd = __req("ui/commands.js");
   const { icon } = __req("ui/icons.js");
-  const { openModal, openPicker, field, textInput, selectInput, segmented, checkbox, toggle, emptyState, badge, chipStat, toast, confirmDialog } = __req("ui/components.js");
-
+  const { openModal, openPicker, field, textInput, selectInput, segmented, checkbox, emptyState, badge, chipStat, toast, confirmDialog } = __req("ui/components.js");
 
 
 
@@ -23753,14 +23077,6 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
               onClick: () => updateFromCalendar(),
             })
           : null,
-        calendar && laPlacedIds(store.getDoc()).size
-          ? el('button', {
-              class: 'cx-btn mini',
-              html: icon('check', { size: 12 }) + '<span>Progress from the calendar</span>',
-              title: 'Offer actual start and finish dates from what the huddle recorded',
-              onClick: () => progressFromCalendar(),
-            })
-          : null,
         Object.keys(register.activities).length
           ? el('button', {
               class: 'cx-btn mini ghost',
@@ -23795,10 +23111,20 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
 
   /* ── From the calendar ─────────────────────────────────────────────────── */
 
-  /** Whether the resource calendar is here to be read: configured, and signed in. */
+  /**
+   * Whether the resource calendar is here to be read: a folder is open and holds
+   * one. Asking opens it, for reading — the timeline never takes the calendar's
+   * pen — and the pane is drawn again once it has answered.
+   */
   function calendarAvailable() {
-    return rc.isConfigured() && rc.isSignedIn();
+    if (rc.isSignedIn()) return true;
+    if (rc.isConfigured() && filestore.hasFolder() && !calendarAsked) {
+      calendarAsked = true;
+      rc.init().then(() => { if (rc.isSignedIn()) refresh(); }).catch(() => {});
+    }
+    return false;
   }
+  let calendarAsked = false;
 
   /**
    * The look-ahead, as the resource calendar holds it now — in one step.
@@ -23854,233 +23180,6 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
     const follow = report.moved.filter((m) => placed.has(m.id));
     if (follow.length) setTimeout(() => openFollowDialog(follow), 350);
     return report;
-  }
-
-  /**
-   * Actual dates, from what the daily huddle recorded.
-   *
-   * The outcomes are traced to the look-ahead rows they were recorded against
-   * and from there to the bars linked to those rows (`outcomeProgress()`); each
-   * bar is offered the first day anybody worked on it as its actual start, and —
-   * only once the look-ahead has nothing more for it and the last word was
-   * "completed" — the day after the last as its actual finish. Nothing is written
-   * until somebody ticks it: a date nobody has set yet starts ticked, a date that
-   * would replace one somebody typed does not. Reads only; nothing about the plan
-   * goes to the calendar.
-   */
-  async function progressFromCalendar() {
-    const doc = store.getDoc();
-    const register = lookaheadRegister(doc);
-    const objects = doc.objects.filter((o) => laLinkedIds(o).length);
-    if (!objects.length) {
-      toast({ tone: 'warn', title: 'No linked bars', message: 'Place or link a look-ahead suggestion first — progress is read for bars that stand for one.' });
-      return null;
-    }
-    let from = Infinity;
-    for (const o of objects) {
-      for (const id of laLinkedIds(o)) {
-        const entry = register.activities[id];
-        if (entry?.start != null) from = Math.min(from, entry.start, entry.previous?.start ?? Infinity);
-      }
-      from = Math.min(from, o.start);
-    }
-    const todayMs = toMs(toISO(Date.now()));
-    // A fortnight's slack before the earliest date: work often starts early.
-    const fromISO = toISO(Math.min(Number.isFinite(from) ? from : todayMs, todayMs) - 14 * MS_DAY);
-    const toISOday = toISO(todayMs);
-
-    let proposals;
-    try {
-      // Asked for now, so read now: an outcome recorded in the last thirty
-      // seconds is exactly the one somebody pressed this to see.
-      rc.forgetReads();
-      const [actuals, plan] = await Promise.all([rc.listActuals(fromISO, toISOday), rc.listPlan(fromISO, toISOday)]);
-      const rowIds = [
-        ...actuals.map((a) => a.lookahead_row_id),
-        ...plan.map((p) => p.lookahead_row_id),
-      ];
-      const rows = await rc.lookaheadRowsByIds(rowIds);
-      proposals = outcomeProgress({ objects, activities: register.activities, actuals, rows, plan, todayMs: todayMs + MS_DAY });
-    } catch (err) {
-      toast({ tone: 'bad', title: 'Could not read the calendar', message: err.message });
-      return null;
-    }
-
-    const offers = [];
-    for (const p of proposals) {
-      const obj = doc.objects.find((o) => o.id === p.objectId);
-      const hasDuration = !!TYPES[obj.type]?.duration;
-      const haveStart = toMs(obj.data?.actualStart);
-      const haveEnd = toMs(obj.data?.actualEnd);
-      const start = haveStart === p.start ? null : { value: p.start, replaces: Number.isFinite(haveStart) ? haveStart : null };
-      const end = !hasDuration || p.end == null || haveEnd === p.end
-        ? null
-        : { value: p.end, replaces: Number.isFinite(haveEnd) ? haveEnd : null };
-      if (start || end) offers.push({ obj, p, start, end });
-    }
-    const held = proposals.filter((p) => p.end == null && p.holding.length
-      && TYPES[doc.objects.find((o) => o.id === p.objectId)?.type]?.duration).length;
-    if (!offers.length) {
-      toast({
-        tone: 'info',
-        title: 'Nothing new',
-        message: proposals.length
-          ? `The actual dates already agree with what the huddle recorded.${
-            held ? ` ${held} bar${held === 1 ? ' is' : 's are'} still waiting on an activity to finish.` : ''}`
-          : 'No outcomes recorded yet against the look-ahead rows your bars stand for.',
-      });
-      return [];
-    }
-    openProgressDialog(offers);
-    return offers;
-  }
-
-  /* Whether the dialog opens with each bar's activities shown — a preference of
-     this browser's, and nothing worse than the default if storage is refused. */
-  const PROGRESS_DETAIL_KEY = 'cx.lookahead.progressDetail';
-  function progressDetailPref() {
-    try {
-      return localStorage.getItem(PROGRESS_DETAIL_KEY) === '1';
-    } catch {
-      return false;
-    }
-  }
-  function setProgressDetailPref(on) {
-    try {
-      localStorage.setItem(PROGRESS_DETAIL_KEY, on ? '1' : '0');
-    } catch {
-      // Remembering is a convenience; the switch still works for this dialog.
-    }
-  }
-
-  /** One activity's line in a bar's breakdown. */
-  function activityLine(a) {
-    const on = (iso) => fmtDate(Date.parse(`${iso}T00:00:00Z`), 'numeric');
-    const state = a.done
-      ? badge('Done', 'good')
-      : a.ahead
-        ? badge('Still planned', 'info')
-        : a.recorded
-          ? badge('Not completed', 'warn')
-          : badge('Nothing recorded', 'neutral');
-    const facts = a.recorded
-      ? [
-          `${a.days} day${a.days === 1 ? '' : 's'}`,
-          `${on(a.first)} → ${on(a.last)}`,
-          `last ${a.lastStatus}`,
-        ].join(' · ')
-      : 'no outcomes against it yet';
-    return el('li', { class: 'la-progress-act' }, [
-      el('span', { class: 'la-progress-act-title', text: a.title || 'Untitled activity' }),
-      el('span', { class: 'la-progress-act-facts', text: facts }),
-      state,
-    ]);
-  }
-
-  function openProgressDialog(offers) {
-    const chosen = new Map(); // `${id}|start` / `${id}|end` → ms
-    const rows = el('div', { class: 'cx-list la-progress' });
-    const details = []; // [{ list, button }] — every bar's breakdown
-    const setOpen = ({ list, button }, open) => {
-      list.hidden = !open;
-      button.setAttribute('aria-expanded', String(open));
-      button.innerHTML = icon(open ? 'chevron-down' : 'chevron-right', { size: 11 })
-        + `<span>${open ? 'Hide' : 'Show'} ${list.childElementCount} activities</span>`;
-    };
-    const showAll = progressDetailPref();
-    const choice = (obj, which, offer, label) => {
-      const key = `${obj.id}|${which}`;
-      if (offer.replaces == null) chosen.set(key, offer.value);
-      const shown = which === 'end' ? offer.value - MS_DAY : offer.value;
-      const text = `${label} ${fmtDate(shown, 'numeric')}`
-        + (offer.replaces != null ? ` (was ${fmtDate(which === 'end' ? offer.replaces - MS_DAY : offer.replaces, 'numeric')})` : '');
-      return checkbox({
-        label: text,
-        checked: offer.replaces == null,
-        onChange: (v) => (v ? chosen.set(key, offer.value) : chosen.delete(key)),
-      });
-    };
-    for (const { obj, p, start, end } of offers) {
-      const several = p.activities.length > 1;
-      const meta = [
-        several ? `${p.activities.length} activities` : null,
-        `${p.days} day${p.days === 1 ? '' : 's'} worked`,
-        `${p.people} ${p.people === 1 ? 'person' : 'people'}`,
-        `last ${p.lastStatus} ${fmtDate(Date.parse(`${p.last}T00:00:00Z`), 'numeric')}`,
-        p.byTask && !p.byRow ? 'matched on the task wording' : null,
-      ].filter(Boolean).join(' · ');
-      // Why there is no finish, said whether or not the breakdown is open.
-      const waiting = !end && p.end == null && p.holding.length && TYPES[obj.type]?.duration
-        ? el('div', { class: 'la-progress-wait', text: `Finish waits on ${p.holding.join(', ')}` })
-        : null;
-      let detail = null;
-      if (several) {
-        const list = el('ul', { class: 'la-progress-acts' }, p.activities.map(activityLine));
-        const button = el('button', { type: 'button', class: 'cx-btn mini ghost la-progress-toggle' });
-        const entry = { list, button };
-        button.addEventListener('click', () => setOpen(entry, list.hidden));
-        setOpen(entry, showAll);
-        details.push(entry);
-        detail = el('div', {}, [button, list]);
-      }
-      rows.appendChild(
-        el('div', { class: 'cx-listrow la-progress-row', style: { cursor: 'default', alignItems: 'flex-start' } }, [
-          el('div', { class: 'lr-main' }, [
-            el('div', { class: 'lr-title', text: obj.title || TYPES[obj.type]?.label || 'Untitled' }),
-            el('div', { class: 'lr-meta', text: meta }),
-            waiting,
-            el('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', marginTop: '6px' } }, [
-              start ? choice(obj, 'start', start, 'Actual start') : null,
-              end ? choice(obj, 'end', end, 'Actual finish') : null,
-            ].filter(Boolean)),
-            detail,
-          ].filter(Boolean)),
-        ])
-      );
-    }
-
-    const body = el('div', {}, [
-      details.length
-        ? el('div', { class: 'la-progress-head' }, [
-            toggle({
-              label: 'Show each activity',
-              checked: showAll,
-              onChange: (on) => {
-                setProgressDetailPref(on);
-                for (const d of details) setOpen(d, on);
-              },
-            }),
-          ])
-        : null,
-      rows,
-    ].filter(Boolean));
-
-    openModal({
-      title: 'Progress from the calendar',
-      subtitle: 'Actual dates from the outcomes recorded in the daily huddle. Nothing changes on the timeline until you apply it.',
-      size: 'wide',
-      body,
-      actions: [
-        { label: 'Not now' },
-        {
-          label: 'Apply selected',
-          kind: 'primary',
-          onClick: () => {
-            if (!chosen.size) return;
-            const patches = new Map();
-            for (const [key, ms] of chosen) {
-              const [id, which] = key.split('|');
-              if (!patches.has(id)) patches.set(id, {});
-              patches.get(id)[which === 'start' ? 'actualStart' : 'actualEnd'] = toISO(ms);
-            }
-            store.updateObjects([...patches.keys()], (o) => ({ data: patches.get(o.id) }), 'Actual dates from the calendar');
-            renderer.requestRender();
-            refresh();
-            toast({ tone: 'good', title: 'Actual dates recorded', message: `${patches.size} bar${patches.size === 1 ? '' : 's'} updated. Undo puts them back.` });
-          },
-        },
-      ],
-    });
   }
 
   /**
@@ -24537,7 +23636,6 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "paneLookahead", { get: () => paneLookahead, enumerable: true });
   Object.defineProperty(__x, "updateFromCalendar", { get: () => updateFromCalendar, enumerable: true });
-  Object.defineProperty(__x, "progressFromCalendar", { get: () => progressFromCalendar, enumerable: true });
   Object.defineProperty(__x, "LA_MIME", { get: () => LA_MIME, enumerable: true });
   Object.defineProperty(__x, "installLookaheadDrops", { get: () => installLookaheadDrops, enumerable: true });
 };
@@ -29543,7 +28641,7 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
   const { fmtDate, fmtTimestamp } = __req("core/dates.js");
   const { TYPES } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { makeBackup, isHosted } = __req("core/storage.js");
+  const { makeBackup } = __req("core/storage.js");
   const filestore = __req("core/filestore.js");
   const access = __req("core/access.js");
   const renderer = __req("timeline/renderer.js");
@@ -29568,25 +28666,10 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
    * This is the whole of file mode's interface: connect a folder, see which plan
    * is live and who has the pen, and open another. It sits at the top of Import /
    * export because that is where someone goes looking for "where does my data
-   * live", and it is hidden entirely on a hosted deployment, where the answer is
-   * the server and this would only confuse.
+   * live".
    */
   function sharedFolderSection() {
     const st = filestore.state();
-
-    // A hosted build saves to the server, so the folder controls would not work
-    // — but rendering nothing was worse: the section simply vanished, with no way
-    // to tell that from a build where the feature was missing. Say which one it is.
-    if (isHosted()) {
-      return section('Shared folder', [
-        el('div', {
-          class: 'cx-hint',
-          text:
-            'This build saves to its server, so the plan cannot also live in a folder. ' +
-            'A folder deployment is a separate build with no backend — see DEPLOY.md.',
-        }),
-      ], { id: 'shared-folder' });
-    }
 
     if (!st.supported) {
       return section('Shared folder', [
@@ -30077,28 +29160,22 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
-// ui/pane_projects.js
+// ui/pane_backups.js
 // ════════════════════════════════════════════════════════════════════════
-__mods["ui/pane_projects.js"] = function (__x, __req) {
+__mods["ui/pane_backups.js"] = function (__x, __req) {
   /**
-   * Projects and Backups.
+   * Backups: the plan's own snapshots, kept on this computer.
    *
    * Split out of `ui/panels.js`; see `ui/pane_util.js` for how a pane reaches the dock.
    */
 
   const { el, clear, bytes, download } = __req("core/util.js");
   const { fmtTimestamp, toISO } = __req("core/dates.js");
-  const { makeProject } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { listBackups, loadBackup, deleteBackup, makeBackup, switchProject, createCloudProject } = __req("core/storage.js");
-
-
-  const cloud = __req("core/cloud.js");
-  const renderer = __req("timeline/renderer.js");
+  const { listBackups, loadBackup, deleteBackup, makeBackup } = __req("core/storage.js");
   const { icon } = __req("ui/icons.js");
-  const { emptyState, badge, confirmDialog, promptDialog, skeleton, toast } = __req("ui/components.js");
+  const { emptyState, confirmDialog, toast } = __req("ui/components.js");
   const cmd = __req("ui/commands.js");
-  const { openShareDialog } = __req("ui/auth.js");
 
   const { refreshPane, iconBtn } = __req("ui/pane_util.js");
 
@@ -30187,214 +29264,7 @@ __mods["ui/pane_projects.js"] = function (__x, __req) {
     toast({ tone: 'good', title: 'Backup restored' });
   }
 
-  /* ══════════════════════════════════════════════════════════════════════════
-     Projects (hosted deployments only)
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const ROLE_TONE = { owner: 'good', editor: 'info', viewer: 'muted' };
-  const ROLE_WORD = { owner: 'Owner', editor: 'Editor', viewer: 'View only' };
-
-  /**
-   * Every plan this account can reach, with the role that governs it.
-   *
-   * The role badge is the whole point of the pane: knowing *before* you open
-   * something whether you will be able to change it is the difference between a
-   * read-only project and a broken one.
-   */
-  function paneProjects(root) {
-    if (!cloud.isConfigured()) {
-      root.appendChild(
-        emptyState({
-          iconName: 'folder',
-          title: 'Local project',
-          message: 'This build keeps everything in this browser. Projects and sharing appear when it is connected to a backend.',
-        })
-      );
-      return;
-    }
-
-    if (!cloud.isSignedIn()) {
-      root.appendChild(
-        emptyState({
-          iconName: 'user',
-          title: 'Not signed in',
-          message: 'Sign in to keep projects on the server and share them.',
-          action: { label: 'Sign in', onClick: () => window.location.reload() },
-        })
-      );
-      return;
-    }
-
-    const actions = el('div', { style: { display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap' } }, [
-      el('button', {
-        class: 'cx-btn mini primary',
-        html: icon('plus', { size: 12 }) + '<span>New project</span>',
-        onClick: () => newCloudProject(),
-      }),
-      el('button', {
-        class: 'cx-btn mini',
-        html: icon('share', { size: 12 }) + '<span>Share</span>',
-        title: 'Who can see the open project',
-        disabled: !cloud.getProjectId(),
-        onClick: () => openShareDialog(cloud.getProjectId(), store.getDoc().name),
-      }),
-    ]);
-    root.appendChild(actions);
-
-    const list = el('div', { class: 'cx-list' });
-    root.appendChild(list);
-    list.appendChild(skeleton(3));
-
-    cloud
-      .listProjects()
-      .then((projects) => {
-        clear(list);
-        if (!projects.length) {
-          list.appendChild(emptyState({ iconName: 'folder', title: 'No projects yet', message: 'Create one to get started.' }));
-          return;
-        }
-        for (const project of projects) list.appendChild(projectRow(project));
-      })
-      .catch((err) => {
-        clear(list);
-        list.appendChild(
-          emptyState({ iconName: 'warning', title: 'Could not load your projects', message: err.message })
-        );
-      });
-  }
-
-  function projectRow(project) {
-    const open = project.id === cloud.getProjectId();
-
-    return el('div', {
-      class: 'cx-listrow' + (open ? ' active' : ''),
-      dataset: { project: project.id },
-      onClick: () => (open ? null : openCloudProject(project)),
-    }, [
-      el('span', { class: 'cx-dot', style: { background: open ? 'var(--accent)' : 'var(--text-subtle)' } }),
-      el('div', { class: 'lr-main' }, [
-        el('div', { class: 'lr-title', text: project.name }),
-        el('div', {
-          class: 'lr-meta',
-          text: [
-            `${project.objects} object${project.objects === 1 ? '' : 's'}`,
-            fmtTimestamp(project.savedAt),
-            project.role === 'owner' ? null : `owner ${project.ownerEmail || '—'}`,
-            project.members > 1 ? `${project.members} people` : null,
-          ].filter(Boolean).join(' · '),
-        }),
-      ]),
-      badge(ROLE_WORD[project.role] || project.role, ROLE_TONE[project.role] || 'muted'),
-      el('div', { class: 'lr-actions' }, [
-        el('button', {
-          class: 'cx-btn icon mini ghost',
-          title: 'Share',
-          'aria-label': `Share ${project.name}`,
-          html: icon('share', { size: 11 }),
-          onClick: (e) => {
-            e.stopPropagation();
-            openShareDialog(project.id, project.name);
-          },
-        }),
-        project.role === 'owner'
-          ? el('button', {
-              class: 'cx-btn icon mini ghost',
-              title: 'Rename',
-              'aria-label': `Rename ${project.name}`,
-              html: icon('edit', { size: 11 }),
-              onClick: async (e) => {
-                e.stopPropagation();
-                const name = await promptDialog({ title: 'Rename project', label: 'Name', value: project.name });
-                if (!name || name === project.name) return;
-                try {
-                  await cloud.renameProject(project.id, name);
-                  if (project.id === cloud.getProjectId()) store.setMeta({ name }, 'Rename project');
-                  refreshPane();
-                } catch (err) {
-                  toast({ tone: 'bad', title: 'Could not rename', message: err.message });
-                }
-              },
-            })
-          : null,
-        project.role === 'owner'
-          ? el('button', {
-              class: 'cx-btn icon mini ghost',
-              title: 'Delete',
-              'aria-label': `Delete ${project.name}`,
-              html: icon('trash', { size: 11 }),
-              onClick: (e) => {
-                e.stopPropagation();
-                removeCloudProject(project);
-              },
-            })
-          : null,
-      ].filter(Boolean)),
-    ]);
-  }
-
-  async function openCloudProject(project) {
-    try {
-      const doc = await switchProject(project.id);
-      store.replaceDoc(doc, 'load');
-      renderer.requestRender();
-      refreshPane();
-      toast({
-        tone: 'good',
-        title: `Opened "${project.name}"`,
-        message: project.role === 'viewer' ? 'You have view-only access to this project.' : undefined,
-      });
-    } catch (err) {
-      toast({ tone: 'bad', title: 'Could not open', message: err.message });
-    }
-  }
-
-  async function newCloudProject() {
-    const name = await promptDialog({ title: 'New project', label: 'Name', value: 'Untitled Project' });
-    if (!name) return;
-    try {
-      const doc = makeProject(name);
-      await createCloudProject(doc);
-      store.replaceDoc(doc, 'load');
-      renderer.requestRender();
-      refreshPane();
-      toast({ tone: 'good', title: 'Project created', message: `"${name}" is yours — share it from here.` });
-    } catch (err) {
-      toast({ tone: 'bad', title: 'Could not create the project', message: err.message });
-    }
-  }
-
-  async function removeCloudProject(project) {
-    const ok = await confirmDialog({
-      title: `Delete "${project.name}"?`,
-      message: 'The project, its backups and everyone\'s access to it are removed. This cannot be undone.',
-      confirmLabel: 'Delete',
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      await cloud.deleteProject(project.id);
-      toast({ tone: 'good', title: 'Deleted' });
-      if (project.id === cloud.getProjectId()) window.location.reload();
-      else refreshPane();
-    } catch (err) {
-      toast({ tone: 'bad', title: 'Could not delete', message: err.message });
-    }
-  }
-
-  /**
-   * What a drawn export contains.
-   *
-   * A printed plan gets cross-referenced against other documents, and the one
-   * thing it could not do was tell you what dates an object actually covers —
-   * a month-scale ruler cannot be read to the day. That is now a toggle, along
-   * with the rest of what makes a drawing worth printing.
-   *
-   * The choices live in the document, so a plan exports the same way for
-   * whoever opens it, and so the same settings apply to every image format.
-   */
-
   Object.defineProperty(__x, "paneBackups", { get: () => paneBackups, enumerable: true });
-  Object.defineProperty(__x, "paneProjects", { get: () => paneProjects, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -30665,7 +29535,6 @@ __mods["ui/panels.js"] = function (__x, __req) {
   const { on, emit, EV } = __req("core/events.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
-  const { paneTeam } = __req("ui/auth.js");
   const { paneP6 } = __req("ui/p6.js");
   const { paneLookahead } = __req("ui/lookahead.js");
   const exporters = __req("io/exporters.js");
@@ -30674,10 +29543,10 @@ __mods["ui/panels.js"] = function (__x, __req) {
 
   const { paneSearch, paneFilters } = __req("ui/pane_filters.js");
   const { paneIo, exportMenu } = __req("ui/pane_io.js");
-  const { paneProjects, paneBackups } = __req("ui/pane_projects.js");
+  const { paneBackups } = __req("ui/pane_backups.js");
   const { paneSettings, paneLists } = __req("ui/pane_settings.js");
   const PANES = [
-    'projects', 'team', 'p6', 'lookahead', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
+    'p6', 'lookahead', 'lanes', 'palette', 'outline', 'releases', 'campaigns', 'risks', 'links',
     'baselines', 'search', 'filters', 'legend', 'history', 'io', 'backups', 'lists',
     'settings',
   ];
@@ -30796,8 +29665,6 @@ __mods["ui/panels.js"] = function (__x, __req) {
   /* ── Router ────────────────────────────────────────────────────────────── */
 
   const RENDERERS = {
-    projects: paneProjects,
-    team: paneTeam,
     p6: paneP6,
     lookahead: paneLookahead,
     lanes: paneLanes,
@@ -30819,7 +29686,7 @@ __mods["ui/panels.js"] = function (__x, __req) {
   };
 
   const TITLES = {
-    projects: 'Projects', team: 'Team & access', p6: 'P6 schedule', lookahead: 'Look-ahead',
+    p6: 'P6 schedule', lookahead: 'Look-ahead',
     lanes: 'Lanes', palette: 'Add objects', outline: 'Outline', releases: 'Software releases',
     campaigns: 'Commissioning campaigns', risks: 'Risks & issues', links: 'Dependencies',
     baselines: 'Baselines', search: 'Global search', filters: 'Filters', legend: 'Legend',
@@ -31140,9 +30007,8 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const { fmtDate, fmtTimestamp } = __req("core/dates.js");
   const { typeGroups, effectiveToday, projectExtent } = __req("core/model.js");
   const store = __req("core/store.js");
-  const { isFallback, isHosted, isFileMode } = __req("core/storage.js");
+  const { isFallback, isFileMode } = __req("core/storage.js");
   const filestore = __req("core/filestore.js");
-  const cloud = __req("core/cloud.js");
   const rcClient = __req("core/rc.js");
   const desktop = __req("core/desktop.js");
   const { linkViolations } = __req("core/analysis.js");
@@ -31153,7 +30019,6 @@ __mods["ui/shell.js"] = function (__x, __req) {
   const { THEMES, applyTheme, getTheme } = __req("ui/theme.js");
   const { showPane, currentPane } = __req("ui/panels.js");
   const workspace = __req("ui/workspace.js");
-  const { accountBlock } = __req("ui/auth.js");
   const cmd = __req("ui/commands.js");
   const { openCommandMenu } = __req("ui/command_menu.js");
 
@@ -31162,7 +30027,6 @@ __mods["ui/shell.js"] = function (__x, __req) {
     {
       section: 'Workspace',
       items: [
-        { pane: 'projects', label: 'Projects', icon: 'folder', hosted: true },
         { pane: 'lanes', label: 'Lanes', icon: 'layers' },
         { pane: 'palette', label: 'Add Objects', icon: 'plus' },
         { pane: 'outline', label: 'Outline', icon: 'list' },
@@ -31195,7 +30059,6 @@ __mods["ui/shell.js"] = function (__x, __req) {
         { pane: 'io', label: 'Import / Export', icon: 'download' },
         { pane: 'backups', label: 'Backups', icon: 'save' },
         { pane: 'lists', label: 'Dropdown Lists', icon: 'list' },
-        { pane: 'team', label: 'Team & Access', icon: 'users', hosted: true, admin: true },
         { pane: 'settings', label: 'Settings', icon: 'gear' },
       ],
     },
@@ -31247,15 +30110,9 @@ __mods["ui/shell.js"] = function (__x, __req) {
 
     // The workspace switch. Two whole interfaces over two different stores, so
     // it sits above the pane list rather than in it: choosing "Calendar" is not
-    // choosing a pane, it is leaving the timeline.
-    //
-    // Hidden from a read-only account, and for a reason that is presentation
-    // rather than protection: the plan lives in a folder only its owner has
-    // granted, so a viewer could never load it. What they *would* see is
-    // `makeStarterProject()` — the built-in sample, with plausible-looking
-    // releases and campaigns — and mistaking fabricated demo content for a real
-    // project is its own small problem.
-    if (rcClient.isConfigured() && !rcClient.isViewer()) {
+    // choosing a pane, it is leaving the timeline. Wherever a folder can be
+    // opened — the desktop application, Edge, Chrome — the calendar can be.
+    if (rcClient.isConfigured()) {
       dom.sidenav.appendChild(workspaceSwitch());
     }
 
@@ -31303,11 +30160,6 @@ __mods["ui/shell.js"] = function (__x, __req) {
       box.appendChild(head);
       dom.navLinks.appendChild(box);
       for (const item of group.items) {
-        // Some panes only mean anything with a backend behind them, and one is
-        // for administrators. Both are re-evaluated on auth:changed, which
-        // rebuilds the sidebar.
-        if (item.hosted && !cloud.isConfigured()) continue;
-        if (item.admin && !cloud.isAdmin()) continue;
         const link = el('a', {
           class: 'nav-link',
           href: '#',
@@ -31328,7 +30180,6 @@ __mods["ui/shell.js"] = function (__x, __req) {
 
     dom.sidenav.appendChild(
       el('div', { class: 'sidenav-footer' }, [
-        cloud.isConfigured() ? accountBlock() : null,
         el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.project || doc.client || fallbackTag() }),
         el('button', {
           class: 'cx-btn mini',
@@ -31344,9 +30195,8 @@ __mods["ui/shell.js"] = function (__x, __req) {
   /**
    * Timeline or calendar.
    *
-   * Only rendered when a calendar backend is configured. A build with no
-   * `rcSupabaseUrl` — which is every build until one is set up — shows nothing
-   * here and behaves exactly as it always has.
+   * Only rendered where a folder can be opened, because that is where the
+   * calendar is kept.
    */
   function workspaceSwitch() {
     const button = (id, label, iconName) => el('button', {
@@ -31365,8 +30215,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
 
   /** What to call a project that has not been given a client or project. */
   function fallbackTag() {
-    if (!cloud.isConfigured()) return 'Local project';
-    return { owner: 'You own this', editor: 'Shared with you', viewer: 'View only' }[cloud.getRole()] || 'Untitled';
+    return isFileMode() ? 'Shared folder' : 'Local project';
   }
 
   function updateNav() {
@@ -31843,7 +30692,7 @@ __mods["ui/shell.js"] = function (__x, __req) {
         : `${st.folder}/${st.plan}`;
     } else {
       dom.storageText.classList.remove('behind');
-      dom.storageText.textContent = isHosted() ? 'Supabase' : isFallback() ? 'localStorage' : 'IndexedDB';
+      dom.storageText.textContent = isFallback() ? 'localStorage' : 'IndexedDB';
       dom.storageText.title = '';
     }
   }
@@ -31880,19 +30729,6 @@ __mods["ui/shell.js"] = function (__x, __req) {
     on(EV.DOC_REPLACED, refresh);
     on(EV.HISTORY_CHANGED, refresh);
 
-    // Which panes exist depends on the account — the Team pane is for
-    // administrators — so the sidebar is rebuilt, not just refreshed, when the
-    // signed-in user changes.
-    on(EV.AUTH_CHANGED, () => {
-      buildSidenav();
-      refreshStatus();
-    });
-    // Whether the switch is drawn at all depends on the calendar's account, which
-    // is signed in long after the sidebar was first built.
-    on(EV.RC_AUTH_CHANGED, () => {
-      buildSidenav();
-      if (rcClient.isViewer()) workspace.show('calendar');
-    });
     on(EV.ACCESS_CHANGED, refresh);
     // The switch is two buttons; repainting the sidebar to move a highlight
     // would throw away the pane list and its scroll position for nothing.
@@ -34221,6 +33057,134 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// ui/access_mode.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["ui/access_mode.js"] = function (__x, __req) {
+  /**
+   * The timeline's read-only state, said out loud.
+   *
+   * A plan in the shared folder is read-only while a colleague holds its pen
+   * (`core/filestore.js`), and the store refuses edits then (`core/store.js`).
+   * This is the part a person sees: the `body.read-only` styles, the bar across
+   * the top saying who has it and when they last saved, and the button that asks
+   * them for it. It explains the state; it does not create it.
+   *
+   * Imports: util, events, filestore, access, icons, components.
+   */
+
+  const { el } = __req("core/util.js");
+  const { on, EV } = __req("core/events.js");
+  const filestore = __req("core/filestore.js");
+  const access = __req("core/access.js");
+  const { icon } = __req("ui/icons.js");
+  const { toast } = __req("ui/components.js");
+
+  function installAccessMode() {
+    const apply = () => {
+      /* Two things can make a session read-only, and the interface says the
+         same thing for both — only the reason differs, and only the reason
+         decides whether there is anything the reader can do about it. A
+         colleague holding the pen on the plan: wait, ask, or take it. And a
+         session that may not edit the plan at all, which outranks the pen —
+         there is nobody to ask, so the banner says why and offers nothing. */
+      const locked = access.planLocked();
+      const viewingFolder = !locked && filestore.isViewer();
+      const readOnly = locked || viewingFolder;
+      document.body.classList.toggle('read-only', readOnly);
+      renderBanner(readOnly, viewingFolder ? filestore.state() : null);
+    };
+
+    on(EV.ACCESS_CHANGED, apply);
+    on(EV.FILE_STATE, apply);
+
+    // One notice per burst — a viewer holding an arrow key would otherwise
+    // stack up a notification per repeat.
+    let lastRefusal = 0;
+    on(EV.EDIT_REFUSED, () => {
+      const now = Date.now();
+      if (now - lastRefusal < 4000) return;
+      lastRefusal = now;
+      toast({
+        tone: 'warn',
+        title: 'Read-only',
+        message: access.planLocked()
+          ? access.lockReason()
+          : 'A colleague has the pen on this plan. Ask for it, or take over editing in Import / export.',
+      });
+    });
+
+    apply();
+  }
+
+  /**
+   * How long ago, in words somebody can act on.
+   *
+   * Deliberately coarse: the difference between eleven and twelve minutes
+   * changes nobody's mind, and a ticking number in a banner reads as something
+   * that needs watching.
+   */
+  function since(ms) {
+    if (!Number.isFinite(ms)) return '';
+    const mins = Math.floor(ms / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
+    const hours = Math.round(mins / 60);
+    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  }
+
+  function renderBanner(readOnly, folder = null) {
+    const existing = document.getElementById('cx-readonly-bar');
+    if (!readOnly) {
+      existing?.remove();
+      return;
+    }
+    // The message can change while the bar is up — a colleague closing the plan
+    // hands the pen over — so rebuild rather than bail out on an existing bar.
+    existing?.remove();
+
+    const holder = folder?.holder || '';
+    /* What they are doing with it, not merely that they have it. "Dana has this
+       plan open" is a fact; "Dana has this plan open, last saved 40 minutes ago"
+       is a decision — wait, ask, or take it. */
+    const idle = folder && Number.isFinite(folder.holderIdleMs)
+      ? ` Last saved ${since(folder.holderIdleMs)}.`
+      : '';
+    const message = access.planLocked()
+      ? `Read-only — ${access.lockReason()}`
+      : holder
+        ? `Read-only — ${holder} has this plan open.${idle}`
+        : 'Read-only — this plan cannot be edited here.';
+
+    const kids = [
+      el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),
+      el('span', { text: message }),
+    ];
+
+    /* The third option. Waiting had no end and taking over is destructive by
+       design, so people took over by habit; asking costs the holder one toast
+       and costs the asker nothing. Only while somebody else really has it. */
+    if (holder && holder !== 'another window of yours') {
+      kids.push(folder.asked
+        ? el('span', { class: 'ro-asked', text: `Asked ${holder} — you will get it when they hand over.` })
+        : el('button', {
+          class: 'cx-btn mini',
+          text: 'Ask for the pen',
+          title: `Let ${holder} know you are waiting. They decide; nothing is taken.`,
+          onClick: async (event) => {
+            event.currentTarget.disabled = true;
+            await filestore.requestPen();
+          },
+        }));
+    }
+
+    const bar = el('div', { id: 'cx-readonly-bar', class: 'cx-readonly-bar', role: 'status' }, kids);
+    document.getElementById('main')?.prepend(bar);
+  }
+
+  Object.defineProperty(__x, "installAccessMode", { get: () => installAccessMode, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // ui/canvas_hint.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["ui/canvas_hint.js"] = function (__x, __req) {
@@ -34428,16 +33392,12 @@ __mods["main.js"] = function (__x, __req) {
    * Application entry point.
    *
    * Boot order matters and is deliberate:
-   *   0. the backend, if this build has one, restores its session and — when
-   *      nobody is signed in — puts the gate up before anything else renders,
-   *   1. storage opens and hands back the document to load,
+   *   1. storage opens and hands back the document to load — the plan in the
+   *      shared folder when it can be reached, a local copy otherwise,
    *   2. the store adopts it (nothing renders against an empty document),
    *   3. the theme is applied before the first paint, so there is no flash,
    *   4. the shell and canvas mount,
    *   5. interaction, shortcuts and menus attach last, once their targets exist.
-   *
-   * Step 0 does nothing at all when `config.js` is blank, which is what keeps
-   * the local-first, double-click-index.html build exactly as it was.
    *
    * Imports: everything — this is the only module allowed to.
    */
@@ -34447,7 +33407,6 @@ __mods["main.js"] = function (__x, __req) {
   const { projectExtent, effectiveToday } = __req("core/model.js");
   const store = __req("core/store.js");
   const { init: initStorage, takeRecovery, saveNow } = __req("core/storage.js");
-  const cloud = __req("core/cloud.js");
   const filestore = __req("core/filestore.js");
   const desktop = __req("core/desktop.js");
   const { criticalPath, linkViolations } = __req("core/analysis.js");
@@ -34461,16 +33420,14 @@ __mods["main.js"] = function (__x, __req) {
   const { buildMinimap } = __req("ui/minimap.js");
   const { buildLegend } = __req("ui/legend.js");
   const { installMenus } = __req("ui/menus.js");
-  const { requireSignIn, installAccessMode } = __req("ui/auth.js");
   const { installP6Drops } = __req("ui/p6.js");
   const { installLookaheadDrops } = __req("ui/lookahead.js");
   const { installShortcuts } = __req("ui/shortcuts.js");
+  const { installAccessMode } = __req("ui/access_mode.js");
   const { installCommandMenu } = __req("ui/command_menu.js");
   const { installCanvasHint } = __req("ui/canvas_hint.js");
   const workspace = __req("ui/workspace.js");
   const { loadCalendar } = __req("ui/calendar_loader.js");
-  const rcClient = __req("core/rc.js");
-  const { lockPlan, setAccount } = __req("core/access.js");
   const exporters = __req("io/exporters.js");
   const cmd = __req("ui/commands.js");
   const { toast, showTooltip, hideTooltip, confirmDialog } = __req("ui/components.js");
@@ -34490,21 +33447,6 @@ __mods["main.js"] = function (__x, __req) {
     // browser this resolves to null immediately and nothing below it happens.
     const startupPen = filestore.startupPen();
 
-    /* ── 0. Account ──────────────────────────────────────────────────────── */
-    if (cloud.isConfigured()) {
-      try {
-        await cloud.init();
-        if (!cloud.isSignedIn()) {
-          // The splash covers the whole viewport and would sit on top of the
-          // sign-in card, swallowing its clicks. Loading is over: say so.
-          dismissSplash();
-          await requireSignIn();
-        }
-      } catch (err) {
-        console.error('[cx-timeline] sign-in failed:', err);
-      }
-    }
-
     /* ── 1. Storage & document ───────────────────────────────────────────── */
     let loaded;
     try {
@@ -34517,9 +33459,7 @@ __mods["main.js"] = function (__x, __req) {
     if (loaded) {
       store.replaceDoc(loaded.doc, 'load');
       // Offer to recover work the unload handler saved after an unclean exit.
-      // A read-only project has nothing to recover — the user cannot have
-      // changed it — so the prompt would be nonsense.
-      const recovery = cloud.isReadOnly() ? null : takeRecovery(loaded.doc);
+      const recovery = takeRecovery(loaded.doc);
       if (recovery) {
         setTimeout(() => offerRecovery(recovery), 900);
       }
@@ -34587,37 +33527,18 @@ __mods["main.js"] = function (__x, __req) {
     // cannot leave anybody unable to open the application. Absent in a browser.
     window.CX_SHELL?.confirmHealthy?.();
 
-    // The timeline kept for when there is no network (sw.js). After the gate
-    // above, like everything that is not needed to open the plan.
-    installOfflineShell();
-
     // The resource calendar is registered here and built on first use — after
-    // the line above, deliberately. It needs a network and an account, and the
-    // trial gate must not be waiting on either: a calendar that could not reach
-    // its backend would otherwise look exactly like a broken update and get
-    // rolled back.
-    // Its code is a second bundle, fetched the first time it is opened — see
-    // ui/calendar_loader.js — so nobody who only uses the timeline downloads it.
+    // the line above, deliberately: a calendar that could not read its folder
+    // must never look like a broken update and get rolled back. Its code is the
+    // calendar bundle, which the desktop payload carries with the main one (see
+    // ui/calendar_loader.js).
     workspace.registerCalendar(() => loadCalendar().then((calendar) => calendar.build()));
 
-    // Resolve the calendar account, if there is a backend for one. This is the
-    // only thing here that touches a network, and it deliberately sits after the
-    // gate above so an unreachable backend can never look like a broken update.
-    //
-    // It is not awaited: the timeline is already usable, and whether somebody is
-    // a read-only viewer only changes what chrome to draw. When it settles it
-    // emits, the shell rebuilds, and a viewer lands on the calendar — which is
-    // the one case that cannot wait for a switch, because a viewer has no switch.
-    if (rcClient.isConfigured()) {
-      rcClient.init().catch((err) => {
-        console.warn('[cx-timeline] the resource calendar could not be reached:', err.message);
-      });
-      installPenIdentity();
-    }
-    // Whether this account may edit the plan at all. Outside the filestore branch
-    // above: it is about the account, not about the folder, and it decides the
-    // store's gate whichever backend the plan is on.
-    installPlanAccess();
+    // A different plan is a different view. Restored on replacement rather than
+    // carried over: the last filter applied to somebody else's bars is not a
+    // filter anybody asked for.
+    on(EV.DOC_REPLACED, () => store.restoreAccountView());
+    store.restoreAccountView();
 
     console.info(`CX Timeline ${APP_VERSION} ready in ${Math.round(performance.now() - started)}ms`);
 
@@ -34625,22 +33546,6 @@ __mods["main.js"] = function (__x, __req) {
     // it, and last, so booting is never held up by a question.
     const pen = await startupPen;
     if (pen) await cmd.announceStartupPen(pen);
-  }
-
-  /**
-   * Register the site's service worker, which keeps the timeline (never the plan)
-   * so it opens with no network — the plan in file mode is already on this
-   * machine. Not in the desktop app, whose page is on disk already and whose
-   * updates are its own (tools/shell/loader.js), and not from a file:// page,
-   * which cannot have one.
-   */
-  function installOfflineShell() {
-    if (window.CX_SHELL || desktop.isAvailable()) return;
-    if (!('serviceWorker' in navigator) || !/^https?:$/.test(location.protocol)) return;
-    navigator.serviceWorker.register('sw.js', { scope: './' }).catch((err) => {
-      // Not fatal: the timeline runs without it, it only cannot open offline.
-      console.warn('[cx-timeline] the service worker did not register:', err.message);
-    });
   }
 
   /** Fade out the boot splash. Safe to call more than once. */
@@ -34710,92 +33615,6 @@ __mods["main.js"] = function (__x, __req) {
       if (refusedNotice) refusedNotice.dismiss();
       refusedNotice = null;
     });
-  }
-
-  /**
-   * Let the pen borrow the name the calendar already knows.
-   *
-   * The lock has always carried a *self-declared* name, typed into a field in
-   * the Shared folder pane, and `getDisplayName()` falls back to "Someone" when
-   * nobody has. So the most common reading of the read-only banner was "Someone
-   * has this plan open" — the least useful answer available, on the one screen
-   * where knowing who matters.
-   *
-   * In a calendar deployment that person is already signed in, with a real name
-   * on their roster row. Borrowing it costs nothing and moves no data: the name
-   * goes into a lock file in the same folder the plan is in, and the plan still
-   * has no backend of any kind.
-   *
-   * Only when nothing has been set. A name somebody typed is a deliberate
-   * choice — "Alex" rather than "Alexander Khoury" — and overwriting it every
-   * time the session refreshes would be the application arguing with them.
-   */
-  function installPenIdentity() {
-    const adopt = () => {
-      if (!filestore.isSupported()) return;
-      const known = filestore.getDisplayName();
-      if (known && known !== 'Someone') return;
-      // Never the name of somebody an administrator is only previewing as.
-      if (rcClient.previewing()) return;
-      const name = rcClient.me()?.name;
-      if (name) filestore.setDisplayName(name);
-    };
-    on(EV.RC_AUTH_CHANGED, adopt);
-    adopt();
-  }
-
-  /**
-   * A calendar member reads the plan and never writes it.
-   *
-   * The plan is the P6 narrative: it carries the contract schedule, the baselines
-   * and the dependencies, and it is maintained by whoever runs the project. The
-   * calendar's members are the field team — they record their own days and read
-   * what they have been asked to do. They were read-only in practice, because the
-   * plan lives in a folder and somebody else usually held the pen, and that is not
-   * the same thing at all: the pen is a *turn*, so "Take over editing" was on
-   * screen and a member who pressed it got the plan.
-   *
-   * So it is stated rather than left to the folder. The role comes from the
-   * calendar, which `core/store.js` and `core/filestore.js` must never import, so
-   * it is pushed down into `core/access.js` from here — the one module that may
-   * see both. After that the store refuses every edit and the pen refuses to be
-   * taken, and the interface stops offering either, in that order of importance.
-   *
-   * **Only when the calendar has an opinion.** No backend, local mode, and every
-   * test suite leave the lock alone, and a signed-out session is not a member of
-   * anything: the timeline is exactly as editable as it has always been until an
-   * account that is a member of a configured calendar signs in.
-   */
-  function installPlanAccess() {
-    const apply = () => {
-      /* Whose view this is. The calendar's account where there is one, the
-         timeline's own where there is not, and '' for a local build with neither —
-         which is one shared view per browser profile, exactly as it has always
-         been. It is a key and never a name: it goes into a localStorage key. */
-      setAccount(rcClient.currentUser()?.id || cloud.currentUser()?.id || '');
-      store.restoreAccountView();
-
-      const member = rcClient.isConfigured() && rcClient.isSignedIn()
-        && Boolean(rcClient.me()) && !rcClient.isAdmin();
-      const previewing = rcClient.previewing();
-      lockPlan(member
-        ? (previewing
-          ? `You are seeing the calendar as ${previewing.name}, who reads the plan and never writes it. `
-            + 'Go back to your own view in the calendar to edit.'
-          : 'Your calendar account is not an administrator, so the plan opens read-only. '
-            + 'Everything you filter, hide or compare here is yours alone and stays with your '
-            + 'account.')
-        : '');
-      emit(EV.ACCESS_CHANGED, { readOnly: store.isDocReadOnly() });
-      emit(EV.FILE_STATE, filestore.state());
-    };
-    on(EV.RC_AUTH_CHANGED, apply);
-    on(EV.AUTH_CHANGED, apply);
-    // A different plan is a different view. Restored on replacement rather than
-    // carried over: the last filter applied to somebody else's bars is not a
-    // filter anybody asked for.
-    on(EV.DOC_REPLACED, () => store.restoreAccountView());
-    apply();
   }
 
   /* ── The shared folder ─────────────────────────────────────────────────── */
@@ -34972,6 +33791,16 @@ __mods["main.js"] = function (__x, __req) {
   function installDesktopShell() {
     window.addEventListener('cx-shell-update', (/** @type {CustomEvent} */ event) => {
       const version = event.detail?.version || '';
+      if (event.detail?.installer) {
+        toast({
+          tone: 'info',
+          title: version ? `Version ${version} needs a new installer` : 'A new installer is needed',
+          message: 'This copy keeps working as it is. Install the newest CX Timeline from the repository\'s '
+            + 'GitHub Releases page to take the update.',
+          sticky: true,
+        });
+        return;
+      }
       toast({
         tone: 'info',
         title: version ? `Version ${version} is ready` : 'An update is ready',

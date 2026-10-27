@@ -1715,6 +1715,117 @@ export async function intakeHash(rel) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   The calendar's files
+
+   The resource calendar keeps its tables as JSON files under `calendar/` in
+   this folder (see `core/rc_db.js`). They are read and written as text — the
+   intake doors above move bytes as arrays of numbers through the desktop
+   bridge, which is fine for a workbook and far too slow for a month of
+   history — and every write is guarded: given the stamp the caller last saw,
+   it refuses when the file on disk is not that one, with `kind: 'conflict'`,
+   exactly as `savePlan()` refuses. On the desktop the compare and the write
+   are one call and the write is atomic.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** `{ text, stamp }`, or null when the file does not exist. */
+export async function dataRead(rel) {
+  if (!folderRef) throw new Error('No folder is connected.');
+  if (onDesktop()) return desktop.dataRead(folderRef, rel);
+  try {
+    const parts = rel.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'));
+    const file = await (await dir.getFileHandle(name)).getFile();
+    return { text: await file.text(), stamp: { size: file.size, modified: file.lastModified } };
+  } catch (err) {
+    if (err && (err.name === 'NotFoundError' || err.name === 'TypeMismatchError')) return null;
+    throw err;
+  }
+}
+
+/** Size and modified time, or null when the file does not exist. */
+export async function dataStat(rel) {
+  if (!folderRef) throw new Error('No folder is connected.');
+  if (onDesktop()) return desktop.dataStat(folderRef, rel);
+  try {
+    const parts = rel.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'));
+    const file = await (await dir.getFileHandle(name)).getFile();
+    return { size: file.size, modified: file.lastModified };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write text, creating folders on the way, refusing when the file on disk is
+ * not the one `expected` describes (null: write whatever is there).
+ */
+export async function dataWrite(rel, text, expected = null) {
+  if (!folderRef) throw new Error('No folder is connected.');
+  if (onDesktop()) return desktop.dataWrite(folderRef, rel, text, expected);
+  const parts = rel.split('/');
+  const name = parts.pop();
+  const dir = await webFolder(parts.join('/'), { create: true });
+  const handle = await dir.getFileHandle(name, { create: true });
+  if (expected) {
+    const current = await handle.getFile();
+    if (current.size !== expected.size || current.lastModified !== expected.modified) {
+      const err = new Error(`${rel} changed on disk, so the save was refused`);
+      err.kind = 'conflict';
+      throw err;
+    }
+  }
+  const writable = await handle.createWritable({ keepExistingData: false });
+  await writable.write(text);
+  await writable.close();
+  const after = await handle.getFile();
+  return { size: after.size, modified: after.lastModified };
+}
+
+/** The files in one folder, `[{ name, size, modified }]`; empty when it does not exist. */
+export async function dataList(rel) {
+  if (!folderRef) throw new Error('No folder is connected.');
+  if (onDesktop()) return desktop.intakeList(folderRef, rel);
+  try {
+    const dir = await webFolder(rel);
+    const out = [];
+    for await (const [name, handle] of dir.entries()) {
+      if (handle.kind !== 'file') continue;
+      const file = await handle.getFile();
+      out.push({ name, size: file.size, modified: file.lastModified, conflict: isConflictCopy(name) });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Delete one file inside a subfolder. Answers whether there was one. */
+export async function dataRemove(rel) {
+  if (!folderRef) throw new Error('No folder is connected.');
+  if (onDesktop()) return desktop.intakeDelete(folderRef, rel);
+  try {
+    const parts = rel.split('/');
+    const name = parts.pop();
+    const dir = await webFolder(parts.join('/'));
+    await dir.removeEntry(name);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * This install's identity and the name it goes by — what the calendar's pen
+ * is claimed as, so it reads the same as the plan's.
+ */
+export function identity() {
+  return { device: deviceId(), name: getDisplayName(), session: sessionId };
+}
+
 export async function putBlob(id, file) {
   if (!folderRef) throw new Error('No folder is connected.');
   return ioPutBlob(folderRef, id, file);

@@ -47,7 +47,7 @@ import {
   toast, confirmDialog, contextMenu, openModal, textInput, selectInput, segmented, emptyState,
   attachTooltip, checkbox,
 } from './components.js';
-import { notifyChanged, todayISO, nameRegister, foldName, codeNodes } from './rc_util.js';
+import { notifyChanged, todayISO, nameRegister, foldName, codeNodes, authorNames } from './rc_util.js';
 import { publishFromEditor, publishDays, EDITOR_SOURCE } from './rc_ingest.js';
 import { la } from './rc_la_state.js';
 import { loadP6, openP6Picker, openP6Import, p6Words } from './rc_la_p6.js';
@@ -61,7 +61,17 @@ const SAVE_BATCH = 400;
 const POLL_MS = 20000;
 /** While the bell is connected (`rc.lookaheadLive()`), a poll is only a check on it. */
 const POLL_LIVE_MS = 120000;
-const PUBLISH_QUIET_MS = 2500;
+/**
+ * How long the editor waits, quiet, before it takes a reading on its own.
+ *
+ * Done editing, and leaving the editor for another section, take one at once
+ * (`flushEditor()`); this only catches an editor left open. It was two and a
+ * half seconds while other people read the database live — every pause was a
+ * reading — and each reading is now a file in the shared folder that OneDrive
+ * uploads, so a reading is taken when somebody has finished, not when they
+ * stopped to think. The edit log keeps the fine detail either way.
+ */
+const PUBLISH_QUIET_MS = 120000;
 
 /**
  * The editor's state, kept for the life of the page so a redraw of the tab —
@@ -1986,7 +1996,7 @@ function activitiesIn(rows) {
 /** Alt+K: link every selected activity to one P6 activity, or give them all one reason. */
 function linkSelection(query = '') {
   if (!E.p6.available) {
-    toast({ tone: 'warn', message: 'This database has no P6 tables yet — run supabase/rc_schema.sql.', timeout: 8000 });
+    toast({ tone: 'warn', message: 'The P6 list could not be read from the folder — try again once OneDrive has synced it.', timeout: 8000 });
     return;
   }
   const rows = activitiesIn(selectedRows());
@@ -2728,7 +2738,7 @@ async function historyDialog(row, day) {
     toast({ tone: 'bad', message: err.message });
     return;
   }
-  const who = new Map(people.filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
+  const nameOf = authorNames(people);
   const when = (iso) => new Date(iso).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const meaning = (hex) => E.legendAll.find((e) => e.argb === hex)?.meaning || '';
   const name = ed.metaValues(row).filter(Boolean)[0] || (row.kind === 'resource' ? 'Names row' : 'Row');
@@ -2738,7 +2748,7 @@ async function historyDialog(row, day) {
     for (const h of ed.cellHistory(edits, row.id, day)) {
       list.appendChild(el('li', { class: 'lae-history-item' }, [
         el('span', { class: 'lae-history-when', text: when(h.at) }),
-        el('span', { class: 'lae-history-who', text: who.get(h.by) || 'Somebody' }),
+        el('span', { class: 'lae-history-who', text: nameOf(h.by) || 'Somebody' }),
         el('span', { class: 'lae-history-what' }, [
           el('span', { class: 'lae-history-from', text: ed.describeCellValue(h.before, meaning) }),
           el('span', { class: 'lae-history-arrow', html: icon('chevron-right', { size: 11 }), 'aria-label': 'became' }),
@@ -2753,7 +2763,7 @@ async function historyDialog(row, day) {
           : h.changes.map((c) => `${c.field}: ${c.from === '' ? 'empty' : c.from} → ${c.to === '' ? 'empty' : c.to}`).join('; ');
       list.appendChild(el('li', { class: 'lae-history-item' }, [
         el('span', { class: 'lae-history-when', text: when(h.at) }),
-        el('span', { class: 'lae-history-who', text: who.get(h.by) || 'Somebody' }),
+        el('span', { class: 'lae-history-who', text: nameOf(h.by) || 'Somebody' }),
         el('span', { class: 'lae-history-what', text: what }),
       ]));
     }
@@ -2779,7 +2789,7 @@ async function restoreDialog() {
     toast({ tone: 'bad', message: err.message });
     return;
   }
-  const who = new Map(people.filter((p) => p.user_id).map((p) => [p.user_id, p.name]));
+  const nameOf = authorNames(people);
   const points = ed.restorePoints(edits).slice(0, 60);
   if (!points.length) {
     toast({ message: 'Nothing has been changed here yet, so there is nowhere to go back to.' });
@@ -2798,7 +2808,7 @@ async function restoreDialog() {
         onClick: () => { chosen = p; drawList(); },
       }, [
         el('span', { class: 'lae-restore-when', text: when(p.at) }),
-        el('span', { text: who.get(p.by) || 'Somebody' }),
+        el('span', { text: nameOf(p.by) || 'Somebody' }),
         el('span', { class: 'rc-hint', text: `${p.count} change${p.count === 1 ? '' : 's'} on ${p.rows} row${p.rows === 1 ? '' : 's'}` }),
       ]));
     }
@@ -3193,6 +3203,9 @@ function startPolling() {
     if (!E.root?.isConnected || document.hidden || E.editing || E.queue.length || E.saving) return;
     asked = Date.now();
     try {
+      // The folder first: another computer's save is only in memory once it is read in.
+      await rc.checkFolder();
+      if (E.editing || E.queue.length || E.saving) return;
       const rev = await rc.lookaheadRevision();
       // Asked again after the wait: an edit made meanwhile is not the other editor's.
       if (E.editing || E.queue.length || E.saving) return;

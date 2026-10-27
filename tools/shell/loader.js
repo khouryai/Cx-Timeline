@@ -2,8 +2,10 @@
  * The desktop shell's loader.
  *
  * Copied into `dist-desktop/loader.js` by `tools/desktop.js`, which substitutes
- * the placeholder on the CHANNEL line below for the deployment this build
- * follows. That token appears exactly once in this file on purpose — the
+ * the placeholder on the CHANNEL line below for the update channel this build
+ * follows — the `desktop-kit` branch of the GitHub repository, read through
+ * raw.githubusercontent.com, which `.github/workflows/kit.yml` writes once
+ * Checks passes on the default branch. That token appears exactly once in this file on purpose — the
  * assembler checks, because a build where it went unsubstituted is a build that
  * silently never updates.
  *
@@ -15,7 +17,7 @@
  *
  *   the copy inside the installer      always present, works on a plane, and is
  *                                      what a first launch uses.
- *   a newer copy from the deployment   fetched in the background, kept in
+ *   a newer copy from GitHub           fetched in the background, kept in
  *                                      IndexedDB, and used from the next launch.
  *
  * Two rules keep that honest:
@@ -30,19 +32,24 @@
  *   interface in another. The new copy is stored, the user is told it is ready,
  *   and it is used the next time the window opens.
  *
- * On trust: this executes code fetched from the deployment, which is the same
- * trust boundary as a browser visiting that deployment — a compromise of the
- * host is a compromise either way. The narrowing that is available is applied:
- * one pinned HTTPS host, allowed by the Content-Security-Policy in
+ * On trust: this executes code fetched from the repository's `desktop-kit`
+ * branch, so whoever may push to the repository may change what runs — the
+ * same people who could change the installer. The narrowing that is available
+ * is applied: one pinned HTTPS host, allowed by the Content-Security-Policy in
  * `tauri.conf.json` and nothing else, and a payload that is rejected unless it
- * is shaped like a release. It reads no folder and holds no plan; every file
+ * is shaped like a release.
+ *
+ * A copy that needs more of the Rust side than this installer has is never
+ * stored: `requiresShell` in the channel's version.json is compared with this
+ * installer's `shell` in shipped.json, and the application is told a new
+ * installer is needed instead. It reads no folder and holds no plan; every file
  * the user's data passes through is the Rust side.
  */
 
 (function () {
   'use strict';
 
-  /** The deployment this build follows. Substituted at assembly time. */
+  /** The update channel this build follows. Substituted at assembly time. */
   var CHANNEL = '__CHANNEL__';
 
   var DB_NAME = 'cx-timeline-shell';
@@ -56,7 +63,7 @@
    * itself up. Finding it still here on the next launch means that copy could
    * not boot, so it is thrown away and the installed one runs instead. Without
    * this, one bad deploy would leave both laptops unable to open the
-   * application at all — and no way to fix it from the deployment, because the
+   * application at all — and no way to fix it from the channel, because the
    * broken copy is what would have to fetch the fix.
    */
   var TRIAL_KEY = 'cx-shell-trial';
@@ -70,7 +77,7 @@
   /**
    * What the shell is doing, readable from the application and from the tests.
    * `source` is 'shipped' when running the copy inside the installer and
-   * 'downloaded' when running one that came from the deployment.
+   * 'downloaded' when running one that came from the update channel.
    */
   var shell = {
     channel: CHANNEL,
@@ -78,6 +85,8 @@
     version: '',
     builtAt: '',
     update: null,
+    /** What this installer's Rust side provides — `SHELL` in tools/desktop.js. */
+    shellApi: 0,
     checkNow: null,
     /** Replaced when a downloaded copy is on trial; a no-op otherwise. */
     confirmHealthy: function () {},
@@ -153,7 +162,7 @@
   }
 
   /**
-   * Run a copy that came from the deployment.
+   * Run a copy that came from the update channel.
    *
    * The shipped stylesheets are removed rather than left underneath, so what is
    * on the page is one version's CSS and not two overlaid. The bundle is handed
@@ -245,17 +254,18 @@
    */
   function checkForUpdate() {
     if (!CHANNEL) return Promise.resolve(null);
-    return fetchJson(CHANNEL + '/desktop/version.json')
+    return fetchJson(CHANNEL + '/version.json')
       .then(function (remote) {
         if (!remote || !remote.builtAt || remote.builtAt <= shell.builtAt) return null;
-        return fetchJson(CHANNEL + '/desktop/payload.json');
+        if (needsInstaller(remote)) return announceInstaller(remote);
+        return fetchJson(CHANNEL + '/payload.json');
       })
       .then(function (payload) {
-        if (!payload) return null;
+        if (!payload || payload.installer) return null;
         // A truncated or unrelated answer — a captive portal's login page, say —
         // must never be stored: it would break the *next* launch, when there is
         // no network to tell us it was wrong.
-        if (!looksLikeRelease(payload) || payload.builtAt <= shell.builtAt) return null;
+        if (!looksLikeRelease(payload) || payload.builtAt <= shell.builtAt || needsInstaller(payload)) return null;
         return dbPut(payload).then(function () {
           shell.update = { version: payload.version, builtAt: payload.builtAt };
           window.dispatchEvent(new CustomEvent('cx-shell-update', { detail: shell.update }));
@@ -263,11 +273,22 @@
         });
       })
       .catch(function (err) {
-        // Offline, blocked by a proxy, or the deployment is down. The
+        // Offline, blocked by a proxy, or GitHub is unreachable. The
         // application is already running; there is nothing to report.
         console.info('[cx-shell] no update available:', err.message);
         return null;
       });
+  }
+
+  /** A copy that calls Rust commands this installer does not have. */
+  function needsInstaller(release) {
+    return (Number(release.requiresShell) || 0) > shell.shellApi;
+  }
+
+  function announceInstaller(remote) {
+    shell.update = { version: remote.version || '', builtAt: remote.builtAt, installer: true };
+    window.dispatchEvent(new CustomEvent('cx-shell-update', { detail: shell.update }));
+    return { installer: true };
   }
 
   shell.checkNow = checkForUpdate;
@@ -278,6 +299,7 @@
     .then(function (results) {
       var shipped = results[0] || { version: '0.0.0', builtAt: '' };
       var cached = results[1];
+      shell.shellApi = Number(shipped.shell) || 0;
 
       // A copy that was started last launch and never reported itself up cannot
       // boot. Throw it away rather than trying it again forever.
@@ -288,7 +310,7 @@
         dbPut(null);
       }
 
-      var useCached = cached && looksLikeRelease(cached) && cached.builtAt > shipped.builtAt;
+      var useCached = cached && looksLikeRelease(cached) && cached.builtAt > shipped.builtAt && !needsInstaller(cached);
       var active = useCached ? cached : shipped;
 
       shell.version = active.version;

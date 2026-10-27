@@ -51,13 +51,13 @@ export async function masterExport(page, { check }) {
   const dialog = page.locator('.cx-modal', { hasText: 'Master export' });
   await dialog.waitFor({ timeout: 5000 });
   check('it asks what goes in — a sheet each, every one ticked to begin with',
-    (await dialog.locator('.rc-mx-sheet input:checked').count()) === 11);
+    (await dialog.locator('.rc-mx-sheet input:checked').count()) === 8);
   check('and when — now, or on a schedule', (await dialog.locator('.rc-mx-every').count()) === 1);
 
-  const before = await page.evaluate(() => Object.keys(window.__files || {}).filter((k) => k.startsWith('exports/')).length);
+  const before = await page.evaluate(() => Object.keys(window.__folder.files).filter((k) => k.startsWith('exports/')).length);
   await dialog.locator('button', { hasText: 'Export now' }).click();
-  await page.waitForFunction((n) => Object.keys(window.__files || {}).filter((k) => k.startsWith('exports/')).length > n, before, { timeout: 20000 }).catch(() => {});
-  const filed = await page.evaluate(() => Object.keys(window.__files || {}).filter((k) => k.startsWith('exports/')));
+  await page.waitForFunction((n) => Object.keys(window.__folder.files).filter((k) => k.startsWith('exports/')).length > n, before, { timeout: 20000 }).catch(() => {});
+  const filed = await page.evaluate(() => Object.keys(window.__folder.files).filter((k) => k.startsWith('exports/')));
   check('"Export now" files the workbook into exports/ in the shared folder',
     filed.includes('exports/LookAhead_Latest.xlsx'), filed.join(' | '));
   check('with the 4WLA beside it, in its own layout', filed.some((k) => /4WLA/.test(k) && !/master/.test(k)), filed.join(' | '));
@@ -97,17 +97,17 @@ export async function masterExport(page, { check }) {
     laDates.length > 0 && laDates[0] <= longAgo.day && laDates.some((d) => d < thisMonday), `${laDates[0]} to ${laDates[laDates.length - 1]}`);
   check('and says that a week no reading has comes from the calendar as written',
     /The calendar as written — no reading has this week/.test(book.sheet('Look-ahead')) && /A reading</.test(book.sheet('Look-ahead')));
-  const want = ['About', 'Look-ahead', 'Shifts worked', 'Cancellations', 'Changes', 'Huddle outcomes', 'Blockers', 'Leave',
-    'P6 activities', 'TAWRs', 'SARs', 'Team', 'Locations', 'Legend', 'Support codes'];
+  const want = ['About', 'Look-ahead', 'Who is on what', 'Cancellations', 'Changes', 'Leave',
+    'P6 activities', 'TAWRs', 'Team', 'Locations', 'Legend', 'Support codes'];
   check('the workbook has a sheet for each, About first', JSON.stringify(book.names) === JSON.stringify(want), book.names.join(', '));
   check('and nothing could not be read', !book.failed.length, JSON.stringify(book.failed));
   const la = book.sheet('Look-ahead');
   check('the look-ahead sheet carries each day with its P6 activity', /CX-1040/.test(la) && /IXL Regression Testing/.test(la)
     && book.sheets.find((s) => s.name === 'Look-ahead')?.rows > 10, `${book.sheets.find((s) => s.name === 'Look-ahead')?.rows} rows`);
   check('its dates are dates Excel can sort, not text', /<c r="A2" s="\d+"><v>\d{5}<\/v><\/c>/.test(la));
-  const shifts = book.sheet('Shifts worked');
+  const shifts = book.sheet('Who is on what');
   check('the shifts sheet names who covered which shift', /Dan/.test(shifts) && /Day</.test(shifts),
-    `${book.sheets.find((s) => s.name === 'Shifts worked')?.rows} rows`);
+    `${book.sheets.find((s) => s.name === 'Who is on what')?.rows} rows`);
   const words = (xml) => xml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   check('the cancellations sheet carries the reason logged and who was responsible',
     /Our crew was reallocated/.test(book.sheet('Cancellations')) && /Hitachi/.test(book.sheet('Cancellations'))
@@ -115,7 +115,7 @@ export async function masterExport(page, { check }) {
     words(book.sheet('Cancellations')).slice(0, 700));
   check('the P6 sheet counts the rows naming each activity', /CX-1040/.test(book.sheet('P6 activities')));
   check('About says how a day is read and what each sheet holds',
-    /newest reading/.test(book.sheet('About')) && /Shifts worked/.test(book.sheet('About')));
+    /newest reading/.test(book.sheet('About')) && /Who is on what/.test(book.sheet('About')));
 
   /* The schedule. Saved now, its first export waits for the next slot rather
      than firing this minute; a slot passed exports once, and not again. */
@@ -128,10 +128,10 @@ export async function masterExport(page, { check }) {
     await dialog.locator('.rc-mx-status').innerText());
   await dialog.locator('button', { hasText: /^Save$/ }).click();
   const tick = (offsetMs) => page.evaluate((ms) => window.__CX_MODULES.req('ui/rc_master_export.js').scheduledTick(Date.now() + ms), offsetMs);
-  const count = () => page.evaluate(() => Object.keys(window.__files || {}).filter((k) => k === 'exports/LookAhead_Latest.xlsx').length);
+  const count = () => page.evaluate(() => Object.keys(window.__folder.files).filter((k) => k === 'exports/LookAhead_Latest.xlsx').length);
   const n0 = await count();
   check('a schedule just saved does not export straight away', (await tick(0)) === false && (await count()) === n0);
-  const filedBefore = await page.evaluate(() => window.__files['exports/LookAhead_Latest.xlsx']);
+  const filedBefore = await page.evaluate(() => window.__folder.files['exports/LookAhead_Latest.xlsx']?.modified);
   const lastAt = () => page.evaluate(() => JSON.parse(localStorage.getItem('cx.rc.masterExport') || '{}').last?.at || 0);
   const at0 = await lastAt();
   const ran = await tick(86400000);
@@ -139,9 +139,9 @@ export async function masterExport(page, { check }) {
     `${n0} → ${await count()} file(s)`);
   check('and only once for that slot', (await tick(86400000 + 60000)) === false);
   check('into the same file, replaced rather than added beside — always LookAhead_Latest.xlsx',
-    (await count()) === 1 && !(await page.evaluate(() => Object.keys(window.__files || {}).some((k) => /^exports\/.*master export/i.test(k)))));
+    (await count()) === 1 && !(await page.evaluate(() => Object.keys(window.__folder.files).some((k) => /^exports\/.*master export/i.test(k)))));
   check('and what is in it is the new export, not the old one kept',
-    Boolean(filedBefore) && (await page.evaluate(() => window.__files['exports/LookAhead_Latest.xlsx'])) !== filedBefore);
+    Boolean(filedBefore) && (await page.evaluate(() => window.__folder.files['exports/LookAhead_Latest.xlsx']?.modified)) > filedBefore);
   check('the time it ran is remembered on this computer',
     await page.evaluate(() => Boolean(JSON.parse(localStorage.getItem('cx.rc.masterExport') || '{}').lastRun)));
   // Back off, so nothing else in the suite meets a schedule.

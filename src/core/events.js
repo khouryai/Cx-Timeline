@@ -111,7 +111,7 @@ export const EV = {
      calendar must not disturb the timeline, which needs no account at all. */
   RC_AUTH_CHANGED: 'rc:auth', // { user, event }
   RC_CHANGED: 'rc:changed', // { what } — a row was written; panes reload
-  RC_QUEUE_CHANGED: 'rc:queue', // { pending } — unsynced huddle entries
+  RC_PEN: 'rc:pen', // { role, holder } — who may write the calendar changed
   RC_SHOW_TAB: 'rc:tab', // { tab } — a tab asking for another; ui/rc.js owns the router
 
   /* Which whole interface is on screen: the timeline, or the calendar. */
