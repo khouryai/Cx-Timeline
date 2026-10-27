@@ -1,10 +1,21 @@
 # Plan: CX Timeline on OneDrive alone
 
-**Status: saved, not started.** Nothing in this document has been implemented.
-It was written on 15 October 2026 so the change can be picked up later, by a
-person or a Claude session, without re-deriving it. Read it whole before
-starting; the stages are ordered so the live calendar keeps working until the
-day you switch.
+**Status: implemented, 27 October 2026.** Kept as the record of why. Where
+the build differs from what is written below, the build is right:
+
+- The calendar's database is `core/rc_db.js` — the Supabase builder's subset,
+  answered in the page over JSON files under `calendar/` — so the screens kept
+  their queries. Its pen is `core/rc_folder.js`; the one-time import is
+  `core/rc_import.js`, from the old site's *Reports → Back it up*.
+- The team's access is the folder's OneDrive sharing; nobody signs in.
+- Updates come from the `desktop-kit` branch on GitHub (`.github/workflows/kit.yml`),
+  not from a release asset: raw.githubusercontent.com answers a webview's fetch,
+  and a release download does not.
+- Kept: the look-ahead and its editor, the cancellation log, Changes, PTO,
+  TAWR, P6 links, the master export and the timeline. Removed: the huddle, the
+  week plan, My day, Reports, the inbox, SARs, the phone app and the website.
+
+How to move across and run it is `DEPLOY.md`.
 
 ---
 

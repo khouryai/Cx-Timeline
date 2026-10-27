@@ -2,86 +2,62 @@
 
 ## The one rule that bites
 
-`index.html` loads **`app.bundle.js`**, not `src/`, and the phone app's
-`m/index.html` loads **`mobile.bundle.js`**. After changing anything under
-`src/`, run `npm run build`, which writes all three bundles — the third,
-`calendar.bundle.js`, is the calendar the main one fetches on first use. They
-are committed on purpose: they are what a deploy serves, with no build step at
-the edge.
+`index.html` loads **`app.bundle.js`**, not `src/`. After changing anything
+under `src/`, run `npm run build`, which writes both bundles — the second,
+`calendar.bundle.js`, is the calendar the main one loads on first use. They are
+committed on purpose: they are what the desktop update kit is packed from, with
+no build step after Checks.
 
-## A saved plan, not started
+## One shape: the desktop app, and a OneDrive folder
 
-`docs/PLAN_ONEDRIVE_ONLY.md` is the owner's plan to drop Supabase and the
-website and run everything from OneDrive through the desktop app. It is saved
-for later. **Do not start it unless asked**, and read it whole first when you
-are.
+There is no server. The plan (the timeline) is a JSON file in a folder the user
+picked — one OneDrive or SharePoint keeps in sync — and the resource calendar
+is a set of JSON files under `calendar/` in the same folder. There is no
+Supabase, no account, no website and no phone app any more; how that came
+about is `docs/PLAN_ONEDRIVE_ONLY.md` (implemented), and how to run it is
+`DEPLOY.md`.
 
-## Hosted, with a local mode for tests
+It ships as the **Windows desktop build** in `src-tauri/`, where the folder is a
+path and simply opens. The same page also runs in Edge or Chrome over a folder
+the browser is granted (File System Access API) — that is how the browser
+suites drive it — and, with no folder connected, against browser storage
+(**local mode**), which is the development and test path.
 
-The application runs against Supabase (accounts, projects, backups, sharing).
-`config.js` is the only file that knows this — blank `supabaseUrl` puts it in
-**local mode**, against browser storage, with no account. That is the
-development and test path, not a deployment option: a build with a backend
-always requires an account (`requireAuth` defaults to true, and
-`tools/dist.js` refuses to publish a config with no backend).
+**Who may do what is the folder's sharing, never the application's.** A
+read-only OneDrive share cannot write; the application's read-only state (the
+pen, `body.read-only`) explains who is editing, it does not protect anything.
+What protects the work is the write guard: every file is written only if it is
+still the copy this window last read.
 
-There is a third shape, and it is a real deployment: **file mode**, where the
-document is a JSON file in a folder the user picked — a shared drive, or one
-synced by OneDrive or SharePoint. It is reachable only when there is no backend
-configured, needs no account, and puts nothing anywhere but that folder. See
-the shared-folder bullet in Conventions, and `DEPLOY.md` for how to ship it.
+**The calendar's database is `core/rc_db.js`.** It answers the subset of the
+Supabase client's builder the screens were written against — `from(table)`,
+`.select()`, `.eq()` … `.range()`, `.insert()`, `.upsert()`, `rpc()` — over
+tables kept in files, with the old views and functions ported to JavaScript
+(`rc_cancelled_days`, `rc_lookahead_days`, `rc_la_apply()`, `rc_tawr_revise()` …).
+So the screens kept their queries, and the rules Postgres used to enforce live
+in one module, tested in Node by `tools/test_rc_db.js`. Three things about it:
 
-File mode ships in two places, and they are the same application: the deployed
-site, where a browser has to be granted the folder, and the **Windows desktop
-build** in `src-tauri/`, where the folder is a path and simply opens. Neither has
-a backend. The desktop build is not a fork — it runs the same
-`app.bundle.js`, fetched from the deployment, so a change deployed once reaches
-both. See the two desktop bullets in Conventions.
+- **Every write is all or nothing, one at a time.** `tx()` applies the change in
+  memory, writes each touched file through the guard, and rolls memory back if
+  any write is refused — so what is on screen is what is on disk.
+- **A refused write says `conflict:` and reads the file again.** Another
+  computer's save that OneDrive brought down is never written over; the error
+  carries `err.conflict` and the screens say so.
+- **A write without the pen is refused before it reaches a file**
+  (`err.readOnly`). The pen is `core/rc_folder.js`, with the plan's rules
+  (`core/folder_rules.js`), but a separate pen: one person can hold the
+  timeline while another holds the calendar.
 
-Local mode is also why the 126-check offline suite still passes untouched. If
-you add a hosted-only feature, hide it behind `cloud.isConfigured()` and cover
-it in `tools/smoke_hosted.js` instead.
+**Nobody signs in.** `rc.me()` is the roster person whose name (or an
+*Also written as* spelling) is the name set in the application
+(`filestore.getDisplayName()`); an edit is stamped with that person's id.
+`rc.isAdmin()` is true whenever a calendar is open — there is one editor at a
+time, and whoever holds the pen may do everything — and `rc.canWrite()` is
+whether this window holds it.
 
-**Permissions are enforced in Postgres, never in the UI.** `supabase/schema.sql`
-defines three roles — owner, editor, viewer — as row-level security policies.
-`src/ui/auth.js` and the `body.read-only` styles explain the state to the user;
-they do not create it. Changing what a role may do means changing the SQL and
-`supabase/test/permissions.sql`, not the interface.
-
-**Sign-up is closed.** An account exists only because an administrator invited
-that address; a trigger on `auth.users` refuses anything else, so hiding the
-form is presentation, not the control. Supabase's own "Allow new users to sign
-up" must stay **on** — turning it off rejects invited people too, before the
-trigger runs. The first account ever created bootstraps as administrator.
-
-**There are two gates, and they claim the same trigger.** `rc_schema.sql`
-installs its own `on_auth_user_invited`, because a calendar deployment applies
-both files into one project and the timeline's version would refuse everybody
-the calendar invited. `rc_enforce_invitation()` accepts an invitation from
-*either* register, guarded by `to_regclass` so it works in a project that has
-only one of them. Apply `rc_schema.sql` **second**; re-running `schema.sql`
-afterwards puts the timeline-only gate back and locks calendar invitees out.
-
-Three things about Postgres here that have already caused bugs:
-
-- **A refused UPDATE or DELETE is not an error.** The row is excluded, the
-  statement matches nothing, and the driver reports success. Every save goes
-  through the `save_project()` function, which raises instead — and any direct
-  table write has to check the returned row count, or it will report a save
-  that never happened.
-- **A policy that queries the table it protects recurses.** The `can_read` /
-  `can_write` / `owns` / `is_admin` helpers are `SECURITY DEFINER` to step
-  outside RLS and break the cycle.
-- **A `RETURNS TABLE` column name shadows a real column inside plpgsql.**
-  `returns table (email text)` makes a bare `email` in the body resolve to the
-  OUT parameter, so `on conflict (email)` and unqualified INSERT column lists
-  fail at runtime — not at creation. This bit `share_project` and
-  `invite_user`; both now prefix their outputs (`member_email`,
-  `invited_email`).
-- **A BEFORE INSERT trigger cannot reference the row it is inserting.**
-  `accept_invitation` sets `accepted_user_id` to the new `auth.users` id, so
-  it has to run AFTER — in BEFORE the foreign key has nothing to point at and
-  every sign-up fails.
+**The old calendar comes in once**, from the backup the old site took of itself
+(*Reports → Back it up*): `core/rc_import.js` reads it, every id kept, and lists
+what is not coming (the huddle, the week plan, SARs, accounts).
 
 ## Architecture
 
@@ -98,51 +74,49 @@ else with a clear error:
   is a syntax error in real JavaScript, and the linker used to filter it away —
   so a file no browser could load bundled happily and shipped. A regex parser
   more forgiving than the language hides exactly the mistakes it should catch.
-- **Three bundles.** `app.bundle.js` is everything `main.js` reaches;
-  `calendar.bundle.js` is `ui/rc.js` and whatever only it reaches, fetched by
-  `ui/calendar_loader.js` the first time the calendar opens. Importing
+- **Two bundles.** `app.bundle.js` is everything `main.js` reaches;
+  `calendar.bundle.js` is `ui/rc.js` and whatever only it reaches, loaded by
+  `ui/calendar_loader.js` the first time the calendar opens (the desktop kit
+  carries both in one script, so the desktop loads nothing). Importing
   `ui/rc.js` statically from the main graph is a build error, and so is a
-  bundle that does not parse. `mobile.bundle.js` is the phone app, `mobile.js`
-  and what it reaches, standalone — and its entry carries a `forbid` list: the
-  timeline, the plan's storage and anything that reads a plan file are refused,
-  naming the chain of imports that reached them.
+  bundle that does not parse.
 
 ### Layers
 
 ```
 core/util · core/events · core/dates      leaves — import nothing
-core/sdk                                  a leaf: fetches vendor/supabase.js the
-                                          first time core/cloud or core/rc makes
-                                          a client
 core/folder_rules                         a leaf: the shared folder's names,
                                           digest and pen rules, pure (Node-tested)
-core/access                               a leaf: may this account edit the plan,
+core/access                               a leaf: may this window edit the plan,
                                           and the view that is theirs alone.
                                           Written by main.js, read by store and
                                           filestore — which must never see core/rc
-core/cloud                                the only module that knows Supabase
-core/rc                                   the calendar's *separate* Supabase client
-                                          — the plan's path never imports it
 core/desktop                              the only module that knows Tauri
 core/filestore → core/desktop · core/folder_rules
                                           the only module that knows the File
-                                          System Access API
+                                          System Access API, and the folder
+core/rc_db → core/folder_rules            the calendar's database: tables in files,
+                                          the old views and functions — no DOM,
+                                          storage handed in (Node-tested)
+core/rc_folder → core/filestore           calendar/ in the folder, and its pen
+core/rc → core/rc_db · core/rc_folder     the calendar's client — the plan's path
+                                          never imports it
+core/rc_import → core/rc_db               the old Supabase backup, read once
 core/model → core/query · core/history · core/analysis
 core/store → core/filestore · core/access · core/lookahead
                                           (never core/storage: that imports the
                                           store, and the build rejects the cycle)
 timeline/viewport → timeline/layout → timeline/connectors
                   → timeline/renderer → timeline/interactions
-ui/icons · ui/components → ui/lists · ui/auth → ui/theme → ui/commands
-ui/pane_util → ui/pane_plan · ui/pane_filters · ui/pane_io · ui/pane_projects
+ui/icons · ui/components → ui/lists · ui/access_mode → ui/theme → ui/commands
+ui/pane_util → ui/pane_plan · ui/pane_filters · ui/pane_io · ui/pane_backups
              · ui/pane_settings · ui/p6 · ui/lookahead → ui/panels
 ui/panels → ui/command_menu · ui/canvas_hint → ui/shell
-ui/workspace · ui/calendar_loader         the calendar, fetched on first use:
-    ui/rc → ui/rc_myday · ui/rc_roster → ui/rc_inbox · ui/rc_settings · ui/rc_activity
-          · ui/rc_huddle · ui/rc_week · ui/rc_pto · ui/rc_reports
+ui/workspace · ui/calendar_loader         the calendar, loaded on first use:
+    ui/rc → ui/rc_gate · ui/rc_roster → ui/rc_settings · ui/rc_activity
+          · ui/rc_pto · ui/rc_tawr · ui/rc_master_export
           · ui/rc_lookahead → ui/rc_la_editor · ui/rc_la_* · ui/rc_ingest → ui/rc_la_state
-          · ui/rc_table · ui/rc_tawr · ui/rc_master_export
-                                          → ui/rc_util   (calendar.bundle.js)
+          · ui/rc_table       → ui/rc_util   (calendar.bundle.js)
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
 io/rc_pdf → io/pdf · io/lookahead         the calendar drawn for print — no DOM
 core/la_edit → core/lookahead             the look-ahead editor's model — no DOM
@@ -154,17 +128,9 @@ core/export_schedule                      a leaf: when a scheduled master export
 io/la_xlsx → core/la_edit · io/xlsx_write the 4WLA as an .xlsx — no DOM
 core/tawr → core/lookahead                a look-ahead week as TAWRs — no DOM
 io/tawr_pdf → io/inflate · io/pdf         BART's fillable PDF, filled — no DOM
-ui/rc_gate                                the calendar's front door (no backend,
-                                          sign-in, not on the team), shared by
-                                          ui/rc and the phone app
+ui/rc_gate                                the calendar's front door: no folder, an
+                                          empty folder (import or start), unreadable
 main.js                                   the only module that may import freely
-
-mobile/theme · mobile/pwa                 the phone app (m/): leaves
-mobile/week · mobile/lookahead · mobile/timeoff · mobile/more
-  → mobile/shell → mobile.js              reads through ui/rc_util, ui/rc_gate and
-                                          ui/components — never the store, the
-                                          timeline or any plan I/O, which
-                                          tools/build.js refuses outright
 ```
 
 Lower layers never import upwards. When something low needs to reach the UI it
@@ -223,27 +189,16 @@ alternative shipped once and went wrong.
 - A claim says when its holder last *saved*, not just that it is alive. [→](docs/ARCHITECTURE.md#a-claim-says-when-its-holder-last-saved-not-just-that-it-is-alive)
 - The pen borrows the name the calendar already knows. [→](docs/ARCHITECTURE.md#the-pen-borrows-the-name-the-calendar-already-knows)
 - `core/filestore.js` has two backends and one set of rules. [→](docs/ARCHITECTURE.md#corefilestorejs-has-two-backends-and-one-set-of-rules)
-- The desktop build has no backend for the plan, and may have one for the calendar. [→](docs/ARCHITECTURE.md#the-desktop-build-has-no-backend-for-the-plan-and-may-have-one-for-the-calendar)
-- The desktop app is fed by the deployment, not by reinstalling. [→](docs/ARCHITECTURE.md#the-desktop-app-is-fed-by-the-deployment-not-by-reinstalling)
+- The calendar is files in the folder, behind its own pen, and every write is guarded: refused when the file on disk is not the one last read, rolled back whole (`core/rc_db.js`). [→](docs/ARCHITECTURE.md#the-calendar-is-files-in-the-folder)
+- The desktop app is fed by the `desktop-kit` branch, not by reinstalling; a kit that needs a newer installer (`SHELL` in `tools/desktop.js`) says so instead of running. [→](docs/ARCHITECTURE.md#the-desktop-app-is-fed-by-github-not-by-reinstalling)
 - The desktop app zooms the page as a browser does (Ctrl + / −, Ctrl + wheel, − 100% + in the status bar) through the window's own zoom, never CSS zoom. [→](docs/ARCHITECTURE.md#the-desktop-app-zooms-the-page-as-a-browser-does)
-- The published assets are named after their contents; the repository's are not. [→](docs/ARCHITECTURE.md#the-published-assets-are-named-after-their-contents-the-repositorys-are-not)
 - A download is the one action with no visible result, so it says so. [→](docs/ARCHITECTURE.md#a-download-is-the-one-action-with-no-visible-result-so-it-says-so)
 
 ### The resource calendar
 
 - The resource calendar is a second module, not a second product. [→](docs/ARCHITECTURE.md#the-resource-calendar-is-a-second-module-not-a-second-product)
 - A grid is the one heavy row, and it moves once. [→](docs/ARCHITECTURE.md#a-grid-is-the-one-heavy-row-and-it-moves-once)
-- Reads are remembered for thirty seconds and forgotten on every write. [→](docs/ARCHITECTURE.md#reads-are-remembered-for-thirty-seconds-and-forgotten-on-every-write)
 - The sheet is parsed once, against the legend it was parsed with. [→](docs/ARCHITECTURE.md#the-sheet-is-parsed-once-against-the-legend-it-was-parsed-with)
-- The huddle goes over today's work and plans the next working day, or goes over the previous working day — `rc_settings.huddle_reviews`, set in Organisation → Settings. [→](docs/ARCHITECTURE.md#the-huddle-goes-over-today-or-the-day-before--the-teams-choice)
-- The meeting can be run rather than filled in, and both are one path. [→](docs/ARCHITECTURE.md#the-meeting-can-be-run-rather-than-filled-in-and-both-are-one-path)
-- Pressing a status is the record; the line that follows is the detail. [→](docs/ARCHITECTURE.md#pressing-a-status-is-the-record-the-line-that-follows-is-the-detail)
-- An outcome is corrected, never edited — and "recorded" is not "final". [→](docs/ARCHITECTURE.md#an-outcome-is-corrected-never-edited--and-recorded-is-not-final)
-- A photograph goes up before the row, never after. [→](docs/ARCHITECTURE.md#a-photograph-goes-up-before-the-row-never-after)
-- An outcome says what the day was spent on, and what kind of work it was. [→](docs/ARCHITECTURE.md#an-outcome-says-what-the-day-was-spent-on-and-what-kind-of-work-it-was)
-- Who said it and who typed it are different facts. [→](docs/ARCHITECTURE.md#who-said-it-and-who-typed-it-are-different-facts)
-- The digest carries no rate and no score. [→](docs/ARCHITECTURE.md#the-digest-carries-no-rate-and-no-score)
-- A carry chain has to survive being rolled forward. [→](docs/ARCHITECTURE.md#a-carry-chain-has-to-survive-being-rolled-forward)
 - A read is only worth taking if the next one is compared to it. [→](docs/ARCHITECTURE.md#a-read-is-only-worth-taking-if-the-next-one-is-compared-to-it)
 - `before` and `after` are jsonb, and two places have to agree on the shape. [→](docs/ARCHITECTURE.md#before-and-after-are-jsonb-and-two-places-have-to-agree-on-the-shape)
 - The 4WLA *is* the plan for the days it names — derived, never written. [→](docs/ARCHITECTURE.md#the-4wla-is-the-plan-for-the-days-it-names--derived-never-written)
@@ -262,45 +217,20 @@ alternative shipped once and went wrong.
 - A BART resource can be cancelled without the day: "X.~WIT" strikes the witness out, the editor asks *Cancel and log* or *Just remove*, and `rc_cancelled_support_days` puts it in the log beside the days cancelled outright. [→](docs/ARCHITECTURE.md#a-bart-resource-can-be-cancelled-without-the-day-and-both-are-in-the-log)
 - The cancellation log is what the look-ahead says now (the newest reading covering each date), lists only BART's resources, and draws as a calendar exportable to Excel, coloured by whose it was (BART red, Hitachi blue, Other amber, no reason yet purple); "Show cells" pins the calendar to that row and its weeks (`la.calendarRow`), never a typed filter. [→](docs/ARCHITECTURE.md#the-cancellation-log-is-what-the-look-ahead-says-now-and-barts)
 - A wrong cancellation is removed from the log by a `dismissed` note, never deleted, and can be put back; a stored "Resource" label is never a cancellation. [→](docs/ARCHITECTURE.md#a-cancellation-can-be-removed-from-the-log-and-put-back)
-- The week plan is one tab, and it used to be two. [→](docs/ARCHITECTURE.md#the-week-plan-is-one-tab-and-it-used-to-be-two)
-- A day the 4WLA cancels is drawn cancelled in the week plan and the phone's week (`cancelledOn()`, the log's rule), and both redraw by the bell when a newer reading is published (`watchForNewReading()`). [→](docs/ARCHITECTURE.md#a-day-the-4wla-cancels-reaches-the-week-plan-by-itself)
 - Today is a column, not a hairline. [→](docs/ARCHITECTURE.md#today-is-a-column-not-a-hairline)
 - The workbook is the assumption, so only a hand-typed day is flagged. [→](docs/ARCHITECTURE.md#the-workbook-is-the-assumption-so-only-a-hand-typed-day-is-flagged)
-- The huddle reads the same index, so half the team stops reading as unplanned. [→](docs/ARCHITECTURE.md#the-huddle-reads-the-same-index-so-half-the-team-stops-reading-as-unplanned)
-- Linking an account before it exists is normal, not a failure. [→](docs/ARCHITECTURE.md#linking-an-account-before-it-exists-is-normal-not-a-failure)
-- The calendar is the team's; the register around it is not. [→](docs/ARCHITECTURE.md#the-calendar-is-the-teams-the-register-around-it-is-not)
-- A member plans their own days, and takes them back. [→](docs/ARCHITECTURE.md#a-member-plans-their-own-days-and-takes-them-back)
-- A member reads the plan and never writes it. [→](docs/ARCHITECTURE.md#a-member-reads-the-plan-and-never-writes-it)
-- A reader's view is their own. [→](docs/ARCHITECTURE.md#a-readers-view-is-their-own)
-- Reports, Organisation and the Daily huddle are an administrator's, and the tabs say so. [→](docs/ARCHITECTURE.md#reports-organisation-and-the-daily-huddle-are-an-administrators-and-the-tabs-say-so)
-- A day is a list of tasks, not a task. [→](docs/ARCHITECTURE.md#a-day-is-a-list-of-tasks-not-a-task)
-- There is one place a day is planned. [→](docs/ARCHITECTURE.md#there-is-one-place-a-day-is-planned)
-- When the sheet moves a task, the task moves. [→](docs/ARCHITECTURE.md#when-the-sheet-moves-a-task-the-task-moves)
-- Being scheduled is a different fact from what somebody may do. [→](docs/ARCHITECTURE.md#being-scheduled-is-a-different-fact-from-what-somebody-may-do)
-- An invitation link points at the site, not at the window it was made in. [→](docs/ARCHITECTURE.md#an-invitation-link-points-at-the-site-not-at-the-window-it-was-made-in)
 - Nothing is emailed from the application, and that is structural. [→](docs/ARCHITECTURE.md#nothing-is-emailed-from-the-application-and-that-is-structural)
-- Adding somebody to the calendar never needs the SQL editor. [→](docs/ARCHITECTURE.md#adding-somebody-to-the-calendar-never-needs-the-sql-editor)
-- Plan data must never reach Supabase, and that is enforced rather than intended. [→](docs/ARCHITECTURE.md#plan-data-must-never-reach-supabase-and-that-is-enforced-rather-than-intended)
-- A blocked day is not an obstacle until somebody owns it. [→](docs/ARCHITECTURE.md#a-blocked-day-is-not-an-obstacle-until-somebody-owns-it)
-- Asking for leave is a member's; answering is an administrator's. [→](docs/ARCHITECTURE.md#asking-for-leave-is-a-members-answering-is-an-administrators)
-- Two families of status, never averaged. [→](docs/ARCHITECTURE.md#two-families-of-status-never-averaged)
-- Retire is the first answer; Delete is the second, and Postgres decides which applies. [→](docs/ARCHITECTURE.md#retire-is-the-first-answer-delete-is-the-second-and-postgres-decides-which-applies)
-- Evidence is append-only, in the database. [→](docs/ARCHITECTURE.md#evidence-is-append-only-in-the-database)
+- Nothing in `src/` makes a network request; the window's policy allows only `raw.githubusercontent.com`, for updates — `test_kit.js` checks both. [→](docs/ARCHITECTURE.md#the-calendar-is-files-in-the-folder)
+- Retire is the first answer; Delete is the second, and the database decides which applies (`rc_delete_*`). [→](docs/ARCHITECTURE.md#retire-is-the-first-answer-delete-is-the-second-and-postgres-decides-which-applies)
 - The look-ahead's window moving is not a change of scope. [→](docs/ARCHITECTURE.md#the-look-aheads-window-moving-is-not-a-change-of-scope)
-- A plan is revised, never edited. [→](docs/ARCHITECTURE.md#a-plan-is-revised-never-edited)
 - The calendar's data can be taken out whole. [→](docs/ARCHITECTURE.md#the-calendars-data-can-be-taken-out-whole)
 - The master export is one Excel workbook, a sheet per question, each read through the function its screen uses (`assignmentIndex()`, `cancellationLog()`, `describe()`) and through the policies; the look-ahead's history is `rc_lookahead_days`, each week from its newest reading — by the week, never day by day over every reading, which took a minute on a real project; a week written in the editor that no reading has comes through the publish path (`writtenOnlyDays()`), and the 4WLA beside it (`4WLA_Latest.xlsx`) is every week written, not the next four. [→](docs/ARCHITECTURE.md#the-master-export-is-one-workbook-read-the-way-the-screens-read)
 - A scheduled master export runs in the page on this computer, catches a missed slot up once, and files into `exports/` in the shared folder as `LookAhead_Latest.xlsx`, replacing the last (downloads without one); its settings are this computer's. [→](docs/ARCHITECTURE.md#the-master-export-runs-on-a-schedule-in-the-page-and-files-into-the-shared-folder)
-- A SAR is recorded, filed and linked in that order, and each step can fail alone. [→](docs/ARCHITECTURE.md#a-sar-is-recorded-filed-and-linked-in-that-order-and-each-step-can-fail-alone)
 - The calendar is used standing up, so it stops assuming a wide screen. [→](docs/ARCHITECTURE.md#the-calendar-is-used-standing-up-so-it-stops-assuming-a-wide-screen)
 
-### The phone app
+### Shifts
 
-- The phone app (`m/`) is the calendar alone, and the linker keeps it that way; the answer to a refusal is to move the helper down a layer, never to widen what the phone may carry. [→](docs/ARCHITECTURE.md#the-phone-app-is-the-calendar-alone-and-the-linker-keeps-it-that-way)
-- It decides nothing of its own: every read is the calendar's (`assignmentIndex()`, `availability()`, `agendaFor()`), every write the same `rc_plan_entries` or `rc_leave` row through `core/rc.js`. [→](docs/ARCHITECTURE.md#the-phone-app-decides-nothing-of-its-own)
 - The third shift is called Blanket and stored as `possession`; draw a shift with `shiftLabel()`, never the raw value. [→](docs/ARCHITECTURE.md#the-third-shift-is-called-blanket-and-stored-as-possession)
-- A phone opening the site is sent to `m/` by `phone.js` before the bundle loads — phones only (shorter side under 600 px), calendar shape only, `?full=1` keeps the full site — so "Add to Home Screen" installs the app instead of bookmarking the desktop page. [→](docs/ARCHITECTURE.md#a-phone-opening-the-site-is-sent-to-the-phone-app)
-- Its service worker keeps the app, never the data, and is published in the calendar shape only. [→](docs/ARCHITECTURE.md#the-phones-service-worker-keeps-the-app-never-the-data)
 
 ### Reading the look-ahead workbook
 
@@ -333,7 +263,6 @@ alternative shipped once and went wrong.
 - Painting a cancellation asks why, once; the paint is saved whatever the answer. [→](docs/ARCHITECTURE.md#painting-a-cancellation-asks-why-once-and-not-now-is-an-answer)
 - Going back is new edits through `rc_la_apply()`, never a rewind of the log. [→](docs/ARCHITECTURE.md#going-back-is-new-edits-not-a-rewind)
 - The timeline reads the calendar's look-ahead in one step, and sends nothing back. [→](docs/ARCHITECTURE.md#the-timeline-reads-the-calendars-look-ahead-in-one-step)
-- Progress comes back from the huddle as actual dates, offered and never written unasked (`outcomeProgress()`); a bar standing for several activities finishes only when every one of them has. [→](docs/ARCHITECTURE.md#progress-comes-back-from-the-huddle-as-actual-dates-offered)
 - The export is also opened and re-saved by LibreOffice Calc in CI (`test_xlsx_compat.js`). [→](docs/ARCHITECTURE.md#the-export-is-opened-by-a-second-program-in-ci)
 - A staffing clash is about the team (names rows, the PTO row, booked leave, two shifts in a day) — never the support codes, and never a name the roster does not know. [→](docs/ARCHITECTURE.md#a-staffing-clash-is-about-the-team-never-about-the-support)
 - A day's or a row's history is `rc_la_edits` read for one place; nothing is reconstructed. [→](docs/ARCHITECTURE.md#a-days-history-is-the-edit-log-read-for-one-place)
@@ -347,9 +276,9 @@ alternative shipped once and went wrong.
 - A TAWR is one location, one shift, one week (Monday–Sunday), read off the newest reading by `extractWeek()` — never `rc_la_*`, never the workbook. [→](docs/ARCHITECTURE.md#a-request-is-one-location-one-shift-one-week)
 - Hours combine (earliest start, latest finish; the shift's own hours where the sheet has none), support adds across activities and the busiest day is asked for; a witness is never on the form and `tawr_line` says where each code goes. [→](docs/ARCHITECTURE.md#hours-combine-and-support-adds-and-the-busiest-day-is-asked-for)
 - An unknown location, a missing location and an unmapped colour are flags that stop approval, never guesses. [→](docs/ARCHITECTURE.md#what-the-sheet-cannot-say-is-a-default-what-it-cannot-be-trusted-with-is-a-flag)
-- A draft follows the look-ahead without losing an edit (`mergeRegenerated()`); an approved request is final in Postgres and changed only by `rc_tawr_revise()`. [→](docs/ARCHITECTURE.md#a-draft-follows-the-look-ahead-an-approved-request-is-final)
+- A draft follows the look-ahead without losing an edit (`mergeRegenerated()`); an approved request is final in `core/rc_db.js` and changed only by `rc_tawr_revise()`. [→](docs/ARCHITECTURE.md#a-draft-follows-the-look-ahead-an-approved-request-is-final)
 - BART's form is filled by an incremental update with an appearance per field, never redrawn, so it stays fillable and signable; every box — filled or blank, and the form's default — is set to 9 pt, never auto (a short box grows upwards; only text too wide shrinks), each field declares the size it was drawn at (never auto) a date takes the box's own `AFDate_FormatEx` format, `NeedAppearances` is switched off, and `FILLER_VERSION` is stamped into every download — raise it when what the filler writes changes. [→](docs/ARCHITECTURE.md#barts-form-is-filled-not-redrawn-and-stays-a-form)
-- The blank form lives in the private `tawr` bucket and is never committed or published; every TAWR table is an administrator's alone. [→](docs/ARCHITECTURE.md#the-blank-form-and-every-signature-are-an-administrators-alone)
+- The blank form lives in the folder (`calendar/tawr/template.pdf`) and is never committed. [→](docs/ARCHITECTURE.md#the-blank-form-and-every-signature-are-an-administrators-alone)
 - A signature is strokes saved once per administrator, drawn as vector lines at download; the approval signatures stay blank. [→](docs/ARCHITECTURE.md#a-signature-is-strokes-drawn-once-per-administrator)
 
 ### Added with the module split and the calendar bundle
@@ -357,35 +286,23 @@ alternative shipped once and went wrong.
 - **The calendar is a second bundle, fetched the first time it is opened.** [→](docs/ARCHITECTURE.md#the-calendar-is-a-second-bundle-fetched-the-first-time-it-is-opened)
 - **The folder's pure rules live in a leaf, and agree with the Rust.** [→](docs/ARCHITECTURE.md#the-folders-pure-rules-live-in-a-leaf-and-agree-with-the-rust)
 - **The calendar's database says which version it is.** [→](docs/ARCHITECTURE.md#the-calendars-database-says-which-version-it-is)
-- **Only the calendar reports its failures, and only from named places.** [→](docs/ARCHITECTURE.md#only-the-calendar-reports-its-failures-and-only-from-named-places)
 - **The command menu adds no behaviour.** [→](docs/ARCHITECTURE.md#the-command-menu-adds-no-behaviour)
 - **Every calendar table gets the same behaviour, without asking.** [→](docs/ARCHITECTURE.md#every-calendar-table-gets-the-same-behaviour-without-asking)
 - **An empty screen names its next step.** [→](docs/ARCHITECTURE.md#an-empty-screen-names-its-next-step)
 - **Touch decides the calendar's sizes, not width.** [→](docs/ARCHITECTURE.md#touch-decides-the-calendars-sizes-not-width)
 - **Announce what changes; never rely on colour alone.** [→](docs/ARCHITECTURE.md#announce-what-changes-never-rely-on-colour-alone)
-- **An administrator works from one list** — Organisation → Inbox reads every source that can be waiting on them, and says when one could not be read. [→](docs/ARCHITECTURE.md#an-administrator-works-from-one-list)
-- **Settings are changed on screen** (Organisation → Settings), and `rc_settings`' policy is the control. [→](docs/ARCHITECTURE.md#settings-are-changed-on-screen)
-- **View as is a preview, refused at the client**: every write in `core/rc.js` throws `err.preview` while it is on, and nothing queues it. [→](docs/ARCHITECTURE.md#seeing-it-as-somebody-else-is-a-preview-refused-at-the-client)
-- **My day is where the team opens the calendar**, and it records nothing — outcomes stay in the huddle. [→](docs/ARCHITECTURE.md#my-day-is-where-the-team-opens-the-calendar)
+- **Settings are changed on screen** (Lists → Settings). [→](docs/ARCHITECTURE.md#settings-are-changed-on-screen)
 - **Only my rows keeps the activity line with its names**: an activity is kept whole, never a names row alone, with the sections above (`rowsNaming()`). [→](docs/ARCHITECTURE.md#only-my-rows-keeps-the-activity-line-with-its-names)
-- **A task opens its whole activity**, found by its row only while the row still says the same thing; an identifier column is never a title. [→](docs/ARCHITECTURE.md#a-task-opens-its-whole-activity)
-- **What changed for me is two readings' stored rows compared** (`changesForMe()`), and **Got it is append-only** (`rc_la_seen`). [→](docs/ARCHITECTURE.md#what-changed-for-me-is-two-readings-compared-and-got-it-is-append-only)
 - **Changes say who made them**: a published reading carries each editor row's id (`la_row_id`, never shown), two readings that both carry ids are compared on them, and `editsBehind()` names who from `rc_la_edits`; **Every edit** is the log itself, one line per thing changed (`editLines()`). [→](docs/ARCHITECTURE.md#changes-say-who-made-them-by-the-rows-id)
 
 ### Added with the performance pass
 
-- The published bundles are minified (esbuild, `tools/dist.js`) and the committed ones are not; CI drives the browser suites against `dist/` too (`CX_SITE=dist`). [→](docs/ARCHITECTURE.md#the-published-bundles-are-minified-the-committed-ones-are-not)
-- The Supabase client is fetched when a client is made (`core/sdk.js`), never by a tag on the page. [→](docs/ARCHITECTURE.md#the-supabase-client-is-fetched-when-a-client-is-made)
 - The calendar's stylesheet (`css/rc.css`) comes with its bundle; `css/calendar.css` keeps what the main page draws, and `rc.css` wins every tie. [→](docs/ARCHITECTURE.md#the-calendars-stylesheet-comes-with-its-bundle)
-- A policy asks who is asking once per query: `(select auth.uid())`, never a bare call — the SQL suites name the offender. [→](docs/ARCHITECTURE.md#a-policy-asks-who-is-asking-once-per-query)
-- The look-ahead rings a bell (`rc_la_beacon`, `onLookaheadChange()`); the polls only check on it, and a newer revision forgets remembered reads. [→](docs/ARCHITECTURE.md#the-look-ahead-rings-a-bell-the-polls-only-check-on-it)
-- Every foreign key that names a calendar row has an index; stamps pointing at `auth.users` are exempt. [→](docs/ARCHITECTURE.md#every-foreign-key-that-names-a-calendar-row-has-an-index)
-- Paged reads ask for the count, then fetch the rest together, and follow a page still full afterwards. [→](docs/ARCHITECTURE.md#paged-reads-ask-for-the-count-then-the-rest-together)
+- The look-ahead rings a bell (`rc_la_revision`, `onLookaheadChange()`) when the folder brings a newer revision; the polls only check on it. [→](docs/ARCHITECTURE.md#the-look-ahead-rings-a-bell-the-polls-only-check-on-it)
 - An edit made of cell ops redraws the days it touched (`redrawAfter()`, `dayCell()`), not the editor's grid. [→](docs/ARCHITECTURE.md#an-edit-redraws-the-days-it-touched)
 - The timeline draws the rows in view and 800 px either side (`CULL_MARGIN`); layout, links and counts still see everything. [→](docs/ARCHITECTURE.md#the-timeline-draws-the-rows-in-view)
 - Reading a sheet is `core/lookahead.js`; comparing two readings is `core/la_register.js`, the calendar's alone. [→](docs/ARCHITECTURE.md#reading-a-sheet-and-comparing-two-readings-are-two-modules)
 - `npm run lint` and `npm run typecheck` catch mistakes, not preferences; destructured options are documented with `?` on the optional ones. [→](docs/ARCHITECTURE.md#lint-and-types-catch-mistakes-not-preferences)
-- The site's service worker (`sw.js`) keeps the timeline for when there is no network, never the plan and nothing only the calendar needs. [→](docs/ARCHITECTURE.md#the-site-keeps-the-timeline-for-when-there-is-no-network-never-the-plan)
 - The System theme is Dark or Light, as the computer is; Dark stays the default. [→](docs/ARCHITECTURE.md#the-system-theme-is-dark-or-light-as-the-computer-is)
 - Motion follows the system's preference, in script (`scrollBehavior()`) as in CSS. [→](docs/ARCHITECTURE.md#motion-follows-the-systems-preference-in-script-as-in-css)
 
@@ -396,18 +313,11 @@ alternative shipped once and went wrong.
   palette, context menus, legend, filters and CSV export all pick it up. Add a
   `build<Shape>` branch in `timeline/renderer.js` only if it needs a new shape.
 - **A new calendar tab**: add it to `TABS` and `RENDERERS` in `ui/rc.js`, and
-  give it a module beside `ui/rc_week.js` that imports `ui/rc_util.js` for
+  give it a module beside `ui/rc_pto.js` that imports `ui/rc_util.js` for
   the shared reading — never a second copy of `assignmentIndex()` or a second
   register, which is the whole reason that module exists. Its tables get the
   shared header, sorting and export from `ui/rc_table.js` without asking; mark
   one `data-csv="<name>"` to offer the export.
-- **A new phone screen**: add it to `TABS` in `src/mobile/shell.js` and give it
-  a module under `src/mobile/` that reads through `ui/rc_util.js`, exactly as a
-  calendar tab does. If it needs something the linker refuses, move that helper
-  down into `rc_util` or `core/` — the forbid list in `tools/build.js` is the
-  boundary, not an obstacle. Cover it in `tools/smoke_mobile.js`, which shares
-  the calendar's stub backend (`tools/lib/rc_stub.js`) so both interfaces are
-  tested against the same answers.
 - **A new dock pane**: add it to `PANES`, `TITLES` and `RENDERERS` in
   `ui/panels.js`, and to `NAV` in `ui/shell.js`. A pane that changes only its
   own view state — a filter, a search — must emit `EV.PANE_REFRESH` to redraw
@@ -440,49 +350,51 @@ alternative shipped once and went wrong.
   be able to walk forward. A new top-level key also needs adding to
   `COLLECTIONS` or `FIELDS` in `core/history.js`, or edits to it will not be
   undoable — they will not even register as a change.
-- **A calendar schema change**: make it re-runnable in `rc_schema.sql`, add any
-  column to `migrate.sql` (a `create table if not exists` never adds one), and
-  raise the stamp at the end of `rc_schema.sql` together with `SCHEMA_VERSION`
-  in `core/rc.js`. Cover it in `supabase/test/rc_permissions.sql`, and in
-  `supabase/test/downgrade.sql` if an older project would lack it.
+- **A calendar table, or a column on one**: add it to `TABLES` in
+  `core/rc_db.js` — the file it is kept in (or its `shard` by month), its key,
+  its unique columns, its `defaults()` — and, if old backups carry it, to
+  `core/rc_import.js`. A column needs no migration: rows are JSON, so read a
+  missing one as its default. Raise `FORMAT_VERSION` only for a change an older
+  copy would misread; it refuses a folder written by a newer one. Cover it in
+  `tools/test_rc_db.js`. A view or function from the old SQL is a function in
+  `VIEWS` or `RPC` there, never a second query in a screen.
 - **A new column on the look-ahead**: add it to `FIELDS` in `core/la_edit.js`
   (heading and width off the sheet), to `rc_la_rows` and `rc_la_apply()`, and
   to the frozen offsets in `.lae-grid` — the export and the published grid follow
   from `FIELDS`.
-- **A new calendar failure worth an administrator's attention**: call
-  `rc.reportError('<area>', err)` at that call site. Never from a global
-  handler — see the rule on reporting.
+- **A new Rust command**: add it to `generate_handler!` in `src-tauri/src/main.rs`
+  and call it from `core/desktop.js` only; raise `SHELL` in `tools/desktop.js`
+  in the same commit, so an older installer is told it needs replacing rather
+  than running a kit that calls something it lacks. `test_kit.js` fails on a
+  command the application calls that the shell does not register.
 
 ## Verify after changes
 
 ```bash
-npm run build          # must succeed — it lints the module graph and parses all three bundles
+npm run build          # must succeed — it lints the module graph and parses both bundles
 npm run lint           # ESLint over src/ — no undefined names, no unused imports
 npm run typecheck      # the JSDoc read as types (tsc --checkJs, no emit)
 npm test               # every suite, in parallel lanes (tools/run_tests.js); must exit 0
 npm run test:serial    # the same, one at a time
-npm run test:rust      #  34 checks — the plan, lock and intake rules, in Rust
+npm run test:rust      #  37 checks — the plan, lock, intake and calendar-file rules, in Rust
 npm run test:xlsx      # the Excel export through LibreOffice Calc (skips without it)
 
 node tools/run_tests.js smoke smoke_calendar   # just these suites
 node tools/smoke.js --shot out.png             # …and eyeball the result
-CX_SITE=dist node tools/run_tests.js smoke smoke_calendar   # against a published copy
 ```
 
 | Suite | Checks | What it covers |
 |---|---|---|
-| `test_dist.js` | 73 | every deployment shape, every bundle fingerprinted, that the plan has no backend in any of them, and the phone app in the calendar shape only, with the site sending phones to it, the site's service worker, and that the calendar's register and stylesheet stay out of the pages that do not open it |
-| `test_lookahead.js` | 283 | the parser, the rows it derives, the change events, progress from outcomes, only-my-rows, one activity whole, what changed for me, and the printed calendar's geometry, no browser |
+| `test_kit.js` | 24 | the desktop shell and its update kit: the channel and the workflow that writes it, the window's policy, the kit whole and saying which installer it needs, every command the application calls registered in Rust, and that nothing makes a network request |
+| `test_rc_db.js` | 90 | the calendar's database over a folder in memory: queries, views and functions, all-or-nothing writes, another computer's save refused rather than overwritten, the pen, and a backup imported |
+| `test_lookahead.js` | 266 | the parser, the rows it derives, the change events, only-my-rows, one activity whole, and the printed calendar's geometry, no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
-| `test_la_edit.js` | 236 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, every page of a long read fetched together, P6 extracts read, searched and compared, and the master export's workbook and schedule |
-| `smoke.js` | 324 | the application, local mode — a tall plan drawn by the rows in view, offline, less motion and the System theme, files from elsewhere (imports, notes, CSV), and dates away from Greenwich — **any console error fails the run** |
-| `smoke_calendar.js` | 709 | the resource calendar, accounts, My day (with what changed and Got it), only my rows, the inbox, settings, View as, the look-ahead grid and editor (`smoke_la_editor.js`) — its past weeks and a hover that repaints nothing — who made each change and every edit, TAWRs (`smoke_tawr.js`), P6 activities linked to rows (`smoke_la_p6.js`), the master export and its schedule (`smoke_master_export.js`), a tablet, and that plan data never leaves |
-| `smoke_mobile.js` | 105 | the phone app: its week, its writes, PTO, the look-ahead by day, installing, offline, a phone opening the site sent to it, and that no timeline loads |
+| `test_la_edit.js` | 230 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, P6 extracts read, searched and compared, and the master export's workbook and schedule |
+| `smoke.js` | 322 | the application, local mode — a tall plan drawn by the rows in view, less motion and the System theme, files from elsewhere (imports, notes, CSV), and dates away from Greenwich — **any console error fails the run** |
+| `smoke_calendar.js` | 438 | the resource calendar over a fake folder (`tools/lib/rc_folder.js`): the door, importing the old calendar and starting empty, the look-ahead register, the cancellation log, PTO, the lists, two computers and the pen, the look-ahead grid and editor (`smoke_la_editor.js`), TAWRs (`smoke_tawr.js`), P6 activities linked to rows (`smoke_la_p6.js`), the master export and its schedule (`smoke_master_export.js`), a tablet, and that nothing is sent anywhere |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
-| `smoke_desktop.js` | 70 | the desktop shell and its updates |
-| `smoke_hosted.js` | 49 | sign-in, invites, read-only |
-| `test_sql.js` | 451 | both permission models, snapshot compaction, Got it, TAWRs and their private bucket, changes naming the editor's row, the schema stamp, and that `migrate.sql` upgrades an old project, policies that ask who you are once per query, every foreign key indexed, the bell, P6 activities imported and their reasons, the look-ahead day by day, and old cancellation reasons given their row |
+| `smoke_desktop.js` | 65 | the desktop shell, its updates — and a kit needing a newer installer refused — and the calendar written into the folder through the shell |
 | `test_xlsx_compat.js` | 18 | the Excel export opened, re-saved and printed by LibreOffice Calc, and the master export's sheets read out by it (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**
@@ -543,12 +455,12 @@ Each of these has caused a real bug:
   A painted look-ahead cell set `style="background:#hex"`, which resets
   `background-image` — so the hatch marking an unmapped colour was never drawn,
   for as long as it existed. Paint with `background-color`.
-- **A write forgets what was read when it lands, not only when it is sent.**
-  `core/rc.js` cleared its thirty-second read memory as a write left, so a read
-  made while the write was on its way got the server as it stood before and
-  was kept as current — the inbox re-read the newest look-ahead reading while
-  the editor's next one was being written, and Done editing then drew the
-  older reading. Every write goes through `landed()`; a new write path must too.
+- **A view the engine has worked out is kept until something writes.**
+  `core/rc_db.js` caches what its views return (`rc_cancelled_days`,
+  `rc_lookahead_days` …) and clears the cache on every write and every file the
+  folder brings in. Rows put into its memory any other way — a test pushing a
+  fixture row — have to call `rc.forgetReads()`, or the views answer as they
+  stood before, and paging back past the reading quietly found no weeks.
 - **`innerHTML` on an element of this page runs what it parses.** An element
   of a live document fetches its images whether or not it is attached, so
   `stripHtml()` setting a `div`'s `innerHTML` to a note carrying
@@ -562,10 +474,6 @@ Each of these has caused a real bug:
 - **`setting || default` turns a meaningful 0 into the default.** "0 disables
   scheduled backups" read `autoBackupMinutes || 60`, so 0 meant an hour. Use
   `??` for any setting where 0 or an empty string is an answer.
-- **A queue written back from the copy it started with loses what arrived
-  meanwhile.** The huddle's flush overwrote the stored queue with its own
-  leftovers, erasing an outcome queued while it was sending. Take off what was
-  settled, by id, from the queue as it is *now*.
 - **A CSV cell starting `=`, `+`, `-` or `@` is a formula to Excel.** Every CSV
   writer goes through `csvField()`, which writes such a cell as text and leaves
   a plain number alone.
@@ -577,20 +485,19 @@ Each of these has caused a real bug:
   and on a slow connection that was after the next cell had been opened — the
   box being typed in went with the old grid. Draw again only what the answer
   changed, in place (`redrawNoted()`, `redrawDays()`), never the grid.
-- **A per-row subquery over a view re-runs the whole view per row.**
-  `rc_cancelled_days` asked `rc_lookahead_cover` for the newest reading once
-  per cancelled day, and the cover aggregates every reading's rows — on the
-  live project's 31,772 reading rows that was over a minute, so the log and
-  the inbox timed out. Join to it once and pick with `distinct on`; time a
-  new view against a realistic volume, not the test fixtures.
+- **A view computed per row re-runs per row.** `rc_cancelled_days` asked for
+  the newest reading once per cancelled day, and the cover aggregates every
+  reading's rows — on the live project's 31,772 reading rows that was over a
+  minute. Work the cover out once and look each day up in it; time a new view
+  against a realistic volume, not the test fixtures.
 - **A unique fingerprint is not "the same as the newest".** The editor's
   publish skipped a grid identical to the newest reading and stored the rest
   under their content hash, which `rc_lookahead_snapshots.file_hash` holds
   unique — so painting a day red and back recreated an older reading's hash,
   the insert collided, and every publish after it failed: the editor drew the
   day put back and the calendar drew it cancelled. The stored hash carries a
-  suffix (`storedHash()`), compared by `sameContent()`; the stub enforces the
-  uniqueness, so the smoke suite catches it.
+  suffix (`storedHash()`), compared by `sameContent()`; `core/rc_db.js` enforces
+  the uniqueness, so the smoke suite catches it.
 - **A note found by a row's words is lost when the words change.** Reasons
   were matched to the log by the activity's label, which includes the Activity
   ID — filling it in afterwards orphaned every reason logged on that row. A
@@ -601,11 +508,11 @@ Each of these has caused a real bug:
 **Work on the default branch, `claude/timeline-planner-app-y1t1nm`, and push
 to it directly** — the owner's standing instruction, whatever branch a session
 was started on. No feature branches and no pull requests: a change is merged
-the moment it is pushed, and a push there is a production deploy (`.github/workflows/deploy.yml`
-publishes that branch to Cloudflare once Checks passes on it; nothing else is
-deployed, and its log is in the Actions tab). So `npm run build` and
-`npm test` pass before every push, not after. Keep the rebuilt
-`app.bundle.js`, `calendar.bundle.js` **and** `mobile.bundle.js` in the same
-commit as the `src/` change that produced them, otherwise the running
-application and the source disagree — CI rebuilds all three and fails on a
-difference.
+the moment it is pushed, and a push there is a release — once Checks passes on
+it, `.github/workflows/kit.yml` writes the `desktop-kit` branch, and every
+installed copy takes it on its next launch (its log is in the Actions tab). So
+`npm run build` and `npm test` pass before every push, not after. Keep the
+rebuilt `app.bundle.js` **and** `calendar.bundle.js` in the same commit as the
+`src/` change that produced them, otherwise the running application and the
+source disagree — CI rebuilds both and fails on a difference. Never push to
+`desktop-kit` by hand; the workflow replaces it whole.

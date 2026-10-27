@@ -1,66 +1,42 @@
 # CX Timeline
 
-**A hosted interactive timeline and commissioning planner.**
+**An interactive timeline and commissioning planner, with a resource calendar,
+kept in a OneDrive folder.**
 
 Built for managing software releases, testing schedules, commissioning
 campaigns and project milestones on rail signalling projects — and designed
 to sit alongside the CX Portal as part of the same software suite.
 
-Sign in, and your projects are wherever you open them. Share a plan with the
-people who need it, read-only or otherwise.
+There is no server and no account. The plan is a JSON file in a folder that
+OneDrive or SharePoint keeps in sync, the resource calendar is a set of files
+beside it, and the application is a Windows desktop app that updates itself
+from GitHub.
 
 ---
 
 ## Getting started
 
-Open the site and sign in. That is the whole installation — there is nothing
-to download and nothing to keep in step.
+Install the desktop application (the per-user `.exe` from GitHub Releases — no
+administrator needed), open it, and connect it to the synced folder:
+**Import / export → Shared folder → Connect a folder…**. From then on it opens
+straight into that folder. See **[DEPLOY.md](DEPLOY.md)** for the folder, the
+first import of the old calendar, and how updates arrive.
 
-A new account starts with an empty project that you own. Your work is saved
-automatically after every edit: there is no Save button, and no way to lose
-changes by forgetting to press one.
+Your work is saved into the folder after every edit: there is no Save button,
+and no way to lose changes by forgetting to press one.
 
-### Accounts are by invitation
+### Who may do what
 
-There is no sign-up form. An administrator invites an email address from
-**Team & Access** and passes on the link that appears; nobody else can create
-an account, and that is enforced by the database rather than by hiding a
-button. Invitations expire after 30 days, work once, and can be revoked.
-
-### Sharing
-
-An account on its own sees nothing. **Projects → Share** grants access to a
-plan by email address, at one of three levels:
-
-| | Viewer | Editor | Owner |
-|---|:--:|:--:|:--:|
-| Open, browse, export | ● | ● | ● |
-| Change the plan | | ● | ● |
-| Take and restore backups | | ● | ● |
-| Share, and change roles | | | ● |
-| Rename, delete the project | | | ● |
-
-Roles are per project, so the same person can own one plan and merely watch
-another. A viewer sees the whole plan, exports it freely, and is stopped from
-changing it — by the database, not just by the interface.
-
-### Deploying your own
-
-See **[DEPLOY.md](DEPLOY.md)**. There are three shapes and it covers all three:
-
-- **Hosted** — Cloudflare and Supabase, accounts, invitation-only sign-up. Both
-  free at this size, about twenty minutes.
-- **Shared folder** — no backend and no account at all: the plan is a JSON file
-  in a folder you picked, usually one OneDrive or SharePoint keeps in sync. Two
-  people take turns, and nothing of yours reaches any vendor.
-- **Desktop app** — the same folder, as a Windows application that opens your
-  plan on launch and needs no administrator to install. It is not a fork: it
-  runs the same bundle, fetched from the deployment, so a deploy reaches it on
-  its next launch without anybody reinstalling anything.
+The folder's sharing decides it, in OneDrive. Share it read-only with anyone
+who should only look; a read-only share cannot write, whatever the application
+does. Among those who can write, one person edits the plan and one edits the
+calendar at a time — each has a **pen**, the header says who holds it, and
+anybody can take it over. Every save is refused rather than written over if
+somebody else saved first.
 
 ```bash
-npm run serve      # http://localhost:8123 — local development
-npm test           # local UI, shared folder, desktop shell, hosted UI, permissions
+npm run serve      # http://localhost:8123 — the page, in Edge or Chrome
+npm test           # every suite
 ```
 
 ---
@@ -275,57 +251,25 @@ between them; the timeline is hidden rather than closed, so switching back lands
 exactly where you left off.
 
 It exists because the timeline answers *what the project is* and this answers
-*who is doing it today*. The two are deliberately not linked: the plan holds
-proprietary P6 data and never leaves its folder, while the calendar is
-non-proprietary and lives in Postgres so the whole team can reach it from a
-browser. Nothing in the plan's code path can even see the calendar's backend,
-and a test asserts it.
+*who is doing it, and what changed*. Both live in the same folder, in separate
+files, with separate pens.
 
-**The daily huddle** is the screen it is built around, and it is an
-administrator's: it asks a whole team in turn how yesterday went and it is the
-one path an outcome is recorded through. One page, everyone side by side, all
-subsystems in one meeting: what each person was planned to do yesterday, what
-actually happened, and what they are doing tomorrow. Five outcomes, one keypress
-each — and they fall into two families that are never averaged together:
+**The look-ahead** is the four-week calendar, written in the calendar itself
+(**Edit**) and published as readings the rest of it reads.
 
-| Performance — what somebody did | Project health — what was done to them |
-|---|---|
-| Completed · Partial · Carried over | Blocked · Reassigned |
+**Delays** are two lists over those readings: the **cancellation log** — every
+day and every BART resource cancelled, with the party responsible and the
+reason, drawn as a calendar and exportable to Excel — and **Changes**, what
+moved between one reading and the next and who moved it.
 
-A possession released late is not underperformance. Counting it as such would
-make the number worse than useless, because people would stop saying they were
-blocked. **Blocked needs a reason and a responsible party**, refused by the
-database rather than by a dialog somebody dismisses at 3:07pm.
+**PTO** shows who is away, from the sheet's PTO row and from leave booked in the
+calendar.
 
-The meeting happens whether or not the wifi does: entries queue on the machine
-and go up on their own when the connection returns.
-
-**The week plan** is where everybody else lives. People down, days across: every
-task on each day, what the 4WLA asked for where a stored entry disagrees with
-it, and the status and note the huddle recorded against each one — read-only,
-because there is one recording path, but *visible*, which is how a member sees
-what was said about their own work. Today is a tinted column with the word in
-the heading. A member creates, changes and removes tasks on their own row and no
-other; the database says the same thing, rather than this screen deciding it.
-Removing one writes a withdrawal rather than deleting anything, because a plan
-that changed the evening before a shift is itself evidence.
-
-**Leave** is a third thing again. Somebody on annual leave did not carry
-anything over, and without somewhere for absence to go it gets quietly spread
-across the performance statuses. It sits in the week grid, so a clash is visible
-rather than merely flagged, and the bottom row says how many people can actually
-be staffed each day. **A member asks and an administrator answers**: a request
-is the same single row it will become, with its status saying nobody has decided
-yet, so approving one changes a word rather than copying anything. It is not
-leave until somebody answers — asking must not take you out of the schedule
-before the decision — and the count of unanswered requests sits on the
-calendar's header, because a request nobody is told about is one that sits
-there.
-
-**Reports** run over any date range — "back one year from today" is as easy as
-"this month" — grouped by person, category, location or subsystem. A carried
-task counts **once** however many days it ran, ranked by age: five days of one
-stuck job is one problem, not five failures by one person.
+**TAWR** turns a look-ahead week into BART's track access work requests and
+fills BART's own PDF form. **P6** links each look-ahead activity to its P6
+activity from an imported extract. The **master export** writes the whole
+calendar into one Excel workbook, and can do it on a schedule into `exports/`
+in the folder, where a Power Automate flow can pick it up.
 
 ### The four-week look-ahead
 
@@ -360,19 +304,11 @@ both halves are logged honestly and the pair is offered for a person to relink.
 Likewise a shift turning red says a cancellation happened but not whose, so it
 asks.
 
-**Site access requests** match look-ahead rows by date and location — never by
-activity text, which is worded differently on the two sides. One SAR covering
-several rows at a location is expected rather than ambiguous. Two reports fall
-out of having both registers: rows with no SAR, which is work planned without
-confirmed access, and SARs with no rows, which is access booked for work that
-has gone.
-
-**The master export.** *Master export* — on the look-ahead and in Reports —
-writes everything useful the calendar holds as one Excel workbook: the
-look-ahead day by day with each row's P6 activity, the shifts worked and by
-whom, every cancellation with the party responsible and the reason, the
-changes between readings and why, the huddle's outcomes, blockers, leave, P6,
-TAWRs, SARs and the registers, under an *About* sheet. Choose the sheets and
+**The master export.** *Master export*, on the look-ahead, writes everything
+useful the calendar holds as one Excel workbook: the look-ahead day by day with
+each row's P6 activity, who is on what, every cancellation with the party
+responsible and the reason, the changes between readings and why, leave, P6,
+TAWRs and the registers, under an *About* sheet. Choose the sheets and
 the dates, then *Export now* or a schedule — every day, every week or every
 few hours. It is filed into `exports/` in the shared folder as
 `LookAhead_Latest.xlsx`, replacing the last one so anything linked to it is
@@ -393,31 +329,6 @@ the ID carry it. A later extract updates names and marks what it left out,
 never deleting it. The calendar pages back a week at a time, and *Everything*
 reaches every week ever written, not just the week before the latest reading.
 
-### On a phone
-
-A calendar deployment also publishes **CX Calendar**, a phone app at `/m/` that
-installs to the home screen (Android: *Install app*; iPhone: Safari → Share →
-*Add to Home Screen*). It is the resource calendar for somebody on site, and
-nothing else:
-
-- **My week** — their own week, a day at a time: what the look-ahead names them
-  on, anything typed in by them or an administrator, leave, and what the daily
-  huddle recorded against each task. Add a task to one day or several, change
-  one, or remove one — each a new row on the record rather than an edit. A
-  colleague's week can be looked at, not changed.
-- **Look-ahead** — the four-week sheet read one day at a time, with who is on
-  each activity, who is off site, and an *Only mine* switch.
-- **PTO** — ask for time off (dates, kind, an optional note) and see the answer:
-  waiting, approved or declined. A request can be withdrawn until somebody
-  answers it; administrators answer on the full site's PTO tab.
-
-Shifts are Day, Night and **Blanket**.
-
-The timeline is not in it at all: the phone app is built from its own entry
-point, and the build refuses to link the timeline or anything that reads the
-plan. It opens without a signal, and says it cannot reach the calendar rather
-than showing an old copy. See [DEPLOY.md](DEPLOY.md#6-the-phone-app).
-
 ### Search, filters and legend
 
 Global search covers titles, notes, owners, subsystems, areas, tags, versions,
@@ -432,20 +343,17 @@ what is left rather than leaving gaps. Exports always hide.
 The legend is generated from what is actually in the document and doubles as a
 filter control.
 
-### Accounts, saving and backups
+### Saving and backups
 
-- **Autosave** after every edit, debounced to 500 ms, straight to Postgres.
+- **Autosave** after every edit, debounced to 500 ms, into the folder.
 - **Version history** — every edit recorded as a reversible patch, with
   unlimited undo/redo and one-click rollback to any earlier point.
 - **Backups** — automatic hourly and every 100 edits (both configurable),
-  kept server-side so they survive a lost laptop. Configurable retention,
-  restorable and downloadable.
-- **Offline cache** — every successful save is mirrored into IndexedDB, so a
-  dropped connection costs nothing and a crash is recoverable.
+  restorable and downloadable; and OneDrive's own version history on every
+  file in the folder.
 - **Conflicts are refused, not merged** — if someone else saved while you had
   the plan open, your write is rejected rather than silently overwriting
-  their work, and you are offered their version. Your copy stays in the
-  browser and can be exported first.
+  their work, and you are offered their version.
 
 ### Export and import
 
@@ -516,25 +424,25 @@ Press <kbd>?</kbd> in the application for the full list. The essentials:
 
 The application is authored as **ES6 modules** under `src/`, organised in
 strict dependency layers. A zero-dependency linker (`tools/build.js`) resolves
-the module graph ahead of time and emits a single self-executing
-`app.bundle.js`.
+the module graph ahead of time and emits two self-executing bundles,
+`app.bundle.js` and `calendar.bundle.js`.
 
-That indirection exists so the deployed site is a handful of static files with
-no build step at the edge, and so the source stays properly modular without a
-toolchain to keep in step. The bundle is committed, so a fresh clone runs
-immediately.
+That indirection exists so the application is a handful of static files with
+no build step after review, and so the source stays properly modular without a
+toolchain to keep in step. The bundles are committed, so a fresh clone runs
+immediately, and the desktop update is packed from them.
 
 ```
 src/
   core/        util · events · dates · model · query · history · store
-               storage · cloud · analysis · lookahead
-               rc            the resource calendar's separate Supabase client
+               storage · filestore · desktop · analysis · lookahead
+               rc · rc_db · rc_folder · rc_import   the calendar, in the folder
   timeline/    viewport · layout · connectors · renderer · interactions
   ui/          icons · components · lists · theme · shell · panels · inspector
                dialogs · menus · commands · shortcuts · notes · attachments
-               minimap · legend · auth · p6
-               workspace · rc · rc_roster · rc_huddle · rc_lookahead
-               rc_reports · rc_util        the second interface
+               minimap · legend · access_mode · p6
+               workspace · rc · rc_roster · rc_lookahead · rc_la_* · rc_pto
+               rc_tawr · rc_master_export · rc_util   the second interface
   io/          scene · svg · pdf · inflate · exporters · importers · lookahead · p6
   main.js
 css/           tokens · base · components · layout · timeline · notes
@@ -559,74 +467,44 @@ A few decisions worth knowing about:
   list, so the two outputs are the same drawing rather than two
   re-implementations.
 - **No runtime dependencies.** Everything — the PDF writer, the DEFLATE
-  decompressor for `.xlsx`, the icon set, even the Supabase client — is in the
+  decompressor for `.xlsx`, the icon set, the calendar's database — is in the
   repository. Nothing is fetched from a CDN, so there is no third party who
   can break or watch the application.
-- **Permissions live in the database.** Roles are enforced by row-level
-  security in Postgres, so bypassing the interface achieves nothing. The
-  read-only UI explains the state; it does not create it. `npm run test:sql`
-  proves it against a real PostgreSQL. A calendar member records their own days,
-  plans their own week and asks for their own leave; the plan itself opens
-  read-only for them, and the pen cannot be taken — being read-only in practice
-  because somebody else held it is not the same as being read-only. What they
-  filter, hide and compare against is theirs alone and stays with their account
-  rather than travelling in the plan.
+- **A database in files.** The calendar's queries are answered by
+  `core/rc_db.js`, in the page, over JSON files in the folder — each write all
+  or nothing, and refused rather than written over when another computer
+  saved first.
 
 ### Working on it
 
 ```bash
-npm run build         # link src/ → app.bundle.js
+npm run build         # link src/ → app.bundle.js and calendar.bundle.js
 npm run watch         # rebuild on change
 npm run serve         # local dev server
-npm run build:dist    # what Cloudflare runs
 npm run build:desktop # assemble the frontend the Windows installer contains
+npm run build:kit     # the update kit the desktop-kit branch serves
 
 npm test              # every suite below except the Rust one
-npm run test:smoke    # 273 checks — the application, local mode
-npm run test:lookahead # 145 checks — the look-ahead parser, no browser
-npm run test:calendar # 307 checks — the resource calendar, and its isolation
-npm run test:folder   #  89 checks — the shared folder, in a browser
-npm run test:desktop  #  64 checks — the desktop shell, and its updates
-npm run test:hosted   #  49 checks — sign-in, sharing and read-only mode
-npm run test:sql      # 304 checks — both permission models, on real PostgreSQL
-npm run test:rust     #  34 checks — the plan, lock and intake rules; no webview needed
+npm run test:smoke    # the application, local mode
+npm run test:calendar # the resource calendar, over a fake folder
+npm run test:rc-db    # the calendar's database, in Node
+npm run test:folder   # the shared folder, in a browser
+npm run test:desktop  # the desktop shell, and its updates
+npm run test:kit      # the shell and the kit, without a browser
+npm run test:rust     # the folder rules, in Rust; no webview needed
 ```
 
 After editing anything under `src/`, run `npm run build` — `index.html` loads
-the bundle, not the source.
-
-Leaving `config.js` blank runs the application in local mode against browser
-storage. That is the development and test path — it is how the offline suite
-runs — not a deployment option: a build with a backend always requires an
-account.
+the bundles, not the source.
 
 ### Data and privacy
 
-- **Postgres (Supabase)** — projects, membership and backups, every row behind
-  row-level security tied to your account
-- **Supabase Storage** — attachment bytes, in a private bucket keyed by
-  project, with the same access rules
-- **IndexedDB** — an offline mirror of the open project, so a dropped
-  connection loses nothing
-- **localStorage** — device preferences (theme, panel sizes), the session, and
-  any huddle entries made while offline, until they sync
+Everything is in your folder: the plan, its attachments, and the calendar under
+`calendar/`. The only other place anything is kept is the machine itself —
+device preferences (theme, panel sizes) and the plan's local backups in browser
+storage. There is no analytics, no telemetry and no third-party script.
 
-The resource calendar is a **separate** Supabase project from the timeline's,
-named separately in `config.js`. That separation is the point: the plan holds
-proprietary project data and stays in your folder, while the calendar holds
-people's names, attendance and outcomes and goes to the database so the team can
-reach it. Two different kinds of data, two different audiences, two different
-homes — and the personal half is worth its own retention answer.
-
-Your data goes to your own Supabase project and nowhere else — there is no
-analytics, no telemetry and no third-party script on the page. Sharing a
-project is the only way anyone else can see it, and an email address is never
-exposed to someone you do not share a project with.
-
-In the two shapes with no backend — the shared folder, and the desktop app —
-none of the first two apply. The plan is a file in your folder, attachments are
-files beside it, and the only thing leaving the machine is whatever your folder
-already syncs. The desktop app makes exactly one network request of its own: it
-asks the deployment whether a newer version of the application exists. It never
-sends anything, and its Content-Security-Policy allows that one host and nothing
-else.
+The desktop app makes exactly one network request of its own: it asks GitHub
+(`raw.githubusercontent.com`) whether a newer version of the application
+exists. It never sends anything, and its Content-Security-Policy allows that
+one host and nothing else.

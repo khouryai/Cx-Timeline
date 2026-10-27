@@ -6,6 +6,17 @@ existed, and the cases it has to cover. When a rule in `CLAUDE.md` seems wrong
 for what you are doing, the section it links to here is where to find out
 whether it is.
 
+**Since 27 October 2026 there is no server.** The calendar lives in the
+OneDrive folder (*The calendar is files in the folder*, below), the
+application ships only as the desktop build, and the huddle, the week plan,
+My day, Reports, the inbox, SARs, accounts, the phone app and the website were
+removed (`docs/PLAN_ONEDRIVE_ONLY.md`). Sections further down that explain a
+Postgres policy, an invitation, the phone or one of those screens are kept as
+the record of why the calendar's rules are what they are — a rule that
+survived (an approved TAWR is final, a cancellation is the newest reading's)
+is now enforced in `core/rc_db.js` instead. Where they disagree with
+`CLAUDE.md`, `CLAUDE.md` is current.
+
 ## Conventions
 
 ### Colours go through tokens, never raw hex
@@ -441,38 +452,63 @@ desktop build two things a browser cannot have: no permission prompt on launch,
 and an **atomic** write (temp file, then rename) so OneDrive never reads a
 half-written plan.
 
-### The desktop build has no backend for the plan, and may have one for the calendar
+### The calendar is files in the folder
 
-**The desktop build has no backend for the plan, and may have one for the
-calendar.** Those are two different sentences and `tools/desktop.js` keeps
-them apart the way `tools/dist.js` does: `supabaseUrl` is written blank in
-every desktop shape, and `rcSupabaseUrl` is filled only when
-`RC_SUPABASE_URL` and `RC_SUPABASE_ANON_KEY` are in the build environment —
-in which case the vendored client is shipped and its script tag kept, and
-otherwise both are stripped. Missing keys are **not** an error here, unlike a
-calendar *site*: a desktop build without them is what shipped for a year and
-does the thing the installer is for. What is refused is an installer whose
-own window would reject the host it is about to call — `cspAllows()` compares
-the configured origin against `app.security.csp` in `tauri.conf.json`, which
-is committed and cannot read a build variable, because that failure is
-otherwise silent: the window opens, signs in, and fails on a network error
-nobody can place. And `config.js` and `vendor/` ride in the **installer**,
-never in the update payload — a deployment that could rewrite the config on
-an installed machine could give the plan a backend from a thousand miles
-away, which is what every other rule here exists to prevent.
+**The calendar is files in the folder, behind its own pen, and every write is
+guarded.** It used to be Postgres behind Supabase, and Supabase was not an
+approved place for the data. The screens asked it questions through the
+Supabase client's builder, so `core/rc_db.js` answers exactly that subset —
+`from().select().eq().order().range()`, `insert`, `upsert`, `update`,
+`delete`, `rpc()` — in the page, over tables it keeps as JSON under
+`calendar/`. The screens did not have to learn a second way of asking, and the
+rules Postgres enforced are in one module: `rc_la_apply()` is all or nothing
+and refused when stale, an approved TAWR changes only through
+`rc_tawr_revise()`, `rc_cancelled_days` is what the newest reading covering a
+date says.
 
-### The desktop app is fed by the deployment, not by reinstalling
+The files are split by how often they change, because OneDrive uploads a whole
+file whenever it changes: the cells on every edit, the registers rarely,
+history by the month and only ever appended, a reading's grid once and never
+again. Every file is rewritten whole from memory through a guard — its size and
+modified time, then its content hash, compared with what this window last
+read. A file another computer saved is never written over: the write is
+refused with `conflict:`, the file is read again, and the change is rolled
+back out of memory, so what is on screen is what is on disk. A metadata change
+with the same content (OneDrive re-touching a file it carried) is not a
+conflict, for the reason in *A file moving is not a plan changing*.
 
-**The desktop app is fed by the deployment, not by reinstalling.** The window
-loads a local page; `tools/shell/loader.js` runs the newest copy the machine
-has and fetches a newer one in the background for the *next* launch. Two rules
-make that safe to leave running on someone else's laptop: launch never waits on
-the network, and a downloaded copy is **on trial** until `main.js` calls
-`CX_SHELL.confirmHealthy()` — a copy that cannot boot is thrown away rather
-than retried forever, so a bad deploy cannot brick both laptops with no way
-back. Publishing the site is the whole release: `tools/dist.js` writes
-`dist/desktop/{version,payload}.json` alongside it. Rebuild the installer only
-when the Rust side changes.
+The pen is the plan's (`core/folder_rules.js`) with one claim file per window
+under `calendar/pen/`, separate from the plan's pen so two people can each hold
+one. Without it every write is refused before it reaches a file
+(`err.readOnly`), but the pen is courtesy; the guard is the protection. And the
+folder's sharing is the only permission: a reader on a read-only OneDrive share
+cannot write whatever the page believes. Nothing in `src/` makes a network
+request, and the window's policy allows only `raw.githubusercontent.com`, for
+updates — `tools/test_kit.js` checks both.
+
+### The desktop app is fed by GitHub, not by reinstalling
+
+**The desktop app is fed by the `desktop-kit` branch, not by reinstalling.**
+The window loads a local page; `tools/shell/loader.js` runs the newest copy the
+machine has and fetches a newer one in the background for the *next* launch.
+Two rules make that safe to leave running on someone else's laptop: launch
+never waits on the network, and a downloaded copy is **on trial** until
+`main.js` calls `CX_SHELL.confirmHealthy()` — a copy that cannot boot is thrown
+away rather than retried forever.
+
+The kit is `version.json` and `payload.json` (`tools/desktop.js --kit`), which
+`.github/workflows/kit.yml` force-pushes to `desktop-kit` once Checks passes on
+the default branch — a red push never becomes an update. It is a branch read
+through `raw.githubusercontent.com` rather than a release asset because a
+release download redirects to a host that answers a webview's `fetch` with no
+CORS header; raw does, and it is one pinned host in the policy.
+
+A kit says which installer it needs (`requiresShell`, from `SHELL` in
+`tools/desktop.js`), and an installer says which it is (`shell` in
+`shipped.json`). A kit that calls a Rust command an older installer lacks is
+never downloaded; the user is told to install the new one from GitHub
+Releases, and the copy they have keeps working. Raise `SHELL` whenever a
+command is added.
 
 ### The desktop app zooms the page as a browser does
 
@@ -489,19 +525,6 @@ It needs the `core:webview:allow-set-webview-zoom` permission in
 a rebuilt installer; an older shell refuses the call and the control is simply
 not shown.
 
-### The published assets are named after their contents; the repository's are not
-
-**The published assets are named after their contents; the repository's are
-not.** `fingerprint()` in `tools/dist.js` renames `app.bundle.js` and each
-stylesheet to `app.<hash>.js` at publish time, rewrites `index.html`, and
-marks them `immutable` — so a repeat visit downloads `index.html` and
-`config.js` and nothing else, where it used to pay 328 kB for the bundle
-every time because the name never changed and the policy therefore had to say
-`no-cache`. It happens only in `dist/`: the committed `index.html` still says
-`app.bundle.js`, which is what makes double-clicking it work with no server
-and what the desktop shell falls back to from its own folder. The desktop
-payload is built from the repository rather than from `dist/`, so renaming
-the published copy cannot reach it.
 
 ### A download is the one action with no visible result, so it says so
 
@@ -2971,21 +2994,29 @@ baseline comparison — down to measuring, at five zooms, that no ghost, and no 
 written on one, is drawn over a bar or over another ghost — all eighteen dock panes,
 all five themes, every exporter (including PDF header validation) and reload
 persistence — then a tall plan drawing only the rows in view, the page opening
-again with the network off, less motion and the System theme. It reads every
-request the page makes, so a page with no backend fetching the Supabase client,
-or the calendar's code before the calendar is opened, fails it. `CX_SITE=dist`
-drives it against a published copy instead of the repository. **Any console
-error fails the run.**
+less motion and the System theme. It reads every request the page makes, so a
+request to anything but the page's own files, or the calendar's code before
+the calendar is opened, fails it. **Any console error fails the run.**
 
-`smoke_mobile.js` serves the repository over HTTP — a service worker needs a
-real origin — at a phone's size with touch, against the same stub backend as
-`smoke_calendar.js` (`tools/lib/rc_stub.js`). It reads the phone bundle's
-module list and every request the page made, so a timeline module or a plan
-file reaching the phone fails it; it adds, changes, removes and overrides days
-and reads back the rows written; it asks for PTO and withdraws it; it checks the
-manifest's icons are real PNGs at the sizes claimed, that the worker is scoped
-to `m/`, caches the app and never the data, and that the page opens again with
-the network cut. `--shot out.png` writes one screenshot per screen.
+`test_rc_db.js` drives `core/rc_db.js` over a folder in memory that can fail a
+write, change a file behind the engine's back, or touch one without changing
+it: the builder's queries, the ported views and functions, all-or-nothing
+writes rolled back on a refused file, a conflict re-read rather than written
+over, a sync client's touch that is not a conflict, the pen's refusal, and a
+backup imported with every id kept.
+
+`smoke_calendar.js` opens the calendar over a fake folder
+(`tools/lib/rc_folder.js`, standing in for `showDirectoryPicker()`), seeded from
+fixture rows written by the same engine. It covers the door — no folder, an
+empty folder imported into or started — and every kept screen, two computers
+(a save arriving through the folder, a conflict refused), the pen (somebody
+else's claim, a takeover), and reads every request the page made, so anything
+leaving the machine fails it.
+
+`test_kit.js` assembles the shell and a kit and reads them: the channel on the
+branch the workflow writes, the window's policy, the kit whole and parseable,
+`requiresShell` on it, every command `core/desktop.js` calls registered in
+`main.rs`, and no network request anywhere in `src/`.
 
 `smoke_folder.js` replaces `window.showDirectoryPicker` with an in-memory
 folder, so the lock, the read-only handover and the write guard are covered
@@ -3039,18 +3070,8 @@ exports by itself, once. The writer's typed cells and the schedule's rule are
 in `test_la_edit.js`, and `test_xlsx_compat.js` has LibreOffice Calc open the
 workbook and write every sheet back out.
 
-`smoke_hosted.js` boots it with a configured backend and a stubbed client, so
-the gate, invitations, sharing and read-only mode are covered without a
-network or an account. `test_sql.js` stands up a throwaway PostgreSQL, applies
-the real `schema.sql` and `rc_schema.sql` against a stub of what Supabase
-provides, and becomes each user in turn; it never touches a real project. The
-calendar's half of it also *signs people up* — inserting into `auth.users` is
-the closest thing to the request GoTrue would serve — because sign-up never
-goes through PostgREST and so the interface has no say in who gets an
-account.
-
 `run_tests.js` runs the suites side by side, in lanes: suites that write the
-same directory (`test_dist` and `smoke_desktop` both assemble `dist-desktop/`)
+same directory (`test_kit` and `smoke_desktop` both assemble `dist-desktop/`)
 share a lane and run in order. `tools/lib/clock.js` shifts `Date` — in Node and,
 before anything else, in every page — to start on a pinned Wednesday afternoon,
 because the calendar is about days and a suite reading the wall clock was a

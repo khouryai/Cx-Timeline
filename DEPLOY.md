@@ -1,862 +1,237 @@
 # Deploying CX Timeline
 
-Three shapes, and this file covers all three. Pick one first:
+There is one shape: **the Windows desktop application, with everything in a
+OneDrive folder.** The plan (the timeline) is a JSON file in that folder; the
+resource calendar — the look-ahead, the cancellation log, Changes, PTO, TAWRs,
+P6 links — is a set of JSON files under `calendar/` in the same folder. There
+is no server, no database, no account and no website. Who may open the
+calendar is who OneDrive lets open the folder.
 
-| | Where the data lives | Accounts | Start at |
+| | Where it lives | Who may edit | Who may read |
 |---|---|---|---|
-| **Hosted** | Supabase | Yes, invitation only | § 1 below |
-| **Shared folder** | A folder you picked, synced by OneDrive or SharePoint | None | *The other deployment*, further down |
-| **Desktop app** | The same folder, opened by a Windows application | None | *The desktop application*, at the end |
+| The plan | `<plan>.json` in the folder | whoever holds the plan's pen | anyone the folder is shared with |
+| The calendar | `calendar/` in the folder | whoever holds the calendar's pen | anyone the folder is shared with |
+| The application | the installer, updated from GitHub | — | — |
 
-The last two hold nothing anywhere but your own folder, and the desktop app is
-not a separate application — it runs the same code as the deployed site and
-picks up a deploy on its next launch.
+Sections:
 
-Everything from here to the divider is the **hosted** shape: Cloudflare for the
-site, Supabase for accounts and data. Both free at this size. About twenty
-minutes end to end.
-
-You need: a Supabase project and a Cloudflare account. Nothing else — no
-server to run, no container, no database to administer.
-
----
-
-## 1. Supabase — create the project
-
-1. [supabase.com/dashboard](https://supabase.com/dashboard) → **New project**.
-2. Name it, pick a region near your users, and set a database password
-   (you will not need it again — save it anyway).
-3. Wait for it to finish provisioning.
-
-## 2. Supabase — create the schema
-
-**SQL Editor** → **New query** → paste the whole of
-[`supabase/schema.sql`](supabase/schema.sql) → **Run**.
-
-That creates the tables, the three roles, the row-level security policies and
-the API. It is idempotent, so you can re-run it after pulling a change.
-
-You should see `Success. No rows returned`. Warnings about triggers or
-policies "not existing, skipping" are expected on a first run.
-
-## 3. Supabase — configure auth
-
-**Authentication → Sign In / Providers**:
-
-- **Email** — enabled (it is by default).
-- **Confirm email** — your call. On is safer; off is friendlier for a small
-  team where you know everyone. With it on, a new user must click a link
-  before they can sign in.
-
-**Authentication → URL Configuration**:
-
-- **Site URL** — your deployed URL, e.g.
-  `https://cx-timeline.<subdomain>.workers.dev`. Password-reset and
-  confirmation links point here, so it has to be right.
-- **Redirect URLs** — add the same URL.
-
-> Come back and fix these after step 5, once you know the real URL.
-
-> ### Leave "Allow new users to sign up" **ON**
->
-> This looks like the setting that makes the application private. It is not,
-> and turning it off breaks the invitation flow — invited people would be
-> refused along with everyone else, because Supabase would reject the sign-up
-> before the database ever sees it.
->
-> Sign-up is closed by a trigger on `auth.users` instead: an account can only
-> be created for an address an administrator has invited, and the refusal
-> happens in Postgres, so it applies to anyone calling the API directly as
-> much as to the sign-in screen. `npm run test:sql` proves it.
-
-## 4. Supabase — collect the two values
-
-**Project Settings → API**:
-
-- **Project URL** → `https://<ref>.supabase.co`
-- **anon / public key** → a long `eyJ…` string
-
-The anon key is meant to be public. It identifies the project; it does not
-grant access. Every row is behind row-level security tied to the signed-in
-user, so on its own it can read nothing. Do **not** use the `service_role`
-key — that one bypasses every policy, and it must never reach a browser.
-
-## 5. Cloudflare — deploy
-
-Cloudflare offers two products here and they are easy to mix up. **Workers**
-(with static assets) is the current one and is what the dashboard steers you
-to; **Pages** is the older one. Either serves this app fine. The repository
-carries a [`wrangler.jsonc`](wrangler.jsonc) configured for **Workers**.
-
-### From GitHub Actions (how the live site is deployed now)
-
-[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) runs the same
-build and `wrangler deploy` on GitHub's machines, after **Checks** passes on the
-default branch (or by hand: Actions → Deploy → Run workflow). Its log is in the
-Actions tab, readable by anyone with the repository, and a red check now stops
-the deploy instead of following it. It needs four repository secrets
-(Settings → Secrets and variables → Actions): `CLOUDFLARE_API_TOKEN` (a token
-with *Edit Cloudflare Workers*), `CLOUDFLARE_ACCOUNT_ID`, and the build
-variables the shape needs — `RC_SUPABASE_URL` and `RC_SUPABASE_ANON_KEY` for the
-calendar shape. Switch Cloudflare's own automatic builds off (Worker →
-Settings → Build → disconnect the repository), or every push deploys twice.
-
-Cloudflare's builder was replaced in October 2026, when it began failing every
-build within seconds — before any of this repository ran — with one build
-frozen "in progress" that could be neither cancelled nor retried.
-
-### Workers (Cloudflare's own builder)
-
-**Workers & Pages** → **Create** → **Import a repository** → pick this repo.
-
-| Setting | Value |
-|---|---|
-| Build command | `npm run build:dist` |
-| Deploy command | `npx wrangler deploy` |
-| Root directory | `/` |
-
-**Build variables** (Settings → Build → Variables and Secrets — these are
-*build* variables, not runtime ones):
-
-| Name | Value |
-|---|---|
-| `SUPABASE_URL` | your Project URL |
-| `SUPABASE_ANON_KEY` | your anon key |
-
-The build writes these into `config.js`, so the keys live in Cloudflare rather
-than in the repository. The build **fails** if they are missing, rather than
-publishing a site nobody can sign in to.
-
-`build:dist` minifies what it publishes, with esbuild — the one build-time
-dependency, pinned in `package.json`. Cloudflare's builder installs it from the
-lockfile before running the build command; anywhere else, run `npm ci` first.
-The build **fails** without it, rather than publishing bundles twice the size.
-
-> **If the build says `[ERROR] Asset too large`**, wrangler is uploading the
-> repository root instead of `dist/` — it generates its own config when it
-> cannot find one, and that config points at `.`, which sweeps in
-> `node_modules/workerd/bin/workerd` at roughly 60 MB against a 25 MiB limit.
-> Make sure `wrangler.jsonc` is committed and that the build command is
-> `npm run build:dist`, so `dist/` exists by the time wrangler runs. A correct
-> build reads about a dozen files, not a few thousand.
-
-### Pages (the older product)
-
-Build command `npm run build:dist`, output directory `dist`, same two
-environment variables. Pages ignores `wrangler.jsonc`.
-
-### The URL
-
-You get `https://<worker>.<subdomain>.workers.dev` (or `<project>.pages.dev`)
-free. Go back to step 3 and put it into Supabase, or password resets and
-confirmation links will bounce.
-
-### A custom domain
-
-Settings → **Domains & Routes** → **Add** (Workers), or **Custom domains**
-(Pages). Free to attach. If you need to *buy* one, Cloudflare Registrar sells
-at cost. Add the new domain to Supabase's redirect URLs too.
+1. [Moving off Supabase — once](#1-moving-off-supabase--once)
+2. [Installing it](#2-installing-it)
+3. [The folder](#3-the-folder)
+4. [Two editors, one pen](#4-two-editors-one-pen)
+5. [The team, read-only — or not at all](#5-the-team-read-only--or-not-at-all)
+6. [Updating it](#6-updating-it)
+7. [Building the installer](#7-building-the-installer)
+8. [Backups](#8-backups)
+9. [Verifying it](#9-verifying-it)
 
 ---
 
-## 6. The first account
+## 1. Moving off Supabase — once
 
-Sign-up is invitation-only, which leaves a chicken-and-egg problem: nobody can
-be invited until somebody is an administrator. So **the first account ever
-created is let in and made an administrator.** After that the door shuts.
+The calendar used to live in Supabase. Its data comes across whole, every id
+kept, from the backup the old calendar takes of itself:
 
-1. Open the site and go to `<your-url>/#invite=you@yourcompany.com`.
-2. Fill in your name and a password, and create the account.
-3. You are now the administrator. Confirm it: **Team & Access** appears in the
-   sidebar, under Data.
+1. **On the old site, before anything else**, open the calendar and take
+   **Reports → Back it up**. It downloads one `.json` file holding every table
+   the calendar kept — readings, edits, cancellation reasons, P6 links, TAWRs
+   and BART's blank TAWR form. Keep that file; it is the migration.
+2. Install the desktop application (§ 2) and open the shared folder in it.
+3. Switch to **Calendar**. The folder has no `calendar/` yet, so it says so and
+   offers two buttons. Type your name — as the roster has it — and press
+   **Import the old calendar…**, then pick the backup.
+4. It shows what is in the file: the row count for each table, what is *not*
+   brought across (the huddle, the week plan, SARs, accounts — the parts that
+   were removed), and any warning, such as a table that stopped at exactly
+   1,000 rows, which would mean the backup was cut short. Press **Import**.
+5. Check the look-ahead, the cancellation log and a TAWR against the old site.
 
-If you had already created an account before running the invitation part of
-the schema, it is not automatically an administrator. Promote it once, in the
-SQL editor:
+Then, when you are satisfied:
 
-```sql
-update public.profiles set is_admin = true where email = 'you@yourcompany.com';
-```
+- **Supabase**: pause or delete the project. Nothing reads it any more.
+- **Cloudflare**: delete the Worker (`cx-timeline`). Nothing deploys to it any
+  more — `.github/workflows/deploy.yml` is gone — and the desktop application
+  does not fetch from it.
+- **GitHub secrets**: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`,
+  `RC_SUPABASE_URL`, `RC_SUPABASE_ANON_KEY` and any `SUPABASE_*` can be removed.
+  Nothing uses them.
 
-## 7. Inviting everyone else
+An installer from before this change carried the Supabase keys and followed the
+website for updates; it cannot read a calendar in the folder. Everybody
+installs the new one once (§ 2). From then on updates arrive by themselves.
 
-**Team & Access → Invite someone.** You get a link to send them however you
-like — Teams, email, a text message. No mail server is involved, which is
-deliberate: Supabase's built-in SMTP is rate-limited to a handful of messages
-an hour and is not meant for production.
+## 2. Installing it
 
-- The link expires in 30 days and works once.
-- **Revoke** stops it being used, even if they already have the link.
-- Finding the link is not enough on its own: the database checks the address
-  against the invitation list, so a shared or guessed URL gets nowhere.
+Download the installer from the repository's **Releases** page on GitHub (or
+from the **Desktop app** workflow's artifact — § 7) and take the
+`…_x64-setup.exe`. It is **per-user**: it writes to your own
+`%LOCALAPPDATA%\Programs`, creates a Start-menu entry, and needs no
+administrator.
 
-An account on its own sees **nothing**. Access to a plan is separate:
+An unsigned executable may be stopped by SmartScreen (*More info → Run anyway*
+clears it) or blocked by AppLocker or Defender Application Control, which only
+IT can lift. If your organisation will sign it, that is a certificate in the
+repository secrets and two lines in `tauri.conf.json`.
 
-## 8. Check the permissions
+**First run.** It has no folder yet, so it opens on a sample plan.
+**Import / export → Shared folder → Connect a folder…** and pick the synced
+folder; Windows' own picker opens. From then on it opens straight into that
+folder on every launch, and the calendar opens from the same folder.
 
-1. **Projects → Share**, add a colleague's email as **Viewer**.
-2. Have them sign in: they see the plan, a "Read-only" bar, no editing tools,
-   and any attempt to change something is refused.
+## 3. The folder
 
-If sharing says *no account for …*, they have been invited but have not yet
-set up their account. Sharing grants access to an account that already
-exists.
+The application reads and writes a real path, so the folder has to be **synced
+into File Explorer**, not opened on onedrive.com:
 
----
+1. Open the folder on onedrive.com (or the SharePoint library).
+2. **Add shortcut to My files** — or, in a library, **Sync**.
+3. In File Explorer, right-click it → **Always keep on this device**, so the
+   files are real files rather than placeholders.
 
-## The permission model
-
-| | Viewer | Editor | Owner |
-|---|:--:|:--:|:--:|
-| Open, browse, export | ● | ● | ● |
-| Change the plan | | ● | ● |
-| Take backups | | ● | ● |
-| Restore a backup | | ● | ● |
-| Share, and change roles | | | ● |
-| Rename, delete the project | | | ● |
-
-Roles are per project, so the same person can own one plan and merely watch
-another.
-
-**Administrator** is separate and deployment-wide: it is the right to invite
-people and to appoint other administrators, and nothing else. An
-administrator gets no automatic sight of anyone's plans — they have to be
-shared like everybody else.
-
-**The rules live in the database, not the interface.** A viewer who opens the
-browser console and calls the API directly is refused by Postgres. The
-read-only mode in the UI exists to explain the state, not to enforce it —
-which is why it is safe for the interface to be the friendly part.
-
-To prove that rather than take it on trust:
-
-```bash
-npm run test:sql
-```
-
-That stands up a throwaway PostgreSQL, applies the real `schema.sql`, and runs
-78 checks that become each user in turn and confirm the database refuses what
-it should — including that an uninvited address cannot create an account, that
-a used or expired invitation cannot be reused, and that a user cannot make
-themselves an administrator. It never touches your Supabase project.
-
----
-
-# The other deployment: a shared folder, no backend
-
-Everything above puts the data in Supabase. There is a second shape that puts it
-in a folder instead — a mapped drive, or one synced by OneDrive or SharePoint —
-with **no account, no database and no vendor holding anything**. The site is
-static files; the plan is a file on your own disk that your existing folder
-permissions and version history already cover.
-
-Choose this when the data cannot leave infrastructure your organisation already
-approves, and when two people taking turns is enough.
-
-## What you give up
-
-- **One editor at a time.** Whoever opens the plan first has the pen; the second
-  person gets read-only and a banner saying who is in there. It becomes editable
-  when they close it.
-- **No accounts, so no client access.** External viewers cannot reach a file on
-  your internal drive — export a PDF for them instead.
-- **Edge or Chrome only.** The API that writes to a folder you picked does not
-  exist in Firefox and is partial in Safari. Other browsers keep working, with
-  the plan in browser storage and Export → JSON to move it. The desktop
-  application at the end of this file has none of these three limits except the
-  first — it is one editor at a time as well, but it needs no browser, no
-  permission click on launch, and no account.
-
-## Deploying it
-
-**The repository decides the shape, not your CI settings.** `package.json` holds:
-
-```json
-"cxTimeline": { "deployment": "folder" }
-```
-
-`tools/dist.js` reads it, so **an existing hosted deployment needs no changes at
-all** — the same build command and even leftover `SUPABASE_URL` variables produce
-a folder build, and the log says the variables were ignored. Set it back to
-`"hosted"` to go the other way. This lives in the repo on purpose: a deployment
-shape decided by a dashboard setting nobody can see is how you end up with a site
-that looks right and quietly saves to the wrong place.
-
-1. Nothing to change in Cloudflare. Your existing build command
-   (`npm run build:dist`) now produces the folder build. Locally,
-   `npm run build:folder` forces it regardless of what `package.json` says.
-2. Tidy up when convenient: delete `SUPABASE_URL` and `SUPABASE_ANON_KEY` from
-   the Cloudflare variables — they are inert now, but leaving credentials lying
-   around is untidy — and delete the Supabase project once you have exported
-   anything you still want from it.
-3. Open the site. There is no sign-in — go straight to **Import / export →
-   Shared folder → Connect a folder…** and pick the synced folder. If it is
-   empty the app offers to write the plan you have open into it; if it already
-   holds plans, you choose one.
-4. Your colleague opens the same URL and picks the same folder on their machine.
-
-The published site is then about a megabyte of HTML, CSS and one JavaScript
-bundle. It talks to nothing — no backend, no CDN, not even a font service — so
-the only thing your host ever sees is a request for those files.
-
-Mark the folder **Always keep on this device** in OneDrive, so the plan is a real
-local file rather than a placeholder. Edge will ask permission to edit files in
-that folder the first time, and again after a browser restart — one click.
-
-## What ends up in the folder
+What ends up in it:
 
 ```
-bart-cbtc.json         the plan, in the same format Export → JSON writes
-bart-cbtc.lock.json    who has the pen, re-stamped every 30 seconds
-attachments/           attachment bytes, one file each
+bart-cbtc.json                   the plan, the format Export → JSON writes
+bart-cbtc.lock.json, .pen-*.json who has the plan's pen
+attachments/                     attachment bytes, one file each
+calendar/db.json                 which format the calendar is, and when it was made
+calendar/registers.json          people, locations, legend, support codes, parties, settings
+calendar/editor.json             the look-ahead as written: rows and cells
+calendar/history/<yyyy-mm>.json  every edit, a file per month
+calendar/readings/…              each published reading, its rows and its grid
+calendar/changes/<yyyy-mm>.json  what moved between readings
+calendar/notes.json              why a day was cancelled; notes on changes
+calendar/leave.json, p6.json     leave booked; the P6 activity list
+calendar/tawr/                   TAWRs, what they are filled from, and BART's blank form
+calendar/pen/                    who has the calendar's pen, a file per window
+exports/LookAhead_Latest.xlsx    the master export, when one is scheduled
+exports/4WLA_Latest.xlsx         the 4WLA beside it
 ```
 
-Nothing proprietary: the plan opens in the importer, reads in a text editor, and
-is versioned by whatever the folder is versioned by.
-
-## How two people stay out of each other's way
-
-Set **your name** in the Shared folder pane first — it goes in the lock, so your
-colleague sees who has the plan rather than "Someone".
-
-The lock file is a **courtesy** — a synced folder takes seconds to propagate, so
-two people opening at the same moment can both think they hold it. The guarantee
-is one layer down: every save checks that the plan on disk is still the one you
-opened, and refuses if it is not. You may be told to reload; you can never
-silently overwrite your colleague.
-
-What that check compares matters, and it is the difference between this being
-pleasant and being unusable. OneDrive rewrites files it has just carried: same
-bytes, new modified time. Comparing *metadata* therefore reported a colleague's
-save several times an hour when nobody had touched anything, and refused
-perfectly good saves over it. The check is on the plan's own content, so a file
-being moved about by the sync client is silent, and only a genuine newer version
-is mentioned — **once**, as a notice with a Reload button, not as a dialog that
-takes the keyboard away while you are typing. It also shows in the status bar
-for as long as it is true, which is why it never needs repeating.
-
-If you are **reading** a plan somebody else has open and have changed nothing,
-their saves simply arrive: no notice, no button, the drawing updates.
-
-Three things release the pen:
-
-- **Closing the browser and coming back.** The lock records the *browser*, not the
-  tab, so a returning session recognises its own lock and takes it straight back.
-  No waiting.
-- **A crash on the other machine.** No heartbeat for four minutes and the lock
-  reads as abandoned; the next person to open it simply gets the pen. (Four,
-  not the seventy-five seconds it used to be: OneDrive can take a minute to
-  carry a small file between two machines, and a shorter window made each side
-  see the other keep dying and coming back — so the pen bounced while nothing
-  at all was wrong.)
-- **An hour with no saves.** The holder's session flushes what it has, hands the
-  pen back and drops to read-only, so somebody who opened a plan before lunch
-  does not hold it all afternoon.
-
-**Two windows of your own** — a second tab, or the browser and the desktop app —
-are recognised as one machine. The second one opens read-only and says so; take
-over from it if that is the one you meant to work in.
-
-And **taking over is never refused.** If the holder still looks live you are
-warned that their unsaved work is at risk, but the decision is yours — the write
-guard means the loser of the race is told to reload, not overwritten.
-
-## Your colleague needs the folder *synced*, not opened in a browser
-
-This is the one thing that catches people out. The app writes to a real folder on
-the machine, so reaching the files through `onedrive.com` in a browser is not
-enough — there is nothing there for a file picker to point at.
-
-On your colleague's machine:
-
-1. Open the shared folder on **onedrive.com** (or the SharePoint library).
-2. **Add shortcut to My files** — or, in a SharePoint library, **Sync**.
-3. It now appears in **File Explorer** under OneDrive. Right-click it and choose
-   **Always keep on this device**, so the plan is a real local file rather than a
-   placeholder.
-4. In the app, **Connect a folder…** and pick it there.
-
-This needs the OneDrive desktop client, which is on any managed Windows machine
-and already signed in. If your organisation blocks syncing shared libraries, file
-mode will not work for that person — they would be back to exporting JSON by hand.
-
-## Verifying it on your own machine
-
-`npm run test:folder` covers the lock, the read-only handover and the write
-guard against a stubbed folder — 43 checks. It cannot cover the file picker,
-because no browser lets a script click its own file dialog. Run these four by
-hand once, on the real thing:
-
-1. **Connect and create.** Connect an empty synced folder, accept the suggested
-   file name, and confirm the `.json` appears in File Explorer and syncs.
-2. **Reconnect.** Close the browser entirely, reopen the site, and confirm one
-   click on **Reconnect** in Import / export gets the plan back — no re-picking.
-3. **Two machines.** Open the same plan on both. The second should be read-only
-   and name the first person. Close the first; within about a minute the second
-   should become editable.
-4. **An attachment.** Attach a file, then confirm it appears under
-   `attachments/` in the folder and opens on the other machine after it syncs.
-
----
-
-# The third deployment: a folder plan, a hosted calendar
-
-This is the shape to publish when the **team needs to read the resource
-calendar in a browser** and the **plan must stay in your folder**. It is not a
-compromise between the other two — it is the two halves of the application
-having different answers, which is the design.
-
-| | Plan (timeline) | Resource calendar |
-|---|---|---|
-| Where it lives | Your OneDrive folder | Its own Supabase project |
-| Account needed | None | Yes |
-| Reachable from a browser | No | Yes |
-
-Your team can never read the plan through the site. A browser only reads a
-folder the person at it grants by clicking, and that grant is per browser
-profile — so the control is OneDrive's sharing, not the application's. The
-Timeline workspace is hidden from read-only accounts anyway, because what they
-would otherwise see is the built-in sample plan, and fabricated demo content
-mistaken for a real project is its own small problem.
-
-## 1. A second Supabase project
-
-Create a **new, separate** project — not the timeline's, if you have one. In
-its SQL editor run, in order:
-
-1. `supabase/schema.sql` — this shape only needs the `auth` plumbing from it.
-2. `supabase/rc_schema.sql` — the calendar itself.
-
-**An existing project needs `supabase/migrate.sql` in between**, and then
-`rc_schema.sql` after it. `create table if not exists` does nothing to a table
-that already exists, so every column added since your project was created is
-silently missing — and the interface then sends a field Postgres has never heard
-of, which takes the whole write down with it. `migrate.sql` fixes the column and
-constraint shapes and nothing else; it is additive, safe to run twice, and safe
-to run on a project that is already current. It ends with a table of "ok" rows
-saying which steps took.
-
-**You do not have to remember to check.** `rc_schema.sql` stamps its version
-into `rc_settings.schema_version` as its last statement, and the calendar
-compares it with the version it was built for when somebody signs in. An
-administrator whose database is behind sees a banner naming these two files;
-everybody else is told that some changes may be refused until it is done.
-
-**Track access work requests need one more step, taken in the application rather
-than here.** An administrator uploads BART's blank fillable TAWR form once, in
-the calendar's TAWR → Setup. It goes into the private `tawr` bucket that
-`rc_schema.sql` creates — readable by administrators only — and is checked for
-every field the requests fill before it is accepted. It is never part of a
-deploy: do not commit it to this repository.
-
-Then Settings → API, and copy **Project URL** and the **anon / public** key.
-The anon key is designed to be public: it identifies the project and grants
-nothing. Every rule is a row-level security policy tied to the signed-in
-account.
-
-## 2. Tell the repository which shape this is
-
-```jsonc
-// package.json
-"cxTimeline": { "deployment": "calendar" }
-```
-
-The answer lives in the repository so it travels with a merge, rather than in a
-CI dashboard where getting it wrong produces a site that looks fine.
-
-## 3. Cloudflare — the build variables
-
-Workers → your project → Settings → **Variables and Secrets**, added to the
-**build** (not runtime) environment:
-
-| Name | Value |
-|---|---|
-| `RC_SUPABASE_URL` | `https://<your-project>.supabase.co` |
-| `RC_SUPABASE_ANON_KEY` | the anon / public key |
-
-Deliberately **not** `SUPABASE_URL`. That name belongs to the plan and must
-stay unset here — two names that cannot be mistaken for one another, because a
-plan that quietly acquired a backend is the one failure nobody would notice.
-The build refuses to publish if `RC_SUPABASE_URL` is missing, rather than
-shipping a site nobody can sign in to.
-
-Build command stays `npm run build:dist`; deploy stays `npx wrangler deploy`.
-
-Locally, the same thing:
-
-```bash
-RC_SUPABASE_URL=https://xxxx.supabase.co RC_SUPABASE_ANON_KEY=eyJ... npm run build:calendar
-```
-
-## 4. Password-protect the site with Cloudflare Access
-
-Zero Trust → Access → Applications → Add a self-hosted application over your
-site's hostname. Free for up to 50 users. Add each team member's email; they
-authenticate with a one-time PIN, or your identity provider if one is
-connected.
-
-**Add a Bypass policy on the path `/desktop/*`, ordered above the Allow
-policy.** The installed desktop application fetches `/desktop/version.json`
-with no browser session, so Access would answer it with a login page and the
-exe would **stop updating silently and permanently** — the loader correctly
-rejects the login page rather than storing it, so nothing breaks loudly enough
-to notice. Nothing on that path is secret: it is the same bundle already served
-to every browser.
-
-Access controls who can load the page. It does **not** protect the Supabase
-API, which is a different origin — row-level security does that. Both are
-needed and neither substitutes for the other.
-
-Verify:
-
-```bash
-curl -sI https://<your-site>/ | head -1              # should redirect to Access
-curl -s  https://<your-site>/desktop/version.json    # must still be JSON
-```
-
-If the second one returns HTML, the bypass is missing or ordered below the
-Allow policy, and every installed copy has quietly stopped updating.
-
-## 5. Accounts, and what each role sees
-
-Everything here is done from **Organisation → Accounts**, inside the
-application. The SQL editor is needed once, to create the first administrator,
-and never again.
-
-| Role | Sees | Writes |
-|---|---|---|
-| `admin` | Everything, including the KPIs and the look-ahead register | Everything |
-| `member` | The schedule and what happened | Their own days: plan, change and remove their own tasks; ask for leave |
-| `viewer` | The schedule and what happened | Nothing |
-
-For a read-only team, `viewer`. Promoting somebody later is a dropdown on their
-row — no migration, no redeploy. A member plans **their own days** and nobody
-else's — `rc_can_act_for()` in the policies, not the interface — and a change or
-a removal is a new row superseding the old one, never an edit, because a plan
-that changed the evening before is delay evidence.
-
-### The first administrator
-
-Sign-up is closed: a trigger on `auth.users` refuses any address nobody
-invited. That leaves the usual chicken and egg, and the same answer as the
-timeline's — **the first account in an empty project is let through**, and the
-roster row it lands on is the one to make an administrator:
-
-```sql
--- after signing up once, in the SQL editor
-update public.rc_people set role = 'admin' where email = 'you@example.com';
-```
-
-Supabase's own **Authentication → Sign In / Providers → Allow new users to sign
-up** must stay **on**. Turning it off rejects invited people too, before the
-trigger ever runs.
-
-### Adding everybody else
-
-**Organisation → Accounts → Invite somebody.** Give the address, the role, and
-optionally the roster row it belongs to. Nothing is emailed from here — send
-them the sign-up link yourself, or invite the same address from Supabase →
-Authentication → Users → Invite if you would rather it came from there. Either
-way the invitation row is what decides whether the sign-up is allowed, so both
-routes end in the same place.
-
-When they sign up, the account attaches to the roster row the invitation named,
-with the role it carried. They are on the team before they first open the page.
-
-Three things worth knowing:
-
-- **An invitation lapses after thirty days.** An expired one shows as expired
-  with a **Send again** button, which reopens it.
-- **Somebody who signed up before their roster row existed** is joined up with
-  **Link account** on their row.
-- **The last administrator cannot be demoted.** The role dropdown refuses it
-  out loud, because a refused UPDATE matches nothing and reports success — and
-  a demotion that left nobody able to administer anything would be a trip back
-  to the SQL editor.
-
-### If you also run the timeline in this project
-
-`schema.sql` and `rc_schema.sql` each install a sign-up gate, and they claim
-the same trigger. Applying them **in the order above** leaves the calendar's
-version installed, which accepts an invitation from *either* register — so
-timeline invitations and calendar invitations both work.
-
-Re-running `schema.sql` afterwards puts the timeline-only gate back, and every
-address invited from Organisation → Accounts would then be refused. If you ever
-re-run it, re-run `rc_schema.sql` after it.
-
-## 6. The phone app
-
-This shape also publishes a phone app at **`https://<your-site>/m/`**. There is
-nothing to configure: it uses the same `config.js`, the same calendar project and
-the same accounts as the site.
-
-It is the resource calendar for somebody in the field, and nothing else:
-
-- **My week** — their tasks day by day: what the 4WLA names them on, anything
-  they or an administrator typed in, whether they are on leave, and what the
-  daily huddle recorded against each task. They can **add** a task (to one day
-  or several), **change** one, and **remove** one they entered. Changing a day
-  the look-ahead plans writes their own entry for it; the workbook itself is
-  never touched. Anybody can look at a colleague's week; only an administrator
-  can change it.
-- **Look-ahead** — the four-week sheet read one day at a time: what is on, where,
-  the shift, who is named on it, and who is off site. **Only mine** narrows it
-  to what names them.
-- **PTO** — ask for time off and see the answer. A request lands on the full
-  site's **PTO** tab for an administrator to approve or decline, and shows as
-  *Leave requested* on those days until they do; it can be withdrawn while it is
-  still unanswered. An administrator's own entry is booked straight away.
-- **More** — their account, light or dark, and how to install it.
-
-**The timeline is not in it** — not hidden, absent. `tools/build.js` builds the
-phone app from its own entry point and refuses to link the timeline, the plan's
-storage or anything that reads a plan file, so nothing of the P6 project is ever
-loaded on a phone. The huddle, answering leave requests, reports and
-Organisation stay on a computer too.
-
-**Installing it.** Send the team the link. On Android, open it in Chrome and use
-**More → Install the app** (or the browser's own *Install app* menu). On an
-iPhone, open it in **Safari**, tap **Share**, then **Add to Home Screen** — iOS
-installs from Safari and nowhere else. An app installed on an iPhone keeps its
-own sign-in, separate from Safari's, so they sign in once more inside it.
-
-An invitation works on a phone too: `https://<your-site>/m/#join=<their address>`
-opens straight on *Create your account* with the address filled in.
-
-**Offline**, the installed app still opens — it keeps its own files on the
-phone — and says it cannot reach the calendar. It never keeps a copy of the
-calendar's data, so nothing on screen is ever an old answer dressed as a current
-one.
-
-**Updating** is deploying the site. A phone picks up the new version the next
-time the app is opened with a signal.
-
-**Behind Cloudflare Access** it needs nothing extra. A phone signs in through
-Access the first time it opens the link (and again whenever the Access session
-lapses), and the manifest is requested with credentials so installing works
-behind it. Unlike `/desktop/*`, there is nothing to bypass: everything under
-`/m/` is loaded by a browser that has a session.
-
-Verify:
-
-```bash
-curl -sI https://<your-site>/m/sw.js | grep -i cache-control   # no-cache
-curl -s  https://<your-site>/m/manifest.webmanifest | head -3   # JSON (behind Access: log in first)
-```
-
----
-
-# The desktop application
-
-The same file mode, as a Windows application instead of a browser tab. Nothing
-about where the data lives changes — it is still a JSON file in your synced
-folder, still no account, still no vendor holding anything. What changes is the
-friction:
-
-| | In Edge | In the desktop app |
-|---|---|---|
-| Opening your plan | Reconnect the folder, one click, after every browser restart | Opens on launch, no prompt ever |
-| Who has the pen | Told after the canvas has drawn | A dialog **before** anything is drawn |
-| Writing the file | Truncate, then write | Written beside the target and renamed over it, so a sync client never reads a half-written plan |
-| Getting a new version | Refresh | Picked up on the next launch, automatically |
-
-## The resource calendar in the desktop app
-
-It is included **only if the installer was built with the calendar's keys**, and
-for a long time it never was: the desktop build wrote a blank `config.js` and
-left the Supabase client out altogether, so the Calendar switch was not drawn at
-all. If your desktop app has no Calendar tab, that is why — nothing is stale and
-nothing is broken.
-
-To include it, set two build variables and build the installer:
-
-```bash
-RC_SUPABASE_URL=https://<ref>.supabase.co RC_SUPABASE_ANON_KEY=eyJ... npm run build:desktop
-```
-
-or, for the GitHub build, add `RC_SUPABASE_URL` and `RC_SUPABASE_ANON_KEY` to the
-repository secrets — **Settings → Secrets and variables → Actions** — and run
-**Actions → Desktop app** as usual. They are the same two values the site is
-published with, and the anon key is public by design: row-level security is the
-control, never the key.
-
-Three things are worth knowing before you do it.
-
-- **The plan still has no backend.** `supabaseUrl` is written blank in every
-  desktop shape, and `tools/test_dist.js` asserts it — including with the
-  calendar's keys present, and with a stale `SUPABASE_URL` left in the shell.
-  The plan stays a file in your folder.
-- **This one needs a reinstall.** The update channel carries the bundle and the
-  stylesheets and nothing else, on purpose: a deployment that could rewrite
-  `config.js` on an installed machine could give the plan a backend from a
-  thousand miles away. `config.js` and the Supabase client ride in the
-  installer, so the calendar arrives with a new installer — once. Everything
-  after that updates on its own as before.
-- **The window has its own policy.** `src-tauri/tauri.conf.json` allows
-  `https://*.supabase.co`; if your project is somewhere else the build refuses
-  and prints the exact line to change, rather than shipping an installer that
-  opens, signs in and fails on a network error nobody can place.
-
-One rough edge, and it is honest to state it: opening a **SAR PDF or an evidence
-photo** calls `window.open()`, which a Tauri window has nowhere to send. Both
-open normally in the browser. Making them work in the window means adding the
-opener plugin to the Rust side — small, but it is a Rust change and a new
-installer, so it is not done yet.
-
-## Installing it without administrative rights
-
-The installer is built **per-user**: it writes to your own
-`%LOCALAPPDATA%\Programs`, creates a Start-menu entry for you, and touches
-nothing that needs an administrator. There is no service, no driver and no
-registry work outside your own profile.
-
-That is the part I can control. The part I cannot is your organisation's
-software policy: an unsigned executable may still be stopped by SmartScreen
-("More info → Run anyway" clears it) or blocked outright by AppLocker or
-Defender Application Control, and neither of those has a way round that does not
-involve IT. If it is blocked, the deployed site in Edge remains the fallback and
-does the same job with the extra click on launch.
-
-If your organisation will sign it, that is a certificate in the repository
-secrets and two lines in `tauri.conf.json` — worth asking for, because it also
-removes the SmartScreen warning for your colleague.
-
-## Building the installer
-
-You do not need a Windows machine or a toolchain: GitHub builds it.
-
-1. **Actions → Desktop app → Run workflow.**
-2. When it finishes, download the **cx-timeline-windows** artifact. It holds two
-   installers — take the `.exe` (per-user, no admin) unless you specifically want
-   the `.msi`.
-3. Run it. That is the whole install.
-
-Tagging a release (`git tag v1.0.1 && git push --tags`) does the same and attaches
-both installers to the GitHub release, so "send me the installer" is a link.
-
-Locally, on a Windows machine with Rust installed:
-
-```bash
-npm run desktop            # build and run it, for development
-npm run desktop:installer  # produce the installers in src-tauri/target/release/bundle/
-```
-
-## Updating it — deploy the site, that is all
-
-**A change to the application does not need a new installer.** The window loads a
-local page which runs the newest copy of the application that machine has, and
-checks the deployment in the background for a newer one:
-
-1. You push to the default branch; Cloudflare rebuilds and publishes as usual.
-   The build now also writes `desktop/version.json` and `desktop/payload.json`
-   next to the site.
-2. The next time anyone opens the application, it notices, downloads it in the
-   background, and says *"Version x.y.z is ready — close CX Timeline and open it
-   again."*
-3. They restart it. That is the update.
-
-Three deliberate properties, because this runs unattended on somebody else's
-laptop:
+All of it is plain JSON (and the two workbooks): readable in a text editor,
+versioned by whatever versions the folder. OneDrive's own **Version history**
+on a file is the first place to look if something was saved wrongly.
+
+The calendar is split into many files because OneDrive uploads a whole file
+whenever it changes: the cells change on every edit, the registers rarely, and
+history only grows — so they are kept apart, and a reading once written is
+never rewritten.
+
+## 4. Two editors, one pen
+
+The plan and the calendar each have a **pen**, and they are separate — you can
+hold the calendar while your deputy holds the timeline.
+
+- The first window to open the calendar holds its pen; the header says
+  **Editing**. Every other window says **Read only**, names who has it, and
+  offers **Take over**. **Hand back** gives it up.
+- A window that has written nothing for an hour hands the pen back by itself.
+  A window that crashes stops restating its claim, and after four minutes the
+  pen is free (a minute, for a window on your own machine).
+- The pen is a courtesy; the guarantee is underneath it. Every file is written
+  through a guard: if the copy on disk is not the one this window last read —
+  another computer's save that OneDrive brought down — the write is refused,
+  the file is read again, and the change is taken back out, so what is on
+  screen is what is on disk. Nobody is ever silently overwritten.
+- A read-only window refreshes from the folder every fifteen seconds, so a
+  reader sees the editor's publishes as OneDrive delivers them — usually within
+  a minute.
+
+**Set your name** first — the name button in the calendar's header, or *Your
+name in the lock* under Import / export; it is one name for both pens. It is what the pen shows, what every edit is stamped
+with, and how the calendar knows which roster row is you. Add the spelling to
+the person under **Lists → People → Also written as** if it differs.
+
+## 5. The team, read-only — or not at all
+
+The team's access is the folder's sharing, set in OneDrive:
+
+- **Share the folder read-only** with anyone who should see the calendar in the
+  application. A read-only OneDrive share cannot write, whatever the
+  application thinks — so a reader can never change it, by design or by
+  accident.
+- **Or give them nothing but the export.** The master export (**Calendar →
+  Master export**) can run on a schedule, in the application, on your machine,
+  and files `exports/LookAhead_Latest.xlsx` and `exports/4WLA_Latest.xlsx` into
+  the folder — replacing the last each time, so the names never change. A
+  Power Automate flow can watch either file (*When a file is modified* in
+  OneDrive for Business) and send it out. Nobody on the team then needs the
+  application or the folder at all.
+
+The schedule runs while the application is open on that machine, and a slot
+missed while it was closed runs once when it next opens. Its settings are that
+computer's, not the folder's.
+
+## 6. Updating it
+
+**A change to the application does not need a new installer.**
+
+1. A push to the default branch runs **Checks**.
+2. When Checks passes, **Desktop update** (`.github/workflows/kit.yml`) writes
+   the `desktop-kit` branch: `version.json` and `payload.json`, the whole
+   application in two files.
+3. The next time anyone opens CX Timeline it checks that branch (through
+   `raw.githubusercontent.com`, the one host the window may reach), downloads a
+   newer copy in the background, and says *"Version … is ready — close CX
+   Timeline and open it again."* Opening it again is the update.
+
+Three properties, because this runs unattended on somebody else's laptop:
 
 - **Launch never waits on the network.** The copy already on the machine starts
-  immediately; the check happens afterwards. On a plane, or behind a proxy that
-  blocks the site, it opens exactly as fast and simply does not update.
-- **Nothing changes mid-session.** A new version is used from the next launch, so
-  the document and the interface are never two different versions of the app.
-- **A bad deploy cannot brick it.** A downloaded copy is on trial until it has
-  booted once. If it throws, the window rolls back and reloads on the spot; if it
-  silently never comes up, the next launch throws it away. Either way the copy
-  inside the installer is still there.
+  at once; the check comes afterwards.
+- **Nothing changes mid-session.** A new copy is used from the next launch.
+- **A bad update cannot brick it.** A downloaded copy is on trial until it has
+  booted once; one that throws, or never comes up, is thrown away and the copy
+  inside the installer runs.
 
-Rebuild the installer only when the Rust side (`src-tauri/`) changes — the folder
-handling, the lock, the window itself. Changes under `src/` and `css/` reach
-everybody through a deploy.
+A change to `src-tauri/` — a new command the application calls — does need a
+new installer. Raise `SHELL` in `tools/desktop.js` in the same commit: the kit
+then says which installer it needs, an older one does not run it, and its user
+is told to install the new one from GitHub Releases.
 
-**The channel is `package.json → cxTimeline.updateChannel`.** If you move the site
-to a different host, change it there and cut one new installer; the CSP in
-`src-tauri/tauri.conf.json` names the same host and is the only one the window may
-reach at all, so both have to move together.
+## 7. Building the installer
 
-## First run
+GitHub builds it; you need no Windows machine.
 
-1. Open it. It has no folder yet, so it starts on a sample plan.
-2. **Import / export → Shared folder → Connect a folder…** and pick your synced
-   folder. Windows' own folder picker opens — no permission prompt.
-3. From then on it opens straight into that plan on every launch.
+1. **Actions → Desktop app → Run workflow**, or push a tag
+   (`git tag v1.0.1 && git push origin v1.0.1`).
+2. Download the **cx-timeline-windows** artifact — or, for a tag, find both
+   installers attached to that release, which is where a copy that needs a new
+   installer sends its user.
 
-Your colleague does the same on their machine, against the same synced folder.
-They still need the folder **synced into File Explorer**, exactly as described
-above — the desktop app reads a real path, so a browser tab on `onedrive.com` is
-no more use to it than it is to Edge.
+Locally, on Windows with Rust installed: `npm run desktop` builds and runs it,
+`npm run desktop:installer` produces the installers.
 
-## The pen, on the desktop
+## 8. Backups
 
-The rules are the same as in the browser — one editor, a courtesy lock, and the
-write guard as the real protection. What the desktop build adds is that it reads
-the lock file *before the window exists*, so:
+- **The folder is the backup's first line.** OneDrive keeps every version of
+  every file for 30 days or more; a wrong save is restored from a file's
+  Version history.
+- **Calendar → Lists → Settings → Back it up** downloads the whole calendar as
+  one `.json` — the same format the import reads. Keep one somewhere that is
+  not the folder now and then; it is also how a calendar is moved to another
+  folder (start the new folder with **Import the old calendar…**).
+- The plan keeps its own backups (**Backups** in the dock), in browser storage
+  on that machine, and **Import / export → JSON** writes the whole plan.
 
-- If your colleague has the plan open, the first thing you see is a dialog naming
-  them and how long since they last saved, with **Open read-only** and **Take over
-  editing**. No canvas draws and then gets walked back.
-- The window title carries it too — `bart-cbtc.json — read-only, Dana has it` —
-  so the state is legible from the taskbar.
-- If their session was left open and died, you are told the pen is yours and whose
-  name was on it, rather than nothing at all.
-- Taking over is still never refused, and whoever saves second is still told to
-  reload rather than overwritten.
-
-## Verifying the desktop build
-
-`npm run test:desktop` (60 checks) and `npm run test:rust` (33) cover the shell,
-the update path including both ways a bad download can fail, and every rule about
-locks and refused writes. Three things need a real Windows machine:
-
-1. **The installer.** It runs without an administrator prompt, and the app appears
-   in the Start menu.
-2. **The folder picker,** and that the plan opens by itself on the second launch.
-3. **Two machines.** Open the plan on both: the second gets the up-front dialog
-   naming the first. Close the first; the second becomes editable within about a
-   minute.
-
----
-
-## Running it afterwards
+## 9. Verifying it
 
 ```bash
-npm run build:dist   # a hosted deployment; fails without a backend configured
-npm run build:folder # a folder deployment, plus the desktop update channel
-npm run build:desktop# assemble dist-desktop/, the frontend inside the installer
-npm test             # local UI, shared folder, desktop shell, hosted UI, permissions
-npm run test:rust    # the plan and lock rules; needs no webview and no display
-npm run serve        # http://localhost:8123, using config.js as committed
+npm run build && npm test   # every suite; must exit 0
+npm run test:rust           # the folder, plan and lock rules in Rust
 ```
 
-Every push to the default branch redeploys. Other branches get a preview URL,
-which shares the same Supabase project — so a preview build writes to real
-data. Use a second Supabase project for previews if that matters to you.
+`test_rc_db.js` covers the calendar's engine against a folder in memory —
+refused writes, two computers, the pen's rules — and `smoke_calendar.js` the
+calendar in a browser against a fake folder, including another computer's save
+arriving and a takeover. What needs a real Windows machine, once:
 
-## Costs
-
-Free at this scale, and the ceilings are generous:
-
-- **Cloudflare** — unlimited bandwidth; 100,000 Worker requests/day on the
-  free plan, which static assets served from cache barely touch.
-- **Supabase free tier** — 500 MB database, 1 GB file storage, 50,000 monthly
-  active users. A project plan is a few hundred kilobytes; attachments are
-  what will eventually push you over, and they are stored outside the
-  document precisely so that stays predictable.
-
-A free Supabase project **pauses after a week with no traffic**. It comes back
-on the next request, but the first person in that morning waits a few seconds.
-Paid plans do not pause.
-
-## Backups
-
-Every backup is a row in `project_backups`, so they survive a lost laptop.
-Retention is per project (**Settings → Backups**), and the server prunes to it.
-
-That is *your* backup of a plan's history — not a backup of the database. For
-that, Supabase takes daily snapshots on paid plans; on the free tier, export
-what you care about (**Import / Export → JSON**) or run `pg_dump` on a
-schedule.
+1. **The installer** runs with no administrator prompt.
+2. **The import**: the old backup comes in, and the look-ahead and the
+   cancellation log match the old site.
+3. **Two machines on one synced folder.** Open the calendar on both: the second
+   is read-only and names the first. Edit and leave Edit on the first; within
+   about a minute the second shows the change. Take over on the second; the
+   first drops to read-only.
+4. **The schedule**: set a master export for a few minutes ahead and see the
+   two workbooks land in `exports/` and sync.
