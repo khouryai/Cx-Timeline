@@ -986,6 +986,17 @@ async function main() {
     await empty.waitForSelector('#rc-frame [data-action="import"]', { timeout: 10000 });
     check('a folder with no calendar offers to bring the old one in, or start empty',
       (await empty.locator('#rc-frame [data-action="start-empty"]').count()) === 1);
+    // A backup taken while a table timed out is refused whole, before anything is shown as importable.
+    const cutShort = { ...backup, tables: { ...backup.tables, rc_lookahead_snapshots: { error: 'canceling statement due to statement timeout' } } };
+    await empty.locator('#rc-frame input[data-field="backup"]').setInputFiles({
+      name: 'resource-calendar-cut-short.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(cutShort)),
+    });
+    await empty.waitForSelector('#rc-frame .rc-error:not([hidden])', { timeout: 10000 }).catch(() => {});
+    const refusal = await empty.locator('#rc-frame .rc-error').innerText().catch(() => '');
+    check('a backup with a table that could not be read is refused, naming it, and nothing is offered to import',
+      /incomplete/.test(refusal) && /rc_lookahead_snapshots/.test(refusal) && (await empty.locator('.cx-modal').count()) === 0
+        && await empty.evaluate(() => !Object.keys(window.__folder.files).some((k) => k.startsWith('calendar/') && !k.startsWith('calendar/pen/'))),
+      refusal.slice(0, 160));
     await empty.locator('#rc-frame input[data-field="backup"]').setInputFiles({
       name: 'resource-calendar-2026-09-22.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(backup)),
     });

@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-27T22:16:58.336Z
+ * Modules: 28   Built: 2026-10-28T03:02:30.738Z
  */
 (function () {
   'use strict';
@@ -69,8 +69,11 @@ __mods["core/rc_import.js"] = function (__x, __req) {
    * Read a backup of the old calendar into rows for `createCalendar()`.
    *
    * Answers `{ tables, files, summary, warnings }`. Throws when the file is not
-   * a backup of the calendar at all; warns — and does not refuse — when it is one
-   * that may be incomplete, because what it holds is still worth having.
+   * a backup of the calendar at all, and when a table it keeps could not be read
+   * when the backup was taken: the calendar is made from this file once, and one
+   * made without its readings would hold rows, changes and cancellations that
+   * point at nothing — so the answer is a new backup, never an import of this one.
+   * Warns, and does not refuse, when it only may be incomplete.
    *
    * @param {any} backup  the parsed JSON
    */
@@ -84,13 +87,16 @@ __mods["core/rc_import.js"] = function (__x, __req) {
     const tables = {};
     const summary = [];
     const warnings = [];
+    const unread = TABLE_NAMES
+      .filter((name) => backup.tables[name] !== undefined && !Array.isArray(backup.tables[name]))
+      .map((name) => `${name} (${backup.tables[name]?.error || 'no rows'})`);
+    if (unread.length) {
+      throw new Error(`This backup is incomplete, so nothing has been written: ${unread.join('; ')} could not be read `
+        + 'when it was taken. Take the backup again on the old calendar and import that one.');
+    }
     for (const name of TABLE_NAMES) {
       const held = backup.tables[name];
       if (held === undefined) continue;
-      if (!Array.isArray(held)) {
-        warnings.push(`${name} could not be read when the backup was taken (${held?.error || 'no rows'}).`);
-        continue;
-      }
       tables[name] = held.map(normaliseRow);
       summary.push({ table: name, rows: held.length });
       // PostgREST answered a thousand rows at most, and the backup read each table
