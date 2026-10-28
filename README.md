@@ -312,7 +312,8 @@ TAWRs and the registers, under an *About* sheet. Choose the sheets and
 the dates, then *Export now* or a schedule — every day, every week or every
 few hours. It is filed into `exports/` in the shared folder as
 `LookAhead_Latest.xlsx`, replacing the last one so anything linked to it is
-always current (with the 4WLA in its own layout beside it), or downloaded where no folder is connected. A
+always current (with the 4WLA in its own layout beside it, and the next four
+weeks on one A3 page as `4WLA_Latest.pdf`), or downloaded where no folder is connected. A
 schedule runs on the computer the calendar is open on, and a time missed while
 it was closed is exported once, the next time it opens.
 

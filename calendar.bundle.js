@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-28T03:45:49.362Z
+ * Modules: 28   Built: 2026-10-28T16:41:21.764Z
  */
 (function () {
   'use strict';
@@ -13861,9 +13861,10 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
    * stories. A sheet that cannot be read is written empty and named in About,
    * never left out silently.
    *
-   * It is also how the look-ahead reaches the team: `LookAhead_Latest.xlsx` and
-   * the 4WLA beside it are what a flow on the shared folder (Power Automate, say)
-   * picks up and sends on, so nobody needs the application to read it.
+   * It is also how the look-ahead reaches the team: `LookAhead_Latest.xlsx`, the
+   * 4WLA beside it (`4WLA_Latest.xlsx`) and the next four weeks on one page
+   * (`4WLA_Latest.pdf`) are what a flow on the shared folder (Power Automate,
+   * say) picks up and sends on, so nobody needs the application to read it.
    *
    * **The schedule runs here, in the page.** There is no server to run it and
    * nothing is emailed from this application (that is structural), so it runs
@@ -13905,6 +13906,16 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
    * and is always the newest. When it was made is on its About sheet.
    */
   const EXPORT_NAME = 'LookAhead_Latest.xlsx';
+
+  /* The 4WLA as a PDF is drawn by the look-ahead (`lookaheadPdfNow()` in
+     `ui/rc_lookahead.js`), which imports this module for its button — so it
+     hands the function over when it loads rather than being imported back,
+     which the build would refuse as a cycle. */
+  /** @type {null | (() => Promise<{ name: string, bytes: Uint8Array } | null>)} */
+  let lookaheadPdf = null;
+  function provideLookaheadPdf(fn) {
+    lookaheadPdf = fn;
+  }
   const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   const STORE_KEY = 'cx.rc.masterExport';
   /** How long a scheduled export that failed waits before it is tried again. */
@@ -13943,6 +13954,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
       from: '',
       to: '',
       companion: true,
+      pdf: true,
       schedule: cleanSchedule({ every: 'off', at: '06:00', weekday: 1, hours: 24 }),
       since: null,
       lastRun: null,
@@ -14441,12 +14453,24 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
     let companion = null;
     if (settings.companion) companion = await lookaheadFileNow({ from: range.from, to: range.to }).catch(() => null);
 
+    /* The next four weeks on one page, for whoever it is sent to. A PDF that
+       cannot be drawn never costs the workbook; it is named among what failed. */
+    let pdf = null;
+    if (settings.pdf && lookaheadPdf) {
+      try {
+        pdf = await lookaheadPdf();
+      } catch (err) {
+        failed.push({ id: 'pdf', label: 'the 4WLA PDF', message: err.message });
+      }
+    }
+
     return {
       bytes,
       name: EXPORT_NAME,
       sheets: sheets.map((s) => ({ name: s.name, rows: s.rows.length })),
       failed,
       companion,
+      pdf,
     };
   }
 
@@ -14469,11 +14493,13 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
       };
       await replace(result.name, result.bytes);
       if (result.companion) await replace(result.companion.name, result.companion.bytes);
-      return { where: 'folder', path: `${EXPORT_DIR}/${result.name}` };
+      if (result.pdf) await replace(result.pdf.name, result.pdf.bytes);
+      return { where: 'folder', path: `${EXPORT_DIR}/${result.name}`, pdfPath: result.pdf ? `${EXPORT_DIR}/${result.pdf.name}` : null };
     }
     saveFile(result.name, result.bytes, XLSX, 'Master export');
     if (result.companion) saveFile(result.companion.name, result.companion.bytes, XLSX, '4WLA');
-    return { where: 'download', path: result.name };
+    if (result.pdf) saveFile(result.pdf.name, result.pdf.bytes, 'application/pdf', '4WLA PDF');
+    return { where: 'download', path: result.name, pdfPath: result.pdf ? result.pdf.name : null };
   }
 
   /** Build, deliver, and remember how it went. */
@@ -14486,7 +14512,8 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
   }
 
   function saidWhere(out) {
-    return out.where === 'folder' ? `Saved to the shared folder — ${out.path}` : `Downloaded — ${out.path}`;
+    const also = out.pdfPath ? `, and ${out.pdfPath}` : '';
+    return out.where === 'folder' ? `Saved to the shared folder — ${out.path}${also}` : `Downloaded — ${out.path}${also}`;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -14557,6 +14584,11 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
     const to = el('input', { type: 'date', class: 'cx-input', value: s.to || '' });
     const dates = el('div', { class: 'rc-mx-dates' }, [field('From', from), field('To', to)]);
     const companion = checkbox({ label: 'Also the 4WLA in its own layout — every week written in these dates, as Export to Excel makes it', checked: s.companion });
+    const pdf = checkbox({
+      label: 'Also the 4WLA as a PDF — the next four weeks on one A3 page, as Export PDF draws it, saved as 4WLA_Latest.pdf',
+      checked: s.pdf,
+    });
+    pdf.classList.add('rc-mx-pdf');
 
     const every = selectInput({
       value: s.schedule.every,
@@ -14583,6 +14615,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
       from: from.value,
       to: to.value,
       companion: companion.querySelector('input').checked,
+      pdf: pdf.querySelector('input').checked,
       schedule: cleanSchedule({ every: every.value, at: at.value, weekday: Number(day.value), hours: Number(hours.value) }),
     });
     const show = () => {
@@ -14619,6 +14652,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
         field('Dates', range),
         dates,
         companion,
+        pdf,
         el('p', {
           class: 'rc-hint rc-mx-where',
           text: folder
@@ -14682,6 +14716,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "EXPORT_DIR", { get: () => EXPORT_DIR, enumerable: true });
   Object.defineProperty(__x, "EXPORT_NAME", { get: () => EXPORT_NAME, enumerable: true });
+  Object.defineProperty(__x, "provideLookaheadPdf", { get: () => provideLookaheadPdf, enumerable: true });
   Object.defineProperty(__x, "SHEETS", { get: () => SHEETS, enumerable: true });
   Object.defineProperty(__x, "RANGES", { get: () => RANGES, enumerable: true });
   Object.defineProperty(__x, "loadSettings", { get: () => loadSettings, enumerable: true });
@@ -14734,7 +14769,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { renderCancellations } = __req("ui/rc_la_cancellations.js");
   const { renderP6, p6Words } = __req("ui/rc_la_p6.js");
   const { openActivity } = __req("ui/rc_activity.js");
-  const { masterExportButton } = __req("ui/rc_master_export.js");
+  const { masterExportButton, provideLookaheadPdf } = __req("ui/rc_master_export.js");
 
   const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6'];
 
@@ -15995,6 +16030,53 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     });
   }
 
+  /**
+   * The 4WLA as a PDF, with nobody at the screen — what the master export files
+   * as `exports/4WLA_Latest.pdf`, on its schedule or when Export now is pressed.
+   *
+   * It is the Export PDF dialog with its defaults, never the screen's state:
+   * four weeks from this week's Monday, every row with work in them (none
+   * filtered, none "only mine"), the names and who is away, the key, on one A3
+   * landscape sheet. Drawn through the same functions — the same view for the
+   * same weeks — so a scheduled PDF and one exported by hand never disagree.
+   * Null when there is nothing to draw.
+   */
+  async function lookaheadPdfNow({ weeks = 4, today = todayISO() } = {}) {
+    const [snapshot, legendRows, sourceSetting] = await Promise.all([rc.latestSnapshot(), rc.listLegend(), lookaheadSource()]);
+    if (!snapshot?.grid?.rows?.length) return null;
+    const view = parsedView(snapshot, legendRows);
+    if (!view.days.length) return null;
+    const written = sourceSetting === EDITOR_SOURCE;
+    const reading = readingSpan(view);
+    const history = await historyOf(written);
+    const viewFor = viewChooser({ view, reading, reach: reachOf(reading, history), written, legendRows, today, history });
+    const start = mondayOf(today);
+    const source = await viewFor(weeks, start);
+    const p6 = await p6Chooser()(source);
+    const rows = drawn(windowed(source, today, weeks, start), '', false, true, null, p6?.names);
+    if (!rows.activities.length) return null;
+    const sheet = snapshot.sheet_name || '4WLA';
+    const blob = calendarPdf(rows, {
+      showResources: true,
+      showAway: true,
+      showLegend: true,
+      legend: legendRows.map((r) => ({ argb: r.argb, meaning: r.meaning }))
+        .filter((e) => paintOn(rows).has(String(e.argb).toUpperCase())),
+      today,
+      pageSize: 'a3',
+      orientation: 'landscape',
+      title: `${sheet} — look-ahead`,
+      subtitle: `${sheet}  ·  ${weeks} weeks from ${dayLabel(start, 'medium')}`,
+    });
+    return { name: LOOKAHEAD_PDF, bytes: new Uint8Array(await blob.arrayBuffer()) };
+  }
+
+  /** The one name it is filed under, replaced each time. */
+  const LOOKAHEAD_PDF = '4WLA_Latest.pdf';
+
+  // The master export files it; this module imports that one, so it is handed over rather than imported back.
+  provideLookaheadPdf(lookaheadPdfNow);
+
   function exportButton(context) {
     return el('button', {
       class: 'cx-btn mini primary la-export-pdf',
@@ -16007,6 +16089,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
 
   Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
+  Object.defineProperty(__x, "lookaheadPdfNow", { get: () => lookaheadPdfNow, enumerable: true });
+  Object.defineProperty(__x, "LOOKAHEAD_PDF", { get: () => LOOKAHEAD_PDF, enumerable: true });
 };
 
 // ui/rc_pto.js

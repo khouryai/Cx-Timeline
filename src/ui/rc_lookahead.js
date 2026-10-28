@@ -36,7 +36,7 @@ import { renderChanges, renderSnapshots } from './rc_la_changes.js';
 import { renderCancellations } from './rc_la_cancellations.js';
 import { renderP6, p6Words } from './rc_la_p6.js';
 import { openActivity } from './rc_activity.js';
-import { masterExportButton } from './rc_master_export.js';
+import { masterExportButton, provideLookaheadPdf } from './rc_master_export.js';
 
 const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6'];
 
@@ -1296,6 +1296,53 @@ function exportDialog({ viewFor, p6Of, legendRows, today, sheetName, isMe = null
     },
   });
 }
+
+/**
+ * The 4WLA as a PDF, with nobody at the screen — what the master export files
+ * as `exports/4WLA_Latest.pdf`, on its schedule or when Export now is pressed.
+ *
+ * It is the Export PDF dialog with its defaults, never the screen's state:
+ * four weeks from this week's Monday, every row with work in them (none
+ * filtered, none "only mine"), the names and who is away, the key, on one A3
+ * landscape sheet. Drawn through the same functions — the same view for the
+ * same weeks — so a scheduled PDF and one exported by hand never disagree.
+ * Null when there is nothing to draw.
+ */
+export async function lookaheadPdfNow({ weeks = 4, today = todayISO() } = {}) {
+  const [snapshot, legendRows, sourceSetting] = await Promise.all([rc.latestSnapshot(), rc.listLegend(), lookaheadSource()]);
+  if (!snapshot?.grid?.rows?.length) return null;
+  const view = parsedView(snapshot, legendRows);
+  if (!view.days.length) return null;
+  const written = sourceSetting === EDITOR_SOURCE;
+  const reading = readingSpan(view);
+  const history = await historyOf(written);
+  const viewFor = viewChooser({ view, reading, reach: reachOf(reading, history), written, legendRows, today, history });
+  const start = mondayOf(today);
+  const source = await viewFor(weeks, start);
+  const p6 = await p6Chooser()(source);
+  const rows = drawn(windowed(source, today, weeks, start), '', false, true, null, p6?.names);
+  if (!rows.activities.length) return null;
+  const sheet = snapshot.sheet_name || '4WLA';
+  const blob = calendarPdf(rows, {
+    showResources: true,
+    showAway: true,
+    showLegend: true,
+    legend: legendRows.map((r) => ({ argb: r.argb, meaning: r.meaning }))
+      .filter((e) => paintOn(rows).has(String(e.argb).toUpperCase())),
+    today,
+    pageSize: 'a3',
+    orientation: 'landscape',
+    title: `${sheet} — look-ahead`,
+    subtitle: `${sheet}  ·  ${weeks} weeks from ${dayLabel(start, 'medium')}`,
+  });
+  return { name: LOOKAHEAD_PDF, bytes: new Uint8Array(await blob.arrayBuffer()) };
+}
+
+/** The one name it is filed under, replaced each time. */
+export const LOOKAHEAD_PDF = '4WLA_Latest.pdf';
+
+// The master export files it; this module imports that one, so it is handed over rather than imported back.
+provideLookaheadPdf(lookaheadPdfNow);
 
 function exportButton(context) {
   return el('button', {

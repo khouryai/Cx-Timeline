@@ -106,6 +106,7 @@ calendar/tawr/                   TAWRs, what they are filled from, and BART's bl
 calendar/pen/                    who has the calendar's pen, a file per window
 exports/LookAhead_Latest.xlsx    the master export, when one is scheduled
 exports/4WLA_Latest.xlsx         the 4WLA beside it
+exports/4WLA_Latest.pdf          the next four weeks on one A3 page
 ```
 
 All of it is plain JSON (and the two workbooks): readable in a text editor,
@@ -152,10 +153,12 @@ The team's access is the folder's sharing, set in OneDrive:
   accident.
 - **Or give them nothing but the export.** The master export (**Calendar →
   Master export**) can run on a schedule, in the application, on your machine,
-  and files `exports/LookAhead_Latest.xlsx` and `exports/4WLA_Latest.xlsx` into
-  the folder — replacing the last each time, so the names never change. A
-  Power Automate flow can watch either file (*When a file is modified* in
-  OneDrive for Business) and send it out. Nobody on the team then needs the
+  and files `exports/LookAhead_Latest.xlsx`, `exports/4WLA_Latest.xlsx` and
+  `exports/4WLA_Latest.pdf` (the next four weeks on one A3 page, as Export PDF
+  draws it) into the folder — replacing the last each time, so the names never
+  change. A Power Automate flow can watch any of them (*When a file is
+  modified* in OneDrive for Business) and send it out — the PDF is the one to
+  attach to an email, since it opens on any phone. Nobody on the team then needs the
   application or the folder at all.
 
 The schedule runs while the application is open on that machine, and a slot

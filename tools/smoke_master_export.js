@@ -53,6 +53,7 @@ export async function masterExport(page, { check }) {
   check('it asks what goes in — a sheet each, every one ticked to begin with',
     (await dialog.locator('.rc-mx-sheet input:checked').count()) === 8);
   check('and when — now, or on a schedule', (await dialog.locator('.rc-mx-every').count()) === 1);
+  check('it offers the 4WLA as a PDF too, ticked to begin with', (await dialog.locator('.rc-mx-pdf input:checked').count()) === 1);
 
   const before = await page.evaluate(() => Object.keys(window.__folder.files).filter((k) => k.startsWith('exports/')).length);
   await dialog.locator('button', { hasText: 'Export now' }).click();
@@ -61,6 +62,21 @@ export async function masterExport(page, { check }) {
   check('"Export now" files the workbook into exports/ in the shared folder',
     filed.includes('exports/LookAhead_Latest.xlsx'), filed.join(' | '));
   check('with the 4WLA beside it, in its own layout', filed.some((k) => /4WLA/.test(k) && !/master/.test(k)), filed.join(' | '));
+  const pdf = await page.evaluate(() => {
+    const f = window.__folder.files['exports/4WLA_Latest.pdf'];
+    if (!f) return null;
+    const text = new TextDecoder('latin1').decode(f.data);
+    return {
+      head: text.slice(0, 5),
+      pages: (text.match(/\/Type\s*\/Page[^s]/g) || []).length,
+      // A3 landscape: 1190.55 x 841.89 points.
+      weeks: /4 weeks from/.test(text),
+      a3: /\/MediaBox\s*\[\s*0\s+0\s+1190\.\d+\s+841\.\d+\s*\]/.test(text),
+      modified: f.modified,
+    };
+  });
+  check('and files it as exports/4WLA_Latest.pdf — a real PDF, one A3 landscape page',
+    pdf?.head === '%PDF-' && pdf.pages === 1 && pdf.a3 && pdf.weeks, JSON.stringify(pdf));
   const said = page.locator('.cx-toast', { hasText: 'Saved to the shared folder' }).first();
   await said.waitFor({ timeout: 8000 }).catch(() => {});
   check('and says where it went, and how much it holds',
@@ -142,6 +158,9 @@ export async function masterExport(page, { check }) {
     (await count()) === 1 && !(await page.evaluate(() => Object.keys(window.__folder.files).some((k) => /^exports\/.*master export/i.test(k)))));
   check('and what is in it is the new export, not the old one kept',
     Boolean(filedBefore) && (await page.evaluate(() => window.__folder.files['exports/LookAhead_Latest.xlsx']?.modified)) > filedBefore);
+  check('the PDF is replaced by the scheduled run too, under the same name',
+    (await page.evaluate(() => window.__folder.files['exports/4WLA_Latest.pdf']?.modified || 0)) > (pdf?.modified || Infinity)
+      && (await page.evaluate(() => Object.keys(window.__folder.files).filter((k) => /^exports\/.*\.pdf$/.test(k)).length)) === 1);
   check('the time it ran is remembered on this computer',
     await page.evaluate(() => Boolean(JSON.parse(localStorage.getItem('cx.rc.masterExport') || '{}').lastRun)));
   // Back off, so nothing else in the suite meets a schedule.

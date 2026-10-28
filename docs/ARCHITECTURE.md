@@ -1790,6 +1790,19 @@ day anything was (`laCellSpan()`) to the last and never less than four weeks
 from this one, within the export's own dates, and files it as
 `4WLA_Latest.xlsx` (`lookaheadLatestName()`), replaced like the workbook.
 
+**And the next four weeks as a PDF, `4WLA_Latest.pdf`**, for whoever is sent
+the look-ahead rather than given the application — a flow on the folder
+attaches it to an email, and it opens on a phone. `lookaheadPdfNow()` in
+`ui/rc_lookahead.js` draws it with the Export PDF dialog's defaults, never the
+screen's state: four weeks from this week's Monday, every row with work in
+them, the names and who is away, the key, one A3 landscape page — through the
+same `viewChooser()`, `windowed()` and `drawn()` the screen uses, so it cannot
+show different rows from the button. The look-ahead imports this module for
+its button, so it hands the function over (`provideLookaheadPdf()`) rather
+than being imported back, which the build would refuse as a cycle. It is
+ticked by default; a PDF that cannot be drawn is named among what failed and
+never costs the workbook.
+
 The writer is `tableWorkbook()` in `io/xlsx_write.js`: typed cells (a date is
 Excel's day number with a date format, a number a number, everything else
 inline text, which is never a formula), the heading row frozen and filtered,
