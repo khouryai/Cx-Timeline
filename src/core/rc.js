@@ -153,8 +153,9 @@ function writable() {
   if (state !== 'open' && state !== 'empty') return 'No calendar is open.';
   if (folder.holdsPen()) return true;
   const { holder } = folder.penState();
-  return `Read only — ${holder || 'somebody else'} is editing the calendar. `
-    + 'Take over at the top of the calendar if they have finished.';
+  if (!holder) return 'Read only — you handed the calendar back. Press Take over editing to change it.';
+  return `Read only — ${holder} is editing the calendar. `
+    + 'Press Take over editing if they have finished.';
 }
 
 /** The name given to the database for stamping its files. */

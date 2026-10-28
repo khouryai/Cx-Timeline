@@ -6,7 +6,7 @@
  * be a cycle, and the build rejects those outright rather than letting one
  * quietly half-initialise.
  *
- * Imports: util, events, dates, components.
+ * Imports: util, events, dates, components, icons.
  */
 
 import { el } from '../core/util.js';
@@ -18,7 +18,8 @@ import {
 } from '../core/lookahead.js';
 import { applyLegend } from '../io/lookahead.js';
 import * as rc from '../core/rc.js';
-import { openModal } from './components.js';
+import { openModal, confirmDialog, toast } from './components.js';
+import { icon } from './icons.js';
 
 /**
  * A modal whose confirm button does something that can fail.
@@ -1226,4 +1227,58 @@ export function availability(person, iso, leaveRows, absent = null) {
   if (absent && ABSENCE_KINDS[absent]?.leave) return { state: 'leave', sheet: absent, asked };
   if (!working.includes(weekday)) return { state: 'non-working', asked };
   return { state: 'available', asked };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The pen, as a button
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Take over editing, or hand it back — the calendar's version of the
+ * timeline's *Take over editing* in Import / export. One button, drawn in the
+ * banner and beside Edit on the look-ahead, so the two never disagree.
+ *
+ * Taking it from somebody asks first; taking it when nobody holds it (it was
+ * handed back) does not, since there is nobody's work to interrupt.
+ */
+export function penButton({ primary = false } = {}) {
+  const pen = rc.penState();
+  if (pen.editing) {
+    return el('button', {
+      class: 'cx-btn mini ghost rc-pen-btn',
+      type: 'button',
+      dataset: { action: 'hand-back' },
+      title: 'Stop editing, so a colleague can. You go on reading it, read-only, until you take it again.',
+      html: icon('eye', { size: 12 }) + '<span>Hand back</span>',
+      onClick: async () => {
+        await rc.releasePen();
+        toast({ message: 'Handed back. The calendar is read-only here until you take over editing again.' });
+      },
+    });
+  }
+  return el('button', {
+    class: `cx-btn mini${primary ? ' primary' : ''} rc-pen-btn`,
+    type: 'button',
+    dataset: { action: 'take-over' },
+    title: pen.holder ? `Take the calendar from ${pen.holder}` : 'Nobody is editing the calendar — take it to edit',
+    html: icon('refresh', { size: 12 }) + '<span>Take over editing</span>',
+    onClick: () => takeOverEditing(),
+  });
+}
+
+/** The take-over itself, asking first only when somebody holds the pen. */
+export async function takeOverEditing() {
+  const { holder } = rc.penState();
+  if (holder) {
+    const ok = await confirmDialog({
+      title: `Take the calendar from ${holder}?`,
+      message: 'Do this when they have finished, or have left it open. Anything they had not saved yet '
+        + 'is refused when they try, rather than written over what you do.',
+      confirmLabel: 'Take over',
+    });
+    if (!ok) return false;
+  }
+  await rc.takePen();
+  toast({ tone: 'good', message: 'You are editing the calendar.' });
+  return true;
 }

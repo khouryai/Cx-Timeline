@@ -19,7 +19,8 @@ import { on, EV } from '../core/events.js';
 import * as rc from '../core/rc.js';
 import * as filestore from '../core/filestore.js';
 import { icon } from './icons.js';
-import { toast, emptyState, confirmDialog, promptDialog } from './components.js';
+import { toast, emptyState, promptDialog } from './components.js';
+import { penButton } from './rc_util.js';
 import { notConfigured, noFolder, emptyFolder, readFailed } from './rc_gate.js';
 import * as roster from './rc_roster.js';
 import * as lookahead from './rc_lookahead.js';
@@ -94,7 +95,7 @@ export function build() {
       toast({
         tone: 'info',
         title: 'Calendar handed back',
-        message: 'Nothing was written for an hour, so the pen went back for whoever is waiting. Take over at the top when you want it again.',
+        message: 'Nothing was written for an hour, so the pen went back for whoever is waiting. Press Take over editing when you want it again.',
         timeout: 12000,
       });
     }
@@ -183,31 +184,19 @@ function renderHead() {
   headEl.appendChild(tabs);
 
   const pen = rc.penState();
-  if (pen.editing) {
-    headEl.appendChild(el('span', {
-      class: 'rc-queue',
-      style: 'background:var(--good-light);border-color:var(--good-border);color:var(--good)',
-      text: 'Editing',
-      title: 'You hold the calendar\'s pen: what you change is saved to the shared folder. Anybody else who opens it reads it.',
-    }));
-    headEl.appendChild(el('button', {
-      class: 'cx-btn mini ghost',
-      type: 'button',
-      text: 'Hand back',
-      title: 'Stop editing, so whoever is waiting can. You go on reading it.',
-      onClick: async () => {
-        await rc.releasePen();
-        toast({ message: 'Handed back. The calendar is read-only here until you take it again.' });
-      },
-    }));
-  } else {
-    headEl.appendChild(el('span', {
-      class: 'rc-queue',
-      style: 'background:var(--info-light);border-color:var(--info-border);color:var(--info)',
-      text: 'Read only',
-      title: `${pen.holder || 'Somebody else'} is editing the calendar.`,
-    }));
-  }
+  headEl.appendChild(el('span', {
+    class: 'rc-queue',
+    style: pen.editing
+      ? 'background:var(--good-light);border-color:var(--good-border);color:var(--good)'
+      : 'background:var(--info-light);border-color:var(--info-border);color:var(--info)',
+    text: pen.editing ? 'Editing' : 'Read only',
+    dataset: { pen: pen.editing ? 'editing' : 'read-only' },
+    title: pen.editing
+      ? 'You hold the calendar\'s pen: what you change is saved to the shared folder. Anybody else who opens it reads it.'
+      : pen.holder ? `${pen.holder} is editing the calendar.` : 'Nobody is editing the calendar. Take over editing to change it.',
+  }));
+  // Read-only, the way to take it is the banner under the tabs, on every tab.
+  if (pen.editing) headEl.appendChild(penButton());
 
   headEl.appendChild(el('button', {
     class: 'cx-btn mini ghost',
@@ -239,28 +228,15 @@ function penBanner() {
   const pen = rc.penState();
   if (pen.editing) return el('span', { hidden: true });
   const idle = pen.holderIdleMs != null ? ` They last saved ${Math.max(1, Math.round(pen.holderIdleMs / 60000))} min ago.` : '';
+  const words = pen.holder
+    ? [el('strong', { text: `${pen.holder} is editing the calendar.` }),
+      el('span', { text: ` You can read everything; changes are theirs to make until they finish or you take over.${idle}` })]
+    : [el('strong', { text: 'You handed the calendar back.' }),
+      el('span', { text: ' Nobody is editing it. It stays read-only here until you take over editing.' })];
   return el('div', { class: 'rc-preview-banner', role: 'status', dataset: { pen: 'viewer' } }, [
     el('span', { html: icon('eye', { size: 16 }), 'aria-hidden': 'true' }),
-    el('div', { class: 'rc-preview-text' }, [
-      el('strong', { text: `${pen.holder || 'Somebody else'} is editing the calendar.` }),
-      el('span', { text: ` You can read everything; changes are theirs to make until they finish or you take over.${idle}` }),
-    ]),
-    el('button', {
-      class: 'cx-btn mini primary',
-      type: 'button',
-      text: 'Take over',
-      onClick: async () => {
-        const ok = await confirmDialog({
-          title: `Take the calendar from ${pen.holder || 'them'}?`,
-          message: 'Do this when they have finished, or have left it open. Anything they had not saved yet '
-            + 'is refused when they try, rather than written over what you do.',
-          confirmLabel: 'Take over',
-        });
-        if (!ok) return;
-        await rc.takePen();
-        toast({ tone: 'good', message: 'You are editing the calendar.' });
-      },
-    }),
+    el('div', { class: 'rc-preview-text' }, words),
+    penButton({ primary: true }),
   ]);
 }
 

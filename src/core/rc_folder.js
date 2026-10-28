@@ -83,6 +83,11 @@ let lastWriteAt = 0;
 let beatTimer = null;
 let settleTimer = null;
 let started = false;
+/* Handed back: this window states no claim and stays read-only until it is
+   taken again, whether or not anybody else is waiting. Without this, handing
+   back with nobody else in the folder restated a claim that won at once — the
+   pen came straight back and the header still said Editing. */
+let yielded = false;
 
 const claimFile = () => {
   const me = filestore.identity();
@@ -97,6 +102,7 @@ export function penState() {
     holder,
     holderIdleMs: holderSavedMs,
     since,
+    yielded,
   };
 }
 
@@ -111,6 +117,7 @@ export function noteWrite() {
 }
 
 async function writeClaim() {
+  if (yielded) return;
   const me = filestore.identity();
   const claim = {
     id: me.session,
@@ -136,6 +143,8 @@ async function readClaims() {
     const read = await filestore.dataRead(`${PEN_DIR}/${f.name}`).catch(() => null);
     const claim = parseClaim(read?.text);
     if (!claim) continue;
+    // A window that has handed back has no claim, whatever a slow sync still shows.
+    if (yielded && claim.id === me.session) continue;
     // Another window of this machine that has stopped beating has closed.
     if (claim.device === me.device && claim.id !== me.session && Date.now() - (claim.beat || 0) > OWN_GONE_MS) {
       continue;
@@ -151,8 +160,10 @@ export async function settle() {
   const me = filestore.identity();
   const claims = await readClaims();
   const winner = penHolder(claims);
-  const next = !winner || winner.id === me.session ? 'editor' : 'viewer';
-  const nextHolder = next === 'editor' ? '' : (winner.device === me.device ? 'another window of yours' : winner.holder || 'Someone');
+  const next = !yielded && (!winner || winner.id === me.session) ? 'editor' : 'viewer';
+  // A viewer with nobody else holding it is a window that handed back: holder is ''.
+  const nextHolder = next === 'editor' || !winner ? ''
+    : (winner.device === me.device ? 'another window of yours' : winner.holder || 'Someone');
   holderSavedMs = next === 'viewer' && winner?.saved ? Date.now() - winner.saved : null;
   if (next === role && nextHolder === holder) return penState();
   role = next;
@@ -169,6 +180,7 @@ export async function settle() {
 export async function startPen() {
   if (started) return penState();
   started = true;
+  yielded = false;
   since = Date.now();
   takeover = 0;
   lastWriteAt = Date.now();
@@ -192,6 +204,7 @@ export async function startPen() {
 /** Take the pen. Never refused: the guard is what keeps the work safe. */
 export async function takePen() {
   if (!started) await startPen();
+  yielded = false;
   takeover = Date.now();
   lastWriteAt = Date.now();
   await writeClaim();
@@ -204,17 +217,16 @@ export async function takePen() {
 
 /**
  * Hand the pen back and read on: the claim is withdrawn, so whoever has been
- * waiting longest holds it on their next settle. A fresh claim is stated at
- * once, at the back of the queue.
+ * waiting longest holds it on their next settle, and this window states no
+ * claim until it takes the pen again (`takePen()`).
  */
 export async function releasePen() {
   if (!started) return penState();
+  yielded = true;
   await filestore.dataRemove(claimFile()).catch(() => false);
-  since = Date.now();
   takeover = 0;
   role = 'viewer';
   holder = '';
-  await writeClaim();
   await settle();
   emit(EV.RC_PEN, penState());
   return penState();

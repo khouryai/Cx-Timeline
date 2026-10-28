@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 60   Built: 2026-10-28T03:02:29.550Z
+ * Modules: 60   Built: 2026-10-28T03:45:49.260Z
  */
 (function () {
   'use strict';
@@ -17065,6 +17065,11 @@ __mods["core/rc_folder.js"] = function (__x, __req) {
   let beatTimer = null;
   let settleTimer = null;
   let started = false;
+  /* Handed back: this window states no claim and stays read-only until it is
+     taken again, whether or not anybody else is waiting. Without this, handing
+     back with nobody else in the folder restated a claim that won at once — the
+     pen came straight back and the header still said Editing. */
+  let yielded = false;
 
   const claimFile = () => {
     const me = filestore.identity();
@@ -17079,6 +17084,7 @@ __mods["core/rc_folder.js"] = function (__x, __req) {
       holder,
       holderIdleMs: holderSavedMs,
       since,
+      yielded,
     };
   }
 
@@ -17093,6 +17099,7 @@ __mods["core/rc_folder.js"] = function (__x, __req) {
   }
 
   async function writeClaim() {
+    if (yielded) return;
     const me = filestore.identity();
     const claim = {
       id: me.session,
@@ -17118,6 +17125,8 @@ __mods["core/rc_folder.js"] = function (__x, __req) {
       const read = await filestore.dataRead(`${PEN_DIR}/${f.name}`).catch(() => null);
       const claim = parseClaim(read?.text);
       if (!claim) continue;
+      // A window that has handed back has no claim, whatever a slow sync still shows.
+      if (yielded && claim.id === me.session) continue;
       // Another window of this machine that has stopped beating has closed.
       if (claim.device === me.device && claim.id !== me.session && Date.now() - (claim.beat || 0) > OWN_GONE_MS) {
         continue;
@@ -17133,8 +17142,10 @@ __mods["core/rc_folder.js"] = function (__x, __req) {
     const me = filestore.identity();
     const claims = await readClaims();
     const winner = penHolder(claims);
-    const next = !winner || winner.id === me.session ? 'editor' : 'viewer';
-    const nextHolder = next === 'editor' ? '' : (winner.device === me.device ? 'another window of yours' : winner.holder || 'Someone');
+    const next = !yielded && (!winner || winner.id === me.session) ? 'editor' : 'viewer';
+    // A viewer with nobody else holding it is a window that handed back: holder is ''.
+    const nextHolder = next === 'editor' || !winner ? ''
+      : (winner.device === me.device ? 'another window of yours' : winner.holder || 'Someone');
     holderSavedMs = next === 'viewer' && winner?.saved ? Date.now() - winner.saved : null;
     if (next === role && nextHolder === holder) return penState();
     role = next;
@@ -17151,6 +17162,7 @@ __mods["core/rc_folder.js"] = function (__x, __req) {
   async function startPen() {
     if (started) return penState();
     started = true;
+    yielded = false;
     since = Date.now();
     takeover = 0;
     lastWriteAt = Date.now();
@@ -17174,6 +17186,7 @@ __mods["core/rc_folder.js"] = function (__x, __req) {
   /** Take the pen. Never refused: the guard is what keeps the work safe. */
   async function takePen() {
     if (!started) await startPen();
+    yielded = false;
     takeover = Date.now();
     lastWriteAt = Date.now();
     await writeClaim();
@@ -17186,17 +17199,16 @@ __mods["core/rc_folder.js"] = function (__x, __req) {
 
   /**
    * Hand the pen back and read on: the claim is withdrawn, so whoever has been
-   * waiting longest holds it on their next settle. A fresh claim is stated at
-   * once, at the back of the queue.
+   * waiting longest holds it on their next settle, and this window states no
+   * claim until it takes the pen again (`takePen()`).
    */
   async function releasePen() {
     if (!started) return penState();
+    yielded = true;
     await filestore.dataRemove(claimFile()).catch(() => false);
-    since = Date.now();
     takeover = 0;
     role = 'viewer';
     holder = '';
-    await writeClaim();
     await settle();
     emit(EV.RC_PEN, penState());
     return penState();
@@ -17399,8 +17411,9 @@ __mods["core/rc.js"] = function (__x, __req) {
     if (state !== 'open' && state !== 'empty') return 'No calendar is open.';
     if (folder.holdsPen()) return true;
     const { holder } = folder.penState();
-    return `Read only — ${holder || 'somebody else'} is editing the calendar. `
-      + 'Take over at the top of the calendar if they have finished.';
+    if (!holder) return 'Read only — you handed the calendar back. Press Take over editing to change it.';
+    return `Read only — ${holder} is editing the calendar. `
+      + 'Press Take over editing if they have finished.';
   }
 
   /** The name given to the database for stamping its files. */

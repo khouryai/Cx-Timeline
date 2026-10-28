@@ -1,391 +1,13 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-28T03:02:30.738Z
+ * Modules: 28   Built: 2026-10-28T03:45:49.362Z
  */
 (function () {
   'use strict';
   var registry = typeof window !== 'undefined' && window.__CX_MODULES;
   if (!registry) throw new Error('CX Timeline: calendar.bundle.js has to load after app.bundle.js');
   var __mods = registry.mods;
-
-// core/rc_import.js
-__mods["core/rc_import.js"] = function (__x, __req) {
-  /**
-   * The old calendar, brought into the folder.
-   *
-   * The calendar lived in Supabase until it moved to the shared folder. Its
-   * "Back it up" file — `exportEverything()`, every table as rows, BART's blank
-   * TAWR form as base64 — is what is read here, once, into an empty folder.
-   * Every id is kept, so a cell still points at its row, an edit at what it
-   * changed, a reading's rows at the reading, a reason at its cancellation and a
-   * TAWR at the request it revised; an account id in `by` or `author` is still
-   * named, because a person's roster row still carries the account it had.
-   *
-   * Only the tables the calendar still keeps come across. The daily huddle, the
-   * week plan, the SARs and "Got it" are not carried, and the summary says so,
-   * so nobody wonders where they went.
-   *
-   * Pure — no folder, no DOM — so `tools/test_rc_import.js` holds it in Node.
-   *
-   * Imports: rc_db.
-   */
-
-  const { TABLE_NAMES } = __req("core/rc_db.js");
-
-  /** What the old calendar kept that this one does not, and why it is not needed. */
-  const DROPPED = {
-    rc_plan_entries: 'the week plan',
-    rc_actuals: 'the daily huddle\'s outcomes',
-    rc_blockers: 'the huddle\'s blockers',
-    rc_blocker_updates: 'the huddle\'s blockers',
-    rc_sars: 'SARs',
-    rc_sar_links: 'SARs',
-    rc_la_seen: 'My day\'s "Got it"',
-    rc_client_errors: 'problems reported to the server',
-  };
-
-  const INSTANT = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?([+-]\d{2}(:?\d{2})?|Z)$/;
-
-  /**
-   * One instant in the one spelling this calendar writes. Postgres answered
-   * `2026-10-15T14:02:11.123456+00:00`; this calendar writes `…11.123Z`, and the
-   * log is ordered by comparing them as text, so they have to agree.
-   */
-  function normaliseInstant(value) {
-    if (typeof value !== 'string' || !INSTANT.test(value)) return value;
-    const ms = Date.parse(value.replace(' ', 'T'));
-    return Number.isFinite(ms) ? new Date(ms).toISOString() : value;
-  }
-
-  function normaliseRow(row) {
-    if (!row || typeof row !== 'object') return row;
-    const out = {};
-    for (const [k, v] of Object.entries(row)) out[k] = normaliseInstant(v);
-    return out;
-  }
-
-  /**
-   * Read a backup of the old calendar into rows for `createCalendar()`.
-   *
-   * Answers `{ tables, files, summary, warnings }`. Throws when the file is not
-   * a backup of the calendar at all, and when a table it keeps could not be read
-   * when the backup was taken: the calendar is made from this file once, and one
-   * made without its readings would hold rows, changes and cancellations that
-   * point at nothing — so the answer is a new backup, never an import of this one.
-   * Warns, and does not refuse, when it only may be incomplete.
-   *
-   * @param {any} backup  the parsed JSON
-   */
-  function readBackup(backup) {
-    if (!backup || typeof backup !== 'object' || !backup.tables || typeof backup.tables !== 'object') {
-      throw new Error('That file is not a backup of the resource calendar — it has no tables in it.');
-    }
-    const known = Object.keys(backup.tables).filter((t) => TABLE_NAMES.includes(t) || DROPPED[t]);
-    if (!known.length) throw new Error('That file holds no table the calendar knows.');
-
-    const tables = {};
-    const summary = [];
-    const warnings = [];
-    const unread = TABLE_NAMES
-      .filter((name) => backup.tables[name] !== undefined && !Array.isArray(backup.tables[name]))
-      .map((name) => `${name} (${backup.tables[name]?.error || 'no rows'})`);
-    if (unread.length) {
-      throw new Error(`This backup is incomplete, so nothing has been written: ${unread.join('; ')} could not be read `
-        + 'when it was taken. Take the backup again on the old calendar and import that one.');
-    }
-    for (const name of TABLE_NAMES) {
-      const held = backup.tables[name];
-      if (held === undefined) continue;
-      tables[name] = held.map(normaliseRow);
-      summary.push({ table: name, rows: held.length });
-      // PostgREST answered a thousand rows at most, and the backup read each table
-      // once until the fix that pages through them.
-      if (held.length === 1000) {
-        warnings.push(`${name} has exactly 1,000 rows, which is where the old backup stopped. `
-          + 'Take a new backup from the old calendar and import that instead.');
-      }
-    }
-    if (!('rc_cancellation_notes' in backup.tables)) {
-      warnings.push('This backup has no cancellation reasons in it — it was taken before they were included. '
-        + 'Take a new one from the old calendar to keep them.');
-    }
-    for (const name of Object.keys(backup.tables)) {
-      if (!DROPPED[name] || !Array.isArray(backup.tables[name]) || !backup.tables[name].length) continue;
-      summary.push({ table: name, rows: backup.tables[name].length, dropped: DROPPED[name] });
-    }
-
-    /* A reading's grid can say it was compacted; anything else that is not an
-       object is a reading this calendar cannot draw, and is said rather than
-       dropped. */
-    for (const s of tables.rc_lookahead_snapshots || []) {
-      if (s.grid !== null && typeof s.grid !== 'object') {
-        warnings.push(`Reading ${s.id} has no grid that can be read.`);
-        s.grid = { rows: [], merges: [], hiddenColumns: [], unknown: [], missing: true };
-      }
-    }
-
-    const files = {};
-    const form = backup.files?.['tawr/template.pdf'];
-    if (typeof form === 'string' && form) {
-      const binary = atob(form);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      files['tawr/template.pdf'] = bytes;
-    } else if ((tables.rc_tawrs || []).length) {
-      warnings.push('BART\'s blank TAWR form is not in this backup. Put it in under TAWR → Settings before downloading a form.');
-    }
-
-    return { tables, files, summary, warnings, exportedAt: backup.exported_at || null, exportedBy: backup.exported_by || null };
-  }
-
-  Object.defineProperty(__x, "DROPPED", { get: () => DROPPED, enumerable: true });
-  Object.defineProperty(__x, "readBackup", { get: () => readBackup, enumerable: true });
-};
-
-// ui/rc_gate.js
-__mods["ui/rc_gate.js"] = function (__x, __req) {
-  /**
-   * The resource calendar's front door: the states that are not the calendar.
-   *
-   * The calendar lives in the shared folder the plan is in, under `calendar/`.
-   * Before it can be drawn there has to be a folder, and the folder has to hold
-   * a calendar — so the door is those two questions, and the one-time answer to
-   * the second: bring the old calendar in from its backup, or start an empty one.
-   *
-   * Nothing here is a permission. Whoever can open the folder can open the
-   * calendar; the folder's sharing is who may.
-   *
-   * Imports: util, events, rc, rc_import, filestore, icons, components, commands.
-   */
-
-  const { el } = __req("core/util.js");
-  const rc = __req("core/rc.js");
-  const filestore = __req("core/filestore.js");
-  const { readBackup } = __req("core/rc_import.js");
-  const { writeBytes } = __req("core/rc_folder.js");
-  const { icon } = __req("ui/icons.js");
-  const { textInput, toast, openModal } = __req("ui/components.js");
-  const { connectFolder, reconnectFolder } = __req("ui/commands.js");
-
-  /** The registers a new calendar starts with — what `rc_schema.sql` seeded. */
-  function starterTables(today) {
-    return {
-      rc_parties: ['Hitachi', 'BART', 'Other team', 'Vendor'].map((name) => ({ name })),
-      rc_leave_kinds: [
-        ['Annual leave', '#3a76e8', true], ['Sick', '#e0803a', false], ['TOIL', '#16a571', true],
-        ['Training', '#9333d9', false], ['Parental', '#0d9488', false], ['Unpaid', '#6b7280', false],
-      ].map(([name, color, counts]) => ({ name, color, counts_against_entitlement: counts })),
-      rc_support_codes: [['X', 'EIC', 10], ['WIT', 'BART witness', 20], ['TCE', 'TCE', 30]]
-        .map(([code, name, sort]) => ({ code, name, party: 'BART', sort })),
-      rc_p6_flags: [['Troubleshooting', 10], ['Regression', 20], ['Support', 30]].map(([label, sort]) => ({ label, sort })),
-      rc_settings: [
-        { key: 'lookahead_sheet', value: '4WLA' },
-        { key: 'lookahead_source', value: 'editor' },
-        { key: 'cancellation_log_from', value: today },
-      ],
-    };
-  }
-
-  /** This build cannot open a folder at all: a browser without the File System Access API. */
-  function notConfigured() {
-    return el('div', { class: 'rc-state' }, [
-      el('div', { class: 'rc-state-icon', html: icon('database', { size: 32 }) }),
-      el('h2', { text: 'The calendar needs a folder' }),
-      el('p', {
-        text: 'The resource calendar is kept in the shared folder beside the plan. Opening a folder '
-          + 'needs the CX Timeline desktop application, or Edge or Chrome.',
-      }),
-    ]);
-  }
-
-  /** Who you are: the name the pen shows and the calendar stamps what you write with. */
-  function nameField() {
-    const input = textInput({ value: rc.displayName(), placeholder: 'Your name, as the roster has it' });
-    input.setAttribute('aria-label', 'Your name');
-    input.dataset.field = 'your-name';
-    return input;
-  }
-
-  function saveName(input) {
-    const name = input.value.trim();
-    if (!name) throw new Error('Say who you are first — your name, as the roster has it.');
-    if (name !== rc.displayName()) filestore.setDisplayName(name);
-  }
-
-  /** No folder connected yet. */
-  function noFolder({ onDone = () => {} } = {}) {
-    const remembered = el('div');
-    filestore.storedFolder().then((last) => {
-      if (!last?.folder || filestore.state().desktop) return;
-      remembered.appendChild(el('button', {
-        class: 'cx-btn ghost', type: 'button', text: `Reconnect to ${last.folder}`,
-        onClick: async () => { if (await reconnectFolder()) onDone(); },
-      }));
-    }).catch(() => {});
-    return el('div', { class: 'rc-state' }, [
-      el('div', { class: 'rc-state-icon', html: icon('folder', { size: 32 }) }),
-      el('h2', { text: 'Open the shared folder' }),
-      el('p', {
-        text: 'The calendar is kept in the same OneDrive folder as the plan, under calendar/. '
-          + 'Open that folder and the calendar opens with it — nothing is kept anywhere else.',
-      }),
-      el('div', { class: 'rc-signin' }, [
-        el('button', {
-          class: 'cx-btn primary', type: 'button', text: 'Open the folder…',
-          onClick: async () => { if (await connectFolder()) onDone(); },
-        }),
-        remembered,
-      ]),
-    ]);
-  }
-
-  /**
-   * A folder with no calendar in it: bring the old one in, or start empty.
-   *
-   * The import is offered first because it is the one that matters: the old
-   * calendar's backup carries every reading, edit, reason and TAWR, and an
-   * empty calendar started by mistake would have to be cleared before it could
-   * be brought in.
-   */
-  function emptyFolder({ onDone = () => {} } = {}) {
-    const name = nameField();
-    const error = el('div', { class: 'rc-error', hidden: true });
-    const fileInput = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
-    fileInput.dataset.field = 'backup';
-
-    const say = (err) => {
-      error.textContent = err?.message || String(err);
-      error.hidden = false;
-    };
-
-    fileInput.addEventListener('change', async () => {
-      const file = fileInput.files?.[0];
-      fileInput.value = '';
-      if (!file) return;
-      try {
-        saveName(name);
-        const parsed = readBackup(JSON.parse(await file.text()));
-        await confirmImport(parsed, file.name, onDone);
-      } catch (err) {
-        say(err);
-      }
-    });
-
-    return el('div', { class: 'rc-state' }, [
-      el('div', { class: 'rc-state-icon', html: icon('database', { size: 32 }) }),
-      el('h2', { text: 'This folder has no calendar yet' }),
-      el('p', {
-        text: `${filestore.state().folder || 'The folder'} is open, and there is no calendar/ in it. `
-          + 'Bring the old calendar in from its backup — taken in the old calendar under Reports → Back it up — '
-          + 'or start an empty one.',
-      }),
-      el('div', { class: 'rc-signin' }, [
-        name,
-        error,
-        el('button', {
-          class: 'cx-btn primary', type: 'button', text: 'Import the old calendar…',
-          dataset: { action: 'import' },
-          onClick: () => {
-            try {
-              saveName(name);
-              fileInput.click();
-            } catch (err) {
-              say(err);
-            }
-          },
-        }),
-        el('button', {
-          class: 'cx-btn ghost', type: 'button', text: 'Start an empty calendar',
-          dataset: { action: 'start-empty' },
-          onClick: async () => {
-            try {
-              saveName(name);
-              await rc.createCalendar(starterTables(new Date().toISOString().slice(0, 10)), { source: 'new' });
-              toast({ tone: 'good', message: 'An empty calendar is ready in calendar/.' });
-              onDone();
-            } catch (err) {
-              say(err);
-            }
-          },
-        }),
-        fileInput,
-      ]),
-    ]);
-  }
-
-  /** What is in the backup, and what is not coming, before anything is written. */
-  function confirmImport(parsed, fileName, onDone) {
-    return new Promise((resolve) => {
-      const kept = parsed.summary.filter((s) => !s.dropped);
-      const dropped = parsed.summary.filter((s) => s.dropped);
-      const total = kept.reduce((n, s) => n + s.rows, 0);
-      const list = (items, render) => el('ul', { class: 'rc-import-list' }, items.map((s) => el('li', { text: render(s) })));
-      const body = el('div', { class: 'cx-form' }, [
-        el('p', {
-          text: `${fileName}${parsed.exportedAt ? `, taken ${new Date(parsed.exportedAt).toLocaleString()}` : ''}`
-            + `${parsed.exportedBy ? ` by ${parsed.exportedBy}` : ''}: ${total} rows in ${kept.length} tables.`,
-        }),
-        parsed.warnings.length
-          ? el('div', { class: 'rc-error', role: 'alert' }, [list(parsed.warnings.map((w) => ({ w })), (x) => x.w)])
-          : null,
-        list(kept, (s) => `${s.table.replace(/^rc_/, '').replace(/_/g, ' ')} — ${s.rows}`),
-        dropped.length
-          ? el('p', {
-            class: 'rc-hint',
-            text: `Not brought across, because the calendar no longer has them: ${[...new Set(dropped.map((d) => d.dropped))].join(', ')}.`,
-          })
-          : null,
-      ].filter(Boolean));
-      let settled = false;
-      const done = (value) => { if (!settled) { settled = true; resolve(value); } };
-      openModal({
-        title: 'Bring the old calendar in?',
-        body,
-        onClose: () => done(false),
-        actions: [
-          { label: 'Cancel', onClick: () => done(false) },
-          {
-            label: 'Import',
-            kind: 'primary',
-            keepOpen: true,
-            onClick: async (handle) => {
-              try {
-                await rc.createCalendar(parsed.tables, { source: 'import' });
-                for (const [path, bytes] of Object.entries(parsed.files)) await writeBytes(path, bytes);
-                done(true);
-                handle.close();
-                toast({ tone: 'good', title: 'The old calendar is in the folder', message: `${total} rows, every id kept.` });
-                onDone();
-              } catch (err) {
-                toast({ tone: 'bad', title: 'The import did not finish', message: err?.message || String(err) });
-              }
-            },
-          },
-        ],
-      });
-    });
-  }
-
-  /** The folder could not be read — half-synced, or written by a newer version. */
-  function readFailed(message, { onDone = () => {} } = {}) {
-    return el('div', { class: 'rc-state' }, [
-      el('div', { class: 'rc-state-icon', html: icon('warning', { size: 32 }) }),
-      el('h2', { text: 'The calendar could not be read' }),
-      el('p', { text: message || 'Something in calendar/ could not be read.' }),
-      el('button', {
-        class: 'cx-btn', type: 'button', text: 'Try again',
-        onClick: async () => { await rc.init(); onDone(); },
-      }),
-    ]);
-  }
-
-  Object.defineProperty(__x, "starterTables", { get: () => starterTables, enumerable: true });
-  Object.defineProperty(__x, "notConfigured", { get: () => notConfigured, enumerable: true });
-  Object.defineProperty(__x, "noFolder", { get: () => noFolder, enumerable: true });
-  Object.defineProperty(__x, "emptyFolder", { get: () => emptyFolder, enumerable: true });
-  Object.defineProperty(__x, "readFailed", { get: () => readFailed, enumerable: true });
-};
 
 // ui/rc_util.js
 __mods["ui/rc_util.js"] = function (__x, __req) {
@@ -397,7 +19,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
    * be a cycle, and the build rejects those outright rather than letting one
    * quietly half-initialise.
    *
-   * Imports: util, events, dates, components.
+   * Imports: util, events, dates, components, icons.
    */
 
   const { el } = __req("core/util.js");
@@ -409,7 +31,8 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
 
   const { applyLegend } = __req("io/lookahead.js");
   const rc = __req("core/rc.js");
-  const { openModal } = __req("ui/components.js");
+  const { openModal, confirmDialog, toast } = __req("ui/components.js");
+  const { icon } = __req("ui/icons.js");
 
   /**
    * A modal whose confirm button does something that can fail.
@@ -1619,6 +1242,60 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
     return { state: 'available', asked };
   }
 
+  /* ══════════════════════════════════════════════════════════════════════════
+     The pen, as a button
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Take over editing, or hand it back — the calendar's version of the
+   * timeline's *Take over editing* in Import / export. One button, drawn in the
+   * banner and beside Edit on the look-ahead, so the two never disagree.
+   *
+   * Taking it from somebody asks first; taking it when nobody holds it (it was
+   * handed back) does not, since there is nobody's work to interrupt.
+   */
+  function penButton({ primary = false } = {}) {
+    const pen = rc.penState();
+    if (pen.editing) {
+      return el('button', {
+        class: 'cx-btn mini ghost rc-pen-btn',
+        type: 'button',
+        dataset: { action: 'hand-back' },
+        title: 'Stop editing, so a colleague can. You go on reading it, read-only, until you take it again.',
+        html: icon('eye', { size: 12 }) + '<span>Hand back</span>',
+        onClick: async () => {
+          await rc.releasePen();
+          toast({ message: 'Handed back. The calendar is read-only here until you take over editing again.' });
+        },
+      });
+    }
+    return el('button', {
+      class: `cx-btn mini${primary ? ' primary' : ''} rc-pen-btn`,
+      type: 'button',
+      dataset: { action: 'take-over' },
+      title: pen.holder ? `Take the calendar from ${pen.holder}` : 'Nobody is editing the calendar — take it to edit',
+      html: icon('refresh', { size: 12 }) + '<span>Take over editing</span>',
+      onClick: () => takeOverEditing(),
+    });
+  }
+
+  /** The take-over itself, asking first only when somebody holds the pen. */
+  async function takeOverEditing() {
+    const { holder } = rc.penState();
+    if (holder) {
+      const ok = await confirmDialog({
+        title: `Take the calendar from ${holder}?`,
+        message: 'Do this when they have finished, or have left it open. Anything they had not saved yet '
+          + 'is refused when they try, rather than written over what you do.',
+        confirmLabel: 'Take over',
+      });
+      if (!ok) return false;
+    }
+    await rc.takePen();
+    toast({ tone: 'good', message: 'You are editing the calendar.' });
+    return true;
+  }
+
   Object.defineProperty(__x, "formModal", { get: () => formModal, enumerable: true });
   Object.defineProperty(__x, "weekStart", { get: () => weekStart, enumerable: true });
   Object.defineProperty(__x, "weekDays", { get: () => weekDays, enumerable: true });
@@ -1663,6 +1340,386 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "assignmentIndex", { get: () => assignmentIndex, enumerable: true });
   Object.defineProperty(__x, "outcomeLookup", { get: () => outcomeLookup, enumerable: true });
   Object.defineProperty(__x, "availability", { get: () => availability, enumerable: true });
+  Object.defineProperty(__x, "penButton", { get: () => penButton, enumerable: true });
+  Object.defineProperty(__x, "takeOverEditing", { get: () => takeOverEditing, enumerable: true });
+};
+
+// core/rc_import.js
+__mods["core/rc_import.js"] = function (__x, __req) {
+  /**
+   * The old calendar, brought into the folder.
+   *
+   * The calendar lived in Supabase until it moved to the shared folder. Its
+   * "Back it up" file — `exportEverything()`, every table as rows, BART's blank
+   * TAWR form as base64 — is what is read here, once, into an empty folder.
+   * Every id is kept, so a cell still points at its row, an edit at what it
+   * changed, a reading's rows at the reading, a reason at its cancellation and a
+   * TAWR at the request it revised; an account id in `by` or `author` is still
+   * named, because a person's roster row still carries the account it had.
+   *
+   * Only the tables the calendar still keeps come across. The daily huddle, the
+   * week plan, the SARs and "Got it" are not carried, and the summary says so,
+   * so nobody wonders where they went.
+   *
+   * Pure — no folder, no DOM — so `tools/test_rc_import.js` holds it in Node.
+   *
+   * Imports: rc_db.
+   */
+
+  const { TABLE_NAMES } = __req("core/rc_db.js");
+
+  /** What the old calendar kept that this one does not, and why it is not needed. */
+  const DROPPED = {
+    rc_plan_entries: 'the week plan',
+    rc_actuals: 'the daily huddle\'s outcomes',
+    rc_blockers: 'the huddle\'s blockers',
+    rc_blocker_updates: 'the huddle\'s blockers',
+    rc_sars: 'SARs',
+    rc_sar_links: 'SARs',
+    rc_la_seen: 'My day\'s "Got it"',
+    rc_client_errors: 'problems reported to the server',
+  };
+
+  const INSTANT = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?([+-]\d{2}(:?\d{2})?|Z)$/;
+
+  /**
+   * One instant in the one spelling this calendar writes. Postgres answered
+   * `2026-10-15T14:02:11.123456+00:00`; this calendar writes `…11.123Z`, and the
+   * log is ordered by comparing them as text, so they have to agree.
+   */
+  function normaliseInstant(value) {
+    if (typeof value !== 'string' || !INSTANT.test(value)) return value;
+    const ms = Date.parse(value.replace(' ', 'T'));
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : value;
+  }
+
+  function normaliseRow(row) {
+    if (!row || typeof row !== 'object') return row;
+    const out = {};
+    for (const [k, v] of Object.entries(row)) out[k] = normaliseInstant(v);
+    return out;
+  }
+
+  /**
+   * Read a backup of the old calendar into rows for `createCalendar()`.
+   *
+   * Answers `{ tables, files, summary, warnings }`. Throws when the file is not
+   * a backup of the calendar at all, and when a table it keeps could not be read
+   * when the backup was taken: the calendar is made from this file once, and one
+   * made without its readings would hold rows, changes and cancellations that
+   * point at nothing — so the answer is a new backup, never an import of this one.
+   * Warns, and does not refuse, when it only may be incomplete.
+   *
+   * @param {any} backup  the parsed JSON
+   */
+  function readBackup(backup) {
+    if (!backup || typeof backup !== 'object' || !backup.tables || typeof backup.tables !== 'object') {
+      throw new Error('That file is not a backup of the resource calendar — it has no tables in it.');
+    }
+    const known = Object.keys(backup.tables).filter((t) => TABLE_NAMES.includes(t) || DROPPED[t]);
+    if (!known.length) throw new Error('That file holds no table the calendar knows.');
+
+    const tables = {};
+    const summary = [];
+    const warnings = [];
+    const unread = TABLE_NAMES
+      .filter((name) => backup.tables[name] !== undefined && !Array.isArray(backup.tables[name]))
+      .map((name) => `${name} (${backup.tables[name]?.error || 'no rows'})`);
+    if (unread.length) {
+      throw new Error(`This backup is incomplete, so nothing has been written: ${unread.join('; ')} could not be read `
+        + 'when it was taken. Take the backup again on the old calendar and import that one.');
+    }
+    for (const name of TABLE_NAMES) {
+      const held = backup.tables[name];
+      if (held === undefined) continue;
+      tables[name] = held.map(normaliseRow);
+      summary.push({ table: name, rows: held.length });
+      // PostgREST answered a thousand rows at most, and the backup read each table
+      // once until the fix that pages through them.
+      if (held.length === 1000) {
+        warnings.push(`${name} has exactly 1,000 rows, which is where the old backup stopped. `
+          + 'Take a new backup from the old calendar and import that instead.');
+      }
+    }
+    if (!('rc_cancellation_notes' in backup.tables)) {
+      warnings.push('This backup has no cancellation reasons in it — it was taken before they were included. '
+        + 'Take a new one from the old calendar to keep them.');
+    }
+    for (const name of Object.keys(backup.tables)) {
+      if (!DROPPED[name] || !Array.isArray(backup.tables[name]) || !backup.tables[name].length) continue;
+      summary.push({ table: name, rows: backup.tables[name].length, dropped: DROPPED[name] });
+    }
+
+    /* A reading's grid can say it was compacted; anything else that is not an
+       object is a reading this calendar cannot draw, and is said rather than
+       dropped. */
+    for (const s of tables.rc_lookahead_snapshots || []) {
+      if (s.grid !== null && typeof s.grid !== 'object') {
+        warnings.push(`Reading ${s.id} has no grid that can be read.`);
+        s.grid = { rows: [], merges: [], hiddenColumns: [], unknown: [], missing: true };
+      }
+    }
+
+    const files = {};
+    const form = backup.files?.['tawr/template.pdf'];
+    if (typeof form === 'string' && form) {
+      const binary = atob(form);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      files['tawr/template.pdf'] = bytes;
+    } else if ((tables.rc_tawrs || []).length) {
+      warnings.push('BART\'s blank TAWR form is not in this backup. Put it in under TAWR → Settings before downloading a form.');
+    }
+
+    return { tables, files, summary, warnings, exportedAt: backup.exported_at || null, exportedBy: backup.exported_by || null };
+  }
+
+  Object.defineProperty(__x, "DROPPED", { get: () => DROPPED, enumerable: true });
+  Object.defineProperty(__x, "readBackup", { get: () => readBackup, enumerable: true });
+};
+
+// ui/rc_gate.js
+__mods["ui/rc_gate.js"] = function (__x, __req) {
+  /**
+   * The resource calendar's front door: the states that are not the calendar.
+   *
+   * The calendar lives in the shared folder the plan is in, under `calendar/`.
+   * Before it can be drawn there has to be a folder, and the folder has to hold
+   * a calendar — so the door is those two questions, and the one-time answer to
+   * the second: bring the old calendar in from its backup, or start an empty one.
+   *
+   * Nothing here is a permission. Whoever can open the folder can open the
+   * calendar; the folder's sharing is who may.
+   *
+   * Imports: util, events, rc, rc_import, filestore, icons, components, commands.
+   */
+
+  const { el } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const filestore = __req("core/filestore.js");
+  const { readBackup } = __req("core/rc_import.js");
+  const { writeBytes } = __req("core/rc_folder.js");
+  const { icon } = __req("ui/icons.js");
+  const { textInput, toast, openModal } = __req("ui/components.js");
+  const { connectFolder, reconnectFolder } = __req("ui/commands.js");
+
+  /** The registers a new calendar starts with — what `rc_schema.sql` seeded. */
+  function starterTables(today) {
+    return {
+      rc_parties: ['Hitachi', 'BART', 'Other team', 'Vendor'].map((name) => ({ name })),
+      rc_leave_kinds: [
+        ['Annual leave', '#3a76e8', true], ['Sick', '#e0803a', false], ['TOIL', '#16a571', true],
+        ['Training', '#9333d9', false], ['Parental', '#0d9488', false], ['Unpaid', '#6b7280', false],
+      ].map(([name, color, counts]) => ({ name, color, counts_against_entitlement: counts })),
+      rc_support_codes: [['X', 'EIC', 10], ['WIT', 'BART witness', 20], ['TCE', 'TCE', 30]]
+        .map(([code, name, sort]) => ({ code, name, party: 'BART', sort })),
+      rc_p6_flags: [['Troubleshooting', 10], ['Regression', 20], ['Support', 30]].map(([label, sort]) => ({ label, sort })),
+      rc_settings: [
+        { key: 'lookahead_sheet', value: '4WLA' },
+        { key: 'lookahead_source', value: 'editor' },
+        { key: 'cancellation_log_from', value: today },
+      ],
+    };
+  }
+
+  /** This build cannot open a folder at all: a browser without the File System Access API. */
+  function notConfigured() {
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('database', { size: 32 }) }),
+      el('h2', { text: 'The calendar needs a folder' }),
+      el('p', {
+        text: 'The resource calendar is kept in the shared folder beside the plan. Opening a folder '
+          + 'needs the CX Timeline desktop application, or Edge or Chrome.',
+      }),
+    ]);
+  }
+
+  /** Who you are: the name the pen shows and the calendar stamps what you write with. */
+  function nameField() {
+    const input = textInput({ value: rc.displayName(), placeholder: 'Your name, as the roster has it' });
+    input.setAttribute('aria-label', 'Your name');
+    input.dataset.field = 'your-name';
+    return input;
+  }
+
+  function saveName(input) {
+    const name = input.value.trim();
+    if (!name) throw new Error('Say who you are first — your name, as the roster has it.');
+    if (name !== rc.displayName()) filestore.setDisplayName(name);
+  }
+
+  /** No folder connected yet. */
+  function noFolder({ onDone = () => {} } = {}) {
+    const remembered = el('div');
+    filestore.storedFolder().then((last) => {
+      if (!last?.folder || filestore.state().desktop) return;
+      remembered.appendChild(el('button', {
+        class: 'cx-btn ghost', type: 'button', text: `Reconnect to ${last.folder}`,
+        onClick: async () => { if (await reconnectFolder()) onDone(); },
+      }));
+    }).catch(() => {});
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('folder', { size: 32 }) }),
+      el('h2', { text: 'Open the shared folder' }),
+      el('p', {
+        text: 'The calendar is kept in the same OneDrive folder as the plan, under calendar/. '
+          + 'Open that folder and the calendar opens with it — nothing is kept anywhere else.',
+      }),
+      el('div', { class: 'rc-signin' }, [
+        el('button', {
+          class: 'cx-btn primary', type: 'button', text: 'Open the folder…',
+          onClick: async () => { if (await connectFolder()) onDone(); },
+        }),
+        remembered,
+      ]),
+    ]);
+  }
+
+  /**
+   * A folder with no calendar in it: bring the old one in, or start empty.
+   *
+   * The import is offered first because it is the one that matters: the old
+   * calendar's backup carries every reading, edit, reason and TAWR, and an
+   * empty calendar started by mistake would have to be cleared before it could
+   * be brought in.
+   */
+  function emptyFolder({ onDone = () => {} } = {}) {
+    const name = nameField();
+    const error = el('div', { class: 'rc-error', hidden: true });
+    const fileInput = el('input', { type: 'file', accept: '.json,application/json', hidden: true });
+    fileInput.dataset.field = 'backup';
+
+    const say = (err) => {
+      error.textContent = err?.message || String(err);
+      error.hidden = false;
+    };
+
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files?.[0];
+      fileInput.value = '';
+      if (!file) return;
+      try {
+        saveName(name);
+        const parsed = readBackup(JSON.parse(await file.text()));
+        await confirmImport(parsed, file.name, onDone);
+      } catch (err) {
+        say(err);
+      }
+    });
+
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('database', { size: 32 }) }),
+      el('h2', { text: 'This folder has no calendar yet' }),
+      el('p', {
+        text: `${filestore.state().folder || 'The folder'} is open, and there is no calendar/ in it. `
+          + 'Bring the old calendar in from its backup — taken in the old calendar under Reports → Back it up — '
+          + 'or start an empty one.',
+      }),
+      el('div', { class: 'rc-signin' }, [
+        name,
+        error,
+        el('button', {
+          class: 'cx-btn primary', type: 'button', text: 'Import the old calendar…',
+          dataset: { action: 'import' },
+          onClick: () => {
+            try {
+              saveName(name);
+              fileInput.click();
+            } catch (err) {
+              say(err);
+            }
+          },
+        }),
+        el('button', {
+          class: 'cx-btn ghost', type: 'button', text: 'Start an empty calendar',
+          dataset: { action: 'start-empty' },
+          onClick: async () => {
+            try {
+              saveName(name);
+              await rc.createCalendar(starterTables(new Date().toISOString().slice(0, 10)), { source: 'new' });
+              toast({ tone: 'good', message: 'An empty calendar is ready in calendar/.' });
+              onDone();
+            } catch (err) {
+              say(err);
+            }
+          },
+        }),
+        fileInput,
+      ]),
+    ]);
+  }
+
+  /** What is in the backup, and what is not coming, before anything is written. */
+  function confirmImport(parsed, fileName, onDone) {
+    return new Promise((resolve) => {
+      const kept = parsed.summary.filter((s) => !s.dropped);
+      const dropped = parsed.summary.filter((s) => s.dropped);
+      const total = kept.reduce((n, s) => n + s.rows, 0);
+      const list = (items, render) => el('ul', { class: 'rc-import-list' }, items.map((s) => el('li', { text: render(s) })));
+      const body = el('div', { class: 'cx-form' }, [
+        el('p', {
+          text: `${fileName}${parsed.exportedAt ? `, taken ${new Date(parsed.exportedAt).toLocaleString()}` : ''}`
+            + `${parsed.exportedBy ? ` by ${parsed.exportedBy}` : ''}: ${total} rows in ${kept.length} tables.`,
+        }),
+        parsed.warnings.length
+          ? el('div', { class: 'rc-error', role: 'alert' }, [list(parsed.warnings.map((w) => ({ w })), (x) => x.w)])
+          : null,
+        list(kept, (s) => `${s.table.replace(/^rc_/, '').replace(/_/g, ' ')} — ${s.rows}`),
+        dropped.length
+          ? el('p', {
+            class: 'rc-hint',
+            text: `Not brought across, because the calendar no longer has them: ${[...new Set(dropped.map((d) => d.dropped))].join(', ')}.`,
+          })
+          : null,
+      ].filter(Boolean));
+      let settled = false;
+      const done = (value) => { if (!settled) { settled = true; resolve(value); } };
+      openModal({
+        title: 'Bring the old calendar in?',
+        body,
+        onClose: () => done(false),
+        actions: [
+          { label: 'Cancel', onClick: () => done(false) },
+          {
+            label: 'Import',
+            kind: 'primary',
+            keepOpen: true,
+            onClick: async (handle) => {
+              try {
+                await rc.createCalendar(parsed.tables, { source: 'import' });
+                for (const [path, bytes] of Object.entries(parsed.files)) await writeBytes(path, bytes);
+                done(true);
+                handle.close();
+                toast({ tone: 'good', title: 'The old calendar is in the folder', message: `${total} rows, every id kept.` });
+                onDone();
+              } catch (err) {
+                toast({ tone: 'bad', title: 'The import did not finish', message: err?.message || String(err) });
+              }
+            },
+          },
+        ],
+      });
+    });
+  }
+
+  /** The folder could not be read — half-synced, or written by a newer version. */
+  function readFailed(message, { onDone = () => {} } = {}) {
+    return el('div', { class: 'rc-state' }, [
+      el('div', { class: 'rc-state-icon', html: icon('warning', { size: 32 }) }),
+      el('h2', { text: 'The calendar could not be read' }),
+      el('p', { text: message || 'Something in calendar/ could not be read.' }),
+      el('button', {
+        class: 'cx-btn', type: 'button', text: 'Try again',
+        onClick: async () => { await rc.init(); onDone(); },
+      }),
+    ]);
+  }
+
+  Object.defineProperty(__x, "starterTables", { get: () => starterTables, enumerable: true });
+  Object.defineProperty(__x, "notConfigured", { get: () => notConfigured, enumerable: true });
+  Object.defineProperty(__x, "noFolder", { get: () => noFolder, enumerable: true });
+  Object.defineProperty(__x, "emptyFolder", { get: () => emptyFolder, enumerable: true });
+  Object.defineProperty(__x, "readFailed", { get: () => readFailed, enumerable: true });
 };
 
 // ui/rc_settings.js
@@ -14664,7 +14721,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { p6Index, p6Status } = __req("core/la_p6.js");
   const { icon } = __req("ui/icons.js");
   const { selectInput, textInput, toast, emptyState, field, checkbox } = __req("ui/components.js");
-  const { notifyChanged, dayLabel, todayISO, formModal, parsedView, viewOfSnapshot, foldName, meMatcher, codeNodes, watchForNewReading } = __req("ui/rc_util.js");
+  const { notifyChanged, dayLabel, todayISO, formModal, parsedView, viewOfSnapshot, foldName, meMatcher, codeNodes, watchForNewReading, penButton } = __req("ui/rc_util.js");
 
 
 
@@ -14754,11 +14811,14 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       onClick: async (e) => {
         const btn = e.currentTarget;
         /* Writing the look-ahead needs the pen. Somebody else holding it is
-           said here, where it is wanted, with the way to take it at the top. */
+           said here, where it is wanted; Take over editing sits beside this. */
         if (!on && !rc.canWrite()) {
+          const { holder } = rc.penState();
           toast({
             tone: 'warn',
-            message: `${rc.penState().holder || 'Somebody else'} is editing the calendar. Take over at the top of the calendar to edit it here.`,
+            message: holder
+              ? `${holder} is editing the calendar. Press Take over editing beside Edit to edit it here.`
+              : 'The calendar is read-only here because you handed it back. Press Take over editing beside Edit first.',
             timeout: 8000,
           });
           return;
@@ -14784,7 +14844,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   async function renderEditing(host) {
     host.appendChild(el('div', { class: 'rc-section-head' }, [
       el('h3', { text: 'The look-ahead' }),
-      editSwitch(),
+      el('div', { class: 'rc-section-actions' }, [penButton(), editSwitch()]),
     ]));
     const body = el('div');
     host.appendChild(body);
@@ -14827,14 +14887,20 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
        which is the whole reason it is a snapshot. */
     const admin = rc.isAdmin();
     const written = la.source === EDITOR_SOURCE;
+    /* One group at the right: who has the pen, Edit, and the master export
+       beside it — each button used to push itself to the right on its own, which
+       spread them across the whole row. */
     host.appendChild(el('div', { class: 'rc-section-head' }, [
       el('h3', { text: 'The look-ahead' }),
-      // Once it is written here there is nothing to check; Edit is the way in.
-      admin && !written ? checkNowButton() : null,
-      admin ? editSwitch() : null,
-      // Everything the calendar holds, as one workbook — the look-ahead is where it is looked for first.
-      admin ? masterExportButton() : null,
-    ].filter(Boolean)));
+      el('div', { class: 'rc-section-actions' }, [
+        // Once it is written here there is nothing to check; Edit is the way in.
+        admin && !written ? checkNowButton() : null,
+        penButton(),
+        admin ? editSwitch() : null,
+        // Everything the calendar holds, as one workbook — the look-ahead is where it is looked for first.
+        admin ? masterExportButton() : null,
+      ].filter(Boolean)),
+    ]));
     watchForNewReading(host, snapshot?.id ?? null);
 
     if (!snapshot?.grid?.rows?.length) {
@@ -18687,7 +18753,8 @@ __mods["ui/rc.js"] = function (__x, __req) {
   const rc = __req("core/rc.js");
   const filestore = __req("core/filestore.js");
   const { icon } = __req("ui/icons.js");
-  const { toast, emptyState, confirmDialog, promptDialog } = __req("ui/components.js");
+  const { toast, emptyState, promptDialog } = __req("ui/components.js");
+  const { penButton } = __req("ui/rc_util.js");
   const { notConfigured, noFolder, emptyFolder, readFailed } = __req("ui/rc_gate.js");
   const roster = __req("ui/rc_roster.js");
   const lookahead = __req("ui/rc_lookahead.js");
@@ -18762,7 +18829,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
         toast({
           tone: 'info',
           title: 'Calendar handed back',
-          message: 'Nothing was written for an hour, so the pen went back for whoever is waiting. Take over at the top when you want it again.',
+          message: 'Nothing was written for an hour, so the pen went back for whoever is waiting. Press Take over editing when you want it again.',
           timeout: 12000,
         });
       }
@@ -18851,31 +18918,19 @@ __mods["ui/rc.js"] = function (__x, __req) {
     headEl.appendChild(tabs);
 
     const pen = rc.penState();
-    if (pen.editing) {
-      headEl.appendChild(el('span', {
-        class: 'rc-queue',
-        style: 'background:var(--good-light);border-color:var(--good-border);color:var(--good)',
-        text: 'Editing',
-        title: 'You hold the calendar\'s pen: what you change is saved to the shared folder. Anybody else who opens it reads it.',
-      }));
-      headEl.appendChild(el('button', {
-        class: 'cx-btn mini ghost',
-        type: 'button',
-        text: 'Hand back',
-        title: 'Stop editing, so whoever is waiting can. You go on reading it.',
-        onClick: async () => {
-          await rc.releasePen();
-          toast({ message: 'Handed back. The calendar is read-only here until you take it again.' });
-        },
-      }));
-    } else {
-      headEl.appendChild(el('span', {
-        class: 'rc-queue',
-        style: 'background:var(--info-light);border-color:var(--info-border);color:var(--info)',
-        text: 'Read only',
-        title: `${pen.holder || 'Somebody else'} is editing the calendar.`,
-      }));
-    }
+    headEl.appendChild(el('span', {
+      class: 'rc-queue',
+      style: pen.editing
+        ? 'background:var(--good-light);border-color:var(--good-border);color:var(--good)'
+        : 'background:var(--info-light);border-color:var(--info-border);color:var(--info)',
+      text: pen.editing ? 'Editing' : 'Read only',
+      dataset: { pen: pen.editing ? 'editing' : 'read-only' },
+      title: pen.editing
+        ? 'You hold the calendar\'s pen: what you change is saved to the shared folder. Anybody else who opens it reads it.'
+        : pen.holder ? `${pen.holder} is editing the calendar.` : 'Nobody is editing the calendar. Take over editing to change it.',
+    }));
+    // Read-only, the way to take it is the banner under the tabs, on every tab.
+    if (pen.editing) headEl.appendChild(penButton());
 
     headEl.appendChild(el('button', {
       class: 'cx-btn mini ghost',
@@ -18907,28 +18962,15 @@ __mods["ui/rc.js"] = function (__x, __req) {
     const pen = rc.penState();
     if (pen.editing) return el('span', { hidden: true });
     const idle = pen.holderIdleMs != null ? ` They last saved ${Math.max(1, Math.round(pen.holderIdleMs / 60000))} min ago.` : '';
+    const words = pen.holder
+      ? [el('strong', { text: `${pen.holder} is editing the calendar.` }),
+        el('span', { text: ` You can read everything; changes are theirs to make until they finish or you take over.${idle}` })]
+      : [el('strong', { text: 'You handed the calendar back.' }),
+        el('span', { text: ' Nobody is editing it. It stays read-only here until you take over editing.' })];
     return el('div', { class: 'rc-preview-banner', role: 'status', dataset: { pen: 'viewer' } }, [
       el('span', { html: icon('eye', { size: 16 }), 'aria-hidden': 'true' }),
-      el('div', { class: 'rc-preview-text' }, [
-        el('strong', { text: `${pen.holder || 'Somebody else'} is editing the calendar.` }),
-        el('span', { text: ` You can read everything; changes are theirs to make until they finish or you take over.${idle}` }),
-      ]),
-      el('button', {
-        class: 'cx-btn mini primary',
-        type: 'button',
-        text: 'Take over',
-        onClick: async () => {
-          const ok = await confirmDialog({
-            title: `Take the calendar from ${pen.holder || 'them'}?`,
-            message: 'Do this when they have finished, or have left it open. Anything they had not saved yet '
-              + 'is refused when they try, rather than written over what you do.',
-            confirmLabel: 'Take over',
-          });
-          if (!ok) return;
-          await rc.takePen();
-          toast({ tone: 'good', message: 'You are editing the calendar.' });
-        },
-      }),
+      el('div', { class: 'rc-preview-text' }, words),
+      penButton({ primary: true }),
     ]);
   }
 

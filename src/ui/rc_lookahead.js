@@ -25,7 +25,7 @@ import { icon } from './icons.js';
 import { selectInput, textInput, toast, emptyState, field, checkbox } from './components.js';
 import {
   notifyChanged, dayLabel, todayISO, formModal, parsedView, viewOfSnapshot, foldName, meMatcher, codeNodes,
-  watchForNewReading,
+  watchForNewReading, penButton,
 } from './rc_util.js';
 
 import { la, WEEK_CHOICES } from './rc_la_state.js';
@@ -113,11 +113,14 @@ function editSwitch() {
     onClick: async (e) => {
       const btn = e.currentTarget;
       /* Writing the look-ahead needs the pen. Somebody else holding it is
-         said here, where it is wanted, with the way to take it at the top. */
+         said here, where it is wanted; Take over editing sits beside this. */
       if (!on && !rc.canWrite()) {
+        const { holder } = rc.penState();
         toast({
           tone: 'warn',
-          message: `${rc.penState().holder || 'Somebody else'} is editing the calendar. Take over at the top of the calendar to edit it here.`,
+          message: holder
+            ? `${holder} is editing the calendar. Press Take over editing beside Edit to edit it here.`
+            : 'The calendar is read-only here because you handed it back. Press Take over editing beside Edit first.',
           timeout: 8000,
         });
         return;
@@ -143,7 +146,7 @@ function editSwitch() {
 async function renderEditing(host) {
   host.appendChild(el('div', { class: 'rc-section-head' }, [
     el('h3', { text: 'The look-ahead' }),
-    editSwitch(),
+    el('div', { class: 'rc-section-actions' }, [penButton(), editSwitch()]),
   ]));
   const body = el('div');
   host.appendChild(body);
@@ -186,14 +189,20 @@ async function renderCalendar(host) {
      which is the whole reason it is a snapshot. */
   const admin = rc.isAdmin();
   const written = la.source === EDITOR_SOURCE;
+  /* One group at the right: who has the pen, Edit, and the master export
+     beside it — each button used to push itself to the right on its own, which
+     spread them across the whole row. */
   host.appendChild(el('div', { class: 'rc-section-head' }, [
     el('h3', { text: 'The look-ahead' }),
-    // Once it is written here there is nothing to check; Edit is the way in.
-    admin && !written ? checkNowButton() : null,
-    admin ? editSwitch() : null,
-    // Everything the calendar holds, as one workbook — the look-ahead is where it is looked for first.
-    admin ? masterExportButton() : null,
-  ].filter(Boolean)));
+    el('div', { class: 'rc-section-actions' }, [
+      // Once it is written here there is nothing to check; Edit is the way in.
+      admin && !written ? checkNowButton() : null,
+      penButton(),
+      admin ? editSwitch() : null,
+      // Everything the calendar holds, as one workbook — the look-ahead is where it is looked for first.
+      admin ? masterExportButton() : null,
+    ].filter(Boolean)),
+  ]));
   watchForNewReading(host, snapshot?.id ?? null);
 
   if (!snapshot?.grid?.rows?.length) {

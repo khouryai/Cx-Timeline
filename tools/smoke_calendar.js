@@ -963,6 +963,45 @@ async function main() {
     }));
   await page.evaluate(() => window.__folder.remove('calendar/pen/d_other-s_other.json'));
 
+  /* Hand back, with nobody else in the folder: it used to restate a claim that
+     won at once, so the toast said read-only while the header said Editing. */
+  await page.evaluate(() => window.__CX_MODULES.req('core/rc_folder.js').settle());
+  await page.waitForSelector('#rc-frame .rc-section-actions');
+  const actions = await page.evaluate(() => [...document.querySelectorAll('#rc-frame .rc-section-actions > button')]
+    .map((b) => b.textContent.trim()));
+  check('the look-ahead keeps its actions together: the pen, Edit and Master export side by side',
+    JSON.stringify(actions.slice(-3)) === JSON.stringify(['Hand back', 'Edit', 'Master export']), actions.join(' | '));
+  await page.locator('#rc-frame .rc-section-actions [data-action="hand-back"]').click();
+  await page.waitForTimeout(500);
+  const handedBack = async () => ({
+    head: await page.locator('#rc-frame .rc-head').innerText(),
+    banner: await page.locator('#rc-frame [data-pen="viewer"]').innerText().catch(() => ''),
+    claim: await page.evaluate(() => Object.keys(window.__folder.files).some((k) => k.startsWith('calendar/pen/'))),
+  });
+  let back = await handedBack();
+  check('handing back makes the header Read only, never still Editing',
+    /Read only/.test(back.head) && !/Editing/.test(back.head), back.head.replace(/\n/g, ' | '));
+  check('and says nobody is editing it, with Take over editing to get it back',
+    /You handed the calendar back/.test(back.banner) && /Take over editing/.test(back.banner), back.banner.replace(/\n/g, ' '));
+  check('and this window states no claim in the folder', !back.claim);
+  // The next settle, and a heartbeat, with nobody else waiting: it must not come straight back.
+  await page.evaluate(async () => {
+    const f = window.__CX_MODULES.req('core/rc_folder.js');
+    await f.settle();
+    return f.penState();
+  });
+  await page.waitForTimeout(300);
+  back = await handedBack();
+  check('and it stays handed back when the pen is settled again with nobody waiting',
+    /Read only/.test(back.head) && !/Editing/.test(back.head) && !back.claim);
+  const refusedEdit = await page.evaluate(() => window.__CX_MODULES.req('core/rc.js').addParty('Not now').then(() => 'written', (e) => e.message));
+  check('a write while handed back is refused, and says why', /handed the calendar back/.test(refusedEdit), refusedEdit);
+  await page.locator('#rc-frame .rc-section-actions [data-action="take-over"]').click();
+  await page.waitForTimeout(500);
+  check('Take over editing beside Edit takes it straight back, with nobody to ask',
+    (await page.locator('.cx-modal').count()) === 0 && /Editing/.test(await page.locator('#rc-frame .rc-head').innerText())
+      && (await page.locator('#rc-frame [data-pen="viewer"]').count()) === 0);
+
 
   /* ── An empty folder ──────────────────────────────────────────────────── */
   console.log('\nAn empty folder: the old calendar brought in');
