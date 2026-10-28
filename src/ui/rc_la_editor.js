@@ -41,6 +41,7 @@ import {
 } from '../core/lookahead.js';
 import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
 import { lookaheadWorkbook, lookaheadFileName, lookaheadLatestName } from '../io/la_xlsx.js';
+import { provide4wla, scheduleSection } from './rc_la_schedule.js';
 import { saveFile } from '../io/exporters.js';
 import { icon } from './icons.js';
 import {
@@ -2894,8 +2895,8 @@ async function exportSource() {
 }
 
 /**
- * The 4WLA as an .xlsx, built without asking — names rows included — for the
- * master export to file beside its workbook: every week written here, from the
+ * The 4WLA as an .xlsx, built without asking — names rows included — filed as
+ * `4WLA_Latest.xlsx` by the schedule in Export to Excel: every week written here, from the
  * first day anything was (`laCellSpan()`) to the last, and never less than this
  * week and the next three. `from` and `to` are the export's own dates, and
  * narrow it; weeks nothing was ever written in are never drawn, however far
@@ -2927,6 +2928,9 @@ export async function lookaheadFileNow({ from = null, to = null } = {}) {
   });
   return { bytes, name: lookaheadLatestName(sheetName), from: days[0], to: days[days.length - 1] };
 }
+
+// 4WLA_Latest.xlsx on a schedule is built here; that module files it.
+provide4wla({ xlsx: () => lookaheadFileNow() });
 
 /** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
 export async function openExcelExport() {
@@ -2991,6 +2995,8 @@ export async function openExcelExport() {
       el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Weeks' }), size]),
       resourcesBox,
       summary,
+      // The same 4WLA, filed as 4WLA_Latest on a schedule for sending on.
+      scheduleSection(),
     ]),
     actions: [
       { label: 'Cancel' },

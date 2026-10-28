@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 28   Built: 2026-10-28T16:41:21.764Z
+ * Modules: 29   Built: 2026-10-28T17:03:52.390Z
  */
 (function () {
   'use strict';
@@ -2481,10 +2481,11 @@ __mods["io/rc_pdf.js"] = function (__x, __req) {
    * No DOM and no network: it takes a parsed view and returns bytes, which is
    * what lets `tools/test_lookahead.js` check the geometry without a browser.
    *
-   * Imports: io/pdf, io/lookahead, core/lookahead.
+   * Imports: io/pdf, io/svg, io/lookahead, core/lookahead.
    */
 
   const { fitToPdf, fitScale, pageBox, textWidth, PAGE_SIZES } = __req("io/pdf.js");
+  const { sceneToSvg } = __req("io/svg.js");
   const { isDark } = __req("io/lookahead.js");
   const { ABSENCE_LABELS } = __req("core/lookahead.js");
 
@@ -2897,6 +2898,40 @@ __mods["io/rc_pdf.js"] = function (__x, __req) {
   }
 
   /**
+   * The calendar as one picture, for a PNG: the same scene the PDF lays on a
+   * page, at its own size rather than fitted to paper, with the title and
+   * subtitle above it as the PDF has them. Returns `{ svg, width, height }` —
+   * SVG markup for `svgToRaster()`, which is the only part that needs a page.
+   */
+  function calendarSvg(view, opts = {}) {
+    const scene = calendarScene(view, opts);
+    /** @type {{ bg?: string, brand?: string, text?: string, textSubtle?: string }} */
+    const palette = scene.meta?.palette || {};
+    const pad = 18;
+    const head = opts.title || opts.subtitle ? 40 : 0;
+    const width = Math.ceil(scene.width + pad * 2);
+    const height = Math.ceil(scene.height + head + pad * 2);
+    const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const parts = [
+      `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+      `<rect x="0" y="0" width="${width}" height="${height}" fill="${esc(palette.bg || '#ffffff')}"/>`,
+    ];
+    if (head) {
+      parts.push(`<rect x="${pad}" y="${pad}" width="3.5" height="24" fill="${esc(palette.brand || '#e60012')}"/>`);
+      if (opts.title) {
+        parts.push(`<text x="${pad + 10}" y="${pad + 12}" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" fill="${esc(palette.text || '#111111')}">${esc(opts.title)}</text>`);
+      }
+      if (opts.subtitle) {
+        parts.push(`<text x="${pad + 10}" y="${pad + 25}" font-family="Arial, Helvetica, sans-serif" font-size="8" fill="${esc(palette.textSubtle || '#888888')}">${esc(opts.subtitle)}</text>`);
+      }
+    }
+    // The scene as its own drawing, placed under the title.
+    parts.push(sceneToSvg(scene).replace('<svg ', `<svg x="${pad}" y="${pad + head}" `));
+    parts.push('</svg>');
+    return { svg: parts.join('\n'), width, height };
+  }
+
+  /**
    * What the export would come out at, before anything is written.
    *
    * `{ scale, pt, width, height, rows, days }` — `pt` being the size the marks in
@@ -2924,6 +2959,7 @@ __mods["io/rc_pdf.js"] = function (__x, __req) {
   Object.defineProperty(__x, "calendarScene", { get: () => calendarScene, enumerable: true });
   Object.defineProperty(__x, "calendarLayout", { get: () => calendarLayout, enumerable: true });
   Object.defineProperty(__x, "calendarPdf", { get: () => calendarPdf, enumerable: true });
+  Object.defineProperty(__x, "calendarSvg", { get: () => calendarSvg, enumerable: true });
   Object.defineProperty(__x, "calendarFit", { get: () => calendarFit, enumerable: true });
   Object.defineProperty(__x, "PAGE_CHOICES", { get: () => PAGE_CHOICES, enumerable: true });
 };
@@ -7263,6 +7299,437 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
   Object.defineProperty(__x, "cancellationWorkbook", { get: () => cancellationWorkbook, enumerable: true });
 };
 
+// core/export_schedule.js
+__mods["core/export_schedule.js"] = function (__x, __req) {
+  /**
+   * When a repeating export is due — the rule alone, no DOM and no clock of its
+   * own, so `tools/test_la_edit.js` can walk it across days in Node.
+   *
+   * A schedule is `{ every, at, weekday, hours }`:
+   *   - `every: 'off'`   — never;
+   *   - `every: 'day'`   — each day at `at` ("HH:MM", this computer's time);
+   *   - `every: 'week'`  — each week on `weekday` (1 Monday … 7 Sunday) at `at`;
+   *   - `every: 'hours'` — every `hours` hours since the last run.
+   *
+   * **A slot missed is run late, once.** The export runs in the page, so it runs
+   * only while the calendar is open; a computer that was off at six in the
+   * morning exports when somebody opens the calendar at eight, and a week
+   * closed does not come back as seven files. What is compared is the latest
+   * slot that has passed against the last run: one run covers every slot
+   * before it.
+   *
+   * Imports: nothing.
+   */
+
+  const EVERY = ['off', 'day', 'week', 'hours'];
+
+  /** "06:30" → [6, 30], or the fallback when it is not a time. */
+  function hoursMinutes(at, fallback = [6, 0]) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(at ?? '').trim());
+    if (!m) return fallback;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    return h < 24 && min < 60 ? [h, min] : fallback;
+  }
+
+  /** A schedule with every field present and in range — what is stored and compared. */
+  function cleanSchedule(s = {}) {
+    const every = EVERY.includes(s.every) ? s.every : 'off';
+    const [h, m] = hoursMinutes(s.at);
+    const weekday = Number.isInteger(Number(s.weekday)) && s.weekday >= 1 && s.weekday <= 7 ? Number(s.weekday) : 1;
+    const hours = Math.min(168, Math.max(1, Math.round(Number(s.hours) || 24)));
+    return { every, at: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`, weekday, hours };
+  }
+
+  /**
+   * The most recent slot at or before `now` (ms), or null for a schedule that
+   * has no fixed slots ('off', 'hours'). Local time: "six in the morning" is the
+   * clock on this computer's wall, not Greenwich's.
+   */
+  function lastSlot(schedule, now) {
+    const s = cleanSchedule(schedule);
+    if (s.every !== 'day' && s.every !== 'week') return null;
+    const [h, m] = hoursMinutes(s.at);
+    const d = new Date(now);
+    const slot = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m, 0, 0);
+    if (s.every === 'day') {
+      if (slot.getTime() > now) slot.setDate(slot.getDate() - 1);
+      return slot.getTime();
+    }
+    const weekday = slot.getDay() || 7; // 1 Monday … 7 Sunday
+    slot.setDate(slot.getDate() - ((weekday - s.weekday + 7) % 7));
+    if (slot.getTime() > now) slot.setDate(slot.getDate() - 7);
+    return slot.getTime();
+  }
+
+  /** The next slot after `now` (ms) — what the dialog says is coming. Null when off. */
+  function nextSlot(schedule, lastRun, now) {
+    const s = cleanSchedule(schedule);
+    if (s.every === 'off') return null;
+    if (s.every === 'hours') return (lastRun ?? now) + s.hours * 3600000;
+    const last = lastSlot(s, now);
+    const step = new Date(last);
+    step.setDate(step.getDate() + (s.every === 'day' ? 1 : 7));
+    return step.getTime();
+  }
+
+  /**
+   * Whether an export is due now: a slot has passed since the last run (or, for
+   * 'hours', that many hours have). `lastRun` null means never — and a schedule
+   * that has never run waits for its first slot rather than firing the moment
+   * it is saved, so `since` (when it was switched on) stands in for it.
+   */
+  function isDue(schedule, { lastRun = null, since = null } = {}, now) {
+    const s = cleanSchedule(schedule);
+    if (s.every === 'off') return false;
+    const from = lastRun ?? since;
+    if (s.every === 'hours') return from == null || now - from >= s.hours * 3600000;
+    const slot = lastSlot(s, now);
+    return slot != null && (from == null || from < slot);
+  }
+
+  Object.defineProperty(__x, "EVERY", { get: () => EVERY, enumerable: true });
+  Object.defineProperty(__x, "cleanSchedule", { get: () => cleanSchedule, enumerable: true });
+  Object.defineProperty(__x, "lastSlot", { get: () => lastSlot, enumerable: true });
+  Object.defineProperty(__x, "nextSlot", { get: () => nextSlot, enumerable: true });
+  Object.defineProperty(__x, "isDue", { get: () => isDue, enumerable: true });
+};
+
+// ui/rc_la_schedule.js
+__mods["ui/rc_la_schedule.js"] = function (__x, __req) {
+  /**
+   * The 4WLA on a schedule: `4WLA_Latest.xlsx`, `4WLA_Latest.pdf` and
+   * `4WLA_Latest.png` in `exports/` in the shared folder, each replacing the last.
+   *
+   * It belongs to Export to Excel, not to the master export: the master export
+   * is the record (`LookAhead_Latest.xlsx`, a sheet per question), and this is
+   * the 4WLA itself, for the people it is sent to — the workbook in its own
+   * layout, the next four weeks on one A3 page, and the same four weeks as a
+   * picture that opens in an email on a phone. A flow on the folder (Power
+   * Automate, say) watches the files and sends them on; nothing is emailed from
+   * here, and that is structural.
+   *
+   * The schedule runs in the page on this computer, while the calendar is open,
+   * and a slot missed while it was closed runs once (`core/export_schedule.js`)
+   * — the same rule as the master export's, with settings of its own, because
+   * the two go to different people at different times.
+   *
+   * What is drawn comes from the screens that draw it — the workbook from the
+   * editor (`lookaheadFileNow()`), the PDF and PNG from the look-ahead
+   * (`lookaheadSheetsNow()`). Both import this module for the dialog, so they
+   * hand their builders over (`provide4wla()`) rather than being imported back,
+   * which the build would refuse as a cycle.
+   *
+   * Imports: util, rc, filestore, export_schedule, exporters, components.
+   */
+
+  const { el } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const filestore = __req("core/filestore.js");
+  const { cleanSchedule, isDue, nextSlot } = __req("core/export_schedule.js");
+  const { saveFile } = __req("io/exporters.js");
+  const { toast, checkbox, selectInput, field } = __req("ui/components.js");
+
+  /** The one name all three are filed under. */
+  const LATEST = '4WLA_Latest';
+  const EXPORT_DIR = 'exports';
+  const STORE_KEY = 'cx.rc.4wlaExport';
+  const RETRY_MS = 30 * 60000;
+  const TYPES = {
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    pdf: 'application/pdf',
+    png: 'image/png',
+  };
+
+  /** @typedef {{ name: string, bytes: Uint8Array } | null} Drawn */
+  /**
+   * @type {{
+   *   xlsx: null | (() => Promise<Drawn>),
+   *   sheets: null | ((what: { pdf?: boolean, png?: boolean }) => Promise<{ pdf: Drawn, png: Drawn }>),
+   * }}
+   */
+  const builders = { xlsx: null, sheets: null };
+
+  /** Called by the editor (the workbook) and the look-ahead (the PDF and PNG) as they load. */
+  function provide4wla(part) {
+    Object.assign(builders, part);
+  }
+
+  /* ── This computer's settings ─────────────────────────────────────────── */
+
+  function defaults() {
+    return {
+      xlsx: true,
+      pdf: true,
+      png: true,
+      schedule: cleanSchedule({ every: 'off', at: '06:00', weekday: 1, hours: 24 }),
+      since: null,
+      lastRun: null,
+      failedAt: null,
+      last: null,
+    };
+  }
+
+  function loadSettings() {
+    let stored = {};
+    try {
+      stored = JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {};
+    } catch {
+      stored = {};
+    }
+    return { ...defaults(), ...stored, schedule: cleanSchedule(stored.schedule || defaults().schedule) };
+  }
+
+  function saveSettings(settings) {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(settings));
+    } catch {
+      // No storage: it still exports now, it just cannot be remembered.
+    }
+  }
+
+  /* ── Building and filing ──────────────────────────────────────────────── */
+
+  /**
+   * The files the settings ask for, `{ files: [{ name, bytes, type }], failed }`.
+   * Each is drawn on its own, so one that cannot be never costs the others.
+   */
+  async function build4wla(settings = loadSettings()) {
+    const files = [];
+    const failed = [];
+    if (settings.xlsx) {
+      try {
+        const book = builders.xlsx ? await builders.xlsx() : null;
+        if (book) files.push({ name: `${LATEST}.xlsx`, bytes: book.bytes, type: TYPES.xlsx });
+        else failed.push({ what: 'the 4WLA workbook', message: 'the look-ahead is not written in the calendar yet' });
+      } catch (err) {
+        failed.push({ what: 'the 4WLA workbook', message: err.message });
+      }
+    }
+    if (settings.pdf || settings.png) {
+      try {
+        const drawn = builders.sheets
+          ? await builders.sheets({ pdf: Boolean(settings.pdf), png: Boolean(settings.png) })
+          : { pdf: null, png: null };
+        if (drawn.pdf) files.push({ name: `${LATEST}.pdf`, bytes: drawn.pdf.bytes, type: TYPES.pdf });
+        if (drawn.png) files.push({ name: `${LATEST}.png`, bytes: drawn.png.bytes, type: TYPES.png });
+        if ((settings.pdf && !drawn.pdf) || (settings.png && !drawn.png)) {
+          failed.push({ what: 'the 4WLA PDF and PNG', message: 'there is nothing on the look-ahead in the next four weeks' });
+        }
+      } catch (err) {
+        failed.push({ what: 'the 4WLA PDF and PNG', message: err.message });
+      }
+    }
+    return { files, failed };
+  }
+
+  /**
+   * Into `exports/` in the shared folder, each replacing the last — or
+   * downloaded, with no folder connected. Answers what went where.
+   */
+  async function deliver(files) {
+    if (filestore.hasFolder?.()) {
+      for (const f of files) {
+        try {
+          await filestore.intakeWrite(`${EXPORT_DIR}/${f.name}`, f.bytes);
+        } catch (err) {
+          // Windows will not replace a file somebody has open, and says nothing of the sort.
+          throw new Error(`${EXPORT_DIR}/${f.name} could not be replaced — if it is open, close it and export again `
+            + `(a scheduled export tries again by itself). ${err.message}`);
+        }
+      }
+      return { where: 'folder', paths: files.map((f) => `${EXPORT_DIR}/${f.name}`) };
+    }
+    for (const f of files) saveFile(f.name, f.bytes, f.type, '4WLA');
+    return { where: 'download', paths: files.map((f) => f.name) };
+  }
+
+  /** Build, file, and remember how it went. */
+  async function run4wla(settings = loadSettings()) {
+    const { files, failed } = await build4wla(settings);
+    if (!files.length) throw new Error(failed.map((f) => `${f.what}: ${f.message}`).join('; ') || 'nothing was asked for');
+    const went = await deliver(files);
+    saveSettings({ ...loadSettings(), last: { at: Date.now(), ...went, failed: failed.length } });
+    return { ...went, failed };
+  }
+
+  function said(out) {
+    const where = out.where === 'folder' ? 'Saved to the shared folder — ' : 'Downloaded — ';
+    const missing = out.failed.length ? ` · not made: ${out.failed.map((f) => `${f.what} (${f.message})`).join('; ')}` : '';
+    return where + out.paths.join(', ') + missing;
+  }
+
+  /* ── The schedule ─────────────────────────────────────────────────────── */
+
+  let started = false;
+  let running = false;
+
+  /** Look once a minute, while the calendar is open on this computer. */
+  function startSchedule4wla() {
+    if (started) return;
+    started = true;
+    setTimeout(() => { tick4wla(); }, 25000);
+    setInterval(() => { tick4wla(); }, 60000);
+  }
+
+  async function tick4wla(now = Date.now()) {
+    if (running || !rc.isSignedIn()) return false;
+    const s = loadSettings();
+    if (!isDue(s.schedule, { lastRun: s.lastRun, since: s.since }, now)) return false;
+    if (s.failedAt && now - s.failedAt < RETRY_MS) return false;
+    // Claimed before it runs, so a second window a moment later finds it done.
+    saveSettings({ ...s, lastRun: now });
+    running = true;
+    try {
+      const out = await run4wla(s);
+      saveSettings({ ...loadSettings(), lastRun: now, failedAt: null });
+      toast({ tone: out.failed.length ? 'warn' : 'info', title: 'Scheduled 4WLA export', message: said(out), timeout: 6000 });
+      return true;
+    } catch (err) {
+      saveSettings({ ...loadSettings(), lastRun: s.lastRun, failedAt: now });
+      rc.reportError('4wla:scheduled', err);
+      toast({ tone: 'bad', title: 'The scheduled 4WLA export failed', message: `${err.message} — it is tried again in half an hour.`, timeout: 12000 });
+      return false;
+    } finally {
+      running = false;
+    }
+  }
+
+  /* ── In the Export to Excel dialog ────────────────────────────────────── */
+
+  const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+  function when(ms) {
+    if (!ms) return '';
+    return new Date(ms).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+
+  /**
+   * The part of Export to Excel that files `4WLA_Latest` — which files, how
+   * often, and its own Save schedule and Export now, so the one-off download
+   * above it is untouched.
+   */
+  function scheduleSection() {
+    const s = loadSettings();
+    const box = (key, label) => {
+      const b = checkbox({ label, checked: s[key] });
+      b.dataset.latest = key;
+      return b;
+    };
+    const xlsx = box('xlsx', `${LATEST}.xlsx — the 4WLA in its own layout, every week written`);
+    const pdf = box('pdf', `${LATEST}.pdf — the next four weeks on one A3 page`);
+    const png = box('png', `${LATEST}.png — the same four weeks as a picture`);
+
+    const every = selectInput({
+      value: s.schedule.every,
+      options: [
+        { value: 'off', label: 'Only when I press Export now' },
+        { value: 'day', label: 'Every day' },
+        { value: 'week', label: 'Every week' },
+        { value: 'hours', label: 'Every few hours' },
+      ],
+    });
+    every.classList.add('la-latest-every');
+    const at = el('input', { type: 'time', class: 'cx-input la-latest-at', value: s.schedule.at });
+    const day = selectInput({ value: String(s.schedule.weekday), options: WEEKDAYS.map((d, i) => ({ value: String(i + 1), label: d })) });
+    const hours = el('input', { type: 'number', class: 'cx-input', min: '1', max: '168', value: String(s.schedule.hours) });
+    const atField = field('At', at);
+    const dayField = field('On', day);
+    const hoursField = field('Every how many hours', hours);
+    const status = el('p', { class: 'rc-hint la-latest-status' });
+
+    const read = () => ({
+      ...loadSettings(),
+      xlsx: xlsx.querySelector('input').checked,
+      pdf: pdf.querySelector('input').checked,
+      png: png.querySelector('input').checked,
+      schedule: cleanSchedule({ every: every.value, at: at.value, weekday: Number(day.value), hours: Number(hours.value) }),
+    });
+    const show = () => {
+      atField.hidden = every.value !== 'day' && every.value !== 'week';
+      dayField.hidden = every.value !== 'week';
+      hoursField.hidden = every.value !== 'hours';
+      const now = Date.now();
+      const cur = loadSettings();
+      const next = read();
+      const last = cur.last ? `Last ${when(cur.last.at)} — ${cur.last.where === 'folder' ? 'into the shared folder' : 'downloaded'}. ` : 'Not exported from this computer yet. ';
+      status.textContent = last + (next.schedule.every === 'off' ? '' : `Next ${when(nextSlot(next.schedule, cur.lastRun ?? cur.since ?? now, now))}.`);
+    };
+    for (const c of [every, at, day, hours]) c.addEventListener('change', show);
+    show();
+
+    const save = () => {
+      const next = read();
+      const was = loadSettings();
+      // Switched on or changed now: the first export is at the next slot, not this minute.
+      if (JSON.stringify(was.schedule) !== JSON.stringify(next.schedule)) {
+        next.since = Date.now();
+        next.lastRun = null;
+        next.failedAt = null;
+      }
+      saveSettings(next);
+      show();
+      return next;
+    };
+
+    const folder = filestore.hasFolder?.();
+    return el('div', { class: 'cx-field la-latest' }, [
+      el('span', { class: 'cx-label', text: `${LATEST} — on a schedule, for sending on` }),
+      el('p', {
+        class: 'rc-hint',
+        text: folder
+          ? `Saved into ${EXPORT_DIR}/ in the shared folder, replacing the last each time, so a flow watching the folder always sends the newest.`
+          : `Downloaded to this computer. Open the shared folder to have them saved into ${EXPORT_DIR}/ there, replacing the last.`,
+      }),
+      xlsx, pdf, png,
+      field('How often', every),
+      el('div', { class: 'rc-mx-when' }, [dayField, atField, hoursField]),
+      el('p', {
+        class: 'rc-hint',
+        text: 'It runs on this computer while the calendar is open on it. A time missed while it was closed is exported once, the next time it opens.',
+      }),
+      status,
+      el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
+        el('button', {
+          class: 'cx-btn mini', type: 'button', text: 'Save schedule', dataset: { action: 'latest-save' },
+          onClick: () => {
+            const next = save();
+            toast({ message: next.schedule.every === 'off' ? `Saved. ${LATEST} is not exported on a schedule.` : `Saved. ${LATEST} is exported on a schedule while the calendar is open here.` });
+          },
+        }),
+        el('button', {
+          class: 'cx-btn mini primary', type: 'button', text: `Export ${LATEST} now`, dataset: { action: 'latest-now' },
+          onClick: async (e) => {
+            const btn = e.currentTarget;
+            const next = save();
+            btn.disabled = true;
+            try {
+              const out = await run4wla(next);
+              toast({ tone: out.failed.length ? 'warn' : 'good', title: `${LATEST} exported`, message: said(out), timeout: 9000 });
+              show();
+            } catch (err) {
+              rc.reportError('4wla', err);
+              toast({ tone: 'bad', message: `${LATEST} could not be exported — ${err.message}`, timeout: 12000 });
+            } finally {
+              btn.disabled = false;
+            }
+          },
+        }),
+      ]),
+    ]);
+  }
+
+  Object.defineProperty(__x, "LATEST", { get: () => LATEST, enumerable: true });
+  Object.defineProperty(__x, "EXPORT_DIR", { get: () => EXPORT_DIR, enumerable: true });
+  Object.defineProperty(__x, "provide4wla", { get: () => provide4wla, enumerable: true });
+  Object.defineProperty(__x, "loadSettings", { get: () => loadSettings, enumerable: true });
+  Object.defineProperty(__x, "build4wla", { get: () => build4wla, enumerable: true });
+  Object.defineProperty(__x, "run4wla", { get: () => run4wla, enumerable: true });
+  Object.defineProperty(__x, "startSchedule4wla", { get: () => startSchedule4wla, enumerable: true });
+  Object.defineProperty(__x, "tick4wla", { get: () => tick4wla, enumerable: true });
+  Object.defineProperty(__x, "scheduleSection", { get: () => scheduleSection, enumerable: true });
+};
+
 // ui/rc_la_p6.js
 __mods["ui/rc_la_p6.js"] = function (__x, __req) {
   /**
@@ -7907,6 +8374,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
 
   const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
   const { lookaheadWorkbook, lookaheadFileName, lookaheadLatestName } = __req("io/la_xlsx.js");
+  const { provide4wla, scheduleSection } = __req("ui/rc_la_schedule.js");
   const { saveFile } = __req("io/exporters.js");
   const { icon } = __req("ui/icons.js");
   const { toast, confirmDialog, contextMenu, openModal, textInput, selectInput, segmented, emptyState, attachTooltip, checkbox } = __req("ui/components.js");
@@ -10760,8 +11228,8 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   }
 
   /**
-   * The 4WLA as an .xlsx, built without asking — names rows included — for the
-   * master export to file beside its workbook: every week written here, from the
+   * The 4WLA as an .xlsx, built without asking — names rows included — filed as
+   * `4WLA_Latest.xlsx` by the schedule in Export to Excel: every week written here, from the
    * first day anything was (`laCellSpan()`) to the last, and never less than this
    * week and the next three. `from` and `to` are the export's own dates, and
    * narrow it; weeks nothing was ever written in are never drawn, however far
@@ -10793,6 +11261,9 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     });
     return { bytes, name: lookaheadLatestName(sheetName), from: days[0], to: days[days.length - 1] };
   }
+
+  // 4WLA_Latest.xlsx on a schedule is built here; that module files it.
+  provide4wla({ xlsx: () => lookaheadFileNow() });
 
   /** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
   async function openExcelExport() {
@@ -10857,6 +11328,8 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
         el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Weeks' }), size]),
         resourcesBox,
         summary,
+        // The same 4WLA, filed as 4WLA_Latest on a schedule for sending on.
+        scheduleSection(),
       ]),
       actions: [
         { label: 'Cancel' },
@@ -13750,102 +14223,6 @@ __mods["ui/rc_activity.js"] = function (__x, __req) {
   Object.defineProperty(__x, "openActivity", { get: () => openActivity, enumerable: true });
 };
 
-// core/export_schedule.js
-__mods["core/export_schedule.js"] = function (__x, __req) {
-  /**
-   * When a repeating export is due — the rule alone, no DOM and no clock of its
-   * own, so `tools/test_la_edit.js` can walk it across days in Node.
-   *
-   * A schedule is `{ every, at, weekday, hours }`:
-   *   - `every: 'off'`   — never;
-   *   - `every: 'day'`   — each day at `at` ("HH:MM", this computer's time);
-   *   - `every: 'week'`  — each week on `weekday` (1 Monday … 7 Sunday) at `at`;
-   *   - `every: 'hours'` — every `hours` hours since the last run.
-   *
-   * **A slot missed is run late, once.** The export runs in the page, so it runs
-   * only while the calendar is open; a computer that was off at six in the
-   * morning exports when somebody opens the calendar at eight, and a week
-   * closed does not come back as seven files. What is compared is the latest
-   * slot that has passed against the last run: one run covers every slot
-   * before it.
-   *
-   * Imports: nothing.
-   */
-
-  const EVERY = ['off', 'day', 'week', 'hours'];
-
-  /** "06:30" → [6, 30], or the fallback when it is not a time. */
-  function hoursMinutes(at, fallback = [6, 0]) {
-    const m = /^(\d{1,2}):(\d{2})$/.exec(String(at ?? '').trim());
-    if (!m) return fallback;
-    const h = Number(m[1]);
-    const min = Number(m[2]);
-    return h < 24 && min < 60 ? [h, min] : fallback;
-  }
-
-  /** A schedule with every field present and in range — what is stored and compared. */
-  function cleanSchedule(s = {}) {
-    const every = EVERY.includes(s.every) ? s.every : 'off';
-    const [h, m] = hoursMinutes(s.at);
-    const weekday = Number.isInteger(Number(s.weekday)) && s.weekday >= 1 && s.weekday <= 7 ? Number(s.weekday) : 1;
-    const hours = Math.min(168, Math.max(1, Math.round(Number(s.hours) || 24)));
-    return { every, at: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`, weekday, hours };
-  }
-
-  /**
-   * The most recent slot at or before `now` (ms), or null for a schedule that
-   * has no fixed slots ('off', 'hours'). Local time: "six in the morning" is the
-   * clock on this computer's wall, not Greenwich's.
-   */
-  function lastSlot(schedule, now) {
-    const s = cleanSchedule(schedule);
-    if (s.every !== 'day' && s.every !== 'week') return null;
-    const [h, m] = hoursMinutes(s.at);
-    const d = new Date(now);
-    const slot = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m, 0, 0);
-    if (s.every === 'day') {
-      if (slot.getTime() > now) slot.setDate(slot.getDate() - 1);
-      return slot.getTime();
-    }
-    const weekday = slot.getDay() || 7; // 1 Monday … 7 Sunday
-    slot.setDate(slot.getDate() - ((weekday - s.weekday + 7) % 7));
-    if (slot.getTime() > now) slot.setDate(slot.getDate() - 7);
-    return slot.getTime();
-  }
-
-  /** The next slot after `now` (ms) — what the dialog says is coming. Null when off. */
-  function nextSlot(schedule, lastRun, now) {
-    const s = cleanSchedule(schedule);
-    if (s.every === 'off') return null;
-    if (s.every === 'hours') return (lastRun ?? now) + s.hours * 3600000;
-    const last = lastSlot(s, now);
-    const step = new Date(last);
-    step.setDate(step.getDate() + (s.every === 'day' ? 1 : 7));
-    return step.getTime();
-  }
-
-  /**
-   * Whether an export is due now: a slot has passed since the last run (or, for
-   * 'hours', that many hours have). `lastRun` null means never — and a schedule
-   * that has never run waits for its first slot rather than firing the moment
-   * it is saved, so `since` (when it was switched on) stands in for it.
-   */
-  function isDue(schedule, { lastRun = null, since = null } = {}, now) {
-    const s = cleanSchedule(schedule);
-    if (s.every === 'off') return false;
-    const from = lastRun ?? since;
-    if (s.every === 'hours') return from == null || now - from >= s.hours * 3600000;
-    const slot = lastSlot(s, now);
-    return slot != null && (from == null || from < slot);
-  }
-
-  Object.defineProperty(__x, "EVERY", { get: () => EVERY, enumerable: true });
-  Object.defineProperty(__x, "cleanSchedule", { get: () => cleanSchedule, enumerable: true });
-  Object.defineProperty(__x, "lastSlot", { get: () => lastSlot, enumerable: true });
-  Object.defineProperty(__x, "nextSlot", { get: () => nextSlot, enumerable: true });
-  Object.defineProperty(__x, "isDue", { get: () => isDue, enumerable: true });
-};
-
 // ui/rc_master_export.js
 __mods["ui/rc_master_export.js"] = function (__x, __req) {
   /**
@@ -13861,10 +14238,9 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
    * stories. A sheet that cannot be read is written empty and named in About,
    * never left out silently.
    *
-   * It is also how the look-ahead reaches the team: `LookAhead_Latest.xlsx`, the
-   * 4WLA beside it (`4WLA_Latest.xlsx`) and the next four weeks on one page
-   * (`4WLA_Latest.pdf`) are what a flow on the shared folder (Power Automate,
-   * say) picks up and sends on, so nobody needs the application to read it.
+   * It is the record, `LookAhead_Latest.xlsx`. The 4WLA itself — its workbook,
+   * PDF and picture, `4WLA_Latest.*` — is filed by Export to Excel's own
+   * schedule (`ui/rc_la_schedule.js`), for a flow on the folder to send on.
    *
    * **The schedule runs here, in the page.** There is no server to run it and
    * nothing is emailed from this application (that is structural), so it runs
@@ -13895,7 +14271,6 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
 
 
   const { KIND_LABELS } = __req("ui/rc_la_changes.js");
-  const { lookaheadFileNow } = __req("ui/rc_la_editor.js");
   const { writtenView } = __req("ui/rc_ingest.js");
 
   /** The folder, inside the shared one, the workbooks are filed in. */
@@ -13907,15 +14282,6 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
    */
   const EXPORT_NAME = 'LookAhead_Latest.xlsx';
 
-  /* The 4WLA as a PDF is drawn by the look-ahead (`lookaheadPdfNow()` in
-     `ui/rc_lookahead.js`), which imports this module for its button — so it
-     hands the function over when it loads rather than being imported back,
-     which the build would refuse as a cycle. */
-  /** @type {null | (() => Promise<{ name: string, bytes: Uint8Array } | null>)} */
-  let lookaheadPdf = null;
-  function provideLookaheadPdf(fn) {
-    lookaheadPdf = fn;
-  }
   const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   const STORE_KEY = 'cx.rc.masterExport';
   /** How long a scheduled export that failed waits before it is tried again. */
@@ -13946,15 +14312,13 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
      This computer's settings
      ═══════════════════════════════════════════════════════════════════════ */
 
-  /** The defaults: every sheet, everything recorded, the 4WLA beside it, no schedule. */
+  /** The defaults: every sheet, everything recorded, no schedule. */
   function defaults() {
     return {
       sheets: SHEETS.map((s) => s.id),
       range: 'all',
       from: '',
       to: '',
-      companion: true,
-      pdf: true,
       schedule: cleanSchedule({ every: 'off', at: '06:00', weekday: 1, hours: 24 }),
       since: null,
       lastRun: null,
@@ -14406,9 +14770,8 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
 
   /**
    * The workbook, from what `settings` asks for. Returns `{ bytes, name,
-   * sheets, failed, companion }`: `sheets` is what went in and how many rows
-   * each has, `failed` what could not be read and why, and `companion` the 4WLA
-   * in its own layout when it was asked for and the look-ahead is written here.
+   * sheets, failed }`: `sheets` is what went in and how many rows each has, and
+   * `failed` what could not be read and why.
    */
   async function buildMasterExport(settings = loadSettings(), { now = new Date() } = {}) {
     const range = rangeDates(settings);
@@ -14450,27 +14813,11 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
     };
     const bytes = await tableWorkbook({ sheets: [about, ...sheets], title: 'CX Timeline — master export' });
 
-    let companion = null;
-    if (settings.companion) companion = await lookaheadFileNow({ from: range.from, to: range.to }).catch(() => null);
-
-    /* The next four weeks on one page, for whoever it is sent to. A PDF that
-       cannot be drawn never costs the workbook; it is named among what failed. */
-    let pdf = null;
-    if (settings.pdf && lookaheadPdf) {
-      try {
-        pdf = await lookaheadPdf();
-      } catch (err) {
-        failed.push({ id: 'pdf', label: 'the 4WLA PDF', message: err.message });
-      }
-    }
-
     return {
       bytes,
       name: EXPORT_NAME,
       sheets: sheets.map((s) => ({ name: s.name, rows: s.rows.length })),
       failed,
-      companion,
-      pdf,
     };
   }
 
@@ -14492,14 +14839,10 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
         }
       };
       await replace(result.name, result.bytes);
-      if (result.companion) await replace(result.companion.name, result.companion.bytes);
-      if (result.pdf) await replace(result.pdf.name, result.pdf.bytes);
-      return { where: 'folder', path: `${EXPORT_DIR}/${result.name}`, pdfPath: result.pdf ? `${EXPORT_DIR}/${result.pdf.name}` : null };
+      return { where: 'folder', path: `${EXPORT_DIR}/${result.name}` };
     }
     saveFile(result.name, result.bytes, XLSX, 'Master export');
-    if (result.companion) saveFile(result.companion.name, result.companion.bytes, XLSX, '4WLA');
-    if (result.pdf) saveFile(result.pdf.name, result.pdf.bytes, 'application/pdf', '4WLA PDF');
-    return { where: 'download', path: result.name, pdfPath: result.pdf ? result.pdf.name : null };
+    return { where: 'download', path: result.name };
   }
 
   /** Build, deliver, and remember how it went. */
@@ -14512,8 +14855,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
   }
 
   function saidWhere(out) {
-    const also = out.pdfPath ? `, and ${out.pdfPath}` : '';
-    return out.where === 'folder' ? `Saved to the shared folder — ${out.path}${also}` : `Downloaded — ${out.path}${also}`;
+    return out.where === 'folder' ? `Saved to the shared folder — ${out.path}` : `Downloaded — ${out.path}`;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -14583,12 +14925,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
     const from = el('input', { type: 'date', class: 'cx-input', value: s.from || '' });
     const to = el('input', { type: 'date', class: 'cx-input', value: s.to || '' });
     const dates = el('div', { class: 'rc-mx-dates' }, [field('From', from), field('To', to)]);
-    const companion = checkbox({ label: 'Also the 4WLA in its own layout — every week written in these dates, as Export to Excel makes it', checked: s.companion });
-    const pdf = checkbox({
-      label: 'Also the 4WLA as a PDF — the next four weeks on one A3 page, as Export PDF draws it, saved as 4WLA_Latest.pdf',
-      checked: s.pdf,
-    });
-    pdf.classList.add('rc-mx-pdf');
+
 
     const every = selectInput({
       value: s.schedule.every,
@@ -14614,8 +14951,6 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
       range: range.value,
       from: from.value,
       to: to.value,
-      companion: companion.querySelector('input').checked,
-      pdf: pdf.querySelector('input').checked,
       schedule: cleanSchedule({ every: every.value, at: at.value, weekday: Number(day.value), hours: Number(hours.value) }),
     });
     const show = () => {
@@ -14651,8 +14986,6 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
         el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'What goes in — a sheet each' }), el('div', { class: 'rc-mx-sheets' }, boxes)]),
         field('Dates', range),
         dates,
-        companion,
-        pdf,
         el('p', {
           class: 'rc-hint rc-mx-where',
           text: folder
@@ -14716,7 +15049,6 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "EXPORT_DIR", { get: () => EXPORT_DIR, enumerable: true });
   Object.defineProperty(__x, "EXPORT_NAME", { get: () => EXPORT_NAME, enumerable: true });
-  Object.defineProperty(__x, "provideLookaheadPdf", { get: () => provideLookaheadPdf, enumerable: true });
   Object.defineProperty(__x, "SHEETS", { get: () => SHEETS, enumerable: true });
   Object.defineProperty(__x, "RANGES", { get: () => RANGES, enumerable: true });
   Object.defineProperty(__x, "loadSettings", { get: () => loadSettings, enumerable: true });
@@ -14746,7 +15078,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { el, clear } = __req("core/util.js");
   const rc = __req("core/rc.js");
   const { isDark } = __req("io/lookahead.js");
-  const { calendarPdf, calendarFit, PAGE_CHOICES } = __req("io/rc_pdf.js");
+  const { calendarPdf, calendarFit, calendarSvg, PAGE_CHOICES } = __req("io/rc_pdf.js");
+  const { svgToRaster } = __req("io/svg.js");
   const { saveFile } = __req("io/exporters.js");
   const { marksOf, ABSENCE_LABELS, isCancelMeaning, rowsNaming, resourceNames, cancellationNoteFor, cancellationReasonText, mergeViews } = __req("core/lookahead.js");
 
@@ -14769,7 +15102,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { renderCancellations } = __req("ui/rc_la_cancellations.js");
   const { renderP6, p6Words } = __req("ui/rc_la_p6.js");
   const { openActivity } = __req("ui/rc_activity.js");
-  const { masterExportButton, provideLookaheadPdf } = __req("ui/rc_master_export.js");
+  const { masterExportButton } = __req("ui/rc_master_export.js");
+  const { provide4wla, LATEST } = __req("ui/rc_la_schedule.js");
 
   const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6'];
 
@@ -16031,21 +16365,26 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   }
 
   /**
-   * The 4WLA as a PDF, with nobody at the screen — what the master export files
-   * as `exports/4WLA_Latest.pdf`, on its schedule or when Export now is pressed.
+   * The 4WLA as a PDF and a PNG, with nobody at the screen — what Export to
+   * Excel's schedule files as `exports/4WLA_Latest.pdf` and `.png`
+   * (`ui/rc_la_schedule.js`), on the schedule or when Export now is pressed.
    *
    * It is the Export PDF dialog with its defaults, never the screen's state:
    * four weeks from this week's Monday, every row with work in them (none
-   * filtered, none "only mine"), the names and who is away, the key, on one A3
-   * landscape sheet. Drawn through the same functions — the same view for the
-   * same weeks — so a scheduled PDF and one exported by hand never disagree.
-   * Null when there is nothing to draw.
+   * filtered, none "only mine"), the names and who is away, the key. Drawn
+   * through the same functions — the same view for the same weeks — so a
+   * scheduled file and one exported by hand never disagree, and the PDF (one A3
+   * landscape page) and the PNG (the same drawing at its own size) are made from
+   * the same rows. Answers `{ pdf, png }`, each `{ name, bytes }` or null — null
+   * when it was not asked for or there is nothing to draw.
    */
-  async function lookaheadPdfNow({ weeks = 4, today = todayISO() } = {}) {
+  async function lookaheadSheetsNow({ pdf = true, png = true, weeks = 4, today = todayISO() } = {}) {
+    const none = { pdf: null, png: null };
+    if (!pdf && !png) return none;
     const [snapshot, legendRows, sourceSetting] = await Promise.all([rc.latestSnapshot(), rc.listLegend(), lookaheadSource()]);
-    if (!snapshot?.grid?.rows?.length) return null;
+    if (!snapshot?.grid?.rows?.length) return none;
     const view = parsedView(snapshot, legendRows);
-    if (!view.days.length) return null;
+    if (!view.days.length) return none;
     const written = sourceSetting === EDITOR_SOURCE;
     const reading = readingSpan(view);
     const history = await historyOf(written);
@@ -16054,9 +16393,9 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
     const source = await viewFor(weeks, start);
     const p6 = await p6Chooser()(source);
     const rows = drawn(windowed(source, today, weeks, start), '', false, true, null, p6?.names);
-    if (!rows.activities.length) return null;
+    if (!rows.activities.length) return none;
     const sheet = snapshot.sheet_name || '4WLA';
-    const blob = calendarPdf(rows, {
+    const opts = {
       showResources: true,
       showAway: true,
       showLegend: true,
@@ -16067,15 +16406,23 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
       orientation: 'landscape',
       title: `${sheet} — look-ahead`,
       subtitle: `${sheet}  ·  ${weeks} weeks from ${dayLabel(start, 'medium')}`,
-    });
-    return { name: LOOKAHEAD_PDF, bytes: new Uint8Array(await blob.arrayBuffer()) };
+    };
+    const bytesOf = async (blob) => new Uint8Array(await blob.arrayBuffer());
+    const out = { ...none };
+    if (pdf) out.pdf = { name: `${LATEST}.pdf`, bytes: await bytesOf(calendarPdf(rows, opts)) };
+    if (png) {
+      /* Twice its size in points, so it stays sharp opened on a phone or
+         pasted into an email — and no more than a screen's worth past that. */
+      const picture = calendarSvg(rows, opts);
+      const scale = Math.max(1.5, Math.min(3, 3200 / picture.width));
+      const blob = await svgToRaster(picture.svg, { scale, type: 'image/png', width: picture.width, height: picture.height });
+      out.png = { name: `${LATEST}.png`, bytes: await bytesOf(blob) };
+    }
+    return out;
   }
 
-  /** The one name it is filed under, replaced each time. */
-  const LOOKAHEAD_PDF = '4WLA_Latest.pdf';
-
-  // The master export files it; this module imports that one, so it is handed over rather than imported back.
-  provideLookaheadPdf(lookaheadPdfNow);
+  // The schedule in Export to Excel files them; that module is imported here, so it is handed over.
+  provide4wla({ sheets: lookaheadSheetsNow });
 
   function exportButton(context) {
     return el('button', {
@@ -16089,8 +16436,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
 
   Object.defineProperty(__x, "render", { get: () => render, enumerable: true });
-  Object.defineProperty(__x, "lookaheadPdfNow", { get: () => lookaheadPdfNow, enumerable: true });
-  Object.defineProperty(__x, "LOOKAHEAD_PDF", { get: () => LOOKAHEAD_PDF, enumerable: true });
+  Object.defineProperty(__x, "lookaheadSheetsNow", { get: () => lookaheadSheetsNow, enumerable: true });
 };
 
 // ui/rc_pto.js
@@ -18846,6 +19192,7 @@ __mods["ui/rc.js"] = function (__x, __req) {
   const tawr = __req("ui/rc_tawr.js");
   const { enhanceTables } = __req("ui/rc_table.js");
   const { startScheduledExports } = __req("ui/rc_master_export.js");
+  const { startSchedule4wla } = __req("ui/rc_la_schedule.js");
 
   /**
    * The tabs: the look-ahead and everything hanging off it — the calendar and
@@ -18933,6 +19280,8 @@ __mods["ui/rc.js"] = function (__x, __req) {
     render();
     // A master export on a schedule runs on this computer while the calendar is open.
     startScheduledExports();
+    // …and 4WLA_Latest, on Export to Excel's own schedule.
+    startSchedule4wla();
   }
 
   /* ── Router ────────────────────────────────────────────────────────────── */

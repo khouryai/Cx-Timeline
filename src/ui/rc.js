@@ -28,6 +28,7 @@ import * as pto from './rc_pto.js';
 import * as tawr from './rc_tawr.js';
 import { enhanceTables } from './rc_table.js';
 import { startScheduledExports } from './rc_master_export.js';
+import { startSchedule4wla } from './rc_la_schedule.js';
 
 /**
  * The tabs: the look-ahead and everything hanging off it — the calendar and
@@ -115,6 +116,8 @@ async function init() {
   render();
   // A master export on a schedule runs on this computer while the calendar is open.
   startScheduledExports();
+  // …and 4WLA_Latest, on Export to Excel's own schedule.
+  startSchedule4wla();
 }
 
 /* ── Router ────────────────────────────────────────────────────────────── */

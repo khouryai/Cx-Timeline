@@ -26,10 +26,11 @@
  * No DOM and no network: it takes a parsed view and returns bytes, which is
  * what lets `tools/test_lookahead.js` check the geometry without a browser.
  *
- * Imports: io/pdf, io/lookahead, core/lookahead.
+ * Imports: io/pdf, io/svg, io/lookahead, core/lookahead.
  */
 
 import { fitToPdf, fitScale, pageBox, textWidth, PAGE_SIZES } from './pdf.js';
+import { sceneToSvg } from './svg.js';
 import { isDark } from './lookahead.js';
 import { ABSENCE_LABELS } from '../core/lookahead.js';
 
@@ -439,6 +440,40 @@ export function calendarPdf(view, opts = {}) {
     author: opts.author || 'CX Timeline',
     footer: opts.footer,
   });
+}
+
+/**
+ * The calendar as one picture, for a PNG: the same scene the PDF lays on a
+ * page, at its own size rather than fitted to paper, with the title and
+ * subtitle above it as the PDF has them. Returns `{ svg, width, height }` —
+ * SVG markup for `svgToRaster()`, which is the only part that needs a page.
+ */
+export function calendarSvg(view, opts = {}) {
+  const scene = calendarScene(view, opts);
+  /** @type {{ bg?: string, brand?: string, text?: string, textSubtle?: string }} */
+  const palette = scene.meta?.palette || {};
+  const pad = 18;
+  const head = opts.title || opts.subtitle ? 40 : 0;
+  const width = Math.ceil(scene.width + pad * 2);
+  const height = Math.ceil(scene.height + head + pad * 2);
+  const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const parts = [
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+    `<rect x="0" y="0" width="${width}" height="${height}" fill="${esc(palette.bg || '#ffffff')}"/>`,
+  ];
+  if (head) {
+    parts.push(`<rect x="${pad}" y="${pad}" width="3.5" height="24" fill="${esc(palette.brand || '#e60012')}"/>`);
+    if (opts.title) {
+      parts.push(`<text x="${pad + 10}" y="${pad + 12}" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" fill="${esc(palette.text || '#111111')}">${esc(opts.title)}</text>`);
+    }
+    if (opts.subtitle) {
+      parts.push(`<text x="${pad + 10}" y="${pad + 25}" font-family="Arial, Helvetica, sans-serif" font-size="8" fill="${esc(palette.textSubtle || '#888888')}">${esc(opts.subtitle)}</text>`);
+    }
+  }
+  // The scene as its own drawing, placed under the title.
+  parts.push(sceneToSvg(scene).replace('<svg ', `<svg x="${pad}" y="${pad + head}" `));
+  parts.push('</svg>');
+  return { svg: parts.join('\n'), width, height };
 }
 
 /**

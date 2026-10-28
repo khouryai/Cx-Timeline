@@ -13,7 +13,8 @@
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import { isDark } from '../io/lookahead.js';
-import { calendarPdf, calendarFit, PAGE_CHOICES } from '../io/rc_pdf.js';
+import { calendarPdf, calendarFit, calendarSvg, PAGE_CHOICES } from '../io/rc_pdf.js';
+import { svgToRaster } from '../io/svg.js';
 import { saveFile } from '../io/exporters.js';
 import {
   marksOf, ABSENCE_LABELS, isCancelMeaning, rowsNaming, resourceNames, cancellationNoteFor,
@@ -36,7 +37,8 @@ import { renderChanges, renderSnapshots } from './rc_la_changes.js';
 import { renderCancellations } from './rc_la_cancellations.js';
 import { renderP6, p6Words } from './rc_la_p6.js';
 import { openActivity } from './rc_activity.js';
-import { masterExportButton, provideLookaheadPdf } from './rc_master_export.js';
+import { masterExportButton } from './rc_master_export.js';
+import { provide4wla, LATEST } from './rc_la_schedule.js';
 
 const SECTIONS = ['calendar', 'cancellations', 'changes', 'snapshots', 'legend', 'p6'];
 
@@ -1298,21 +1300,26 @@ function exportDialog({ viewFor, p6Of, legendRows, today, sheetName, isMe = null
 }
 
 /**
- * The 4WLA as a PDF, with nobody at the screen — what the master export files
- * as `exports/4WLA_Latest.pdf`, on its schedule or when Export now is pressed.
+ * The 4WLA as a PDF and a PNG, with nobody at the screen — what Export to
+ * Excel's schedule files as `exports/4WLA_Latest.pdf` and `.png`
+ * (`ui/rc_la_schedule.js`), on the schedule or when Export now is pressed.
  *
  * It is the Export PDF dialog with its defaults, never the screen's state:
  * four weeks from this week's Monday, every row with work in them (none
- * filtered, none "only mine"), the names and who is away, the key, on one A3
- * landscape sheet. Drawn through the same functions — the same view for the
- * same weeks — so a scheduled PDF and one exported by hand never disagree.
- * Null when there is nothing to draw.
+ * filtered, none "only mine"), the names and who is away, the key. Drawn
+ * through the same functions — the same view for the same weeks — so a
+ * scheduled file and one exported by hand never disagree, and the PDF (one A3
+ * landscape page) and the PNG (the same drawing at its own size) are made from
+ * the same rows. Answers `{ pdf, png }`, each `{ name, bytes }` or null — null
+ * when it was not asked for or there is nothing to draw.
  */
-export async function lookaheadPdfNow({ weeks = 4, today = todayISO() } = {}) {
+export async function lookaheadSheetsNow({ pdf = true, png = true, weeks = 4, today = todayISO() } = {}) {
+  const none = { pdf: null, png: null };
+  if (!pdf && !png) return none;
   const [snapshot, legendRows, sourceSetting] = await Promise.all([rc.latestSnapshot(), rc.listLegend(), lookaheadSource()]);
-  if (!snapshot?.grid?.rows?.length) return null;
+  if (!snapshot?.grid?.rows?.length) return none;
   const view = parsedView(snapshot, legendRows);
-  if (!view.days.length) return null;
+  if (!view.days.length) return none;
   const written = sourceSetting === EDITOR_SOURCE;
   const reading = readingSpan(view);
   const history = await historyOf(written);
@@ -1321,9 +1328,9 @@ export async function lookaheadPdfNow({ weeks = 4, today = todayISO() } = {}) {
   const source = await viewFor(weeks, start);
   const p6 = await p6Chooser()(source);
   const rows = drawn(windowed(source, today, weeks, start), '', false, true, null, p6?.names);
-  if (!rows.activities.length) return null;
+  if (!rows.activities.length) return none;
   const sheet = snapshot.sheet_name || '4WLA';
-  const blob = calendarPdf(rows, {
+  const opts = {
     showResources: true,
     showAway: true,
     showLegend: true,
@@ -1334,15 +1341,23 @@ export async function lookaheadPdfNow({ weeks = 4, today = todayISO() } = {}) {
     orientation: 'landscape',
     title: `${sheet} — look-ahead`,
     subtitle: `${sheet}  ·  ${weeks} weeks from ${dayLabel(start, 'medium')}`,
-  });
-  return { name: LOOKAHEAD_PDF, bytes: new Uint8Array(await blob.arrayBuffer()) };
+  };
+  const bytesOf = async (blob) => new Uint8Array(await blob.arrayBuffer());
+  const out = { ...none };
+  if (pdf) out.pdf = { name: `${LATEST}.pdf`, bytes: await bytesOf(calendarPdf(rows, opts)) };
+  if (png) {
+    /* Twice its size in points, so it stays sharp opened on a phone or
+       pasted into an email — and no more than a screen's worth past that. */
+    const picture = calendarSvg(rows, opts);
+    const scale = Math.max(1.5, Math.min(3, 3200 / picture.width));
+    const blob = await svgToRaster(picture.svg, { scale, type: 'image/png', width: picture.width, height: picture.height });
+    out.png = { name: `${LATEST}.png`, bytes: await bytesOf(blob) };
+  }
+  return out;
 }
 
-/** The one name it is filed under, replaced each time. */
-export const LOOKAHEAD_PDF = '4WLA_Latest.pdf';
-
-// The master export files it; this module imports that one, so it is handed over rather than imported back.
-provideLookaheadPdf(lookaheadPdfNow);
+// The schedule in Export to Excel files them; that module is imported here, so it is handed over.
+provide4wla({ sheets: lookaheadSheetsNow });
 
 function exportButton(context) {
   return el('button', {

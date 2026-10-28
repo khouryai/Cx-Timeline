@@ -114,7 +114,7 @@ ui/pane_util → ui/pane_plan · ui/pane_filters · ui/pane_io · ui/pane_backup
 ui/panels → ui/command_menu · ui/canvas_hint → ui/shell
 ui/workspace · ui/calendar_loader         the calendar, loaded on first use:
     ui/rc → ui/rc_gate · ui/rc_roster → ui/rc_settings · ui/rc_activity
-          · ui/rc_pto · ui/rc_tawr · ui/rc_master_export
+          · ui/rc_pto · ui/rc_tawr · ui/rc_master_export · ui/rc_la_schedule
           · ui/rc_lookahead → ui/rc_la_editor · ui/rc_la_* · ui/rc_ingest → ui/rc_la_state
           · ui/rc_table       → ui/rc_util   (calendar.bundle.js)
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
@@ -225,7 +225,7 @@ alternative shipped once and went wrong.
 - The look-ahead's window moving is not a change of scope. [→](docs/ARCHITECTURE.md#the-look-aheads-window-moving-is-not-a-change-of-scope)
 - The calendar's data can be taken out whole. [→](docs/ARCHITECTURE.md#the-calendars-data-can-be-taken-out-whole)
 - The master export is one Excel workbook, a sheet per question, each read through the function its screen uses (`assignmentIndex()`, `cancellationLog()`, `describe()`) and through the policies; the look-ahead's history is `rc_lookahead_days`, each week from its newest reading — by the week, never day by day over every reading, which took a minute on a real project; a week written in the editor that no reading has comes through the publish path (`writtenOnlyDays()`), and the 4WLA beside it (`4WLA_Latest.xlsx`) is every week written, not the next four. [→](docs/ARCHITECTURE.md#the-master-export-is-one-workbook-read-the-way-the-screens-read)
-- A scheduled master export runs in the page on this computer, catches a missed slot up once, and files into `exports/` in the shared folder as `LookAhead_Latest.xlsx`, with `4WLA_Latest.xlsx` and `4WLA_Latest.pdf` beside it (the next four weeks on one A3 page, `lookaheadPdfNow()` — the Export PDF dialog's defaults, never the screen's state), each replacing the last (downloads without one); its settings are this computer's. [→](docs/ARCHITECTURE.md#the-master-export-runs-on-a-schedule-in-the-page-and-files-into-the-shared-folder)
+- A scheduled master export runs in the page on this computer, catches a missed slot up once, and files into `exports/` in the shared folder as `LookAhead_Latest.xlsx`, replacing the last (downloads without one); its settings are this computer's. The 4WLA itself is Export to Excel's, on a schedule of its own (`ui/rc_la_schedule.js`): `4WLA_Latest.xlsx`, `.pdf` (the next four weeks on one A3 page) and `.png` (the same as a picture), drawn by `lookaheadFileNow()` and `lookaheadSheetsNow()` — the Export PDF dialog's defaults, never the screen's state — and handed over with `provide4wla()`, since both modules import the schedule for its dialog. [→](docs/ARCHITECTURE.md#the-master-export-runs-on-a-schedule-in-the-page-and-files-into-the-shared-folder)
 - The calendar is used standing up, so it stops assuming a wide screen. [→](docs/ARCHITECTURE.md#the-calendar-is-used-standing-up-so-it-stops-assuming-a-wide-screen)
 
 ### Shifts
@@ -392,7 +392,7 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
 | `test_la_edit.js` | 230 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, P6 extracts read, searched and compared, and the master export's workbook and schedule |
 | `smoke.js` | 322 | the application, local mode — a tall plan drawn by the rows in view, less motion and the System theme, files from elsewhere (imports, notes, CSV), and dates away from Greenwich — **any console error fails the run** |
-| `smoke_calendar.js` | 449 | the resource calendar over a fake folder (`tools/lib/rc_folder.js`): the door, importing the old calendar and starting empty, the look-ahead register, the cancellation log, PTO, the lists, two computers and the pen, the look-ahead grid and editor (`smoke_la_editor.js`), TAWRs (`smoke_tawr.js`), P6 activities linked to rows (`smoke_la_p6.js`), the master export and its schedule (`smoke_master_export.js`), a tablet, and that nothing is sent anywhere |
+| `smoke_calendar.js` | 455 | the resource calendar over a fake folder (`tools/lib/rc_folder.js`): the door, importing the old calendar and starting empty, the look-ahead register, the cancellation log, PTO, the lists, two computers and the pen, the look-ahead grid and editor (`smoke_la_editor.js`), TAWRs (`smoke_tawr.js`), P6 activities linked to rows (`smoke_la_p6.js`), the master export and its schedule (`smoke_master_export.js`), a tablet, and that nothing is sent anywhere |
 | `smoke_folder.js` | 89 | the shared folder, in a browser |
 | `smoke_desktop.js` | 65 | the desktop shell, its updates — and a kit needing a newer installer refused — and the calendar written into the folder through the shell |
 | `test_xlsx_compat.js` | 18 | the Excel export opened, re-saved and printed by LibreOffice Calc, and the master export's sheets read out by it (skips where Calc is absent; the `xlsx` CI job installs it) |

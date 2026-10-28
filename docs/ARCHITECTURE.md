@@ -1790,18 +1790,23 @@ day anything was (`laCellSpan()`) to the last and never less than four weeks
 from this one, within the export's own dates, and files it as
 `4WLA_Latest.xlsx` (`lookaheadLatestName()`), replaced like the workbook.
 
-**And the next four weeks as a PDF, `4WLA_Latest.pdf`**, for whoever is sent
-the look-ahead rather than given the application — a flow on the folder
-attaches it to an email, and it opens on a phone. `lookaheadPdfNow()` in
-`ui/rc_lookahead.js` draws it with the Export PDF dialog's defaults, never the
-screen's state: four weeks from this week's Monday, every row with work in
-them, the names and who is away, the key, one A3 landscape page — through the
-same `viewChooser()`, `windowed()` and `drawn()` the screen uses, so it cannot
-show different rows from the button. The look-ahead imports this module for
-its button, so it hands the function over (`provideLookaheadPdf()`) rather
-than being imported back, which the build would refuse as a cycle. It is
-ticked by default; a PDF that cannot be drawn is named among what failed and
-never costs the workbook.
+**The 4WLA itself is Export to Excel's, on its own schedule** (`ui/rc_la_schedule.js`):
+`4WLA_Latest.xlsx`, `4WLA_Latest.pdf` and `4WLA_Latest.png` in `exports/`, each
+replacing the last. The master export is the record, `LookAhead_Latest.xlsx`;
+the 4WLA is what is sent to people — the workbook in its own layout, the next
+four weeks on one A3 page, and the same four weeks as a picture that opens in an
+email on a phone — so they are two exports with two schedules, which can go to
+different people at different times. The workbook is `lookaheadFileNow()`; the
+PDF and PNG are `lookaheadSheetsNow()` in `ui/rc_lookahead.js`, drawn with the
+Export PDF dialog's defaults, never the screen's state: four weeks from this
+week's Monday, every row with work in them, the names and who is away, the key
+— through the same `viewChooser()`, `windowed()` and `drawn()` the screen uses,
+from the same rows for both, so neither can show different rows from the
+button. The PNG is the same scene at its own size (`calendarSvg()`),
+rasterised at about twice its size. Both modules import the schedule for its
+section in the dialog, so they hand their builders over (`provide4wla()`)
+rather than being imported back, which the build would refuse as a cycle. One
+file that cannot be drawn is named and never costs the others.
 
 The writer is `tableWorkbook()` in `io/xlsx_write.js`: typed cells (a date is
 Excel's day number with a date format, a number a number, everything else

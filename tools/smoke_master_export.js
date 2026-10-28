@@ -9,6 +9,7 @@
  * its reason and rows linked to P6 to carry.
  */
 
+import fs from 'node:fs';
 import { readZip, parseSheet } from '../src/io/lookahead.js';
 import { readGrid } from '../src/core/lookahead.js';
 
@@ -22,23 +23,13 @@ async function workbookIn(page) {
       for (const b of bytes) s += String.fromCharCode(b);
       return btoa(s);
     };
-    return {
-      bytes: b64(out.bytes), sheets: out.sheets, failed: out.failed,
-      companion: out.companion ? out.companion.name : null,
-      companionBytes: out.companion ? b64(out.companion.bytes) : null,
-    };
+    return { bytes: b64(out.bytes), sheets: out.sheets, failed: out.failed };
   });
   const files = readZip(Uint8Array.from(Buffer.from(b64.bytes, 'base64')).buffer);
   const text = (name) => new TextDecoder().decode(files.get(name) || new Uint8Array());
   const names = [...text('xl/workbook.xml').matchAll(/<sheet name="([^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, '&'));
   const sheet = (name) => text(`xl/worksheets/sheet${names.indexOf(name) + 1}.xml`);
-  /* The 4WLA beside it, read back the way a workbook is read, for the days it covers. */
-  let companionDays = [];
-  if (b64.companionBytes) {
-    const buf = Uint8Array.from(Buffer.from(b64.companionBytes, 'base64')).buffer;
-    companionDays = readGrid(parseSheet(buf, '4WLA'), { anchorISO: '2026-09-23' }).days.map((d) => d.date).filter(Boolean);
-  }
-  return { ...b64, names, sheet, companionDays, deflated: [...files.keys()].length > 0 };
+  return { ...b64, names, sheet, deflated: [...files.keys()].length > 0 };
 }
 
 export async function masterExport(page, { check }) {
@@ -53,7 +44,6 @@ export async function masterExport(page, { check }) {
   check('it asks what goes in — a sheet each, every one ticked to begin with',
     (await dialog.locator('.rc-mx-sheet input:checked').count()) === 8);
   check('and when — now, or on a schedule', (await dialog.locator('.rc-mx-every').count()) === 1);
-  check('it offers the 4WLA as a PDF too, ticked to begin with', (await dialog.locator('.rc-mx-pdf input:checked').count()) === 1);
 
   const before = await page.evaluate(() => Object.keys(window.__folder.files).filter((k) => k.startsWith('exports/')).length);
   await dialog.locator('button', { hasText: 'Export now' }).click();
@@ -61,22 +51,8 @@ export async function masterExport(page, { check }) {
   const filed = await page.evaluate(() => Object.keys(window.__folder.files).filter((k) => k.startsWith('exports/')));
   check('"Export now" files the workbook into exports/ in the shared folder',
     filed.includes('exports/LookAhead_Latest.xlsx'), filed.join(' | '));
-  check('with the 4WLA beside it, in its own layout', filed.some((k) => /4WLA/.test(k) && !/master/.test(k)), filed.join(' | '));
-  const pdf = await page.evaluate(() => {
-    const f = window.__folder.files['exports/4WLA_Latest.pdf'];
-    if (!f) return null;
-    const text = new TextDecoder('latin1').decode(f.data);
-    return {
-      head: text.slice(0, 5),
-      pages: (text.match(/\/Type\s*\/Page[^s]/g) || []).length,
-      // A3 landscape: 1190.55 x 841.89 points.
-      weeks: /4 weeks from/.test(text),
-      a3: /\/MediaBox\s*\[\s*0\s+0\s+1190\.\d+\s+841\.\d+\s*\]/.test(text),
-      modified: f.modified,
-    };
-  });
-  check('and files it as exports/4WLA_Latest.pdf — a real PDF, one A3 landscape page',
-    pdf?.head === '%PDF-' && pdf.pages === 1 && pdf.a3 && pdf.weeks, JSON.stringify(pdf));
+  check('and only that: the 4WLA files are Export to Excel\'s, not the master export\'s',
+    !filed.some((k) => /4WLA/.test(k)), filed.join(' | '));
   const said = page.locator('.cx-toast', { hasText: 'Saved to the shared folder' }).first();
   await said.waitFor({ timeout: 8000 }).catch(() => {});
   check('and says where it went, and how much it holds',
@@ -102,11 +78,6 @@ export async function masterExport(page, { check }) {
     d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
     return d.toISOString().slice(0, 10);
   });
-  check('the 4WLA beside it has one name, replaced each time, not one named for its dates',
-    book.companion === '4WLA_Latest.xlsx', book.companion);
-  check('and it reaches back to the first week anything was written, not only this week and the next three',
-    book.companionDays.length > 28 && book.companionDays[0] <= longAgo.day && book.companionDays.includes(longAgo.day),
-    `${book.companionDays[0]} to ${book.companionDays[book.companionDays.length - 1]} (written ${longAgo.day})`);
   const laDates = [...book.sheet('Look-ahead').matchAll(/<c r="A\d+" s="\d+"><v>(\d{5})<\/v>/g)]
     .map((m) => new Date((Number(m[1]) - 25569) * 864e5).toISOString().slice(0, 10)).sort();
   check('the look-ahead sheet carries the weeks already gone, back to the day written two months ago',
@@ -158,14 +129,88 @@ export async function masterExport(page, { check }) {
     (await count()) === 1 && !(await page.evaluate(() => Object.keys(window.__folder.files).some((k) => /^exports\/.*master export/i.test(k)))));
   check('and what is in it is the new export, not the old one kept',
     Boolean(filedBefore) && (await page.evaluate(() => window.__folder.files['exports/LookAhead_Latest.xlsx']?.modified)) > filedBefore);
-  check('the PDF is replaced by the scheduled run too, under the same name',
-    (await page.evaluate(() => window.__folder.files['exports/4WLA_Latest.pdf']?.modified || 0)) > (pdf?.modified || Infinity)
-      && (await page.evaluate(() => Object.keys(window.__folder.files).filter((k) => /^exports\/.*\.pdf$/.test(k)).length)) === 1);
   check('the time it ran is remembered on this computer',
     await page.evaluate(() => Boolean(JSON.parse(localStorage.getItem('cx.rc.masterExport') || '{}').lastRun)));
   // Back off, so nothing else in the suite meets a schedule.
   await page.evaluate(() => {
     const s = JSON.parse(localStorage.getItem('cx.rc.masterExport') || '{}');
     localStorage.setItem('cx.rc.masterExport', JSON.stringify({ ...s, schedule: { ...s.schedule, every: 'off' } }));
+  });
+
+  /* ── 4WLA_Latest, on Export to Excel's own schedule ─────────────────── */
+  console.log('\n4WLA_Latest, on Export to Excel\'s schedule');
+  await page.locator('#rc-frame .la-export-xlsx').click();
+  const xl = page.locator('.cx-modal', { hasText: 'Export to Excel' });
+  await xl.waitFor({ timeout: 5000 });
+  check('Export to Excel offers 4WLA_Latest on a schedule — the workbook, the PDF and the PNG, each ticked',
+    (await xl.locator('.la-latest [data-latest] input:checked').count()) === 3);
+  await xl.locator('[data-action="latest-now"]').click();
+  await page.waitForFunction(() => ['xlsx', 'pdf', 'png'].every((e) => window.__folder.files[`exports/4WLA_Latest.${e}`]), null, { timeout: 20000 }).catch(() => {});
+  check('Export 4WLA_Latest now files all three into exports/, under the one name',
+    await page.evaluate(() => ['xlsx', 'pdf', 'png'].every((e) => window.__folder.files[`exports/4WLA_Latest.${e}`])),
+    (await page.evaluate(() => Object.keys(window.__folder.files).filter((k) => k.startsWith('exports/')))).join(' | '));
+  const pdf = await page.evaluate(() => {
+    const f = window.__folder.files['exports/4WLA_Latest.pdf'];
+    if (!f) return null;
+    const text = new TextDecoder('latin1').decode(f.data);
+    return {
+      head: text.slice(0, 5),
+      pages: (text.match(/\/Type\s*\/Page[^s]/g) || []).length,
+      // A3 landscape: 1190.55 x 841.89 points.
+      weeks: /4 weeks from/.test(text),
+      a3: /\/MediaBox\s*\[\s*0\s+0\s+1190\.\d+\s+841\.\d+\s*\]/.test(text),
+      modified: f.modified,
+    };
+  });
+  check('the PDF is a real PDF, one A3 landscape page, of the next four weeks — a real PDF, one A3 landscape page',
+    pdf?.head === '%PDF-' && pdf.pages === 1 && pdf.a3 && pdf.weeks, JSON.stringify(pdf));
+  const png = await page.evaluate(() => {
+    const f = window.__folder.files['exports/4WLA_Latest.png'];
+    if (!f || typeof f.data === 'string') return null;
+    const b = f.data;
+    const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    return {
+      signature: [...b.slice(0, 8)].join(','),
+      // IHDR: width and height, big-endian, at bytes 16 and 20.
+      width: view.getUint32(16), height: view.getUint32(20),
+      bytes: b.length, modified: f.modified,
+      b64: btoa(Array.from(b, (c) => String.fromCharCode(c)).join('')),
+    };
+  });
+  if (png && process.env.CX_PNG_SHOT) fs.writeFileSync(process.env.CX_PNG_SHOT, Buffer.from(png.b64, 'base64'));
+  check('the PNG is the same four weeks as a real PNG — a real PNG, wide and sharp enough to read',
+    png?.signature === '137,80,78,71,13,10,26,10' && png.width >= 1600 && png.height >= 400 && png.width > png.height,
+    png ? `${png.width} × ${png.height} px, ${Math.round(png.bytes / 1024)} kB` : 'not filed');
+  const sheetDays = await page.evaluate(() => {
+    const b = window.__folder.files['exports/4WLA_Latest.xlsx']?.data;
+    return b ? btoa(Array.from(b, (c) => String.fromCharCode(c)).join('')) : null;
+  }).then((b64) => (b64
+    ? readGrid(parseSheet(Uint8Array.from(Buffer.from(b64, 'base64')).buffer, '4WLA'), { anchorISO: '2026-09-23' }).days.map((d) => d.date).filter(Boolean)
+    : []));
+  check('the workbook reaches back to the first week anything was written, not only this week and the next three',
+    sheetDays.length > 28 && sheetDays[0] <= longAgo.day && sheetDays.includes(longAgo.day),
+    `${sheetDays[0]} to ${sheetDays[sheetDays.length - 1]} (written ${longAgo.day})`);
+
+  // Its own schedule: saved now, the first run waits for the next slot; a slot passed runs once.
+  await xl.locator('.la-latest-every').selectOption('day');
+  await xl.locator('.la-latest-at').fill('06:00');
+  await xl.locator('.la-latest-at').dispatchEvent('change');
+  check('a daily schedule says when the next one is', /Next /.test(await xl.locator('.la-latest-status').innerText()));
+  await xl.locator('[data-action="latest-save"]').click();
+  const latestTick = (ms) => page.evaluate((offset) => window.__CX_MODULES.req('ui/rc_la_schedule.js').tick4wla(Date.now() + offset), ms);
+  const stamps = () => page.evaluate(() => ['xlsx', 'pdf', 'png'].map((e) => window.__folder.files[`exports/4WLA_Latest.${e}`]?.modified || 0));
+  const s0 = await stamps();
+  check('a schedule just saved does not export straight away', (await latestTick(0)) === false);
+  check('once its time has passed it exports all three by itself, replacing each',
+    (await latestTick(86400000)) === true && (await stamps()).every((m, k) => m > s0[k]));
+  check('and only once for that slot', (await latestTick(86400000 + 60000)) === false);
+  check('never beside the last: one of each',
+    (await page.evaluate(() => Object.keys(window.__folder.files).filter((k) => /^exports\/4WLA/.test(k)).length)) === 3);
+  check('and the master export\'s schedule is its own — that one is still off',
+    await page.evaluate(() => JSON.parse(localStorage.getItem('cx.rc.masterExport') || '{}').schedule?.every === 'off'));
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => {
+    const s = JSON.parse(localStorage.getItem('cx.rc.4wlaExport') || '{}');
+    localStorage.setItem('cx.rc.4wlaExport', JSON.stringify({ ...s, schedule: { ...s.schedule, every: 'off' } }));
   });
 }

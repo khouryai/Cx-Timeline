@@ -105,8 +105,9 @@ calendar/leave.json, p6.json     leave booked; the P6 activity list
 calendar/tawr/                   TAWRs, what they are filled from, and BART's blank form
 calendar/pen/                    who has the calendar's pen, a file per window
 exports/LookAhead_Latest.xlsx    the master export, when one is scheduled
-exports/4WLA_Latest.xlsx         the 4WLA beside it
+exports/4WLA_Latest.xlsx         the 4WLA in its own layout (Export to Excel's schedule)
 exports/4WLA_Latest.pdf          the next four weeks on one A3 page
+exports/4WLA_Latest.png          the same four weeks as a picture
 ```
 
 All of it is plain JSON (and the two workbooks): readable in a text editor,
@@ -151,14 +152,18 @@ The team's access is the folder's sharing, set in OneDrive:
   application. A read-only OneDrive share cannot write, whatever the
   application thinks — so a reader can never change it, by design or by
   accident.
-- **Or give them nothing but the export.** The master export (**Calendar →
-  Master export**) can run on a schedule, in the application, on your machine,
-  and files `exports/LookAhead_Latest.xlsx`, `exports/4WLA_Latest.xlsx` and
-  `exports/4WLA_Latest.pdf` (the next four weeks on one A3 page, as Export PDF
-  draws it) into the folder — replacing the last each time, so the names never
-  change. A Power Automate flow can watch any of them (*When a file is
-  modified* in OneDrive for Business) and send it out — the PDF is the one to
-  attach to an email, since it opens on any phone. Nobody on the team then needs the
+- **Or give them nothing but the export.** Two exports run on schedules of
+  their own, in the application, on your machine, and file into `exports/` in
+  the folder — replacing the last each time, so the names never change:
+  - **Master export** (on the look-ahead) — `LookAhead_Latest.xlsx`, the whole
+    record, a sheet per question.
+  - **Export to Excel → 4WLA_Latest** — `4WLA_Latest.xlsx` (the 4WLA in its own
+    layout), `4WLA_Latest.pdf` (the next four weeks on one A3 page, as Export
+    PDF draws it) and `4WLA_Latest.png` (the same as a picture).
+
+  A Power Automate flow can watch any of them (*When a file is modified* in
+  OneDrive for Business) and send it out — the PDF or the PNG is the one to
+  attach to an email, since either opens on any phone. Nobody on the team then needs the
   application or the folder at all.
 
 The schedule runs while the application is open on that machine, and a slot

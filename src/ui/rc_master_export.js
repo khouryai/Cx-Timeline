@@ -11,10 +11,9 @@
  * stories. A sheet that cannot be read is written empty and named in About,
  * never left out silently.
  *
- * It is also how the look-ahead reaches the team: `LookAhead_Latest.xlsx`, the
- * 4WLA beside it (`4WLA_Latest.xlsx`) and the next four weeks on one page
- * (`4WLA_Latest.pdf`) are what a flow on the shared folder (Power Automate,
- * say) picks up and sends on, so nobody needs the application to read it.
+ * It is the record, `LookAhead_Latest.xlsx`. The 4WLA itself — its workbook,
+ * PDF and picture, `4WLA_Latest.*` — is filed by Export to Excel's own
+ * schedule (`ui/rc_la_schedule.js`), for a flow on the folder to send on.
  *
  * **The schedule runs here, in the page.** There is no server to run it and
  * nothing is emailed from this application (that is structural), so it runs
@@ -45,7 +44,6 @@ import {
   cancellationLog, parsedView, authorNames,
 } from './rc_util.js';
 import { KIND_LABELS } from './rc_la_changes.js';
-import { lookaheadFileNow } from './rc_la_editor.js';
 import { writtenView } from './rc_ingest.js';
 
 /** The folder, inside the shared one, the workbooks are filed in. */
@@ -57,15 +55,6 @@ export const EXPORT_DIR = 'exports';
  */
 export const EXPORT_NAME = 'LookAhead_Latest.xlsx';
 
-/* The 4WLA as a PDF is drawn by the look-ahead (`lookaheadPdfNow()` in
-   `ui/rc_lookahead.js`), which imports this module for its button — so it
-   hands the function over when it loads rather than being imported back,
-   which the build would refuse as a cycle. */
-/** @type {null | (() => Promise<{ name: string, bytes: Uint8Array } | null>)} */
-let lookaheadPdf = null;
-export function provideLookaheadPdf(fn) {
-  lookaheadPdf = fn;
-}
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const STORE_KEY = 'cx.rc.masterExport';
 /** How long a scheduled export that failed waits before it is tried again. */
@@ -96,15 +85,13 @@ export const RANGES = [
    This computer's settings
    ═══════════════════════════════════════════════════════════════════════ */
 
-/** The defaults: every sheet, everything recorded, the 4WLA beside it, no schedule. */
+/** The defaults: every sheet, everything recorded, no schedule. */
 function defaults() {
   return {
     sheets: SHEETS.map((s) => s.id),
     range: 'all',
     from: '',
     to: '',
-    companion: true,
-    pdf: true,
     schedule: cleanSchedule({ every: 'off', at: '06:00', weekday: 1, hours: 24 }),
     since: null,
     lastRun: null,
@@ -556,9 +543,8 @@ const NAMES = {
 
 /**
  * The workbook, from what `settings` asks for. Returns `{ bytes, name,
- * sheets, failed, companion }`: `sheets` is what went in and how many rows
- * each has, `failed` what could not be read and why, and `companion` the 4WLA
- * in its own layout when it was asked for and the look-ahead is written here.
+ * sheets, failed }`: `sheets` is what went in and how many rows each has, and
+ * `failed` what could not be read and why.
  */
 export async function buildMasterExport(settings = loadSettings(), { now = new Date() } = {}) {
   const range = rangeDates(settings);
@@ -600,27 +586,11 @@ export async function buildMasterExport(settings = loadSettings(), { now = new D
   };
   const bytes = await tableWorkbook({ sheets: [about, ...sheets], title: 'CX Timeline — master export' });
 
-  let companion = null;
-  if (settings.companion) companion = await lookaheadFileNow({ from: range.from, to: range.to }).catch(() => null);
-
-  /* The next four weeks on one page, for whoever it is sent to. A PDF that
-     cannot be drawn never costs the workbook; it is named among what failed. */
-  let pdf = null;
-  if (settings.pdf && lookaheadPdf) {
-    try {
-      pdf = await lookaheadPdf();
-    } catch (err) {
-      failed.push({ id: 'pdf', label: 'the 4WLA PDF', message: err.message });
-    }
-  }
-
   return {
     bytes,
     name: EXPORT_NAME,
     sheets: sheets.map((s) => ({ name: s.name, rows: s.rows.length })),
     failed,
-    companion,
-    pdf,
   };
 }
 
@@ -642,14 +612,10 @@ async function deliver(result) {
       }
     };
     await replace(result.name, result.bytes);
-    if (result.companion) await replace(result.companion.name, result.companion.bytes);
-    if (result.pdf) await replace(result.pdf.name, result.pdf.bytes);
-    return { where: 'folder', path: `${EXPORT_DIR}/${result.name}`, pdfPath: result.pdf ? `${EXPORT_DIR}/${result.pdf.name}` : null };
+    return { where: 'folder', path: `${EXPORT_DIR}/${result.name}` };
   }
   saveFile(result.name, result.bytes, XLSX, 'Master export');
-  if (result.companion) saveFile(result.companion.name, result.companion.bytes, XLSX, '4WLA');
-  if (result.pdf) saveFile(result.pdf.name, result.pdf.bytes, 'application/pdf', '4WLA PDF');
-  return { where: 'download', path: result.name, pdfPath: result.pdf ? result.pdf.name : null };
+  return { where: 'download', path: result.name };
 }
 
 /** Build, deliver, and remember how it went. */
@@ -662,8 +628,7 @@ export async function runMasterExport(settings = loadSettings()) {
 }
 
 function saidWhere(out) {
-  const also = out.pdfPath ? `, and ${out.pdfPath}` : '';
-  return out.where === 'folder' ? `Saved to the shared folder — ${out.path}${also}` : `Downloaded — ${out.path}${also}`;
+  return out.where === 'folder' ? `Saved to the shared folder — ${out.path}` : `Downloaded — ${out.path}`;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -733,12 +698,7 @@ export function openMasterExport() {
   const from = el('input', { type: 'date', class: 'cx-input', value: s.from || '' });
   const to = el('input', { type: 'date', class: 'cx-input', value: s.to || '' });
   const dates = el('div', { class: 'rc-mx-dates' }, [field('From', from), field('To', to)]);
-  const companion = checkbox({ label: 'Also the 4WLA in its own layout — every week written in these dates, as Export to Excel makes it', checked: s.companion });
-  const pdf = checkbox({
-    label: 'Also the 4WLA as a PDF — the next four weeks on one A3 page, as Export PDF draws it, saved as 4WLA_Latest.pdf',
-    checked: s.pdf,
-  });
-  pdf.classList.add('rc-mx-pdf');
+
 
   const every = selectInput({
     value: s.schedule.every,
@@ -764,8 +724,6 @@ export function openMasterExport() {
     range: range.value,
     from: from.value,
     to: to.value,
-    companion: companion.querySelector('input').checked,
-    pdf: pdf.querySelector('input').checked,
     schedule: cleanSchedule({ every: every.value, at: at.value, weekday: Number(day.value), hours: Number(hours.value) }),
   });
   const show = () => {
@@ -801,8 +759,6 @@ export function openMasterExport() {
       el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'What goes in — a sheet each' }), el('div', { class: 'rc-mx-sheets' }, boxes)]),
       field('Dates', range),
       dates,
-      companion,
-      pdf,
       el('p', {
         class: 'rc-hint rc-mx-where',
         text: folder
